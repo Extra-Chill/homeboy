@@ -8,6 +8,10 @@ use crate::release::context::ReleaseExtension;
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension;
+use homeboy_core::observation::coordination::{
+    CoordinationRecord, ExpectedRevision, RecordOutcome, RecordWrite,
+};
+use homeboy_core::observation::ObservationStore;
 use homeboy_core::{self};
 use homeboy_extension_contract::ExtensionCapability;
 use serde::{Deserialize, Serialize};
@@ -184,6 +188,13 @@ pub(crate) fn run_package(
     result
 }
 
+/// Coordination namespace for outputs left by failed package attempts, one
+/// record per component id (#15947).
+const OWNERSHIP_NAMESPACE: &str = "release-package-ownership";
+const OWNERSHIP_STATE: &str = "owned";
+/// Bound on compare-and-set retries against a concurrently changing record.
+const OWNERSHIP_MAX_ATTEMPTS: usize = 64;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FailedPackageOwnership {
     component_id: String,
@@ -228,7 +239,34 @@ fn record_failed_package_owned_paths_in_roots(
         head_commit: homeboy_core::git::get_head_commit(&component.local_path).ok(),
         paths,
     };
-    write_failed_package_ownership_in_roots(data_root, &record)
+    write_failed_package_ownership(data_root, &record)
+}
+
+/// Replace the component's ownership record, whatever revision it is at.
+fn write_failed_package_ownership(data_root: &Path, record: &FailedPackageOwnership) -> Result<()> {
+    let store = open_ownership_store(data_root)?;
+    let payload = ownership_payload(record)?;
+    let key = record.component_id.as_str();
+    let mut current = store.coordination_record(OWNERSHIP_NAMESPACE, key)?;
+    for _ in 0..OWNERSHIP_MAX_ATTEMPTS {
+        let expected = current.as_ref().map_or(ExpectedRevision::Absent, |row| {
+            ExpectedRevision::Revision(row.revision)
+        });
+        match store.put_coordination_record(
+            OWNERSHIP_NAMESPACE,
+            key,
+            expected,
+            RecordWrite {
+                state: OWNERSHIP_STATE,
+                payload: &payload,
+                expires_at_ms: None,
+            },
+        )? {
+            RecordOutcome::Applied(_) => return Ok(()),
+            RecordOutcome::Conflict { current: latest } => current = latest,
+        }
+    }
+    Err(ownership_contended(key))
 }
 
 /// The ownership record left by a failed package attempt, below an explicitly
@@ -241,9 +279,11 @@ pub(crate) fn failed_package_owned_paths_in_roots(
     data_root: &Path,
     component: &Component,
 ) -> Result<Vec<String>> {
-    let Some(record) = read_failed_package_ownership_in_roots(data_root, &component.id)? else {
+    let store = open_ownership_store(data_root)?;
+    let Some(row) = store.coordination_record(OWNERSHIP_NAMESPACE, &component.id)? else {
         return Ok(Vec::new());
     };
+    let record = parse_ownership(&row)?;
     if record.component_path != canonical_component_path(&component.local_path)
         || record.head_commit != homeboy_core::git::get_head_commit(&component.local_path).ok()
     {
@@ -269,68 +309,63 @@ pub(crate) fn acknowledge_failed_package_owned_paths_in_roots(
     if removed_paths.is_empty() {
         return Ok(());
     }
-    let Some(mut record) = read_failed_package_ownership_in_roots(data_root, &component.id)? else {
-        return Ok(());
-    };
-    if record.component_path != canonical_component_path(&component.local_path) {
-        return Ok(());
-    }
-    record
-        .paths
-        .retain(|owned| !removed_paths.contains(&owned.path));
-    if record.paths.is_empty() {
-        let path = failed_package_ownership_path_in_roots(data_root, &component.id);
-        if path.exists() {
-            fs::remove_file(path).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let store = open_ownership_store(data_root)?;
+    let component_path = canonical_component_path(&component.local_path);
+    let mut current = store.coordination_record(OWNERSHIP_NAMESPACE, &component.id)?;
+    for _ in 0..OWNERSHIP_MAX_ATTEMPTS {
+        let Some(row) = current else {
+            return Ok(());
+        };
+        let mut record = parse_ownership(&row)?;
+        if record.component_path != component_path {
+            return Ok(());
         }
-    } else {
-        write_failed_package_ownership_in_roots(data_root, &record)?;
+        record
+            .paths
+            .retain(|owned| !removed_paths.contains(&owned.path));
+        let outcome = if record.paths.is_empty() {
+            store.delete_coordination_record(OWNERSHIP_NAMESPACE, &component.id, row.revision)?
+        } else {
+            store.put_coordination_record(
+                OWNERSHIP_NAMESPACE,
+                &component.id,
+                ExpectedRevision::Revision(row.revision),
+                RecordWrite {
+                    state: OWNERSHIP_STATE,
+                    payload: &ownership_payload(&record)?,
+                    expires_at_ms: None,
+                },
+            )?
+        };
+        match outcome {
+            RecordOutcome::Applied(_) => return Ok(()),
+            RecordOutcome::Conflict { current: latest } => current = latest,
+        }
     }
-    Ok(())
+    Err(ownership_contended(&component.id))
 }
 
-fn failed_package_ownership_path_in_roots(data_root: &Path, component_id: &str) -> PathBuf {
-    data_root.join("release-package-ownership").join(format!(
-        "{}.json",
-        homeboy_core::paths::sanitize_path_segment(component_id)
+/// The observation store of the home whose data root the caller injected.
+fn open_ownership_store(data_root: &Path) -> Result<ObservationStore> {
+    ObservationStore::open_initialized_for_lifecycle_at(
+        homeboy_core::paths::observation_db_in_root(data_root),
+    )
+}
+
+fn parse_ownership(row: &CoordinationRecord) -> Result<FailedPackageOwnership> {
+    serde_json::from_value(row.payload.clone())
+        .map_err(|error| Error::internal_json(error.to_string(), Some(row.key.clone())))
+}
+
+fn ownership_payload(record: &FailedPackageOwnership) -> Result<serde_json::Value> {
+    serde_json::to_value(record)
+        .map_err(|error| Error::internal_json(error.to_string(), Some(record.component_id.clone())))
+}
+
+fn ownership_contended(component_id: &str) -> Error {
+    Error::internal_unexpected(format!(
+        "failed package ownership for '{component_id}' kept changing during {OWNERSHIP_MAX_ATTEMPTS} attempts"
     ))
-}
-
-fn read_failed_package_ownership_in_roots(
-    data_root: &Path,
-    component_id: &str,
-) -> Result<Option<FailedPackageOwnership>> {
-    let path = failed_package_ownership_path_in_roots(data_root, component_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    serde_json::from_slice(
-        &fs::read(&path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(path.display().to_string()))
-        })?,
-    )
-    .map(Some)
-    .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
-}
-
-fn write_failed_package_ownership_in_roots(
-    data_root: &Path,
-    record: &FailedPackageOwnership,
-) -> Result<()> {
-    let path = failed_package_ownership_path_in_roots(data_root, &record.component_id);
-    fs::create_dir_all(path.parent().expect("ownership parent"))
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    let temporary = path.with_extension("json.tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec(record)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
-    )
-    .map_err(|error| {
-        Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
-    })?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
 }
 
 fn canonical_component_path(path: &str) -> String {
@@ -510,6 +545,131 @@ fn output_tail(output: &str, max_bytes: usize) -> String {
         .find_map(|(index, _)| (index >= output.len().saturating_sub(max_bytes)).then_some(index))
         .unwrap_or_default();
     format!("[truncated]\n{}", output[start..].trim())
+}
+
+#[cfg(test)]
+mod failed_package_ownership_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    /// A non-git checkout with two package outputs and the ownership record a
+    /// failed package attempt would leave for them.
+    fn fixture() -> (tempfile::TempDir, tempfile::TempDir, Component) {
+        let data_root = tempfile::tempdir().expect("data root");
+        let checkout = tempfile::tempdir().expect("checkout");
+        std::fs::create_dir(checkout.path().join("build")).expect("build dir");
+        std::fs::write(checkout.path().join("build/output"), "diagnostic").expect("output");
+        std::fs::write(checkout.path().join("fixture.tgz"), "partial").expect("archive");
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: checkout.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+        let paths = ["build", "fixture.tgz"]
+            .into_iter()
+            .map(|path| OwnedPackagePath {
+                path: path.to_string(),
+                fingerprint: package_path_fingerprint(checkout.path().join(path))
+                    .expect("fingerprint"),
+            })
+            .collect();
+        write_failed_package_ownership(
+            data_root.path(),
+            &FailedPackageOwnership {
+                component_id: component.id.clone(),
+                component_path: canonical_component_path(&component.local_path),
+                head_commit: None,
+                paths,
+            },
+        )
+        .expect("record ownership");
+        (data_root, checkout, component)
+    }
+
+    fn stored_record(data_root: &Path) -> Option<CoordinationRecord> {
+        open_ownership_store(data_root)
+            .expect("store")
+            .coordination_record(OWNERSHIP_NAMESPACE, "fixture")
+            .expect("read")
+    }
+
+    #[test]
+    fn ownership_survives_reopen_and_only_names_unchanged_outputs() {
+        let (data_root, checkout, component) = fixture();
+        assert_eq!(
+            failed_package_owned_paths_in_roots(data_root.path(), &component).expect("owned"),
+            ["build", "fixture.tgz"]
+        );
+
+        std::fs::write(checkout.path().join("fixture.tgz"), "operator bytes").expect("rewrite");
+        assert_eq!(
+            failed_package_owned_paths_in_roots(data_root.path(), &component).expect("owned"),
+            ["build"],
+            "an output whose bytes changed is no longer owned"
+        );
+    }
+
+    #[test]
+    fn partial_acknowledgement_updates_and_full_acknowledgement_deletes() {
+        let (data_root, _checkout, component) = fixture();
+        let before = stored_record(data_root.path()).expect("record");
+
+        acknowledge_failed_package_owned_paths_in_roots(
+            data_root.path(),
+            &component,
+            &["build".to_string()],
+        )
+        .expect("acknowledge build");
+        let after = stored_record(data_root.path()).expect("record remains");
+        assert_eq!(after.revision, before.revision + 1);
+        assert_eq!(
+            failed_package_owned_paths_in_roots(data_root.path(), &component).expect("owned"),
+            ["fixture.tgz"]
+        );
+
+        acknowledge_failed_package_owned_paths_in_roots(
+            data_root.path(),
+            &component,
+            &["fixture.tgz".to_string()],
+        )
+        .expect("acknowledge archive");
+        assert!(stored_record(data_root.path()).is_none());
+        assert!(
+            failed_package_owned_paths_in_roots(data_root.path(), &component)
+                .expect("owned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn concurrent_acknowledgements_each_remove_their_own_paths() {
+        let (data_root, _checkout, component) = fixture();
+        let barrier = Arc::new(Barrier::new(2));
+        let workers = ["build", "fixture.tgz"]
+            .into_iter()
+            .map(|path| {
+                let barrier = Arc::clone(&barrier);
+                let root = data_root.path().to_path_buf();
+                let component = component.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    acknowledge_failed_package_owned_paths_in_roots(
+                        &root,
+                        &component,
+                        &[path.to_string()],
+                    )
+                    .expect("acknowledge");
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("acknowledger thread");
+        }
+        assert!(
+            stored_record(data_root.path()).is_none(),
+            "neither acknowledgement may resurrect the other's paths"
+        );
+    }
 }
 
 #[cfg(test)]

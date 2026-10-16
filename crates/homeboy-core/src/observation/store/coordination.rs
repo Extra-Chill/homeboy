@@ -160,6 +160,27 @@ impl ObservationStore {
         read_record(&self.connection, namespace, key, now_ms())
     }
 
+    /// Every live record in `namespace`, ordered by key. Expired records are
+    /// omitted, matching [`ObservationStore::coordination_record`].
+    pub fn coordination_records(&self, namespace: &'static str) -> Result<Vec<CoordinationRecord>> {
+        super::validate_required("coordination.namespace", namespace)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT namespace, record_key, revision, state, payload_json,
+                        created_at_ms, updated_at_ms, expires_at_ms
+                 FROM coordination_records
+                 WHERE namespace = ?1
+                   AND (expires_at_ms IS NULL OR expires_at_ms > ?2)
+                 ORDER BY record_key",
+            )
+            .map_err(sqlite_error("prepare coordination record list"))?;
+        let rows = statement
+            .query_map(params![namespace, now_ms()], record_from_row)
+            .map_err(sqlite_error("list coordination records"))?;
+        super::collect_rows(rows, "collect coordination records")
+    }
+
     /// Write a record when `expected` matches what is stored. Creating needs
     /// [`ExpectedRevision::Absent`]; an expired record counts as absent and is
     /// replaced with the next revision so revisions never repeat.
@@ -429,21 +450,23 @@ fn read_record(
              WHERE namespace = ?1 AND record_key = ?2
                AND (expires_at_ms IS NULL OR expires_at_ms > ?3)",
             params![namespace, key, now],
-            |row| {
-                Ok(CoordinationRecord {
-                    namespace: row.get(0)?,
-                    key: row.get(1)?,
-                    revision: row.get(2)?,
-                    state: row.get(3)?,
-                    payload: super::parse_metadata(row.get(4)?)?,
-                    created_at_ms: row.get(5)?,
-                    updated_at_ms: row.get(6)?,
-                    expires_at_ms: row.get(7)?,
-                })
-            },
+            record_from_row,
         )
         .optional()
         .map_err(sqlite_error("read coordination record"))
+}
+
+fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CoordinationRecord> {
+    Ok(CoordinationRecord {
+        namespace: row.get(0)?,
+        key: row.get(1)?,
+        revision: row.get(2)?,
+        state: row.get(3)?,
+        payload: super::parse_metadata(row.get(4)?)?,
+        created_at_ms: row.get(5)?,
+        updated_at_ms: row.get(6)?,
+        expires_at_ms: row.get(7)?,
+    })
 }
 
 fn acquire_lease_at(
