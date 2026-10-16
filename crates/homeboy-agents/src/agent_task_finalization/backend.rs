@@ -311,7 +311,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         if behind != 0 {
             return Ok(AgentTaskPrCandidateState::BehindBase {
                 behind,
-                ahead,
                 base_ref: base_ref.clone(),
                 base_sha: base.sha.clone(),
             });

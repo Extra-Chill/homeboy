@@ -352,13 +352,12 @@ pub enum AgentTaskPrCandidateState {
         push_required: bool,
     },
     Equivalent,
-    /// HEAD does not contain the resolved base. `ahead == 0` is a clean
-    /// fast-forward; `ahead > 0` is a divergence that may still merge cleanly.
-    /// Distinguishing the two is what lets finalization converge a base that
-    /// moved during the run instead of discarding the work (#13695).
+    /// HEAD does not contain the resolved base. A committed candidate may
+    /// still converge cleanly with a base that moved during the run instead of
+    /// discarding the work (#13695); an uncommitted one is committed on its
+    /// recorded parent (#15017).
     BehindBase {
         behind: u64,
-        ahead: u64,
         base_ref: String,
         base_sha: String,
     },
