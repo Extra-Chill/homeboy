@@ -1,8 +1,5 @@
 //! Durable, versioned lifecycle records for resumable multi-target deploys.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -12,10 +9,16 @@ use homeboy_core::phase_timing::PhaseTimingReport;
 
 const SCHEMA_VERSION: u32 = 1;
 
-/// A durable activity projection for the single-project deploy lifecycle.
+/// Metadata key on the aggregate deploy `runs` row that carries the resumable
+/// multi-target checkpoint. The deploy id is the run id, so the checkpoint has
+/// no storage of its own.
+const CHECKPOINT_KEY: &str = "checkpoint";
+
+/// A durable activity projection for the deploy lifecycle.
 ///
-/// The observation store is the generic activity surface. The file-backed
-/// multi-project lifecycle below remains the resumable aggregate checkpoint.
+/// The observation `runs` row is the only durable home for deploy state: the
+/// activity metadata and, for multi-target deploys, the resumable checkpoint
+/// under [`CHECKPOINT_KEY`].
 pub(crate) struct DeployObservation {
     store: ObservationStore,
     run_id: String,
@@ -53,28 +56,36 @@ impl DeployObservation {
         )
     }
 
-    pub(crate) fn start_with_control_plane_in_roots(
+    /// Admit a multi-target deploy whose run row carries `checkpoint`. The
+    /// checkpoint id becomes the run id.
+    pub(crate) fn start_checkpointed_in_roots(
         roots: &homeboy_core::paths::PathRoots,
-        requested_id: Option<&str>,
+        checkpoint: &DeployLifecycleRun,
         project_id: &str,
-        source: &str,
         lineage: Option<&crate::types::DeployControlPlaneLineage>,
         artifact_sha256: Option<&str>,
     ) -> Result<Self> {
-        Self::start_with_control_plane_in_store(
+        Self::start_with_control_plane_in_store_with_checkpoint(
             ObservationStore::open_initialized_in_roots(roots)?,
-            requested_id,
+            Some(&checkpoint.id),
             project_id,
-            source,
+            &checkpoint.identity.source,
             lineage,
             artifact_sha256,
+            Some(checkpoint_value(checkpoint)?),
         )
     }
 
-    pub(crate) fn resume_with_control_plane_in_roots(
+    /// Reopen a terminal multi-target deploy run and its checkpoint.
+    ///
+    /// The reopen is the run API's guarded `resume_run` (only a non-running
+    /// row can be reopened), so two concurrent resumers cannot both own the
+    /// run: exactly one wins and the other fails closed.
+    pub(crate) fn resume_checkpointed_in_roots(
         roots: &homeboy_core::paths::PathRoots,
         run_id: &str,
-    ) -> Result<Self> {
+        identity: &DeployRunIdentity,
+    ) -> Result<(Self, DeployLifecycleRun)> {
         let store = ObservationStore::open_initialized_in_roots(roots)?;
         let current = store.get_run(run_id)?.ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -92,16 +103,60 @@ impl DeployObservation {
                 None,
             ));
         }
+        let mut checkpoint: DeployLifecycleRun = current
+            .metadata_json
+            .get(CHECKPOINT_KEY)
+            .cloned()
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "resume",
+                    "deploy run has no resumable checkpoint",
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some(format!("parse deploy checkpoint for run {run_id}")),
+                    )
+                })
+            })?;
+        checkpoint.id = run_id.to_string();
+        checkpoint.resume(identity)?;
         let mut metadata = current.metadata_json;
         metadata["phase"] = json!("resuming");
         metadata["control_plane"]["phase"] = json!("resuming");
+        metadata[CHECKPOINT_KEY] = checkpoint_value(&checkpoint)?;
         store.resume_run(run_id, "deploy", metadata.clone())?;
-        Ok(Self {
-            store,
-            run_id: run_id.to_string(),
-            metadata,
-            finished: false,
-        })
+        Ok((
+            Self {
+                store,
+                run_id: run_id.to_string(),
+                metadata,
+                finished: false,
+            },
+            checkpoint,
+        ))
+    }
+
+    /// Persist the multi-target checkpoint on this run's row. Fenced on the
+    /// run still being active, so a late writer can never rewrite a run some
+    /// other owner already terminalized.
+    pub(crate) fn save_checkpoint(&mut self, checkpoint: &DeployLifecycleRun) -> Result<()> {
+        self.metadata[CHECKPOINT_KEY] = checkpoint_value(checkpoint)?;
+        self.store
+            .update_running_run_metadata(&self.run_id, self.metadata.clone())?
+            .map(|_| ())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "run_id",
+                    "deploy run is no longer active; checkpoint not recorded",
+                    Some(self.run_id.clone()),
+                    None,
+                )
+            })
     }
 
     fn start_with_control_plane_in_store(
@@ -112,7 +167,27 @@ impl DeployObservation {
         lineage: Option<&crate::types::DeployControlPlaneLineage>,
         artifact_sha256: Option<&str>,
     ) -> Result<Self> {
-        let metadata = json!({
+        Self::start_with_control_plane_in_store_with_checkpoint(
+            store,
+            requested_id,
+            project_id,
+            source,
+            lineage,
+            artifact_sha256,
+            None,
+        )
+    }
+
+    fn start_with_control_plane_in_store_with_checkpoint(
+        store: ObservationStore,
+        requested_id: Option<&str>,
+        project_id: &str,
+        source: &str,
+        lineage: Option<&crate::types::DeployControlPlaneLineage>,
+        artifact_sha256: Option<&str>,
+        checkpoint: Option<serde_json::Value>,
+    ) -> Result<Self> {
+        let mut metadata = json!({
             "schema": "homeboy/deploy-lifecycle/v1",
             "source": source,
             "phase": "admitted",
@@ -138,6 +213,9 @@ impl DeployObservation {
                 })]).unwrap_or_default(),
             },
         });
+        if let Some(checkpoint) = checkpoint {
+            metadata[CHECKPOINT_KEY] = checkpoint;
+        }
         let builder = NewRunRecord::builder("deploy")
             .component_id(project_id)
             .command(format!("homeboy deploy {project_id}"))
@@ -267,6 +345,15 @@ impl DeployObservation {
             .update_run_metadata(&self.run_id, self.metadata.clone())
             .map(|_| ())
     }
+}
+
+fn checkpoint_value(checkpoint: &DeployLifecycleRun) -> Result<serde_json::Value> {
+    serde_json::to_value(checkpoint).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize deploy checkpoint".to_string()),
+        )
+    })
 }
 
 impl Drop for DeployObservation {
@@ -409,61 +496,6 @@ impl DeployLifecycleRun {
     }
 }
 
-/// The deploy lifecycle checkpoint below an explicitly injected data root.
-///
-/// Rooted rather than wrapped: `run_multi` resolves once and every checkpoint
-/// read and write in that run addresses the same home. The ambient form
-/// resolved the data root independently on each of the seven calls a multi
-/// target deploy makes, so a repoint mid-run could have resumed from one home's
-/// checkpoint and then recorded target outcomes into another's — the resumed
-/// run would silently redo targets it had already succeeded (#7505).
-fn lifecycle_path_in_roots(data_root: &Path, id: &str) -> PathBuf {
-    data_root.join("deploy-runs").join(format!("{id}.json"))
-}
-
-pub(super) fn load_in_roots(data_root: &Path, id: &str) -> Result<DeployLifecycleRun> {
-    let path = lifecycle_path_in_roots(data_root, id);
-    let contents = fs::read_to_string(&path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("read deploy run {}", path.display())),
-        )
-    })?;
-    serde_json::from_str(&contents).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("parse deploy run {}", path.display())),
-        )
-    })
-}
-
-pub(super) fn save_in_roots(data_root: &Path, run: &DeployLifecycleRun) -> Result<()> {
-    let path = lifecycle_path_in_roots(data_root, &run.id);
-    let parent = path.parent().expect("deploy lifecycle path has parent");
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", parent.display())),
-        )
-    })?;
-    let temporary = path.with_extension("json.tmp");
-    let contents = serde_json::to_vec_pretty(run).map_err(|error| {
-        Error::internal_io(error.to_string(), Some("serialize deploy run".to_string()))
-    })?;
-    fs::write(&temporary, contents).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("write {}", temporary.display())),
-        )
-    })?;
-    fs::rename(&temporary, &path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("commit {}", path.display())),
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,46 +563,176 @@ mod tests {
         assert!(error.message.contains("does not exactly match"));
     }
 
+    fn checkpoint_on_row(
+        roots: &homeboy_core::paths::PathRoots,
+        run_id: &str,
+    ) -> (homeboy_core::observation::RunRecord, DeployLifecycleRun) {
+        let run = ObservationStore::open_initialized_in_roots(roots)
+            .expect("store")
+            .get_run(run_id)
+            .expect("read run")
+            .expect("run row");
+        let checkpoint = serde_json::from_value(run.metadata_json[CHECKPOINT_KEY].clone())
+            .expect("checkpoint on run metadata");
+        (run, checkpoint)
+    }
+
     #[test]
-    fn durable_record_round_trips_target_state_and_partial_timing_evidence() {
-        // Deliberately no `with_isolated_home`. Every durable call below already
-        // takes a data root, so this test can name its own instead of mutating
-        // `HOME` and reading it straight back out through `from_environment`.
-        //
-        // That is what #7505 is for. A test that owns its roots needs neither
-        // the environment nor the process-global mutex `HomeGuard` takes to
-        // protect it, so it can run beside any other test instead of queueing
-        // behind all of them.
+    fn checkpoint_round_trips_through_run_row_across_reopen() {
+        // Explicit roots, no `with_isolated_home`: the checkpoint addresses the
+        // store under the roots it was given (#7505).
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
+        let mut run = DeployLifecycleRun::new("deploy-checkpoint-run".to_string(), identity());
         {
-            let data_root = tempfile::tempdir().expect("data root");
-            let data_root = data_root.path();
-            let mut run = DeployLifecycleRun::new("run".to_string(), identity());
+            let mut observation =
+                DeployObservation::start_checkpointed_in_roots(&roots, &run, "multi", None, None)
+                    .expect("admit checkpointed run");
+            assert_eq!(observation.run_id(), "deploy-checkpoint-run");
             let mut timer = homeboy_core::phase_timing::PhaseTimer::new();
             timer.record_failed("transfer", std::time::Duration::from_millis(1));
+            run.update_target("a", DeployTargetStatus::Running, None, None);
             run.update_target(
                 "b",
                 DeployTargetStatus::Failed,
                 Some("connection lost".to_string()),
                 Some(timer.into_report()),
             );
-            save_in_roots(data_root, &run).expect("persist run before retryable remote work");
-
-            let restored = load_in_roots(data_root, "run").expect("read durable run");
-            assert_eq!(restored.schema_version, SCHEMA_VERSION);
-            assert_eq!(restored.targets[1].status, DeployTargetStatus::Failed);
-            assert_eq!(
-                restored.targets[1].error.as_deref(),
-                Some("connection lost")
-            );
-            assert_eq!(
-                restored.targets[1]
-                    .phase_timings
-                    .as_ref()
-                    .and_then(|report| report.span("transfer"))
-                    .map(|span| span.status),
-                Some(homeboy_core::phase_timing::PhaseStatus::Failed)
-            );
+            observation
+                .save_checkpoint(&run)
+                .expect("persist checkpoint before retryable remote work");
+            // Process ends mid-target: drop terminalizes the run.
         }
+
+        let (row, stored) = checkpoint_on_row(&roots, "deploy-checkpoint-run");
+        assert_eq!(row.kind, "deploy");
+        assert_eq!(row.status, RunStatus::Error.as_str());
+        assert_eq!(stored.schema_version, SCHEMA_VERSION);
+        assert_eq!(stored.targets[0].status, DeployTargetStatus::Running);
+
+        let (observation, restored) = DeployObservation::resume_checkpointed_in_roots(
+            &roots,
+            "deploy-checkpoint-run",
+            &identity(),
+        )
+        .expect("reopen checkpointed run");
+        assert_eq!(observation.run_id(), "deploy-checkpoint-run");
+        assert_eq!(restored.id, "deploy-checkpoint-run");
+        assert_eq!(restored.targets[0].status, DeployTargetStatus::Unknown);
+        assert!(restored.target_skips_mutation_retry("a"));
+        assert_eq!(restored.targets[1].status, DeployTargetStatus::Failed);
+        assert_eq!(
+            restored.targets[1].error.as_deref(),
+            Some("connection lost")
+        );
+        assert_eq!(
+            restored.targets[1]
+                .phase_timings
+                .as_ref()
+                .and_then(|report| report.span("transfer"))
+                .map(|span| span.status),
+            Some(homeboy_core::phase_timing::PhaseStatus::Failed)
+        );
+        let (row, stored) = checkpoint_on_row(&roots, "deploy-checkpoint-run");
+        assert_eq!(row.status, RunStatus::Running.as_str());
+        assert_eq!(stored.targets[0].status, DeployTargetStatus::Unknown);
+    }
+
+    #[test]
+    fn concurrent_resumers_of_one_checkpoint_have_exactly_one_winner() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
+        let run = DeployLifecycleRun::new("deploy-contended".to_string(), identity());
+        drop(
+            DeployObservation::start_checkpointed_in_roots(&roots, &run, "multi", None, None)
+                .expect("admit"),
+        );
+
+        let barrier = std::sync::Barrier::new(2);
+        let outcomes = std::thread::scope(|scope| {
+            let claimants = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        DeployObservation::resume_checkpointed_in_roots(
+                            &roots,
+                            "deploy-contended",
+                            &identity(),
+                        )
+                        .map(|(mut observation, _)| {
+                            // Keep the winner's run active for the loser to observe.
+                            observation.finished = true;
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            claimants
+                .into_iter()
+                .map(|claimant| claimant.join().expect("claimant thread"))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        let (row, _) = checkpoint_on_row(&roots, "deploy-contended");
+        assert_eq!(row.status, RunStatus::Running.as_str());
+    }
+
+    #[test]
+    fn resume_refuses_identity_mismatch_without_reopening_the_run() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
+        let run = DeployLifecycleRun::new("deploy-mismatch".to_string(), identity());
+        drop(
+            DeployObservation::start_checkpointed_in_roots(&roots, &run, "multi", None, None)
+                .expect("admit"),
+        );
+        let mut changed = identity();
+        changed.policy = "tagged=false".to_string();
+        let error =
+            DeployObservation::resume_checkpointed_in_roots(&roots, "deploy-mismatch", &changed)
+                .err()
+                .expect("mismatched identity fails closed");
+        assert!(error.message.contains("does not exactly match"));
+        let (row, _) = checkpoint_on_row(&roots, "deploy-mismatch");
+        assert_eq!(row.status, RunStatus::Error.as_str());
+    }
+
+    #[test]
+    fn checkpoint_writes_are_fenced_once_the_run_is_terminal() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
+        let mut run = DeployLifecycleRun::new("deploy-fenced".to_string(), identity());
+        let mut observation =
+            DeployObservation::start_checkpointed_in_roots(&roots, &run, "multi", None, None)
+                .expect("admit");
+        observation.finish(RunStatus::Pass, None);
+        run.update_target("a", DeployTargetStatus::Running, None, None);
+        assert!(observation.save_checkpoint(&run).is_err());
+        let (row, stored) = checkpoint_on_row(&roots, "deploy-fenced");
+        assert_eq!(row.status, RunStatus::Pass.as_str());
+        assert_eq!(stored.targets[0].status, DeployTargetStatus::Planned);
+    }
+
+    #[test]
+    fn resume_without_a_checkpoint_fails_closed() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+        drop(
+            DeployObservation::start_with_control_plane_in_store(
+                store,
+                Some("deploy-single"),
+                "site",
+                "HEAD",
+                None,
+                None,
+            )
+            .expect("admit single-project deploy"),
+        );
+        let error =
+            DeployObservation::resume_checkpointed_in_roots(&roots, "deploy-single", &identity())
+                .err()
+                .expect("no checkpoint");
+        assert!(error.message.contains("no resumable checkpoint"));
     }
 
     #[test]
