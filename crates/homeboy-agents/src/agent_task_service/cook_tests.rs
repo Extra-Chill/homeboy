@@ -25515,3 +25515,81 @@ fn run_cook_preserves_prior_failed_candidate_before_detached_dispatch() {
         assert_eq!(dispatches.load(Ordering::SeqCst), 1, "result: {result:?}");
     });
 }
+
+fn commit_message_finalization_options(
+    commit_message: &str,
+) -> crate::agent_task_finalization::AgentTaskPrFinalizationOptions {
+    let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
+    let cook_id = "commit-subject-cook";
+    let run_id = "commit-subject-run";
+    let target = tempfile::tempdir().expect("fixture target");
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.identity.initial_run_id = run_id.to_string();
+    options.identity.initial_plan.tasks[0].executor.model =
+        Some("commit-subject-model".to_string());
+    // Prompt-only Cook: the title comes from the agent form.
+    options.finalization.title.clear();
+    options.finalization.commit_message = commit_message.to_string();
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist the recipe");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&options.identity.initial_plan, run_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("seed the run record");
+    lifecycle_store
+        .record_cook_attempt(cook_id, 1, run_id)
+        .expect("record the cook attempt");
+    lifecycle_store
+        .record_run_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &review_form_aggregate(&options.identity.initial_plan),
+        )
+        .expect("record the review-form aggregate");
+    let promotion = promotion_with_existing_path(run_id, target.path());
+    cook_finalization_options_with_stores(
+        &recipe_store,
+        &lifecycle_store,
+        &options,
+        run_id,
+        &promotion,
+        Vec::new(),
+    )
+    .expect("build finalization options")
+}
+
+#[test]
+fn cook_commit_subject_is_the_validated_form_title_without_an_explicit_message() {
+    // #16052: a Cook PR has one commit and GitHub squash-merges it under that
+    // commit's subject, so the commit must carry the specific PR title rather
+    // than a generic `fix: cook <repo>`.
+    let options = commit_message_finalization_options("");
+    assert_eq!(options.commit_message, test_review_form().pr_title);
+    assert_eq!(options.title, test_review_form().pr_title);
+}
+
+#[test]
+fn cook_commit_subject_keeps_an_explicit_commit_message() {
+    let options = commit_message_finalization_options("chore: operator-chosen subject");
+    assert_eq!(options.commit_message, "chore: operator-chosen subject");
+    assert_eq!(options.title, test_review_form().pr_title);
+}
+
+#[test]
+fn cook_commit_subject_falls_back_only_when_no_title_exists() {
+    use super::super::cook_promotion::cook_commit_message;
+    assert_eq!(
+        cook_commit_message("", "  ", Some("blocks-engine")),
+        "fix: cook blocks-engine"
+    );
+    assert_eq!(cook_commit_message("", "", None), "fix: cook agent task");
+    assert_eq!(
+        cook_commit_message("", "Guard the reload path", Some("blocks-engine")),
+        "Guard the reload path"
+    );
+}
