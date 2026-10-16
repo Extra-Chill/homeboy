@@ -1799,6 +1799,92 @@ fn daemon_polling_reloads_a_refreshed_session_endpoint() {
     server.join().expect("server");
 }
 
+fn serve_one_job_poll(listener: std::net::TcpListener, job: Job) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("poll request");
+        let mut request = [0; 4096];
+        let _ = std::io::Read::read(&mut stream, &mut request).expect("read request");
+        let body = serde_json::json!({
+            "success": true,
+            "data": { "body": { "job": job } },
+        })
+        .to_string();
+        std::io::Write::write_all(
+            &mut stream,
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            )
+            .as_bytes(),
+        )
+        .expect("write response");
+    })
+}
+
+fn closed_endpoint() -> String {
+    let unavailable = std::net::TcpListener::bind("127.0.0.1:0").expect("unavailable listener");
+    let endpoint = format!("http://{}", unavailable.local_addr().expect("address"));
+    drop(unavailable);
+    endpoint
+}
+
+#[test]
+fn daemon_polling_keeps_its_grace_window_when_a_reattach_cannot_reach_the_daemon_yet() {
+    let stale_endpoint = closed_endpoint();
+    let job = running_job();
+    let job_id = job.id.to_string();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("refreshed listener");
+    let refreshed_endpoint = format!("http://{}", listener.local_addr().expect("address"));
+    let server = serve_one_job_poll(listener, job.clone());
+    let client = Client::builder().no_proxy().build().expect("client");
+    let reloads = std::sync::atomic::AtomicUsize::new(0);
+
+    let (fetched, endpoint) =
+        fetch_daemon_job_resilient_with_endpoint_reload(&client, &stale_endpoint, &job_id, || {
+            if reloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                // The Lab daemon is briefly unreachable while the tunnel is
+                // re-established: the first reattach fails at transport level.
+                return Err(crate::daemon_http_get::daemon_transport_error(
+                    crate::daemon_http_get::DaemonHttpErrorKind::Connect,
+                    "/health",
+                    None,
+                    "reattach runner `lab` job-owning daemon",
+                    "remote daemon health endpoint failed after 4 bounded requests",
+                ));
+            }
+            Ok(Some(refreshed_endpoint.clone()))
+        })
+        .expect("a transient reattach failure must not end the poll grace window");
+
+    assert_eq!(fetched.id, job.id);
+    assert_eq!(endpoint, refreshed_endpoint);
+    assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    server.join().expect("server");
+}
+
+#[test]
+fn daemon_polling_returns_an_authoritative_reattach_refusal_immediately() {
+    let stale_endpoint = closed_endpoint();
+    let job_id = running_job().id.to_string();
+    let client = Client::builder().no_proxy().build().expect("client");
+    let reloads = std::sync::atomic::AtomicUsize::new(0);
+
+    let err =
+        fetch_daemon_job_resilient_with_endpoint_reload(&client, &stale_endpoint, &job_id, || {
+            reloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(Error::validation_invalid_argument(
+                "runner",
+                "refreshed runner `lab` daemon identity `b` does not match the accepted daemon `a`",
+                Some("lab".to_string()),
+                None,
+            ))
+        })
+        .expect_err("an identity refusal is authoritative");
+
+    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[test]
 fn authoritative_daemon_job_error_does_not_reopen_a_tunnel() {
     let error = Error::new(

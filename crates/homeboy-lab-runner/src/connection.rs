@@ -2507,17 +2507,7 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
             runner_id,
             session_path: &session_path,
         })
-        .map_err(|report| {
-            let (report, _) = *report;
-            Error::validation_invalid_argument(
-                "runner",
-                report.failure_message.unwrap_or_else(|| {
-                    "unable to reattach the job-owning daemon generation".to_string()
-                }),
-                Some(runner_id.to_string()),
-                None,
-            )
-        })?;
+        .map_err(|report| job_owner_reattach_error(runner_id, report.0))?;
     let session = RunnerSession {
         local_port: Some(local_port),
         local_url: Some(local_url),
@@ -2529,6 +2519,42 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
         ..owner
     };
     Ok(session)
+}
+
+/// A reattach that could not reach the job-owning daemon (the SSH tunnel did
+/// not open, or the daemon did not answer `/health` within the settle window)
+/// is the same transport loss the job poll already observed. It keeps the
+/// typed transport signal so the poll's grace window and the recoverable
+/// disconnect classification still apply. A daemon that answered with another
+/// identity is authoritative and stays a refusal.
+fn job_owner_reattach_error(runner_id: &str, report: RunnerConnectReport) -> Error {
+    let message = report
+        .failure_message
+        .clone()
+        .unwrap_or_else(|| "unable to reattach the job-owning daemon generation".to_string());
+    let unreachable = report.failure_kind == Some(RunnerFailureKind::TunnelFailure)
+        || report
+            .failure_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.durability_stage.as_deref())
+            .is_some_and(|stage| matches!(stage, "health_settle" | "tunnel_durability"));
+    if !unreachable {
+        return Error::validation_invalid_argument(
+            "runner",
+            message,
+            Some(runner_id.to_string()),
+            None,
+        );
+    }
+    let mut error = super::daemon_http_get::daemon_transport_error(
+        super::daemon_http_get::DaemonHttpErrorKind::Connect,
+        "/health",
+        None,
+        &format!("reattach runner `{runner_id}` job-owning daemon"),
+        message,
+    );
+    error.details["runner_id"] = Value::String(runner_id.to_string());
+    error
 }
 
 /// Reopen and retain the direct tunnel for the durable generation which owns a
