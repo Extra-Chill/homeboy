@@ -5662,6 +5662,22 @@ pub(crate) fn reconcile_terminal_cook_provider_result_with_scheduler(
             "run_id": run_id,
             "generation": record.metadata["cook_continuation"]["generation"].as_u64().unwrap_or(0),
         });
+        // One terminal continuation at a time owns the Cook's active
+        // controller key, and it drives later attempts inline. While one is
+        // claimed, this attempt's result stays pending for that owner (or the
+        // daemon recovery pass); submitting would collide with the owner's
+        // active idempotency key (#16054).
+        let mut continuation_running = false;
+        for attempt in &recipe.attempts {
+            continuation_running |= crate::agent_task_service::continuation_state_in_store(
+                &recipe_store,
+                &cook_id,
+                &attempt.run_id,
+            )? == crate::agent_task_service::CookContinuationState::Claimed;
+        }
+        if continuation_running {
+            return Ok(record);
+        }
         let receipt = schedule(&request)?;
         if receipt["scheduled"] == true {
             lifecycle_store.mutate_record(run_id, |stored| {

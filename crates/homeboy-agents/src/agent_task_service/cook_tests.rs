@@ -12555,6 +12555,95 @@ fn strict_cross_cook_run_ownership_rejection_leaves_state_unchanged() {
     });
 }
 
+/// Submit a Cook attempt as a detached Lab run and project its succeeded
+/// terminal runner snapshot, as the terminal Lab mirror does.
+fn submit_terminal_lab_attempt(
+    plan: &AgentTaskPlan,
+    run_id: &str,
+    runner_id: &str,
+    runner_job_id: &str,
+    remote_workspace: &str,
+) {
+    agent_task_lifecycle::submit_plan(plan, Some(run_id)).expect("submit Lab attempt");
+    agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+        run_id,
+        runner_id,
+        runner_job_id,
+        remote_workspace,
+        remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+    })
+    .expect("accept Lab handoff");
+    let aggregate = crate::agent_task_scheduler::AgentTaskAggregate {
+        schema: "homeboy/agent-task-aggregate/v1".to_string(),
+        plan_id: plan.plan_id.clone(),
+        status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
+        totals: Default::default(),
+        outcomes: Vec::new(),
+        events: Vec::new(),
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: Default::default(),
+    };
+    let job_id = uuid::Uuid::parse_str(runner_job_id).expect("runner job id");
+    let snapshot = homeboy_core::api_jobs::RunnerJobLogSnapshot {
+        job: homeboy_core::api_jobs::Job {
+            id: job_id,
+            operation: "agent-task".to_string(),
+            status: homeboy_core::api_jobs::JobStatus::Succeeded,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            started_at_ms: Some(1),
+            finished_at_ms: Some(2),
+            event_count: 1,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            daemon_lease_id: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+            runner_job_projection: None,
+        },
+        events: vec![homeboy_core::api_jobs::JobEvent {
+            sequence: 1,
+            job_id,
+            kind: homeboy_core::api_jobs::JobEventKind::Progress,
+            timestamp_ms: 2,
+            message: Some("terminal Cook aggregate".to_string()),
+            data: Some(serde_json::json!({
+                "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+                "identity": {
+                    "runner_id": runner_id,
+                    "runner_job_id": runner_job_id,
+                    "persisted_run_id": run_id,
+                    "run_id": run_id,
+                },
+                "aggregate": aggregate,
+            })),
+        }],
+    };
+    assert!(
+        agent_task_lifecycle::project_terminal_runner_result_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            &snapshot,
+        )
+        .expect("project actual terminal runner snapshot")
+    );
+    assert_eq!(
+        agent_task_lifecycle::exact_record(run_id)
+            .expect("projected record")
+            .state,
+        agent_task_lifecycle::AgentTaskRunState::Succeeded,
+        "terminal Lab mirror projection must settle the lifecycle before enqueue"
+    );
+}
+
 #[test]
 fn terminal_lab_cook_provider_result_queues_continuation_without_status_or_resume() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -12575,85 +12664,12 @@ fn terminal_lab_cook_provider_result_queues_continuation_without_status_or_resum
             recipe_store
                 .persist_initial_recipe(&options)
                 .expect("persist recipe");
-            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit Lab attempt");
-            agent_task_lifecycle::record_detached_lab_run(
-                agent_task_lifecycle::DetachedLabRunRecord {
-                    run_id,
-                    runner_id: "strict-terminal-lab",
-                    runner_job_id,
-                    remote_workspace: "/runner/strict-terminal-workspace",
-                    remote_command: &["homeboy".to_string(), "agent-task".to_string()],
-                },
-            )
-            .expect("accept Lab handoff");
-            let aggregate = crate::agent_task_scheduler::AgentTaskAggregate {
-                schema: "homeboy/agent-task-aggregate/v1".to_string(),
-                plan_id: plan.plan_id.clone(),
-                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
-                totals: Default::default(),
-                outcomes: Vec::new(),
-                events: Vec::new(),
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            };
-            let job_id = uuid::Uuid::parse_str(runner_job_id).expect("runner job id");
-            let snapshot = homeboy_core::api_jobs::RunnerJobLogSnapshot {
-                job: homeboy_core::api_jobs::Job {
-                    id: job_id,
-                    operation: "agent-task".to_string(),
-                    status: homeboy_core::api_jobs::JobStatus::Succeeded,
-                    created_at_ms: 1,
-                    updated_at_ms: 2,
-                    started_at_ms: Some(1),
-                    finished_at_ms: Some(2),
-                    event_count: 1,
-                    source_snapshot: None,
-                    path_materialization_plan: None,
-                    stale_reason: None,
-                    daemon_lease_id: None,
-                    target_runner_id: None,
-                    target_project_id: None,
-                    claim_id: None,
-                    claimed_by_runner_id: None,
-                    claimed_at_ms: None,
-                    claim_expires_at_ms: None,
-                    artifacts: Vec::new(),
-                    runner_job_projection: None,
-                },
-                events: vec![homeboy_core::api_jobs::JobEvent {
-                    sequence: 1,
-                    job_id,
-                    kind: homeboy_core::api_jobs::JobEventKind::Progress,
-                    timestamp_ms: 2,
-                    message: Some("terminal Cook aggregate".to_string()),
-                    data: Some(serde_json::json!({
-                        "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
-                        "identity": {
-                            "runner_id": "strict-terminal-lab",
-                            "runner_job_id": runner_job_id,
-                            "persisted_run_id": run_id,
-                            "run_id": run_id,
-                        },
-                        "aggregate": aggregate,
-                    })),
-                }],
-            };
-            assert!(
-                agent_task_lifecycle::project_terminal_runner_result_in_store(
-                    &test_lifecycle_store(),
-                    run_id,
-                    &snapshot,
-                )
-                .expect("project actual terminal runner snapshot")
-            );
-            assert_eq!(
-                agent_task_lifecycle::exact_record(run_id)
-                    .expect("projected record")
-                    .state,
-                agent_task_lifecycle::AgentTaskRunState::Succeeded,
-                "terminal Lab mirror projection must settle the lifecycle before enqueue"
+            submit_terminal_lab_attempt(
+                &plan,
+                run_id,
+                "strict-terminal-lab",
+                runner_job_id,
+                "/runner/strict-terminal-workspace",
             );
 
             agent_task_lifecycle::record_cook_attempt_in_store(
@@ -12750,6 +12766,108 @@ fn terminal_lab_cook_provider_result_queues_continuation_without_status_or_resum
             )
             .expect("re-read terminal authority")
             .is_some());
+        });
+    });
+}
+
+/// A running terminal continuation owns the Cook's active controller key and
+/// drives later attempts inline. When such an attempt reaches its terminal
+/// state, its result stays pending for that owner instead of submitting a
+/// competing WorkJob that collides with the owner's active key (#16054).
+#[test]
+fn terminal_attempt_driven_by_a_running_continuation_does_not_schedule_a_competing_job() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        with_strict_config_lock(|| {
+            let cook_id = "cook-two-attempt-terminal-lab";
+            let first_run = "cook-two-attempt-terminal-lab-attempt-1";
+            let second_run = "cook-two-attempt-terminal-lab-attempt-2";
+            let mut options = batch_cook_options(
+                cook_id,
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::new(AtomicUsize::new(0)),
+                }),
+            );
+            options.identity.initial_run_id = first_run.to_string();
+            let first_plan = options.identity.initial_plan.clone();
+            let recipe_store = super::super::cook_recipe::CookRecipeStore::from_current_data_root()
+                .expect("Cook recipe store");
+            recipe_store
+                .persist_initial_recipe(&options)
+                .expect("persist recipe");
+
+            submit_terminal_lab_attempt(
+                &first_plan,
+                first_run,
+                "two-attempt-lab",
+                "00000000-0000-0000-0000-000000000201",
+                "/runner/two-attempt-workspace",
+            );
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                first_run,
+            )
+            .expect("register first attempt");
+            agent_task_lifecycle::reconcile_terminal_cook_provider_result_with_scheduler(
+                first_run,
+                |_| Ok(serde_json::json!({ "scheduled": true, "job_id": "owner-work-job" })),
+            )
+            .expect("first attempt schedules the owning continuation");
+            // The owning continuation's worker is running.
+            let owner = recipe_store
+                .claim_continuation_for(cook_id, first_run)
+                .expect("claim first continuation")
+                .expect("first attempt continuation is claimable");
+
+            // That worker dispatches a second attempt, which then reaches its
+            // terminal state while the owner still holds the active key.
+            let mut second_plan = first_plan.clone();
+            second_plan.plan_id = format!("{}-attempt-2", first_plan.plan_id);
+            super::super::cook_recipe::record_recipe_attempt_with_lineage_in_store(
+                &recipe_store,
+                cook_id,
+                2,
+                second_run,
+                &second_plan,
+                None,
+            )
+            .expect("record second recipe attempt");
+            submit_terminal_lab_attempt(
+                &second_plan,
+                second_run,
+                "two-attempt-lab",
+                "00000000-0000-0000-0000-000000000202",
+                "/runner/two-attempt-workspace",
+            );
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                2,
+                second_run,
+            )
+            .expect("register second attempt");
+            let second =
+                agent_task_lifecycle::reconcile_terminal_cook_provider_result_with_scheduler(
+                    second_run,
+                    |_| panic!("the running continuation owns this Cook; no competing job"),
+                )
+                .expect("terminal projection under a running owner succeeds");
+            assert_eq!(second.metadata["cook_continuation"]["state"], "pending");
+
+            // Once the owner settles, the pending result is still reachable.
+            owner.complete().expect("owner completes");
+            let scheduled = std::cell::Cell::new(0);
+            agent_task_lifecycle::reconcile_terminal_cook_provider_result_with_scheduler(
+                second_run,
+                |request| {
+                    assert_eq!(request["run_id"], second_run);
+                    scheduled.set(scheduled.get() + 1);
+                    Ok(serde_json::json!({ "scheduled": true, "job_id": "next-work-job" }))
+                },
+            )
+            .expect("pending second attempt schedules after the owner settles");
+            assert_eq!(scheduled.get(), 1);
         });
     });
 }
