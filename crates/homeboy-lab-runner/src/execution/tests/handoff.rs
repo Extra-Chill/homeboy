@@ -36,12 +36,46 @@ fn runner_wait_settings_and_environment_resolve_at_the_controller() {
     };
     let _env = EnvVarGuard::unset(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
     assert_eq!(
-        runner_exec_wait_timeout(&settings),
+        runner_exec_wait_timeout(&settings, None),
         Duration::from_secs(2400)
     );
 
     let _env = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "60");
-    assert_eq!(runner_exec_wait_timeout(&settings), Duration::from_secs(60));
+    assert_eq!(
+        runner_exec_wait_timeout(&settings, None),
+        Duration::from_secs(60)
+    );
+}
+
+#[test]
+fn agent_task_wait_honors_a_workload_budget_beyond_the_transport_default() {
+    let budget_ms = 90 * 60 * 1_000;
+    assert_eq!(
+        resolve_runner_exec_wait_timeout(None, None, Some(budget_ms)),
+        Duration::from_millis(budget_ms)
+            + Duration::from_secs(AGENT_TASK_WAIT_STAGING_HARVEST_GRACE_SECS)
+    );
+}
+
+#[test]
+fn explicit_wait_override_wins_over_the_workload_budget() {
+    let budget_ms = Some(90 * 60 * 1_000);
+    assert_eq!(
+        resolve_runner_exec_wait_timeout(None, Some(2400), budget_ms),
+        Duration::from_secs(2400)
+    );
+    assert_eq!(
+        resolve_runner_exec_wait_timeout(Some(60), Some(2400), budget_ms),
+        Duration::from_secs(60)
+    );
+}
+
+#[test]
+fn generic_exec_wait_keeps_the_twenty_minute_default() {
+    assert_eq!(
+        resolve_runner_exec_wait_timeout(None, None, None),
+        Duration::from_secs(20 * 60)
+    );
 }
 
 #[test]
@@ -147,6 +181,7 @@ fn agent_task_workload() -> homeboy_core::lab_contract::LabRunnerWorkload {
             .map(str::to_string)
             .collect::<Vec<_>>(),
         Some("agent-task-wait-expiry"),
+        None,
     );
     workload
 }

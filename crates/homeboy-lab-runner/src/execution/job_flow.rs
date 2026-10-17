@@ -189,7 +189,13 @@ where
         return Ok(RunnerExecCompletion::InFlight(output));
     }
 
-    let deadline = Instant::now() + runner_exec_wait_timeout(&flow.runner.settings);
+    let workload_budget_ms = flow
+        .lab_runner_workload
+        .as_ref()
+        .and_then(|workload| workload.agent_task.as_ref())
+        .and_then(|agent_task| agent_task.wait_budget_ms);
+    let deadline =
+        Instant::now() + runner_exec_wait_timeout(&flow.runner.settings, workload_budget_ms);
     let mut observed_terminal_daemon_job = job.status.is_terminal();
     let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {

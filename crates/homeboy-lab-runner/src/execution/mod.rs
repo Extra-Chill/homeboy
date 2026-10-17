@@ -33,6 +33,9 @@ use super::{
 };
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
+/// Bounded allowance past an agent-task workload's own budget for runner-side
+/// staging before the provider starts and harvest after it ends.
+const AGENT_TASK_WAIT_STAGING_HARVEST_GRACE_SECS: u64 = 10 * 60;
 pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
 /// Per-run override: when set to a truthy value, a controller-side wait-timeout
 /// best-effort cancels the still-running remote runner job. Otherwise the runner

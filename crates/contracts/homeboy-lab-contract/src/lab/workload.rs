@@ -70,6 +70,12 @@ pub struct LabRunnerWorkloadAgentTask {
     /// event", which is exactly when the stdout fallback must still run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_mirror_policy: Option<LabRunnerWorkloadAgentTaskHandoffMirrorPolicy>,
+    /// The workload's own declared wall-clock budget, in milliseconds: its
+    /// effective provider max timeout plus its gate budget. The controller's
+    /// handoff wait derives its deadline from this instead of the generic
+    /// runner-exec default; `None` keeps that default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_budget_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -344,6 +350,7 @@ mod tests {
             handoff_mirror_policy: Some(
                 LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff,
             ),
+            wait_budget_ms: None,
         };
 
         let value = serde_json::to_value(&agent_task).expect("agent_task serializes");

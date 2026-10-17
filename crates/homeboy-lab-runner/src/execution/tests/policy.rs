@@ -187,7 +187,7 @@ fn canonical_daemon_body_returns_nested_body() {
 fn runner_exec_wait_timeout_defaults_to_controller_timeout_budget() {
     std::env::remove_var(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
     assert_eq!(
-        runner_exec_wait_timeout(&homeboy_core::server::RunnerSettings::default()),
+        runner_exec_wait_timeout(&homeboy_core::server::RunnerSettings::default(), None),
         Duration::from_secs(20 * 60)
     );
 }

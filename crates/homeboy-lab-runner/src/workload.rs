@@ -1,4 +1,9 @@
 use homeboy_agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
+use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
+use homeboy_agents::agent_task_timeout::{
+    effective_provider_max_timeout_ms, effective_provider_timeout_ms,
+};
+use homeboy_agents::agent_tasks::gate::VerifyGateOptions;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::{
     lab_capability_is_pipeline_enforced, LabRunnerWorkload, LabRunnerWorkloadAgentTask,
@@ -165,6 +170,7 @@ fn is_homeboy_executable(value: &str) -> bool {
 pub(crate) fn lab_runner_workload_agent_task_from_command(
     args: &[String],
     run_id: Option<&str>,
+    plan: Option<&AgentTaskPlan>,
 ) -> Option<LabRunnerWorkloadAgentTask> {
     let agent_task_index = args.iter().position(|arg| arg == "agent-task")?;
     let action = args.get(agent_task_index + 1)?.as_str();
@@ -181,6 +187,10 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
             handoff_mirror_policy: Some(
                 LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff,
             ),
+            wait_budget_ms: agent_task_wait_budget_ms(
+                plan,
+                cook_gate_budget_ms(args, agent_task_index),
+            ),
         }),
         "dispatch" => run_id.map(|run_id| LabRunnerWorkloadAgentTask {
             run_id: run_id.to_string(),
@@ -191,6 +201,7 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
             handoff_mirror_policy: Some(
                 LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff,
             ),
+            wait_budget_ms: agent_task_wait_budget_ms(plan, 0),
         }),
         "run-plan" => {
             let plan_ref = option_value_after(args, agent_task_index + 1, "--plan")?;
@@ -208,10 +219,39 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
                 // than leaving the field unset keeps "no handoff to mirror"
                 // distinguishable from "emitter predates the field".
                 handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
+                wait_budget_ms: agent_task_wait_budget_ms(plan, 0),
             })
         }
         _ => None,
     }
+}
+
+/// The agent-task workload's own declared budget: every task's effective
+/// provider max timeout plus the Cook gate budget. `None` without a
+/// controller-materialized plan, so the handoff wait keeps its default.
+fn agent_task_wait_budget_ms(plan: Option<&AgentTaskPlan>, gate_budget_ms: u64) -> Option<u64> {
+    let plan = plan.filter(|plan| !plan.tasks.is_empty())?;
+    let provider_ms = plan
+        .tasks
+        .iter()
+        .map(|task| {
+            effective_provider_max_timeout_ms(
+                effective_provider_timeout_ms(
+                    task.limits.timeout_ms.or(plan.options.timeout_ms),
+                    task.limits.max_runtime_ms,
+                ),
+                task.limits.max_timeout_ms,
+            )
+        })
+        .fold(0, u64::saturating_add);
+    Some(provider_ms.saturating_add(gate_budget_ms))
+}
+
+fn cook_gate_budget_ms(args: &[String], agent_task_index: usize) -> u64 {
+    option_value_after(args, agent_task_index + 1, "--gate-timeout-seconds")
+        .and_then(|seconds| seconds.parse::<u64>().ok())
+        .unwrap_or_else(|| VerifyGateOptions::default().gate_timeout_seconds)
+        .saturating_mul(1_000)
 }
 
 fn resolved_provider_policy_from_command(
@@ -1669,6 +1709,7 @@ mod tests {
                 "--record-run-id=run-typed".to_string(),
             ],
             None,
+            None,
         )
         .expect("agent task workload contract");
 
@@ -1705,6 +1746,7 @@ mod tests {
                     "run-7530".to_string(),
                 ],
                 Some("run-7530"),
+                None,
             )
             .unwrap_or_else(|| panic!("agent task workload contract for {action}"));
 
@@ -1733,8 +1775,74 @@ mod tests {
                 "cook".to_string(),
             ],
             None,
+            None,
         )
         .is_none());
+    }
+
+    /// A Cook declares its own handoff wait budget from the controller plan:
+    /// the provider max timeout (3x a 30 min `--timeout-ms`) plus its gate
+    /// budget, well past the 20 min transport default.
+    #[test]
+    fn cook_wait_budget_is_provider_max_timeout_plus_gate_budget() {
+        use homeboy_agents::agent_task::{
+            AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest,
+            AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
+        };
+        let task = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "cook-task".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "fake".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions: "cook".to_string(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits {
+                timeout_ms: Some(30 * 60 * 1_000),
+                ..Default::default()
+            },
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
+            metadata: serde_json::Value::Null,
+        };
+        let plan = AgentTaskPlan::new("cook-plan", vec![task]);
+        let args = [
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--gate-timeout-seconds",
+            "600",
+        ]
+        .map(str::to_string);
+
+        let agent_task =
+            lab_runner_workload_agent_task_from_command(&args, Some("cook-run"), Some(&plan))
+                .expect("cook workload contract");
+
+        assert_eq!(
+            agent_task.wait_budget_ms,
+            Some(3 * 30 * 60 * 1_000 + 600 * 1_000)
+        );
+        assert_eq!(
+            lab_runner_workload_agent_task_from_command(&args, Some("cook-run"), None)
+                .expect("cook workload contract")
+                .wait_budget_ms,
+            None
+        );
     }
 
     #[test]
