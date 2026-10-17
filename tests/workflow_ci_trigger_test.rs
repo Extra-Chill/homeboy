@@ -71,3 +71,67 @@ fn release_quality_gates_use_the_ci_action_revision() {
         "release lint and test must use the pinned CI action revision"
     );
 }
+
+fn prepare_step(name: &str) -> Value {
+    release_workflow()["jobs"]["prepare"]["steps"]
+        .as_sequence()
+        .expect("prepare declares steps")
+        .iter()
+        .find(|step| step["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("prepare declares the '{name}' step"))
+        .clone()
+}
+
+/// Runs the "Mark prepared release" script with its declared release outputs
+/// and returns everything the step wrote to `$GITHUB_OUTPUT`.
+fn mark_prepared_outputs(released: &str, skipped_reason: &str) -> String {
+    let script = prepare_step("Mark prepared release for downstream publish")["run"]
+        .as_str()
+        .expect("the mark step is a run script")
+        .to_string();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("github_output");
+    std::fs::write(&output, "").expect("seed GITHUB_OUTPUT");
+    let status = std::process::Command::new("bash")
+        .args(["-e", "-c", &script])
+        .env("GITHUB_OUTPUT", &output)
+        .env("RELEASE_TAG", "v9.9.9")
+        .env("RELEASED", released)
+        .env("SKIPPED_REASON", skipped_reason)
+        .status()
+        .expect("run bash");
+    assert!(status.success(), "the mark step must not fail the release");
+    std::fs::read_to_string(&output).expect("read GITHUB_OUTPUT")
+}
+
+// When two main pushes race through `check` with the same predicted version,
+// the later `prepare` finds the tag already at HEAD. The earlier run owns that
+// tag and publishes it. The later run must not hand it to its own build/host
+// chain: rebuilding the tag produces a different `dist-manifest.json`, which
+// fails publication with "conflicts with the canonical publication bytes"
+// (v0.428.22, run 38965622773).
+#[test]
+fn prepare_stands_down_when_an_earlier_run_already_tagged_head() {
+    let outputs = mark_prepared_outputs("false", "release-already-at-head");
+    assert!(
+        !outputs.contains("prepared=true"),
+        "a run that did not cut the tag must not publish it: {outputs}"
+    );
+    assert!(outputs.contains("tag-owned-elsewhere=true"), "{outputs}");
+
+    let resolve = prepare_step("Resolve release outputs")["run"]
+        .as_str()
+        .expect("resolve is a run script")
+        .to_string();
+    assert!(
+        resolve.contains("steps.prepared.outputs['tag-owned-elsewhere']")
+            && resolve.contains("prepared=false"),
+        "resolve must turn a stand-down into a clean prepared=false handoff"
+    );
+}
+
+#[test]
+fn prepare_hands_a_freshly_cut_tag_to_downstream_publication() {
+    let outputs = mark_prepared_outputs("true", "");
+    assert!(outputs.contains("prepared=true"), "{outputs}");
+}
