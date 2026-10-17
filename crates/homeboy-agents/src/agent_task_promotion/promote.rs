@@ -2961,8 +2961,23 @@ fn bounded_setup_error_text(value: &str) -> String {
     result
 }
 
+/// Retry action for a gate setup failure whose cause cannot change between
+/// attempts: a validation error the cause itself marked non-retryable, such as a
+/// Lab gate rejected in preflight for a missing runner `secret_env` ref (#16121).
+pub(crate) const GATE_SETUP_FIX_CONFIGURATION: &str = "fix_configuration";
+
+fn gate_setup_failure_is_deterministic(error: &Error) -> bool {
+    error.retryable == Some(false) && error.code.as_str().starts_with("validation.")
+}
+
 fn gate_setup_failure(classification: &str, component: &str, error: Error) -> Error {
-    Error::dependency_step_failed(
+    let deterministic = gate_setup_failure_is_deterministic(&error);
+    let retry_action = if deterministic {
+        GATE_SETUP_FIX_CONFIGURATION
+    } else {
+        "retry_dependency_hydration"
+    };
+    let mut failure = Error::dependency_step_failed(
         "promotion.gate_setup",
         component.to_string(),
         None,
@@ -2974,9 +2989,13 @@ fn gate_setup_failure(classification: &str, component: &str, error: Error) -> Er
             "code": error.code.as_str(),
             "message": bounded_setup_error_text(&homeboy_core::redaction::redact_string(&error.message)),
             "details": bounded_setup_error_text(&homeboy_core::redaction::redact_string(&error.details.to_string())),
-            "retry_action": "retry_dependency_hydration",
+            "retry_action": retry_action,
         })),
-    )
+    );
+    if deterministic {
+        failure.retryable = Some(false);
+    }
+    failure
 }
 
 fn gate_setup_outcome_failure(
@@ -4682,5 +4701,57 @@ mod gate_setup_message_tests {
         assert!(error
             .message
             .ends_with("stderr: ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with frozen-lockfile"));
+    }
+}
+
+#[cfg(test)]
+mod gate_setup_failure_retry_tests {
+    use super::*;
+
+    #[test]
+    fn non_retryable_validation_cause_is_a_configuration_fix_not_a_hydration_retry() {
+        let mut cause = Error::validation_invalid_argument(
+            "secret_env",
+            "missing runner secret env ref for WP_CODEBOX_DB_HOST",
+            None,
+            None,
+        );
+        cause.retryable = Some(false);
+
+        let failure = gate_setup_failure(
+            "destination_gate_toolchain",
+            "destination_gate_workspace",
+            cause,
+        );
+
+        assert_eq!(failure.retryable, Some(false));
+        assert_eq!(
+            failure.details["cause"]["retry_action"],
+            GATE_SETUP_FIX_CONFIGURATION
+        );
+        assert!(failure.details["cause"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("WP_CODEBOX_DB_HOST")));
+    }
+
+    #[test]
+    fn environmental_causes_keep_the_hydration_retry() {
+        let cause = Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            "ssh: connection reset",
+            serde_json::json!({}),
+        );
+
+        let failure = gate_setup_failure(
+            "destination_gate_toolchain",
+            "destination_gate_workspace",
+            cause,
+        );
+
+        assert_ne!(failure.retryable, Some(false));
+        assert_eq!(
+            failure.details["cause"]["retry_action"],
+            "retry_dependency_hydration"
+        );
     }
 }
