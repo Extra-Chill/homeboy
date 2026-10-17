@@ -455,6 +455,7 @@ mod tests {
             handoff_mirror_policy: Some(
                 LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff,
             ),
+            wait_budget_ms: None,
         };
         assert!(agent_task_mirrors_dispatch_handoff(&agent_task));
 

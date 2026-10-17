@@ -363,17 +363,36 @@ pub(super) fn persist_lab_offload_handoff_run(
     }
 }
 
+/// Controller wait deadline for a submitted runner job. An explicit
+/// `HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS` or `runner_exec_wait_timeout_secs`
+/// wins; otherwise an agent-task workload waits for its own declared budget,
+/// and generic `runner exec` keeps the transport default.
 pub(super) fn runner_exec_wait_timeout(
     settings: &homeboy_core::server::RunnerSettings,
+    workload_budget_ms: Option<u64>,
 ) -> Duration {
-    std::env::var(RUNNER_EXEC_WAIT_TIMEOUT_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
+    resolve_runner_exec_wait_timeout(
+        std::env::var(RUNNER_EXEC_WAIT_TIMEOUT_ENV)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok()),
+        settings.runner_exec_wait_timeout_secs,
+        workload_budget_ms,
+    )
+}
+
+pub(super) fn resolve_runner_exec_wait_timeout(
+    env_secs: Option<u64>,
+    setting_secs: Option<u64>,
+    workload_budget_ms: Option<u64>,
+) -> Duration {
+    env_secs
+        .or(setting_secs)
         .map(Duration::from_secs)
         .or_else(|| {
-            settings
-                .runner_exec_wait_timeout_secs
-                .map(Duration::from_secs)
+            workload_budget_ms.map(|budget_ms| {
+                Duration::from_millis(budget_ms)
+                    + Duration::from_secs(AGENT_TASK_WAIT_STAGING_HARVEST_GRACE_SECS)
+            })
         })
         .unwrap_or_else(|| Duration::from_secs(DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS))
 }

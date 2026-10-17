@@ -1043,6 +1043,7 @@ mod tests {
             dispatch_kind: homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::Cook,
             lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
             handoff_mirror_policy,
+            wait_budget_ms: None,
         }
     }
 
@@ -1184,6 +1185,7 @@ mod tests {
             lifecycle_mirror_policy:
                 LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
             handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
+            wait_budget_ms: None,
         };
 
         mirror_agent_task_run_plan_lifecycle(&args, Some(&agent_task), None, stdout, None, None)
@@ -1209,6 +1211,7 @@ mod tests {
                 lifecycle_mirror_policy:
                     LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
                 handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
+                wait_budget_ms: None,
             };
             let events = vec![JobEvent {
                 sequence: 1,
@@ -1267,6 +1270,7 @@ mod tests {
                 lifecycle_mirror_policy:
                     LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
                 handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
+                wait_budget_ms: None,
             };
             let events = vec![JobEvent {
                 sequence: 1,
@@ -1404,6 +1408,7 @@ mod tests {
                 lifecycle_mirror_policy:
                     LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
                 handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
+                wait_budget_ms: None,
             };
             let events = vec![JobEvent {
                 sequence: 1,

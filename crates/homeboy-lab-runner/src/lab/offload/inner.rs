@@ -2574,8 +2574,11 @@ pub(crate) fn run_lab_offload_inner(
         },
         &command,
     );
-    lab_runner_workload.agent_task =
-        lab_runner_workload_agent_task_from_command(&command, agent_task_run_id.as_deref());
+    lab_runner_workload.agent_task = lab_runner_workload_agent_task_from_command(
+        &command,
+        agent_task_run_id.as_deref(),
+        request.durable_agent_task_plan,
+    );
     lab_runner_workload.required_extensions = runner_required_extensions.clone();
     lab_runner_workload.required_secrets.secret_env_plan =
         secret_env_handoff.secret_env_plan.clone();

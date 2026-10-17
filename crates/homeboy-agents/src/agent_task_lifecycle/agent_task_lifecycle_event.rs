@@ -310,6 +310,7 @@ mod tests {
                 dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
                 handoff_mirror_policy: Some(homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
+                wait_budget_ms: None,
             },
             "workspace_mappings": { "source_path_mode": "snapshot", "workspace_mode_policy": "snapshot", "mapping_ref": null },
             "required_capabilities": [],
