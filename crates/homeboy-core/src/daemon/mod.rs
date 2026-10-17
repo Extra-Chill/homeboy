@@ -3639,9 +3639,12 @@ fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport
     let validation = validate_lease_file(&path)?;
     // Durable terminal evidence proves no workload remains, so those jobs do
     // not protect this daemon from replacement either.
+    // Another daemon's jobs in the shared ledger neither occupy nor protect
+    // this daemon (#16089).
     let blocking_active_jobs = job_store
         .active_daemon_job_recovery_evidence(None, pid_is_running)
         .into_iter()
+        .filter(|evidence| job_store.executes_lease(evidence.daemon_lease_id.as_deref()))
         .filter(|evidence| {
             evidence.disposition
                 != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
@@ -5888,6 +5891,76 @@ mod tests {
                 0
             );
             assert!(store.active_runner_jobs().is_empty());
+        });
+    }
+
+    /// #16089: every daemon running as one Unix user opens the same
+    /// HOME-scoped job ledger, whatever its `HOMEBOY_DAEMON_STATE_DIR`. One
+    /// controller scope's live job must not count as another scope's daemon
+    /// work: the controller derives `active_job_count` and `safe_to_rotate`
+    /// for its own daemon from these projections, and rotating that daemon's
+    /// unit cannot touch a job another daemon executes.
+    #[test]
+    fn runner_job_projections_count_only_this_daemons_lease_in_a_shared_ledger() {
+        with_isolated_home(|_| {
+            let own_lease = "lease-controller-a";
+            write_test_lease(own_lease);
+            let ledger = paths::observation_db().expect("shared ledger path");
+            let other_scope = JobStore::open_without_reconciliation(&ledger)
+                .expect("open other scope's store")
+                .with_daemon_lease("lease-controller-b".to_string());
+            let foreign = other_scope.create("runner.exec");
+            other_scope.start(foreign.id).expect("start foreign job");
+
+            let own_scope = JobStore::open_without_reconciliation(&ledger)
+                .expect("open own store")
+                .with_daemon_lease(own_lease.to_string());
+            let described = describe_runner(&own_scope).expect("describe");
+            assert_eq!(
+                described["active_runner_job_count"], 0,
+                "another scope's live job is not this daemon's work: {described}"
+            );
+            assert_eq!(described["freshness"]["active_jobs"], 0);
+            assert_eq!(
+                daemon_freshness_report(&own_scope)
+                    .expect("freshness")
+                    .active_jobs,
+                0
+            );
+            let jobs = http_api::handle_with_jobs(
+                http_api::HttpApiRequest {
+                    method: HttpMethod::Get,
+                    path: "/jobs".to_string(),
+                    body: None,
+                },
+                &own_scope,
+            )
+            .expect("jobs");
+            assert_eq!(jobs.body["active_runner_job_count"], 0);
+            assert!(
+                jobs.body["jobs"]
+                    .as_array()
+                    .expect("job inventory")
+                    .iter()
+                    .any(|job| job["id"] == foreign.id.to_string()),
+                "the operator inventory keeps host-wide visibility"
+            );
+
+            // This daemon's own live job still fences its rotation.
+            let own = own_scope.create("runner.exec");
+            own_scope.start(own.id).expect("start own job");
+            let described = describe_runner(&own_scope).expect("describe");
+            assert_eq!(described["active_runner_job_count"], 1);
+            assert_eq!(
+                described["active_runner_jobs"][0]["job_id"],
+                own.id.to_string()
+            );
+            assert_eq!(
+                daemon_freshness_report(&own_scope)
+                    .expect("freshness")
+                    .active_jobs,
+                1
+            );
         });
     }
 
