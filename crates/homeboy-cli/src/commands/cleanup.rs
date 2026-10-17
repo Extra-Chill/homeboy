@@ -2750,6 +2750,8 @@ fn run_cleanup_category(
                         cleanup_replay_command(&args, false, false),
                         cleanup_replay_command(&args, true, true),
                     )?;
+                    let has_more = output.has_more;
+                    let next_cursor = output.next_cursor.clone();
                     let mut category = category_from_output(
                         RUNTIME_TMP_METADATA,
                         apply,
@@ -2767,6 +2769,19 @@ fn run_cleanup_category(
                             category.canonical_cleanup_command,
                             category.specialist_command,
                         ) = (canonical, specialist);
+                    }
+                    // A pass that stopped with inventory left is not a complete
+                    // inventory. Reporting `complete` here made a 290 GB backlog
+                    // read as a clean zero-candidate sweep.
+                    if has_more {
+                        category.inventory_completeness = "partial".to_string();
+                        if let Some(cursor) = next_cursor {
+                            category.continuation_command = format!(
+                                "{} --cursor {}",
+                                category.canonical_cleanup_command,
+                                quote_arg(&cursor)
+                            );
+                        }
                     }
                     Ok(vec![category])
                 },
@@ -2884,6 +2899,9 @@ fn run_cleanup_category(
                                 .map(|days| days.saturating_mul(86_400)),
                         },
                         args.cursor.as_deref(),
+                        // Stop walking past retained leases while there is still
+                        // time to report, rather than being killed at the wall.
+                        runtime_tmp_scan_deadline(deadline),
                     )?;
                     category_from_output(
                         CONTROLLER_SCRATCH_METADATA,
@@ -5150,6 +5168,69 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// A runtime-tmp pass that stopped with inventory left must say so. The
+    /// live dry run reported `has_more: true` with a `next_cursor`, yet the
+    /// category claimed `outcome: completed` / `inventory_completeness:
+    /// complete`, so the aggregate read as a clean zero-candidate sweep over a
+    /// 290 GB backlog.
+    #[test]
+    fn runtime_tmp_category_with_remaining_inventory_is_partial_and_resumable() {
+        homeboy::test_support::with_isolated_home(|root| {
+            let runtime_root = root.path().join("runtime-tmp-backlog");
+            std::fs::create_dir_all(&runtime_root).expect("runtime root");
+            let stale = SystemTime::now() - Duration::from_secs(30 * 86_400);
+            for index in 0..3 {
+                let path = runtime_root.join(format!("homeboy-stray-{index}"));
+                let file = std::fs::File::create(&path).expect("stray entry");
+                file.set_modified(stale).expect("age stray entry");
+            }
+            let previous = std::env::var_os("HOMEBOY_RUNTIME_TMPDIR");
+            std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", &runtime_root);
+
+            let result = cleanup_inventory_with_deadline(
+                CleanupArgs {
+                    apply: false,
+                    include: vec![CleanupCategoryArg::RuntimeTmp],
+                    exclude: Vec::new(),
+                    include_untagged: false,
+                    older_than_days: None,
+                    runtime_tmp_managed_older_than_days: None,
+                    limit: Some(1),
+                    full: false,
+                    cursor: None,
+                    command: None,
+                },
+                None,
+            );
+
+            match previous {
+                Some(value) => std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", value),
+                None => std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR"),
+            }
+
+            let result = result.expect("aggregate result");
+            let category = &result.output["categories"][0];
+            assert_eq!(category["category"], "runtime_tmp");
+            assert_eq!(category["output"]["has_more"], true);
+            assert_eq!(category["candidate_count"], 1);
+            assert_eq!(
+                category["inventory_completeness"], "partial",
+                "a pass that stopped with inventory left is not complete: {category}"
+            );
+            let cursor = category["output"]["next_cursor"]
+                .as_str()
+                .expect("next cursor");
+            assert!(
+                category["continuation_command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains("--include runtime-tmp")
+                        && command.contains(&quote_arg(cursor))),
+                "continuation must resume the runtime-tmp cursor: {category}"
+            );
+            assert_eq!(result.output["continuation_required"], true);
+        });
+    }
 
     #[test]
     fn scoped_cleanup_continuations_receive_the_aggregate_budget() {

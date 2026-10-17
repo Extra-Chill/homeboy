@@ -301,6 +301,8 @@ pub struct RuntimeTempCleanupOptions<'a> {
     /// entries always retain `older_than_days` because their liveness is unknown.
     pub managed_older_than_days: Option<u64>,
     pub prefix: Option<&'a str>,
+    /// Reclaim candidates one pass may plan. Retained and protected entries
+    /// the walk passes to reach them do not count against it.
     pub limit: usize,
     pub run_max_bytes: u64,
     pub run_max_count: usize,
@@ -1165,7 +1167,9 @@ fn cleanup_runtime_tmp_bounded_with_remover(
     // actually accumulate. Not sweeping it would leak them permanently — the
     // #11125 failure mode, moved to a new root.
     if let Some(fallback) = socket_safe_fallback_root() {
-        let remaining = options.limit.max(1).saturating_sub(output.rows.len());
+        // Candidates, not rows: retained runs walked past in the active root
+        // must not starve the fallback drain.
+        let remaining = options.limit.max(1).saturating_sub(output.planned_count);
         // The row bound and wall-clock budget are shared with the active root
         // so the aggregate sweep stays bounded; exhausting either defers the
         // drain to the next invocation (#14221).
@@ -1401,204 +1405,236 @@ fn cleanup_runtime_tmp_root(
             })
             .unwrap_or(0)
     };
-    let page_end = start
-        .saturating_add(options.limit.max(1))
-        .min(managed.len());
-    let mut managed_has_more = page_end < managed.len();
-    let page_last_name = managed
-        .get(page_end.saturating_sub(1))
-        .map(|entry| entry.file_name().to_string_lossy().to_string());
-    let managed = managed.into_iter().skip(start).take(options.limit.max(1));
-
-    let mut managed_inspections = Vec::new();
-    for entry in managed {
-        // Planning reads only the owner record and pin for every entry; the
-        // recursive storage walk below is skipped for size-independent
-        // candidates and bounded by the budget for the rest (#14221, #15724).
-        lock.heartbeat()?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if options
-            .prefix
-            .is_some_and(|prefix| !managed_entry_matches_prefix(&path, &name, prefix))
-        {
-            output.skipped_count += 1;
-            output
-                .rows
-                .push(skip_row(path, name, "entry does not match prefix"));
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("read runtime tmp {}", path.display())),
-            )
-        })?;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_dir()
-            || !path_is_within_root(&path, &root)
-        {
-            output.skipped_count += 1;
-            output.rows.push(skip_row(
-                path,
-                name,
-                "managed run path is not a safe directory",
-            ));
-            continue;
-        }
-        let (owner, metadata_warning) = match read_run_owner(&path) {
-            Ok(owner) => (owner, None),
-            Err(error) => {
-                let modified = metadata.modified().unwrap_or(SystemTime::now());
-                let age = SystemTime::now()
-                    .duration_since(modified)
-                    .unwrap_or_default();
-                let owner = RuntimeRunOwner {
-                    schema: RUN_OWNER_SCHEMA.to_string(),
-                    owner_id: format!("corrupt:{name}"),
-                    owner_pid: 0,
-                    linux_starttime_ticks: None,
-                    process_start_identity: None,
-                    run_id: None,
-                    invocation_ids: Vec::new(),
-                    state: "corrupt".to_string(),
-                    created_at: chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339(),
-                    completed_at: None,
-                    reason: Some(error.message.clone()),
-                    producer: None,
-                    placement: None,
-                    allocation_prefix: None,
-                };
-                let warning = format!("owner metadata is corrupt: {}", error.message);
-                if age < CORRUPT_OWNER_GRACE {
-                    managed_inspections.push(ManagedRunInspection {
-                        path: path.clone(),
-                        name,
-                        owner,
-                        age_seconds: age.as_secs(),
-                        size_bytes: path_storage_measure(&path)?.logical_bytes,
-                        allocated_bytes: path_storage_measure(&path)?.allocated_bytes,
-                        protection_reason: Some(format!(
-                            "{warning}; protected during {}s quarantine grace",
-                            CORRUPT_OWNER_GRACE.as_secs()
-                        )),
-                        metadata_warning: Some(warning),
-                    });
-                    continue;
-                }
-                (owner, Some(warning))
-            }
-        };
-        let age_seconds = owner
-            .completed_at
-            .as_deref()
-            .unwrap_or(&owner.created_at)
-            .parse::<chrono::DateTime<chrono::Utc>>()
-            .ok()
-            .map(|time| {
-                chrono::Utc::now()
-                    .signed_duration_since(time)
-                    .num_seconds()
-                    .max(0) as u64
-            })
-            .unwrap_or(0);
-        let lifecycle_protection = inspection_owner_protection(&owner);
-        let pin_state = runtime_temp_pin_state(&path);
-        let protection_reason = lifecycle_protection.or_else(|| match pin_state {
-            RuntimeTempPinState::Active(pid) => {
-                Some(format!("runtime temp pin owner PID {pid} is running"))
-            }
-            RuntimeTempPinState::Malformed(reason)
-                if age_seconds < CORRUPT_OWNER_GRACE.as_secs() =>
-            {
-                Some(format!("{reason}; protected during quarantine grace"))
-            }
-            RuntimeTempPinState::Malformed(_) => None,
-            RuntimeTempPinState::Dead | RuntimeTempPinState::Absent
-                if owner.state == "active" && owner_process_identity_matches(&owner) =>
-            {
-                Some(format!(
-                    "runtime run owner PID {} is running",
-                    owner.owner_pid
-                ))
-            }
-            RuntimeTempPinState::Dead | RuntimeTempPinState::Absent => None,
-        });
-        // Terminal and age-expired entries are removable independently of
-        // their size. Do not let a large tree delay discovering later cleanup
-        // candidates; size is measured below only for retained-byte accounting.
-        let age_expired = age_seconds
-            >= options
-                .managed_older_than_days
-                .unwrap_or(options.older_than_days)
-                .saturating_mul(86_400);
-        let size_independent_candidate =
-            metadata_warning.is_some() || owner.state == "succeeded" || age_expired;
-        let storage = if protection_reason.is_some()
-            || (!size_independent_candidate && !options.budget_spent())
-        {
-            path_storage_measure(&path)?
-        } else {
-            if !size_independent_candidate && options.budget_spent() {
-                managed_has_more = true;
-            }
-            StorageMeasure {
-                logical_bytes: 0,
-                allocated_bytes: 0,
-            }
-        };
-        managed_inspections.push(ManagedRunInspection {
-            path: path.clone(),
-            name,
-            owner,
-            age_seconds,
-            size_bytes: storage.logical_bytes,
-            allocated_bytes: storage.allocated_bytes,
-            protection_reason,
-            metadata_warning,
-        });
-    }
-
-    managed_inspections.sort_by(|left, right| {
-        left.age_seconds
-            .cmp(&right.age_seconds)
-            .then_with(|| left.path.cmp(&right.path))
-    });
+    // The walk stays newest-first: count and byte retention keep the *newest*
+    // failed runs, so `retained_count`/`retained_bytes` must accrue in that
+    // order. What `limit` bounds is reclaim candidates, not the retained runs
+    // the walk has to pass to reach them. Bounding inspection instead let a
+    // steady stream of fresh runs fill every page: each pass inspected the
+    // newest `limit` entries, all retained, and never reached the old
+    // reclaimable backlog behind them (`planned_count: 0` over 290 GB). The
+    // retained runs walked past are themselves bounded by the count and byte
+    // budgets, and the deadline bounds the rest.
+    let limit = options.limit.max(1);
+    let mut next = start;
+    let mut managed_has_more = false;
+    let mut page_last_name = None;
+    let mut managed_candidates = 0usize;
     let mut managed_decisions = Vec::new();
-    for inspection in managed_inspections {
-        let managed_older_than_days = options
-            .managed_older_than_days
-            .unwrap_or(options.older_than_days);
-        let age_expired = inspection.age_seconds >= managed_older_than_days.saturating_mul(86_400);
-        let exceeds_count = retained_count >= options.run_max_count;
-        let exceeds_bytes =
-            retained_bytes.saturating_add(inspection.size_bytes) > options.run_max_bytes;
-        let eligible = inspection.metadata_warning.is_some()
-            || inspection.owner.state == "succeeded"
-            || age_expired
-            || exceeds_count
-            || exceeds_bytes;
-        let eligibility_reason = if inspection.protection_reason.is_some() || !eligible {
-            None
-        } else if let Some(warning) = inspection.metadata_warning.as_deref() {
-            Some(format!("{warning}; quarantine grace expired"))
-        } else if inspection.owner.state == "succeeded" {
-            Some("successful run teardown is complete".to_string())
-        } else if age_expired {
-            Some("failed or interrupted run exceeded age retention".to_string())
-        } else if exceeds_count {
-            Some("failed or interrupted run exceeded count retention".to_string())
-        } else {
-            Some("failed or interrupted run exceeded byte retention".to_string())
-        };
-        if inspection.protection_reason.is_none() && eligibility_reason.is_none() {
-            retained_count += 1;
-            retained_bytes = retained_bytes.saturating_add(inspection.size_bytes);
+    while next < managed.len() && managed_candidates < limit && !managed_has_more {
+        // The first page always runs so a spent budget still makes progress.
+        if next > start && options.budget_spent() {
+            break;
         }
-        managed_decisions.push((inspection, eligibility_reason));
+        // Each entry yields at most one candidate, so sizing the page to the
+        // remaining candidate budget keeps the pass within `limit`.
+        let page_end = next
+            .saturating_add(limit - managed_candidates)
+            .min(managed.len());
+        page_last_name = Some(
+            managed[page_end - 1]
+                .file_name()
+                .to_string_lossy()
+                .to_string(),
+        );
+        let page = &managed[next..page_end];
+        next = page_end;
+
+        let mut managed_inspections = Vec::new();
+        for entry in page {
+            // Planning reads only the owner record and pin for every entry; the
+            // recursive storage walk below is skipped for size-independent
+            // candidates and bounded by the budget for the rest (#14221, #15724).
+            lock.heartbeat()?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if options
+                .prefix
+                .is_some_and(|prefix| !managed_entry_matches_prefix(&path, &name, prefix))
+            {
+                output.skipped_count += 1;
+                output
+                    .rows
+                    .push(skip_row(path, name, "entry does not match prefix"));
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read runtime tmp {}", path.display())),
+                )
+            })?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_dir()
+                || !path_is_within_root(&path, &root)
+            {
+                output.skipped_count += 1;
+                output.rows.push(skip_row(
+                    path,
+                    name,
+                    "managed run path is not a safe directory",
+                ));
+                continue;
+            }
+            let (owner, metadata_warning) = match read_run_owner(&path) {
+                Ok(owner) => (owner, None),
+                Err(error) => {
+                    let modified = metadata.modified().unwrap_or(SystemTime::now());
+                    let age = SystemTime::now()
+                        .duration_since(modified)
+                        .unwrap_or_default();
+                    let owner = RuntimeRunOwner {
+                        schema: RUN_OWNER_SCHEMA.to_string(),
+                        owner_id: format!("corrupt:{name}"),
+                        owner_pid: 0,
+                        linux_starttime_ticks: None,
+                        process_start_identity: None,
+                        run_id: None,
+                        invocation_ids: Vec::new(),
+                        state: "corrupt".to_string(),
+                        created_at: chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339(),
+                        completed_at: None,
+                        reason: Some(error.message.clone()),
+                        producer: None,
+                        placement: None,
+                        allocation_prefix: None,
+                    };
+                    let warning = format!("owner metadata is corrupt: {}", error.message);
+                    if age < CORRUPT_OWNER_GRACE {
+                        managed_inspections.push(ManagedRunInspection {
+                            path: path.clone(),
+                            name,
+                            owner,
+                            age_seconds: age.as_secs(),
+                            size_bytes: path_storage_measure(&path)?.logical_bytes,
+                            allocated_bytes: path_storage_measure(&path)?.allocated_bytes,
+                            protection_reason: Some(format!(
+                                "{warning}; protected during {}s quarantine grace",
+                                CORRUPT_OWNER_GRACE.as_secs()
+                            )),
+                            metadata_warning: Some(warning),
+                        });
+                        continue;
+                    }
+                    (owner, Some(warning))
+                }
+            };
+            let age_seconds = owner
+                .completed_at
+                .as_deref()
+                .unwrap_or(&owner.created_at)
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .ok()
+                .map(|time| {
+                    chrono::Utc::now()
+                        .signed_duration_since(time)
+                        .num_seconds()
+                        .max(0) as u64
+                })
+                .unwrap_or(0);
+            let lifecycle_protection = inspection_owner_protection(&owner);
+            let pin_state = runtime_temp_pin_state(&path);
+            let protection_reason = lifecycle_protection.or_else(|| match pin_state {
+                RuntimeTempPinState::Active(pid) => {
+                    Some(format!("runtime temp pin owner PID {pid} is running"))
+                }
+                RuntimeTempPinState::Malformed(reason)
+                    if age_seconds < CORRUPT_OWNER_GRACE.as_secs() =>
+                {
+                    Some(format!("{reason}; protected during quarantine grace"))
+                }
+                RuntimeTempPinState::Malformed(_) => None,
+                RuntimeTempPinState::Dead | RuntimeTempPinState::Absent
+                    if owner.state == "active" && owner_process_identity_matches(&owner) =>
+                {
+                    Some(format!(
+                        "runtime run owner PID {} is running",
+                        owner.owner_pid
+                    ))
+                }
+                RuntimeTempPinState::Dead | RuntimeTempPinState::Absent => None,
+            });
+            // Terminal and age-expired entries are removable independently of
+            // their size. Do not let a large tree delay discovering later cleanup
+            // candidates; size is measured below only for retained-byte accounting.
+            let age_expired = age_seconds
+                >= options
+                    .managed_older_than_days
+                    .unwrap_or(options.older_than_days)
+                    .saturating_mul(86_400);
+            let size_independent_candidate =
+                metadata_warning.is_some() || owner.state == "succeeded" || age_expired;
+            let storage = if protection_reason.is_some()
+                || (!size_independent_candidate && !options.budget_spent())
+            {
+                path_storage_measure(&path)?
+            } else {
+                if !size_independent_candidate && options.budget_spent() {
+                    managed_has_more = true;
+                }
+                StorageMeasure {
+                    logical_bytes: 0,
+                    allocated_bytes: 0,
+                }
+            };
+            managed_inspections.push(ManagedRunInspection {
+                path: path.clone(),
+                name,
+                owner,
+                age_seconds,
+                size_bytes: storage.logical_bytes,
+                allocated_bytes: storage.allocated_bytes,
+                protection_reason,
+                metadata_warning,
+            });
+        }
+
+        managed_inspections.sort_by(|left, right| {
+            left.age_seconds
+                .cmp(&right.age_seconds)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        for inspection in managed_inspections {
+            let managed_older_than_days = options
+                .managed_older_than_days
+                .unwrap_or(options.older_than_days);
+            let age_expired =
+                inspection.age_seconds >= managed_older_than_days.saturating_mul(86_400);
+            let exceeds_count = retained_count >= options.run_max_count;
+            let exceeds_bytes =
+                retained_bytes.saturating_add(inspection.size_bytes) > options.run_max_bytes;
+            let eligible = inspection.metadata_warning.is_some()
+                || inspection.owner.state == "succeeded"
+                || age_expired
+                || exceeds_count
+                || exceeds_bytes;
+            let eligibility_reason = if inspection.protection_reason.is_some() || !eligible {
+                None
+            } else if let Some(warning) = inspection.metadata_warning.as_deref() {
+                Some(format!("{warning}; quarantine grace expired"))
+            } else if inspection.owner.state == "succeeded" {
+                Some("successful run teardown is complete".to_string())
+            } else if age_expired {
+                Some("failed or interrupted run exceeded age retention".to_string())
+            } else if exceeds_count {
+                Some("failed or interrupted run exceeded count retention".to_string())
+            } else {
+                Some("failed or interrupted run exceeded byte retention".to_string())
+            };
+            if inspection.protection_reason.is_none() && eligibility_reason.is_none() {
+                retained_count += 1;
+                retained_bytes = retained_bytes.saturating_add(inspection.size_bytes);
+            }
+            if eligibility_reason.is_some() {
+                managed_candidates += 1;
+            }
+            managed_decisions.push((inspection, eligibility_reason));
+        }
     }
-    // Candidate-first ordering lets bounded invocations converge even when the
-    // configured inspection limit is smaller than the retained count budget.
+    if next < managed.len() {
+        managed_has_more = true;
+    }
+    // Candidate-first, oldest-first rows: bounded presentations surface what
+    // the pass plans to reclaim before the retained runs it walked past.
     managed_decisions.sort_by(|left, right| {
         right
             .1
@@ -1607,8 +1643,7 @@ fn cleanup_runtime_tmp_root(
             .then_with(|| right.0.age_seconds.cmp(&left.0.age_seconds))
             .then_with(|| left.0.path.cmp(&right.0.path))
     });
-    for (inspection, eligibility_reason) in managed_decisions.into_iter().take(options.limit.max(1))
-    {
+    for (inspection, eligibility_reason) in managed_decisions {
         // Removal is the phase that actually reclaims bytes, so a spent budget
         // stops it rather than abandoning the rows it already applied.
         if options.apply && options.budget_spent() {
@@ -1706,7 +1741,7 @@ fn cleanup_runtime_tmp_root(
 
     let unmanaged_len = unmanaged.len();
     let unmanaged_start = if managed_has_more {
-        0
+        unmanaged_len
     } else if cursor_phase == "unmanaged" {
         cursor_name
             .as_deref()
@@ -1719,34 +1754,24 @@ fn cleanup_runtime_tmp_root(
     } else {
         0
     };
-    let unmanaged_capacity = if managed_has_more {
-        0
+    // Same bound as the managed walk: `limit` caps reclaim candidates, so
+    // fresh strays the walk passes cannot starve the old ones behind them.
+    let mut unmanaged_next = unmanaged_start;
+    let mut unmanaged_resume = if cursor_phase == "unmanaged" {
+        cursor_name.clone()
     } else {
-        options.limit.max(1).saturating_sub(output.rows.len())
+        None
     };
-    let unmanaged_end = unmanaged_start
-        .saturating_add(unmanaged_capacity)
-        .min(unmanaged_len);
-    let unmanaged_last_name = (unmanaged_end > unmanaged_start).then(|| {
-        unmanaged[unmanaged_end - 1]
-            .file_name()
-            .to_string_lossy()
-            .to_string()
-    });
-    let mut unmanaged_truncated_at = None;
-    for entry in unmanaged
-        .into_iter()
-        .skip(unmanaged_start)
-        .take(unmanaged_capacity)
-    {
-        if options.budget_spent() {
+    for entry in unmanaged.iter().skip(unmanaged_start) {
+        if output.planned_count >= limit || options.budget_spent() {
             break;
         }
         lock.heartbeat()?;
         output.totals.inspected_count += 1;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        unmanaged_truncated_at = Some(name.clone());
+        unmanaged_next += 1;
+        unmanaged_resume = Some(name.clone());
         let mut row = RuntimeTempCleanupRow {
             path: path.display().to_string(),
             name: name.clone(),
@@ -1823,14 +1848,8 @@ fn cleanup_runtime_tmp_root(
         output.rows.push(row);
     }
 
-    // A budget-truncated unmanaged page resumes from the last entry it actually
-    // reached, not from the page end it never got to.
-    let unmanaged_resume = if options.budget_spent() {
-        unmanaged_truncated_at.or(unmanaged_last_name)
-    } else {
-        unmanaged_last_name
-    };
-    let unmanaged_has_more = unmanaged_end < unmanaged_len || options.budget_spent();
+    // A truncated unmanaged walk resumes after the last entry it reached.
+    let unmanaged_has_more = unmanaged_next < unmanaged_len;
     if managed_has_more {
         output.has_more = true;
         output.next_cursor = page_last_name
