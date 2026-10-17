@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.31] - 2026-10-17
+
+### Changed
+- isolate provider evidence, probe gate and probe timing per test (#14832, part 1)
+
+### Fixed
+- derive agent-task handoff wait from the workload's own budget
+- treat an already released lease as a completed stop
+- reap orphans and keep fixture git maintenance in the foreground
+
 ## [0.428.30] - 2026-10-17
 
 ### Fixed
