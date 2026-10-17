@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.25] - 2026-10-17
+
+### Changed
+- acquire release binaries through the canonical installer
+
+### Fixed
+- sweep runtime tmp and controller scratch so bounded passes reach reclaimable entries
+- rotate automatic retention so an early phase cannot starve the rest
+- keep polling through a reattach that waits out a contended generation lock
+
 ## [0.428.24] - 2026-10-17
 
 ### Changed
