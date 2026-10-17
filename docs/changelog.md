@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.32] - 2026-10-17
+
+### Changed
+- one CAS writer for the persisted cook_delivery record (#16049 slice 2)
+
 ## [0.428.31] - 2026-10-17
 
 ### Changed
