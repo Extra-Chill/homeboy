@@ -107,6 +107,63 @@ fn lab_gate_exec_options(
     }
 }
 
+/// One Lab workspace a gate materializes (its declared resource package or
+/// its candidate snapshot).
+///
+/// The gate's durable controller run (`lab-gate-*`) owns the workspace lease,
+/// so prune can resolve the owner's authority, and the run-scoped
+/// [`crate::MaterializedWorkspace`] handle releases it on drop: reaped when the
+/// gate fails before any runner job exists or once the accepted job's terminal
+/// state is observed, and retained for job reconciliation when that terminal
+/// state is never observed.
+struct GateWorkspace {
+    sync: crate::RunnerWorkspaceSyncOutput,
+    handle: crate::MaterializedWorkspace,
+}
+
+impl GateWorkspace {
+    /// The runner accepted the gate job that executes against this workspace.
+    /// Until its terminal state is observed, the live job keeps the workspace.
+    fn admitted(&mut self, job_id: &str, daemon_generation: Option<&str>) {
+        self.handle
+            .retain_for_reconciliation(job_id, daemon_generation);
+    }
+
+    /// The accepted gate job reached an authoritatively observed terminal state.
+    fn terminal(&mut self, outcome: crate::WorkspaceTerminalOutcome) {
+        self.handle.set_terminal_outcome(outcome);
+    }
+}
+
+fn materialize_gate_workspace(
+    runner_id: &str,
+    path: &Path,
+    mode: crate::RunnerWorkspaceSyncMode,
+    run_id: &str,
+) -> Result<GateWorkspace> {
+    let (sync, _) = crate::sync_workspace(
+        runner_id,
+        crate::RunnerWorkspaceSyncOptions {
+            path: path.display().to_string(),
+            mode,
+            controller_routed_git: false,
+            changed_since_base: None,
+            git_fetch_refs: vec![],
+            snapshot_includes: vec![],
+            allow_dirty_lab_workspace: false,
+            validation_dependency_ids: None,
+            run_isolation_token: Some(run_id.to_string()),
+        },
+    )?;
+    let handle = crate::MaterializedWorkspace::new(
+        runner_id.to_string(),
+        sync.remote_path.clone(),
+        None,
+        crate::WorkspaceCleanupPolicy::DeleteAlways,
+    );
+    Ok(GateWorkspace { sync, handle })
+}
+
 fn execute_owned(
     cwd: &Path,
     request: &LabGateRequest,
@@ -166,20 +223,13 @@ fn execute_owned(
     std::fs::write(resource_root.join("resources.json"), b"{}")
         .map_err(|error| Error::internal_io(error.to_string(), None))?;
     let mut resources = sealed.clone();
-    let (snapshot, _) = crate::sync_workspace(
+    let mut snapshot_workspace = materialize_gate_workspace(
         &request.runner_id,
-        crate::RunnerWorkspaceSyncOptions {
-            path: resource_root.display().to_string(),
-            mode: crate::RunnerWorkspaceSyncMode::Snapshot,
-            controller_routed_git: false,
-            changed_since_base: None,
-            git_fetch_refs: vec![],
-            snapshot_includes: vec![],
-            allow_dirty_lab_workspace: false,
-            validation_dependency_ids: None,
-            run_isolation_token: Some(uuid::Uuid::new_v4().to_string()),
-        },
+        &resource_root,
+        crate::RunnerWorkspaceSyncMode::Snapshot,
+        run_id,
     )?;
+    let snapshot = snapshot_workspace.sync.clone();
     for resource in &mut resources {
         let relative = Path::new(&resource.source)
             .strip_prefix(&resource_root)
@@ -194,20 +244,13 @@ fn execute_owned(
             .display()
             .to_string();
     }
-    let (candidate, _) = crate::sync_workspace(
+    let mut candidate_workspace = materialize_gate_workspace(
         &request.runner_id,
-        crate::RunnerWorkspaceSyncOptions {
-            path: cwd.display().to_string(),
-            mode: crate::RunnerWorkspaceSyncMode::SnapshotGit,
-            controller_routed_git: false,
-            changed_since_base: None,
-            git_fetch_refs: vec![],
-            snapshot_includes: vec![],
-            allow_dirty_lab_workspace: false,
-            validation_dependency_ids: None,
-            run_isolation_token: Some(uuid::Uuid::new_v4().to_string()),
-        },
+        cwd,
+        crate::RunnerWorkspaceSyncMode::SnapshotGit,
+        run_id,
     )?;
+    let candidate = candidate_workspace.sync.clone();
     let binary = runner.settings.homeboy_path.as_deref().ok_or_else(|| {
         Error::invalid_argument(
             "gate.runtime",
@@ -262,13 +305,34 @@ fn execute_owned(
     let options = lab_gate_exec_options(command, run_id, secret_env_names);
     let mut execution = crate::RunnerExecRequest::new(&request.runner_id, options);
     execution.workspace_ref = Some(candidate.workspace_ref);
-    let (output, _) = crate::exec_request(execution)?;
+    let daemon_generation = status
+        .session
+        .as_ref()
+        .and_then(|session| session.remote_daemon_lease_id.clone());
+    let output = match crate::exec_request(execution) {
+        Ok((output, _)) => output,
+        Err(error) => {
+            // A lost exec response may still have been accepted by the daemon.
+            // Keep that job's workspaces until reconciliation proves it ended.
+            if let Some(job) =
+                crate::lab::offload::accepted_runner_job_id(&request.runner_id, run_id)
+            {
+                for workspace in [&mut snapshot_workspace, &mut candidate_workspace] {
+                    workspace.admitted(&job.id, job.daemon_generation.as_deref());
+                }
+            }
+            return Err(error);
+        }
+    };
     let job_id = output.job_id.as_deref().ok_or_else(|| {
         Error::invalid_argument(
             "gate.receipt",
             "Lab gate output is missing its accepted job identity",
         )
     })?;
+    for workspace in [&mut snapshot_workspace, &mut candidate_workspace] {
+        workspace.admitted(job_id, daemon_generation.as_deref());
+    }
     let started = std::time::Instant::now();
     let last_heartbeat = std::cell::Cell::new(started);
     let heartbeat_error = std::cell::RefCell::new(None);
@@ -296,10 +360,7 @@ fn execute_owned(
     let terminal = crate::execution::observe_daemon_job_until_terminal(
         &request.runner_id,
         job_id,
-        status
-            .session
-            .as_ref()
-            .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+        daemon_generation.as_deref(),
         std::time::Duration::from_secs(request.timeout_seconds.saturating_add(120)),
         &cancelled,
     );
@@ -316,6 +377,9 @@ fn execute_owned(
                 std::time::Duration::from_secs(60),
                 &|| false,
             )?;
+            for workspace in [&mut snapshot_workspace, &mut candidate_workspace] {
+                workspace.terminal(crate::WorkspaceTerminalOutcome::Cancelled);
+            }
             let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
             homeboy_agents::agent_task_lifecycle::project_terminal_runner_result_in_store(
                 &store,
@@ -334,6 +398,16 @@ fn execute_owned(
             return Err(error);
         }
     };
+    let outcome = if terminal.job.status == homeboy_core::api_jobs::JobStatus::Succeeded {
+        crate::WorkspaceTerminalOutcome::Success
+    } else {
+        crate::WorkspaceTerminalOutcome::Failure
+    };
+    // The receipt is downloaded from the resource workspace below; the handles
+    // reap both workspaces when this function returns.
+    for workspace in [&mut snapshot_workspace, &mut candidate_workspace] {
+        workspace.terminal(outcome);
+    }
     let result = crate::execution::result_event_data(&terminal.events).ok_or_else(|| {
         Error::invalid_argument("gate.receipt", "terminal runner gate has no result event")
     })?;
@@ -559,6 +633,9 @@ pub fn register() {
 
 #[cfg(test)]
 mod native_tests;
+
+#[cfg(test)]
+mod workspace_tests;
 
 #[cfg(test)]
 mod secret_env_tests {

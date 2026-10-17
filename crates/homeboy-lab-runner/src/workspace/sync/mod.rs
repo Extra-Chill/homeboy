@@ -3721,7 +3721,15 @@ fn workspace_run_authority(
         Ok(None) => match homeboy_agents::agent_task_lifecycle::exact_record(run_id) {
             Ok(record) if record.state.is_terminal() => RunAuthority::Terminal,
             Ok(_) => RunAuthority::Active,
-            Err(_) => RunAuthority::Unavailable,
+            // Not an agent-task run: a generic runner-exec run (a Lab gate's
+            // `lab-gate-*` run) owns its workspaces from the observation store.
+            Err(_) => match homeboy_agents::agent_task_lifecycle::runner_exec_run_is_terminal(
+                run_id, &runner.id,
+            ) {
+                Ok(Some(true)) => RunAuthority::Terminal,
+                Ok(Some(false)) => RunAuthority::Active,
+                Ok(None) | Err(_) => RunAuthority::Unavailable,
+            },
         },
     }
 }
