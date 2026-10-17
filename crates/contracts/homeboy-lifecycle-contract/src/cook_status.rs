@@ -93,8 +93,10 @@ pub enum CookStatus {
     NoCandidate,
     /// Finalization ran and found no changed files.
     NoChanges,
-    /// A no-op candidate failed its gates.
-    NoOpGateFailed,
+    /// A no-op candidate failed its gates. Spelled `no_changes_gate_failed`,
+    /// matching the promotion status it reports; reports written before
+    /// #16049 spelled it `no_op_gate_failed`, which still parses here.
+    NoChangesGateFailed,
     /// A deterministic gate failed.
     GateFailed,
     /// A deterministic gate could not execute under the resolved placement
@@ -160,7 +162,7 @@ impl CookStatus {
             "intentional_no_change" => Self::IntentionalNoChange,
             "no_candidate" => Self::NoCandidate,
             "no_changes" => Self::NoChanges,
-            "no_op_gate_failed" => Self::NoOpGateFailed,
+            "no_changes_gate_failed" | "no_op_gate_failed" => Self::NoChangesGateFailed,
             "gate_failed" => Self::GateFailed,
             "gates_deferred" => Self::GatesDeferred,
             "gate_declaration_invalid" => Self::GateDeclarationInvalid,
@@ -197,7 +199,7 @@ impl CookStatus {
             Self::IntentionalNoChange => "intentional_no_change",
             Self::NoCandidate => "no_candidate",
             Self::NoChanges => "no_changes",
-            Self::NoOpGateFailed => "no_op_gate_failed",
+            Self::NoChangesGateFailed => "no_changes_gate_failed",
             Self::GateFailed => "gate_failed",
             Self::GatesDeferred => "gates_deferred",
             Self::GateDeclarationInvalid => "gate_declaration_invalid",
@@ -233,6 +235,12 @@ impl CookStatus {
     /// Cook loop and never sourced from finalization JSON.
     pub fn is_in_flight(&self) -> bool {
         matches!(self, Self::Queued | Self::Running | Self::InFlight)
+    }
+
+    /// Whether a deterministic gate rejected the candidate, with or without a
+    /// patch.
+    pub fn is_gate_failure(&self) -> bool {
+        matches!(self, Self::GateFailed | Self::NoChangesGateFailed)
     }
 
     /// Whether this status alone means the operator has nothing to act on.
@@ -394,6 +402,20 @@ mod tests {
         assert_eq!(parsed, status);
     }
 
+    /// One canonical spelling is written; the historical one still parses.
+    #[test]
+    fn the_no_change_gate_failure_has_one_written_spelling() {
+        assert_eq!(
+            CookStatus::NoChangesGateFailed.as_str(),
+            "no_changes_gate_failed"
+        );
+        for spelling in ["no_changes_gate_failed", "no_op_gate_failed"] {
+            let status = CookStatus::from_status(spelling);
+            assert_eq!(status, CookStatus::NoChangesGateFailed);
+            assert!(status.is_gate_failure());
+        }
+    }
+
     #[test]
     fn every_known_status_round_trips_through_its_wire_form() {
         for status in [
@@ -407,7 +429,7 @@ mod tests {
             CookStatus::IntentionalNoChange,
             CookStatus::NoCandidate,
             CookStatus::NoChanges,
-            CookStatus::NoOpGateFailed,
+            CookStatus::NoChangesGateFailed,
             CookStatus::GateFailed,
             CookStatus::GatesDeferred,
             CookStatus::AwaitingAcceptance,

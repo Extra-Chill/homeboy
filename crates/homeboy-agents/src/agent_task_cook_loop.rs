@@ -94,7 +94,10 @@ pub enum AgentTaskCookLoopStatus {
     /// differently, so provider remediation is intentionally withheld.
     IntentionalNoChange,
     NoChanges,
-    NoOpGateFailed,
+    /// A no-patch candidate failed its gates. Reports written before #16049
+    /// spelled this `no_op_gate_failed`.
+    #[serde(alias = "no_op_gate_failed")]
+    NoChangesGateFailed,
     /// At least one declared deterministic gate deferred rather than
     /// executing (no failure occurred). The candidate patch is promoted and
     /// durable but unverified; retry is a verification retry, not a provider
@@ -409,7 +412,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     } else if invalid_gate_declaration {
         AgentTaskCookLoopStatus::GateDeclarationInvalid
     } else if options.promotion_report.status == AgentTaskPromotionStatus::NoChangesGateFailed {
-        AgentTaskCookLoopStatus::NoOpGateFailed
+        AgentTaskCookLoopStatus::NoChangesGateFailed
     } else if options.promotion_report.status == AgentTaskPromotionStatus::GateDeferred {
         // No gate failed, so `follow_up_request`/`failed_gates` are both
         // empty and this would otherwise fall through to `GreenCompleted` —
@@ -1866,7 +1869,7 @@ mod tests {
             review_form: None,
             metadata: Value::Null,
         });
-        assert_eq!(failed.status, AgentTaskCookLoopStatus::NoOpGateFailed);
+        assert_eq!(failed.status, AgentTaskCookLoopStatus::NoChangesGateFailed);
         assert!(failed.follow_up_request.is_none());
     }
 

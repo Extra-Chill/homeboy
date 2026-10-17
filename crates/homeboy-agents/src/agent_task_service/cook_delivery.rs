@@ -1,39 +1,72 @@
-//! The Cook delivery read model (#16049, slice 1).
+//! The Cook delivery record (#16049).
 //!
 //! Delivery is everything after the provider finishes: apply, gates, base
-//! convergence, commit, push and PR. Its facts are persisted across several
-//! run-metadata keys written by different stages, and they have picked up
-//! more than one spelling over time. [`CookDelivery::from_run_metadata`] is
-//! the only code that interprets those keys. Reporters read the typed result
-//! instead of the raw JSON, so they agree on one answer. Writers are
-//! unchanged; this module never mutates a record.
+//! convergence, commit, push and PR. Its facts are persisted as one versioned
+//! `cook_delivery` record (schema [`COOK_DELIVERY_SCHEMA`]) that the lifecycle
+//! store's single delivery writer keeps current beside the older per-stage
+//! keys. [`CookDelivery::from_run_metadata`] reads that record, and falls back
+//! to deriving the same value from the per-stage keys (and their historical
+//! spellings) for runs recorded before it existed. Reporters read the typed
+//! result instead of the raw JSON, so they agree on one answer.
+//!
+//! [`CookDelivery::lifecycle`] is the one place a delivery decides what it
+//! contributes to its run's state and its Cook's status.
 
+use homeboy_core::cook_status::CookStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent_task_gate::AgentTaskGateStatus;
+use crate::agent_task_lifecycle::AgentTaskRunState;
 use crate::agent_task_promotion::AgentTaskPromotionStatus;
+
+/// Schema of the persisted `cook_delivery` run-metadata record.
+pub const COOK_DELIVERY_SCHEMA: &str = "homeboy/cook-delivery/v1";
+
+/// Run-metadata key of the persisted delivery record.
+pub(crate) const COOK_DELIVERY_KEY: &str = "cook_delivery";
 
 /// Moving-base recovery stops retrying after this many observed base moves.
 /// Mirrors the writer's continuation budget in the Cook spine.
 const BASE_MOVEMENT_BUDGET: u32 = 3;
 
 /// One typed read of where a Cook's candidate is on its way to publication.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookDelivery {
     pub state: CookDeliveryState,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate: Option<CookDeliveryCandidate>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<CookDeliveryDestination>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<CookDeliveryGate>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<CookDeliveryPublication>,
+    #[serde(default)]
     pub base_movements: u32,
     /// Present exactly when `state` is [`CookDeliveryState::Blocked`].
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocker: Option<CookDeliveryBlocker>,
+}
+
+/// The persisted `cook_delivery` record: the delivery under a schema tag.
+#[derive(Serialize, Deserialize)]
+struct CookDeliveryRecord {
+    schema: String,
+    #[serde(flatten)]
+    delivery: CookDelivery,
+}
+
+/// What a delivery contributes to its run's lifecycle, decided only by
+/// [`CookDelivery::lifecycle`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CookDeliveryLifecycle {
+    /// The run state this delivery asks for. `CandidateRecoverable` while the
+    /// candidate is unverified or rejected; `Succeeded` once it is verified.
+    /// `None` when delivery says nothing about the run state.
+    pub run_state: Option<AgentTaskRunState>,
+    /// The Cook status this delivery reports on its own, if any.
+    pub cook_status: Option<CookStatus>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,63 +111,63 @@ impl CookDeliveryBlockerCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookDeliveryCandidate {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     /// The latest promotion's status. `no_op_gate_failed` reads as
     /// `no_changes_gate_failed`.
     pub promotion: AgentTaskPromotionStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_artifact: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_sha: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_base: Option<String>,
     /// The post-apply checkpoint proves this exact candidate reached its
     /// declared destination. A promotion status alone does not.
     pub target_applied: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookDeliveryDestination {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookDeliveryGate {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub state: AgentTaskGateStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proof_refs: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookDeliveryPublication {
     /// The receipt status exactly as the publisher recorded it.
     pub status: String,
     /// A pull request receipt with a usable identity.
     pub published: bool,
     pub draft: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pushed_sha: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_number: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
 }
 
@@ -147,18 +180,18 @@ impl CookDeliveryPublication {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookDeliveryBlocker {
     pub code: CookDeliveryBlockerCode,
     /// Names the step that stopped delivery.
     pub message: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
     /// The durable command recorded for this blocker, when one is legal.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
     /// The writer's own error code, when it recorded one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
     /// JSON pointer into run metadata holding the blocker's evidence.
     pub evidence: String,
@@ -167,7 +200,40 @@ pub struct CookDeliveryBlocker {
 impl CookDelivery {
     /// Read delivery from a run's persisted metadata. `None` when the run has
     /// no delivery evidence (no promotion, publication or recovery record).
+    ///
+    /// The persisted `cook_delivery` record is authoritative when present and
+    /// valid; otherwise delivery is derived from the per-stage keys.
     pub fn from_run_metadata(metadata: &Value) -> Option<Self> {
+        match present(metadata, "/cook_delivery") {
+            Some(record) => {
+                Self::from_record(record).or_else(|| Self::from_legacy_metadata(metadata))
+            }
+            None => Self::from_legacy_metadata(metadata),
+        }
+    }
+
+    /// The delivery a persisted `cook_delivery` record holds, if it is one this
+    /// binary understands.
+    fn from_record(record: &Value) -> Option<Self> {
+        serde_json::from_value::<CookDeliveryRecord>(record.clone())
+            .ok()
+            .filter(|record| record.schema == COOK_DELIVERY_SCHEMA)
+            .map(|record| record.delivery)
+    }
+
+    /// The versioned `cook_delivery` record persisting this delivery.
+    pub(crate) fn to_record(&self) -> Value {
+        serde_json::to_value(CookDeliveryRecord {
+            schema: COOK_DELIVERY_SCHEMA.to_string(),
+            delivery: self.clone(),
+        })
+        .expect("a Cook delivery always serializes")
+    }
+
+    /// Derive delivery from the per-stage keys the delivery writers persist
+    /// beside the record. The single writer projects the record from this, so
+    /// the two always agree.
+    pub(crate) fn from_legacy_metadata(metadata: &Value) -> Option<Self> {
         let (promotion_pointer, promotion) = latest_promotion(metadata);
         let promotion_status = promotion.and_then(promotion_status);
         let finalization = present(metadata, "/cook_finalization");
@@ -258,6 +324,60 @@ impl CookDelivery {
         })
     }
 
+    /// What this delivery contributes to its run state and Cook status.
+    ///
+    /// Decided from [`Self::state`] and the blocker code alone, so every
+    /// writer and reader agrees: an unverified (`applied`, `gates_deferred`)
+    /// or rejected (`gate_failed`) candidate leaves its run recoverable; a
+    /// verified or published one lets it succeed. Gate failures with and
+    /// without a patch both report `gate_failed`-family Cook statuses; the
+    /// no-patch one is the canonical `no_changes_gate_failed`.
+    pub fn lifecycle(&self) -> CookDeliveryLifecycle {
+        use CookDeliveryBlockerCode as Code;
+        let recoverable = Some(AgentTaskRunState::CandidateRecoverable);
+        let (run_state, cook_status) = match (self.state, self.blocker_code()) {
+            (CookDeliveryState::Applied, _) if self.candidate.is_some() => (recoverable, None),
+            (CookDeliveryState::Applied, _) => (None, None),
+            (CookDeliveryState::Verified, _) => (Some(AgentTaskRunState::Succeeded), None),
+            (CookDeliveryState::Published, _) => (
+                Some(AgentTaskRunState::Succeeded),
+                Some(match self.publication.as_ref().is_some_and(|p| p.draft) {
+                    true => CookStatus::DraftPublished,
+                    false => CookStatus::ReviewReady,
+                }),
+            ),
+            (CookDeliveryState::NoChange, _) => (None, None),
+            (CookDeliveryState::Blocked, Some(Code::GateFailed)) => (
+                recoverable,
+                Some(
+                    match self.promotion() == Some(AgentTaskPromotionStatus::NoChangesGateFailed) {
+                        true => CookStatus::NoChangesGateFailed,
+                        false => CookStatus::GateFailed,
+                    },
+                ),
+            ),
+            (CookDeliveryState::Blocked, Some(Code::GatesDeferred)) => {
+                (recoverable, Some(CookStatus::GatesDeferred))
+            }
+            (CookDeliveryState::Blocked, Some(Code::PublishRefused)) => (
+                None,
+                Some(CookStatus::Unknown("finalization_failed".to_string())),
+            ),
+            (CookDeliveryState::Blocked, _) => (None, None),
+        };
+        CookDeliveryLifecycle {
+            run_state,
+            cook_status,
+        }
+    }
+
+    /// The candidate reached its destination but has not been verified:
+    /// gates are pending or could not execute.
+    pub fn is_unverified(&self) -> bool {
+        self.state == CookDeliveryState::Applied
+            || self.blocker_code() == Some(CookDeliveryBlockerCode::GatesDeferred)
+    }
+
     pub fn blocker_code(&self) -> Option<CookDeliveryBlockerCode> {
         self.blocker.as_ref().map(|blocker| blocker.code)
     }
@@ -303,11 +423,8 @@ fn latest_promotion(metadata: &Value) -> (String, Option<&Value>) {
 
 /// Dry runs are not delivery, and an unknown status is not evidence.
 fn promotion_status(promotion: &Value) -> Option<AgentTaskPromotionStatus> {
-    let status = match promotion.get("status")?.as_str()? {
-        "no_op_gate_failed" => AgentTaskPromotionStatus::NoChangesGateFailed,
-        "gates_deferred" => AgentTaskPromotionStatus::GateDeferred,
-        status => serde_json::from_value(Value::String(status.to_string())).ok()?,
-    };
+    let status: AgentTaskPromotionStatus =
+        serde_json::from_value(promotion.get("status")?.clone()).ok()?;
     (status != AgentTaskPromotionStatus::DryRun).then_some(status)
 }
 

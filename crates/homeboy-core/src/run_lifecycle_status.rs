@@ -194,7 +194,7 @@ impl From<&CookStatus> for RunLifecycleStatus {
             // A gate verdict is against the candidate, not against running
             // again: the Cook loop's own remedy for a failed gate is another
             // attempt.
-            CookStatus::GateFailed | CookStatus::NoOpGateFailed => Self::Failed,
+            CookStatus::GateFailed | CookStatus::NoChangesGateFailed => Self::Failed,
             // The provider failed. Another attempt is the standard remedy.
             CookStatus::ProviderFailure => Self::Failed,
             // The durable recipe is intact, which is exactly the precondition
@@ -295,7 +295,7 @@ mod tests {
             CookStatus::IntentionalNoChange,
             CookStatus::NoCandidate,
             CookStatus::NoChanges,
-            CookStatus::NoOpGateFailed,
+            CookStatus::NoChangesGateFailed,
             CookStatus::GateFailed,
             CookStatus::GatesDeferred,
             CookStatus::GateDeclarationInvalid,
@@ -331,7 +331,7 @@ mod tests {
                 CookStatus::IntentionalNoChange => RunLifecycleStatus::Succeeded,
                 CookStatus::NoCandidate => RunLifecycleStatus::PartialFailure,
                 CookStatus::NoChanges => RunLifecycleStatus::PartialFailure,
-                CookStatus::NoOpGateFailed => RunLifecycleStatus::Failed,
+                CookStatus::NoChangesGateFailed => RunLifecycleStatus::Failed,
                 CookStatus::GateFailed => RunLifecycleStatus::Failed,
                 CookStatus::GatesDeferred => RunLifecycleStatus::CandidateRecoverable,
                 CookStatus::GateDeclarationInvalid => RunLifecycleStatus::PartialFailure,

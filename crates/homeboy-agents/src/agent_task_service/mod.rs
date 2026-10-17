@@ -44,9 +44,11 @@ pub use cook_activity::{worktree_files_changed, CookActivityProbe, CookProviderA
 pub use cook_adoption::*;
 pub use cook_baseline::*;
 pub use cook_budget::*;
+pub(crate) use cook_delivery::COOK_DELIVERY_KEY;
 pub use cook_delivery::{
     CookDelivery, CookDeliveryBlocker, CookDeliveryBlockerCode, CookDeliveryCandidate,
-    CookDeliveryDestination, CookDeliveryGate, CookDeliveryPublication, CookDeliveryState,
+    CookDeliveryDestination, CookDeliveryGate, CookDeliveryLifecycle, CookDeliveryPublication,
+    CookDeliveryState, COOK_DELIVERY_SCHEMA,
 };
 pub use cook_lineage::{CookAttemptLineage, CookLineageKind};
 #[cfg(test)]
