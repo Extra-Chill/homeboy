@@ -4683,24 +4683,6 @@ fn blocker(
             retry: None,
         });
     }
-    // A finalization that could not publish a gate-green candidate records why
-    // on its moving-base recovery. Name that step instead of leaving status to
-    // report a generic unpublished candidate (#15017).
-    if let Some(recovery) = record.metadata.get("cook_moving_base_recovery") {
-        if let Some(message) = recovery
-            .get("blocker")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-        {
-            return Some(ControlPlaneBlocker {
-                code: Some("finalization".to_string()),
-                message: redacted_bounded(message, MESSAGE_BOUND),
-                state: None,
-                reason: None,
-                retry: None,
-            });
-        }
-    }
     if matches!(
         record.state,
         AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure
@@ -9712,8 +9694,9 @@ mod tests {
         });
     }
 
-    /// #15017: a gate-green candidate whose finalization is blocked names that
-    /// step in the run's blocker instead of a generic unpublished candidate.
+    /// #15017: a gate-green candidate whose finalization is blocked by base
+    /// divergence names that step through the typed delivery blocker (#16049)
+    /// instead of a generic unpublished candidate.
     #[test]
     fn project_record_names_a_blocked_finalization() {
         let mut blocked = record(AGENT_TASK_RUN);
@@ -9730,7 +9713,7 @@ mod tests {
 
         let resource = project_record(&blocked, None).expect("project blocked finalization");
         let blocker = resource.blocker.expect("finalization blocker");
-        assert_eq!(blocker.code.as_deref(), Some("finalization"));
+        assert_eq!(blocker.code.as_deref(), Some("base_conflict"));
         assert_eq!(
             blocker.message,
             "HEAD is behind or diverged from resolved base `main`"
