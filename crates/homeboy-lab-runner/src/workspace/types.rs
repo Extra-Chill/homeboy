@@ -433,10 +433,14 @@ pub struct RunnerWorkspacePruneOutput {
     pub skipped_unknown_count: usize,
     /// Capacity withheld by liveness evidence, grouped by its exact reason.
     pub withheld_by_liveness_reason: Vec<RunnerWorkspacePruneWithheldReason>,
+    /// Inspected entries kept because their owner is still accountable, grouped
+    /// by reason. With candidates and `skipped`, every inspected entry is
+    /// accounted for.
+    pub retained_by_reason: Vec<RunnerWorkspacePruneRetainedReason>,
     pub inspect_command: String,
     pub stop_command: String,
     pub reconcile_command: String,
-    /// Number of workspace directories inspected during this invocation.
+    /// Number of top-level Lab workspace entries inspected during this invocation.
     pub scanned_workspace_count: usize,
     /// Whether the inspected window reached the end of the workspace root.
     pub scan_complete: bool,
@@ -517,6 +521,12 @@ pub struct RunnerWorkspaceLivenessEvidence {
 pub struct RunnerWorkspacePruneSkippedEntry {
     pub remote_path: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspacePruneRetainedReason {
+    pub reason: String,
+    pub workspace_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

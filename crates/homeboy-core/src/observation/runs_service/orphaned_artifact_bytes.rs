@@ -39,11 +39,11 @@
 //!
 //! # Size is advisory and never gates removal
 //!
-//! `bounded_directory_size` in the lab workspace pruner shells out to `du -sk`
-//! and feeds `size.is_some()` into the liveness verdict
-//! (`workspace/sync/mod.rs:2602-2604`, `:3457`). When `du` failed, size came
-//! back `None`, liveness degraded to `"unknown"`, and prune silently became a
-//! no-op. That couples an advisory measurement to a deletion decision, in the
+//! The lab workspace pruner once measured size with `bounded_directory_size`
+//! (`du -sk`) and fed `size.is_some()` into the liveness verdict. When `du`
+//! failed, size came back `None`, liveness degraded to `"unknown"`, and prune
+//! silently became a no-op. Its successor, `prune_size_command`, only records a
+//! `workspace_size_measurement_unavailable` observation. That couples an advisory measurement to a deletion decision, in the
 //! direction that quietly disables the feature.
 //!
 //! Here the removal decision is a pure function of (name shape, entry type,

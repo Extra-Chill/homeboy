@@ -8,11 +8,11 @@ use base64::Engine;
 
 use crate::workspace::sync::{
     active_resource_lifecycle_liveness, encoded_materialized_workspace_metadata_is_valid,
-    has_terminal_delete_on_success_lifecycle_with, prune_scan_command, prune_workspaces,
-    revalidated_candidate_is_deletable, runner_job_liveness_with, ssh_process_liveness_command,
-    ssh_prune_delete_command_with_terminal_authority,
-    ssh_prune_delete_materialized_workspace_command, sync_workspace,
-    update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
+    has_terminal_delete_on_success_lifecycle_with, prune_scan_command, prune_size_command,
+    prune_workspaces, revalidated_candidate_is_deletable, runner_job_liveness_with,
+    ssh_process_liveness_command, ssh_prune_delete_command_with_terminal_authority,
+    ssh_prune_delete_materialized_workspace_command, ssh_prune_delete_orphan_artifact_dir_command,
+    sync_workspace, update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
     ActiveResourceLifecycleLiveness, RunAuthority, WORKSPACE_METADATA_FILE,
 };
 use crate::workspace::types::{
@@ -175,7 +175,17 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
         assert_eq!(output.total_candidate_count, 2);
         assert!(output.total_candidate_bytes >= output.total_removed_bytes);
         assert_eq!(output.remaining_candidate_count, 0);
+        // The metadata-free directory is reported, not deleted, and does not
+        // keep the drain open: rerunning cannot prove its ownership.
         assert!(!output.has_more);
+        assert_eq!(output.skipped_unknown_count, 1);
+        assert_eq!(
+            output.skipped[0].remote_path,
+            unmanaged.display().to_string()
+        );
+        assert!(output.skipped[0]
+            .reason
+            .contains("workspace_metadata_missing"));
         assert!(output
             .removed
             .iter()
@@ -1123,7 +1133,9 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
         .expect("resume convergence");
         assert_eq!(resumed.skipped_unknown_count, 1);
         let resumed = resumed.convergence.expect("resumed convergence evidence");
-        assert_eq!(resumed.pass_count, WORKSPACE_COUNT);
+        // `limit` bounds candidates, so withheld workspaces never end a pass:
+        // one pass per removable workspace plus the pass that reaches the end.
+        assert_eq!(resumed.pass_count, REMOVABLE_COUNT + 1);
         assert_eq!(resumed.inspected_count, WORKSPACE_COUNT);
         assert_eq!(resumed.applied_count, REMOVABLE_COUNT);
         assert_eq!(resumed.skipped_count, 2);
@@ -1152,13 +1164,277 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
     }
 }
 
+/// Age a Lab workspace entry past the prune age gate.
+fn age_entry(path: &Path) {
+    let status = Command::new("touch")
+        .args(["-t", "202001010000"])
+        .arg(path)
+        .status()
+        .expect("age workspace entry");
+    assert!(status.success());
+}
+
+/// A metadata-backed workspace shaped like `sync_workspace` writes it.
+fn write_family_workspace(path: &Path, local_path: &Path, run_id: Option<&str>) {
+    fs::create_dir_all(path.join(".homeboy")).expect("workspace metadata dir");
+    fs::write(path.join("file.txt"), "workspace\n").expect("workspace file");
+    let mut metadata = serde_json::json!({
+        "schema": "homeboy/runner-workspace/v1",
+        "runner_id": "lab-local-prune-families",
+        "repo": path.file_name().and_then(|name| name.to_str()),
+        "local_path": local_path.display().to_string(),
+        "remote_path": path.display().to_string(),
+        "sync_mode": "snapshot",
+        "snapshot_identity": "snapshot:0123456789abcdef",
+        "synced_at": "2026-09-29T00:00:00Z",
+    });
+    if let Some(run_id) = run_id {
+        metadata["run_id"] = serde_json::json!(run_id);
+        metadata["resource_lifecycle"] = serde_json::json!({
+            "owner": "runner.workspace",
+            "run_id": run_id,
+            "runner_id": "lab-local-prune-families",
+            "path": path.display().to_string(),
+            "kind": "runner_workspace",
+            "cleanup_policy": "delete_on_success",
+            "evidence_retention": "metadata",
+            "cleanup_intent": "dry_run",
+            "status": "active"
+        });
+    }
+    fs::write(path.join(WORKSPACE_METADATA_FILE), metadata.to_string()).expect("metadata");
+}
+
+/// Live Lab: 1,515 top-level entries, yet a cursorless prune page (what the
+/// automatic `remote_lab_workspaces` cleanup runs) only ever inspected the
+/// first `limit` names, and entries without runner-workspace metadata (the
+/// `<checkout>-homeboy-artifacts` siblings, manual checkouts) were counted but
+/// never planned nor reported. Every top-level entry must be inventoried:
+/// stale workspaces behind a retained prefix are planned, orphaned artifact
+/// siblings are planned on their checkout ownership proof, and entries with
+/// no ownership proof are reported as unknown with a reason.
+#[test]
+fn prune_page_inventories_every_lab_workspace_family_behind_a_retained_prefix() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let runner_root = tempfile::tempdir().expect("runner root");
+    let sources = tempfile::tempdir().expect("sources");
+    let live_source = sources.path().join("live-source");
+    fs::create_dir_all(&live_source).expect("live source");
+    let missing_source = sources.path().join("removed-source");
+    let root = runner_root.path().join("_lab_workspaces");
+    fs::create_dir_all(&root).expect("lab workspaces root");
+
+    // A retained prefix larger than the page size, sorted ahead of everything.
+    for index in 0..30 {
+        write_family_workspace(
+            &root.join(format!("aaa-retained-{index:02}")),
+            &live_source,
+            None,
+        );
+    }
+    // Stale orphans of the live name families.
+    let agent =
+        root.join("agent-0de3a73a49b8-9f98df59-c4d4-4101-a210-af5f018c6e0a-1792021408680403000");
+    let baseline = root.join(
+        "baseline-185d71f1-19bf-41c6-8abf-934993d7d5fc-46522c0b2765-28cf9b26-1791387195668401000",
+    );
+    let fix_issue =
+        root.join("homeboy-fix-issue-14832-homeboy-75f172ad2571-0f62e000-1792000000000000000");
+    for path in [&agent, &baseline, &fix_issue] {
+        write_family_workspace(path, &missing_source, None);
+    }
+    // Run-owned lease whose run authority is unavailable: withheld, reported.
+    let declared = root.join("declared-gate-resources-9f1ff7e143d7-1f241e11-91b7-47b9-b6ff-aa28b5f6e127-1792021117096117000");
+    write_family_workspace(
+        &declared,
+        &missing_source,
+        Some("run-authority-unavailable"),
+    );
+    // Artifact sibling whose checkout is gone, and one whose checkout lives.
+    let orphan_artifacts = root.join("zz-gone-checkout-homeboy-artifacts");
+    fs::create_dir_all(orphan_artifacts.join("provenance")).expect("orphan artifacts");
+    fs::write(orphan_artifacts.join("provenance/receipt.json"), "{}").expect("receipt");
+    let kept = root.join("zz-kept-checkout");
+    write_family_workspace(&kept, &live_source, None);
+    let kept_artifacts = root.join("zz-kept-checkout-homeboy-artifacts");
+    fs::create_dir_all(kept_artifacts.join("provenance")).expect("kept artifacts");
+    // No ownership proof at all.
+    let manual = root.join("manual-checkout");
+    fs::create_dir_all(manual.join(".git")).expect("manual checkout");
+    let stray = root.join("stray-file");
+    fs::write(&stray, "stray").expect("stray file");
+    for entry in fs::read_dir(&root).expect("read root") {
+        age_entry(&entry.expect("entry").path());
+    }
+    // Fresh orphan: below the age gate.
+    let young = root.join("young-orphan");
+    write_family_workspace(&young, &missing_source, None);
+    let entry_count = fs::read_dir(&root).expect("read root").count();
+    rooted_local_runner(&roots, "lab-local-prune-families", runner_root.path());
+
+    let (output, _) = crate::workspace::sync::prune_workspaces_in_roots(
+        &roots,
+        "lab-local-prune-families",
+        RunnerWorkspacePruneOptions {
+            apply: false,
+            min_age_hours: 1,
+            limit: 25,
+            passes: 1,
+            cursor: None,
+            ..RunnerWorkspacePruneOptions::default()
+        },
+    )
+    .expect("prune preview");
+
+    let mut planned = output
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.remote_path.clone(), candidate.reason.clone()))
+        .collect::<Vec<_>>();
+    planned.sort();
+    let path = |path: &Path| path.display().to_string();
+    assert_eq!(
+        planned,
+        vec![
+            (path(&agent), "source_path_missing".to_string()),
+            (path(&baseline), "source_path_missing".to_string()),
+            (path(&fix_issue), "source_path_missing".to_string()),
+            (
+                path(&orphan_artifacts),
+                "artifact_dir_checkout_missing".to_string()
+            ),
+        ],
+        "{}",
+        prune_diagnosis(&output)
+    );
+    assert_eq!(
+        output.scanned_workspace_count,
+        entry_count,
+        "{}",
+        prune_diagnosis(&output)
+    );
+    assert!(output.scan_complete, "{}", prune_diagnosis(&output));
+    let skipped_reason = |target: &Path| {
+        output
+            .skipped
+            .iter()
+            .find(|entry| entry.remote_path == path(target))
+            .map(|entry| entry.reason.clone())
+            .unwrap_or_default()
+    };
+    assert!(
+        skipped_reason(&declared).contains("active_resource_lifecycle_authority_unavailable"),
+        "{}",
+        prune_diagnosis(&output)
+    );
+    assert!(
+        skipped_reason(&manual).contains("workspace_metadata_missing"),
+        "{}",
+        prune_diagnosis(&output)
+    );
+    assert!(
+        skipped_reason(&stray).contains("not_a_directory"),
+        "{}",
+        prune_diagnosis(&output)
+    );
+    assert_eq!(output.skipped.len(), 3, "{}", prune_diagnosis(&output));
+    assert_eq!(output.skipped_unknown_count, 3);
+    let retained = output
+        .retained_by_reason
+        .iter()
+        .map(|retained| (retained.reason.as_str(), retained.workspace_count))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained,
+        vec![
+            ("artifact_dir_owned_by_checkout", 1),
+            ("source_path_present", 31),
+            ("younger_than_min_age", 1),
+        ]
+    );
+    // Every inspected entry is accounted for exactly once.
+    assert_eq!(
+        output.candidates.len()
+            + output.skipped.len()
+            + retained.iter().map(|(_, count)| count).sum::<usize>(),
+        entry_count
+    );
+    assert!(young.exists() && orphan_artifacts.exists() && manual.exists());
+
+    let (applied, _) = crate::workspace::sync::prune_workspaces_in_roots(
+        &roots,
+        "lab-local-prune-families",
+        RunnerWorkspacePruneOptions {
+            apply: true,
+            min_age_hours: 1,
+            limit: 25,
+            passes: 1,
+            cursor: None,
+            ..RunnerWorkspacePruneOptions::default()
+        },
+    )
+    .expect("prune apply");
+    assert_eq!(applied.removed.len(), 4, "{}", prune_diagnosis(&applied));
+    for removed in [&agent, &baseline, &fix_issue, &orphan_artifacts] {
+        assert!(!removed.exists(), "{}", removed.display());
+    }
+    for kept in [&declared, &kept, &kept_artifacts, &manual, &stray, &young] {
+        assert!(kept.exists(), "{}", kept.display());
+    }
+}
+
+#[test]
+fn ssh_orphan_artifact_dir_delete_revalidates_checkout_absence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("_lab_workspaces");
+    let checkout = root.join("repo-run");
+    let artifacts = root.join("repo-run-homeboy-artifacts");
+    fs::create_dir_all(artifacts.join("provenance")).expect("artifacts");
+    fs::create_dir_all(&checkout).expect("checkout");
+    let delete = || {
+        Command::new("sh")
+            .arg("-c")
+            .arg(ssh_prune_delete_orphan_artifact_dir_command(
+                &root.display().to_string(),
+                &artifacts.display().to_string(),
+            ))
+            .output()
+            .expect("run orphan artifact delete")
+    };
+
+    let output = delete();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "unknown:artifact_dir_checkout_present"
+    );
+    assert!(artifacts.exists());
+
+    fs::remove_dir_all(&checkout).expect("remove checkout");
+    let output = delete();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "removed");
+    assert!(!artifacts.exists());
+
+    // Only `-homeboy-artifacts` siblings under the root are admissible.
+    let foreign = Command::new("sh")
+        .arg("-c")
+        .arg(ssh_prune_delete_orphan_artifact_dir_command(
+            &root.display().to_string(),
+            &checkout.display().to_string(),
+        ))
+        .output()
+        .expect("run foreign delete");
+    assert_eq!(
+        String::from_utf8_lossy(&foreign.stdout),
+        "unknown:workspace_path"
+    );
+}
+
 #[test]
 fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        // Pagination is what this covers: the scan limit below is 127, so this
-        // still walks several pages and places orphans mid-page, on a later
-        // page, and on the final entry. Thousands of fixtures only multiplied
-        // setup I/O without adding a distinct cursor transition.
+        // Orphans sit behind hundreds of unowned entries, mid-root and on the
+        // final entry. Thousands of fixtures only multiplied setup I/O.
         const WORKSPACE_COUNT: usize = 640;
         const ORPHAN_INDICES: [usize; 3] = [200, 401, 639];
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -1185,38 +1461,29 @@ fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
         )
         .expect("create runner");
 
-        let mut cursor = None;
-        let mut scanned = 0;
-        let mut removed = Vec::new();
-        for _ in 0..20 {
-            let (output, _) = prune_workspaces(
-                "lab-local-prune-thousands",
-                RunnerWorkspacePruneOptions {
-                    apply: true,
-                    min_age_hours: 0,
-                    limit: 127,
-                    passes: 3,
-                    cursor,
-                    ..RunnerWorkspacePruneOptions::default()
-                },
-            )
-            .expect("bounded mixed-entry drain");
-            assert!(output.scanned_workspace_count <= 127 * 3);
-            scanned += output.scanned_workspace_count;
-            removed.extend(output.removed);
-            if output.scan_complete {
-                assert!(output.continuation_cursor.is_none());
-                break;
-            }
-            cursor = Some(
-                output
-                    .continuation_cursor
-                    .expect("partial scan continuation cursor"),
-            );
-        }
-
-        assert_eq!(scanned, WORKSPACE_COUNT);
-        assert_eq!(removed.len(), ORPHAN_INDICES.len());
+        // `limit` bounds candidates, not inspected entries: one cursorless
+        // invocation walks every entry, plans every orphan, and reports each
+        // malformed or metadata-free entry instead of silently passing it.
+        let (output, _) = prune_workspaces(
+            "lab-local-prune-thousands",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 0,
+                limit: 127,
+                passes: 3,
+                cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
+            },
+        )
+        .expect("bounded mixed-entry drain");
+        assert!(output.scan_complete, "{}", prune_diagnosis(&output));
+        assert!(output.continuation_cursor.is_none());
+        assert_eq!(output.scanned_workspace_count, WORKSPACE_COUNT);
+        assert_eq!(output.removed.len(), ORPHAN_INDICES.len());
+        assert_eq!(
+            output.skipped_unknown_count,
+            WORKSPACE_COUNT - ORPHAN_INDICES.len()
+        );
         for index in ORPHAN_INDICES {
             assert!(!workspaces_root
                 .join(format!("workspace-{index:05}"))
@@ -1232,13 +1499,15 @@ fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
 }
 
 #[test]
-fn ssh_prune_scan_command_bounds_thousands_of_entries() {
+fn ssh_prune_scan_command_bounds_measured_rows_not_inspected_entries() {
     let temp = tempfile::tempdir().expect("tempdir");
-    // The generated scan breaks out of its read loop once `scan_limit` entries
-    // are counted, so entries beyond the limit are never processed. Size the
-    // fixture to prove the bound and the `partial` marker, not to benchmark
-    // `find`.
-    for index in 0..40 {
+    // Entries without ownership proof sort first and are cheap to report; the
+    // row budget bounds only the size-measured rows the controller must
+    // classify, so the walk passes the whole unowned prefix in one page.
+    for index in 0..20 {
+        fs::create_dir_all(temp.path().join(format!("manual-{index:05}"))).expect("manual dir");
+    }
+    for index in 0..20 {
         write_orphan_workspace(&temp.path().join(format!("workspace-{index:05}")));
     }
 
@@ -1249,6 +1518,7 @@ fn ssh_prune_scan_command_bounds_thousands_of_entries() {
             0,
             5,
             None,
+            20,
         ))
         .output()
         .expect("run generated prune scan command");
@@ -1258,13 +1528,21 @@ fn ssh_prune_scan_command_bounds_thousands_of_entries() {
     assert_eq!(
         stdout
             .lines()
-            .filter(|line| !line.starts_with("__homeboy_prune_scan__"))
+            .filter(|line| line.starts_with("unknown\tworkspace_metadata_missing\t"))
+            .count(),
+        20,
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("workspace\t"))
             .count(),
         5,
         "{stdout}"
     );
     assert!(
-        stdout.contains("__homeboy_prune_scan__\t5\tpartial"),
+        stdout.contains("__homeboy_prune_scan__\t25\tpartial"),
         "{stdout}"
     );
 
@@ -1276,6 +1554,7 @@ fn ssh_prune_scan_command_bounds_thousands_of_entries() {
             0,
             5,
             Some(&after),
+            20,
         ))
         .output()
         .expect("resume generated prune scan command");
@@ -1291,10 +1570,12 @@ fn ssh_prune_scan_command_bounds_thousands_of_entries() {
 }
 
 #[test]
-fn ssh_prune_scan_command_advances_past_a_timed_out_size_measurement() {
+fn prune_size_command_bounds_each_measurement() {
     let temp = tempfile::tempdir().expect("tempdir");
-    write_orphan_workspace(&temp.path().join("workspace-00000"));
-    write_orphan_workspace(&temp.path().join("workspace-00001"));
+    let first = temp.path().join("workspace-00000");
+    let second = temp.path().join("workspace-00001");
+    write_orphan_workspace(&first);
+    write_orphan_workspace(&second);
     let commands = tempfile::tempdir().expect("fake command tempdir");
     let bin = commands.path().join("bin");
     fs::create_dir_all(&bin).expect("fake command dir");
@@ -1303,55 +1584,38 @@ fn ssh_prune_scan_command_advances_past_a_timed_out_size_measurement() {
         .args(["+x", &bin.join("du").display().to_string()])
         .status()
         .expect("make fake du executable");
+    let paths = [first.display().to_string(), second.display().to_string()];
+    let paths = paths.iter().map(String::as_str).collect::<Vec<_>>();
 
     let started = Instant::now();
     let output = Command::new("sh")
         .arg("-c")
-        .arg(prune_scan_command(
-            &temp.path().display().to_string(),
-            0,
-            1,
-            None,
-        ))
+        .arg(prune_size_command(&paths))
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
         )
         .output()
-        .expect("run generated prune scan command");
+        .expect("run generated prune size command");
 
     assert!(output.status.success(), "{output:?}");
-    assert!(started.elapsed() < Duration::from_secs(3));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\tunknown\n"), "{stdout}");
-    assert!(
-        stdout.contains("__homeboy_prune_scan__\t1\tpartial"),
-        "{stdout}"
+    assert!(started.elapsed() < Duration::from_secs(4));
+    // A timed-out measurement reports an empty size, never a guessed one.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("\t{}\n\t{}\n", paths[0], paths[1])
     );
 
-    let after = temp.path().join("workspace-00000");
-    let resumed = Command::new("sh")
+    let measured = Command::new("sh")
         .arg("-c")
-        .arg(prune_scan_command(
-            &temp.path().display().to_string(),
-            0,
-            1,
-            Some(&after),
-        ))
-        .env(
-            "PATH",
-            format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
-        )
+        .arg(prune_size_command(&paths))
         .output()
-        .expect("resume generated prune scan command");
-    let resumed_stdout = String::from_utf8_lossy(&resumed.stdout);
-    assert!(resumed.status.success(), "{resumed:?}");
-    assert!(
-        resumed_stdout.contains("workspace-00001\t"),
-        "{resumed_stdout}"
-    );
-    assert!(resumed_stdout.contains("\tunknown\n"), "{resumed_stdout}");
-    assert!(resumed_stdout.contains("__homeboy_prune_scan__\t1\tcomplete\t\n"));
+        .expect("run real prune size command");
+    let measured = String::from_utf8_lossy(&measured.stdout);
+    for line in measured.lines() {
+        let (blocks, _) = line.split_once('\t').expect("size row");
+        assert!(blocks.parse::<u64>().is_ok(), "{measured}");
+    }
 }
 
 #[test]
@@ -1422,7 +1686,13 @@ fn ssh_prune_scan_command_handles_paths_that_need_shell_quoting() {
 
     let output = Command::new("sh")
         .arg("-c")
-        .arg(prune_scan_command(&root.display().to_string(), 0, 10, None))
+        .arg(prune_scan_command(
+            &root.display().to_string(),
+            0,
+            10,
+            None,
+            20,
+        ))
         .output()
         .expect("run generated prune scan command");
 

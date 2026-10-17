@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -45,7 +44,8 @@ use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
     RunnerWorkspaceLivenessEvidence, RunnerWorkspaceMaterializationPlan, RunnerWorkspaceMetadata,
     RunnerWorkspacePruneConvergence, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
-    RunnerWorkspacePruneOutput, RunnerWorkspacePrunePageReceipt, RunnerWorkspacePruneSkippedEntry,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePrunePageReceipt,
+    RunnerWorkspacePruneRetainedReason, RunnerWorkspacePruneSkippedEntry,
     RunnerWorkspacePruneWithheldReason, RunnerWorkspaceRefResolution, RunnerWorkspaceSnapshotEntry,
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
     RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence, RunnerWorkspaceUpdateOptions,
@@ -60,6 +60,7 @@ use homeboy_core::engine::shell;
 use homeboy_core::server::{
     execute_local_command_in_dir_with_timeout, is_transient_ssh_error, CommandOutput,
 };
+use homeboy_lab_contract::lab::handoff::RUNNER_ARTIFACT_ROOT_DIR_SUFFIX;
 use sha2::{Digest, Sha256};
 
 mod snapshots;
@@ -1838,6 +1839,10 @@ fn prune_workspaces_for_runner(
     let mut skipped_live_count = 0;
     let mut skipped_unknown_count = 0;
     let mut withheld_workspaces = std::collections::BTreeMap::<String, (String, u64)>::new();
+    let mut retained_by_reason = std::collections::BTreeMap::<String, usize>::new();
+    // Entries without ownership proof stay reported on every page; another
+    // pass cannot resolve them, so they do not keep the drain open.
+    let mut unowned_count = 0;
     let mut stop_commands = Vec::new();
     let mut candidate_entries = Vec::new();
     let mut total_candidate_count = 0;
@@ -1925,6 +1930,18 @@ fn prune_workspaces_for_runner(
         scan_complete = scan.scan_complete;
         continuation_cursor = scan.continuation_cursor;
         let candidates = scan.candidates;
+        for (reason, count) in scan.retained {
+            *retained_by_reason.entry(reason).or_default() += count;
+        }
+        for unknown in scan.unknown {
+            skipped_unknown_count += 1;
+            unowned_count += 1;
+            withheld_workspaces.insert(unknown.remote_path.clone(), (unknown.reason.clone(), 0));
+            skipped.push(RunnerWorkspacePruneSkippedEntry {
+                remote_path: unknown.remote_path,
+                reason: format!("workspace ownership is unknown; {}", unknown.reason),
+            });
+        }
         for withheld in scan.withheld {
             match withheld.liveness.state.as_str() {
                 "live" => skipped_live_count += 1,
@@ -2108,7 +2125,7 @@ fn prune_workspaces_for_runner(
 
     let remaining_candidate_count = remaining_candidates.len();
     let remaining_candidate_bytes = remaining_candidates.iter().map(|entry| entry.bytes).sum();
-    let has_more = !scan_complete || remaining_candidate_count > 0 || !skipped.is_empty();
+    let has_more = !scan_complete || remaining_candidate_count > 0 || skipped.len() > unowned_count;
     let runner_arg = shell_arg(&runner.id);
     let cursor_arg = (!scan_complete)
         .then_some(continuation_cursor.as_deref())
@@ -2204,6 +2221,15 @@ fn prune_workspaces_for_runner(
                     },
                 )
                 .collect(),
+            retained_by_reason: retained_by_reason
+                .into_iter()
+                .map(
+                    |(reason, workspace_count)| RunnerWorkspacePruneRetainedReason {
+                        reason,
+                        workspace_count,
+                    },
+                )
+                .collect(),
             inspect_command: format!("homeboy runner status {runner_arg}"),
             stop_command: stop_commands.into_iter().next().unwrap_or_else(|| {
                 format!("homeboy runner doctor {runner_arg} --scope lab-offload --repair")
@@ -2246,30 +2272,113 @@ fn record_withheld_liveness(
     withheld.insert(candidate.remote_path.clone(), (reason, candidate.bytes));
 }
 
+/// One bounded prune page over the Lab workspaces root.
+///
+/// Every top-level entry is inventoried in byte order and resolves to exactly
+/// one outcome: a candidate, a liveness-withheld entry, a retained entry with
+/// its reason, or an entry whose ownership cannot be proven (reported, never
+/// deleted). `limit` bounds the candidates a page plans, not the entries it
+/// walks past to reach them: the automatic cleanup restarts every pass at the
+/// head of the root, so bounding entries let a retained prefix starve the page
+/// forever. The scan budget bounds the walk; a page stopped by either bound
+/// resumes strictly after the last inspected entry.
 fn prune_candidates_for_runner(
     runner: &super::super::Runner,
     lab_workspaces_root: &str,
     options: &RunnerWorkspacePruneOptions,
-    scan_limit: usize,
+    limit: usize,
     cursor: Option<&str>,
 ) -> Result<PruneCandidateScan> {
-    match runner.kind {
-        RunnerKind::Local => prune_candidates_local(
-            runner,
-            Path::new(lab_workspaces_root),
-            options,
-            scan_limit,
-            cursor,
-        ),
+    let deadline = Instant::now() + WORKSPACE_PRUNE_SCAN_BUDGET;
+    let min_age = options.min_age_hours.saturating_mul(3600);
+    let mut after = cursor
+        .map(|cursor| decode_prune_cursor(Path::new(lab_workspaces_root), cursor))
+        .transpose()?;
+    let ssh_client = match runner.kind {
+        RunnerKind::Local => None,
         RunnerKind::Ssh => {
-            prune_candidates_ssh(runner, lab_workspaces_root, options, scan_limit, cursor)
+            let (_server, mut client) = ssh_client_for_runner(runner)?;
+            client.env.extend(runner.env.clone());
+            Some(client)
+        }
+    };
+    let run = |command: &str| match ssh_client.as_ref() {
+        Some(client) => client.execute_with_timeout(command, WORKSPACE_PRUNE_TIMEOUT),
+        None => {
+            execute_local_command_in_dir_with_timeout(command, None, None, WORKSPACE_PRUNE_TIMEOUT)
+        }
+    };
+    let mut scan = PruneCandidateScan::default();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if scan.scanned_workspace_count > 0 && remaining.is_zero() {
+            break;
+        }
+        let command = prune_scan_command(
+            lab_workspaces_root,
+            min_age,
+            limit.saturating_sub(scan.candidates.len()).max(1),
+            after.as_deref(),
+            remaining.as_secs(),
+        );
+        let output = run(&command);
+        if !output.success {
+            return Err(Error::internal_unexpected(format!(
+                "runner workspace prune scan failed: {}",
+                output.stderr.trim()
+            )));
+        }
+        let page = parse_prune_scan_output(&output.stdout)?;
+        scan.scanned_workspace_count += page.scanned_workspace_count;
+        let mut planned = Vec::new();
+        for row in page.rows {
+            match classify_prune_scan_row(runner, row) {
+                PruneScanOutcome::Planned(entry) => planned.push(entry),
+                PruneScanOutcome::Retained(reason) => {
+                    *scan.retained.entry(reason.to_string()).or_default() += 1
+                }
+                PruneScanOutcome::Unknown {
+                    remote_path,
+                    reason,
+                } => scan.unknown.push(RunnerWorkspacePruneSkippedEntry {
+                    remote_path,
+                    reason: reason.to_string(),
+                }),
+            }
+        }
+        settle_planned_entries(runner, &run, planned, &mut scan);
+        match page.last_inspected {
+            None => {
+                scan.scan_complete = true;
+                break;
+            }
+            Some(last) => after = Some(last),
+        }
+        if scan.candidates.len() >= limit {
+            break;
         }
     }
+    scan.continuation_cursor = (!scan.scan_complete)
+        .then_some(after.as_deref())
+        .flatten()
+        .map(encode_prune_cursor);
+    scan.candidates.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| b.age_seconds.cmp(&a.age_seconds))
+            .then_with(|| a.remote_path.cmp(&b.remote_path))
+    });
+    Ok(scan)
 }
 
+#[derive(Default)]
 struct PruneCandidateScan {
     candidates: Vec<RunnerWorkspacePruneEntry>,
     withheld: Vec<RunnerWorkspacePruneEntry>,
+    /// Entries kept because their owner is still accountable, by reason.
+    retained: std::collections::BTreeMap<String, usize>,
+    /// Entries without ownership proof. Reported, never deleted.
+    unknown: Vec<RunnerWorkspacePruneSkippedEntry>,
     scanned_workspace_count: usize,
     scan_complete: bool,
     continuation_cursor: Option<String>,
@@ -3459,199 +3568,6 @@ fn exclude_homeboy_metadata_from_git_status(workspace_path: &Path) -> Result<()>
     })
 }
 
-fn prune_candidates_local(
-    runner: &super::super::Runner,
-    root: &Path,
-    options: &RunnerWorkspacePruneOptions,
-    scan_limit: usize,
-    cursor: Option<&str>,
-) -> Result<PruneCandidateScan> {
-    if !root.is_dir() {
-        return Ok(PruneCandidateScan {
-            candidates: Vec::new(),
-            withheld: Vec::new(),
-            scanned_workspace_count: 0,
-            scan_complete: true,
-            continuation_cursor: None,
-        });
-    }
-    let after = cursor
-        .map(|cursor| decode_prune_cursor(root, cursor))
-        .transpose()?;
-    let mut candidates = Vec::new();
-    let mut withheld = Vec::new();
-    let entries = fs::read_dir(root).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some("read runner workspace root".to_string()),
-        )
-    })?;
-    let mut paths = BTreeSet::new();
-    for entry in entries {
-        let entry = entry.map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("read runner workspace entry".to_string()),
-            )
-        })?;
-        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let path = entry.path();
-        if after.as_ref().is_some_and(|after| path <= *after) {
-            continue;
-        }
-        paths.insert(path);
-        if paths.len() > scan_limit.saturating_add(1) {
-            paths.pop_last();
-        }
-    }
-    let mut scan_complete = paths.len() <= scan_limit;
-    if !scan_complete {
-        paths.pop_last();
-    }
-    let inspected = paths.into_iter().collect::<Vec<_>>();
-    let mut scanned_workspace_count = 0;
-    let deadline = Instant::now() + WORKSPACE_PRUNE_SCAN_BUDGET;
-    let mut last_inspected = None;
-    for path in inspected {
-        if last_inspected.is_some() && Instant::now() >= deadline {
-            scan_complete = false;
-            break;
-        }
-        last_inspected = Some(path.clone());
-        scanned_workspace_count += 1;
-        if let Some(candidate) = classify_local_candidate(runner, root, &path, options)? {
-            if candidate.liveness.state == "inactive" {
-                candidates.push(candidate);
-            } else {
-                withheld.push(candidate);
-            }
-        }
-    }
-    let continuation_cursor = (!scan_complete)
-        .then_some(last_inspected.as_ref())
-        .flatten()
-        .map(|path| encode_prune_cursor(path));
-    candidates.sort_by(|a, b| {
-        b.bytes
-            .cmp(&a.bytes)
-            .then_with(|| b.age_seconds.cmp(&a.age_seconds))
-            .then_with(|| a.remote_path.cmp(&b.remote_path))
-    });
-    Ok(PruneCandidateScan {
-        candidates,
-        withheld,
-        scanned_workspace_count,
-        scan_complete,
-        continuation_cursor,
-    })
-}
-
-fn classify_local_candidate(
-    runner: &super::super::Runner,
-    root: &Path,
-    path: &Path,
-    options: &RunnerWorkspacePruneOptions,
-) -> Result<Option<RunnerWorkspacePruneEntry>> {
-    if !path.starts_with(root) || path == root {
-        return Ok(None);
-    }
-    let age_seconds = path_age_seconds(path)?;
-    if age_seconds < options.min_age_hours.saturating_mul(3600) {
-        return Ok(None);
-    }
-    if has_pending_apply_back_local(path) {
-        return Ok(None);
-    }
-    let metadata_path = path.join(WORKSPACE_METADATA_FILE);
-    let metadata = match fs::read_to_string(&metadata_path) {
-        Ok(content) => content,
-        Err(_) => return Ok(None),
-    };
-    let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&metadata) else {
-        return Ok(None);
-    };
-    if metadata.get("schema").and_then(|value| value.as_str())
-        != Some("homeboy/runner-workspace/v1")
-    {
-        return Ok(None);
-    }
-    let Some(source_path) = metadata.get("local_path").and_then(|value| value.as_str()) else {
-        return Ok(None);
-    };
-    let reason = prune_candidate_reason(runner, &metadata, path, source_path)?;
-    let Some(reason) = reason else {
-        return Ok(None);
-    };
-    let size = bounded_directory_size(path);
-    let liveness =
-        workspace_liveness_with_size_observation(runner, &metadata, path, size.is_some());
-    Ok(Some(RunnerWorkspacePruneEntry {
-        remote_path: path.display().to_string(),
-        source_path: source_path.to_string(),
-        run_id: metadata
-            .get("run_id")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        job_id: metadata
-            .get("job_id")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        sync_mode: metadata
-            .get("sync_mode")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        snapshot_identity: metadata
-            .get("snapshot_identity")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        age_seconds,
-        bytes: size.unwrap_or(0),
-        reason,
-        liveness,
-    }))
-}
-
-fn prune_candidate_reason(
-    runner: &super::super::Runner,
-    metadata: &serde_json::Value,
-    path: &Path,
-    source_path: &str,
-) -> Result<Option<String>> {
-    if let Some(resource) = metadata.get("resource_lifecycle") {
-        let resource: ResourceLifecycleRecord =
-            serde_json::from_value(resource.clone()).map_err(|err| {
-                Error::internal_json(err.to_string(), Some(path.display().to_string()))
-            })?;
-        if matches!(
-            resource.cleanup_policy,
-            ResourceCleanupPolicy::DeleteAfterTtl
-        ) {
-            if let Some(ttl) = resource.ttl.as_deref() {
-                let modified = fs::metadata(path)
-                    .and_then(|metadata| metadata.modified())
-                    .map_err(|err| {
-                        Error::internal_io(
-                            err.to_string(),
-                            Some("read workspace mtime".to_string()),
-                        )
-                    })?;
-                if resource_lifecycle_path_ttl_expired_at(ttl, modified, chrono::Utc::now()) {
-                    return Ok(Some("resource_ttl_expired".to_string()));
-                }
-            }
-        }
-    }
-
-    Ok(prune_candidate_reason_after_ttl(
-        runner,
-        metadata,
-        path,
-        source_path,
-    ))
-}
-
 fn prune_candidate_reason_after_ttl(
     runner: &super::super::Runner,
     metadata: &serde_json::Value,
@@ -3771,10 +3687,7 @@ fn workspace_liveness(
         }
     }
 
-    match runner.kind {
-        RunnerKind::Local => local_process_liveness(path),
-        RunnerKind::Ssh => ssh_process_liveness(runner, &path.display().to_string()),
-    }
+    process_liveness(runner, path)
 }
 
 /// A compacted lifecycle record is not enough to make an active lease stale.
@@ -3931,6 +3844,17 @@ fn revalidate_candidate_liveness(
 ) -> Result<RunnerWorkspaceLivenessEvidence> {
     // Job state and process ownership can both change after the bounded scan.
     // Keep this check immediately adjacent to the delete call.
+    if candidate.reason == ARTIFACT_DIR_CHECKOUT_MISSING_REASON {
+        return Ok(match runner.kind {
+            RunnerKind::Local if Path::new(&candidate.source_path).exists() => {
+                liveness("unknown", vec!["artifact_dir_checkout_present".to_string()])
+            }
+            RunnerKind::Local => local_process_liveness(Path::new(&candidate.remote_path)),
+            // Checkout absence and process ownership are revalidated
+            // atomically with deletion on the runner.
+            RunnerKind::Ssh => liveness("inactive", Vec::new()),
+        });
+    }
     let metadata = match runner.kind {
         RunnerKind::Local => {
             let path = Path::new(&candidate.remote_path).join(WORKSPACE_METADATA_FILE);
@@ -4233,151 +4157,274 @@ pub(crate) fn ssh_process_liveness_command(path: &str) -> String {
     )
 }
 
-fn prune_candidates_ssh(
-    runner: &super::super::Runner,
-    root: &str,
-    options: &RunnerWorkspacePruneOptions,
-    scan_limit: usize,
-    cursor: Option<&str>,
-) -> Result<PruneCandidateScan> {
-    let (_server, mut client) = ssh_client_for_runner(runner)?;
-    client.env.extend(runner.env.clone());
-    let min_age = options.min_age_hours.saturating_mul(3600);
-    let after = cursor
-        .map(|cursor| decode_prune_cursor(Path::new(root), cursor))
-        .transpose()?;
-    let command = prune_scan_command(root, min_age, scan_limit, after.as_deref());
-    let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
-    if !output.success {
-        return Err(Error::internal_unexpected(format!(
-            "runner workspace prune scan failed: {}",
-            output.stderr.trim()
-        )));
-    }
-    let mut candidates = Vec::new();
-    let mut withheld = Vec::new();
-    let mut scan_status = None;
-    for line in output.stdout.lines() {
-        if let Some(status) = line.strip_prefix("__homeboy_prune_scan__\t") {
-            let parts = status.split('\t').collect::<Vec<_>>();
-            let [scanned_workspace_count, completion, last_inspected] = parts.as_slice() else {
-                return Err(Error::internal_unexpected(
-                    "runner workspace prune scan returned an invalid completion status".to_string(),
-                ));
+/// Prune scan protocol marker for the page completion line.
+const PRUNE_SCAN_STATUS_PREFIX: &str = "__homeboy_prune_scan__\t";
+/// Candidate reason for a run artifact sibling whose checkout no longer exists.
+const ARTIFACT_DIR_CHECKOUT_MISSING_REASON: &str = "artifact_dir_checkout_missing";
+
+/// One inventoried top-level entry, as reported by [`prune_scan_command`].
+enum PruneScanRow {
+    /// Old enough, carries runner-workspace metadata, no pending apply-back.
+    Workspace {
+        age_seconds: u64,
+        remote_path: String,
+        encoded_metadata: String,
+    },
+    /// Old `<checkout>-homeboy-artifacts` sibling whose checkout is gone.
+    OrphanArtifactDir {
+        age_seconds: u64,
+        remote_path: String,
+    },
+    Retained {
+        reason: String,
+    },
+    Unknown {
+        remote_path: String,
+        reason: String,
+    },
+}
+
+struct PruneScanPage {
+    rows: Vec<PruneScanRow>,
+    scanned_workspace_count: usize,
+    /// `None` once the walk reached the end of the root.
+    last_inspected: Option<PathBuf>,
+}
+
+enum PruneScanOutcome {
+    /// Has a prune reason; liveness is decided after the entry is measured.
+    Planned(PlannedPruneEntry),
+    Retained(String),
+    Unknown {
+        remote_path: String,
+        reason: String,
+    },
+}
+
+struct PlannedPruneEntry {
+    entry: RunnerWorkspacePruneEntry,
+    /// Runner-workspace metadata; `None` for orphaned artifact siblings.
+    metadata: Option<serde_json::Value>,
+}
+
+fn invalid_prune_scan(what: &str) -> Error {
+    Error::internal_unexpected(format!("runner workspace prune scan returned {what}"))
+}
+
+fn parse_prune_scan_output(stdout: &str) -> Result<PruneScanPage> {
+    let mut rows = Vec::new();
+    let mut status = None;
+    for line in stdout.lines() {
+        if let Some(fields) = line.strip_prefix(PRUNE_SCAN_STATUS_PREFIX) {
+            let [scanned, completion, last] = fields.split('\t').collect::<Vec<_>>()[..] else {
+                return Err(invalid_prune_scan("an invalid completion status"));
             };
-            let scanned_workspace_count = scanned_workspace_count.parse().map_err(|err| {
-                Error::internal_unexpected(format!(
-                    "runner workspace prune scan returned an invalid inspected count: {err}"
-                ))
-            })?;
-            let scan_complete = match *completion {
-                "complete" => true,
-                "partial" => false,
-                _ => {
-                    return Err(Error::internal_unexpected(
-                        "runner workspace prune scan returned an invalid completion status"
-                            .to_string(),
-                    ));
-                }
-            };
-            let continuation_cursor = match (*completion, *last_inspected) {
+            let scanned = scanned
+                .parse()
+                .map_err(|_| invalid_prune_scan("an invalid inspected count"))?;
+            let last_inspected = match (completion, last) {
                 ("complete", "") => None,
-                ("partial", path) if !path.is_empty() => Some(encode_prune_cursor(Path::new(path))),
-                _ => {
-                    return Err(Error::internal_unexpected(
-                        "runner workspace prune scan returned an invalid continuation cursor"
-                            .to_string(),
-                    ))
-                }
+                ("partial", path) if !path.is_empty() => Some(PathBuf::from(path)),
+                _ => return Err(invalid_prune_scan("an invalid continuation cursor")),
             };
-            scan_status = Some((scanned_workspace_count, scan_complete, continuation_cursor));
+            status = Some((scanned, last_inspected));
             continue;
         }
-        let parts = line.splitn(5, '\t').collect::<Vec<_>>();
-        if parts.len() != 5 {
-            continue;
-        }
-        let age_seconds = parts[0].parse::<u64>().unwrap_or(0);
-        let bytes = parts[1].parse::<u64>().unwrap_or(0);
-        let remote_path = parts[2].to_string();
-        let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(parts[3]) else {
-            continue;
+        let fields = line.split('\t').collect::<Vec<_>>();
+        let number = |value: &str| value.parse::<u64>().unwrap_or(0);
+        let row = match fields[..] {
+            ["workspace", age, path, metadata] => PruneScanRow::Workspace {
+                age_seconds: number(age),
+                remote_path: path.to_string(),
+                encoded_metadata: metadata.to_string(),
+            },
+            ["artifact", age, path] => PruneScanRow::OrphanArtifactDir {
+                age_seconds: number(age),
+                remote_path: path.to_string(),
+            },
+            ["retained", reason, _path] => PruneScanRow::Retained {
+                reason: reason.to_string(),
+            },
+            ["unknown", reason, path] => PruneScanRow::Unknown {
+                remote_path: path.to_string(),
+                reason: reason.to_string(),
+            },
+            _ => return Err(invalid_prune_scan(&format!("an unrecognized row `{line}`"))),
         };
-        let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&decoded) else {
-            continue;
-        };
-        if metadata.get("schema").and_then(|value| value.as_str())
-            != Some("homeboy/runner-workspace/v1")
-        {
-            continue;
-        }
-        let Some(source_path) = metadata.get("local_path").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        let reason = prune_candidate_reason_from_decoded_metadata(
-            runner,
-            &metadata,
-            age_seconds,
-            Path::new(&parts[2]),
-        );
-        let Some(reason) = reason else {
-            continue;
-        };
-        let liveness = workspace_liveness_with_size_observation(
-            runner,
-            &metadata,
-            Path::new(&parts[2]),
-            parts[4] == "measured",
-        );
-        let entry = RunnerWorkspacePruneEntry {
+        rows.push(row);
+    }
+    let (scanned_workspace_count, last_inspected) =
+        status.ok_or_else(|| invalid_prune_scan("no completion status"))?;
+    Ok(PruneScanPage {
+        rows,
+        scanned_workspace_count,
+        last_inspected,
+    })
+}
+
+/// Decide one inventoried entry from its producer's ownership proof.
+///
+/// Runner workspaces (every `sync_workspace` checkout, whatever its name
+/// family) are proven by `.homeboy/runner-workspace.json`; run artifact
+/// siblings are proven by their `<checkout>-homeboy-artifacts` name and follow
+/// the checkout they belong to. Anything else has no ownership proof and is
+/// reported as unknown rather than silently skipped or deleted.
+fn classify_prune_scan_row(runner: &super::super::Runner, row: PruneScanRow) -> PruneScanOutcome {
+    let planned = |remote_path: String, source_path: String, age_seconds: u64, reason: String| {
+        RunnerWorkspacePruneEntry {
             remote_path,
-            source_path: source_path.to_string(),
-            run_id: metadata
-                .get("run_id")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            job_id: metadata
-                .get("job_id")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            sync_mode: metadata
-                .get("sync_mode")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            snapshot_identity: metadata
-                .get("snapshot_identity")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
+            source_path,
+            run_id: None,
+            job_id: None,
+            sync_mode: None,
+            snapshot_identity: None,
             age_seconds,
-            bytes,
+            bytes: 0,
             reason,
-            liveness,
+            liveness: liveness("unknown", Vec::new()),
+        }
+    };
+    match row {
+        PruneScanRow::Retained { reason } => PruneScanOutcome::Retained(reason),
+        PruneScanRow::Unknown {
+            remote_path,
+            reason,
+        } => PruneScanOutcome::Unknown {
+            remote_path,
+            reason,
+        },
+        PruneScanRow::OrphanArtifactDir {
+            age_seconds,
+            remote_path,
+        } => {
+            let checkout = artifact_dir_checkout(&remote_path)
+                .unwrap_or_default()
+                .to_string();
+            PruneScanOutcome::Planned(PlannedPruneEntry {
+                entry: planned(
+                    remote_path,
+                    checkout,
+                    age_seconds,
+                    ARTIFACT_DIR_CHECKOUT_MISSING_REASON.to_string(),
+                ),
+                metadata: None,
+            })
+        }
+        PruneScanRow::Workspace {
+            age_seconds,
+            remote_path,
+            encoded_metadata,
+        } => {
+            let metadata = base64::engine::general_purpose::STANDARD
+                .decode(&encoded_metadata)
+                .ok()
+                .and_then(|decoded| serde_json::from_slice::<serde_json::Value>(&decoded).ok())
+                .filter(|metadata| {
+                    metadata.get("schema").and_then(|value| value.as_str())
+                        == Some("homeboy/runner-workspace/v1")
+                });
+            let Some((metadata, source_path)) = metadata.and_then(|metadata| {
+                let source_path = metadata.get("local_path")?.as_str()?.to_string();
+                Some((metadata, source_path))
+            }) else {
+                return PruneScanOutcome::Unknown {
+                    remote_path,
+                    reason: "workspace_metadata_invalid".to_string(),
+                };
+            };
+            let Some(reason) = prune_candidate_reason_from_decoded_metadata(
+                runner,
+                &metadata,
+                age_seconds,
+                Path::new(&remote_path),
+            ) else {
+                return PruneScanOutcome::Retained("source_path_present".to_string());
+            };
+            let text = |key: &str| {
+                metadata
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            };
+            let entry = RunnerWorkspacePruneEntry {
+                run_id: text("run_id"),
+                job_id: text("job_id"),
+                sync_mode: text("sync_mode"),
+                snapshot_identity: text("snapshot_identity"),
+                ..planned(remote_path, source_path, age_seconds, reason)
+            };
+            PruneScanOutcome::Planned(PlannedPruneEntry {
+                entry,
+                metadata: Some(metadata),
+            })
+        }
+    }
+}
+
+/// Size and liveness for one page of planned entries. Sizes are measured in
+/// one bounded round trip, then each entry's liveness decides whether it is a
+/// candidate or withheld.
+fn settle_planned_entries(
+    runner: &super::super::Runner,
+    run: &dyn Fn(&str) -> CommandOutput,
+    planned: Vec<PlannedPruneEntry>,
+    scan: &mut PruneCandidateScan,
+) {
+    if planned.is_empty() {
+        return;
+    }
+    let paths = planned
+        .iter()
+        .map(|planned| planned.entry.remote_path.as_str())
+        .collect::<Vec<_>>();
+    let output = run(&prune_size_command(&paths));
+    let sizes = if output.success {
+        parse_prune_sizes(&output.stdout)
+    } else {
+        Default::default()
+    };
+    for PlannedPruneEntry {
+        mut entry,
+        metadata,
+    } in planned
+    {
+        let size = sizes.get(&entry.remote_path).copied();
+        entry.bytes = size.unwrap_or(0);
+        let path = Path::new(&entry.remote_path);
+        entry.liveness = match metadata.as_ref() {
+            Some(metadata) => {
+                workspace_liveness_with_size_observation(runner, metadata, path, size.is_some())
+            }
+            None => {
+                let mut evidence = process_liveness(runner, path);
+                if size.is_none() {
+                    evidence
+                        .observations
+                        .push("workspace_size_measurement_unavailable".to_string());
+                }
+                evidence
+            }
         };
         if entry.liveness.state == "inactive" {
-            candidates.push(entry);
+            scan.candidates.push(entry);
         } else {
-            withheld.push(entry);
+            scan.withheld.push(entry);
         }
     }
-    candidates.sort_by(|a, b| {
-        b.bytes
-            .cmp(&a.bytes)
-            .then_with(|| b.age_seconds.cmp(&a.age_seconds))
-            .then_with(|| a.remote_path.cmp(&b.remote_path))
-    });
-    let (scanned_workspace_count, scan_complete, continuation_cursor) =
-        scan_status.ok_or_else(|| {
-            Error::internal_unexpected(
-                "runner workspace prune scan did not return a completion status".to_string(),
-            )
-        })?;
-    Ok(PruneCandidateScan {
-        candidates,
-        withheld,
-        scanned_workspace_count,
-        scan_complete,
-        continuation_cursor,
-    })
+}
+
+/// The checkout a run artifact sibling belongs to.
+fn artifact_dir_checkout(remote_path: &str) -> Option<&str> {
+    remote_path
+        .strip_suffix(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX)
+        .filter(|checkout| !checkout.is_empty())
+}
+
+fn process_liveness(runner: &super::super::Runner, path: &Path) -> RunnerWorkspaceLivenessEvidence {
+    match runner.kind {
+        RunnerKind::Local => local_process_liveness(path),
+        RunnerKind::Ssh => ssh_process_liveness(runner, &path.display().to_string()),
+    }
 }
 
 fn prune_candidate_reason_from_decoded_metadata(
@@ -4408,22 +4455,91 @@ fn prune_candidate_reason_from_decoded_metadata(
     prune_candidate_reason_after_ttl(runner, metadata, path, source_path)
 }
 
+/// Inventory one bounded window of the Lab workspaces root.
+///
+/// Walks every top-level entry after `after` in byte order and prints one row
+/// per entry (see [`PruneScanRow`]). Only rows that need controller-side
+/// classification (`workspace`, `artifact`) count against `row_budget`; the
+/// walk also stops once `scan_budget_seconds` is spent, but always inspects at
+/// least one entry so every page advances. Nothing is size-measured here:
+/// only planned entries are measured, by [`prune_size_command`].
 pub(crate) fn prune_scan_command(
     root: &str,
     min_age: u64,
-    scan_limit: usize,
+    row_budget: usize,
     after: Option<&Path>,
+    scan_budget_seconds: u64,
 ) -> String {
     format!(
-        "root={root}; after={after}; meta_rel={meta}; min_age={min_age}; now=$(date +%s); deadline=$((now + {scan_budget})); if [ -d \"$root\" ]; then LC_ALL=C find \"$root\" -mindepth 1 -maxdepth 1 -type d -print | LC_ALL=C sort | {{ scanned=0; complete=complete; last=; while IFS= read -r dir; do [ -z \"$after\" ] || [ \"$dir\" \\> \"$after\" ] || continue; if [ \"$scanned\" -ge {scan_limit} ] || {{ [ \"$scanned\" -gt 0 ] && [ \"$(date +%s)\" -ge \"$deadline\" ]; }}; then complete=partial; break; fi; scanned=$((scanned + 1)); last=$dir; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; blocks=; size_file=$(mktemp \"${{TMPDIR:-/tmp}}/homeboy-prune.XXXXXX\") || size_file=; if [ -n \"$size_file\" ]; then du -sk \"$dir\" > \"$size_file\" 2>/dev/null & measure_pid=$!; {{ sleep {size_timeout}; kill \"$measure_pid\" 2>/dev/null; }} & measure_watchdog=$!; wait \"$measure_pid\"; measure_status=$?; kill \"$measure_watchdog\" 2>/dev/null; wait \"$measure_watchdog\" 2>/dev/null; [ \"$measure_status\" -eq 0 ] && blocks=$(cat \"$size_file\"); rm -f \"$size_file\"; fi; blocks=${{blocks%%[!0-9]*}}; bytes=$((blocks * 1024)); measurement=measured; [ -n \"$blocks\" ] || measurement=unknown; printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\t%s\\n\" \"$measurement\"; done; [ \"$complete\" = partial ] || last=; printf \"__homeboy_prune_scan__\\t%s\\t%s\\t%s\\n\" \"$scanned\" \"$complete\" \"$last\"; }}; else printf \"__homeboy_prune_scan__\\t0\\tcomplete\\t\\n\"; fi",
+        concat!(
+            "root={root}; after={after}; meta_rel={meta}; suffix={suffix}; min_age={min_age}; ",
+            "now=$(date +%s); deadline=$((now + {scan_budget})); ",
+            "if [ -d \"$root\" ]; then LC_ALL=C find \"$root\" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort | {{ ",
+            "scanned=0; rows=0; complete=complete; last=; ",
+            "while IFS= read -r dir; do ",
+            "[ -z \"$after\" ] || [ \"$dir\" \\> \"$after\" ] || continue; ",
+            "if [ \"$rows\" -ge {row_budget} ] || {{ [ \"$scanned\" -gt 0 ] && [ \"$(date +%s)\" -ge \"$deadline\" ]; }}; then complete=partial; break; fi; ",
+            "scanned=$((scanned + 1)); last=$dir; ",
+            "mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); ",
+            "if [ \"$age\" -lt \"$min_age\" ]; then printf \"retained\\tyounger_than_min_age\\t%s\\n\" \"$dir\"; continue; fi; ",
+            "if [ -L \"$dir\" ] || [ ! -d \"$dir\" ]; then printf \"unknown\\tnot_a_directory\\t%s\\n\" \"$dir\"; continue; fi; ",
+            "meta=\"$dir/$meta_rel\"; ",
+            "if [ -f \"$meta\" ]; then ",
+            "if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then printf \"retained\\tpending_apply_back\\t%s\\n\" \"$dir\"; continue; fi; ",
+            "kind=workspace; ",
+            "else case \"$dir\" in ",
+            "*\"$suffix\") checkout=${{dir%\"$suffix\"}}; if [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; then printf \"retained\\tartifact_dir_owned_by_checkout\\t%s\\n\" \"$dir\"; continue; fi; kind=artifact ;; ",
+            "*) printf \"unknown\\tworkspace_metadata_missing\\t%s\\n\" \"$dir\"; continue ;; ",
+            "esac; fi; ",
+            "rows=$((rows + 1)); printf \"%s\\t%s\\t%s\" \"$kind\" \"$age\" \"$dir\"; ",
+            "if [ \"$kind\" = workspace ]; then printf \"\\t\"; base64 < \"$meta\" | tr -d \"\\n\"; fi; printf \"\\n\"; ",
+            "done; [ \"$complete\" = partial ] || last=; printf \"__homeboy_prune_scan__\\t%s\\t%s\\t%s\\n\" \"$scanned\" \"$complete\" \"$last\"; }}; ",
+            "else printf \"__homeboy_prune_scan__\\t0\\tcomplete\\t\\n\"; fi"
+        ),
         root = shell::quote_arg(root),
         after = shell::quote_arg(after.and_then(Path::to_str).unwrap_or("")),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        suffix = shell::quote_arg(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX),
         min_age = shell::quote_arg(&min_age.to_string()),
-        scan_limit = scan_limit,
-        scan_budget = WORKSPACE_PRUNE_SCAN_BUDGET.as_secs(),
+        row_budget = row_budget,
+        scan_budget = scan_budget_seconds,
+    )
+}
+
+/// Measure planned entries, one bounded `du` per entry.
+///
+/// Prints `<kilobytes>\t<path>` per entry; the size is empty when `du` failed
+/// or exceeded its watchdog, so one huge tree cannot stall the page.
+pub(crate) fn prune_size_command(paths: &[&str]) -> String {
+    let paths = paths
+        .iter()
+        .map(|path| shell::quote_arg(path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        concat!(
+            "for dir in {paths}; do ",
+            "blocks=; size_file=$(mktemp \"${{TMPDIR:-/tmp}}/homeboy-prune.XXXXXX\") || size_file=; ",
+            "if [ -n \"$size_file\" ]; then du -sk \"$dir\" > \"$size_file\" 2>/dev/null & measure_pid=$!; {{ sleep {size_timeout}; kill \"$measure_pid\" 2>/dev/null; }} & measure_watchdog=$!; wait \"$measure_pid\"; measure_status=$?; kill \"$measure_watchdog\" 2>/dev/null; wait \"$measure_watchdog\" 2>/dev/null; [ \"$measure_status\" -eq 0 ] && blocks=$(cat \"$size_file\"); rm -f \"$size_file\"; fi; ",
+            "blocks=${{blocks%%[!0-9]*}}; printf \"%s\\t%s\\n\" \"$blocks\" \"$dir\"; ",
+            "done"
+        ),
+        paths = paths,
         size_timeout = WORKSPACE_PRUNE_SIZE_TIMEOUT.as_secs(),
     )
+}
+
+fn parse_prune_sizes(stdout: &str) -> std::collections::HashMap<String, u64> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (blocks, path) = line.split_once('\t')?;
+            Some((
+                path.to_string(),
+                blocks.parse::<u64>().ok()?.saturating_mul(1024),
+            ))
+        })
+        .collect()
 }
 
 const PRUNE_CURSOR_PREFIX: &str = "homeboy-workspace-prune/v1\0";
@@ -4465,6 +4581,15 @@ fn remove_prune_candidate(
 ) -> Result<Option<RunnerWorkspaceLivenessEvidence>> {
     match runner.kind {
         RunnerKind::Local => {
+            if candidate.reason == ARTIFACT_DIR_CHECKOUT_MISSING_REASON
+                && artifact_dir_checkout(&candidate.remote_path)
+                    .is_none_or(|checkout| Path::new(checkout).exists())
+            {
+                return Ok(Some(liveness(
+                    "unknown",
+                    vec!["artifact_dir_checkout_present".to_string()],
+                )));
+            }
             if candidate.reason == STALE_MATERIALIZED_WORKSPACE_REASON {
                 let path = Path::new(&candidate.remote_path);
                 let metadata = fs::read(path.join(WORKSPACE_METADATA_FILE))
@@ -4493,7 +4618,9 @@ fn remove_ssh_prune_candidate(
 ) -> Result<Option<RunnerWorkspaceLivenessEvidence>> {
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
-    let command = if candidate.reason == STALE_MATERIALIZED_WORKSPACE_REASON {
+    let command = if candidate.reason == ARTIFACT_DIR_CHECKOUT_MISSING_REASON {
+        ssh_prune_delete_orphan_artifact_dir_command(root, &candidate.remote_path)
+    } else if candidate.reason == STALE_MATERIALIZED_WORKSPACE_REASON {
         let metadata_path = Path::new(&candidate.remote_path).join(WORKSPACE_METADATA_FILE);
         let metadata_command = format!(
             "meta={}; [ -f \"$meta\" ] && base64 < \"$meta\" | tr -d '\\n'",
@@ -4593,21 +4720,48 @@ pub(crate) fn ssh_prune_delete_materialized_workspace_command(
             "trap 'rm -f \"$expected\"' EXIT HUP INT TERM; cat > \"$expected\" || {{ printf unknown:metadata_transport; exit 0; }}; ",
             "meta=\"$p/$meta_rel\"; [ -f \"$meta\" ] || {{ printf unknown:metadata; exit 0; }}; ",
             "cmp -s \"$meta\" \"$expected\" || {{ printf unknown:materialized_workspace_lifecycle_changed; exit 0; }}; ",
-            "command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown:process_probe_unavailable; exit 0; }}; ",
-            "ps_output=$(ps -eo pid=,ppid=,args=) || {{ printf unknown:process_probe_failed; exit 0; }}; ",
-            "printf '%s\n' \"$ps_output\" | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}'; state=$?; ",
-            "[ \"$state\" -eq 0 ] && {{ printf live:remote_process_ownership; exit 0; }}; [ \"$state\" -eq 1 ] || {{ printf unknown:process_probe_failed; exit 0; }}; ",
-            "cwd=$(lsof -w -Fn -a -d cwd +D \"$p\" 2>/dev/null); state=$?; ",
-            "[ \"$state\" -eq 0 ] && [ -n \"$cwd\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$cwd\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; ",
-            "open=$(lsof -w -Fn +D \"$p\" 2>/dev/null); state=$?; ",
-            "[ \"$state\" -eq 0 ] && [ -n \"$open\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$open\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; ",
-            "rm -rf -- \"$p\" && printf removed || printf unknown:delete_failed"
+            "{probe_and_delete}"
         ),
         root = shell::quote_arg(root),
         path = shell::quote_arg(remote_path),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        probe_and_delete = SSH_PRUNE_PROBE_AND_DELETE,
     )
 }
+
+/// Delete an orphaned run artifact sibling, revalidating at the destructive
+/// boundary that its checkout is still gone and no process owns it.
+pub(crate) fn ssh_prune_delete_orphan_artifact_dir_command(
+    root: &str,
+    remote_path: &str,
+) -> String {
+    format!(
+        concat!(
+            "root={root}; p={path}; suffix={suffix}; ",
+            "case \"$p\" in \"$root\"/*\"$suffix\") ;; *) printf unknown:workspace_path; exit 0 ;; esac; ",
+            "checkout=${{p%\"$suffix\"}}; {{ [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; }} && {{ printf unknown:artifact_dir_checkout_present; exit 0; }}; ",
+            "{probe_and_delete}"
+        ),
+        root = shell::quote_arg(root),
+        path = shell::quote_arg(remote_path),
+        suffix = shell::quote_arg(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX),
+        probe_and_delete = SSH_PRUNE_PROBE_AND_DELETE,
+    )
+}
+
+/// Process-ownership revalidation shared by the SSH prune deletes, ending in
+/// the delete itself. Expects `$p` to name the entry being removed.
+const SSH_PRUNE_PROBE_AND_DELETE: &str = concat!(
+            "command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || { printf unknown:process_probe_unavailable; exit 0; }; ",
+            "ps_output=$(ps -eo pid=,ppid=,args=) || { printf unknown:process_probe_failed; exit 0; }; ",
+            "printf '%s\n' \"$ps_output\" | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) { found=1 } END { exit !found }'; state=$?; ",
+            "[ \"$state\" -eq 0 ] && { printf live:remote_process_ownership; exit 0; }; [ \"$state\" -eq 1 ] || { printf unknown:process_probe_failed; exit 0; }; ",
+            "cwd=$(lsof -w -Fn -a -d cwd +D \"$p\" 2>/dev/null); state=$?; ",
+            "[ \"$state\" -eq 0 ] && [ -n \"$cwd\" ] && { printf live:remote_process_ownership; exit 0; }; { [ \"$state\" -eq 1 ] && [ -z \"$cwd\" ]; } || { printf unknown:process_probe_failed; exit 0; }; ",
+            "open=$(lsof -w -Fn +D \"$p\" 2>/dev/null); state=$?; ",
+            "[ \"$state\" -eq 0 ] && [ -n \"$open\" ] && { printf live:remote_process_ownership; exit 0; }; { [ \"$state\" -eq 1 ] && [ -z \"$open\" ]; } || { printf unknown:process_probe_failed; exit 0; }; ",
+            "rm -rf -- \"$p\" && printf removed || printf unknown:delete_failed"
+);
 
 fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str) -> Result<()> {
     let root_path = Path::new(root);
@@ -4672,47 +4826,6 @@ fn remove_local_workspace_with_lifecycle(root: &Path, path: &Path) -> Result<()>
         )
     })?;
     ResourceLifecycle::delete_path(&cleanup_path)
-}
-
-fn path_age_seconds(path: &Path) -> Result<u64> {
-    let modified = fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read workspace mtime".to_string()))
-        })?;
-    Ok(SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or_default()
-        .as_secs())
-}
-
-fn bounded_directory_size(path: &Path) -> Option<u64> {
-    let command = format!("du -sk {}", shell::quote_arg(&path.display().to_string()));
-    let output = execute_local_command_in_dir_with_timeout(
-        &command,
-        None,
-        None,
-        WORKSPACE_PRUNE_SIZE_TIMEOUT,
-    );
-    output.success.then_some(())?;
-    output
-        .stdout
-        .split_whitespace()
-        .next()?
-        .parse::<u64>()
-        .ok()
-        .map(|blocks| blocks.saturating_mul(1024))
-}
-
-fn has_pending_apply_back_local(path: &Path) -> bool {
-    let homeboy = path.join(".homeboy");
-    let Ok(entries) = fs::read_dir(homeboy) else {
-        return false;
-    };
-    entries.filter_map(|entry| entry.ok()).any(|entry| {
-        let name = entry.file_name().to_string_lossy().to_string();
-        name.contains("patch") || name.ends_with(".patch") || name.ends_with(".diff")
-    })
 }
 
 pub(crate) use crate::shell_quote::shell_arg;
