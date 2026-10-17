@@ -2300,7 +2300,7 @@ fn ensure_runtime_tmp_dir() -> Result<PathBuf> {
         crate::capacity::CapacityReserve::configured_for_path(&runtime_dir),
     );
     if preflight.is_exhausted() {
-        match crate::cleanup::run_automatic_runtime_temp_retention() {
+        match crate::cleanup::run_automatic_runtime_temp_retention(None) {
             Ok(output) if output.status == "busy" => {
                 let mut exhausted = preflight.error().expect("exhausted preflight has an error");
                 exhausted.details["runtime_cleanup"] = serde_json::json!({

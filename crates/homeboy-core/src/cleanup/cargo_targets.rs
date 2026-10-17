@@ -1111,7 +1111,7 @@ fn admit_shared_cargo_target(root: &Path) -> Result<()> {
         // The automatic owner is bounded and single-flight across processes.
         // A busy pass is followed by this fresh measurement, never assumed to
         // have restored capacity.
-        super::run_automatic_cargo_retention()?;
+        super::run_automatic_cargo_retention(super::automatic_retention_deadline(&retention))?;
         filesystem_capacity(root)
     })
 }

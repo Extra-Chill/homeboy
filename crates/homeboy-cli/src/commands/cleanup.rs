@@ -98,6 +98,9 @@ struct AutomaticRetentionControllerOutput {
     state_key: String,
     resume_command: &'static str,
     reconciliation: homeboy::agents::agent_task_service::AgentTaskReconcileReport,
+    /// Which phases this pass ran and deferred; the controller record's
+    /// cursor is `rotation.next_phase`.
+    rotation: AutomaticRetentionRotation,
     repo_artifacts: Value,
     cleanup: Value,
 }
@@ -147,9 +150,11 @@ const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 11] = [
 /// Written down so the difference between "decided against" and "forgotten" is
 /// visible. `runner-downloads` and `task-worktrees` can hold live inputs a
 /// running job still needs; `shared-cargo-targets` is reclaimed by its own
-/// separately budgeted pass (`run_automatic_cargo_retention`) and must not
-/// enter the aggregate sweep. `repo-artifacts` is likewise driven separately,
-/// by `try_run_automatic_artifact_retention_in_root` over registered workspace roots.
+/// cursor-resumed owner (`run_automatic_cargo_retention`) and must not enter
+/// the aggregate sweep. `repo-artifacts` is likewise reclaimed by its own
+/// owner, `try_run_automatic_artifact_retention_in_root`, over registered
+/// workspace roots. Both owners are still phases of the one unattended
+/// rotation (`automatic_retention_phases`) and draw on its one budget.
 /// Read only by
 /// `every_cleanup_category_is_either_swept_unattended_or_held_out_with_a_reason`,
 /// which partitions `CleanupCategoryArg` across this table and
@@ -1842,6 +1847,120 @@ const CONTROLLER_RUNTIMES_METADATA: CleanupInventoryCategoryMetadata =
         apply_command: "homeboy runtime controller-prune --apply",
     };
 
+/// One slot in the unattended pass's rotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomaticRetentionPhase {
+    /// Automatic artifact retention over registered workspace roots.
+    RepoArtifacts,
+    /// One aggregate cleanup category.
+    Category(CleanupCategoryArg),
+    /// The bounded, cursor-resumed shared cargo-target owner.
+    CargoTargets,
+    /// The bounded, cursor-resumed runtime-temp owner.
+    RuntimeTmpRetention,
+}
+
+impl AutomaticRetentionPhase {
+    fn name(self) -> &'static str {
+        match self {
+            Self::RepoArtifacts => "repo_artifacts",
+            Self::Category(category) => cleanup_category_metadata(category).category,
+            Self::CargoTargets => "cargo_targets",
+            Self::RuntimeTmpRetention => "runtime_tmp_retention",
+        }
+    }
+}
+
+/// Every phase of an unattended pass, in canonical order. Each phase is in the
+/// rotation and draws on the one pass budget; none runs ahead of it.
+fn automatic_retention_phases() -> Vec<AutomaticRetentionPhase> {
+    std::iter::once(AutomaticRetentionPhase::RepoArtifacts)
+        .chain(
+            CLEANUP_CATEGORY_ORDER
+                .into_iter()
+                .filter(|category| AUTOMATIC_RETENTION_CATEGORIES.contains(category))
+                .map(AutomaticRetentionPhase::Category),
+        )
+        .chain([
+            AutomaticRetentionPhase::CargoTargets,
+            AutomaticRetentionPhase::RuntimeTmpRetention,
+        ])
+        .collect()
+}
+
+/// This pass's phase order: the canonical order rotated to start at the phase
+/// the previous pass deferred first. An unknown or absent cursor starts at the
+/// beginning.
+///
+/// A fixed order restarts at the same phase every pass, so a phase that drains
+/// the budget starves everything after it forever. Rotating to the first
+/// deferred phase means every pass starts one the previous pass did not reach.
+fn automatic_retention_rotation(cursor: Option<&str>) -> Vec<AutomaticRetentionPhase> {
+    let mut phases = automatic_retention_phases();
+    let start = cursor
+        .and_then(|cursor| phases.iter().position(|phase| phase.name() == cursor))
+        .unwrap_or(0);
+    phases.rotate_left(start);
+    phases
+}
+
+/// Which phases this pass ran and which it deferred, and where the next pass
+/// starts.
+#[derive(Debug, Serialize)]
+struct AutomaticRetentionRotation {
+    started_at: &'static str,
+    ran: Vec<&'static str>,
+    deferred: Vec<&'static str>,
+    /// First phase of the next pass: the first deferred phase, if any.
+    next_phase: Option<&'static str>,
+}
+
+/// Cap an in-process owner phase to one category's share of the pass budget,
+/// so it cannot drain the aggregate the phases after it need.
+fn automatic_owner_phase_deadline(deadline: Option<SystemTime>) -> Option<SystemTime> {
+    SystemTime::now().checked_add(cleanup_category_timeout(
+        cleanup_category_budget(false),
+        deadline,
+    ))
+}
+
+fn deferred_phase_value(reason: &str) -> Value {
+    serde_json::json!({ "status": CLEANUP_PHASE_OUTCOME_DEFERRED, "reason": reason })
+}
+
+fn automatic_repo_artifacts(
+    data: &Path,
+    deadline: Option<SystemTime>,
+) -> homeboy::core::Result<Value> {
+    let roots = homeboy::core::component::registered()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|component| PathBuf::from(component.local_path))
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Ok(serde_json::json!({
+            "status": "retained",
+            "reason": "no controller-accessible registered workspace roots",
+        }));
+    }
+    Ok(
+        match cleanup::try_run_automatic_artifact_retention_in_root(data, roots, deadline) {
+            Ok(Some(output)) => serde_json::to_value(output).map_err(|error| {
+                homeboy::core::Error::internal_json(
+                    error.to_string(),
+                    Some("serialize automatic artifact retention".to_string()),
+                )
+            })?,
+            Ok(None) => serde_json::json!({
+                "status": "busy",
+                "reason": "automatic artifact retention is already running",
+            }),
+            Err(error) => serde_json::json!({ "status": "retained", "reason": error.message }),
+        },
+    )
+}
+
 fn automatic_retention() -> CmdResult<Value> {
     let data = homeboy::core::paths::homeboy_data()?;
     let kind = cleanup::AutomaticRetentionKind::Controller;
@@ -1860,109 +1979,139 @@ fn automatic_retention() -> CmdResult<Value> {
         ));
     };
     let retention = defaults::load_config().retention;
-    let deadline = SystemTime::now().checked_add(Duration::from_secs(
-        retention.automatic_retention_max_run_seconds,
-    ));
     let _residue = homeboy::core::worktree::retire_residue()?;
     let reconciliation = homeboy::agents::agent_task_service::reconcile_stale_active_runs(false)?;
-    let roots = homeboy::core::component::registered()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|component| PathBuf::from(component.local_path))
-        .filter(|path| path.is_dir())
-        .collect::<Vec<_>>();
-    let repo_artifacts = if roots.is_empty() {
-        serde_json::json!({
-            "status": "retained",
-            "reason": "no controller-accessible registered workspace roots",
-        })
-    } else {
-        match cleanup::try_run_automatic_artifact_retention_in_root(&data, roots) {
-            Ok(Some(output)) => serde_json::to_value(output).map_err(|error| {
-                homeboy::core::Error::internal_json(
-                    error.to_string(),
-                    Some("serialize automatic artifact retention".to_string()),
-                )
-            })?,
-            Ok(None) => serde_json::json!({
-                "status": "busy",
-                "reason": "automatic artifact retention is already running",
-            }),
-            Err(error) => serde_json::json!({ "status": "retained", "reason": error.message }),
-        }
+    let args = CleanupArgs {
+        apply: true,
+        include: AUTOMATIC_RETENTION_CATEGORIES.to_vec(),
+        exclude: Vec::new(),
+        // Unattended. Widening a delete predicate is an operator decision.
+        include_untagged: false,
+        older_than_days: None,
+        runtime_tmp_managed_older_than_days: None,
+        limit: None,
+        full: false,
+        cursor: None,
+        command: None,
     };
-    let cleanup = cleanup_inventory_with_deadline(
-        CleanupArgs {
-            apply: true,
-            include: AUTOMATIC_RETENTION_CATEGORIES.to_vec(),
-            exclude: Vec::new(),
-            // Unattended. Widening a delete predicate is an operator decision.
-            include_untagged: false,
-            older_than_days: None,
-            runtime_tmp_managed_older_than_days: None,
-            limit: None,
-            full: false,
-            cursor: None,
-            command: None,
-        },
-        deadline,
-    )?;
-    let cargo_targets = if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
-        cleanup::AutomaticRetentionOutput {
-            command: "cleanup.automatic_retention",
-            status: "partial",
-            max_run_seconds: retention.automatic_retention_max_run_seconds,
-            row_limit: retention.limit as usize,
-            state_key: cleanup::AutomaticRetentionKind::CargoTarget.state_key(),
-            resume_command: "homeboy cleanup automatic-retention".to_string(),
-            cargo_targets: None,
-            runtime_tmp: None,
-        }
-    } else {
-        cleanup::run_automatic_cargo_retention()?
+    let sweep = CleanupSweep::new(&args)?;
+    // The rotation owns the whole pass budget, measured from its first phase.
+    let mut budget = CleanupPassBudget::until(SystemTime::now().checked_add(Duration::from_secs(
+        retention.automatic_retention_max_run_seconds,
+    )));
+    let rotation_order = automatic_retention_rotation(pass.cursor());
+    let mut rotation = AutomaticRetentionRotation {
+        started_at: rotation_order[0].name(),
+        ran: Vec::new(),
+        deferred: Vec::new(),
+        next_phase: None,
     };
-    let runtime_tmp = if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
-        serde_json::json!({ "status": "partial" })
-    } else {
-        match cleanup::run_automatic_runtime_temp_retention() {
-            Ok(output) => serde_json::to_value(output.runtime_tmp).map_err(|error| {
-                homeboy::core::Error::internal_json(
-                    error.to_string(),
-                    Some("serialize automatic runtime-temp retention".to_string()),
-                )
-            })?,
-            Err(error) => serde_json::json!({ "status": "retained", "reason": error.message }),
+    let mut categories = Vec::new();
+    let mut repo_artifacts = Value::Null;
+    let mut cargo_targets = None;
+    let mut cargo_targets_value = Value::Null;
+    let mut runtime_tmp = Value::Null;
+    for phase in rotation_order {
+        let started = match phase {
+            AutomaticRetentionPhase::Category(category) => {
+                run_cleanup_category(&sweep, category, &mut budget, &mut categories)
+            }
+            owner => match budget.admit(CLEANUP_CATEGORY_MINIMUM_BUDGET) {
+                CleanupPhaseAdmission::Deferred(reason) => {
+                    let deferred = deferred_phase_value(&reason);
+                    match owner {
+                        AutomaticRetentionPhase::RepoArtifacts => repo_artifacts = deferred,
+                        AutomaticRetentionPhase::CargoTargets => cargo_targets_value = deferred,
+                        _ => runtime_tmp = deferred,
+                    }
+                    false
+                }
+                CleanupPhaseAdmission::Run(deadline) => {
+                    let deadline = automatic_owner_phase_deadline(deadline);
+                    match owner {
+                        AutomaticRetentionPhase::RepoArtifacts => {
+                            repo_artifacts = automatic_repo_artifacts(&data, deadline)?;
+                        }
+                        AutomaticRetentionPhase::CargoTargets => {
+                            let output = cleanup::run_automatic_cargo_retention(deadline)?;
+                            cargo_targets_value =
+                                serde_json::to_value(&output).map_err(|error| {
+                                    homeboy::core::Error::internal_json(
+                                        error.to_string(),
+                                        Some("serialize automatic cargo retention".to_string()),
+                                    )
+                                })?;
+                            cargo_targets = Some(output);
+                        }
+                        _ => {
+                            runtime_tmp =
+                                match cleanup::run_automatic_runtime_temp_retention(deadline) {
+                                    Ok(output) => serde_json::to_value(output.runtime_tmp)
+                                        .map_err(|error| {
+                                            homeboy::core::Error::internal_json(
+                                                error.to_string(),
+                                                Some(
+                                                    "serialize automatic runtime-temp retention"
+                                                        .to_string(),
+                                                ),
+                                            )
+                                        })?,
+                                    Err(error) => serde_json::json!({
+                                        "status": "retained",
+                                        "reason": error.message,
+                                    }),
+                                };
+                        }
+                    }
+                    true
+                }
+            },
+        };
+        if started {
+            rotation.ran.push(phase.name());
+        } else {
+            rotation.deferred.push(phase.name());
         }
-    };
+    }
+    rotation.next_phase = rotation.deferred.first().copied();
+    let cleanup = sweep.finish(categories)?;
     let cleanup_exit_code = cleanup.exit_code;
-    // A category that ran out of budget leaves the aggregate resumable, not
-    // broken. Reporting that as `partial` keeps the run out of the scheduler's
-    // failure count while still telling the operator another pass is owed
-    // (#12727).
-    let cleanup_continuation_required = cleanup.output["continuation_required"] == true;
+    // A category that ran out of budget, or a phase deferred to the next
+    // pass, leaves the aggregate resumable, not broken. Reporting that as
+    // `partial` keeps the run out of the scheduler's failure count while still
+    // telling the operator another pass is owed (#12727).
+    let cleanup_continuation_required =
+        cleanup.output["continuation_required"] == true || !rotation.deferred.is_empty();
     let status = if cleanup_exit_code == 0 {
         if runtime_tmp["status"] == "retained" {
             "partial_failure"
         } else if cleanup_continuation_required
-            || (runtime_tmp["continuation_required"] == true && cargo_targets.status == "completed")
+            || (runtime_tmp["continuation_required"] == true
+                && cargo_targets
+                    .as_ref()
+                    .is_some_and(|output| output.status == "completed"))
         {
             "partial"
         } else {
-            cargo_targets.status
+            cargo_targets
+                .as_ref()
+                .map_or("partial", |output| output.status)
         }
     } else {
         "partial_failure"
     };
+    let next_phase = rotation.next_phase.map(str::to_string);
     let output = AutomaticRetentionControllerOutput {
         command: "cleanup.automatic_retention",
         status,
         state_key,
         resume_command: "homeboy cleanup automatic-retention",
         reconciliation,
+        rotation,
         repo_artifacts,
         cleanup: serde_json::json!({
             "categories": cleanup.output,
-            "cargo_targets": cargo_targets,
+            "cargo_targets": cargo_targets_value,
             "runtime_tmp": runtime_tmp,
         }),
     };
@@ -1972,7 +2121,7 @@ fn automatic_retention() -> CmdResult<Value> {
             Some("serialize automatic retention output".to_string()),
         )
     })?;
-    pass.finish(status, None)?;
+    pass.finish(status, next_phase)?;
     Ok((value, (status == "partial_failure") as i32))
 }
 
@@ -2044,669 +2193,837 @@ fn cleanup_inventory_with_deadline(
     args: CleanupArgs,
     deadline: Option<SystemTime>,
 ) -> homeboy::core::Result<CleanupInventoryResult> {
-    let selected = CleanupCategorySelection::new(args.include.clone(), args.exclude.clone());
+    let sweep = CleanupSweep::new(&args)?;
+    let mut budget = CleanupPassBudget::until(deadline);
+    let mut categories = Vec::new();
+    for category in sweep.selected_categories() {
+        run_cleanup_category(&sweep, category, &mut budget, &mut categories);
+    }
+    sweep.finish(categories)
+}
+
+/// The order an aggregate sweep visits its categories in.
+const CLEANUP_CATEGORY_ORDER: [CleanupCategoryArg; 15] = [
+    CleanupCategoryArg::RepoArtifacts,
+    CleanupCategoryArg::TaskWorktrees,
+    CleanupCategoryArg::TerminalRuns,
+    CleanupCategoryArg::PersistedRunArtifacts,
+    CleanupCategoryArg::OrphanedArtifactBytes,
+    CleanupCategoryArg::RunnerDownloads,
+    CleanupCategoryArg::RemoteLabWorkspaces,
+    CleanupCategoryArg::RunnerBinaryCaches,
+    CleanupCategoryArg::RuntimeTmp,
+    CleanupCategoryArg::LeakedTestHomes,
+    CleanupCategoryArg::ReleaseArtifacts,
+    CleanupCategoryArg::ControllerScratch,
+    CleanupCategoryArg::ControllerRuntimes,
+    CleanupCategoryArg::SharedCargoTargets,
+    CleanupCategoryArg::ExternalStorage,
+];
+
+fn cleanup_category_metadata(category: CleanupCategoryArg) -> CleanupInventoryCategoryMetadata {
+    match category {
+        CleanupCategoryArg::RepoArtifacts => REPO_ARTIFACTS_METADATA,
+        CleanupCategoryArg::TaskWorktrees => TASK_WORKTREES_METADATA,
+        CleanupCategoryArg::TerminalRuns => TERMINAL_RUNS_METADATA,
+        CleanupCategoryArg::PersistedRunArtifacts => PERSISTED_RUN_ARTIFACTS_METADATA,
+        CleanupCategoryArg::OrphanedArtifactBytes => ORPHANED_ARTIFACT_BYTES_METADATA,
+        CleanupCategoryArg::RunnerDownloads => RUNNER_DOWNLOADS_METADATA,
+        CleanupCategoryArg::RemoteLabWorkspaces => REMOTE_LAB_WORKSPACES_METADATA,
+        CleanupCategoryArg::RunnerBinaryCaches => RUNNER_BINARY_CACHES_METADATA,
+        CleanupCategoryArg::RuntimeTmp => RUNTIME_TMP_METADATA,
+        CleanupCategoryArg::LeakedTestHomes => LEAKED_TEST_HOMES_METADATA,
+        CleanupCategoryArg::ReleaseArtifacts => RELEASE_ARTIFACTS_METADATA,
+        CleanupCategoryArg::ControllerScratch => CONTROLLER_SCRATCH_METADATA,
+        CleanupCategoryArg::ControllerRuntimes => CONTROLLER_RUNTIMES_METADATA,
+        CleanupCategoryArg::SharedCargoTargets => SHARED_CARGO_TARGETS_METADATA,
+        CleanupCategoryArg::ExternalStorage => EXTERNAL_STORAGE_METADATA,
+    }
+}
+
+/// One pass's wall-clock budget, shared by its phases in the order they start.
+///
+/// A phase starts only while the remaining budget still covers the minimum it
+/// needs to do useful work. Once one phase is deferred every later phase is
+/// deferred too, so a pass always runs a prefix of its order and the first
+/// deferred phase is exactly where the next pass resumes. A deferred phase was
+/// never started: it is reported as `deferred`, never as a 0 ms timeout.
+struct CleanupPassBudget {
+    deadline: Option<SystemTime>,
+    deferred: Option<String>,
+}
+
+enum CleanupPhaseAdmission {
+    /// Start the phase; it must stop by this deadline.
+    Run(Option<SystemTime>),
+    /// Do not start the phase this pass, for this reason.
+    Deferred(String),
+}
+
+impl CleanupPassBudget {
+    fn until(deadline: Option<SystemTime>) -> Self {
+        Self {
+            deadline,
+            deferred: None,
+        }
+    }
+
+    fn admit(&mut self, minimum: Duration) -> CleanupPhaseAdmission {
+        if let Some(reason) = &self.deferred {
+            return CleanupPhaseAdmission::Deferred(reason.clone());
+        }
+        let Some(deadline) = self.deadline else {
+            return CleanupPhaseAdmission::Run(None);
+        };
+        let remaining = deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining >= minimum {
+            return CleanupPhaseAdmission::Run(Some(deadline));
+        }
+        let reason = format!(
+            "deferred to the next pass: {} ms of the pass budget remained, below the {} ms a phase needs to start",
+            remaining.as_millis(),
+            minimum.as_millis()
+        );
+        self.deferred = Some(reason.clone());
+        CleanupPhaseAdmission::Deferred(reason)
+    }
+}
+
+/// Resolved inputs shared by every category of one aggregate sweep.
+struct CleanupSweep<'a> {
+    args: &'a CleanupArgs,
+    selected: CleanupCategorySelection,
+    config: defaults::HomeboyConfig,
+    policy: CleanupPolicy,
+    store: cleanup::StoreAvailability,
+}
+
+impl<'a> CleanupSweep<'a> {
+    fn new(args: &'a CleanupArgs) -> homeboy::core::Result<Self> {
+        let config = defaults::load_config();
+        // One resolver for every category and every specialist command. The
+        // aggregate no longer derives its own windows.
+        let policy = cleanup::cleanup_policy_from_retention(
+            &config.retention,
+            CleanupPolicyOverrides {
+                terminal_run_days: args.older_than_days,
+                runtime_tmp_managed_days: args.runtime_tmp_managed_older_than_days,
+                limit: args.limit,
+                ..CleanupPolicyOverrides::default()
+            },
+        )?;
+        Ok(Self {
+            args,
+            selected: CleanupCategorySelection::new(args.include.clone(), args.exclude.clone()),
+            config,
+            policy,
+            // One probe for the whole sweep. Every database-backed category
+            // otherwise attempts its own `ObservationStore::open_initialized`,
+            // and each attempt is another `create_dir_all` plus WAL
+            // journal-file creation against a filesystem that may have no
+            // inode left to give — the exact state cleanup is being asked to
+            // recover from (#11127, #10603). Probing once turns N failing
+            // writes into one, and N generic per-category failures into one
+            // named degraded mode.
+            store: cleanup::observation_store_availability(),
+        })
+    }
+
+    fn selected_categories(&self) -> Vec<CleanupCategoryArg> {
+        CLEANUP_CATEGORY_ORDER
+            .into_iter()
+            .filter(|category| self.selected.includes(*category))
+            .collect()
+    }
+
+    fn finish(
+        &self,
+        categories: Vec<CleanupInventoryCategory>,
+    ) -> homeboy::core::Result<CleanupInventoryResult> {
+        let apply = self.args.apply;
+        let policy = self.policy;
+        let candidate_count = categories
+            .iter()
+            .map(|category| category.candidate_count)
+            .sum();
+        let applied_count = categories
+            .iter()
+            .map(|category| category.applied_count)
+            .sum();
+        let skipped_count = categories
+            .iter()
+            .map(|category| category.skipped_count)
+            .sum();
+        let reconciliation_blocker_count = categories
+            .iter()
+            .map(|category| category.reconciliation_blocker_count)
+            .sum();
+        let unsatisfied_native_contract_count = categories
+            .iter()
+            .map(|category| category.unsatisfied_native_contract_count)
+            .sum();
+        let estimated_bytes = categories
+            .iter()
+            .map(|category| category.estimated_bytes)
+            .sum();
+        let reclaimed_bytes = categories
+            .iter()
+            .map(|category| category.reclaimed_bytes)
+            .sum();
+        let applied_category_count = applied_category_count(&categories);
+        let continuation_category_count = categories
+            .iter()
+            .filter(|category| is_bounded_continuation(category))
+            .count();
+        let failed_category_count = categories
+            .iter()
+            .filter(|category| category.failure.is_some() && !is_bounded_continuation(category))
+            .count();
+        let actionable = cleanup_actionable(&categories, apply);
+        let output = serde_json::to_value(CleanupInventoryOutput {
+            command: "cleanup.inventory",
+            status: cleanup_inventory_status(
+                failed_category_count,
+                unsatisfied_native_contract_count,
+                continuation_category_count,
+            ),
+            mode: if apply { "apply" } else { "dry_run" },
+            category_count: categories.len(),
+            failed_category_count,
+            continuation_category_count,
+            continuation_required: continuation_category_count > 0,
+            candidate_count,
+            applied_count,
+            skipped_count,
+            reconciliation_blocker_count,
+            unsatisfied_native_contract_count,
+            applied_category_count,
+            estimated_bytes,
+            reclaimed_bytes,
+            retention: policy,
+            categories,
+            actionable,
+        })
+        .map_err(|err| {
+            homeboy::core::Error::internal_json(
+                err.to_string(),
+                Some("cleanup inventory".to_string()),
+            )
+        })?;
+        Ok(CleanupInventoryResult {
+            output,
+            exit_code: cleanup_inventory_exit_code(
+                failed_category_count,
+                unsatisfied_native_contract_count,
+            ),
+        })
+    }
+}
+
+/// Run one category inside `budget`, or record it as deferred when the budget
+/// can no longer start it. Returns whether the category started.
+fn run_cleanup_category(
+    sweep: &CleanupSweep<'_>,
+    category: CleanupCategoryArg,
+    budget: &mut CleanupPassBudget,
+    categories: &mut Vec<CleanupInventoryCategory>,
+) -> bool {
+    let args = sweep.args;
     let apply = args.apply;
+    let metadata = cleanup_category_metadata(category);
+    let deadline = match budget.admit(cleanup_category_start_minimum(metadata)) {
+        CleanupPhaseAdmission::Run(deadline) => deadline,
+        CleanupPhaseAdmission::Deferred(reason) => {
+            categories.push(cleanup_category_deferred(
+                metadata,
+                apply,
+                reason,
+                cleanup_category_replay_command(metadata, args),
+            ));
+            return false;
+        }
+    };
     // Copied out for the same reason as `apply`: the per-category closures
     // below borrow `args` for their replay strings, and a `Copy` bool keeps
     // this one out of that borrow entirely.
     let include_untagged = args.include_untagged;
-    let config = defaults::load_config();
-    // One resolver for every category and every specialist command. The
-    // aggregate no longer derives its own windows.
-    let policy = cleanup::cleanup_policy_from_retention(
-        &config.retention,
-        CleanupPolicyOverrides {
-            terminal_run_days: args.older_than_days,
-            runtime_tmp_managed_days: args.runtime_tmp_managed_older_than_days,
-            limit: args.limit,
-            ..CleanupPolicyOverrides::default()
-        },
-    )?;
+    let config = &sweep.config;
+    let policy = sweep.policy;
+    let store = &sweep.store;
     let terminal_run_days = policy.terminal_run_days;
     let limit = policy.limit;
-    // One probe for the whole sweep. Every database-backed category otherwise
-    // attempts its own `ObservationStore::open_initialized`, and each attempt
-    // is another `create_dir_all` plus WAL journal-file creation against a
-    // filesystem that may have no inode left to give — the exact state cleanup
-    // is being asked to recover from (#11127, #10603). Probing once turns N
-    // failing writes into one, and N generic per-category failures into one
-    // named degraded mode.
-    let store = cleanup::observation_store_availability();
-    let mut categories = Vec::new();
-
-    if selected.includes(CleanupCategoryArg::RepoArtifacts) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            REPO_ARTIFACTS_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                repo_artifacts_category(
-                    apply,
-                    cleanup_category_action_deadline(deadline),
-                    args.cursor.as_deref(),
-                    policy.scan_limit(),
-                    args.limit.and_then(|limit| usize::try_from(limit).ok()),
-                )
-                .map(|category| vec![category])
-            },
-        );
-    }
-
-    if selected.includes(CleanupCategoryArg::TaskWorktrees) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            TASK_WORKTREES_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                let category_deadline = cleanup_category_action_deadline(deadline);
-                let remaining = category_deadline
-                    .map(|deadline| {
-                        deadline.duration_since(SystemTime::now()).map_err(|_| {
-                            homeboy::core::Error::internal_unexpected(
-                                "cleanup category deadline exhausted before task-worktree cleanup",
-                            )
-                        })
-                    })
-                    .transpose()?;
-                let output = worktree::cleanup_page(worktree::WorktreeCleanupPageOptions {
-                    cleanup: WorktreeCleanupOptions {
-                        force: false,
-                        dry_run: !apply,
-                        cleanup_branches: apply,
-                        allow_unmerged_branches: false,
-                        reaper: None,
-                    },
-                    limit: args.limit.unwrap_or(500).max(1) as usize,
-                    cursor: args.cursor.clone(),
-                    deadline: remaining.and_then(|remaining| Instant::now().checked_add(remaining)),
-                })?;
-                task_worktrees_category(output, apply).map(|category| vec![category])
-            },
-        );
-    }
-
-    if selected.includes(CleanupCategoryArg::TerminalRuns) {
-        isolate_store_backed_cleanup_category_bounded(
-            &mut categories,
-            TERMINAL_RUNS_METADATA,
-            apply,
-            &args,
-            deadline,
-            &store,
-            || {
-                let output = runs_service::retain_terminal_runs(
-                    runs_service::TerminalRunRetentionOptions {
+    match category {
+        CleanupCategoryArg::RepoArtifacts => {
+            isolate_cleanup_category_bounded(
+                categories,
+                REPO_ARTIFACTS_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || {
+                    repo_artifacts_category(
                         apply,
-                        older_than_days: terminal_run_days,
-                        limit,
-                    },
-                )?;
-                let lifecycle_bytes = output
-                    .lifecycle_directories
-                    .iter()
-                    .map(|directory| directory.size_bytes)
-                    .sum();
-                category_from_output(
-                    TERMINAL_RUNS_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: output.candidate_run_ids.len(),
-                        applied_count: output.removed_run_count,
-                        skipped_count: output.skipped_run_ids.len(),
-                        estimated_bytes: lifecycle_bytes,
-                        reclaimed_bytes: if apply { lifecycle_bytes } else { 0 },
-                    },
-                    output,
-                )
-                .map(|category| vec![category])
-            },
-        );
-    }
-
-    if selected.includes(CleanupCategoryArg::PersistedRunArtifacts) {
-        isolate_store_backed_cleanup_category_bounded(
-            &mut categories,
-            PERSISTED_RUN_ARTIFACTS_METADATA,
-            apply,
-            &args,
-            deadline,
-            &store,
-            || {
-                let persisted =
-                    runs_service::cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
-                        apply,
-                        older_than_days: terminal_run_days,
-                        run_id: None,
-                        kind: None,
-                        artifact_type: None,
-                        run_kind: None,
-                        component_id: None,
-                        limit,
-                        terminal_only: true,
-                    })?;
-                let resources = runs_resources(RunsResourcesArgs {
-                    cleanup_plan: true,
-                    apply: false,
-                    cleanup_root: None,
-                    limit: 1000,
-                    ..RunsResourcesArgs::default()
-                })?
-                .0;
-                let RunsOutput::Resources(resources) = resources else {
-                    return Err(homeboy::core::Error::internal_unexpected(
-                        "runs resources returned unexpected output",
-                    ));
-                };
-                persisted_artifacts_category(persisted, resources, apply)
+                        cleanup_category_action_deadline(deadline),
+                        args.cursor.as_deref(),
+                        policy.scan_limit(),
+                        args.limit.and_then(|limit| usize::try_from(limit).ok()),
+                    )
                     .map(|category| vec![category])
-            },
-        );
-    }
+                },
+            );
+        }
 
-    if selected.includes(CleanupCategoryArg::OrphanedArtifactBytes) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            ORPHANED_ARTIFACT_BYTES_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                let mut output = runs_service::cleanup_orphaned_artifact_bytes(
-                    OrphanedArtifactBytesCleanupOptions {
-                        apply,
-                        // Orphaned artifacts have no cursor. Restricting their source
-                        // scan would leave later entries unreachable, so execution
-                        // always receives the configured retention limit.
-                        limit: policy.scan_limit(),
-                    },
-                )?;
-                runs_service::present_orphaned_artifact_bytes_cleanup(
-                    &mut output,
-                    args.full,
-                    cleanup_replay_command(&args, true, true),
-                )?;
-                category_from_output(
-                    ORPHANED_ARTIFACT_BYTES_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: output.planned_count,
-                        applied_count: output.removed_count,
-                        skipped_count: output.skipped_count,
-                        estimated_bytes: output.planned_size_bytes,
-                        reclaimed_bytes: output.removed_size_bytes,
-                    },
-                    output,
-                )
-                .map(|category| vec![category])
-            },
-        );
-    }
-
-    if selected.includes(CleanupCategoryArg::RunnerDownloads) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            RUNNER_DOWNLOADS_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                let output =
-                    runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
-                        apply,
-                        runner: None,
-                        run_id: None,
-                        limit: policy.scan_limit(),
-                        // Store-tolerant, not store-independent: with the
-                        // database shut its liveness veto fails closed and it
-                        // retains everything. Passing the probed answer keeps
-                        // that verdict without a second failing open.
-                        store_available: store.is_available(),
-                        // Off unless the operator typed it. This widens the
-                        // delete predicate to cover caches written before
-                        // intent tagging existed (#11128); the age floor, the
-                        // running-run veto, and the never-reap rule for
-                        // operator pulls are all untouched by it.
-                        include_untagged,
-                    })?;
-                // `planned_count`, not `inspected_count`: a candidate is a resource
-                // selected for removal, not every entry the sweep walked past. Using
-                // the inspected total reported `candidate_count: 588, applied_count: 1`
-                // for a sweep that removed everything it selected, which reads as a
-                // 587-resource failure (#9483). The full inspected total remains
-                // visible in this category's nested `output`.
-                category_from_output(
-                    RUNNER_DOWNLOADS_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: output.planned_count,
-                        applied_count: output.removed_count,
-                        skipped_count: output.skipped_count,
-                        estimated_bytes: output.planned_size_bytes,
-                        reclaimed_bytes: output.removed_size_bytes,
-                    },
-                    output,
-                )
-                .map(|category| vec![category])
-            },
-        );
-    }
-
-    if selected.includes(CleanupCategoryArg::RemoteLabWorkspaces) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            REMOTE_LAB_WORKSPACES_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || remote_lab_workspace_categories(policy, apply),
-        );
-    }
-
-    if selected.includes(CleanupCategoryArg::RunnerBinaryCaches) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            RUNNER_BINARY_CACHES_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || runner_binary_cache_categories(policy, apply),
-        );
-    }
-
-    if selected.includes(CleanupCategoryArg::RuntimeTmp) {
-        let commands = args
-            .runtime_tmp_managed_older_than_days
-            .map(|days| runtime_tmp_commands(apply, days));
-        let canonical_cleanup_command = commands.as_ref().map(|(canonical, _)| canonical.clone());
-        let specialist_command = commands.as_ref().map(|(_, specialist)| specialist.clone());
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            RUNTIME_TMP_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides {
-                canonical: canonical_cleanup_command.as_deref(),
-                specialist: specialist_command.as_deref(),
-            },
-            || {
-                let mut output = engine::temp::cleanup_runtime_tmp_bounded(
-                    engine::temp::RuntimeTempCleanupOptions {
-                        apply,
-                        older_than_days: policy.runtime_tmp_days,
-                        managed_older_than_days: Some(policy.runtime_tmp_managed_days),
-                        prefix: None,
-                        limit: if apply || args.full {
-                            policy.scan_limit()
-                        } else {
-                            policy.scan_limit().min(OutputBudget::COLLECTION.max_items)
+        CleanupCategoryArg::TaskWorktrees => {
+            isolate_cleanup_category_bounded(
+                categories,
+                TASK_WORKTREES_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || {
+                    let category_deadline = cleanup_category_action_deadline(deadline);
+                    let remaining = category_deadline
+                        .map(|deadline| {
+                            deadline.duration_since(SystemTime::now()).map_err(|_| {
+                                homeboy::core::Error::internal_unexpected(
+                                    "cleanup category deadline exhausted before task-worktree cleanup",
+                                )
+                            })
+                        })
+                        .transpose()?;
+                    let output = worktree::cleanup_page(worktree::WorktreeCleanupPageOptions {
+                        cleanup: WorktreeCleanupOptions {
+                            force: false,
+                            dry_run: !apply,
+                            cleanup_branches: apply,
+                            allow_unmerged_branches: false,
+                            reaper: None,
                         },
-                        run_max_bytes: policy.runtime_run_max_bytes,
-                        run_max_count: policy.runtime_run_max_count,
-                        cursor: args.cursor.as_deref(),
-                        // Stop at an entry boundary while there is still time to
-                        // report, rather than being killed at the category wall
-                        // with the cleanup lock still on disk (#14221).
-                        deadline: runtime_tmp_scan_deadline(deadline),
-                    },
-                )?;
-                engine::temp::present_runtime_temp_cleanup(
-                    &mut output,
-                    args.full,
-                    cleanup_replay_command(&args, false, false),
-                    cleanup_replay_command(&args, true, true),
-                )?;
-                let mut category = category_from_output(
-                    RUNTIME_TMP_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: output.planned_count,
-                        applied_count: output.removed_count,
-                        skipped_count: output.skipped_count,
-                        estimated_bytes: output.totals.planned_size_bytes,
-                        reclaimed_bytes: output.totals.removed_size_bytes,
-                    },
-                    output,
-                )?;
-                if let Some((canonical, specialist)) = commands {
-                    (
-                        category.canonical_cleanup_command,
-                        category.specialist_command,
-                    ) = (canonical, specialist);
-                }
-                Ok(vec![category])
-            },
-        );
-    }
-
-    // Sits beside `runtime-tmp` because operators reach for them together and
-    // apart because they prove ownership differently: `runtime-tmp` reads pin
-    // files under the Homeboy runtime root, this reads a filename marker under
-    // the roots `tempfile` actually resolves. When `TMPDIR` and the runtime root
-    // differ — and on any host that moved `TMPDIR` to a dedicated volume they do
-    // — the second category is the only one looking at the leak (#11073).
-    if selected.includes(CleanupCategoryArg::LeakedTestHomes) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            LEAKED_TEST_HOMES_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                let output =
-                    cleanup::cleanup_leaked_test_homes(cleanup::LeakedTestHomeCleanupOptions {
-                        apply,
-                        min_age: policy.leaked_test_home_min_age(),
-                        max_total_bytes: policy.leaked_test_home_max_total_bytes,
-                        limit: policy.scan_limit(),
-                        roots: Vec::new(),
-                    })?;
-                category_from_output(
-                    LEAKED_TEST_HOMES_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: output.planned_count,
-                        applied_count: output.removed_count,
-                        skipped_count: output.skipped_count,
-                        estimated_bytes: output.planned_size_bytes,
-                        reclaimed_bytes: output.removed_size_bytes,
-                    },
-                    output,
-                )
-                .map(|category| vec![category])
-            },
-        );
-    }
-
-    // Not reachable by `orphaned-artifact-bytes`, which shares the artifact
-    // root: these directories are referenced by durable release records, so
-    // that category correctly inventories zero candidates against them. They
-    // are live, not orphaned, and bounding them needs a policy of its own
-    // (#14223).
-    if selected.includes(CleanupCategoryArg::ReleaseArtifacts) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            RELEASE_ARTIFACTS_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                let output =
-                    cleanup::cleanup_release_artifacts(cleanup::ReleaseArtifactCleanupOptions {
-                        apply,
-                        max_count_per_repo: policy.release_artifact_max_count,
-                        max_bytes_per_repo: policy.release_artifact_max_bytes,
-                        min_age: policy.release_artifact_min_age(),
-                        limit: policy.scan_limit(),
-                        root: None,
-                    })?;
-                // `candidate_count` and `estimated_bytes` come straight from
-                // the category, which derives both from the same retention
-                // decision that gates removal. Recomputing them here would be a
-                // second place for the plan and the apply to disagree (#14222).
-                category_from_output(
-                    RELEASE_ARTIFACTS_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: output.candidate_count,
-                        applied_count: output.removed_count,
-                        skipped_count: output.skipped_count,
-                        estimated_bytes: output.estimated_bytes,
-                        reclaimed_bytes: output.reclaimed_bytes,
-                    },
-                    output,
-                )
-                .map(|category| vec![category])
-            },
-        );
-    }
-
-    if selected.includes(CleanupCategoryArg::ControllerScratch) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            CONTROLLER_SCRATCH_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                let output = homeboy::agents::controller_scratch::cleanup(
-                    homeboy::agents::controller_scratch::ControllerScratchCleanupOptions {
-                        apply,
-                        limit: policy.scan_limit(),
-                        full: args.full,
-                        // Thread the operator's explicit `--older-than-days` override
-                        // into the retention eligibility decision so released, clean,
-                        // terminal scratch can converge under disk pressure. When the
-                        // operator does not pass the flag (`None`), preserve the default
-                        // per-resource retention window (P7D) rather than substituting
-                        // the configured terminal-run default used by other categories.
-                        retention_override_seconds: args
-                            .older_than_days
-                            .map(|days| days.saturating_mul(86_400)),
-                    },
-                    args.cursor.as_deref(),
-                )?;
-                category_from_output(
-                    CONTROLLER_SCRATCH_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: output.candidate_count,
-                        applied_count: output.applied_count,
-                        skipped_count: output.skipped_count,
-                        estimated_bytes: output.estimated_bytes,
-                        reclaimed_bytes: output.reclaimed_bytes,
-                    },
-                    output,
-                )
-                .map(|mut category| {
-                    if let Some(next) = category.output.get("next_command").and_then(Value::as_str)
-                    {
-                        category.inventory_completeness = "partial".to_string();
-                        category.continuation_command = next.to_string();
-                    }
-                    vec![category]
-                })
-            },
-        );
-    }
-    if selected.includes(CleanupCategoryArg::ControllerRuntimes) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            CONTROLLER_RUNTIMES_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                // Policy is resolved by core so this path and `homeboy runtime
-                // controller-prune` cannot drift apart again (#10288).
-                let output =
-                    controller_runtime::cleanup(controller_runtime::resolve_cleanup_options(
-                        apply,
-                        ControllerRuntimeRetentionOverrides {
-                            limit: Some(limit),
-                            ignore_retention: false,
-                        },
-                    ))?;
-                // Counts come from core rather than being re-derived here, so
-                // the advertised reclaim is exactly what an apply achieves. A
-                // locally recomputed count is how this category advertised
-                // 143 MB it could never free (#14222).
-                let candidate_count = output.candidate_count();
-                let estimated_bytes = output.candidate_bytes();
-                category_from_output(
-                    CONTROLLER_RUNTIMES_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count,
-                        applied_count: output.removed_identities.len(),
-                        skipped_count: output.retained.len(),
-                        estimated_bytes,
-                        reclaimed_bytes: output.reclaimed_bytes,
-                    },
-                    output,
-                )
-                .map(|category| vec![category])
-            },
-        );
-    }
-
-    if selected.includes(CleanupCategoryArg::SharedCargoTargets) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            SHARED_CARGO_TARGETS_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                let output =
-                    cleanup::cleanup_shared_cargo_targets(cleanup::CargoTargetCleanupOptions {
-                        root: None,
-                        apply,
-                        older_than: policy.shared_store_min_age(),
-                        max_bytes: policy.shared_store_max_bytes,
-                        limit: policy.scan_limit(),
+                        limit: args.limit.unwrap_or(500).max(1) as usize,
                         cursor: args.cursor.clone(),
-                        now: std::time::SystemTime::now(),
-                        lease_ttl: policy.shared_store_lease_ttl(),
-                        deadline: cleanup_category_action_deadline(deadline),
+                        deadline: remaining
+                            .and_then(|remaining| Instant::now().checked_add(remaining)),
                     })?;
-                category_from_output(
-                    SHARED_CARGO_TARGETS_METADATA,
-                    apply,
-                    CleanupCategoryMetrics {
-                        candidate_count: output.candidate_count,
-                        applied_count: output.applied_count,
-                        skipped_count: output.skipped_count,
-                        estimated_bytes: output
-                            .candidates
-                            .iter()
-                            .map(|store| store.size_bytes)
-                            .sum(),
-                        reclaimed_bytes: output.reclaimed_bytes,
-                    },
-                    output,
-                )
-                .map(|category| vec![category])
-            },
-        );
-    }
+                    task_worktrees_category(output, apply).map(|category| vec![category])
+                },
+            );
+        }
 
-    if selected.includes(CleanupCategoryArg::ExternalStorage) {
-        isolate_cleanup_category_bounded(
-            &mut categories,
-            EXTERNAL_STORAGE_METADATA,
-            apply,
-            &args,
-            deadline,
-            CleanupCategoryCommandOverrides::default(),
-            || {
-                let output = cleanup::cleanup_external_storage_from_extensions(
-                    cleanup::ExternalStorageCleanupOptions {
-                        apply,
-                        min_age_days: config.retention.external_storage_days,
-                        max_bytes: config.retention.external_storage_max_bytes,
-                        reserve_bytes: config.retention.external_storage_reserve_bytes,
-                        limit: policy.scan_limit(),
-                        evidence_limit: if args.full {
-                            policy.scan_limit()
-                        } else {
-                            OutputBudget::COLLECTION.max_items
+        CleanupCategoryArg::TerminalRuns => {
+            isolate_store_backed_cleanup_category_bounded(
+                categories,
+                TERMINAL_RUNS_METADATA,
+                apply,
+                &args,
+                deadline,
+                &store,
+                || {
+                    let output = runs_service::retain_terminal_runs(
+                        runs_service::TerminalRunRetentionOptions {
+                            apply,
+                            older_than_days: terminal_run_days,
+                            limit,
                         },
-                        deadline: cleanup_category_action_deadline(deadline),
-                    },
-                )?;
-                external_storage_category(output, apply)
-            },
-        );
-    }
+                    )?;
+                    let lifecycle_bytes = output
+                        .lifecycle_directories
+                        .iter()
+                        .map(|directory| directory.size_bytes)
+                        .sum();
+                    category_from_output(
+                        TERMINAL_RUNS_METADATA,
+                        apply,
+                        CleanupCategoryMetrics {
+                            candidate_count: output.candidate_run_ids.len(),
+                            applied_count: output.removed_run_count,
+                            skipped_count: output.skipped_run_ids.len(),
+                            estimated_bytes: lifecycle_bytes,
+                            reclaimed_bytes: if apply { lifecycle_bytes } else { 0 },
+                        },
+                        output,
+                    )
+                    .map(|category| vec![category])
+                },
+            );
+        }
 
-    let candidate_count = categories
-        .iter()
-        .map(|category| category.candidate_count)
-        .sum();
-    let applied_count = categories
-        .iter()
-        .map(|category| category.applied_count)
-        .sum();
-    let skipped_count = categories
-        .iter()
-        .map(|category| category.skipped_count)
-        .sum();
-    let reconciliation_blocker_count = categories
-        .iter()
-        .map(|category| category.reconciliation_blocker_count)
-        .sum();
-    let unsatisfied_native_contract_count = categories
-        .iter()
-        .map(|category| category.unsatisfied_native_contract_count)
-        .sum();
-    let estimated_bytes = categories
-        .iter()
-        .map(|category| category.estimated_bytes)
-        .sum();
-    let reclaimed_bytes = categories
-        .iter()
-        .map(|category| category.reclaimed_bytes)
-        .sum();
-    let applied_category_count = applied_category_count(&categories);
-    let continuation_category_count = categories
-        .iter()
-        .filter(|category| is_bounded_continuation(category))
-        .count();
-    let failed_category_count = categories
-        .iter()
-        .filter(|category| category.failure.is_some() && !is_bounded_continuation(category))
-        .count();
-    let actionable = cleanup_actionable(&categories, apply);
-    let output = serde_json::to_value(CleanupInventoryOutput {
-        command: "cleanup.inventory",
-        status: cleanup_inventory_status(
-            failed_category_count,
-            unsatisfied_native_contract_count,
-            continuation_category_count,
-        ),
-        mode: if apply { "apply" } else { "dry_run" },
-        category_count: categories.len(),
-        failed_category_count,
-        continuation_category_count,
-        continuation_required: continuation_category_count > 0,
-        candidate_count,
-        applied_count,
-        skipped_count,
-        reconciliation_blocker_count,
-        unsatisfied_native_contract_count,
-        applied_category_count,
-        estimated_bytes,
-        reclaimed_bytes,
-        retention: policy,
-        categories,
-        actionable,
-    })
-    .map_err(|err| {
-        homeboy::core::Error::internal_json(err.to_string(), Some("cleanup inventory".to_string()))
-    })?;
-    Ok(CleanupInventoryResult {
-        output,
-        exit_code: cleanup_inventory_exit_code(
-            failed_category_count,
-            unsatisfied_native_contract_count,
-        ),
-    })
+        CleanupCategoryArg::PersistedRunArtifacts => {
+            isolate_store_backed_cleanup_category_bounded(
+                categories,
+                PERSISTED_RUN_ARTIFACTS_METADATA,
+                apply,
+                &args,
+                deadline,
+                &store,
+                || {
+                    let persisted = runs_service::cleanup_persisted_artifacts(
+                        PersistedArtifactCleanupOptions {
+                            apply,
+                            older_than_days: terminal_run_days,
+                            run_id: None,
+                            kind: None,
+                            artifact_type: None,
+                            run_kind: None,
+                            component_id: None,
+                            limit,
+                            terminal_only: true,
+                        },
+                    )?;
+                    let resources = runs_resources(RunsResourcesArgs {
+                        cleanup_plan: true,
+                        apply: false,
+                        cleanup_root: None,
+                        limit: 1000,
+                        ..RunsResourcesArgs::default()
+                    })?
+                    .0;
+                    let RunsOutput::Resources(resources) = resources else {
+                        return Err(homeboy::core::Error::internal_unexpected(
+                            "runs resources returned unexpected output",
+                        ));
+                    };
+                    persisted_artifacts_category(persisted, resources, apply)
+                        .map(|category| vec![category])
+                },
+            );
+        }
+
+        CleanupCategoryArg::OrphanedArtifactBytes => {
+            isolate_cleanup_category_bounded(
+                categories,
+                ORPHANED_ARTIFACT_BYTES_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || {
+                    let mut output = runs_service::cleanup_orphaned_artifact_bytes(
+                        OrphanedArtifactBytesCleanupOptions {
+                            apply,
+                            // Orphaned artifacts have no cursor. Restricting their source
+                            // scan would leave later entries unreachable, so execution
+                            // always receives the configured retention limit.
+                            limit: policy.scan_limit(),
+                        },
+                    )?;
+                    runs_service::present_orphaned_artifact_bytes_cleanup(
+                        &mut output,
+                        args.full,
+                        cleanup_replay_command(&args, true, true),
+                    )?;
+                    category_from_output(
+                        ORPHANED_ARTIFACT_BYTES_METADATA,
+                        apply,
+                        CleanupCategoryMetrics {
+                            candidate_count: output.planned_count,
+                            applied_count: output.removed_count,
+                            skipped_count: output.skipped_count,
+                            estimated_bytes: output.planned_size_bytes,
+                            reclaimed_bytes: output.removed_size_bytes,
+                        },
+                        output,
+                    )
+                    .map(|category| vec![category])
+                },
+            );
+        }
+
+        CleanupCategoryArg::RunnerDownloads => {
+            isolate_cleanup_category_bounded(
+                categories,
+                RUNNER_DOWNLOADS_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || {
+                    let output =
+                        runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
+                            apply,
+                            runner: None,
+                            run_id: None,
+                            limit: policy.scan_limit(),
+                            // Store-tolerant, not store-independent: with the
+                            // database shut its liveness veto fails closed and it
+                            // retains everything. Passing the probed answer keeps
+                            // that verdict without a second failing open.
+                            store_available: store.is_available(),
+                            // Off unless the operator typed it. This widens the
+                            // delete predicate to cover caches written before
+                            // intent tagging existed (#11128); the age floor, the
+                            // running-run veto, and the never-reap rule for
+                            // operator pulls are all untouched by it.
+                            include_untagged,
+                        })?;
+                    // `planned_count`, not `inspected_count`: a candidate is a resource
+                    // selected for removal, not every entry the sweep walked past. Using
+                    // the inspected total reported `candidate_count: 588, applied_count: 1`
+                    // for a sweep that removed everything it selected, which reads as a
+                    // 587-resource failure (#9483). The full inspected total remains
+                    // visible in this category's nested `output`.
+                    category_from_output(
+                        RUNNER_DOWNLOADS_METADATA,
+                        apply,
+                        CleanupCategoryMetrics {
+                            candidate_count: output.planned_count,
+                            applied_count: output.removed_count,
+                            skipped_count: output.skipped_count,
+                            estimated_bytes: output.planned_size_bytes,
+                            reclaimed_bytes: output.removed_size_bytes,
+                        },
+                        output,
+                    )
+                    .map(|category| vec![category])
+                },
+            );
+        }
+
+        CleanupCategoryArg::RemoteLabWorkspaces => {
+            isolate_cleanup_category_bounded(
+                categories,
+                REMOTE_LAB_WORKSPACES_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || remote_lab_workspace_categories(policy, apply),
+            );
+        }
+
+        CleanupCategoryArg::RunnerBinaryCaches => {
+            isolate_cleanup_category_bounded(
+                categories,
+                RUNNER_BINARY_CACHES_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || runner_binary_cache_categories(policy, apply),
+            );
+        }
+
+        CleanupCategoryArg::RuntimeTmp => {
+            let commands = args
+                .runtime_tmp_managed_older_than_days
+                .map(|days| runtime_tmp_commands(apply, days));
+            let canonical_cleanup_command =
+                commands.as_ref().map(|(canonical, _)| canonical.clone());
+            let specialist_command = commands.as_ref().map(|(_, specialist)| specialist.clone());
+            isolate_cleanup_category_bounded(
+                categories,
+                RUNTIME_TMP_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides {
+                    canonical: canonical_cleanup_command.as_deref(),
+                    specialist: specialist_command.as_deref(),
+                },
+                || {
+                    let mut output = engine::temp::cleanup_runtime_tmp_bounded(
+                        engine::temp::RuntimeTempCleanupOptions {
+                            apply,
+                            older_than_days: policy.runtime_tmp_days,
+                            managed_older_than_days: Some(policy.runtime_tmp_managed_days),
+                            prefix: None,
+                            limit: if apply || args.full {
+                                policy.scan_limit()
+                            } else {
+                                policy.scan_limit().min(OutputBudget::COLLECTION.max_items)
+                            },
+                            run_max_bytes: policy.runtime_run_max_bytes,
+                            run_max_count: policy.runtime_run_max_count,
+                            cursor: args.cursor.as_deref(),
+                            // Stop at an entry boundary while there is still time to
+                            // report, rather than being killed at the category wall
+                            // with the cleanup lock still on disk (#14221).
+                            deadline: runtime_tmp_scan_deadline(deadline),
+                        },
+                    )?;
+                    engine::temp::present_runtime_temp_cleanup(
+                        &mut output,
+                        args.full,
+                        cleanup_replay_command(&args, false, false),
+                        cleanup_replay_command(&args, true, true),
+                    )?;
+                    let mut category = category_from_output(
+                        RUNTIME_TMP_METADATA,
+                        apply,
+                        CleanupCategoryMetrics {
+                            candidate_count: output.planned_count,
+                            applied_count: output.removed_count,
+                            skipped_count: output.skipped_count,
+                            estimated_bytes: output.totals.planned_size_bytes,
+                            reclaimed_bytes: output.totals.removed_size_bytes,
+                        },
+                        output,
+                    )?;
+                    if let Some((canonical, specialist)) = commands {
+                        (
+                            category.canonical_cleanup_command,
+                            category.specialist_command,
+                        ) = (canonical, specialist);
+                    }
+                    Ok(vec![category])
+                },
+            );
+        }
+
+        // Sits beside `runtime-tmp` because operators reach for them together and
+        // apart because they prove ownership differently: `runtime-tmp` reads pin
+        // files under the Homeboy runtime root, this reads a filename marker under
+        // the roots `tempfile` actually resolves. When `TMPDIR` and the runtime root
+        // differ — and on any host that moved `TMPDIR` to a dedicated volume they do
+        // — the second category is the only one looking at the leak (#11073).
+        CleanupCategoryArg::LeakedTestHomes => {
+            isolate_cleanup_category_bounded(
+                categories,
+                LEAKED_TEST_HOMES_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || {
+                    let output = cleanup::cleanup_leaked_test_homes(
+                        cleanup::LeakedTestHomeCleanupOptions {
+                            apply,
+                            min_age: policy.leaked_test_home_min_age(),
+                            max_total_bytes: policy.leaked_test_home_max_total_bytes,
+                            limit: policy.scan_limit(),
+                            roots: Vec::new(),
+                        },
+                    )?;
+                    category_from_output(
+                        LEAKED_TEST_HOMES_METADATA,
+                        apply,
+                        CleanupCategoryMetrics {
+                            candidate_count: output.planned_count,
+                            applied_count: output.removed_count,
+                            skipped_count: output.skipped_count,
+                            estimated_bytes: output.planned_size_bytes,
+                            reclaimed_bytes: output.removed_size_bytes,
+                        },
+                        output,
+                    )
+                    .map(|category| vec![category])
+                },
+            );
+        }
+
+        // Not reachable by `orphaned-artifact-bytes`, which shares the artifact
+        // root: these directories are referenced by durable release records, so
+        // that category correctly inventories zero candidates against them. They
+        // are live, not orphaned, and bounding them needs a policy of its own
+        // (#14223).
+        CleanupCategoryArg::ReleaseArtifacts => {
+            isolate_cleanup_category_bounded(
+                categories,
+                RELEASE_ARTIFACTS_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || {
+                    let output = cleanup::cleanup_release_artifacts(
+                        cleanup::ReleaseArtifactCleanupOptions {
+                            apply,
+                            max_count_per_repo: policy.release_artifact_max_count,
+                            max_bytes_per_repo: policy.release_artifact_max_bytes,
+                            min_age: policy.release_artifact_min_age(),
+                            limit: policy.scan_limit(),
+                            root: None,
+                        },
+                    )?;
+                    // `candidate_count` and `estimated_bytes` come straight from
+                    // the category, which derives both from the same retention
+                    // decision that gates removal. Recomputing them here would be a
+                    // second place for the plan and the apply to disagree (#14222).
+                    category_from_output(
+                        RELEASE_ARTIFACTS_METADATA,
+                        apply,
+                        CleanupCategoryMetrics {
+                            candidate_count: output.candidate_count,
+                            applied_count: output.removed_count,
+                            skipped_count: output.skipped_count,
+                            estimated_bytes: output.estimated_bytes,
+                            reclaimed_bytes: output.reclaimed_bytes,
+                        },
+                        output,
+                    )
+                    .map(|category| vec![category])
+                },
+            );
+        }
+
+        CleanupCategoryArg::ControllerScratch => {
+            isolate_cleanup_category_bounded(
+                categories,
+                CONTROLLER_SCRATCH_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || {
+                    let output = homeboy::agents::controller_scratch::cleanup(
+                        homeboy::agents::controller_scratch::ControllerScratchCleanupOptions {
+                            apply,
+                            limit: policy.scan_limit(),
+                            full: args.full,
+                            // Thread the operator's explicit `--older-than-days` override
+                            // into the retention eligibility decision so released, clean,
+                            // terminal scratch can converge under disk pressure. When the
+                            // operator does not pass the flag (`None`), preserve the default
+                            // per-resource retention window (P7D) rather than substituting
+                            // the configured terminal-run default used by other categories.
+                            retention_override_seconds: args
+                                .older_than_days
+                                .map(|days| days.saturating_mul(86_400)),
+                        },
+                        args.cursor.as_deref(),
+                    )?;
+                    category_from_output(
+                        CONTROLLER_SCRATCH_METADATA,
+                        apply,
+                        CleanupCategoryMetrics {
+                            candidate_count: output.candidate_count,
+                            applied_count: output.applied_count,
+                            skipped_count: output.skipped_count,
+                            estimated_bytes: output.estimated_bytes,
+                            reclaimed_bytes: output.reclaimed_bytes,
+                        },
+                        output,
+                    )
+                    .map(|mut category| {
+                        if let Some(next) =
+                            category.output.get("next_command").and_then(Value::as_str)
+                        {
+                            category.inventory_completeness = "partial".to_string();
+                            category.continuation_command = next.to_string();
+                        }
+                        vec![category]
+                    })
+                },
+            );
+        }
+        CleanupCategoryArg::ControllerRuntimes => {
+            isolate_cleanup_category_bounded(
+                categories,
+                CONTROLLER_RUNTIMES_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || {
+                    // Policy is resolved by core so this path and `homeboy runtime
+                    // controller-prune` cannot drift apart again (#10288).
+                    let output =
+                        controller_runtime::cleanup(controller_runtime::resolve_cleanup_options(
+                            apply,
+                            ControllerRuntimeRetentionOverrides {
+                                limit: Some(limit),
+                                ignore_retention: false,
+                            },
+                        ))?;
+                    // Counts come from core rather than being re-derived here, so
+                    // the advertised reclaim is exactly what an apply achieves. A
+                    // locally recomputed count is how this category advertised
+                    // 143 MB it could never free (#14222).
+                    let candidate_count = output.candidate_count();
+                    let estimated_bytes = output.candidate_bytes();
+                    category_from_output(
+                        CONTROLLER_RUNTIMES_METADATA,
+                        apply,
+                        CleanupCategoryMetrics {
+                            candidate_count,
+                            applied_count: output.removed_identities.len(),
+                            skipped_count: output.retained.len(),
+                            estimated_bytes,
+                            reclaimed_bytes: output.reclaimed_bytes,
+                        },
+                        output,
+                    )
+                    .map(|category| vec![category])
+                },
+            );
+        }
+
+        CleanupCategoryArg::SharedCargoTargets => {
+            isolate_cleanup_category_bounded(
+                categories,
+                SHARED_CARGO_TARGETS_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || {
+                    let output = cleanup::cleanup_shared_cargo_targets(
+                        cleanup::CargoTargetCleanupOptions {
+                            root: None,
+                            apply,
+                            older_than: policy.shared_store_min_age(),
+                            max_bytes: policy.shared_store_max_bytes,
+                            limit: policy.scan_limit(),
+                            cursor: args.cursor.clone(),
+                            now: std::time::SystemTime::now(),
+                            lease_ttl: policy.shared_store_lease_ttl(),
+                            deadline: cleanup_category_action_deadline(deadline),
+                        },
+                    )?;
+                    category_from_output(
+                        SHARED_CARGO_TARGETS_METADATA,
+                        apply,
+                        CleanupCategoryMetrics {
+                            candidate_count: output.candidate_count,
+                            applied_count: output.applied_count,
+                            skipped_count: output.skipped_count,
+                            estimated_bytes: output
+                                .candidates
+                                .iter()
+                                .map(|store| store.size_bytes)
+                                .sum(),
+                            reclaimed_bytes: output.reclaimed_bytes,
+                        },
+                        output,
+                    )
+                    .map(|category| vec![category])
+                },
+            );
+        }
+
+        CleanupCategoryArg::ExternalStorage => {
+            isolate_cleanup_category_bounded(
+                categories,
+                EXTERNAL_STORAGE_METADATA,
+                apply,
+                &args,
+                deadline,
+                CleanupCategoryCommandOverrides::default(),
+                || {
+                    let output = cleanup::cleanup_external_storage_from_extensions(
+                        cleanup::ExternalStorageCleanupOptions {
+                            apply,
+                            min_age_days: config.retention.external_storage_days,
+                            max_bytes: config.retention.external_storage_max_bytes,
+                            reserve_bytes: config.retention.external_storage_reserve_bytes,
+                            limit: policy.scan_limit(),
+                            evidence_limit: if args.full {
+                                policy.scan_limit()
+                            } else {
+                                OutputBudget::COLLECTION.max_items
+                            },
+                            deadline: cleanup_category_action_deadline(deadline),
+                        },
+                    )?;
+                    external_storage_category(output, apply)
+                },
+            );
+        }
+    }
+    true
 }
 
 /// Aggregate status for one `cleanup.inventory` pass.
@@ -2862,26 +3179,11 @@ fn isolate_cleanup_category_bounded(
     commands: CleanupCategoryCommandOverrides<'_>,
     action: impl FnOnce() -> homeboy::core::Result<Vec<CleanupInventoryCategory>>,
 ) {
-    // Checked before dispatch rather than inside each execution path. The
-    // in-process path had no budget check at all, so an exhausted deadline
-    // reached a category as a real invocation with no usable time remaining,
-    // turning an exhausted aggregate budget into a misleading category failure.
-    if let Some(remaining) = exhausted_category_budget(deadline) {
-        categories.push(cleanup_category_timeout_failure(
-            metadata,
-            apply,
-            remaining,
-            0,
-            Some("aggregate cleanup budget was exhausted before this category started".to_string()),
-            cleanup_category_replay_command(metadata, args),
-        ));
-        return;
-    }
-
-    let category_child =
-        std::env::var(CLEANUP_CATEGORY_CHILD_ENV).ok().as_deref() == Some(metadata.category);
-    if cfg!(test) || category_child {
-        if category_child {
+    // Admission against the pass budget already happened in
+    // `run_cleanup_category`, before dispatch: a category that reaches here
+    // has at least `cleanup_category_start_minimum` to work with.
+    if cleanup_category_runs_in_process(metadata) {
+        if is_cleanup_category_child(metadata) {
             eprintln!(
                 "HOMEBOY_PROGRESS {{\"phase\":\"cleanup_category\",\"current\":\"{}\"}}",
                 metadata.category
@@ -3150,22 +3452,82 @@ fn append_cleanup_child_args(process: &mut Command, args: &CleanupArgs) {
     }
 }
 
-/// Smallest budget worth starting an in-process category with.
+/// Smallest budget worth starting an in-process phase with.
 ///
-/// Below this the category cannot do useful work and would only report a
+/// Below this the phase cannot do useful work and would only report a
 /// timeout it was never given a chance to avoid.
 const CLEANUP_CATEGORY_MINIMUM_BUDGET: Duration = Duration::from_millis(250);
 
-/// `Some(remaining)` when `deadline` leaves too little budget to start a
-/// category, `None` when there is enough time to proceed.
+/// Smallest budget worth spawning a category process with: enough to start
+/// it, let it work, and still reap it inside its termination allowance.
+const CLEANUP_SPAWNED_CATEGORY_MINIMUM_BUDGET: Duration = CLEANUP_CHILD_TERMINATION_ALLOWANCE
+    .saturating_mul(2)
+    .saturating_add(Duration::from_secs(1));
+
+/// Whether this process is the isolated child running `metadata`'s category.
+fn is_cleanup_category_child(metadata: CleanupInventoryCategoryMetadata) -> bool {
+    std::env::var(CLEANUP_CATEGORY_CHILD_ENV).ok().as_deref() == Some(metadata.category)
+}
+
+/// Whether `metadata`'s category runs in this process rather than in an
+/// isolated, supervised child.
+fn cleanup_category_runs_in_process(metadata: CleanupInventoryCategoryMetadata) -> bool {
+    cfg!(test) || is_cleanup_category_child(metadata)
+}
+
+/// The least pass budget a category must have left to be started at all.
+fn cleanup_category_start_minimum(metadata: CleanupInventoryCategoryMetadata) -> Duration {
+    if cleanup_category_runs_in_process(metadata) {
+        CLEANUP_CATEGORY_MINIMUM_BUDGET
+    } else {
+        CLEANUP_SPAWNED_CATEGORY_MINIMUM_BUDGET
+    }
+}
+
+/// Outcome marker for a phase the pass budget did not start this pass.
+const CLEANUP_PHASE_OUTCOME_DEFERRED: &str = "deferred";
+
+/// A category the pass did not start because its budget ran out first.
 ///
-/// An absent deadline means the sweep is unbounded, which is never exhausted.
-fn exhausted_category_budget(deadline: Option<SystemTime>) -> Option<Duration> {
-    let deadline = deadline?;
-    let remaining = deadline
-        .duration_since(SystemTime::now())
-        .unwrap_or(Duration::ZERO);
-    (remaining < CLEANUP_CATEGORY_MINIMUM_BUDGET).then_some(remaining)
+/// Not a failure and not a timeout: the category was never given a deadline.
+/// It is a resumable continuation, and the next pass of a rotating caller
+/// starts with it.
+fn cleanup_category_deferred(
+    metadata: CleanupInventoryCategoryMetadata,
+    apply: bool,
+    reason: String,
+    continuation_command: String,
+) -> CleanupInventoryCategory {
+    CleanupInventoryCategory {
+        category: metadata.category.to_string(),
+        canonical_cleanup_command: continuation_command.clone(),
+        specialist_command: metadata.specialist_command(apply).to_string(),
+        included: true,
+        skipped: true,
+        skip_reason: Some(reason.clone()),
+        failure: None,
+        outcome: CLEANUP_PHASE_OUTCOME_DEFERRED.to_string(),
+        inventory_completeness: "partial".to_string(),
+        elapsed_ms: 0,
+        timeout_ms: 0,
+        last_progress: None,
+        continuation_command: continuation_command.clone(),
+        cleanup_run_ref: active_cleanup_run_ref(),
+        candidate_count: 0,
+        applied_count: 0,
+        skipped_count: 0,
+        reconciliation_blocker_count: 0,
+        reconciliation_command: None,
+        unsatisfied_native_contract_count: 0,
+        estimated_bytes: 0,
+        reclaimed_bytes: 0,
+        output: serde_json::json!({
+            "category": metadata.category,
+            "outcome": CLEANUP_PHASE_OUTCOME_DEFERRED,
+            "reason": reason,
+            "continuation_command": continuation_command,
+        }),
+    }
 }
 
 /// Budget a cleanup category according to how the operator can resume it.
@@ -3279,6 +3641,7 @@ fn run_cleanup_category_fixture(_category: &str) -> homeboy::core::Result<()> {
 /// scheduler disabled automatic retention entirely (#12727).
 fn is_bounded_continuation(category: &CleanupInventoryCategory) -> bool {
     category.outcome == CLEANUP_CATEGORY_OUTCOME_TIMED_OUT
+        || category.outcome == CLEANUP_PHASE_OUTCOME_DEFERRED
         || (category.failure.is_none() && category.inventory_completeness == "partial")
 }
 
@@ -5829,12 +6192,12 @@ mod tests {
             let categories = result.output["categories"].as_array().expect("categories");
             assert_eq!(categories.len(), 2);
             for category in categories {
-                assert_eq!(category["outcome"], "timed_out");
-                assert_eq!(category["failure"]["code"], "cleanup.category_timeout");
-                assert_eq!(
-                    category["failure"]["retryable"], true,
-                    "a starved category must advertise that it can be resumed"
-                );
+                // Never started, so never timed out: deferred, not failed.
+                assert_eq!(category["outcome"], "deferred");
+                assert!(category["failure"].is_null(), "{category:#}");
+                assert!(category["skip_reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.starts_with("deferred to the next pass")));
                 assert!(
                     category["continuation_command"]
                         .as_str()
@@ -5953,31 +6316,70 @@ mod tests {
         assert_eq!(result.output["status"], "partial_failure");
     }
 
-    /// The budget check runs before dispatch, so no category is ever started
-    /// with a zero timeout.
+    /// The budget check runs before dispatch, so no phase is ever started
+    /// with a zero timeout, and once one phase is deferred every later phase
+    /// is too: a pass runs a prefix of its order.
     #[test]
-    fn exhausted_budget_is_detected_before_a_category_is_dispatched() {
-        let expired = SystemTime::now()
-            .checked_sub(Duration::from_secs(1))
-            .expect("expired deadline");
-        assert_eq!(
-            exhausted_category_budget(Some(expired)),
-            Some(Duration::ZERO),
-            "an expired deadline must be refused before dispatch"
-        );
-
+    fn pass_budget_admits_a_prefix_and_defers_the_rest() {
         let ample = SystemTime::now()
             .checked_add(Duration::from_secs(60))
             .expect("ample deadline");
+        let mut budget = CleanupPassBudget::until(Some(ample));
+        assert!(matches!(
+            budget.admit(CLEANUP_CATEGORY_MINIMUM_BUDGET),
+            CleanupPhaseAdmission::Run(Some(deadline)) if deadline == ample
+        ));
+        // A phase needing more than remains is deferred, and so is every
+        // later phase, even one that would fit.
+        assert!(matches!(
+            budget.admit(Duration::from_secs(120)),
+            CleanupPhaseAdmission::Deferred(_)
+        ));
+        assert!(matches!(
+            budget.admit(CLEANUP_CATEGORY_MINIMUM_BUDGET),
+            CleanupPhaseAdmission::Deferred(_)
+        ));
+
+        let expired = SystemTime::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("expired deadline");
+        assert!(matches!(
+            CleanupPassBudget::until(Some(expired)).admit(CLEANUP_CATEGORY_MINIMUM_BUDGET),
+            CleanupPhaseAdmission::Deferred(_)
+        ));
+        assert!(matches!(
+            CleanupPassBudget::until(None).admit(Duration::from_secs(3600)),
+            CleanupPhaseAdmission::Run(None)
+        ));
+    }
+
+    /// Every unattended phase is in the one rotation, and a pass resumes at
+    /// the phase the previous pass deferred first.
+    #[test]
+    fn automatic_retention_rotation_resumes_at_the_first_deferred_phase() {
+        let canonical = automatic_retention_rotation(None);
+        assert_eq!(canonical[0], AutomaticRetentionPhase::RepoArtifacts);
         assert_eq!(
-            exhausted_category_budget(Some(ample)),
-            None,
-            "an ample budget must proceed"
+            canonical.len(),
+            AUTOMATIC_RETENTION_CATEGORIES.len() + 3,
+            "repo artifacts, every category, cargo targets and runtime temp"
         );
+        for category in AUTOMATIC_RETENTION_CATEGORIES {
+            assert!(canonical.contains(&AutomaticRetentionPhase::Category(category)));
+        }
+
+        let resumed = automatic_retention_rotation(Some("controller_scratch"));
+        assert_eq!(resumed[0].name(), "controller_scratch");
+        assert_eq!(resumed.len(), canonical.len());
+        let wrapped = resumed
+            .iter()
+            .position(|phase| *phase == canonical[0])
+            .unwrap();
+        assert_eq!(&resumed[wrapped..], &canonical[..canonical.len() - wrapped]);
+
         assert_eq!(
-            exhausted_category_budget(None),
-            None,
-            "an unbounded sweep is never exhausted"
+            automatic_retention_rotation(Some("retired-phase")),
+            canonical
         );
     }
 
@@ -6012,6 +6414,88 @@ mod tests {
                 .coordination_lease_holders(cleanup::AUTOMATIC_RETENTION_NAMESPACE, "controller")
                 .expect("holders")
                 .is_empty());
+        });
+    }
+
+    /// One phase that consumes the whole aggregate budget must not starve the
+    /// phases after it forever.
+    ///
+    /// Lab, 2026-10-16: every pass of `cleanup automatic-retention` spent its
+    /// 60 s budget before the category sweep began, so every category reported
+    /// `timed_out` with a 0 ms deadline and reclaimed nothing, pass after pass,
+    /// while the disk filled to 98%. A fixed-order pass restarts at the same
+    /// phase every time, so whatever runs first owns the budget permanently.
+    /// Across a handful of consecutive passes, every category must run.
+    #[cfg(unix)]
+    #[test]
+    fn a_budget_draining_category_cannot_starve_later_categories_across_passes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        homeboy::test_support::with_isolated_home(|root| {
+            let mut config = defaults::load_config();
+            config.retention.automatic_retention_max_run_seconds = 1;
+            defaults::save_config(&config).expect("save retention budget");
+            let runtime_tmp = root.path().join("runtime-tmp");
+            std::fs::create_dir_all(&runtime_tmp).expect("runtime temp root");
+            // The first category in the sweep drains the entire budget.
+            let fixture = root.path().join("drain-budget.sh");
+            std::fs::write(
+                &fixture,
+                "#!/bin/sh\n[ \"$1\" = terminal_runs ] && sleep 1.3\nexit 0\n",
+            )
+            .expect("write fixture");
+            std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755))
+                .expect("make fixture executable");
+            let previous_tmp = std::env::var_os("HOMEBOY_RUNTIME_TMPDIR");
+            let previous_fixture = std::env::var_os(CLEANUP_CATEGORY_FIXTURE_ENV);
+            std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", &runtime_tmp);
+            std::env::set_var(CLEANUP_CATEGORY_FIXTURE_ENV, &fixture);
+
+            let passes = (0..4).map(|_| automatic_retention()).collect::<Vec<_>>();
+
+            for (name, previous) in [
+                ("HOMEBOY_RUNTIME_TMPDIR", previous_tmp),
+                (CLEANUP_CATEGORY_FIXTURE_ENV, previous_fixture),
+            ] {
+                match previous {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+
+            let mut ran = HashSet::new();
+            let mut zero_deadline_timeouts = Vec::new();
+            for pass in passes {
+                let (output, _) = pass.expect("automatic retention pass");
+                let rows = output["cleanup"]["categories"]["categories"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                for row in rows {
+                    let category = row["category"].as_str().unwrap_or_default().to_string();
+                    if row["outcome"] == CLEANUP_CATEGORY_OUTCOME_TIMED_OUT {
+                        if row["timeout_ms"] == 0 {
+                            zero_deadline_timeouts.push(category);
+                        }
+                    } else if row["outcome"] != "deferred" {
+                        ran.insert(category);
+                    }
+                }
+            }
+            let starved = AUTOMATIC_RETENTION_CATEGORIES
+                .iter()
+                .map(|category| cleanup_category_arg_name(category).replace('-', "_"))
+                .filter(|category| !ran.contains(category))
+                .collect::<Vec<_>>();
+            assert!(
+                starved.is_empty(),
+                "categories never ran across 4 passes: {starved:?}"
+            );
+            // A category that never started was deferred, not timed out.
+            assert!(
+                zero_deadline_timeouts.is_empty(),
+                "never-started categories reported as 0 ms timeouts: {zero_deadline_timeouts:?}"
+            );
         });
     }
 
