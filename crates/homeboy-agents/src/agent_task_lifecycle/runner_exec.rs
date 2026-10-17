@@ -303,6 +303,29 @@ pub fn record_runner_exec_provider_result(
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
+/// Terminal authority of a generic runner-exec run bound to `runner_id`.
+///
+/// Runner-exec runs (for example a Lab gate's `lab-gate-*` run) live in the
+/// observation `runs` table, not the agent-task lifecycle store, yet they own
+/// the runner workspaces they materialize. Returns `None` when this
+/// installation has no runner-exec run with that id on that runner, so callers
+/// can stay fail-closed for an owner they cannot resolve.
+pub fn runner_exec_run_is_terminal(run_id: &str, runner_id: &str) -> Result<Option<bool>> {
+    let store =
+        AgentTaskLifecycleStore::from_current_environment()?.open_observation_maintained()?;
+    let Some(run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(None);
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND)
+        || run.metadata_json.get("runner_id").and_then(Value::as_str) != Some(runner_id)
+    {
+        return Ok(None);
+    }
+    Ok(Some(
+        RunStatus::from_label(&run.status).is_some_and(RunStatus::is_terminal),
+    ))
+}
+
 /// Create (or validate ownership of) a generic runner-exec run that has no
 /// daemon runner job — the diagnostic-SSH transport executes synchronously and
 /// never accepts a durable runner job, but a caller-supplied `--run-id` with

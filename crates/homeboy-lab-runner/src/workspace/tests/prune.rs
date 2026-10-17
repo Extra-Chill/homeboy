@@ -380,6 +380,113 @@ fn retained_terminal_receipt_reclassifies_and_releases_compacted_workspace() {
     });
 }
 
+/// A Lab gate owns its declared-resource and candidate workspaces through its
+/// generic runner-exec run (`lab-gate-*`), which lives in the observation
+/// `runs` table rather than the agent-task lifecycle store. Prune must resolve
+/// that run kind: terminal releases the lease, running keeps it live, and an
+/// unknown owner stays fail-closed.
+#[test]
+fn declared_gate_workspace_resolves_its_runner_exec_run_authority() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_id = "lab-local-prune-gate-run";
+        let source_parent = tempfile::tempdir().expect("source parent");
+        // The controller's private resource package is gone after the gate, as
+        // on the Lab: every workspace is an orphan candidate whose deletion
+        // depends only on its owning run's authority.
+        let source = source_parent.path().join("declared-gate-resources");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        crate::create(
+            &format!(
+                r#"{{"id":"{runner_id}","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let lab = runner_root.path().join("_lab_workspaces");
+        let terminal = lab.join("declared-gate-resources-terminal");
+        let running = lab.join("declared-gate-resources-running");
+        let unknown = lab.join("declared-gate-resources-unknown");
+        let other_runner = lab.join("declared-gate-resources-other-runner");
+        write_terminal_workspace(&terminal, &source, runner_root.path(), "lab-gate-terminal");
+        write_terminal_workspace(&running, &source, runner_root.path(), "lab-gate-running");
+        write_terminal_workspace(&unknown, &source, runner_root.path(), "lab-gate-unknown");
+        write_terminal_workspace(
+            &other_runner,
+            &source,
+            runner_root.path(),
+            "lab-gate-other-runner",
+        );
+        let command = ["homeboy".to_string(), "agent-task".to_string()];
+        for (run_id, owner) in [
+            ("lab-gate-terminal", runner_id),
+            ("lab-gate-running", runner_id),
+            ("lab-gate-other-runner", "another-runner"),
+        ] {
+            homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
+                run_id,
+                owner,
+                &source.display().to_string(),
+                &command,
+            )
+            .expect("gate run");
+        }
+        for run_id in ["lab-gate-terminal", "lab-gate-other-runner"] {
+            assert!(
+                homeboy_agents::agent_task_lifecycle::finish_runner_exec_pre_handoff_failure(
+                    run_id,
+                    "lab_gate",
+                    "transport",
+                    false,
+                    &homeboy_core::Error::internal_unexpected("gate finished"),
+                )
+                .expect("terminalize gate run")
+            );
+        }
+
+        let (preview, _) = prune_workspaces(
+            runner_id,
+            RunnerWorkspacePruneOptions {
+                apply: false,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+                cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
+            },
+        )
+        .expect("preview gate workspaces");
+
+        let candidates = preview
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.remote_path.clone(), candidate.reason.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            candidates,
+            vec![(
+                terminal.display().to_string(),
+                "terminal_resource_lifecycle".to_string()
+            )],
+            "{}",
+            prune_diagnosis(&preview)
+        );
+        assert_eq!(
+            preview.skipped_live_count,
+            1,
+            "{}",
+            prune_diagnosis(&preview)
+        );
+        assert_eq!(
+            preview.skipped_unknown_count,
+            2,
+            "{}",
+            prune_diagnosis(&preview)
+        );
+        assert!(running.exists() && unknown.exists() && other_runner.exists());
+    });
+}
+
 #[test]
 fn active_lifecycle_lease_requires_unambiguous_terminal_run_authority() {
     let metadata = active_lifecycle_metadata("run-terminal", "run-terminal");
