@@ -106,6 +106,20 @@ TMP="$TMPDIR"
 TEMP="$TMPDIR"
 export TMP TEMP
 
+# Git 2.47+ runs auto maintenance detached after fetch, commit and similar
+# commands. That background git escapes the fixture's process group, outlives
+# the fixture, and keeps writing into temp repositories the test is removing.
+# Keep fixture git in the foreground through a system-level config layer that
+# includes the real one. Unlike GIT_CONFIG_* entries, which Homeboy's git
+# transport deliberately replaces for remote commands, this layer reaches every
+# git the test spawns.
+hermetic_git_system_config="$(git var GIT_CONFIG_SYSTEM 2>/dev/null || printf '%s' /etc/gitconfig)"
+GIT_CONFIG_SYSTEM="$TMPDIR/.hermetic-gitconfig"
+printf '[include]\n\tpath = %s\n[maintenance]\n\tautoDetach = false\n[gc]\n\tautoDetach = false\n' \
+    "$hermetic_git_system_config" > "$GIT_CONFIG_SYSTEM"
+export GIT_CONFIG_SYSTEM
+unset hermetic_git_system_config
+
 # Cargo's runner is the last parent guaranteed to receive cancellation when a
 # test binary is interrupted. A Perl parent uses waitpid(WNOHANG), rather than
 # a shell `wait` held open by inherited descriptors, then reaps the test group.
@@ -227,10 +241,19 @@ exec perl -MPOSIX=setsid,WNOHANG -MTime::HiRes=time -e '
         };
         alarm $timeout_seconds;
     }
-    my $reaped;
-    do { $reaped = waitpid $child, 0 } while ($reaped == -1 && $!{EINTR});
+    # As a Linux subreaper this process inherits every orphaned descendant of
+    # the test binary (for example a git child whose spawning wrapper exited).
+    # Reap any child while waiting so those orphans cannot accumulate as
+    # zombies for the whole suite; a resource guard counts them as processes.
+    my ($reaped, $exit);
+    while (1) {
+        $reaped = waitpid -1, 0;
+        if ($reaped == $child) { $exit = $?; last; }
+        next if $reaped > 0 || $!{EINTR};
+        $exit = $?;
+        last;
+    }
     alarm 0;
-    my $exit = $?;
     $cleanup->();
     $discard_tmpdir->();
     exit($exit >> 8);
