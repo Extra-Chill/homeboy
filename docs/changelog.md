@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.29] - 2026-10-17
+
+### Fixed
+- workspace prune inventories every Lab workspace
+- enforce the agent-task state transition graph at the write choke point
+
 ## [0.428.28] - 2026-10-17
 
 ### Fixed
