@@ -2,6 +2,7 @@ use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -655,6 +656,8 @@ pub struct ControllerScratchRetentionOwner {
 #[derive(Debug, Clone, Copy)]
 pub struct ControllerScratchCleanupOptions {
     pub apply: bool,
+    /// Reclaim candidates one pass may admit. Retained leases the walk passes
+    /// to reach them do not count against it.
     pub limit: usize,
     /// Return all detail rows rather than the normal agent-facing response budget.
     pub full: bool,
@@ -1109,14 +1112,28 @@ fn finalize_run_unlocked(
     Ok(())
 }
 
+/// One bounded cleanup pass.
+///
+/// `options.limit` bounds the reclaim candidates a pass admits, not the
+/// retained leases it walks past to find them; `deadline` bounds that walk.
+/// When the deadline is spent the pass stops at a resource boundary and
+/// reports `has_more` with a resumable cursor.
 pub fn cleanup(
     options: ControllerScratchCleanupOptions,
     cursor: Option<&str>,
+    deadline: Option<Instant>,
 ) -> Result<ControllerScratchCleanupOutput> {
     let index_path = index_path()?;
     let observation = ObservationStore::open_initialized()?;
     let recovery = RecoveryRetention::configured()?;
-    cleanup_at_index(&index_path, &observation, &recovery, options, cursor)
+    cleanup_at_index(
+        &index_path,
+        &observation,
+        &recovery,
+        options,
+        cursor,
+        deadline,
+    )
 }
 
 fn cleanup_at_index(
@@ -1125,9 +1142,10 @@ fn cleanup_at_index(
     recovery: &RecoveryRetention,
     options: ControllerScratchCleanupOptions,
     cursor: Option<&str>,
+    deadline: Option<Instant>,
 ) -> Result<ControllerScratchCleanupOutput> {
     with_index_lock(index_path, || {
-        cleanup_unlocked(index_path, observation, recovery, options, cursor)
+        cleanup_unlocked(index_path, observation, recovery, options, cursor, deadline)
     })
 }
 
@@ -1137,6 +1155,7 @@ fn cleanup_unlocked(
     recovery: &RecoveryRetention,
     options: ControllerScratchCleanupOptions,
     cursor: Option<&str>,
+    deadline: Option<Instant>,
 ) -> Result<ControllerScratchCleanupOutput> {
     if options.limit == 0 {
         return Err(Error::validation_invalid_argument(
@@ -1167,8 +1186,8 @@ fn cleanup_unlocked(
         })
         .transpose()?;
     let mut index = read_index_at_unlocked(index_path)?;
-    // Enumerate identity only before admitting the page. Filesystem walks, Git
-    // probes and lifecycle lookups happen only for admitted resources. A stable
+    // Enumerate identity only before walking. Filesystem walks, Git probes and
+    // lifecycle lookups happen only for resources the walk reaches. A stable
     // path digest survives removal of earlier rows and avoids offset starvation.
     let mut ordered: Vec<_> = index
         .resources
@@ -1178,10 +1197,6 @@ fn cleanup_unlocked(
         .filter(|(key, _)| cursor_key.is_none_or(|cursor| key.as_str() > cursor))
         .collect();
     ordered.sort_unstable();
-    let inspected_count = ordered.len().min(options.limit);
-    let uninspected_resource_count = ordered.len().saturating_sub(inspected_count);
-    let next_cursor = (uninspected_resource_count > 0)
-        .then(|| format!("controller-scratch:{}", ordered[inspected_count - 1].0));
     // Only durably registered resources are cleanup candidates. In particular,
     // do not infer ownership by scanning a shared system temporary directory.
     let mut skipped = Vec::new();
@@ -1204,7 +1219,21 @@ fn cleanup_unlocked(
     // stranded in its source repository indefinitely (#10568).
     let mut stranded: Vec<usize> = Vec::new();
     let mut registered_worktree_count = 0;
-    for (_, position) in ordered.into_iter().take(options.limit) {
+    // `limit` bounds admitted candidates, not inspected resources. Every pass
+    // the aggregate and automatic retention run starts at the head of this
+    // order, so bounding inspection let retained leases that sort first fill
+    // the page on every pass: 1000 inspected, 6920 never reached, ~6 GB of a
+    // 393 GB root ever considered. Retained leases are walked past (their
+    // block reason is decided before any size walk), and the deadline bounds
+    // the walk so a pass returns what it found instead of being killed.
+    let mut inspected_count = 0;
+    for &(_, position) in &ordered {
+        if eligible.len() >= options.limit
+            || (inspected_count > 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline))
+        {
+            break;
+        }
+        inspected_count += 1;
         let resource = &index.resources[position];
         let path = PathBuf::from(&resource.path);
         if !path.exists() {
@@ -1281,6 +1310,9 @@ fn cleanup_unlocked(
             source_ref: resource.source_ref.clone(),
         });
     }
+    let uninspected_resource_count = ordered.len().saturating_sub(inspected_count);
+    let next_cursor = (uninspected_resource_count > 0)
+        .then(|| format!("controller-scratch:{}", ordered[inspected_count - 1].0));
     let stale_registration_count = stranded.len();
     let mut stale_registrations_pruned = 0;
     if options.apply {
@@ -2853,6 +2885,7 @@ mod tests {
             observation,
             &test_recovery_retention(data_root),
             options,
+            None,
             None,
         )
         .expect("cleanup")
@@ -5162,9 +5195,11 @@ mod tests {
                 &test_recovery_retention(data_root.path()),
                 options,
                 cursor.as_deref(),
+                None,
             )
             .expect("page");
-            assert_eq!(page.inspected_count, 1);
+            // `limit` bounds candidates; retained rows are walked past.
+            assert!(page.candidate_count <= 1);
             if let Some(cursor) = cursor.as_deref() {
                 assert!(page.candidate_detail.export_command.contains(cursor));
                 assert!(page.skipped_detail.export_command.contains(cursor));
@@ -5186,6 +5221,72 @@ mod tests {
         );
     }
 
+    /// A bounded pass restarts from the head of the index (the aggregate and
+    /// automatic retention never resume a cursor), so retained leases that sort
+    /// first must not consume the whole page. Live: `inspected_count 1000`,
+    /// `uninspected_resource_count 6920`, ~6 GB estimated of a 393 GB root.
+    #[test]
+    fn bounded_pass_reaches_reclaimable_scratch_behind_retained_prefix() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let mut paths: Vec<PathBuf> = (0..4)
+            .map(|number| {
+                let path = root.path().join(format!("lease-{number}"));
+                fs::create_dir(&path).expect("lease");
+                fs::write(path.join("evidence"), "evidence").expect("evidence");
+                path
+            })
+            .collect();
+        // Index order is the sweep order; the first `limit` are retained.
+        paths.sort_by_key(|path| sha256(path.display().to_string().as_bytes()));
+        let (retained, reclaimable) = paths.split_at(2);
+        let resources = paths
+            .iter()
+            .map(|path| {
+                let mut stored = resource(path, root.path());
+                stored.lifecycle_state = "released".to_string();
+                stored.ephemeral = true;
+                if retained.contains(path) {
+                    stored.owner_pid = std::process::id();
+                }
+                stored
+            })
+            .collect();
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
+                schema: schema(),
+                resources,
+            },
+        );
+
+        let options = ControllerScratchCleanupOptions {
+            apply: false,
+            limit: 2,
+            full: false,
+            retention_override_seconds: Some(0),
+        };
+        let preview = cleanup_at(data_root.path(), &observation, options);
+        assert_eq!(
+            preview.candidate_count, 2,
+            "retained prefix starved the page: {:?}",
+            preview.retention_reasons
+        );
+
+        let applied = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
+                apply: true,
+                ..options
+            },
+        );
+        assert_eq!(applied.applied_count, 2);
+        assert!(reclaimable.iter().all(|path| !path.exists()));
+        assert!(retained.iter().all(|path| path.join("evidence").is_file()));
+    }
+
     #[test]
     fn scratch_pagination_rejects_zero_limit_and_foreign_cursors() {
         let data_root = tempfile::tempdir().expect("data root");
@@ -5203,7 +5304,8 @@ mod tests {
             &observation,
             &recovery,
             options,
-            Some("other-category:cursor")
+            Some("other-category:cursor"),
+            None
         )
         .is_err());
         assert!(cleanup_at_index(
@@ -5214,6 +5316,7 @@ mod tests {
                 limit: 0,
                 ..options
             },
+            None,
             None
         )
         .is_err());
