@@ -9694,6 +9694,38 @@ mod tests {
         });
     }
 
+    /// The typed Cook delivery read model owns moving-base blockers. Once the
+    /// candidate is published, a moving-base recovery left over from an
+    /// earlier attempt is history, so the run reports no blocker.
+    #[test]
+    fn published_candidate_ignores_a_stale_moving_base_recovery() {
+        let mut published = record(AGENT_TASK_RUN);
+        published.state = AgentTaskRunState::Succeeded;
+        let metadata = published.metadata.as_object_mut().expect("metadata");
+        metadata.remove("cook_controller_failure");
+        metadata.insert(
+            "cook_finalization".to_string(),
+            json!({
+                "status": "review_ready",
+                "base": "main",
+                "head": "cook/fix",
+                "pr_number": 42,
+                "pr_url": "https://github.com/Extra-Chill/homeboy/pull/42",
+            }),
+        );
+        metadata.insert(
+            "cook_moving_base_recovery".to_string(),
+            json!({
+                "blocker": "HEAD is behind or diverged from resolved base `main`",
+                "continuation": format!("homeboy agent-task cook-continue {AGENT_TASK_RUN}"),
+            }),
+        );
+
+        let resource = project_record(&published, None).expect("project published run");
+        assert!(resource.publication.is_some());
+        assert_eq!(resource.blocker, None);
+    }
+
     #[test]
     fn project_record_names_a_runner_resource_guard_stop() {
         let mut failed = record(AGENT_TASK_RUN);
