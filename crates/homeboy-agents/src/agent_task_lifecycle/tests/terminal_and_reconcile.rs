@@ -4174,6 +4174,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
                 retention_override_seconds: Some(0),
             },
             None,
+            None,
         )
         .expect("orphan stale resource");
         assert_eq!(orphaned_preview.candidate_count, 0);
@@ -4192,6 +4193,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
                 retention_override_seconds: Some(0),
             },
             None,
+            None,
         )
         .expect("recovery-backed cleanup preview");
         assert_eq!(preview.candidate_count, 1);
@@ -4207,6 +4209,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
                 retention_override_seconds: Some(0),
             },
             None,
+            None,
         )
         .expect("first bounded cleanup");
         assert_eq!(first.applied_count, 1);
@@ -4218,6 +4221,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
                 retention_override_seconds: Some(0),
             },
             first.next_cursor.as_deref(),
+            None,
         )
         .expect("second bounded cleanup");
         assert_eq!(second.applied_count, 1);

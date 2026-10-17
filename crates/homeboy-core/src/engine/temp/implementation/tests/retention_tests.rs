@@ -196,19 +196,19 @@ fn failed_runs_converge_under_count_and_byte_bounds() {
         let first = failed_run("homeboy-run-bound", 32);
         std::thread::sleep(Duration::from_millis(5));
         let second = failed_run("homeboy-run-bound", 64);
-        let mut count_options = bounded_options(true, Some("homeboy-run-bound"));
-        count_options.run_max_count = 1;
-        count_options.limit = 1;
+        let count_options = {
+            let mut options = bounded_options(true, Some("homeboy-run-bound"));
+            options.run_max_count = 1;
+            options.limit = 1;
+            options
+        };
 
-        let first_page = cleanup_runtime_tmp_bounded(count_options).expect("first count page");
-        assert_eq!(first_page.totals.inspected_count, 1);
-        assert_eq!(first_page.removed_count, 0);
-        assert!(first_page.has_more);
-        let cursor = first_page.next_cursor.expect("next cursor");
-        count_options.cursor = Some(&cursor);
-        let count_output = cleanup_runtime_tmp_bounded(count_options).expect("second count page");
+        // `limit` bounds candidates, not the retained run walked past to
+        // reach them: one pass keeps the newest run and evicts the older one.
+        let count_output = cleanup_runtime_tmp_bounded(count_options).expect("count pass");
+        assert_eq!(count_output.totals.inspected_count, 2);
         assert_eq!(count_output.removed_count, 1);
-        assert!(first.exists() ^ second.exists());
+        assert!(!first.exists() && second.exists());
 
         let mut byte_options = bounded_options(true, Some("homeboy-run-bound"));
         byte_options.run_max_bytes = 0;
@@ -983,5 +983,88 @@ fn cleanup_reclaims_fallback_owners_and_spares_live_invocation_dirs() {
         assert!(!fallback_owner.exists());
 
         run_dir.cleanup();
+    });
+}
+
+/// A constant stream of fresh failed runs must not hide the old reclaimable
+/// ones behind it. The managed walk is newest-first (count retention keeps the
+/// newest runs), so with more fresh retained runs than one page, a pass that
+/// only inspects its first page never reaches the age-expired entries at the
+/// tail. Live: 20 newest rows, all `skip`, `planned_count: 0`, while 6,890
+/// entries were idle for days and 290 GB was reclaimable.
+#[test]
+fn bounded_pass_reaches_old_eligible_runs_behind_fresh_retained_page() {
+    with_isolated_home(|_| {
+        let runtime_tmp = owned_runtime_tmp_root();
+        env::set_var(runtime_tmpdir_env(), runtime_tmp.path());
+        let stale_time = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        let mut old = Vec::new();
+        for _ in 0..2 {
+            let path = failed_run("homeboy-run-backlog", 64);
+            let mut owner = read_run_owner(&path).expect("owner");
+            owner.created_at = stale_time.clone();
+            owner.completed_at = Some(stale_time.clone());
+            write_run_owner(&path, &owner).expect("age owner");
+            old.push(path);
+        }
+        // Allocated later, so they sort ahead of the old runs.
+        let mut fresh = Vec::new();
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(2));
+            fresh.push(failed_run("homeboy-run-backlog", 64));
+        }
+
+        // Exactly how the aggregate dry run calls it: no cursor, a page
+        // smaller than the fresh retained set.
+        let mut options = bounded_options(false, None);
+        options.limit = 2;
+        let planned = cleanup_runtime_tmp_bounded(options).expect("dry run");
+        for path in &old {
+            assert!(
+                planned
+                    .rows
+                    .iter()
+                    .any(|row| row.path == path.display().to_string() && row.action == "remove"),
+                "old eligible run was not planned by a bounded pass: {} (rows: {:?})",
+                path.display(),
+                planned
+                    .rows
+                    .iter()
+                    .map(|row| (&row.name, &row.action, &row.reason))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(planned.planned_count, 2);
+
+        // A smaller candidate budget pages through the backlog by cursor; the
+        // resumed page carries the retained accounting and plans the rest.
+        let mut paged = options;
+        paged.limit = 1;
+        let first_page = cleanup_runtime_tmp_bounded(paged).expect("first page");
+        assert_eq!(first_page.planned_count, 1);
+        assert!(first_page.has_more);
+        let cursor = first_page.next_cursor.clone().expect("cursor");
+        paged.cursor = Some(&cursor);
+        let second_page = cleanup_runtime_tmp_bounded(paged).expect("second page");
+        assert_eq!(second_page.planned_count, 1);
+        let planned_names = first_page
+            .rows
+            .iter()
+            .chain(&second_page.rows)
+            .filter(|row| row.action == "remove")
+            .map(|row| row.path.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            planned_names,
+            old.iter()
+                .map(|path| path.display().to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+
+        options.apply = true;
+        let applied = cleanup_runtime_tmp_bounded(options).expect("apply");
+        assert_eq!(applied.removed_count, 2);
+        assert!(old.iter().all(|path| !path.exists()));
+        assert!(fresh.iter().all(|path| path.exists()));
     });
 }

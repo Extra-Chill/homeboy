@@ -553,25 +553,32 @@ mod tests {
         let runtime = tempfile::tempdir_in("/tmp").unwrap();
         let env_name = crate::product_identity::PRODUCT_IDENTITY.env_var("RUNTIME_TMPDIR");
         std::env::set_var(&env_name, runtime.path());
-        let stale = runtime.path().join("stale-ownerless");
-        fs::create_dir(&stale).unwrap();
-        fs::write(stale.join("payload"), b"stale payload").unwrap();
-        fs::File::open(&stale)
-            .unwrap()
-            .set_modified(SystemTime::now() - Duration::from_secs(1))
-            .unwrap();
+        let stale = ["stale-ownerless-a", "stale-ownerless-b"].map(|name| {
+            let path = runtime.path().join(name);
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("payload"), b"stale payload").unwrap();
+            fs::File::open(&path)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(1))
+                .unwrap();
+            path
+        });
         let live = crate::engine::temp::RuntimeTempOwner::allocate("live", "test").unwrap();
         fs::write(live.path().join("payload"), b"live payload").unwrap();
         let mut config = enabled_retention();
         config.runtime_tmp_days = 0;
         config.limit = 1;
 
+        // `limit` bounds reclaim candidates: the live owner is walked past and
+        // protected, and the pass still reaches one stale root behind it.
         let first =
             run_automatic_runtime_temp_retention_in(&config, open(&db), SystemTime::now(), None)
                 .unwrap();
         let first_runtime = first.runtime_tmp.unwrap();
         assert!(live.path().exists());
         assert!(first_runtime.protected_bytes >= b"live payload".len() as u64);
+        assert!(first_runtime.reclaimed_bytes >= b"stale payload".len() as u64);
+        assert_eq!(stale.iter().filter(|path| path.exists()).count(), 1);
         assert!(first_runtime.continuation_required);
         assert_eq!(first_runtime.root, runtime.path().display().to_string());
         assert_eq!(
@@ -579,11 +586,12 @@ mod tests {
             first_runtime.next_cursor
         );
 
+        // The persisted cursor resumes the walk and reclaims the remainder.
         let second =
             run_automatic_runtime_temp_retention_in(&config, open(&db), SystemTime::now(), None)
                 .unwrap();
         let second_runtime = second.runtime_tmp.unwrap();
-        assert!(!stale.exists());
+        assert!(stale.iter().all(|path| !path.exists()));
         assert!(live.path().exists());
         assert!(second_runtime.reclaimable_bytes >= b"stale payload".len() as u64);
         assert!(second_runtime.reclaimed_bytes >= b"stale payload".len() as u64);

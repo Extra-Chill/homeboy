@@ -118,7 +118,8 @@ pub struct SelfCleanupRuntimeTmpArgs {
     /// Only include entries whose directory/file name starts with this prefix.
     #[arg(long)]
     pub prefix: Option<String>,
-    /// Maximum temp entries to inspect in one invocation.
+    /// Maximum reclaim candidates to plan in one invocation; retained entries
+    /// walked past to reach them do not count.
     /// Defaults to the configured `retention.limit`.
     #[arg(long)]
     pub limit: Option<i64>,
