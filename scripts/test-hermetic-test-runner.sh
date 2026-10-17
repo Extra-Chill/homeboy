@@ -139,7 +139,7 @@ fi
 # otherwise they accumulate as zombies for the whole suite and a runner
 # process-count guard counts every one of them.
 if [ "$(uname -s)" = Linux ]; then
-    "$runner" sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do sh -c "(sleep 0.1) &"; done; sleep 3; exit 5' &
+    HOMEBOY_TEST_TIMEOUT_SECONDS=30 "$runner" sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do sh -c "(sleep 0.1) &"; done; sleep 3; exit 5' &
     runner_pid=$!
     sleep 1.5
     zombies="$(/bin/ps -eo ppid=,stat= | awk -v parent="$runner_pid" '$1 == parent && $2 ~ /Z/' | wc -l)"
@@ -153,3 +153,12 @@ if [ "$(uname -s)" = Linux ]; then
         exit 1
     fi
 fi
+
+# Fixture git must not detach auto maintenance, including for commands whose
+# GIT_CONFIG_* layer Homeboy's transport replaces, and the real system config
+# stays included.
+HOMEBOY_TEST_TIMEOUT_SECONDS=30 GIT_CONFIG_COUNT=0 "$runner" sh -c '
+    [ "$(git config --get maintenance.autoDetach)" = false ] &&
+    [ "$(git config --get gc.autoDetach)" = false ] &&
+    git config --system --list --show-origin >/dev/null
+' || { echo "runner did not configure foreground git maintenance" >&2; exit 1; }
