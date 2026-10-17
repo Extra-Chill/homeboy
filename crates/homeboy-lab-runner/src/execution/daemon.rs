@@ -1893,8 +1893,9 @@ where
                         DAEMON_POLL_TRANSIENT_GRACE.as_secs()
                     )));
                 }
-                // A reattach that cannot reach the daemon yet is the same
-                // transport loss; keep retrying inside the grace window rather
+                // A reattach that cannot reach the daemon yet, or that waited
+                // out a contended controller lock, leaves the transport loss
+                // unresolved; keep retrying inside the grace window rather
                 // than letting the first failed reconnect end it.
                 match reload_endpoint() {
                     Ok(Some(refreshed_endpoint)) if refreshed_endpoint != endpoint => {
@@ -1902,7 +1903,7 @@ where
                         continue;
                     }
                     Ok(_) => {}
-                    Err(reload_err) if daemon_poll_transport_was_lost(&reload_err) => {}
+                    Err(reload_err) if reattach_failure_is_transient(&reload_err) => {}
                     Err(reload_err) => return Err(reload_err),
                 }
                 std::thread::sleep(DAEMON_POLL_RETRY_BACKOFF);
@@ -1918,6 +1919,14 @@ pub(super) fn daemon_poll_transport_was_lost(error: &Error) -> bool {
             .and_then(Value::as_str),
         Some("connect" | "timeout" | "body_decode")
     )
+}
+
+/// A failed job-owner reattach is transient when it lost the daemon transport
+/// or its producer marked it retryable (for example a controller generation
+/// lock contended by concurrent Cooks). Authoritative refusals, such as a
+/// daemon identity mismatch, are not retryable and end the poll.
+fn reattach_failure_is_transient(error: &Error) -> bool {
+    daemon_poll_transport_was_lost(error) || error.retryable == Some(true)
 }
 
 fn refreshed_daemon_endpoint(
