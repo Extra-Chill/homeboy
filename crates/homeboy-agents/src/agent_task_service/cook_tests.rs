@@ -11939,12 +11939,6 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
             .expect("persist incomplete recipe");
         materialize_initial_cook_attempt_with_stores(&store, &lifecycle_store, &options)
             .expect("materialize initial attempt");
-        lifecycle_store
-            .mutate_record(&options.identity.initial_run_id, |record| {
-                record.state = AgentTaskRunState::Succeeded;
-                true
-            })
-            .expect("make the continuation a terminal service replay");
 
         let capture_counter = Arc::new(WorkspaceBaseCaptureHook {
             workspace: repository.clone(),
@@ -11954,34 +11948,27 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
         *WORKSPACE_BASE_CAPTURE_HOOK
             .lock()
             .expect("install workspace base capture counter") = Some(Arc::clone(&capture_counter));
-        let winner_options = options.clone();
-        let loser_options = options.clone();
+        // Two controllers reach the base capture together. Only the capture is
+        // concurrent: whole spines of one Cook cannot run side by side, because
+        // `run_cook_with_runtime` admits a single driver per Cook (#15566).
+        let mut winner_options = options.clone();
+        let mut loser_options = options.clone();
         let barrier = Arc::new(Barrier::new(2));
         let (winner, loser) = std::thread::scope(|scope| {
             let winner = scope.spawn(|| {
                 barrier.wait();
-                let mut side_effects = CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
-                run_cook_spine(
+                pin_and_persist_initial_cook_workspace_base(
                     &store,
                     &lifecycle_store,
-                    winner_options.clone(),
-                    Arc::new(UnusedExecutor),
-                    &mut side_effects,
-                    None,
-                    CookMode::Resume,
+                    &mut winner_options,
                 )
             });
             let loser = scope.spawn(|| {
                 barrier.wait();
-                let mut side_effects = CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})));
-                run_cook_spine(
+                pin_and_persist_initial_cook_workspace_base(
                     &store,
                     &lifecycle_store,
-                    loser_options.clone(),
-                    Arc::new(UnusedExecutor),
-                    &mut side_effects,
-                    None,
-                    CookMode::Resume,
+                    &mut loser_options,
                 )
             });
             (
@@ -11989,8 +11976,15 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
                 loser.join().expect("capture peer joins"),
             )
         });
-        winner.expect("first concurrent continuation reloads captured base");
-        loser.expect("second concurrent continuation reloads captured base");
+        winner.expect("first concurrent controller captures the missing base");
+        loser.expect("second concurrent controller reuses the captured base");
+        for captured in [&winner_options, &loser_options] {
+            assert_eq!(
+                captured.workspace.task_base_sha.as_deref(),
+                Some(expected_sha.as_str()),
+                "each controller proceeds from the one captured base"
+            );
+        }
         *WORKSPACE_BASE_CAPTURE_HOOK
             .lock()
             .expect("remove workspace base capture counter") = None;

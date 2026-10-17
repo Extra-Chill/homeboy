@@ -10067,7 +10067,7 @@ fn cook_owns_attempt_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
 ) -> Result<bool> {
-    let recipe_store = CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    let recipe_store = CookRecipeStore::for_lifecycle_store(lifecycle_store);
     let recipe = match recipe_store.load_recipe(&options.identity.cook_id) {
         Ok(recipe) => recipe,
         Err(_) => return Ok(false),
