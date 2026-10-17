@@ -1586,9 +1586,9 @@ impl AgentTaskLifecycleStore {
     /// event is appended in that transaction. A stale `expected_revision`
     /// returns [`AgentTaskTransitionError::Conflict`] and writes nothing.
     ///
-    /// Which source states a transition may leave is the caller's decision:
-    /// this API guarantees only that the decision was made from the record it
-    /// replaces.
+    /// The edge from the stored state to the committed one must be legal in
+    /// [`AgentTaskRunState::can_transition_to`]; an illegal edge is refused
+    /// with `agent_task_illegal_transition` and writes nothing.
     pub fn transition(
         &self,
         run_id: &str,
@@ -2274,15 +2274,34 @@ pub(super) fn write_record_guarded(
         .map(|run| run.metadata_json)
         .unwrap_or_else(|| json!({}));
     let stored_revision = stored_run_revision(&existing_metadata);
+    let stored_state = existing_metadata
+        .pointer("/agent_task_run/state")
+        .cloned()
+        .and_then(|state| serde_json::from_value::<AgentTaskRunState>(state).ok());
     if let Some(guard) = guard {
         if guard.expected_revision != stored_revision {
             return Ok(GuardedRecordWrite::Conflict {
                 actual_revision: stored_revision,
-                actual_state: existing_metadata
-                    .pointer("/agent_task_run/state")
-                    .cloned()
-                    .and_then(|state| serde_json::from_value(state).ok()),
+                actual_state: stored_state,
             });
+        }
+    }
+    // The run state graph is enforced here, against the record the fenced
+    // write was decided from, so no prepared record or mutation closure can
+    // commit an edge it does not name (#15718). Only a test fixture writes
+    // unfenced, and it seeds a state rather than taking an edge.
+    if let (Some(guard), Some(from)) = (guard, stored_state) {
+        if !from.can_transition_to(record.state) {
+            return Err(super::terminal_transition::illegal_state_transition(
+                &record.run_id,
+                from,
+                record.state,
+                guard.transition.unwrap_or("annotate"),
+                &format!(
+                    "agent-task run `{}` cannot move from {from:?} to {:?}; nothing was written",
+                    record.run_id, record.state
+                ),
+            ));
         }
     }
     let mut record = record.clone();

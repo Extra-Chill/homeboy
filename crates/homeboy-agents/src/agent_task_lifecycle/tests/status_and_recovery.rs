@@ -2766,16 +2766,17 @@ fn set_run_state_stamps_finished_at_for_candidate_recoverable_terminal_runs() {
     })
     .expect("rewrite record");
 
-    // And a non-terminal state must NOT stamp finished_at.
-    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
-        record.lifecycle.execution.finished_at = None;
-        set_run_state(record, AgentTaskRunState::Running);
-        assert!(
-            record.lifecycle.execution.finished_at.is_none(),
-            "a non-terminal Running run must not stamp finished_at"
-        );
-    })
-    .expect("rewrite record running");
+    // And a non-terminal state must NOT stamp finished_at. A finished run
+    // cannot be committed back to `Running`, so this half stays in memory.
+    let mut record = lifecycle_store
+        .read_record(&record.run_id)
+        .expect("read record");
+    record.lifecycle.execution.finished_at = None;
+    set_run_state(&mut record, AgentTaskRunState::Running);
+    assert!(
+        record.lifecycle.execution.finished_at.is_none(),
+        "a non-terminal Running run must not stamp finished_at"
+    );
 }
 
 /// A runner-continuation provider that counts every runner interaction so a
