@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.30] - 2026-10-17
+
+### Fixed
+- release declared gate workspaces and resolve their run authority for prune
+
 ## [0.428.29] - 2026-10-17
 
 ### Fixed
