@@ -587,12 +587,30 @@ jobs:
           release-skip-github-release: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
+      # Two main pushes minutes apart can both pass `check` with the same
+      # predicted version. The mutation lock serializes `prepare`, so the first
+      # run tags it and the second finds the tag already at HEAD
+      # (`released=false`, `release-already-at-head`). That tag belongs to the
+      # first run, which builds and publishes it. If the second run published
+      # too, it would rebuild the tag and collide with the first run's
+      # non-reproducible `dist-manifest.json`. So the second run stands down.
+      # A tag that was left unpublished is still handled by the recovery path
+      # in `check`.
       - name: Mark prepared release for downstream publish
         id: prepared
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true' && steps.release.outputs['release-tag'] != ''
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs['release-tag'] }}
+          RELEASED: ${{ steps.release.outputs.released }}
+          SKIPPED_REASON: ${{ steps.release.outputs['skipped-reason'] }}
         run: |
+          if [ "${RELEASED}" != "true" ] && [ "${SKIPPED_REASON}" = "release-already-at-head" ]; then
+            echo "tag-owned-elsewhere=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${RELEASE_TAG} was already tagged at HEAD by an earlier run, which owns its publication; this run stands down"
+            exit 0
+          fi
           echo "prepared=true" >> "$GITHUB_OUTPUT"
-          echo "::notice::Prepared ${{ steps.release.outputs['release-tag'] }}; downstream jobs will publish it in this run"
+          echo "::notice::Prepared ${RELEASE_TAG}; downstream jobs will publish it in this run"
 
       - name: Use existing release tag
         id: recovery
@@ -618,6 +636,11 @@ jobs:
           PREPARED="${{ steps.recovery.outputs.prepared || steps.prepared.outputs.prepared }}"
           RELEASED="${{ steps.recovery.outputs.released || steps.release.outputs.released }}"
           RECOVERY_RELEASE="${{ needs.check.outputs.recovery-release }}"
+
+          if [ "${{ steps.prepared.outputs['tag-owned-elsewhere'] }}" = "true" ]; then
+            echo "prepared=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           if [ -z "${RELEASE_VERSION}" ] || [ -z "${RELEASE_TAG}" ] || [ "${PREPARED}" != "true" ]; then
             echo "::error::Release check selected work, but Prepare Release produced an incomplete handoff (release-version='${RELEASE_VERSION:-<empty>}', release-tag='${RELEASE_TAG:-<empty>}', prepared='${PREPARED:-<empty>}'). Refusing to skip artifact and publication jobs."
