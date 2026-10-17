@@ -195,18 +195,26 @@ pub fn begin_automatic_retention_pass(
     Ok(Some(pass))
 }
 
-pub fn run_automatic_cargo_retention() -> Result<AutomaticRetentionOutput> {
+/// Run one bounded shared cargo-target retention pass that stops at
+/// `deadline`. The caller owns the budget: a phase of a larger pass passes its
+/// share, a standalone admission passes its own.
+pub fn run_automatic_cargo_retention(
+    deadline: Option<SystemTime>,
+) -> Result<AutomaticRetentionOutput> {
     let retention = crate::defaults::load_config().retention;
     let store = ObservationStore::open_initialized_for_lifecycle()?;
-    run_automatic_cargo_retention_in(&retention, store, None, SystemTime::now())
+    run_automatic_cargo_retention_in(&retention, store, None, SystemTime::now(), deadline)
 }
 
-/// Run the runtime-temp owner before allocating more temporary storage when its
-/// filesystem is under configured capacity pressure.
-pub fn run_automatic_runtime_temp_retention() -> Result<AutomaticRetentionOutput> {
+/// Run the runtime-temp owner, stopping at an entry boundary at `deadline`.
+/// Also run before allocating more temporary storage when its filesystem is
+/// under configured capacity pressure.
+pub fn run_automatic_runtime_temp_retention(
+    deadline: Option<SystemTime>,
+) -> Result<AutomaticRetentionOutput> {
     let retention = crate::defaults::load_config().retention;
     let store = ObservationStore::open_initialized_for_lifecycle()?;
-    run_automatic_runtime_temp_retention_in(&retention, store, SystemTime::now())
+    run_automatic_runtime_temp_retention_in(&retention, store, SystemTime::now(), deadline)
 }
 
 fn run_automatic_cargo_retention_in(
@@ -214,6 +222,7 @@ fn run_automatic_cargo_retention_in(
     store: ObservationStore,
     cargo_root: Option<PathBuf>,
     now: SystemTime,
+    deadline: Option<SystemTime>,
 ) -> Result<AutomaticRetentionOutput> {
     let kind = AutomaticRetentionKind::CargoTarget;
     let base = output_base(retention, kind);
@@ -230,9 +239,7 @@ fn run_automatic_cargo_retention_in(
         limit: usize::try_from(retention.limit).unwrap_or(0),
         cursor: pass.cursor().map(str::to_string),
         now,
-        deadline: now.checked_add(Duration::from_secs(
-            retention.automatic_retention_max_run_seconds,
-        )),
+        deadline,
     })?;
     let status = pass_status(
         cargo_targets.applied_count == 0,
@@ -250,13 +257,14 @@ fn run_automatic_runtime_temp_retention_in(
     retention: &RetentionConfig,
     store: ObservationStore,
     now: SystemTime,
+    deadline: Option<SystemTime>,
 ) -> Result<AutomaticRetentionOutput> {
     let kind = AutomaticRetentionKind::RuntimeTemp;
     let base = output_base(retention, kind);
     let Some(pass) = begin_automatic_retention_pass(store, kind, now)? else {
         return Ok(base);
     };
-    let runtime_tmp = cleanup_runtime_tmp_retention(retention, pass.cursor())?;
+    let runtime_tmp = cleanup_runtime_tmp_retention(retention, pass.cursor(), deadline)?;
     let status = pass_status(
         runtime_tmp.reclaimed_bytes == 0,
         runtime_tmp.continuation_required,
@@ -280,6 +288,7 @@ fn pass_status(no_progress: bool, continuation_required: bool) -> &'static str {
 fn cleanup_runtime_tmp_retention(
     retention: &RetentionConfig,
     cursor: Option<&str>,
+    deadline: Option<SystemTime>,
 ) -> Result<RuntimeTempRetentionOutput> {
     let cleanup = cleanup_runtime_tmp_bounded(RuntimeTempCleanupOptions {
         apply: true,
@@ -290,7 +299,12 @@ fn cleanup_runtime_tmp_retention(
         run_max_bytes: retention.runtime_run_max_bytes,
         run_max_count: retention.runtime_run_max_count,
         cursor,
-        deadline: None,
+        deadline: deadline.map(|deadline| {
+            std::time::Instant::now()
+                + deadline
+                    .duration_since(SystemTime::now())
+                    .unwrap_or(Duration::ZERO)
+        }),
     })?;
     let managed_bytes = cleanup
         .rows
@@ -465,6 +479,7 @@ mod tests {
             open(&db),
             Some(cargo.path().to_path_buf()),
             now,
+            None,
         )
         .unwrap();
         assert_eq!(first_pass.status, "partial");
@@ -484,6 +499,7 @@ mod tests {
             open(&db),
             Some(cargo.path().to_path_buf()),
             now,
+            None,
         )
         .unwrap();
         assert_eq!(second_pass.status, "completed");
@@ -510,6 +526,7 @@ mod tests {
             open(&db),
             Some(cargo.path().to_path_buf()),
             now,
+            None,
         )
         .unwrap();
         assert_eq!(output.status, "no_progress");
@@ -550,7 +567,8 @@ mod tests {
         config.limit = 1;
 
         let first =
-            run_automatic_runtime_temp_retention_in(&config, open(&db), SystemTime::now()).unwrap();
+            run_automatic_runtime_temp_retention_in(&config, open(&db), SystemTime::now(), None)
+                .unwrap();
         let first_runtime = first.runtime_tmp.unwrap();
         assert!(live.path().exists());
         assert!(first_runtime.protected_bytes >= b"live payload".len() as u64);
@@ -562,7 +580,8 @@ mod tests {
         );
 
         let second =
-            run_automatic_runtime_temp_retention_in(&config, open(&db), SystemTime::now()).unwrap();
+            run_automatic_runtime_temp_retention_in(&config, open(&db), SystemTime::now(), None)
+                .unwrap();
         let second_runtime = second.runtime_tmp.unwrap();
         assert!(!stale.exists());
         assert!(live.path().exists());
@@ -592,6 +611,7 @@ mod tests {
             open(&db),
             Some(cargo.path().to_path_buf()),
             SystemTime::now(),
+            None,
         )
         .unwrap();
 

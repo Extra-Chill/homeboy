@@ -324,6 +324,7 @@ pub fn admit_reconstructable_artifact_work_in_root(
             data_root,
             &repository_roots,
             &retention,
+            automatic_retention_deadline(&retention),
         )?;
     }
 
@@ -353,7 +354,18 @@ pub fn try_run_automatic_artifact_retention(
     roots: Vec<PathBuf>,
 ) -> Result<Option<ArtifactCleanupOutput>> {
     let data_root = homeboy_paths::homeboy_data()?;
-    try_run_automatic_artifact_retention_in_root(&data_root, roots)
+    let deadline = automatic_retention_deadline(&crate::defaults::load_config().retention);
+    try_run_automatic_artifact_retention_in_root(&data_root, roots, deadline)
+}
+
+/// Deadline for one standalone automatic pass that is not a phase of a larger
+/// pass: the configured automatic budget, starting now.
+pub(crate) fn automatic_retention_deadline(
+    retention: &crate::defaults::RetentionConfig,
+) -> Option<SystemTime> {
+    SystemTime::now().checked_add(Duration::from_secs(
+        retention.automatic_retention_max_run_seconds,
+    ))
 }
 
 /// [`try_run_automatic_artifact_retention`] against an explicitly injected data
@@ -364,18 +376,25 @@ pub fn try_run_automatic_artifact_retention(
 /// Resolving the lock's root ambiently meant two passes over the *same*
 /// repository roots could take locks in two different installations and fail to
 /// exclude each other.
+///
+/// `deadline` is the caller's share of its own pass budget. The pass never
+/// grants itself a fresh budget: as a phase of `cleanup automatic-retention`
+/// it is one slot in that pass's rotation, and taking a full budget of its own
+/// is what left every later category with 0 ms on every pass.
 pub fn try_run_automatic_artifact_retention_in_root(
     data_root: &Path,
     roots: Vec<PathBuf>,
+    deadline: Option<SystemTime>,
 ) -> Result<Option<ArtifactCleanupOutput>> {
     let retention = crate::defaults::load_config().retention;
-    try_run_automatic_artifact_retention_with_config(data_root, &roots, &retention)
+    try_run_automatic_artifact_retention_with_config(data_root, &roots, &retention, deadline)
 }
 
 fn try_run_automatic_artifact_retention_with_config(
     data: &Path,
     roots: &[PathBuf],
     retention: &crate::defaults::RetentionConfig,
+    deadline: Option<SystemTime>,
 ) -> Result<Option<ArtifactCleanupOutput>> {
     let Ok(_admission) = AUTOMATIC_ARTIFACT_RETENTION_ADMISSION
         .get_or_init(|| Mutex::new(()))
@@ -396,7 +415,7 @@ fn try_run_automatic_artifact_retention_with_config(
     let Some(_cross_process_owner) = FsIndexLock::try_acquire_in(data, lock)? else {
         return Ok(None);
     };
-    run_automatic_artifact_retention_in(roots, retention).map(Some)
+    run_automatic_artifact_retention_in(roots, retention, deadline).map(Some)
 }
 
 fn existing_unique_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -510,13 +529,17 @@ fn reconstructable_admission_error(
 fn run_automatic_artifact_retention_in(
     roots: &[PathBuf],
     retention: &crate::defaults::RetentionConfig,
+    deadline: Option<SystemTime>,
 ) -> Result<ArtifactCleanupOutput> {
     // Resolve the shared cleanup policy before acquiring a cleanup run or
     // inspecting paths. Invalid persisted policy must never reach deletion.
     let policy = cleanup_policy_from_retention(retention, CleanupPolicyOverrides::default())?;
-    let deadline = Instant::now().checked_add(Duration::from_secs(
-        retention.automatic_retention_max_run_seconds,
-    ));
+    let deadline = deadline.map(|deadline| {
+        Instant::now()
+            + deadline
+                .duration_since(SystemTime::now())
+                .unwrap_or(Duration::ZERO)
+    });
     let options = ArtifactCleanupOptions {
         apply: true,
         scope: ArtifactCleanupScope::RepositoryWorktrees,
@@ -3637,6 +3660,7 @@ mod tests {
             let output = run_automatic_artifact_retention_in(
                 &[small.path().to_path_buf(), large.path().to_path_buf()],
                 &retention,
+                automatic_retention_deadline(&retention),
             )
             .expect("automatic retention");
 
@@ -3667,9 +3691,12 @@ mod tests {
             })
             .expect("save retention");
 
-            let output =
-                run_automatic_artifact_retention_in(&[repo.path().to_path_buf()], &retention)
-                    .expect("automatic retention");
+            let output = run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                automatic_retention_deadline(&retention),
+            )
+            .expect("automatic retention");
 
             assert_eq!(output.applied_count, 1);
             assert!(!repo.path().join(".cargo-target").exists());
@@ -3719,9 +3746,12 @@ mod tests {
                 reconstructable_artifact_reserve_bytes: u64::MAX,
                 ..Default::default()
             };
-            let output =
-                run_automatic_artifact_retention_in(&[repo.path().to_path_buf()], &retention)
-                    .expect("pressure retention");
+            let output = run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                automatic_retention_deadline(&retention),
+            )
+            .expect("pressure retention");
 
             assert_eq!(output.applied_count, 1);
             assert!(!repo.path().join("target").exists());
@@ -3775,9 +3805,12 @@ mod tests {
                 ..Default::default()
             };
 
-            let output =
-                run_automatic_artifact_retention_in(&[repo.path().to_path_buf()], &retention)
-                    .expect("expired retention remains a bounded partial pass");
+            let output = run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                automatic_retention_deadline(&retention),
+            )
+            .expect("expired retention remains a bounded partial pass");
 
             assert!(!output.scan_complete);
             assert_eq!(output.inspected_count, 0);
@@ -4021,10 +4054,12 @@ mod tests {
                 ..Default::default()
             };
 
-            assert!(
-                run_automatic_artifact_retention_in(&[repo.path().to_path_buf()], &retention,)
-                    .is_err()
-            );
+            assert!(run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                automatic_retention_deadline(&retention),
+            )
+            .is_err());
             assert!(repo.path().join("target").exists());
         });
     }
@@ -4040,9 +4075,12 @@ mod tests {
                 ..Default::default()
             };
 
-            let output =
-                run_automatic_artifact_retention_in(&[repo.path().to_path_buf()], &retention)
-                    .expect("automatic retention");
+            let output = run_automatic_artifact_retention_in(
+                &[repo.path().to_path_buf()],
+                &retention,
+                automatic_retention_deadline(&retention),
+            )
+            .expect("automatic retention");
 
             assert_eq!(output.applied_count, 0);
             assert!(repo.path().join("target").exists());
@@ -4153,6 +4191,7 @@ mod tests {
                 &homeboy_paths::homeboy_data().expect("data root"),
                 &[repo.path().to_path_buf()],
                 &crate::defaults::RetentionConfig::default(),
+                None,
             )
             .expect("busy admission is not an error");
 
