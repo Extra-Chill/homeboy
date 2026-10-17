@@ -243,12 +243,18 @@ pub enum AgentTaskPromotionStatus {
     /// on the candidate: the patch is promoted and durable, but unverified.
     /// Distinct from `GateFailed` so a run whose gates could not execute is
     /// never classified as rejected (#14731).
+    ///
+    /// Written as `gates_deferred`, the one spelling the Cook status and the
+    /// delivery blocker share (#16049); promotions recorded earlier spelled it
+    /// `gate_deferred`.
+    #[serde(rename = "gates_deferred", alias = "gate_deferred")]
     GateDeferred,
     /// A provider produced no patch, but the pinned candidate workspace passed
     /// every declared deterministic verification gate.
     VerifiedNoChanges,
     /// A provider produced no patch and the pinned candidate workspace failed
     /// deterministic verification. The candidate remains available for repair.
+    #[serde(alias = "no_op_gate_failed")]
     NoChangesGateFailed,
     NoChanges,
 }

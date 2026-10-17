@@ -40,6 +40,7 @@ mod cancellation;
 mod control_plane_identities;
 pub mod controller_pin_reference_provider;
 mod conversion;
+mod cook_delivery_writer;
 mod cook_workspace_restore;
 mod durable_progress;
 #[cfg(any(test, feature = "test-support"))]
@@ -119,6 +120,7 @@ pub use workspace_authority::*;
 pub use workspace_claims::*;
 
 pub(crate) use conversion::*;
+pub(crate) use cook_delivery_writer::{record_cook_delivery, CookDeliveryCommit};
 pub(crate) use lifecycle_record_ops::*;
 pub(crate) use runner_continuation::with_runner_continuation;
 

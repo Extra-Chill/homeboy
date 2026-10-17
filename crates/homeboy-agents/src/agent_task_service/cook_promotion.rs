@@ -6963,10 +6963,13 @@ pub(crate) fn cook_failure_context_with_stores(
         .as_ref()
         .filter(|claim| claim.state == agent_task_lifecycle::ClaimState::Failed)
         .and_then(|claim| claim.result.clone());
-    let promotion_gate_failed = promotion
-        .and_then(|promotion| promotion.get("status"))
-        .and_then(Value::as_str)
-        .is_some_and(|status| matches!(status, "gate_failed" | "no_op_gate_failed"));
+    let promotion_gate_failed = record
+        .as_ref()
+        .and_then(|record| super::CookDelivery::from_run_metadata(&record.metadata))
+        .is_some_and(|delivery| {
+            delivery.blocker_code() == Some(super::CookDeliveryBlockerCode::GateFailed)
+        });
+    let cook_status = CookStatus::from_status(status);
     let progress_phase = record
         .as_ref()
         .and_then(|record| record.metadata.pointer("/cook_progress/phase"))
@@ -7049,10 +7052,8 @@ pub(crate) fn cook_failure_context_with_stores(
             Some(diagnostic.clone()),
         )
     } else if promotion_gate_failed
-        || matches!(
-            status,
-            "gate_failed" | "no_op_gate_failed" | "deterministic_gate_failure"
-        )
+        || cook_status.is_gate_failure()
+        || status == "deterministic_gate_failure"
     {
         let diagnostic = promotion
             .and_then(|promotion| gate_failure_diagnostic(promotion, record_run_id))
@@ -7183,9 +7184,7 @@ pub(crate) fn cook_failure_context_with_stores(
                 record
                     .as_ref()
                     .and_then(|record| record.metadata.get("cook_continuation_admission")),
-                retry_admitted
-                    || (matches!(status, "gate_failed" | "no_op_gate_failed")
-                        && continuation_pending),
+                retry_admitted || (cook_status.is_gate_failure() && continuation_pending),
             );
             cook_recovery_actions_with_prefix(
                 status,
@@ -7735,17 +7734,17 @@ fn cook_recovery_actions_with_prefix(
         };
     }
 
-    let continuation_eligible = match status {
-        "completed"
-        | "review_ready"
-        | "green_no_finalize"
-        | "intentional_no_change"
-        | "no_candidate"
-        | "cancelled"
-        | "execution_budget_exhausted"
-        | "retries_exhausted"
-        | "pre_execution_failure" => false,
-        "gate_failed" | "no_op_gate_failed" => retry_admitted,
+    let continuation_eligible = match CookStatus::from_status(status) {
+        CookStatus::Completed
+        | CookStatus::ReviewReady
+        | CookStatus::GreenNoFinalize
+        | CookStatus::IntentionalNoChange
+        | CookStatus::NoCandidate
+        | CookStatus::Cancelled
+        | CookStatus::ExecutionBudgetExhausted
+        | CookStatus::RetriesExhausted
+        | CookStatus::PreExecutionFailure => false,
+        status if status.is_gate_failure() => retry_admitted,
         _ => true,
     };
     let prefix = prefix.unwrap_or_else(|| super::cook_recovery_command_prefix(run_id));

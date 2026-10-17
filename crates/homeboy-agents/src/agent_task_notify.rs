@@ -444,10 +444,13 @@ fn terminal_payload(
             "unverified"
         };
         payload = payload.with_fact("Gates", gate_status);
-    } else if matches!(report.status.as_str(), "gate_failed" | "no_op_gate_failed") {
-        payload = payload.with_fact("Gates", "failed");
-    } else if report.status == "gates_deferred" {
-        payload = payload.with_fact("Gates", "deferred");
+    } else {
+        let status = homeboy_core::cook_status::CookStatus::from_status(&report.status);
+        if status.is_gate_failure() {
+            payload = payload.with_fact("Gates", "failed");
+        } else if status == homeboy_core::cook_status::CookStatus::GatesDeferred {
+            payload = payload.with_fact("Gates", "deferred");
+        }
     }
 
     // The pull request link is the single most useful thing a completed cook

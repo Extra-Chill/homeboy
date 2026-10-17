@@ -18,7 +18,6 @@ use homeboy::agents::agent_task_provider::structured_error::normalized_structure
 use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_task_service::{CookDelivery, CookDeliveryBlockerCode};
 use homeboy::agents::agent_tasks::lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
-use homeboy::agents::agent_tasks::promotion::AgentTaskPromotionStatus;
 use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::agents::agent_tasks::{
@@ -27,6 +26,7 @@ use homeboy::agents::agent_tasks::{
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::error::{ActionSafety, ExecutableAction};
 use homeboy::core::output::{budget_json_values, OutputBudget};
+use homeboy_core::cook_status::CookStatus;
 use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 
 use super::super::CmdResult;
@@ -771,12 +771,8 @@ fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) 
         record.state,
         agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-    ) || matches!(
-        record
-            .metadata
-            .pointer("/latest_promotion/status")
-            .and_then(Value::as_str),
-        Some("gate_failed" | "no_op_gate_failed" | "no_changes_gate_failed")
+    ) || CookDelivery::from_run_metadata(&record.metadata).is_some_and(
+        |delivery| delivery.blocker_code() == Some(CookDeliveryBlockerCode::GateFailed),
     );
     if !recoverable
         || record
@@ -3251,7 +3247,7 @@ fn current_lifecycle_next_actions(record: &AgentTaskRunRecord) -> Vec<CommandNex
         return actions;
     };
     let Some(recovery) =
-        agent_task_service_direct::cook_failure_context(cook_id, Some(run_id), status)
+        agent_task_service_direct::cook_failure_context(cook_id, Some(run_id), status.as_str())
     else {
         return actions;
     };
@@ -5672,18 +5668,10 @@ fn current_lifecycle_diagnostic(record: &AgentTaskRunRecord) -> Option<Collected
 
 /// The Cook failure status the recovery handoff admits for the current
 /// delivery blocker, if any.
-fn current_lifecycle_status(record: &AgentTaskRunRecord) -> Option<&'static str> {
+fn current_lifecycle_status(record: &AgentTaskRunRecord) -> Option<CookStatus> {
     let delivery = CookDelivery::from_run_metadata(&record.metadata)?;
-    match delivery.blocker_code()? {
-        CookDeliveryBlockerCode::GateFailed
-            if delivery.promotion() == Some(AgentTaskPromotionStatus::NoChangesGateFailed) =>
-        {
-            Some("no_op_gate_failed")
-        }
-        CookDeliveryBlockerCode::GateFailed => Some("gate_failed"),
-        CookDeliveryBlockerCode::PublishRefused => Some("finalization_failed"),
-        _ => None,
-    }
+    delivery.blocker.as_ref()?;
+    delivery.lifecycle().cook_status
 }
 
 /// Cancellation is controller-owned lifecycle evidence, even when the runner

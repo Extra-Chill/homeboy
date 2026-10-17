@@ -457,7 +457,12 @@ fn gate_lifecycle_requests_for_promotion(
             }),
         )?);
     }
-    let gate_phase_failed = matches!(status, "gate_failed" | "no_changes_gate_failed");
+    // Typed, so both historical spellings of a no-patch gate failure count.
+    use crate::agent_task_promotion::AgentTaskPromotionStatus as Status;
+    let gate_phase_failed = matches!(
+        serde_json::from_value(Value::String(status.to_string())),
+        Ok(Status::GateFailed | Status::NoChangesGateFailed)
+    );
     requests.push(progress_request(
         &format!("gate\0{}\0{promotion_index}\0terminal", record.run_id),
         if gate_phase_failed {

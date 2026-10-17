@@ -7496,8 +7496,7 @@ pub fn invalidate_cook_finalization_for_dependency_in_store(
     dependency_revision: &str,
     next_command: &str,
 ) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    let record = lifecycle_store.mutate_record(&run_id, |record| {
+    record_cook_delivery(lifecycle_store, run_id, |record| {
         let metadata = record.ensure_metadata_object();
         // Retrying the same invalidation after an interrupted coordinator must
         // preserve the original review evidence and leave its timestamp stable.
@@ -7509,7 +7508,7 @@ pub fn invalidate_cook_finalization_for_dependency_in_store(
                         && checkpoint["dependency_revision"] == dependency_revision
                 })
         {
-            return false;
+            return None;
         }
         let prior = metadata.remove("cook_finalization");
         let original_prior = metadata
@@ -7521,8 +7520,7 @@ pub fn invalidate_cook_finalization_for_dependency_in_store(
             // A terminal child can have no promotion only when it was never a
             // review-ready Cook; retain an inspectable invalidation marker.
             metadata.insert("dependency_rebase".to_string(), json!({ "revision": dependency_revision, "next_command": next_command, "prior_finalization": original_prior }));
-            record.updated_at = Some(now_timestamp());
-            return true;
+            return Some(CookDeliveryCommit::FollowDelivery);
         };
         promotion["status"] = json!("verification_pending");
         promotion["dependency_revision"] = json!(dependency_revision);
@@ -7537,13 +7535,8 @@ pub fn invalidate_cook_finalization_for_dependency_in_store(
                 "prior_finalization": original_prior,
             }),
         );
-        record.updated_at = Some(now_timestamp());
-        true
-    })?;
-    match record {
-        Some(record) => Ok(record),
-        None => lifecycle_store.read_record(&run_id),
-    }
+        Some(CookDeliveryCommit::FollowDelivery)
+    })
 }
 
 pub fn cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
@@ -8136,27 +8129,24 @@ fn attempt_preserves_candidate_or_gate(
     let Ok(record) = lifecycle_store.read_record_bounded(run_id) else {
         return false;
     };
-    let Some(promotion) = record.metadata.get("latest_promotion") else {
+    use crate::agent_task_promotion::AgentTaskPromotionStatus as Status;
+    let Some(delivery) =
+        crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
+    else {
         return record.latest_executor_evidence.is_some();
     };
-    let status = promotion.get("status").and_then(Value::as_str);
+    let Some(candidate) = delivery.candidate.as_ref() else {
+        return record.latest_executor_evidence.is_some();
+    };
     matches!(
-        status,
-        Some(
-            "gate_failed"
-                | "no_op_gate_failed"
-                | "no_changes_gate_failed"
-                | "verification_pending"
-                | "applied"
-        )
-    ) || promotion
-        .get("deterministic_gates")
-        .and_then(Value::as_array)
-        .is_some_and(|gates| !gates.is_empty())
-        || promotion
-            .pointer("/provenance/candidate")
-            .is_some_and(|candidate| !candidate.is_null())
-        || promotion.get("patch_artifact").is_some()
+        candidate.promotion,
+        Status::GateFailed
+            | Status::NoChangesGateFailed
+            | Status::VerificationPending
+            | Status::Applied
+    ) || !delivery.gates.is_empty()
+        || candidate.fingerprint.is_some()
+        || candidate.patch_artifact.is_some()
 }
 
 fn acceptance_candidate(
@@ -8249,21 +8239,15 @@ pub fn record_promotion_in_store(
     promotion: Value,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = lifecycle_store.mutate_record(&run_id, |record| {
+    // The run state follows the delivery this promotion produces (see
+    // `CookDelivery::lifecycle`): a candidate that has not completed
+    // controller-owned verification is recoverable evidence, not a successful
+    // completed run (#14315), and a verified one releases a latch its own
+    // pending or deferred verification set (homeboy#15008).
+    let record = record_cook_delivery(lifecycle_store, &run_id, |record| {
         if record.metadata.get("latest_promotion") == Some(&promotion) {
-            return false;
+            return None;
         }
-        record.updated_at = Some(now_timestamp());
-        // Captured before this write overwrites `latest_promotion` below, so
-        // this is the status of the *previous* promotion recorded for this
-        // run — the one the pending/failed-gate branch below may have already
-        // latched `CandidateRecoverable` for (homeboy#15008).
-        let previous_status = record
-            .metadata
-            .get("latest_promotion")
-            .and_then(|value| value.get("status"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
         let metadata = record.ensure_metadata_object();
         // The first post-apply checkpoint is immutable recovery authority. Later
         // gate/finalization reports advance `latest_promotion` without obscuring
@@ -8284,49 +8268,6 @@ pub fn record_promotion_in_store(
             .expect("promotions array")
             .push(promotion.clone());
         metadata.insert("latest_promotion".to_string(), promotion.clone());
-        // A candidate that has not completed controller-owned verification is
-        // recoverable evidence, not a successful completed run. In particular,
-        // the verification-pending checkpoint is written before gates start;
-        // leaving the provider's Succeeded state in place made Cook report
-        // success while the destination was still unverified (#14315).
-        if matches!(
-            promotion.get("status").and_then(Value::as_str),
-            Some("verification_pending" | "gate_failed" | "no_op_gate_failed")
-        ) {
-            set_run_state(record, AgentTaskRunState::CandidateRecoverable);
-        } else if promotion.get("status").and_then(Value::as_str) == Some("applied")
-            && record.state == AgentTaskRunState::CandidateRecoverable
-            && previous_status.as_deref() == Some("verification_pending")
-            && record.candidate_adoption.is_none()
-        {
-            // The branch above only ever *sets* `CandidateRecoverable`;
-            // nothing previously reverted it once a later promotion for the
-            // same run's own live progression reached a conclusive status.
-            // That left it permanently latched even once a still-pending
-            // candidate went on to apply clean (the #14315 case: this run was
-            // never anything but its own straight-line execution, so once
-            // verification completes there is nothing left to wait on).
-            //
-            // Scoped to reverting a `verification_pending` checkpoint
-            // specifically: a *documented* `gate_failed` (a candidate that
-            // was actually rejected, not merely unverified) must stay a
-            // permanent scar on this run's history even after a later
-            // corrected promotion proves a different candidate clean — that
-            // is the existing, deliberately un-reverted behavior of
-            // `corrected_promotion_replaces_gate_failed_latest_proof`.
-            //
-            // Excluded whenever `candidate_adoption` is active on this
-            // record: an adoption's own gate/verification checkpoints can
-            // legitimately land here mid-flight — e.g. once gates pass but
-            // before a still-pending review-form follow-up resolves — and
-            // reverting early would hide the adoption's pending continuation
-            // before it concludes.
-            // `reconcile_candidate_adoption_terminal_state_in_store` (below)
-            // is the one place that can tell adoption has truly concluded —
-            // including any dispatched remediation — so it owns the
-            // equivalent revert for that flow (homeboy#15008).
-            set_run_state(record, AgentTaskRunState::Succeeded);
-        }
         if let Some(acceptance) = record.acceptance.as_mut() {
             let candidate = acceptance_candidate(&promotion);
             let base_sha = promotion
@@ -8376,12 +8317,8 @@ pub fn record_promotion_in_store(
                 ));
             }
         }
-        true
+        Some(CookDeliveryCommit::FollowDelivery)
     })?;
-    let record = match record {
-        Some(record) => record,
-        None => lifecycle_store.read_record(&run_id)?,
-    };
     if let Ok(aggregate) = lifecycle_store.read_aggregate(&run_id) {
         update_cook_candidate_after_completion_in_store(
             lifecycle_store,
@@ -8620,21 +8557,15 @@ pub fn record_cook_finalization_in_store(
     run_id: &str,
     finalization: Value,
 ) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    let record = lifecycle_store.mutate_record(&run_id, |record| {
+    record_cook_delivery(lifecycle_store, run_id, |record| {
         if record.metadata.get("cook_finalization") == Some(&finalization) {
-            return false;
+            return None;
         }
-        record.updated_at = Some(now_timestamp());
         record
             .ensure_metadata_object()
             .insert("cook_finalization".to_string(), finalization.clone());
-        true
-    })?;
-    match record {
-        Some(record) => Ok(record),
-        None => lifecycle_store.read_record(&run_id),
-    }
+        Some(CookDeliveryCommit::FollowDelivery)
+    })
 }
 
 // The ambient `record_cook_force_with_lease_receipt()` shim that used to sit
@@ -8645,21 +8576,15 @@ pub fn record_cook_force_with_lease_receipt_in_store(
     run_id: &str,
     receipt: Value,
 ) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    let record = lifecycle_store.mutate_record(&run_id, |record| {
+    record_cook_delivery(lifecycle_store, run_id, |record| {
         if record.metadata.get("cook_force_with_lease_receipt") == Some(&receipt) {
-            return false;
+            return None;
         }
-        record.updated_at = Some(now_timestamp());
         record
             .ensure_metadata_object()
             .insert("cook_force_with_lease_receipt".to_string(), receipt.clone());
-        true
-    })?;
-    match record {
-        Some(record) => Ok(record),
-        None => lifecycle_store.read_record(&run_id),
-    }
+        Some(CookDeliveryCommit::FollowDelivery)
+    })
 }
 
 /// Persist a validated manual publication intent without claiming Cook completion.
@@ -8667,28 +8592,22 @@ pub(crate) fn record_manual_finalization_intent(
     run_id: &str,
     intent: Value,
 ) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
     let digest = manual_finalization_intent_digest(&intent);
-    let record = store::mutate_record(&run_id, |record| {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_delivery(&lifecycle_store, run_id, |record| {
         if record.metadata.get("manual_finalization_intent") == Some(&intent)
             && record.metadata.get("manual_finalization_intent_digest") == Some(&json!(digest))
         {
-            return false;
+            return None;
         }
-        record.updated_at = Some(now_timestamp());
-        record
-            .ensure_metadata_object()
-            .insert("manual_finalization_intent".to_string(), intent.clone());
-        record.ensure_metadata_object().insert(
+        let metadata = record.ensure_metadata_object();
+        metadata.insert("manual_finalization_intent".to_string(), intent.clone());
+        metadata.insert(
             "manual_finalization_intent_digest".to_string(),
             json!(digest),
         );
-        true
-    })?;
-    match record {
-        Some(record) => Ok(record),
-        None => store::read_record(&run_id),
-    }
+        Some(CookDeliveryCommit::FollowDelivery)
+    })
 }
 
 /// Mark a preflight dossier as a retryable direct publication. Unlike an
@@ -8745,9 +8664,8 @@ pub(crate) fn record_manual_finalization_receipt(
     run_id: &str,
     receipt: Value,
 ) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    let record = lifecycle_store.transition_when(&run_id, |record| {
+    record_cook_delivery(&lifecycle_store, run_id, |record| {
         let intent_digest = record.metadata["manual_finalization_intent_digest"].clone();
         let receipt_matches = record.metadata.get("cook_finalization") == Some(&receipt);
         let already_succeeded = record.state == AgentTaskRunState::Succeeded;
@@ -8756,19 +8674,12 @@ pub(crate) fn record_manual_finalization_receipt(
         if receipt_matches && already_succeeded && retry_cleared && failure_cleared {
             return None;
         }
-        let mut metadata = serde_json::Map::new();
+        let metadata = record.ensure_metadata_object();
         metadata.insert("cook_finalization".to_string(), receipt.clone());
-        metadata.insert("manual_finalization_failure".to_string(), Value::Null);
-        metadata.insert("manual_finalization_retry".to_string(), Value::Null);
-        if let Some(candidate) = record.metadata.get("manual_finalization_retry_candidate") {
-            metadata.insert(
-                "manual_finalization_retry_candidate".to_string(),
-                Value::Null,
-            );
-            metadata.insert(
-                "manual_finalization_retry_origin".to_string(),
-                candidate.clone(),
-            );
+        metadata.remove("manual_finalization_failure");
+        metadata.remove("manual_finalization_retry");
+        if let Some(candidate) = metadata.remove("manual_finalization_retry_candidate") {
+            metadata.insert("manual_finalization_retry_origin".to_string(), candidate);
         }
         metadata.insert(
             "manual_finalization_receipt_digest".to_string(),
@@ -8778,15 +8689,10 @@ pub(crate) fn record_manual_finalization_receipt(
             "manual_finalization_receipt_intent_digest".to_string(),
             intent_digest,
         );
-        Some(AgentTaskTransition::Terminate {
-            outcome: AgentTaskTerminalOutcome::Succeeded,
-            metadata,
-        })
-    })?;
-    match record {
-        Some(record) => Ok(record),
-        None => lifecycle_store.read_record(&run_id),
-    }
+        Some(CookDeliveryCommit::Terminal(
+            AgentTaskTerminalOutcome::Succeeded,
+        ))
+    })
 }
 
 /// Record a failed manual publication as a terminal, recoverable lifecycle
@@ -8809,23 +8715,19 @@ pub fn record_manual_finalization_failure(
         },
     });
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    let record = lifecycle_store.transition_when(&run_id, |record| {
+    record_cook_delivery(&lifecycle_store, &run_id, |record| {
         if record.metadata.get("manual_finalization_failure") == Some(&failure)
             && record.state == AgentTaskRunState::Failed
         {
             return None;
         }
-        let mut metadata = serde_json::Map::new();
-        metadata.insert("manual_finalization_failure".to_string(), failure.clone());
-        Some(AgentTaskTransition::Terminate {
-            outcome: AgentTaskTerminalOutcome::Failed,
-            metadata,
-        })
-    })?;
-    match record {
-        Some(record) => Ok(record),
-        None => lifecycle_store.read_record(&run_id),
-    }
+        record
+            .ensure_metadata_object()
+            .insert("manual_finalization_failure".to_string(), failure.clone());
+        Some(CookDeliveryCommit::Terminal(
+            AgentTaskTerminalOutcome::Failed,
+        ))
+    })
 }
 
 pub fn record_cook_moving_base_recovery_in_store(
@@ -8833,40 +8735,26 @@ pub fn record_cook_moving_base_recovery_in_store(
     run_id: &str,
     recovery: Value,
 ) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    let record = lifecycle_store.mutate_record(&run_id, |record| {
+    record_cook_delivery(lifecycle_store, run_id, |record| {
         if record.metadata.get("cook_moving_base_recovery") == Some(&recovery) {
-            return false;
+            return None;
         }
-        record.updated_at = Some(now_timestamp());
         record
             .ensure_metadata_object()
             .insert("cook_moving_base_recovery".to_string(), recovery.clone());
-        true
-    })?;
-    match record {
-        Some(record) => Ok(record),
-        None => lifecycle_store.read_record(&run_id),
-    }
+        Some(CookDeliveryCommit::FollowDelivery)
+    })
 }
 
 pub(crate) fn clear_cook_moving_base_recovery_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    let record = lifecycle_store.mutate_record(&run_id, |record| {
-        let Some(metadata) = record.metadata.as_object_mut() else {
-            return false;
-        };
-        if metadata.remove("cook_moving_base_recovery").is_none() {
-            return false;
-        }
-        record.updated_at = Some(now_timestamp());
-        true
-    })?;
-    match record {
-        Some(record) => Ok(record),
-        None => lifecycle_store.read_record(&run_id),
-    }
+    record_cook_delivery(lifecycle_store, run_id, |record| {
+        record
+            .metadata
+            .as_object_mut()?
+            .remove("cook_moving_base_recovery")
+            .map(|_| CookDeliveryCommit::FollowDelivery)
+    })
 }

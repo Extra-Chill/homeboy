@@ -7169,8 +7169,8 @@ fn run_cook_spine(
                             "loaded the terminal persisted promotion; the agent's review form declares the task incomplete, so it was not published",
                             1,
                         ),
-                        AgentTaskCookLoopStatus::NoOpGateFailed => (
-                            "no_op_gate_failed",
+                        AgentTaskCookLoopStatus::NoChangesGateFailed => (
+                            "no_changes_gate_failed",
                             "loaded the terminal persisted no-changes gate failure",
                             1,
                         ),
@@ -8169,10 +8169,10 @@ fn run_cook_spine(
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
-            AgentTaskCookLoopStatus::NoOpGateFailed => {
+            AgentTaskCookLoopStatus::NoChangesGateFailed => {
                 return Ok(cook_report(CookReportInput {
                     cook_id,
-                    status: "no_op_gate_failed",
+                    status: "no_changes_gate_failed",
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
