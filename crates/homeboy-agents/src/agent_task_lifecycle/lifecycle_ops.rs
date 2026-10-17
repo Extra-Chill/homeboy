@@ -8042,6 +8042,10 @@ pub(crate) fn resolve_run_id_in_store(
     let run_id = sanitize_run_id(run_id);
     match lifecycle_store.read_cook_index(&run_id) {
         Ok(index) => Ok(index.latest_run_id),
+        // A busy store is not "no Cook alias": falling through would spend a
+        // second read-only busy budget on the record read that follows, so a
+        // contended durable read took twice its bound (#14832).
+        Err(error) if error.code == ErrorCode::ObservationStoreBusy => Err(error),
         Err(_) => Ok(run_id),
     }
 }

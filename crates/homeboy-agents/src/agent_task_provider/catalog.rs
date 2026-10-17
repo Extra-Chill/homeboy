@@ -303,12 +303,31 @@ impl ExtensionProviderAgentTaskExecutor {
         }
     }
 
+    /// Test executors own their evidence. The process-wide store would let
+    /// one test's readiness, capacity, and account evidence leak into
+    /// another, and a single panicking holder would poison it for every test
+    /// in the binary (#14832). Tests that exercise cross-executor sharing
+    /// opt in with [`Self::sharing_evidence_with`].
     #[cfg(test)]
     pub(super) fn with_providers(providers: Vec<AgentTaskExecutorProvider>) -> Self {
         Self {
             providers,
             diagnostics: Vec::new(),
-            evidence: shared_provider_evidence(),
+            evidence: Arc::new(Mutex::new(ProviderEvidenceStore {
+                readiness: ProviderRuntimeReadinessCache::isolated(),
+                ..Default::default()
+            })),
+        }
+    }
+
+    /// A separately constructed executor that shares `self`'s evidence, as
+    /// every production executor in one process does.
+    #[cfg(test)]
+    pub(super) fn sharing_evidence_with(&self, providers: Vec<AgentTaskExecutorProvider>) -> Self {
+        Self {
+            providers,
+            diagnostics: Vec::new(),
+            evidence: Arc::clone(&self.evidence),
         }
     }
 
