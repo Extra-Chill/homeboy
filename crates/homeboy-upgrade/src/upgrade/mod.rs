@@ -21,7 +21,9 @@ pub use admission::{
     VerifiedTargetUpgrade,
 };
 pub use detached::{continue_detached_upgrade, start_detached_upgrade};
-pub use execution::{controller_source_checkout, parse_build_identity_display};
+pub use execution::{
+    controller_source_checkout, parse_build_identity_display, RELEASE_INSTALLER_SCRIPT,
+};
 pub use helpers::{
     current_build_version, current_version, detect_install_method, fetch_latest_version,
     run_upgrade_with_method, version_is_newer,

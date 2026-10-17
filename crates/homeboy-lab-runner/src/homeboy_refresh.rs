@@ -3150,14 +3150,17 @@ fn installed_homeboy_env(
     env
 }
 
+/// Shell preflight that resolves `$ref` to `$target` and refuses implicit
+/// downgrades against every refresh authority before anything is built.
+///
+/// It first decides whether `$ref` names a published release: for the
+/// canonical source (`release_source=true`), a commit that a `v*` tag on
+/// `$source` points at is acquired through the canonical installer, so its Git
+/// history lives in the checkout-less `.homeboy-history` repository shared by
+/// every release slot. Any other ref keeps its per-ref checkout as the object
+/// cache.
 fn refresh_acquisition_preflight(authority_commits: &str) -> String {
-    r#"cache="$dir"
-mkdir -p "$cache"
-if [ ! -d "$cache/.git" ]; then
-  git init --quiet "$cache"
-fi
-echo "HOMEBOY_REFRESH_OBJECT_CACHE=$cache" >&2
-no_progress="${HOMEBOY_REFRESH_FETCH_NO_PROGRESS_SECONDS:-120}"
+    r#"no_progress="${HOMEBOY_REFRESH_FETCH_NO_PROGRESS_SECONDS:-120}"
 overall="${HOMEBOY_REFRESH_FETCH_DEADLINE_SECONDS:-900}"
 case "$no_progress:$overall" in
   *[!0-9:]*|:*|*:) echo "Invalid runner fetch deadlines" >&2; exit 1 ;;
@@ -3247,6 +3250,40 @@ bounded_git() {
   emit_fetch_phase "$phase" "fetched" "$duration" "$bytes"
   return 0
 }
+release_tag=
+release_commit=
+if [ "$release_source" = true ]; then
+  if ! bounded_git resolve_release git ls-remote "$source" "$ref" "refs/heads/$ref" "refs/tags/$ref" "refs/tags/${ref}^{}" 'refs/tags/v*'; then
+    echo "Homeboy ref not found: $ref" >&2
+    exit 1
+  fi
+  if is_full_sha "$ref"; then
+    release_commit=$(printf '%s' "$ref" | tr 'A-F' 'a-f')
+  else
+    release_commit=$(awk -v ref="$ref" '$2 == "refs/heads/" ref || ($2 == ref && ref ~ /^refs\/heads\//) {print $1; exit}' "$fetch_output")
+    if [ -z "$release_commit" ]; then
+      release_commit=$(awk -v ref="$ref" '$2 == "refs/tags/" ref "^{}" || $2 == ref "^{}" {print $1; exit}' "$fetch_output")
+    fi
+    if [ -z "$release_commit" ]; then
+      release_commit=$(awk -v ref="$ref" '$2 == "refs/tags/" ref || $2 == ref {print $1; exit}' "$fetch_output")
+    fi
+  fi
+  if [ -n "$release_commit" ]; then
+    release_tag=$(awk -v commit="$release_commit" '$1 == commit && $2 ~ /^refs\/tags\/v/ { sub("refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2; exit }' "$fetch_output")
+  fi
+  rm -f "$fetch_output"
+fi
+if [ -n "$release_tag" ]; then
+  cache="$(dirname "$dir")/.homeboy-history"
+  echo "HOMEBOY_REFRESH_RELEASE_TAG=$release_tag" >&2
+else
+  cache="$dir"
+fi
+mkdir -p "$cache"
+if [ ! -d "$cache/.git" ]; then
+  git init --quiet "$cache"
+fi
+echo "HOMEBOY_REFRESH_OBJECT_CACHE=$cache" >&2
 skip_network=false
 if is_full_sha "$ref"; then
   all_same=true
@@ -3374,61 +3411,141 @@ done
     .replace("HOMEBOY_AUTHORITIES", authority_commits)
 }
 
-/// Shell fragment defining `release_binary_from_asset`, run on the runner
-/// before the source build (#15376).
+/// The runner materialization script: resolve `$ref`, refuse implicit
+/// downgrades, acquire the binary, then publish it into the content-addressed
+/// `homeboy-<sha256>/homeboy` slot with its `provenance` record.
 ///
-/// When the resolved commit `$target` is a published release (a `v*` tag on
-/// `$source`) and the release has an asset for this host, the asset is
-/// downloaded, verified against its `.sha256`, required to report the exact
-/// commit, and placed at `$binary`. The rest of materialization (immutable
-/// slot, provenance, identity verification) is unchanged. Any miss (no curl,
-/// unknown platform, unreleased commit, network, checksum or identity
-/// mismatch) returns non-zero and the caller builds from source as before.
-/// `HOMEBOY_REFRESH_FROM_SOURCE=1` forces the source build;
-/// `HOMEBOY_REFRESH_RELEASE_BASE` overrides the release download base URL.
-const RELEASE_BINARY_FAST_PATH: &str = r#"release_binary_from_asset() {
-  [ "${HOMEBOY_REFRESH_FROM_SOURCE:-}" = 1 ] && return 1
-  command -v curl >/dev/null 2>&1 || return 1
-  command -v tar >/dev/null 2>&1 || return 1
-  release_base=${HOMEBOY_REFRESH_RELEASE_BASE:-}
-  if [ -z "$release_base" ]; then
-    case "$source" in
-      https://github.com/*) release_base="${source%.git}/releases/download" ;;
-      *) return 1 ;;
-    esac
+/// A published release (see [`refresh_acquisition_preflight`]) is acquired by
+/// the canonical installer in stage-only mode: it downloads the release asset,
+/// verifies its checksum and archive members, checks the target version, and
+/// writes only `.stage-*/homeboy`. Releases never create a Git checkout. Any
+/// other ref is checked out into `$dir` and built from source.
+const MATERIALIZE_SCRIPT: &str = r#"set -e
+printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"fetch"}'
+source=@SOURCE@
+ref=@REF@
+dir=@DIR@
+binary=@BINARY@
+allow_downgrade=@ALLOW_DOWNGRADE@
+release_source=@RELEASE_SOURCE@
+homeboy_installer=@INSTALLER@
+hash_binary() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | awk '{print $1}'; }
+release_stage=
+cleanup_release_stage() {
+  if [ -n "$release_stage" ]; then
+    rm -rf "$release_stage"
+    release_stage=
   fi
-  case "$(uname -s)-$(uname -m)" in
-    Linux-x86_64) triple=x86_64-unknown-linux-gnu ;;
-    Linux-aarch64|Linux-arm64) triple=aarch64-unknown-linux-gnu ;;
-    Darwin-arm64) triple=aarch64-apple-darwin ;;
-    *) return 1 ;;
-  esac
-  tag=$(git ls-remote --tags "$source" 'refs/tags/v*' 2>/dev/null | awk -v t="$target" '$1 == t { sub("refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2; exit }') || return 1
-  [ -n "$tag" ] || return 1
-  asset="homeboy-$triple.tar.xz"
-  release_work=$(mktemp -d) || return 1
-  if ! curl -fsSL --retry 2 --connect-timeout 20 --max-time 300 -o "$release_work/$asset" "$release_base/$tag/$asset" \
-    || ! curl -fsSL --retry 2 --connect-timeout 20 --max-time 60 -o "$release_work/$asset.sha256" "$release_base/$tag/$asset.sha256"; then
-    rm -rf "$release_work"; return 1
-  fi
-  expected_asset_sha=$(awk '{print $1; exit}' "$release_work/$asset.sha256")
-  if [ -z "$expected_asset_sha" ] || [ "$(hash_binary "$release_work/$asset")" != "$expected_asset_sha" ]; then
-    echo "release asset checksum mismatch for $tag/$asset; building from source" >&2
-    rm -rf "$release_work"; return 1
-  fi
-  tar -xJf "$release_work/$asset" -C "$release_work" || { rm -rf "$release_work"; return 1; }
-  release_binary="$release_work/homeboy-$triple/homeboy"
-  [ -x "$release_binary" ] || { rm -rf "$release_work"; return 1; }
-  case "$("$release_binary" --version 2>/dev/null)" in
-    *"+$target"*) ;;
-    *) echo "release asset $tag/$asset does not report commit $target; building from source" >&2; rm -rf "$release_work"; return 1 ;;
-  esac
-  mkdir -p "$(dirname "$binary")" || { rm -rf "$release_work"; return 1; }
-  cp "$release_binary" "$binary" && chmod 0755 "$binary" || { rm -rf "$release_work"; return 1; }
-  rm -rf "$release_work"
-  echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release:$tag/$asset"
-  return 0
 }
+@PREFLIGHT@mkdir -p "$(dirname "$dir")"
+if [ -n "$release_tag" ]; then
+  if [ "$target" != "$release_commit" ]; then
+    echo "Homeboy ref $ref resolved to $target, not release $release_tag ($release_commit)" >&2
+    exit 1
+  fi
+  current_remote=$(git -C "$cache" config --get remote.origin.url 2>/dev/null || true)
+  if [ "$current_remote" != "$source" ]; then
+    git -C "$cache" remote set-url origin "$source" 2>/dev/null || git -C "$cache" remote add origin "$source"
+  fi
+  echo "HOMEBOY_REFRESH_SOURCE_SHA=$target"
+  printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"build"}'
+  release_stage=$(mktemp -d "$(dirname "$dir")/.stage-XXXXXX")
+  trap cleanup_release_stage EXIT HUP INT TERM
+  HOMEBOY_INSTALL_STAGE_ONLY=1 HOMEBOY_INSTALL_PATH="$release_stage/homeboy" HOMEBOY_UPGRADE_RELEASE_TAG="$release_tag" HOMEBOY_UPGRADE_RELEASE_VERSION="${release_tag#v}" sh -c "$homeboy_installer"
+  binary="$release_stage/homeboy"
+  echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release:$release_tag"
+else
+  checkout_existed=false
+  if [ -d "$dir/.git" ]; then
+    checkout_existed=true
+  else
+    git init --quiet "$dir"
+  fi
+  current_remote=$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)
+  if [ "$current_remote" != "$source" ]; then
+    git -C "$dir" remote set-url origin "$source" 2>/dev/null || git -C "$dir" remote add origin "$source"
+  fi
+  if ! git -C "$dir" cat-file -e "${target}^{commit}" 2>/dev/null; then
+    git -C "$dir" fetch --quiet "$cache" "$target"
+  fi
+  requested=$target
+  if [ -z "$requested" ]; then
+    echo "Homeboy ref not found: $ref" >&2
+    exit 1
+  fi
+  target=$(git -C "$dir" rev-parse --verify --quiet "${requested}^{commit}")
+  current=
+  if [ "$checkout_existed" = true ]; then
+    current=$(git -C "$dir" rev-parse --verify --quiet HEAD || true)
+  fi
+  if [ -n "$current" ] && [ "$current" != "$target" ] && git -C "$dir" merge-base --is-ancestor "$target" "$current"; then
+    echo "HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current" >&2
+    echo "HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref" >&2
+    echo "HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target" >&2
+    if [ "$allow_downgrade" != true ]; then
+      echo "Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback" >&2
+      exit 1
+    fi
+  fi
+  git -C "$dir" checkout --quiet --force --detach "$target"
+  git -C "$dir" reset --hard "$target"
+  echo "HOMEBOY_REFRESH_SOURCE_SHA=$target"
+  printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"build"}'
+  cargo build --release --bin homeboy --manifest-path "$dir/Cargo.toml"
+fi
+binary_sha=$(hash_binary "$binary")
+if [ -z "$binary_sha" ]; then
+  echo "could not hash materialized Homeboy binary" >&2
+  exit 1
+fi
+printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"install"}'
+slot_dir="$(dirname "$dir")/homeboy-$binary_sha"
+immutable_binary="$slot_dir/homeboy"
+mkdir -p "$slot_dir"
+if [ -e "$immutable_binary" ]; then
+  existing_sha=$(hash_binary "$immutable_binary")
+  if [ "$existing_sha" != "$binary_sha" ]; then
+    echo "immutable Homeboy binary slot hash mismatch" >&2
+    exit 1
+  fi
+else
+  staged_binary=$(mktemp "$slot_dir/.homeboy.XXXXXX")
+  trap 'rm -f "$staged_binary"; cleanup_release_stage' EXIT HUP INT TERM
+  cp "$binary" "$staged_binary"
+  chmod 0755 "$staged_binary"
+  staged_sha=$(hash_binary "$staged_binary")
+  if [ "$staged_sha" != "$binary_sha" ]; then
+    echo "staged Homeboy binary hash mismatch" >&2
+    exit 1
+  fi
+  if ! ln "$staged_binary" "$immutable_binary"; then
+    if [ ! -e "$immutable_binary" ] || [ "$(hash_binary "$immutable_binary")" != "$binary_sha" ]; then
+      echo "immutable Homeboy binary slot publication failed" >&2
+      exit 1
+    fi
+  fi
+  rm -f "$staged_binary"
+  trap - EXIT HUP INT TERM
+fi
+cleanup_release_stage
+echo "HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha"
+echo "HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary"
+echo "HOMEBOY_REFRESH_HISTORY_REPOSITORY=$cache"
+printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"verify"}'
+identity=$("$immutable_binary" self identity)
+identity_record=$(printf '%s' "$identity" | tr -d '\n')
+provenance="$slot_dir/provenance"
+staged_provenance=$(mktemp "$slot_dir/.provenance.XXXXXX")
+trap 'rm -f "$staged_provenance"' EXIT HUP INT TERM
+printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$source" "$cache" "$ref" "$target" "$binary_sha" "$identity_record" > "$staged_provenance"
+if [ -e "$provenance" ]; then
+  cmp -s "$staged_provenance" "$provenance" || { echo "immutable Homeboy slot provenance mismatch" >&2; exit 1; }
+elif ! ln "$staged_provenance" "$provenance"; then
+  [ -e "$provenance" ] && cmp -s "$staged_provenance" "$provenance" || { echo "immutable Homeboy slot provenance publication failed" >&2; exit 1; }
+fi
+rm -f "$staged_provenance"
+trap - EXIT HUP INT TERM
+printf '%s\n' "$identity"
 "#;
 
 fn materialize_script(
@@ -3439,51 +3556,51 @@ fn materialize_script(
     allow_downgrade: bool,
     authority_commits: &[&str],
 ) -> String {
-    let mut script = format!(
-        "set -e\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"fetch\"}}'\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nhash_binary() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git init --quiet \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\nif ! git -C \"$dir\" cat-file -e \"${{target}}^{{commit}}\" 2>/dev/null; then\n  git -C \"$dir\" fetch --quiet \"$cache\" \"$target\"\nfi\nrequested=$target\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"build\"}}'\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nbinary_sha=$(hash_binary \"$binary\")\nif [ -z \"$binary_sha\" ]; then\n  echo \"could not hash materialized Homeboy binary\" >&2\n  exit 1\nfi\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"install\"}}'\nslot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\"\nimmutable_binary=\"$slot_dir/homeboy\"\nmkdir -p \"$slot_dir\"\nif [ -e \"$immutable_binary\" ]; then\n  existing_sha=$(hash_binary \"$immutable_binary\")\n  if [ \"$existing_sha\" != \"$binary_sha\" ]; then\n    echo \"immutable Homeboy binary slot hash mismatch\" >&2\n    exit 1\n  fi\nelse\n  staged_binary=$(mktemp \"$slot_dir/.homeboy.XXXXXX\")\n  trap 'rm -f \"$staged_binary\"' EXIT HUP INT TERM\n  cp \"$binary\" \"$staged_binary\"\n  chmod 0755 \"$staged_binary\"\n  staged_sha=$(hash_binary \"$staged_binary\")\n  if [ \"$staged_sha\" != \"$binary_sha\" ]; then\n    echo \"staged Homeboy binary hash mismatch\" >&2\n    exit 1\n  fi\n  if ! ln \"$staged_binary\" \"$immutable_binary\"; then\n    if [ ! -e \"$immutable_binary\" ] || [ \"$(hash_binary \"$immutable_binary\")\" != \"$binary_sha\" ]; then\n      echo \"immutable Homeboy binary slot publication failed\" >&2\n      exit 1\n    fi\n  fi\n  rm -f \"$staged_binary\"\n  trap - EXIT HUP INT TERM\nfi\necho \"HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha\"\necho \"HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary\"\n",
-        quote_path(source),
-        quote_path(git_ref),
-        quote_path(target_dir),
-        quote_path(binary_path),
-        allow_downgrade,
-    );
     let authority_commits = authority_commits
         .iter()
         .map(|authority| quote_path(authority))
         .collect::<Vec<_>>()
         .join(" ");
-    // Prefer the published release binary for this exact commit over a cold
-    // `cargo build --release` on the runner, which takes 15-20 minutes (#15376).
-    script = script.replacen(
-        "cargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n",
-        &format!(
-            "{RELEASE_BINARY_FAST_PATH}if ! release_binary_from_asset; then\n  cargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nfi\n"
-        ),
-        1,
-    );
-    let downgrade_guard = refresh_acquisition_preflight(&authority_commits);
-    script = script.replacen(
-        "mkdir -p \"$(dirname \"$dir\")\"",
-        &format!("{downgrade_guard}mkdir -p \"$(dirname \"$dir\")\""),
-        1,
-    );
-    script.push_str(
-        r#"printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"verify"}'
-identity=$("$immutable_binary" self identity)
-provenance="$slot_dir/provenance"
-staged_provenance=$(mktemp "$slot_dir/.provenance.XXXXXX")
-trap 'rm -f "$staged_provenance"' EXIT HUP INT TERM
-printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$source" "$dir" "$ref" "$target" "$binary_sha" "$identity" > "$staged_provenance"
-if [ -e "$provenance" ]; then
-  cmp -s "$staged_provenance" "$provenance" || { echo "immutable Homeboy slot provenance mismatch" >&2; exit 1; }
-elif ! ln "$staged_provenance" "$provenance"; then
-  [ -e "$provenance" ] && cmp -s "$staged_provenance" "$provenance" || { echo "immutable Homeboy slot provenance publication failed" >&2; exit 1; }
-fi
-rm -f "$staged_provenance"
-trap - EXIT HUP INT TERM
-printf '%s\n' "$identity"
-"#,
-    );
+    // Release assets are published only for the canonical repository, so only
+    // that source can resolve a ref to a release and ship the installer.
+    let release_source = github_integration::is_canonical_homeboy_source(source);
+    let installer = if release_source {
+        quote_path(homeboy_upgrade::RELEASE_INSTALLER_SCRIPT)
+    } else {
+        String::new()
+    };
+    fill_script_template(
+        MATERIALIZE_SCRIPT,
+        &[
+            ("@SOURCE@", &quote_path(source)),
+            ("@REF@", &quote_path(git_ref)),
+            ("@DIR@", &quote_path(target_dir)),
+            ("@BINARY@", &quote_path(binary_path)),
+            ("@ALLOW_DOWNGRADE@", &allow_downgrade.to_string()),
+            ("@RELEASE_SOURCE@", &release_source.to_string()),
+            ("@INSTALLER@", &installer),
+            (
+                "@PREFLIGHT@",
+                &refresh_acquisition_preflight(&authority_commits),
+            ),
+        ],
+    )
+}
+
+/// Substitute each placeholder, in template order, in a single pass so a
+/// substituted value is never rescanned for later placeholders.
+fn fill_script_template(template: &str, values: &[(&str, &str)]) -> String {
+    let mut script = String::with_capacity(template.len());
+    let mut rest = template;
+    for (placeholder, value) in values {
+        let (head, tail) = rest
+            .split_once(placeholder)
+            .expect("script template placeholders are in order");
+        script.push_str(head);
+        script.push_str(value);
+        rest = tail;
+    }
+    script.push_str(rest);
     script
 }
 
@@ -3495,20 +3612,27 @@ fn source_sha_from_output(stdout: &str) -> Option<String> {
     })
 }
 
+/// The runner Git repository that holds the candidate's history for ancestry
+/// checks: the history repository a materialization reports (a release slot
+/// has no checkout of its own), or the verified checkout recorded in a selected
+/// managed slot's provenance.
 fn managed_slot_checkout(
     plan: &HomeboyBinaryRefreshPlan,
     stdout: &str,
     identity: &Value,
 ) -> Result<Option<String>> {
-    if plan.mode != "select" {
-        return Ok(None);
-    }
     let metadata = |name| {
         stdout
             .lines()
             .find_map(|line| line.strip_prefix(name))
             .filter(|value| !value.is_empty())
     };
+    if plan.mode == "materialize" {
+        return Ok(metadata("HOMEBOY_REFRESH_HISTORY_REPOSITORY=").map(str::to_string));
+    }
+    if plan.mode != "select" {
+        return Ok(None);
+    }
     let Some(commit) = metadata("HOMEBOY_REFRESH_MANAGED_COMMIT=") else {
         return Ok(None);
     };
@@ -3625,6 +3749,11 @@ fn rotation_candidate_identity(identity: &Value) -> Result<(&str, &str)> {
     Ok((version, display))
 }
 
+/// Probe a selected binary's identity. A binary in a managed
+/// `homeboy-<sha256>/homeboy` slot whose six-line `provenance` (source,
+/// history repository, ref, commit, binary SHA-256, single-line identity)
+/// still matches is reported as managed. Anything else fails closed to an
+/// unmanaged selection.
 fn identity_probe_script(binary_path: &str) -> String {
     r#"set -e
 binary=BINARY_PATH
@@ -3632,10 +3761,11 @@ slot_dir=$(dirname "$binary")
 slot_name=$(basename "$slot_dir")
 hash_file() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | awk '{print $1}'; }
 identity=$("$binary" self identity)
+identity_record=$(printf '%s' "$identity" | tr -d '\n')
 binary_sha=$(hash_file "$binary")
 if [ "$binary" = "$slot_dir/homeboy" ] && [ "$slot_name" = "homeboy-$binary_sha" ] && [ -f "$slot_dir/provenance" ]; then
   { IFS= read -r source && IFS= read -r checkout && IFS= read -r ref && IFS= read -r commit && IFS= read -r recorded_sha && IFS= read -r recorded_identity && ! IFS= read -r extra; } < "$slot_dir/provenance" || { source=; }
-  if [ -n "$source" ] && [ -n "$checkout" ] && [ -n "$ref" ] && [ -n "$commit" ] && [ "$recorded_sha" = "$binary_sha" ] && [ "$recorded_identity" = "$identity" ]; then
+  if [ -n "$source" ] && [ -n "$checkout" ] && [ -n "$ref" ] && [ -n "$commit" ] && [ "$recorded_sha" = "$binary_sha" ] && [ "$recorded_identity" = "$identity_record" ]; then
     echo "HOMEBOY_REFRESH_MANAGED_SOURCE=$source"
     echo "HOMEBOY_REFRESH_MANAGED_REF=$ref"
     echo "HOMEBOY_REFRESH_MANAGED_COMMIT=$commit"
