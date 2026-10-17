@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.24] - 2026-10-17
+
+### Changed
+- one typed Cook delivery read model for status, verdict and summaries (#16049 slice 1)
+
+### Fixed
+- prune content-addressed Homeboy slots and protect every live link target
+- runner-owned process guard scaled to cores, violation breakdown, actionable remedy
+
 ## [0.428.23] - 2026-10-16
 
 ### Fixed
