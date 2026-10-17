@@ -77,7 +77,7 @@ const WORKSPACE_BASE_CAPTURE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 /// Durable Cook storage bound to explicit filesystem roots.
 #[derive(Clone, Debug)]
 pub struct CookRecipeStore {
-    data_root: PathBuf,
+    roots: paths::PathRoots,
 }
 
 /// Result of publishing Cook's initial durable recipe.
@@ -100,30 +100,57 @@ impl InitialRecipeMaterialization {
 
 impl CookRecipeStore {
     pub fn new(roots: paths::PathRoots) -> Self {
-        Self::from_data_root(roots.data().to_path_buf())
+        Self { roots }
     }
 
     pub fn from_environment() -> Result<Self> {
         Ok(Self::new(paths::PathRoots::from_environment()?))
     }
 
-    /// Bind Cook's data-only storage without requiring unrelated config or
-    /// artifact roots. Legacy Cook entry points use this to preserve their
-    /// historical `HOMEBOY_DATA_DIR`-only contract.
+    /// Bind Cook storage to a self-contained data root, deriving its config
+    /// root exactly as [`agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root`]
+    /// does, so both stores agree on the lock that guards their records.
     pub fn from_data_root(data: PathBuf) -> Self {
-        Self { data_root: data }
+        Self::new(
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(data)
+                .roots()
+                .clone(),
+        )
     }
 
+    /// Bind Cook storage to the current installation's roots.
     pub fn from_current_data_root() -> Result<Self> {
-        Ok(Self::from_data_root(paths::homeboy_data()?))
+        Self::from_environment()
+    }
+
+    /// Bind Cook storage to the roots of the lifecycle store that owns its
+    /// attempts, so recipe and record writes serialize on one config lock.
+    pub fn for_lifecycle_store(
+        lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    ) -> Self {
+        Self::new(lifecycle_store.roots().clone())
+    }
+
+    pub fn roots(&self) -> &paths::PathRoots {
+        &self.roots
     }
 
     pub fn data_root(&self) -> PathBuf {
-        self.data_root.clone()
+        self.roots.data().to_path_buf()
+    }
+
+    /// The lifecycle store for this Cook's attempt records.
+    ///
+    /// It is built from this store's full roots, never re-derived from the data
+    /// root alone: a data-root-derived store locks a different config root than
+    /// the one every other writer of these records holds, so its writes would
+    /// race theirs.
+    pub fn lifecycle_store(&self) -> agent_task_lifecycle::AgentTaskLifecycleStore {
+        agent_task_lifecycle::AgentTaskLifecycleStore::new(self.roots.clone())
     }
 
     fn recipe_root(&self) -> PathBuf {
-        self.data_root.join("agent-task-cooks")
+        self.roots.data().join("agent-task-cooks")
     }
 
     fn recipe_path(&self, cook_id: &str) -> PathBuf {
@@ -419,8 +446,7 @@ impl CookRecipeStore {
     /// Failed continuation records may be rearmed, but no new attempt or budget
     /// is created here; normal continuation admission remains authoritative.
     pub fn enqueue_feedback_remediation(&self, cook_id: &str, run_id: &str) -> Result<bool> {
-        let lifecycle_store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(self.data_root());
+        let lifecycle_store = self.lifecycle_store();
         let record = lifecycle_store.read_record(run_id)?;
         if !record.state.is_terminal() {
             return Ok(false);
@@ -714,8 +740,7 @@ pub fn persist_initial_recipe_in_store(
             return Err(error);
         }
         let mismatches = recipe_mismatch_fields(&existing, &recipe);
-        let lifecycle_store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+        let lifecycle_store = store.lifecycle_store();
         ensure_correction_is_safe_in_store(&lifecycle_store, &existing, &recipe, &mismatches)?;
         let requested_attempt = recipe.attempts.pop().expect("validated recipe has attempt");
         let next_attempt = existing
@@ -886,8 +911,7 @@ pub fn validate_initial_recipe_compatibility_in_store(
             .remove("policy");
     }
     let mismatches = recipe_mismatch_fields(&existing, &recipe);
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+    let lifecycle_store = store.lifecycle_store();
     ensure_correction_is_safe_in_store(&lifecycle_store, &existing, &recipe, &mismatches)?;
     Ok(())
 }
@@ -2023,8 +2047,7 @@ pub enum ScheduledContinuationGate {
 
 impl CookRecipeStore {
     pub fn scheduled_continuation_gate(&self, run_id: &str) -> ScheduledContinuationGate {
-        let lifecycle_store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(self.data_root());
+        let lifecycle_store = self.lifecycle_store();
         let Ok(record) = lifecycle_store.read_record(run_id) else {
             return ScheduledContinuationGate::Ready;
         };
@@ -2110,8 +2133,7 @@ fn enqueue_lifecycle_continuation(
     rearm_failed: bool,
 ) -> Result<bool> {
     validate_continuation(continuation)?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(recipe_store.data_root());
+    let lifecycle_store = recipe_store.lifecycle_store();
     let recipe = recipe_store.load_recipe(&continuation.cook_id)?;
     if !recipe
         .attempts
@@ -2188,8 +2210,7 @@ fn claim_lifecycle_continuation_for(
     cook_id: &str,
     run_id: &str,
 ) -> Result<Option<ClaimedCookContinuation>> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(recipe_store.data_root());
+    let lifecycle_store = recipe_store.lifecycle_store();
     let recipe = recipe_store.load_recipe(cook_id)?;
     if !recipe
         .attempts
@@ -2214,8 +2235,7 @@ fn claim_scheduled_lifecycle_continuation_for(
     cook_id: &str,
     run_id: &str,
 ) -> Result<ScheduledContinuationClaim> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(recipe_store.data_root());
+    let lifecycle_store = recipe_store.lifecycle_store();
     if let Ok(record) = lifecycle_store.read_record(run_id) {
         let value = lifecycle_continuation(&record);
         if lifecycle_continuation_state(value) == CookContinuationState::Pending {
@@ -2346,8 +2366,7 @@ fn claim_lifecycle_continuation_with_budget(
     recipe_store: &CookRecipeStore,
     budget: usize,
 ) -> Result<CookContinuationClaim> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(recipe_store.data_root());
+    let lifecycle_store = recipe_store.lifecycle_store();
     let mut inspected = 0;
     if inspected >= budget {
         return Ok(CookContinuationClaim {
@@ -2625,8 +2644,7 @@ pub fn failed_continuation_diagnostic_in_store(
     store: &CookRecipeStore,
     run_id: &str,
 ) -> Result<Option<String>> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+    let lifecycle_store = store.lifecycle_store();
     let record = lifecycle_store.read_record(run_id)?;
     let value = lifecycle_continuation(&record);
     if lifecycle_continuation_state(value) != CookContinuationState::Failed {
@@ -2647,8 +2665,7 @@ pub fn continuation_state_in_store(
     cook_id: &str,
     run_id: &str,
 ) -> Result<CookContinuationState> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+    let lifecycle_store = store.lifecycle_store();
     observe_continuation_state(&lifecycle_store, cook_id, run_id)
 }
 
@@ -2706,8 +2723,7 @@ pub fn preflight_continuation_claim_in_store(
     run_id: &str,
     rearm: bool,
 ) -> Result<CookContinuationState> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+    let lifecycle_store = store.lifecycle_store();
     if let Some(driver) = store.foreign_cook_driver(cook_id)? {
         return Err(Error::validation_invalid_argument(
             "cook_continuation.claim",
@@ -3318,7 +3334,7 @@ where
     let Some(cook_id) = record.metadata["cook_id"].as_str() else {
         return Ok(());
     };
-    let recipe_store = CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    let recipe_store = CookRecipeStore::for_lifecycle_store(&lifecycle_store);
     let recipe = recipe_store.load_recipe(cook_id)?;
     let dispatcher = reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
     let require_current_runtime = !pre_execution_runtime_recovery_is_eligible(&recipe, &record);
@@ -3425,8 +3441,7 @@ fn consume_claimed_with_dispatcher_policy(
     execute: impl FnOnce(CookRequest) -> Result<i32>,
     mode: CookMode,
 ) -> Result<i32> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+    let lifecycle_store = store.lifecycle_store();
     if lifecycle_store
         .read_record(&claim.continuation().run_id)?
         .metadata
@@ -3805,6 +3820,51 @@ mod tests {
         AgentTaskProgressEvent, AgentTaskState,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A lifecycle store reached through a Cook recipe store must serialize on
+    /// the same config lock as the lifecycle store that owns the records.
+    /// Re-deriving it from the data root alone locks a different config root,
+    /// so its record writes raced every correctly locked writer and lost with a
+    /// spurious revision conflict.
+    #[test]
+    fn recipe_store_lifecycle_writes_share_the_record_owner_config_lock() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let roots = paths::PathRoots::from_environment().expect("isolated roots");
+            let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
+            let recipe_store = CookRecipeStore::new(roots.clone());
+            let derived = [
+                recipe_store.lifecycle_store(),
+                CookRecipeStore::for_lifecycle_store(&lifecycle_store).lifecycle_store(),
+            ];
+            for derived in derived {
+                assert_eq!(derived.roots().config(), roots.config());
+                let (held, wait_for_holder) = std::sync::mpsc::sync_channel(0);
+                let hold = std::time::Duration::from_millis(300);
+                let waited = std::thread::scope(|scope| {
+                    let owner = &lifecycle_store;
+                    scope.spawn(move || {
+                        owner
+                            .with_config_lock(|| {
+                                held.send(()).expect("signal holder");
+                                std::thread::sleep(hold);
+                                Ok(())
+                            })
+                            .expect("hold the record owner lock");
+                    });
+                    wait_for_holder.recv().expect("holder took the lock");
+                    let started = std::time::Instant::now();
+                    derived
+                        .with_config_lock(|| Ok(()))
+                        .expect("derived store takes the lock");
+                    started.elapsed()
+                });
+                assert!(
+                    waited >= hold / 2,
+                    "derived lifecycle store must wait for the record owner lock, waited {waited:?}"
+                );
+            }
+        });
+    }
 
     #[derive(Debug)]
     struct ReconstructedDispatcher;
@@ -5104,16 +5164,11 @@ mod tests {
             CookContinuationState::Pending
         );
         assert_eq!(
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root())
-                .read_record("run")
-                .unwrap()
-                .metadata["cook_continuation"]["diagnostic"],
+            store.lifecycle_store().read_record("run").unwrap().metadata["cook_continuation"]
+                ["diagnostic"],
             "Cook continuation worker exited before recording a result; retry scheduled"
         );
-        let retry_record =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root())
-                .read_record("run")
-                .unwrap();
+        let retry_record = store.lifecycle_store().read_record("run").unwrap();
         assert_eq!(retry_record.metadata["cook_continuation"]["retries"], 1);
         assert_eq!(retry_record.metadata["cook_continuation"]["generation"], 1);
         assert!(store

@@ -7159,7 +7159,7 @@ pub(crate) fn cook_failure_context_with_stores(
                 let state = lifecycle_store
                     .map(|store| {
                         super::cook_recipe::continuation_state_in_store(
-                            &super::cook_recipe::CookRecipeStore::from_data_root(store.data_root()),
+                            &super::cook_recipe::CookRecipeStore::for_lifecycle_store(store),
                             cook_id,
                             &record.run_id,
                         )

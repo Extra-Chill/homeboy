@@ -5620,7 +5620,7 @@ pub(crate) fn reconcile_terminal_cook_provider_result_with_scheduler(
         return Ok(record);
     }
     let recipe_store =
-        crate::agent_task_service::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+        crate::agent_task_service::CookRecipeStore::for_lifecycle_store(&lifecycle_store);
     let recipe = match record
         .metadata
         .get("cook_id")
@@ -5770,7 +5770,7 @@ fn converge_resolved_run_in_store(
     options: AgentTaskStatusOptions,
 ) -> Result<(AgentTaskRunRecord, AgentTaskRunnerProbePlan)> {
     let recipe_store =
-        crate::agent_task_service::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+        crate::agent_task_service::CookRecipeStore::for_lifecycle_store(lifecycle_store);
     let _ = reconcile_deferred_candidate_in_store(lifecycle_store, resolved_run_id)?;
     // A candidate adoption whose owner process died is interrupted. Decided
     // from a fresh read under the store lock, not from a caller copy.
@@ -6682,7 +6682,7 @@ where
     let source = lifecycle_store.read_record(&resolve_run_id_in_store(lifecycle_store, run_id)?)?;
     if let Some(cook_id) = source.metadata["cook_id"].as_str() {
         let recipes =
-            crate::agent_task_service::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+            crate::agent_task_service::CookRecipeStore::for_lifecycle_store(lifecycle_store);
         if recipes.recipe_exists(cook_id)
             && reservation_metadata
                 .as_ref()

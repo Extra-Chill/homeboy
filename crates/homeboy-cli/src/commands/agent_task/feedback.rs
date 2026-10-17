@@ -83,10 +83,7 @@ pub(crate) fn feedback(args: CookFeedbackArgs) -> CmdResult<Value> {
     let recipe_store =
         homeboy::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
     let remediation_queued = if recipe_store.recipe_exists(&args.cook_id) {
-        let lifecycle_store =
-            homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_data_root(
-                recipe_store.data_root(),
-            );
+        let lifecycle_store = recipe_store.lifecycle_store();
         let run_id =
             homeboy::agents::agent_task_service::resolve_cook_continuation_run_id_in_store(
                 &recipe_store,

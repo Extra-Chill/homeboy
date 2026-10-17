@@ -1040,8 +1040,7 @@ pub(super) fn prepare_reserved_cook_retry(
         ));
     }
     let registration = lifecycle_store.with_config_lock(|| {
-        let recipes =
-            super::CookRecipeStore::from_data_root(lifecycle_store.data_root().to_path_buf());
+        let recipes = super::CookRecipeStore::for_lifecycle_store(lifecycle_store);
         if source_recipe_revision(&recipes, &preparation.cook_id, &preparation.source_run_id)?
             != preparation.source_recipe_revision
         {
@@ -1104,7 +1103,7 @@ fn retry_reservation_metadata(
     source_run_id: &str,
     replaces_source_attempt: bool,
 ) -> Result<(super::RetryPreparation, serde_json::Map<String, Value>)> {
-    let recipes = super::CookRecipeStore::from_data_root(lifecycle_store.data_root().to_path_buf());
+    let recipes = super::CookRecipeStore::for_lifecycle_store(lifecycle_store);
     let preparation = super::RetryPreparation {
         cook_id: retry.cook_id.clone(),
         source_run_id: source_run_id.to_string(),
@@ -1657,8 +1656,7 @@ where
         let lifecycle_missing =
             !agent_task_lifecycle::run_record_exists_in_store(&lifecycle_store, retry_run_id)?;
         if lifecycle_missing {
-            let recipes =
-                super::CookRecipeStore::from_data_root(lifecycle_store.data_root().to_path_buf());
+            let recipes = super::CookRecipeStore::for_lifecycle_store(&lifecycle_store);
             let recipe = recipes.load_recipe(&cook_retry.cook_id)?;
             let edge = recipe
                 .attempts
@@ -2505,8 +2503,7 @@ fn retryable_cook_attempt(
             None,
         )
     })?;
-    let recipe_store =
-        super::cook_recipe::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    let recipe_store = super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store);
     if !recipe_store.recipe_exists(cook_id) {
         // Legacy runs predate durable recipes. Retain their established generic
         // lifecycle retry behavior rather than inventing Cook ownership.
@@ -2921,8 +2918,7 @@ fn retry_admission_in_store(
     source: &agent_task_lifecycle::AgentTaskRunRecord,
     require_latest_attempt: bool,
 ) -> Result<Option<CookRetryAttempt>> {
-    let recipe_store =
-        super::cook_recipe::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    let recipe_store = super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store);
     let has_cook_ownership = source
         .metadata
         .get("cook_id")
@@ -3694,9 +3690,8 @@ mod tests {
                     true
                 })
                 .expect("mark retryable source attempt");
-            let recipe_store = super::super::cook_recipe::CookRecipeStore::from_data_root(
-                store.data_root().to_path_buf(),
-            );
+            let recipe_store =
+                super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(&store);
             recipe_store
                 .persist_recipe(&super::super::cook_recipe::AgentTaskCookRecipe {
                     schema: super::super::cook_recipe::COOK_RECIPE_SCHEMA.to_string(),
