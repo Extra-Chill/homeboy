@@ -197,19 +197,127 @@ fn execute_direct(runner: &Runner, command: &str) -> Result<DirectOutput> {
     }
 }
 
-fn inventory_command(root: &str, configured: &str, min_age: u64) -> String {
-    // Slot names are created by refresh (`homeboy-<sanitized-ref>`) and dev-sync
-    // (`dev/<sha-prefix>`). Everything else remains visible but fail-closed.
+/// Shell functions shared by inventory and delete, so both recognize the same
+/// slot layouts and enforce the same protected references.
+///
+/// Recognized layouts below the cache root:
+/// - `homeboy-<64-hex sha256>/homeboy`: content-addressed slot published by refresh.
+/// - `homeboy-<ref>/target/release/homeboy`: refresh source checkout.
+/// - `dev/<16-hex>/homeboy`: dev-sync native build slot.
+///
+/// A slot is protected when the configured Homeboy path, any runner-service
+/// controller link, or `$HOME/.local/bin/homeboy` resolves into it. Service
+/// links are discovered by glob because other controllers' links are unknown
+/// to this controller; an unresolvable reference protects every slot.
+fn slot_shell_functions(root: &str, configured: &str) -> String {
+    const SLOT_FUNCTIONS: &str = r#"slot_binary() {
+  case "$1" in
+    dev/__HEX16__) printf '%s/homeboy' "$root/$1" ;;
+    */*) ;;
+    homeboy-__HEX64__) printf '%s/homeboy' "$root/$1" ;;
+    homeboy-*) printf '%s/target/release/homeboy' "$root/$1" ;;
+  esac
+}
+reference_protects() {
+  [ -n "$2" ] || return 1
+  [ -e "$2" ] || [ -L "$2" ] || return 1
+  resolved=$(readlink -f "$2" 2>/dev/null) || resolved=
+  if [ -z "$resolved" ]; then
+    protected_state=ambiguous
+    protected_reason="unresolved_$1:$2"
+    return 0
+  fi
+  case "$resolved" in
+    "$slot"|"$slot"/*|"$physical"|"$physical"/*)
+      protected_state=selected
+      protected_reason="$1:$2"
+      return 0 ;;
+  esac
+  return 1
+}
+slot_protected() {
+  slot=$1
+  physical=$(cd -P "$slot" 2>/dev/null && pwd -P) || physical=$slot
+  case "$configured" in
+    "$slot"/*|"$physical"/*)
+      protected_state=selected
+      protected_reason="configured_homeboy_path:$configured"
+      return 0 ;;
+  esac
+  reference_protects configured_homeboy_path "$configured" && return 0
+  for reference in "$HOME"/.local/share/homeboy/runner-service/*/controllers/*/homeboy; do
+    reference_protects runner_service_link "$reference" && return 0
+  done
+  reference_protects local_bin_link "$HOME/.local/bin/homeboy" && return 0
+  return 1
+}
+slot_identity() {
+  stat -c '%d:%i:%Y' "$1" 2>/dev/null || stat -f '%d:%i:%m' "$1" 2>/dev/null || echo unknown
+}
+slot_process_owned() {
+  lsof -w -Fn -a -d cwd +D "$1" 2>/dev/null | grep -q . || lsof -w -Fn +D "$1" 2>/dev/null | grep -q .
+}
+"#;
     format!(
-        "root={root}; configured={configured}; min_age={min_age}; now=$(date +%s); [ -d \"$root\" ] || exit 0; {{ find \"$root\" -mindepth 1 -maxdepth 1 \\( -type d -o -type l \\) ! -name dev -print; if [ -d \"$root/dev\" ] && [ ! -L \"$root/dev\" ]; then find \"$root/dev\" -mindepth 1 -maxdepth 1 \\( -type d -o -type l \\) -print; fi; }} | LC_ALL=C sort | while IFS= read -r p; do rel=${{p#\"$root\"/}}; binary=; case \"$rel\" in homeboy-*) binary=\"$p/target/release/homeboy\" ;; dev/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) binary=\"$p/homeboy\" ;; esac; blocks=$(du -sk \"$p\" 2>/dev/null | cut -f1); bytes=$(( ${{blocks:-0}} * 1024 )); mtime=$(stat -c %Y \"$p\" 2>/dev/null || stat -f %m \"$p\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge 0 ] || age=0; identity=$(stat -c '%d:%i:%Y' \"$p\" 2>/dev/null || stat -f '%d:%i:%m' \"$p\" 2>/dev/null || echo unknown); [ -n \"$binary\" ] && [ -f \"$binary\" ] && [ ! -L \"$binary\" ] || {{ printf '%s\\t%s\\t%s\\t%s\\tretained\\tunrecognized_slot\\n' \"$p\" \"$bytes\" \"$age\" \"$identity\"; continue; }}; [ ! -L \"$p\" ] || {{ printf '%s\\t%s\\t%s\\t%s\\tretained\\tsymlink\\n' \"$p\" \"$bytes\" \"$age\" \"$identity\"; continue; }}; case \"$configured\" in \"$p\"/*) printf '%s\\t%s\\t%s\\t%s\\tselected\\tconfigured_homeboy_path\\n' \"$p\" \"$bytes\" \"$age\" \"$identity\"; continue ;; esac; command -v lsof >/dev/null 2>&1 || {{ printf '%s\\t%s\\t%s\\t%s\\tambiguous\\tprocess_probe_unavailable\\n' \"$p\" \"$bytes\" \"$age\" \"$identity\"; continue; }}; if lsof -w -Fn -a -d cwd +D \"$p\" 2>/dev/null | grep -q . || lsof -w -Fn +D \"$p\" 2>/dev/null | grep -q .; then printf '%s\\t%s\\t%s\\t%s\\tactive\\tprocess_ownership\\n' \"$p\" \"$bytes\" \"$age\" \"$identity\"; elif [ \"$age\" -lt \"$min_age\" ]; then printf '%s\\t%s\\t%s\\t%s\\tretained\\tminimum_age\\n' \"$p\" \"$bytes\" \"$age\" \"$identity\"; else printf '%s\\t%s\\t%s\\t%s\\teligible\\tunselected_managed_slot\\n' \"$p\" \"$bytes\" \"$age\" \"$identity\"; fi; done",
-        root = shell::quote_arg(root), configured = shell::quote_arg(configured), min_age = min_age,
+        "root={root}\nconfigured={configured}\n{functions}",
+        root = shell::quote_arg(root),
+        configured = shell::quote_arg(configured),
+        functions = SLOT_FUNCTIONS
+            .replace("__HEX16__", &"[0-9a-f]".repeat(16))
+            .replace("__HEX64__", &"[0-9a-f]".repeat(64)),
+    )
+}
+
+fn inventory_command(root: &str, configured: &str, min_age: u64) -> String {
+    // `dev-source` stages dev-sync source archives for an in-flight build; it
+    // is reported but never pruned. Unrecognized names remain fail-closed.
+    format!(
+        r#"{functions}min_age={min_age}
+now=$(date +%s)
+[ -d "$root" ] || exit 0
+row() {{ printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$bytes" "$age" "$identity" "$1" "$2"; }}
+{{ find "$root" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) ! -name dev -print; if [ -d "$root/dev" ] && [ ! -L "$root/dev" ]; then find "$root/dev" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -print; fi; }} | LC_ALL=C sort | while IFS= read -r p; do
+  rel=${{p#"$root"/}}
+  binary=$(slot_binary "$rel")
+  blocks=$(du -sk "$p" 2>/dev/null | cut -f1)
+  bytes=$(( ${{blocks:-0}} * 1024 ))
+  mtime=$(stat -c %Y "$p" 2>/dev/null || stat -f %m "$p" 2>/dev/null || echo 0)
+  age=$((now-mtime))
+  [ "$age" -ge 0 ] || age=0
+  identity=$(slot_identity "$p")
+  if [ "$rel" = dev-source ]; then row retained dev_source_upload_staging; continue; fi
+  [ -n "$binary" ] && [ -f "$binary" ] && [ ! -L "$binary" ] || {{ row retained unrecognized_slot; continue; }}
+  [ ! -L "$p" ] || {{ row retained symlink; continue; }}
+  if slot_protected "$p"; then row "$protected_state" "$protected_reason"; continue; fi
+  command -v lsof >/dev/null 2>&1 || {{ row ambiguous process_probe_unavailable; continue; }}
+  if slot_process_owned "$p"; then row active process_ownership
+  elif [ "$age" -lt "$min_age" ]; then row retained minimum_age
+  else row eligible unselected_managed_slot
+  fi
+done
+"#,
+        functions = slot_shell_functions(root, configured),
     )
 }
 
 fn delete_command(root: &str, path: &str, identity: &str, configured: &str) -> String {
     format!(
-        "root={root}; p={path}; expected={identity}; configured={configured}; binary=; case \"$p\" in \"$root\"/homeboy-*) binary=\"$p/target/release/homeboy\" ;; \"$root\"/dev/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) binary=\"$p/homeboy\" ;; *) printf changed_identity; exit 0;; esac; [ ! -L \"$p\" ] && [ -d \"$p\" ] && [ -f \"$binary\" ] && [ ! -L \"$binary\" ] || {{ printf symlink_or_missing; exit 0; }}; case \"$configured\" in \"$p\"/*) printf selected; exit 0 ;; esac; actual=$(stat -c '%d:%i:%Y' \"$p\" 2>/dev/null || stat -f '%d:%i:%m' \"$p\" 2>/dev/null || echo unknown); [ \"$actual\" = \"$expected\" ] || {{ printf changed_identity; exit 0; }}; command -v lsof >/dev/null 2>&1 || {{ printf process_probe_unavailable; exit 0; }}; if lsof -w -Fn -a -d cwd +D \"$p\" 2>/dev/null | grep -q . || lsof -w -Fn +D \"$p\" 2>/dev/null | grep -q .; then printf active_process; exit 0; fi; rm -rf -- \"$p\" && printf removed || printf delete_failed",
-        root = shell::quote_arg(root), path = shell::quote_arg(path), identity = shell::quote_arg(identity), configured = shell::quote_arg(configured),
+        r#"{functions}p={path}
+expected={identity}
+rel=${{p#"$root"/}}
+[ "$rel" != "$p" ] || {{ printf changed_identity; exit 0; }}
+binary=$(slot_binary "$rel")
+[ -n "$binary" ] || {{ printf changed_identity; exit 0; }}
+[ ! -L "$p" ] && [ -d "$p" ] && [ -f "$binary" ] && [ ! -L "$binary" ] || {{ printf symlink_or_missing; exit 0; }}
+if slot_protected "$p"; then printf '%s' "$protected_reason"; exit 0; fi
+[ "$(slot_identity "$p")" = "$expected" ] || {{ printf changed_identity; exit 0; }}
+command -v lsof >/dev/null 2>&1 || {{ printf process_probe_unavailable; exit 0; }}
+if slot_process_owned "$p"; then printf active_process; exit 0; fi
+rm -rf -- "$p" && printf removed || printf delete_failed
+"#,
+        functions = slot_shell_functions(root, configured),
+        path = shell::quote_arg(path),
+        identity = shell::quote_arg(identity),
     )
 }
 
@@ -270,6 +378,138 @@ mod tests {
         slot
     }
 
+    fn content_addressed_slot(root: &std::path::Path, digit: char) -> std::path::PathBuf {
+        let slot = root.join(format!("homeboy-{}", digit.to_string().repeat(64)));
+        fs::create_dir_all(&slot).expect("create content-addressed slot");
+        fs::write(slot.join("homeboy"), b"binary").expect("write slot binary");
+        fs::write(slot.join("provenance"), b"provenance").expect("write provenance");
+        slot
+    }
+
+    fn run_shell_as(command: &str, path: &str, home: &std::path::Path) -> std::process::Output {
+        Command::new("sh")
+            .args(["-c", command])
+            .env("PATH", path)
+            .env("HOME", home)
+            .output()
+            .expect("run cache lifecycle shell")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn content_addressed_slots_prune_only_when_no_live_link_targets_them() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temp root");
+        let path = inactive_process_tools(temp.path());
+        let home = temp.path().join("home");
+        let root = temp.path().join("_homeboy_binaries");
+        let configured = content_addressed_slot(&root, 'a');
+        let service = content_addressed_slot(&root, 'b');
+        let local_bin = content_addressed_slot(&root, 'c');
+        let unreferenced = content_addressed_slot(&root, 'd');
+        let service_link =
+            home.join(".local/share/homeboy/runner-service/lab/controllers/other/homeboy");
+        fs::create_dir_all(service_link.parent().expect("service dir")).expect("service dir");
+        symlink(service.join("homeboy"), &service_link).expect("service link");
+        let local_bin_link = home.join(".local/bin/homeboy");
+        fs::create_dir_all(local_bin_link.parent().expect("bin dir")).expect("bin dir");
+        symlink(local_bin.join("homeboy"), &local_bin_link).expect("local bin link");
+        let root_arg = root.to_str().expect("root path");
+        let configured_binary = configured.join("homeboy");
+        let configured_arg = configured_binary.to_str().expect("configured path");
+
+        let output = run_shell_as(
+            &inventory_command(root_arg, configured_arg, 0),
+            &path,
+            &home,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let entries = parse_entries(&String::from_utf8_lossy(&output.stdout)).expect("inventory");
+        let entry = |slot: &std::path::Path| {
+            entries
+                .iter()
+                .find(|entry| entry.path == slot.to_string_lossy())
+                .unwrap_or_else(|| panic!("missing {}: {entries:#?}", slot.display()))
+        };
+
+        assert_eq!(entries.len(), 4, "{entries:#?}");
+        assert_eq!(entry(&configured).state, "selected", "{entries:#?}");
+        assert_eq!(
+            entry(&configured).reason,
+            format!("configured_homeboy_path:{configured_arg}")
+        );
+        assert_eq!(entry(&service).state, "selected", "{entries:#?}");
+        assert_eq!(
+            entry(&service).reason,
+            format!("runner_service_link:{}", service_link.display())
+        );
+        assert_eq!(entry(&local_bin).state, "selected", "{entries:#?}");
+        assert_eq!(
+            entry(&local_bin).reason,
+            format!("local_bin_link:{}", local_bin_link.display())
+        );
+        assert_eq!(entry(&unreferenced).state, "eligible", "{entries:#?}");
+
+        for slot in [&configured, &service, &local_bin] {
+            let deletion = run_shell_as(
+                &delete_command(
+                    root_arg,
+                    slot.to_str().expect("slot path"),
+                    &entry(slot).identity,
+                    configured_arg,
+                ),
+                &path,
+                &home,
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&deletion.stdout),
+                entry(slot).reason,
+                "{}",
+                slot.display()
+            );
+            assert!(slot.exists());
+        }
+
+        let late_link =
+            home.join(".local/share/homeboy/runner-service/lab/controllers/late/homeboy");
+        fs::create_dir_all(late_link.parent().expect("late dir")).expect("late dir");
+        symlink(unreferenced.join("homeboy"), &late_link).expect("late link");
+        let refused = run_shell_as(
+            &delete_command(
+                root_arg,
+                unreferenced.to_str().expect("slot path"),
+                &entry(&unreferenced).identity,
+                configured_arg,
+            ),
+            &path,
+            &home,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&refused.stdout),
+            format!("runner_service_link:{}", late_link.display())
+        );
+        assert!(unreferenced.exists());
+        fs::remove_file(&late_link).expect("remove late link");
+
+        let deletion = run_shell_as(
+            &delete_command(
+                root_arg,
+                unreferenced.to_str().expect("slot path"),
+                &entry(&unreferenced).identity,
+                configured_arg,
+            ),
+            &path,
+            &home,
+        );
+        assert_eq!(String::from_utf8_lossy(&deletion.stdout), "removed");
+        assert!(!unreferenced.exists());
+    }
+
     #[test]
     #[cfg(unix)]
     fn inventory_classifies_real_managed_and_ambiguous_layouts() {
@@ -303,7 +543,7 @@ mod tests {
         assert!(entries.iter().any(|entry| {
             entry.path == selected.to_string_lossy()
                 && entry.state == "selected"
-                && entry.reason == "configured_homeboy_path"
+                && entry.reason.starts_with("configured_homeboy_path:")
         }));
         assert!(
             entries.iter().any(|entry| {

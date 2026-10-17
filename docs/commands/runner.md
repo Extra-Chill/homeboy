@@ -1035,9 +1035,30 @@ homeboy runner cache-prune <runner-id>
 homeboy runner cache-prune <runner-id> --apply --min-age-hours 24
 ```
 
-Inventories stale managed Homeboy binary slots on a runner. `--apply` removes
-only unselected slots that meet the shared minimum-age floor; omit it to inspect
-the eligible slots without changing the runner.
+Inventories stale managed Homeboy binary slots below
+`<workspace_root>/_homeboy_binaries` on a runner. `--apply` removes only
+unselected slots that meet the shared minimum-age floor; omit it to inspect the
+eligible slots without changing the runner.
+
+Recognized slot layouts:
+
+- `homeboy-<64-hex sha256>/homeboy` — content-addressed slot published by
+  `refresh-homeboy` (with its `provenance` file).
+- `homeboy-<ref>/target/release/homeboy` — the source checkout refresh builds in.
+- `dev/<16-hex>/homeboy` — a dev-sync native build slot.
+
+A slot is `selected` (never removed) when any of these resolve into it:
+the configured `homeboy_path` (`configured_homeboy_path:<path>`), any
+runner-service controller link `~/.local/share/homeboy/runner-service/*/controllers/*/homeboy`
+(`runner_service_link:<path>`, covering every controller's daemon), or
+`~/.local/bin/homeboy` (`local_bin_link:<path>`). A reference that exists but
+cannot be resolved protects every slot (`ambiguous`, `unresolved_<kind>:<path>`).
+Process-owned slots are `active`. `dev-source` (dev-sync's source upload
+staging) is retained as `dev_source_upload_staging`; symlinked slots, slots
+without their regular binary, and unrecognized names (`unrecognized_slot`) are
+retained for an operator to inspect. `--apply` re-checks layout, every
+protected reference, identity, and process ownership immediately before each
+removal.
 
 ### `workspace apply`
 
