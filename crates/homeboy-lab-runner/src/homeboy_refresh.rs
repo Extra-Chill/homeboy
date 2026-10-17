@@ -1039,7 +1039,7 @@ pub fn refresh_homeboy_binary_in_roots(
             options.force,
         ) {
             Ok(job_ids) => job_ids,
-            Err(_) => {
+            Err(error) => {
                 let deferred = defer_reconnect_after_promotion_race_in_roots(
                     roots,
                     &plan.runner_id,
@@ -1047,6 +1047,8 @@ pub fn refresh_homeboy_binary_in_roots(
                     previous_homeboy_path.as_deref(),
                     &active_jobs,
                 )?;
+                let failure =
+                    deferred_reconnect_failure(&plan, exec_output.clone(), &error, &deferred);
                 return Ok((
                     HomeboyBinaryRefreshOutput {
                         variant: "refresh_homeboy",
@@ -1071,7 +1073,7 @@ pub fn refresh_homeboy_binary_in_roots(
                             continuation: deferred.followup_commands.last().cloned(),
                         }),
                         reconnect_deferred: Some(deferred),
-                        failure: None,
+                        failure: Some(failure),
                         bootstrap_provenance: None,
                         rollback: rollback.clone(),
                         build_transcript: Some(refresh_build_transcript(&exec_output)),
@@ -3979,6 +3981,30 @@ fn defer_reconnect_after_promotion_race_in_roots(
         followup_commands: active_job_followups(runner_id, &active_job_ids),
         ownership_contention,
     })
+}
+
+/// A deferred reconnect exits 1 with readiness `draining`; it must name the
+/// live jobs that deferred it rather than leaving `failure: None`, which the
+/// CLI reports as "exited 1 without reporting a failure cause" (#16089).
+fn deferred_reconnect_failure(
+    plan: &HomeboyBinaryRefreshPlan,
+    execution: RunnerExecOutput,
+    cause: &Error,
+    deferred: &HomeboyReconnectDeferred,
+) -> HomeboyBinaryRefreshFailure {
+    let contention = deferred
+        .ownership_contention
+        .as_deref()
+        .map(|contention| format!(" {contention}."))
+        .unwrap_or_default();
+    refresh_verification_failure(
+        plan,
+        execution,
+        format!(
+            "reconnect deferred after promotion: {}{contention}",
+            cause.message
+        ),
+    )
 }
 
 fn rollback_refresh_error_with<T, Restore>(mut primary_error: Error, restore: Restore) -> Result<T>

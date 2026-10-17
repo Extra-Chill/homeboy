@@ -459,3 +459,28 @@ fn unconverged_readiness_message_names_state_owners_and_next_action() {
         "must surface the exact continuation command"
     );
 }
+
+/// #16089: a post-promotion active-job race defers the reconnect and exits 1
+/// with readiness `draining`. That exit must name the jobs that deferred it,
+/// not ship `failure: None` ("exited 1 without reporting a failure cause").
+#[test]
+fn deferred_reconnect_names_the_jobs_that_deferred_it() {
+    let (plan, execution) = unconverged_refresh_fixture();
+    let job_ids = vec!["job-raced-after-precheck".to_string()];
+    let cause = active_job_reconnect_error("homeboy-lab", &job_ids);
+    let deferred = HomeboyReconnectDeferred {
+        reason: "active_daemon_jobs",
+        active_job_ids: job_ids.clone(),
+        selected_binary_path: "/runner/homeboy".to_string(),
+        followup_commands: active_job_followups("homeboy-lab", &job_ids),
+        ownership_contention: Some("selector moved".to_string()),
+    };
+
+    let failure = deferred_reconnect_failure(&plan, execution, &cause, &deferred);
+
+    assert_eq!(failure.exit_code, 1);
+    let message = failure.verification.expect("deferred cause is named");
+    assert!(message.contains("reconnect deferred"), "{message}");
+    assert!(message.contains("job-raced-after-precheck"), "{message}");
+    assert!(message.contains("selector moved"), "{message}");
+}

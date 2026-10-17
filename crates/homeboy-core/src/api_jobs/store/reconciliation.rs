@@ -1056,6 +1056,25 @@ impl JobStore {
         Ok(diagnostics)
     }
 
+    /// Whether this store's daemon executes a job stamped with `job_lease_id`.
+    ///
+    /// Every daemon running as one Unix user opens the same HOME-scoped
+    /// ledger, whatever its `HOMEBOY_DAEMON_STATE_DIR` (#16089). The executing
+    /// daemon stamps its lease on each job it creates or claims, so a job
+    /// stamped with another lease is another daemon's work: it cannot occupy
+    /// this daemon's capacity, and replacing this daemon cannot interrupt it.
+    /// An unstamped record has no proven owner and stays counted. A store
+    /// without a lease (CLI inspection) projects the whole ledger.
+    pub(crate) fn executes_lease(&self, job_lease_id: Option<&str>) -> bool {
+        match (self.daemon_lease_id.as_deref(), job_lease_id) {
+            (Some(own), Some(job)) => own == job,
+            _ => true,
+        }
+    }
+
+    /// This daemon's typed live-job ownership snapshot; see
+    /// [`Self::executes_lease`]. The full ledger stays available through
+    /// [`Self::list`] for operator inventory.
     pub(crate) fn active_runner_jobs(&self) -> Vec<super::super::types::ActiveRunnerJobSummary> {
         let now = timestamp_ms();
         let inner = self.inner.lock().expect("job store mutex poisoned");
@@ -1063,6 +1082,7 @@ impl JobStore {
             .jobs
             .values()
             .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
+            .filter(|stored| self.executes_lease(stored.job.daemon_lease_id.as_deref()))
             .map(|stored| {
                 stored
                     .remote_runner
@@ -1122,6 +1142,7 @@ impl JobStore {
             .filter(|stored| {
                 stored.job.status == JobStatus::Failed && stored.job.stale_reason.is_some()
             })
+            .filter(|stored| self.executes_lease(stored.job.daemon_lease_id.as_deref()))
             .filter_map(|stored| {
                 let envelope = &stored.remote_runner.as_ref()?.envelope;
                 Some(super::super::summary::active_runner_job_summary(
