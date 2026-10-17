@@ -2963,7 +2963,7 @@ where
         // Preserve that state here so the reclaim it is about to record stays
         // durable evidence instead of silently reading as a fresh start.
         if existing.state == AgentTaskRunState::Running && !existing.owner_process_is_running() {
-            record.state = existing.state;
+            set_run_state(&mut record, existing.state);
         }
         let existing_fanout = canonical_fanout_mission(&existing.metadata)?;
         let submitted_fanout = canonical_fanout_mission(&record.metadata)?;

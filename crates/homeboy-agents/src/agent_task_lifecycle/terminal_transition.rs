@@ -19,6 +19,11 @@
 //! state it leaves against the stored record.
 //! `mutate_record` re-reads under the config lock and commits at the revision
 //! it read, so no production writer can commit a stale snapshot.
+//!
+//! Whatever the commit kind, the edge from the stored state to the committed
+//! one must be legal in [`AgentTaskRunState::can_transition_to`]. The single
+//! write path refuses any other edge with [`AGENT_TASK_ILLEGAL_TRANSITION`];
+//! the per-kind rules below only narrow it.
 
 use super::*;
 
@@ -283,21 +288,31 @@ impl AgentTaskTransition {
                 prepared,
                 aggregate,
             } => {
-                validate_prepared_terminal_record(&prepared, &stored, "an aggregate projection")?;
+                validate_prepared_terminal_record(
+                    &prepared,
+                    &stored,
+                    "project_aggregate",
+                    "an aggregate projection",
+                )?;
                 Ok((*prepared, Some(*aggregate), true))
             }
             Self::CommitRecord { prepared } => {
-                validate_prepared_terminal_record(&prepared, &stored, "a terminal record commit")?;
+                validate_prepared_terminal_record(
+                    &prepared,
+                    &stored,
+                    "commit_record",
+                    "a terminal record commit",
+                )?;
                 Ok((*prepared, stored_aggregate, false))
             }
             Self::Annotate { prepared } => {
                 validate_identity(&prepared, &stored, "an annotation")?;
                 if let Some(field) = ownership_change(&stored, &prepared) {
-                    return Err(Error::validation_invalid_argument(
-                        "transition",
-                        format!("an annotation cannot change {field}; commit a typed transition"),
-                        Some(stored.run_id.clone()),
-                        None,
+                    return Err(illegal_transition(
+                        &stored,
+                        prepared.state,
+                        "annotate",
+                        &format!("an annotation cannot change {field}; commit a typed transition"),
                     ));
                 }
                 Ok((*prepared, stored_aggregate, false))
@@ -305,11 +320,11 @@ impl AgentTaskTransition {
             Self::Advance { kind, prepared } => {
                 validate_identity(&prepared, &stored, kind.name())?;
                 if let Some(problem) = kind.violation(&stored, &prepared) {
-                    return Err(Error::validation_invalid_argument(
-                        "transition",
-                        format!("{problem} (stored state {:?})", stored.state),
-                        Some(stored.run_id.clone()),
-                        None,
+                    return Err(illegal_transition(
+                        &stored,
+                        prepared.state,
+                        kind.name(),
+                        &format!("{problem} (stored state {:?})", stored.state),
                     ));
                 }
                 Ok((*prepared, stored_aggregate, false))
@@ -337,6 +352,7 @@ fn validate_identity(
 fn validate_prepared_terminal_record(
     prepared: &AgentTaskRunRecord,
     stored: &AgentTaskRunRecord,
+    name: &str,
     what: &str,
 ) -> Result<()> {
     if prepared.run_id != stored.run_id || prepared.plan_id != stored.plan_id {
@@ -348,14 +364,60 @@ fn validate_prepared_terminal_record(
         ));
     }
     if !prepared.state.is_terminal() {
-        return Err(Error::validation_invalid_argument(
-            "transition",
-            format!("{what} must commit a terminal run state"),
-            Some(stored.run_id.clone()),
-            None,
+        return Err(illegal_transition(
+            stored,
+            prepared.state,
+            name,
+            &format!("{what} must commit a terminal run state"),
         ));
     }
     Ok(())
+}
+
+/// `reason_code` carried in the details of a refused transition: the commit
+/// would take the run along an edge the run state graph
+/// ([`AgentTaskRunState::can_transition_to`]) or the named transition does
+/// not allow. Nothing was written.
+pub const AGENT_TASK_ILLEGAL_TRANSITION: &str = "agent_task_illegal_transition";
+
+/// Refuse a commit that would move `stored` to `to` along an illegal edge.
+pub(crate) fn illegal_transition(
+    stored: &AgentTaskRunRecord,
+    to: AgentTaskRunState,
+    transition: &str,
+    problem: &str,
+) -> Error {
+    illegal_state_transition(&stored.run_id, stored.state, to, transition, problem)
+}
+
+pub(crate) fn illegal_state_transition(
+    run_id: &str,
+    from: AgentTaskRunState,
+    to: AgentTaskRunState,
+    transition: &str,
+    problem: &str,
+) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "transition",
+        problem.to_string(),
+        Some(run_id.to_string()),
+        None,
+    );
+    let extra = json!({
+        "reason_code": AGENT_TASK_ILLEGAL_TRANSITION,
+        "from_state": from,
+        "to_state": to,
+        "transition": transition,
+    });
+    match error.details.as_object_mut() {
+        Some(details) => {
+            if let Some(extra) = extra.as_object() {
+                details.extend(extra.clone());
+            }
+        }
+        None => error.details = extra,
+    }
+    error
 }
 
 /// Outcome of committing a terminal record prepared from a caller-held

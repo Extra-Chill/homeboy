@@ -1404,6 +1404,57 @@ impl AgentTaskRunState {
                 | AgentTaskRunState::Cancelled
         )
     }
+
+    /// The run state transition graph: whether a committed record in `self`
+    /// may be replaced by one in `next`.
+    ///
+    /// The single definition of legal run state edges. Every record write
+    /// passes through `write_record_guarded`, which refuses an edge this
+    /// rejects with `agent_task_illegal_transition`, so no closure or prepared
+    /// record can commit a state change the graph does not name (#15718).
+    ///
+    /// | from | to |
+    /// |---|---|
+    /// | any | itself (annotation, idempotent re-projection) |
+    /// | `Queued`, `Running` | any |
+    /// | any terminal | `Queued` |
+    /// | `Cancelled` | `Running` |
+    /// | `CandidateRecoverable` | `Cancelled` |
+    /// | non-cancelled terminal | non-cancelled terminal |
+    pub fn can_transition_to(self, next: AgentTaskRunState) -> bool {
+        use AgentTaskRunState::*;
+        match (self, next) {
+            _ if self == next => true,
+            // A live run is claimed (`Start`, `BindLabHandoff`), returned to
+            // the queue (`Requeue`, `reset_for_requeue`) or finished.
+            (Queued | Running, _) => true,
+            // A finished run re-enters only through the queue: a plan
+            // resubmission (`Submit`), the zero-execution rearm
+            // (`rearm_pre_execution_record_inner`), and the reclaim of a
+            // detached Cook that failed before its handoff projected
+            // (`claim_detached_cook_handoff_parent_in_store`).
+            (_, Queued) => true,
+            // A runner's late acceptance of an expired Lab handoff supersedes
+            // the synthetic expiry cancellation (`BindLabHandoff`).
+            (Cancelled, Running) => true,
+            // Otherwise a cancellation is final: its `run.cancelled` receipt
+            // is immutable, so nothing may re-project the run as another
+            // outcome.
+            (Cancelled, _) => false,
+            // No other finished run resumes in place.
+            (_, Running) => false,
+            // A run stopped with a recoverable candidate is waiting on a
+            // decision, which the operator may make by cancelling it
+            // (`cancel`). Every other outcome refuses cancellation.
+            (CandidateRecoverable, Cancelled) => true,
+            (_, Cancelled) => false,
+            // Between the other outcomes a finished run is re-projected from
+            // later evidence: an aggregate (`apply_aggregate_to_record`), a
+            // Cook's `no_candidate` result, or a candidate adoption that
+            // supersedes a pre-execution failure.
+            _ => true,
+        }
+    }
 }
 
 /// Canonical projection of a run's aggregate state onto the generic
@@ -1474,6 +1525,75 @@ impl From<AgentTaskRunState> for RunLifecycleStatus {
 #[cfg(test)]
 mod run_state_lifecycle_projection_tests {
     use super::*;
+
+    /// Every edge a production writer commits, named by its call site, is
+    /// legal; the edges no writer may take are refused.
+    #[test]
+    fn the_transition_graph_allows_every_production_edge_and_refuses_the_rest() {
+        use AgentTaskRunState::*;
+        let allowed = [
+            // `Start`, `BindLabHandoff`, `mark_running`, runner projection.
+            (Queued, Running),
+            (Running, Running),
+            // `Requeue`, `reset_for_requeue`.
+            (Running, Queued),
+            // Cancellation of a live run.
+            (Queued, Cancelled),
+            (Running, Cancelled),
+            // Pre-execution and aggregate terminalization.
+            (Queued, Failed),
+            (Running, Succeeded),
+            (Running, CandidateRecoverable),
+            (Running, PartialRecoverable),
+            (Running, PartialFailure),
+            (Running, Failed),
+            // Resubmission, zero-execution rearm, detached Cook reclaim.
+            (Failed, Queued),
+            (Cancelled, Queued),
+            (Succeeded, Queued),
+            // Late Lab acceptance of an expired handoff.
+            (Cancelled, Running),
+            // Operator cancel of a run waiting on a candidate decision.
+            (CandidateRecoverable, Cancelled),
+            // Candidate adoption superseding a pre-execution failure.
+            (Failed, Succeeded),
+            (CandidateRecoverable, Succeeded),
+            // A Cook's `no_candidate` result.
+            (Succeeded, PartialFailure),
+            // A controller failure attached before the aggregate projected.
+            (Succeeded, Failed),
+        ];
+        for (from, to) in allowed {
+            assert!(
+                from.can_transition_to(to),
+                "{from:?} -> {to:?} must be legal"
+            );
+        }
+        for state in ALL_RUN_STATES {
+            assert!(state.can_transition_to(state), "{state:?} -> itself");
+        }
+        let refused = [
+            (Succeeded, Running),
+            (Failed, Running),
+            (CandidateRecoverable, Running),
+            (PartialRecoverable, Running),
+            (PartialFailure, Running),
+            (Cancelled, Succeeded),
+            (Cancelled, CandidateRecoverable),
+            (Cancelled, PartialFailure),
+            (Cancelled, Failed),
+            (Succeeded, Cancelled),
+            (Failed, Cancelled),
+            (PartialFailure, Cancelled),
+            (PartialRecoverable, Cancelled),
+        ];
+        for (from, to) in refused {
+            assert!(
+                !from.can_transition_to(to),
+                "{from:?} -> {to:?} must be refused"
+            );
+        }
+    }
 
     /// Every `AgentTaskRunState`, so a new variant is a compile error in the
     /// tests below rather than a silently unchecked one.

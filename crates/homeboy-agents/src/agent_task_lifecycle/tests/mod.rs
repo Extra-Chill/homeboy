@@ -338,6 +338,7 @@ mod non_terminal_transitions;
 mod operation_claims;
 mod private_attachment;
 mod runner_exec;
+mod state_graph;
 mod status_and_recovery;
 mod status_purity;
 mod submit_and_persist;

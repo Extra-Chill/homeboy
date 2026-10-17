@@ -2142,7 +2142,6 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
         record.plan_path =
             "/home/chubes/.local/share/homeboy/agent-task-runs/cook-lab-attempt/plan.json"
                 .to_string();
-        record.state = AgentTaskRunState::Running;
     })
     .expect("runner transport projection replaces display path");
 
