@@ -636,7 +636,13 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
         }
     });
 
-    // The root's serving lease is the controller job's only route.
+    // The root's serving lease is the controller job's only route. The daemon
+    // state override outranks an injected root, and every parallel test's
+    // isolated home sets it, so pin it absent under the env lock rather than
+    // routing to whichever home is current (#14832).
+    let _env = homeboy_core::test_support::env_lock();
+    let _daemon_state_dir =
+        homeboy_core::test_support::EnvVarGuard::unset(homeboy_core::paths::DAEMON_STATE_DIR_ENV);
     let daemon_dir = lifecycle_store.roots().config().join("daemon");
     std::fs::create_dir_all(&daemon_dir).expect("create rooted daemon dir");
     let state_path = daemon_dir.join("state.json");

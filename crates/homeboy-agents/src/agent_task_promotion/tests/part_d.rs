@@ -80,6 +80,7 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
 
 #[test]
 fn promotion_applies_verified_snapshot_when_source_artifact_is_replaced() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("promotion tempdir");
     let (source_path, source) = write_patch_source(&temp);
     let artifact_path = temp.path().join("changes.patch");
@@ -142,6 +143,7 @@ fn normalize_promotion_patch_strips_lab_sandbox_workspace_prefix() {
 
 #[test]
 fn empty_patch_records_declared_base_candidate_delta_before_running_gates() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -221,6 +223,7 @@ fn empty_patch_records_declared_base_candidate_delta_before_running_gates() {
 /// the reused destination branch are not reported as this attempt's change.
 #[test]
 fn verified_unchanged_attempt_promotes_as_no_change_without_running_gates() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -294,6 +297,7 @@ fn verified_unchanged_attempt_promotes_as_no_change_without_running_gates() {
 /// without a patch artifact unless Homeboy verified the checkout unchanged.
 #[test]
 fn no_op_without_patch_artifact_still_requires_an_audited_candidate_without_verification() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let source_path = temp.path().join("outcome.json");
     let source = serde_json::json!({
@@ -338,6 +342,7 @@ fn no_op_without_patch_artifact_still_requires_an_audited_candidate_without_veri
 
 #[test]
 fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -524,6 +529,7 @@ fn validate_patch_rejects_path_traversal() {
 
 #[test]
 fn promote_dry_run_validates_provider_request_without_applying() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let (source_path, source) = write_patch_source(&temp);
 
@@ -619,6 +625,7 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
 
 #[test]
 fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let patch = "diff --git a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n--- a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n+++ b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
     let patch_path = temp.path().join("changes.patch");
@@ -725,6 +732,7 @@ fn explicit_candidate_rejections_leave_target_unmodified() {
 
 #[test]
 fn promotion_report_serializes_generic_command_evidence() {
+    let _home = gate_home();
     let report = AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: AgentTaskPromotionStatus::Applied,

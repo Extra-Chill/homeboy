@@ -2285,6 +2285,7 @@ mod tests {
 
     #[test]
     fn shared_evaluator_uses_effective_config_redacts_runtime_reason_and_deduplicates() {
+        let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let script = root.path().join("readiness.js");
         let count = root.path().join("count");
@@ -2474,6 +2475,7 @@ mod tests {
 
     #[test]
     fn repeated_admission_reconsiders_a_recovered_primary_from_the_durable_plan() {
+        let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let block_fallback = root.path().join("block-fallback");
@@ -2537,6 +2539,7 @@ mod tests {
 
     #[test]
     fn repeated_admission_of_a_bound_fallback_never_reconsiders_primary() {
+        let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let script = root.path().join("readiness.js");

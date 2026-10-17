@@ -1126,6 +1126,7 @@ mod tests {
 
     #[test]
     fn sibling_child_readiness_reuses_one_subprocess_probe() {
+        let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let temp = tempfile::tempdir().expect("tempdir");
         let count = temp.path().join("probe-count");
         let readiness: AgentTaskExecutorProvider = serde_json::from_value(json!({
@@ -1571,6 +1572,7 @@ mod tests {
 
     #[test]
     fn provider_capacity_evidence_is_shared_across_plans_and_scoped_to_the_model_identity() {
+        let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let executor = readiness_executor();
         let blocked = readiness_request("blocked-model");
         let mut blocked_outcome = AgentTaskOutcome {
@@ -1696,6 +1698,7 @@ mod tests {
 
     #[test]
     fn provider_reported_account_switch_does_not_inherit_capacity_evidence() {
+        let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let account = root.path().join("account");
         let script = root.path().join("readiness.js");

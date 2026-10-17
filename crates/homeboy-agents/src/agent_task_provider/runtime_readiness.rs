@@ -1321,6 +1321,16 @@ fn readiness_error(
     error
 }
 
+/// The readiness cache identity includes the probe's `HOME`. A parallel test
+/// repointing `HOME` between two probes turns them into different identities,
+/// so the second one re-probes (#14832). Tests that assert readiness reuse hold
+/// an isolated home, which fixes `HOME` for their whole duration and keeps the
+/// durable fan-out cache out of the real data root.
+#[cfg(test)]
+pub(crate) fn stable_identity_home() -> homeboy_core::test_support::HomeGuard {
+    homeboy_core::test_support::HomeGuard::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1425,6 +1435,7 @@ mod tests {
 
     #[test]
     fn shared_cache_deduplicates_a_fanout_runtime_probe() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
@@ -1440,6 +1451,7 @@ mod tests {
 
     #[test]
     fn process_local_cache_deduplicates_phases_without_reusing_stale_credentials() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
@@ -1474,6 +1486,7 @@ mod tests {
 
     #[test]
     fn durable_fanout_cache_hashes_provider_identity_and_expires() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("entry.json");
         let request_key = content_hash::sha256_hex(b"test-request");
@@ -1526,6 +1539,7 @@ mod tests {
 
     #[test]
     fn explicit_provider_config_client_contexts_do_not_share_fanout_readiness() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
@@ -1551,6 +1565,7 @@ mod tests {
 
     #[test]
     fn generated_fanout_child_identity_deduplicates_readiness() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
@@ -1589,6 +1604,7 @@ mod tests {
 
     #[test]
     fn caller_fanout_shape_without_the_internal_marker_remains_distinct() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
@@ -1670,6 +1686,7 @@ mod tests {
 
     #[test]
     fn negative_runtime_evidence_expires_and_reprobes_recovered_credentials() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let recovered = root.path().join("recovered");
@@ -1725,6 +1742,7 @@ mod tests {
 
     #[test]
     fn concurrent_exact_key_probes_singleflight() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let script = root.path().join("singleflight.js");
@@ -1759,6 +1777,7 @@ mod tests {
 
     #[test]
     fn short_deadline_waiter_does_not_poison_long_deadline_singleflight() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let release = root.path().join("release");
@@ -1843,6 +1862,7 @@ mod tests {
 
     #[test]
     fn expired_probe_owner_releases_singleflight_for_a_long_deadline_retry() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let release = root.path().join("release");
@@ -1943,6 +1963,7 @@ mod tests {
 
     #[test]
     fn concurrent_distinct_keys_keep_pending_cache_entries_bounded() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let release = root.path().join("release");
         let probes = root.path().join("probes");
@@ -2029,6 +2050,7 @@ mod tests {
     /// satisfy live-inference readiness (or vice versa).
     #[test]
     fn capacity_mode_probes_are_a_distinct_cache_identity_from_live_inference() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let modes = root.path().join("modes.log");
         let script = root.path().join("mode-echo.js");
@@ -2079,6 +2101,7 @@ mod tests {
 
     #[test]
     fn readiness_probe_errors_are_cached_briefly() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let script = root.path().join("failure.js");
@@ -2257,6 +2280,7 @@ mod tests {
 
     #[test]
     fn delayed_ready_route_is_cached_across_repeated_admission_probes() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let script = root.path().join("delayed-ready.js");

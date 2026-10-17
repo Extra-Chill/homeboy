@@ -130,6 +130,7 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
 
 #[test]
 fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
+    let _home = gate_home();
     let left_context = homeboy_core::test_support::HermeticTestContext::new();
     let right_context = homeboy_core::test_support::HermeticTestContext::new();
     let left_store =
@@ -275,6 +276,7 @@ fn committed_changes_retention_uses_the_explicit_observation_store() {
 
 #[test]
 fn promote_recoverable_candidate_rejects_mismatched_run_provenance() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let (source_path, source) = recoverable_patch_source(&temp, 1);
     let mut source: Value = serde_json::from_str(&source).expect("source JSON");
@@ -454,6 +456,7 @@ fn normalize_promotion_patch_leaves_unrelated_workspace_paths() {
 
 #[test]
 fn empty_patch_failing_gate_is_reported_against_destination() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -511,6 +514,7 @@ fn empty_patch_failing_gate_is_reported_against_destination() {
 
 #[test]
 fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -606,6 +610,7 @@ fn normalize_promotion_patch_rejects_repo_sandbox_without_relative_suffix() {
 
 #[test]
 fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let (source_path, source) = write_patch_source(&temp);
     let mut source: Value = serde_json::from_str(&source).expect("source JSON");
@@ -654,6 +659,7 @@ fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
 
 #[test]
 fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let worktree_path = temp.path().join("managed-target");
     std::fs::create_dir(&worktree_path).expect("create target");

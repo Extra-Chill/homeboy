@@ -305,24 +305,18 @@ mod tests {
             assert!(Instant::now() < deadline, "leader did not exit on its own");
             std::thread::sleep(Duration::from_millis(25));
         }
-        #[cfg(target_os = "linux")]
+        // Observing the leader's exit drains its group on every platform: the
+        // Linux execution supervisor drains descendants before it exits, and
+        // elsewhere the owner terminates the remaining process group once it
+        // reaps the root. The non-Linux branch that expected the descendant to
+        // outlive the leader predated that drain and failed on macOS (#14832).
         assert!(
-            !homeboy_core::process::pid_is_running(descendant_pid),
-            "the execution supervisor must drain descendants before exiting"
-        );
-        #[cfg(not(target_os = "linux"))]
-        assert!(
-            homeboy_core::process::pid_is_running(descendant_pid),
-            "descendant must outlive its leader for this to test anything"
+            wait_until_gone(descendant_pid, Duration::from_secs(5)),
+            "descendant {descendant_pid} survived its leader's observed exit"
         );
         containment
             .reap_after_exit()
-            .expect("surviving group members are reaped");
-
-        assert!(
-            wait_until_gone(descendant_pid, Duration::from_secs(5)),
-            "descendant {descendant_pid} survived cleanup after its leader exited"
-        );
+            .expect("reaping an already drained group succeeds");
     }
 
     /// A Homeboy-initiated kill (timeout / liveness watchdog) must take the

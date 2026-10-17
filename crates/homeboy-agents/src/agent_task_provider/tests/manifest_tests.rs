@@ -1,4 +1,4 @@
-use super::common::{request, script};
+use super::common::{artifact_home, request, script};
 use super::*;
 use crate::agent_task::{AgentTaskOutputDeclaration, AgentTaskOutputEvidenceRelationship};
 
@@ -168,6 +168,7 @@ fn runtime_manifest_normalizes_codex_invocation_argv() {
 
 #[test]
 fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
+    let _home = artifact_home();
     let (mut request, _provider) = request("missing-opencode", "unused".to_string());
     request.executor.backend = "opencode".to_string();
     let executor = ExtensionProviderAgentTaskExecutor::from_catalog(AgentTaskProviderCatalog {
@@ -290,6 +291,7 @@ fn provider_readiness_timeout_uses_an_injected_zero_duration() {
 
 #[test]
 fn workspace_permission_root_capability_serializes_the_exact_task_workspace() {
+    let _home = artifact_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let original = temp.path().join("promotion-target");
     let candidate = temp.path().join("attempt-candidate");
@@ -381,6 +383,7 @@ process.stdin.on('end', () => {
 
 #[test]
 fn provider_adapter_receives_and_consumes_resolved_stdio_runtime_tool() {
+    let _home = artifact_home();
     let tool = script(
         "if (process.env.FIXTURE_MODE !== 'isolated') process.exit(17); if (process.argv[2] !== '--launch-only' && (process.env.PROBE_HOME !== 'declared' || process.env.PATH !== undefined || process.env.HOME !== undefined)) process.exit(19); if (process.argv[2] === '--version') { process.stdout.write('fixture 1.0'); process.exit(0); } if (process.argv[2] === '--capability-probe') process.exit(0); if (process.argv[2] !== '--launch-only') process.exit(18); process.stdout.write(process.env.FIXTURE_MODE + ':ping'); process.exit(0);",
     );
@@ -460,6 +463,7 @@ process.stdin.once('data', input => {
 
 #[test]
 fn runtime_tool_cannot_claim_capability_without_a_probe() {
+    let _home = artifact_home();
     let (mut request, provider) = request("runtime-tool-unverified", "/bin/true".to_string());
     request.metadata = json!({
         "capability_requirements": {
@@ -506,6 +510,7 @@ fn runtime_tool_cannot_claim_capability_without_a_probe() {
 
 #[test]
 fn runtime_tool_without_capabilities_is_usable_without_a_probe() {
+    let _home = artifact_home();
     let test_context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(test_context.path_roots());
@@ -555,6 +560,7 @@ fn runtime_tool_without_capabilities_is_usable_without_a_probe() {
 
 #[test]
 fn runtime_tool_readiness_obeys_the_command_policy() {
+    let _home = artifact_home();
     let script = script("process.exit(0);");
     let (mut request, provider) = request("runtime-tool-policy", format!("node {script}"));
     request.runtime_tools = vec![serde_json::from_value(json!({
@@ -601,6 +607,7 @@ fn runtime_tool_readiness_obeys_the_command_policy() {
 
 #[test]
 fn runtime_tool_capability_probe_obeys_the_command_policy() {
+    let _home = artifact_home();
     let script = script("process.exit(0);");
     let (mut request, provider) =
         request("runtime-tool-capability-policy", format!("node {script}"));

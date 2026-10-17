@@ -5513,6 +5513,37 @@ mod tests {
         homeboy_core::test_support::env_lock()
     }
 
+    /// Replacing `PATH` is process-wide: while it names a fixture bin, every
+    /// parallel test that spawns `git` or `sh` by name fails with ENOENT, and
+    /// the env lock cannot prevent it because those spawners never take it
+    /// (#14832). A test that must replace `PATH` reruns itself alone in a child
+    /// of this test binary and mutates the environment only there.
+    ///
+    /// Returns `true` inside that child, where the caller runs its body. Call it
+    /// while holding [`env_mutex`], so the child inherits the real environment
+    /// rather than another test's isolated home.
+    #[cfg(unix)]
+    fn rerun_alone_to_replace_path(test: &str) -> bool {
+        const CHILD_ENV: &str = "HOMEBOY_TEST_GATE_PATH_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            return true;
+        }
+        let test_name = homeboy_core::test_support::harness_test_name(module_path!(), test);
+        let output = homeboy_core::test_support::run_child_test(
+            std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(CHILD_ENV, "1"),
+            &test_name,
+        );
+        assert!(
+            output.status.success(),
+            "{test_name} failed in its PATH-isolated child:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
     #[test]
     fn cargo_test_results_preserve_selected_counts_without_rejecting_broad_gates() {
         let summary = "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1675 filtered out; finished in 0.00s\n";
@@ -8617,6 +8648,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = env_mutex();
+        if !rerun_alone_to_replace_path(
+            "toolchain_preflight_preserves_only_declared_homes_for_cargo_on_path",
+        ) {
+            return;
+        }
         let workspace = tempfile::tempdir().expect("workspace");
         let original_home = tempfile::tempdir().expect("original home");
         let cargo_bin = original_home.path().join(".cargo/bin");
@@ -8671,6 +8707,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = env_mutex();
+        if !rerun_alone_to_replace_path(
+            "rust_gate_cache_hydration_resolves_rustc_from_toolchain_bin",
+        ) {
+            return;
+        }
         let workspace = tempfile::tempdir().expect("workspace");
         let cache = tempfile::tempdir().expect("cache");
         let fixtures = tempfile::tempdir().expect("fixtures");
@@ -8721,6 +8762,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = env_mutex();
+        if !rerun_alone_to_replace_path(
+            "rust_gate_cache_hydrates_once_coordinates_waiters_and_separates_identities",
+        ) {
+            return;
+        }
         let root = tempfile::tempdir().expect("controller data");
         let workspace = tempfile::tempdir().expect("workspace");
         let runtime = tempfile::tempdir().expect("runtime");
@@ -8961,6 +9007,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = env_mutex();
+        if !rerun_alone_to_replace_path("rust_gate_cache_bounds_stalled_hydration") {
+            return;
+        }
         let bin = tempfile::tempdir().expect("tool bin");
         let workspace = tempfile::tempdir().expect("workspace");
         let cache = tempfile::tempdir().expect("cache");
@@ -8988,6 +9037,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = env_mutex();
+        if !rerun_alone_to_replace_path(
+            "toolchain_preflight_reports_generic_initialization_failures_without_code_feedback",
+        ) {
+            return;
+        }
         let workspace = tempfile::tempdir().expect("workspace");
         let bin = tempfile::tempdir().expect("bin");
         let tool = bin.path().join("other-tool");

@@ -13535,10 +13535,15 @@ fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
         let entered = temp.path().join("baseline-entered");
         let release = temp.path().join("baseline-release");
         let wrapper = temp.path().join("git");
+        // PATH is process-global, so every parallel test's git resolves to this
+        // wrapper while it is installed. Only block `git status` in this
+        // fixture's own worktree; everything else passes straight through.
+        let source_root = source.canonicalize().expect("canonical source root");
         std::fs::write(
                 &wrapper,
                 format!(
-                    "#!/bin/sh\nif test \"$1\" = status; then touch \"{}\"; while ! test -f \"{}\"; do sleep 0.01; done; fi\nexec /usr/bin/git \"$@\"\n",
+                    "#!/bin/sh\nif test \"$1\" = status && test \"$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null)\" = \"{}\"; then touch \"{}\"; while ! test -f \"{}\"; do sleep 0.01; done; fi\nexec /usr/bin/git \"$@\"\n",
+                    source_root.display(),
                     entered.display(),
                     release.display(),
                 ),

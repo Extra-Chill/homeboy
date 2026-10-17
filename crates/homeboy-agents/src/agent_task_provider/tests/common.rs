@@ -9,6 +9,14 @@ static SCRIPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// a spurious `Timeout` (#7739).
 pub(super) const PROVIDER_TEST_TIMEOUT_MS: u64 = 60_000;
 
+/// Isolated home for a test that executes a provider. Execution materializes
+/// its artifact root below the ambient home; without a home of its own the test
+/// writes into whichever home a parallel test isolates, and loses the root when
+/// that test exits (#14832).
+pub(super) fn artifact_home() -> homeboy_core::test_support::HomeGuard {
+    homeboy_core::test_support::HomeGuard::new()
+}
+
 pub(super) fn script(body: &str) -> String {
     let path = std::env::temp_dir().join(format!(
         "homeboy-agent-task-provider-{}-{}.js",

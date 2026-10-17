@@ -369,6 +369,7 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
 
 #[test]
 fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let remote = temp.path().join("origin.git");
     let target = temp.path().join("target");
@@ -477,6 +478,7 @@ fn promote_recoverable_candidate_collapses_duplicate_digest_aliases() {
 
 #[test]
 fn promote_recoverable_candidate_retains_patch_larger_than_256_kib() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let (source_path, source) = recoverable_patch_source(&temp, 1);
     let patch = padded_patch(300 * 1024, 'x');
@@ -586,6 +588,7 @@ fn padded_patch(size: usize, fill: char) -> String {
 
 #[test]
 fn promote_recoverable_candidate_reports_distinct_patch_review_choices() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let (source_path, source) = recoverable_patch_source(&temp, 2);
     let distinct = VALID_PATCH.replace("+new", "+different");
@@ -627,6 +630,7 @@ fn promote_recoverable_candidate_reports_distinct_patch_review_choices() {
 
 #[test]
 fn promote_recoverable_candidate_keeps_same_patch_from_distinct_attempts() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let (source_path, source) = recoverable_patch_source(&temp, 2);
     let mut source: Value = serde_json::from_str(&source).expect("source JSON");
@@ -771,6 +775,7 @@ fn validate_patch_rejects_empty_patch() {
 
 #[test]
 fn promote_no_op_outcome_uses_audited_committed_candidate() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -843,6 +848,7 @@ fn promote_no_op_outcome_uses_audited_committed_candidate() {
 
 #[test]
 fn adopt_no_op_pre_existing_candidate_when_base_equals_candidate() {
+    let _home = gate_home();
     // #8895: a recovery agent prepares an immutable candidate commit, the cook
     // records that commit AS the task base, and the provider reviews it and
     // returns no-op. With an explicit candidate_ref the base is rebased to the
@@ -918,6 +924,7 @@ fn adopt_no_op_pre_existing_candidate_when_base_equals_candidate() {
 
 #[test]
 fn adoption_scopes_a_rebased_two_file_candidate_to_its_parent() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -988,6 +995,7 @@ fn adoption_scopes_a_rebased_two_file_candidate_to_its_parent() {
 
 #[test]
 fn adoption_accepts_a_two_parent_merge_and_exports_only_the_candidate_delta() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -1096,6 +1104,7 @@ fn adoption_accepts_a_two_parent_merge_and_exports_only_the_candidate_delta() {
 
 #[test]
 fn adoption_rejects_merge_candidates_without_a_related_advanced_base() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -1159,6 +1168,7 @@ fn adoption_rejects_merge_candidates_without_a_related_advanced_base() {
 
 #[test]
 fn adoption_rejects_an_unrelated_historical_task_base() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -1213,6 +1223,7 @@ fn adoption_rejects_an_unrelated_historical_task_base() {
 
 #[test]
 fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -1398,6 +1409,7 @@ fn review_only_patch_cannot_be_selected_for_promotion() {
 
 #[test]
 fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("target");
     std::fs::create_dir(&target).expect("target");
@@ -1482,6 +1494,7 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
 
 #[test]
 fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
+    let _home = gate_home();
     // #9400 regression sequence: review selected a Cook artifact for a trunk
     // repository, a legacy generated promote command defaulted to main after
     // applying it, then the corrected review command resumes the exact target.
@@ -1563,6 +1576,7 @@ fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
 
 #[test]
 fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("target");
     std::fs::create_dir(&target).expect("target");
@@ -1649,6 +1663,7 @@ fn explicit_candidate_gate_failure_is_recorded_after_normal_promotion_handoff() 
 
 #[test]
 fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -1722,6 +1737,7 @@ fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence()
 
 #[test]
 fn promotion_rejects_a_cargo_gate_that_selected_zero_tests() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -1822,6 +1838,7 @@ fn promotion_rejects_a_cargo_gate_that_selected_zero_tests() {
 
 #[test]
 fn continue_all_gate_policy_runs_downstream_command_after_failure() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -1891,6 +1908,7 @@ fn continue_all_gate_policy_runs_downstream_command_after_failure() {
 #[cfg(unix)]
 #[test]
 fn typed_plan_and_legacy_gate_keep_contiguous_gate_ids() {
+    let _home = gate_home();
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1970,6 +1988,7 @@ fn typed_plan_and_legacy_gate_keep_contiguous_gate_ids() {
 
 #[test]
 fn promotion_runs_gates_in_the_destination_workspace() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -2128,6 +2147,7 @@ fn promotion_hydrates_destination_package_execution_projections_before_gates() {
 
 #[test]
 fn promotion_can_disable_candidate_dependency_hydration() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -2260,6 +2280,7 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
 
 #[test]
 fn missing_destination_tool_is_a_typed_setup_failure_before_provider_verification() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -2323,6 +2344,7 @@ fn missing_destination_tool_is_a_typed_setup_failure_before_provider_verificatio
 
 #[test]
 fn promotion_rejects_mutation_after_checkpoint_before_gate_materialization() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -2376,6 +2398,7 @@ fn promotion_rejects_mutation_after_checkpoint_before_gate_materialization() {
 
 #[test]
 fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("target");
     std::fs::create_dir(&target).expect("target");
@@ -2442,6 +2465,7 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
 
 #[test]
 fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
