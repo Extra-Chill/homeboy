@@ -928,9 +928,16 @@ const GATE_SETUP_PROMOTION_RETRIES: u32 = 2;
 /// candidate. These are usually environmental (network, registry, a tool
 /// installed after the failure), and retrying promotion is idempotent: the
 /// candidate is durable and the operation claim is reacquirable after failure.
+///
+/// A setup failure whose cause is deterministic configuration (for example a
+/// Lab gate rejected in preflight for a missing runner `secret_env` ref) is
+/// excluded: retrying cannot change it and only multiplies failed Lab runs
+/// (#16121).
 fn is_gate_setup_failure(error: &Error) -> bool {
     error.code == homeboy_core::ErrorCode::DependencyStepFailed
         && error.details["step_id"] == "promotion.gate_setup"
+        && error.retryable != Some(false)
+        && error.details["cause"]["retry_action"] != "fix_configuration"
 }
 
 /// Run promotion, retrying a bounded number of times with backoff when gate

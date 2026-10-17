@@ -50,12 +50,13 @@ impl LabGateTransport for NativeLabGateTransport {
                 .map_err(|error| Error::internal_io(error.to_string(), None))?;
                 let store = homeboy_core::observation::ObservationStore::open_initialized()?;
                 let artifact = store.record_artifact_with_metadata(&run_id, "lab-gate-diagnostic", file.path(), serde_json::json!({"visibility":request.visibility, "source":"native_gate_transport"}))?;
-                let mut public = Error::new(
-                    error.code,
-                    "Lab gate transport did not produce verified passing evidence",
-                    serde_json::json!({"stage":error.details.get("stage"), "gate_disposition":error.details.get("gate_disposition"), "job_id":error.details.get("job_id"), "artifact_ref":format!("homeboy://run/{run_id}/artifact/{}", artifact.id)}),
+                let mut public = lab_gate_public_error(
+                    &error,
+                    format!("homeboy://run/{run_id}/artifact/{}", artifact.id),
                 );
-                public.retryable = error.retryable;
+                if public.retryable.is_none() {
+                    public.retryable = error.retryable;
+                }
                 homeboy_agents::agent_task_lifecycle::finish_runner_exec_pre_handoff_failure(
                     &run_id,
                     "lab_gate",
@@ -67,6 +68,48 @@ impl LabGateTransport for NativeLabGateTransport {
             }
         }
     }
+}
+
+const LAB_GATE_PUBLIC_MESSAGE: &str =
+    "Lab gate transport did not produce verified passing evidence";
+
+/// Whether a transport failure is a controller-side configuration error that
+/// was rejected before any runner job existed (for example a missing runner
+/// `secret_env` ref). It carries no gate output, so its message is safe to
+/// surface, and nothing changes between retries, so it is not retryable
+/// (#16121).
+fn is_pre_handoff_configuration_error(error: &Error) -> bool {
+    error.code.as_str().starts_with("validation.")
+        && error.retryable != Some(true)
+        && error
+            .details
+            .get("job_id")
+            .is_none_or(serde_json::Value::is_null)
+}
+
+/// The bounded public error for a failed Lab gate transport. Gate output stays
+/// in the private diagnostic artifact; a pre-handoff configuration error names
+/// its redacted cause so `status` shows something an operator can act on.
+fn lab_gate_public_error(error: &Error, artifact_ref: String) -> Error {
+    let mut details = serde_json::json!({
+        "stage": error.details.get("stage"),
+        "gate_disposition": error.details.get("gate_disposition"),
+        "job_id": error.details.get("job_id"),
+        "artifact_ref": artifact_ref,
+    });
+    if !is_pre_handoff_configuration_error(error) {
+        return Error::new(error.code, LAB_GATE_PUBLIC_MESSAGE, details);
+    }
+    let cause = homeboy_core::redaction::redact_string(&error.message);
+    details["pre_handoff_configuration_error"] = serde_json::json!(true);
+    details["cause_message"] = serde_json::json!(cause);
+    let mut public = Error::new(
+        error.code,
+        format!("{LAB_GATE_PUBLIC_MESSAGE}: {cause}"),
+        details,
+    );
+    public.retryable = Some(false);
+    public
 }
 
 /// Secret identity names the admitted component's test capability declares.
@@ -666,5 +709,63 @@ mod secret_env_tests {
             dir.path()
         )
         .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod public_error_tests {
+    use super::*;
+
+    fn missing_secret_ref() -> Error {
+        Error::validation_invalid_argument(
+            "secret_env",
+            "missing runner secret env ref for WP_CODEBOX_DB_HOST",
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn pre_handoff_configuration_error_surfaces_cause_and_is_terminal() {
+        let public =
+            lab_gate_public_error(&missing_secret_ref(), "homeboy://run/x/artifact/y".into());
+
+        assert!(
+            public
+                .message
+                .contains("missing runner secret env ref for WP_CODEBOX_DB_HOST"),
+            "{}",
+            public.message
+        );
+        assert!(public.message.starts_with(LAB_GATE_PUBLIC_MESSAGE));
+        assert_eq!(public.details["pre_handoff_configuration_error"], true);
+        assert_eq!(public.retryable, Some(false));
+        assert_eq!(public.code.as_str(), "validation.invalid_argument");
+    }
+
+    #[test]
+    fn errors_after_runner_handoff_keep_the_bounded_public_message() {
+        let mut error = missing_secret_ref();
+        error.details = serde_json::json!({"job_id": "job-1", "stage": "execution"});
+
+        let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
+
+        assert_eq!(public.message, LAB_GATE_PUBLIC_MESSAGE);
+        assert!(public.details.get("cause_message").is_none());
+        assert_eq!(public.retryable, None);
+    }
+
+    #[test]
+    fn transport_failures_keep_the_bounded_public_message() {
+        let error = Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            "ssh: connection reset",
+            serde_json::json!({"stage": "transport"}),
+        );
+
+        let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
+
+        assert_eq!(public.message, LAB_GATE_PUBLIC_MESSAGE);
+        assert_eq!(public.retryable, None);
     }
 }

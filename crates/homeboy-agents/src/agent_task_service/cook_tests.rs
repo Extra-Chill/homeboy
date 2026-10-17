@@ -25243,6 +25243,50 @@ fn gate_setup_failures_are_retried_and_other_promotion_errors_are_not() {
     assert_eq!(calls.get(), 1);
 }
 
+/// #16121: a gate setup failure caused by deterministic configuration (a Lab
+/// gate rejected in preflight for a missing runner `secret_env` ref) cannot
+/// change between attempts, so promotion is not retried.
+#[test]
+fn deterministic_gate_setup_configuration_failures_are_not_retried() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let options = compile_options("gate-setup-config");
+    let calls = std::cell::Cell::new(0);
+    let mut misconfigured = CookSideEffects::for_test(
+        |_, _, _| {
+            calls.set(calls.get() + 1);
+            let mut error = homeboy_core::Error::dependency_step_failed(
+                "promotion.gate_setup",
+                "destination_gate_workspace".to_string(),
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                Some(serde_json::json!({
+                    "classification": "destination_gate_toolchain",
+                    "code": "validation.invalid_argument",
+                    "message": "Lab gate transport did not produce verified passing evidence: missing runner secret env ref for WP_CODEBOX_DB_HOST",
+                    "retry_action": "fix_configuration",
+                })),
+            );
+            error.retryable = Some(false);
+            Err(error)
+        },
+        |_, _, _| unreachable!("no recovery"),
+        |_, _, _, _| Ok(Value::Null),
+    );
+    let error = super::promote_with_gate_setup_retries(
+        &mut misconfigured,
+        &lifecycle_store,
+        &options,
+        "gate-setup-config-run",
+        |_, _, _| panic!("deterministic configuration failures are not retried"),
+    )
+    .expect_err("configuration failure is final");
+    assert_eq!(calls.get(), 1);
+    assert_eq!(error.details["cause"]["retry_action"], "fix_configuration");
+}
+
 /// #15364: detached Lab dispatch returns before the runner daemon accepts the
 /// handoff; the acceptance receipt is written minutes later by staging. The
 /// controller waits for it instead of failing on the first read, and a
