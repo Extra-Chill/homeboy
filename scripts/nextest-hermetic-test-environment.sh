@@ -227,10 +227,19 @@ exec perl -MPOSIX=setsid,WNOHANG -MTime::HiRes=time -e '
         };
         alarm $timeout_seconds;
     }
-    my $reaped;
-    do { $reaped = waitpid $child, 0 } while ($reaped == -1 && $!{EINTR});
+    # As a Linux subreaper this process inherits every orphaned descendant of
+    # the test binary (for example a git child whose spawning wrapper exited).
+    # Reap any child while waiting so those orphans cannot accumulate as
+    # zombies for the whole suite; a resource guard counts them as processes.
+    my ($reaped, $exit);
+    while (1) {
+        $reaped = waitpid -1, 0;
+        if ($reaped == $child) { $exit = $?; last; }
+        next if $reaped > 0 || $!{EINTR};
+        $exit = $?;
+        last;
+    }
     alarm 0;
-    my $exit = $?;
     $cleanup->();
     $discard_tmpdir->();
     exit($exit >> 8);

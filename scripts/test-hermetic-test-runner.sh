@@ -133,3 +133,23 @@ if ! perl -0777 -ne 'exit(/must be a positive integer/ ? 0 : 1)' "$scratch/zero.
     echo "zero timeout was not rejected" >&2
     exit 1
 fi
+
+# Linux only: the runner is a child subreaper, so orphaned descendants are
+# reparented to it. It must reap them while the test binary is still running;
+# otherwise they accumulate as zombies for the whole suite and a runner
+# process-count guard counts every one of them.
+if [ "$(uname -s)" = Linux ]; then
+    "$runner" sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do sh -c "(sleep 0.1) &"; done; sleep 3; exit 5' &
+    runner_pid=$!
+    sleep 1.5
+    zombies="$(/bin/ps -eo ppid=,stat= | awk -v parent="$runner_pid" '$1 == parent && $2 ~ /Z/' | wc -l)"
+    set +e
+    wait "$runner_pid"
+    status=$?
+    set -e
+    [ "$status" -eq 5 ]
+    if [ "$zombies" -ne 0 ]; then
+        echo "runner left $zombies orphaned descendants unreaped during the run" >&2
+        exit 1
+    fi
+fi
