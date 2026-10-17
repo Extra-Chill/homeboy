@@ -6769,6 +6769,32 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_lease_the_daemon_already_released_is_idempotent() {
+        crate::test_support::with_isolated_home(|_| {
+            let path = state_path().expect("state path");
+            let persisted_identity = || {
+                let state: DaemonState =
+                    serde_json::from_str(&fs::read_to_string(&path).expect("read lease"))
+                        .expect("parse lease");
+                DaemonLeaseIdentity::from_state(&state)
+            };
+
+            write_test_lease("lease-released");
+            let identity = persisted_identity();
+            // The stopped daemon's clean shutdown releases its own lease
+            // before the stopping caller gets to it.
+            fs::remove_file(&path).expect("daemon releases its lease");
+            assert!(!remove_lease_if_identity_matches(&path, &identity)
+                .expect("an already released lease is the requested outcome"));
+
+            write_test_lease("lease-present");
+            let identity = persisted_identity();
+            assert!(remove_lease_if_identity_matches(&path, &identity).expect("remove lease"));
+            assert!(!path.exists());
+        });
+    }
+
+    #[test]
     fn admission_reservation_rejects_a_changed_daemon_lease_before_job_creation() {
         let error = validate_admission_lease("lease-a", "lease-b")
             .expect_err("a reservation must not cross daemon leases");
@@ -7960,12 +7986,23 @@ fn corrupt_daemon_lease_error(path: &Path, reason: Option<String>) -> Error {
     )
 }
 
+/// Release the lease when it is still `expected`. A lease that is already gone
+/// is the outcome every caller wants: a stop that signals a daemon races the
+/// daemon's own clean shutdown, which releases this exact lease itself. Returns
+/// whether this call removed it.
 fn remove_lease_if_identity_matches(path: &Path, expected: &DaemonLeaseIdentity) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
     let _ = read_lease_if_identity_matches(path, expected)?;
-    fs::remove_file(path).map_err(|e| {
-        Error::internal_io(e.to_string(), Some(format!("delete {}", path.display())))
-    })?;
-    Ok(true)
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(format!("delete {}", path.display())),
+        )),
+    }
 }
 
 fn read_lease_if_identity_matches(
