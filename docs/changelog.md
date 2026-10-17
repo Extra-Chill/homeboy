@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.28] - 2026-10-17
+
+### Fixed
+- scope daemon job ownership projections to the daemon's own lease
+
 ## [0.428.27] - 2026-10-17
 
 ### Changed
