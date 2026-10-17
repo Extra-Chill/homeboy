@@ -1400,6 +1400,18 @@ fn run_materialized_provider_command_once_contained(
                     }
                 }
                 if elapsed >= kill_at(current_deadline_ms) {
+                    // A starved loop can first observe both deadlines on the
+                    // same pass. Classify by the deadline that expired first,
+                    // not by the order of these checks: a silent provider whose
+                    // liveness window closed before the wall deadline stalled,
+                    // however late this thread got to run (#14832).
+                    let liveness_expired_first = liveness_timeout.is_some_and(|liveness| {
+                        Duration::from_millis(last_progress_ms.load(Ordering::SeqCst)) + liveness
+                            <= kill_at(current_deadline_ms)
+                    });
+                    if liveness_expired_first {
+                        break (None, true, false, false);
+                    }
                     // `last_progress_ms` starts at zero, the spawn instant. A
                     // provider that has never produced anything has shown no
                     // progress to extend, however early its deadline falls.

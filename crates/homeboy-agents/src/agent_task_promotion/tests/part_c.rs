@@ -99,6 +99,7 @@ fn promote_recoverable_candidate_rejects_zero_actionable_patches() {
 /// provider has nothing left to emit as a patch.
 #[test]
 fn promote_recoverable_candidate_harvests_committed_changes_behind_an_empty_patch_artifact() {
+    let _home = gate_home();
     let (temp, repo, base, candidate) = adopted_commit_repo();
     let empty_patch_path = temp.path().join("empty-candidate.patch");
     std::fs::write(&empty_patch_path, "").expect("write empty candidate patch");
@@ -159,6 +160,7 @@ fn promote_recoverable_candidate_harvests_committed_changes_behind_an_empty_patc
 
 #[test]
 fn promote_recoverable_candidate_reports_unreadable_patch_evidence() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let (source_path, source) = recoverable_patch_source(&temp, 1);
     std::fs::remove_file(temp.path().join("candidate-0.patch")).expect("remove patch");
@@ -318,6 +320,7 @@ fn empty_patch_promotes_a_candidate_already_committed_on_the_destination() {
 
 #[test]
 fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -378,6 +381,7 @@ fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
 
 #[test]
 fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -469,6 +473,7 @@ fn select_patch_artifact_requires_unambiguous_patch() {
 
 #[test]
 fn promote_applies_patch_with_fake_workspace_provider() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let worktree_path = temp.path().join("controlled-worktree");
     let (source_path, source) = write_patch_source(&temp);
@@ -548,6 +553,7 @@ fn promote_applies_patch_with_fake_workspace_provider() {
 
 #[test]
 fn promote_persists_force_added_ignored_git_candidate_paths() {
+    let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let worktree_path = temp.path().join("controlled-worktree");
     std::fs::create_dir(&worktree_path).expect("worktree");
@@ -676,6 +682,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
 
 #[test]
 fn explicit_candidate_adoption_ignores_recoverable_provider_patch_selection() {
+    let _home = gate_home();
     let (temp, repo, base, candidate) = adopted_commit_repo();
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(repo.clone()),

@@ -1126,6 +1126,7 @@ mod tests {
 
     #[test]
     fn sibling_child_readiness_reuses_one_subprocess_probe() {
+        let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let temp = tempfile::tempdir().expect("tempdir");
         let count = temp.path().join("probe-count");
         let readiness: AgentTaskExecutorProvider = serde_json::from_value(json!({
@@ -1140,8 +1141,7 @@ mod tests {
         })).expect("provider");
         let first_executor =
             ExtensionProviderAgentTaskExecutor::with_providers(vec![readiness.clone()]);
-        let later_child_executor =
-            ExtensionProviderAgentTaskExecutor::with_providers(vec![readiness]);
+        let later_child_executor = first_executor.sharing_evidence_with(vec![readiness]);
 
         for task_id in ["child-one", "child-two", "child-three"] {
             let mut request = readiness_request("shared-model");
@@ -1252,9 +1252,21 @@ mod tests {
         let baseline_readiness_script = make_readiness_script(&baseline_probe_log);
         let candidate_readiness_script = make_readiness_script(&candidate_probe_log);
         let test_binary = std::env::current_exe().expect("test binary");
+        // PATH and HOME are part of the readiness request identity, and child
+        // processes inherit them from this process, where concurrent tests
+        // override HOME. Pin both once so every worker computes the same key
+        // regardless of what other tests are doing (#14832).
+        let path = std::env::var_os("PATH").expect("PATH");
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).expect("worker home");
+        let worker = || {
+            let mut command = Command::new(&test_binary);
+            command.env("PATH", &path).env("HOME", &home);
+            command
+        };
         let baseline_started = Instant::now();
         for child in 0..9 {
-            let output = Command::new(&test_binary)
+            let output = worker()
                 .args([
                     "--exact",
                     "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
@@ -1281,7 +1293,7 @@ mod tests {
         let data_root = temp.path().join("candidate-homeboy-data");
         let candidate_started = Instant::now();
         for _ in 0..9 {
-            let output = Command::new(&test_binary)
+            let output = worker()
                 .args([
                     "--exact",
                     "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
@@ -1300,7 +1312,7 @@ mod tests {
             );
         }
         let candidate_shared_route_elapsed = candidate_started.elapsed();
-        let output = Command::new(&test_binary)
+        let output = worker()
             .args([
                 "--exact",
                 "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
@@ -1318,7 +1330,7 @@ mod tests {
             "capacity invalidator failed: {}",
             String::from_utf8_lossy(&output.stdout)
         );
-        let output = Command::new(&test_binary)
+        let output = worker()
             .args([
                 "--exact",
                 "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
@@ -1335,7 +1347,7 @@ mod tests {
             "post-capacity worker failed: {}",
             String::from_utf8_lossy(&output.stdout)
         );
-        let output = Command::new(&test_binary)
+        let output = worker()
             .args([
                 "--exact",
                 "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
@@ -1352,7 +1364,7 @@ mod tests {
             "different-model worker failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let output = Command::new(&test_binary)
+        let output = worker()
             .args([
                 "--exact",
                 "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
@@ -1369,7 +1381,7 @@ mod tests {
             "rotated-credential worker failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let output = Command::new(&test_binary)
+        let output = worker()
             .args([
                 "--exact",
                 "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
@@ -1386,7 +1398,7 @@ mod tests {
             "different-account worker failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let output = Command::new(&test_binary)
+        let output = worker()
             .args([
                 "--exact",
                 "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
@@ -1407,7 +1419,7 @@ mod tests {
         let mut concurrent_children = Vec::new();
         for _ in 0..9 {
             concurrent_children.push(
-                Command::new(&test_binary)
+                worker()
                     .args([
                         "--exact",
                         "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
@@ -1486,8 +1498,11 @@ mod tests {
                 "account-c:token-one",
             ]
         );
+        // The probe log above is the sharing proof. Comparing against the
+        // baseline measured under the same host load keeps the speedup check;
+        // an absolute budget would only measure how fast this host spawns nine
+        // test binaries (#14832).
         assert!(candidate_shared_route_elapsed < baseline_elapsed);
-        assert!(candidate_shared_route_elapsed < std::time::Duration::from_secs(3));
 
         for entry in std::fs::read_dir(&cache_directory)
             .expect("enumerate durable cache entries for TTL proof")
@@ -1509,7 +1524,7 @@ mod tests {
             )
             .expect("expire durable entry");
         }
-        let output = Command::new(&test_binary)
+        let output = worker()
             .args([
                 "--exact",
                 "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
@@ -1557,6 +1572,7 @@ mod tests {
 
     #[test]
     fn provider_capacity_evidence_is_shared_across_plans_and_scoped_to_the_model_identity() {
+        let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let executor = readiness_executor();
         let blocked = readiness_request("blocked-model");
         let mut blocked_outcome = AgentTaskOutcome {
@@ -1590,7 +1606,8 @@ mod tests {
         let capacity_key = executor.provider_route_capacity_key(&capped);
         executor.record_provider_outcome(&capped, &capacity_key, &blocked_outcome);
 
-        let separately_constructed_for_later_plan = readiness_executor();
+        let separately_constructed_for_later_plan =
+            executor.sharing_evidence_with(executor.providers().to_vec());
         let readiness = separately_constructed_for_later_plan.provider_route_readiness(&capped);
         assert_eq!(readiness.state, "usage_capped");
         assert_eq!(readiness.reset_at, Some(reset_at));
@@ -1608,7 +1625,8 @@ mod tests {
             .expect("account block")
             .expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
         assert!(
-            readiness_executor()
+            executor
+                .sharing_evidence_with(executor.providers().to_vec())
                 .provider_route_readiness(&blocked)
                 .ready,
             "expired negative evidence must re-admit a recovered account"
@@ -1680,6 +1698,7 @@ mod tests {
 
     #[test]
     fn provider_reported_account_switch_does_not_inherit_capacity_evidence() {
+        let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let account = root.path().join("account");
         let script = root.path().join("readiness.js");

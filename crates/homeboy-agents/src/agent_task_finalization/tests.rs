@@ -19,6 +19,32 @@ use homeboy_core::run_lifecycle_record::{
 };
 use std::process::Command;
 
+/// Finalization reads `options.run_id`'s durable lifecycle record from the
+/// ambient store. Without its own isolated home a test resolves that store
+/// through whichever parallel test holds the process-wide home override, and
+/// reads it while that test creates or deletes it ("no such table: runs",
+/// #14832). Mock-backend tests therefore finalize in their own isolated home;
+/// tests that seed durable records isolate once and call
+/// `super::finalize_pr_with_backend` directly.
+fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+    options: AgentTaskPrFinalizationOptions,
+    backend: &mut B,
+) -> Result<AgentTaskPrFinalizationReport> {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        super::finalize_pr_with_backend(options, backend)
+    })
+}
+
+/// [`finalize_pr_with_backend`]'s isolation for the preflight entry point.
+fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+    options: AgentTaskPrFinalizationOptions,
+    backend: &mut B,
+) -> Result<AgentTaskPrFinalizationReport> {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        super::preflight_pr_with_backend(options, backend)
+    })
+}
+
 #[derive(Default)]
 struct MockBackend {
     branch: String,
@@ -1851,7 +1877,7 @@ fn manual_finalization_cannot_bypass_acceptance_for_an_existing_run_id() {
             gate_proof: Some(proof),
             ..Default::default()
         };
-        let error = finalize_pr_with_backend(options, &mut backend).unwrap_err();
+        let error = super::finalize_pr_with_backend(options, &mut backend).unwrap_err();
         assert!(error.message.contains("awaiting_acceptance"));
         assert!(!backend.committed && !backend.pushed && !backend.created);
     });
@@ -2588,7 +2614,7 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
         finalization_options.run_id = record.run_id.clone();
         finalization_options.manual_finalization = false;
 
-        let error = finalize_pr_with_backend(finalization_options, &mut backend)
+        let error = super::finalize_pr_with_backend(finalization_options, &mut backend)
             .expect_err("model-less terminal record is rejected");
         let after = crate::agent_task_lifecycle::reconcile_status(&record.run_id)
             .expect("obsolete record remains readable");
@@ -2681,7 +2707,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
         finalization_options.manual_finalization = false;
         finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
-        let report = finalize_pr_with_backend(finalization_options.clone(), &mut backend)
+        let report = super::finalize_pr_with_backend(finalization_options.clone(), &mut backend)
             .expect("mixed durable evidence finalizes");
         assert_eq!(report.pr_action, "created");
         assert_eq!(backend.create_calls, 1);
@@ -2691,7 +2717,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
             url: "https://github.com/Extra-Chill/homeboy/pull/123".to_string(),
             is_draft: false,
         });
-        let repeated = finalize_pr_with_backend(finalization_options, &mut backend)
+        let repeated = super::finalize_pr_with_backend(finalization_options, &mut backend)
             .expect("existing PR is reused");
         assert_eq!(repeated.pr_action, "updated");
         assert_eq!(backend.create_calls, 1);

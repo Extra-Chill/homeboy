@@ -360,6 +360,17 @@ pub(super) fn promote_recoverable_patch_count(
     (result, provider.apply_calls.len())
 }
 
+/// An isolated home for a test that executes or resumes promotion gates.
+///
+/// Gate execution leases controller scratch, invocation state, and runtime run
+/// owners below the ambient home and runtime tmpdir. Without its own, the test
+/// resolves whichever home a parallel test currently isolates and loses that
+/// state when the other test exits ("allocated scratch lease is not
+/// registered", a missing `.homeboy-run-owner-v1.json`, #14832).
+pub(super) fn gate_home() -> homeboy_core::test_support::HomeGuard {
+    homeboy_core::test_support::HomeGuard::new()
+}
+
 pub(super) fn git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

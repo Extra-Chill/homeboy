@@ -113,6 +113,23 @@ impl ProviderRuntimeReadinessCache {
 
 #[cfg(test)]
 impl ProviderRuntimeReadinessCache {
+    /// A cache with its own probe gate. The production gate caps concurrent
+    /// probes for the whole process, which in a test binary means every
+    /// parallel test queues behind unrelated tests' probes and spends its
+    /// readiness deadline waiting for a permit (#14832).
+    pub(crate) fn isolated() -> Self {
+        Self {
+            shared: Arc::new(ProviderRuntimeReadinessCacheShared {
+                state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
+                changed: Condvar::new(),
+                probe_gate: Arc::new(ProviderReadinessProbeGate {
+                    active: Mutex::new(0),
+                    changed: Condvar::new(),
+                }),
+            }),
+        }
+    }
+
     pub(crate) fn expire_all(&self) {
         let mut state = self
             .shared
@@ -1304,6 +1321,16 @@ fn readiness_error(
     error
 }
 
+/// The readiness cache identity includes the probe's `HOME`. A parallel test
+/// repointing `HOME` between two probes turns them into different identities,
+/// so the second one re-probes (#14832). Tests that assert readiness reuse hold
+/// an isolated home, which fixes `HOME` for their whole duration and keeps the
+/// durable fan-out cache out of the real data root.
+#[cfg(test)]
+pub(crate) fn stable_identity_home() -> homeboy_core::test_support::HomeGuard {
+    homeboy_core::test_support::HomeGuard::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1314,16 +1341,7 @@ mod tests {
     use homeboy_core::command_invocation::CommandInvocation;
 
     fn test_cache() -> ProviderRuntimeReadinessCache {
-        ProviderRuntimeReadinessCache {
-            shared: Arc::new(ProviderRuntimeReadinessCacheShared {
-                state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
-                changed: Condvar::new(),
-                probe_gate: Arc::new(ProviderReadinessProbeGate {
-                    active: Mutex::new(0),
-                    changed: Condvar::new(),
-                }),
-            }),
-        }
+        ProviderRuntimeReadinessCache::isolated()
     }
 
     fn provider(script: &std::path::Path, count: &std::path::Path) -> AgentTaskExecutorProvider {
@@ -1417,6 +1435,7 @@ mod tests {
 
     #[test]
     fn shared_cache_deduplicates_a_fanout_runtime_probe() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
@@ -1432,6 +1451,7 @@ mod tests {
 
     #[test]
     fn process_local_cache_deduplicates_phases_without_reusing_stale_credentials() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
@@ -1466,6 +1486,7 @@ mod tests {
 
     #[test]
     fn durable_fanout_cache_hashes_provider_identity_and_expires() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("entry.json");
         let request_key = content_hash::sha256_hex(b"test-request");
@@ -1518,6 +1539,7 @@ mod tests {
 
     #[test]
     fn explicit_provider_config_client_contexts_do_not_share_fanout_readiness() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
@@ -1543,6 +1565,7 @@ mod tests {
 
     #[test]
     fn generated_fanout_child_identity_deduplicates_readiness() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
@@ -1581,6 +1604,7 @@ mod tests {
 
     #[test]
     fn caller_fanout_shape_without_the_internal_marker_remains_distinct() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
@@ -1662,6 +1686,7 @@ mod tests {
 
     #[test]
     fn negative_runtime_evidence_expires_and_reprobes_recovered_credentials() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let recovered = root.path().join("recovered");
@@ -1717,6 +1742,7 @@ mod tests {
 
     #[test]
     fn concurrent_exact_key_probes_singleflight() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let script = root.path().join("singleflight.js");
@@ -1751,25 +1777,32 @@ mod tests {
 
     #[test]
     fn short_deadline_waiter_does_not_poison_long_deadline_singleflight() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
+        let release = root.path().join("release");
         let script = root.path().join("different-deadlines.js");
+        // The probe finishes only once the test releases it, so the short
+        // waiter's deadline provably expires while the probe is in flight
+        // rather than racing a fixed sleep (#14832).
         std::fs::write(
             &script,
-            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}})),200);",
+            format!("const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');const timer=setInterval(()=>{{if(fs.existsSync({release:?})){{clearInterval(timer);process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{{account:'shared'}}}}))}}}},10);"),
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
         let cache = test_cache();
         let long_provider = provider.clone();
         let mut long_cache = cache.clone();
+        // The long deadline only has to outlive the handshake; it bounds a
+        // hung probe, not the code under test.
         let long = std::thread::spawn(move || {
             readiness_verdict_with_credentials_and_deadline(
                 &long_provider,
                 &json!({"model":"same"}),
                 &[],
                 &mut long_cache,
-                Some(crate::agent_task_timeout::now_unix_ms() + 2_000),
+                Some(crate::agent_task_timeout::now_unix_ms() + 60_000),
             )
         });
         let started = Instant::now() + Duration::from_secs(5);
@@ -1804,6 +1837,7 @@ mod tests {
         .expect_err("short waiter must time out locally");
         assert_eq!(error.details["classification"], "timeout");
         assert_eq!(error.details["deadline_unix_ms"], short_deadline);
+        std::fs::write(&release, "release").expect("release probe");
         assert!(
             long.join()
                 .expect("long waiter")
@@ -1828,18 +1862,25 @@ mod tests {
 
     #[test]
     fn expired_probe_owner_releases_singleflight_for_a_long_deadline_retry() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
+        let release = root.path().join("release");
         let script = root.path().join("owner-different-deadlines.js");
+        // The probe answers only after the test releases it, so the short
+        // owner always expires with its probe in flight (#14832).
         std::fs::write(
             &script,
-            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}})),1000);",
+            format!("const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');const timer=setInterval(()=>{{if(fs.existsSync({release:?})){{clearInterval(timer);process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{{account:'shared'}}}}))}}}},10);"),
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
         let mut cache = test_cache();
 
-        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 300;
+        // The short deadline must only outlast the probe's process startup,
+        // which on a loaded host is scheduling latency rather than readiness
+        // work; the probe itself never answers before the deadline.
+        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 5_000;
         let short_provider = provider.clone();
         let mut short_cache = cache.clone();
         let short = std::thread::spawn(move || {
@@ -1851,15 +1892,13 @@ mod tests {
                 Some(short_deadline),
             )
         });
-        let start_deadline = Instant::now() + Duration::from_secs(2);
         while !count.exists() {
-            assert!(Instant::now() < start_deadline, "short probe did not start");
+            assert!(
+                crate::agent_task_timeout::now_unix_ms() < short_deadline,
+                "short deadline expired before its probe started"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(
-            crate::agent_task_timeout::now_unix_ms() < short_deadline,
-            "short deadline expired before its probe started"
-        );
         let error = short
             .join()
             .expect("short probe owner")
@@ -1867,12 +1906,13 @@ mod tests {
         assert_eq!(error.details["classification"], "timeout");
         assert_eq!(error.details["deadline_unix_ms"], short_deadline);
 
+        std::fs::write(&release, "release").expect("release probe");
         let verdict = readiness_verdict_with_credentials_and_deadline(
             &provider,
             &json!({"model":"same"}),
             &[],
             &mut cache,
-            Some(crate::agent_task_timeout::now_unix_ms() + 2_000),
+            Some(crate::agent_task_timeout::now_unix_ms() + 60_000),
         )
         .expect("long waiter starts a fresh readiness probe");
         assert!(verdict.ready);
@@ -1923,6 +1963,7 @@ mod tests {
 
     #[test]
     fn concurrent_distinct_keys_keep_pending_cache_entries_bounded() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let release = root.path().join("release");
         let probes = root.path().join("probes");
@@ -1933,13 +1974,16 @@ mod tests {
         )
         .expect("readiness script");
         let mut provider = provider(&script, &release);
-        provider
+        let invocation = provider
             .readiness_invocation
             .as_mut()
-            .expect("readiness invocation")
-            .command
-            .argv
-            .push(probes.display().to_string());
+            .expect("readiness invocation");
+        invocation.command.argv.push(probes.display().to_string());
+        // Each request's readiness budget also covers its wait for one of the
+        // four probe permits. 65 probes drain in ~17 serial waves of process
+        // spawns, so on a loaded host the default 20s budget measured spawn
+        // scheduling rather than the cache bound under test (#14832).
+        invocation.timeout_ms = 300_000;
         let cache = test_cache();
         std::thread::scope(|scope| {
             for index in (0..65).chain(std::iter::once(0)) {
@@ -2006,6 +2050,7 @@ mod tests {
     /// satisfy live-inference readiness (or vice versa).
     #[test]
     fn capacity_mode_probes_are_a_distinct_cache_identity_from_live_inference() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let modes = root.path().join("modes.log");
         let script = root.path().join("mode-echo.js");
@@ -2056,6 +2101,7 @@ mod tests {
 
     #[test]
     fn readiness_probe_errors_are_cached_briefly() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let script = root.path().join("failure.js");
@@ -2103,15 +2149,19 @@ mod tests {
         let script = root.path().join("retry-deadline.js");
         std::fs::write(
             &script,
-            "const fs=require('fs');const count=process.argv[2];const n=fs.existsSync(count)?Number(fs.readFileSync(count,'utf8'))+1:1;fs.writeFileSync(count,String(n));if(n===1){process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'transient_failure',retryable:true,remediation:'retry',reason:'transient',cache_key:'retry',identity:{}}))}else{setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'ready',identity:{}})),5000)}",
+            "const fs=require('fs');const count=process.argv[2];const n=fs.existsSync(count)?Number(fs.readFileSync(count,'utf8'))+1:1;fs.writeFileSync(count,String(n));if(n===1){process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'transient_failure',retryable:true,remediation:'retry',reason:'transient',cache_key:'retry',identity:{}}))}else{setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'ready',identity:{}})),600000)}",
         )
         .expect("readiness script");
+        // The budget only has to cover the first attempt's process startup on
+        // a loaded host; the retry never answers, so it always runs into the
+        // shared deadline whatever the budget is (#14832).
+        const BUDGET_MS: u64 = 10_000;
         let mut provider = provider(&script, &count);
         provider
             .readiness_invocation
             .as_mut()
             .expect("readiness invocation")
-            .timeout_ms = 2_000;
+            .timeout_ms = BUDGET_MS;
         let gate = Box::leak(Box::new(ProviderReadinessProbeGate {
             active: Mutex::new(0),
             changed: Condvar::new(),
@@ -2121,8 +2171,8 @@ mod tests {
             &json!({"model":"retry-deadline"}),
             &[],
             gate,
-            Instant::now() + Duration::from_millis(2_000),
-            2_000,
+            Instant::now() + Duration::from_millis(BUDGET_MS),
+            BUDGET_MS,
             None,
         )
         .expect_err("the retry shares the first attempt's total deadline");
@@ -2135,7 +2185,7 @@ mod tests {
             .and_then(|value| value.split(" ms").next())
             .and_then(|value| value.parse::<u64>().ok())
             .expect("millisecond retry timeout");
-        assert!(retry_timeout_ms < 2_000, "{error}");
+        assert!(retry_timeout_ms < BUDGET_MS, "{error}");
         assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
     }
 
@@ -2188,10 +2238,18 @@ mod tests {
         let script = root.path().join("slow.js");
         std::fs::write(
             &script,
-            "const fs=require('fs');fs.writeFileSync(process.argv[2],String(process.pid));setTimeout(()=>process.stdout.write('{}'),5000);",
+            "const fs=require('fs');fs.writeFileSync(process.argv[2],String(process.pid));setInterval(()=>{},1000);",
         )
         .expect("slow readiness script");
-        let provider = provider(&script, &pid_file);
+        // The command's own timeout is far beyond the absolute deadline, so
+        // returning well before it proves the cap. The deadline itself only
+        // has to let the probe start and record its pid on a loaded host.
+        let mut provider = provider(&script, &pid_file);
+        provider
+            .readiness_invocation
+            .as_mut()
+            .expect("readiness invocation")
+            .timeout_ms = 120_000;
         let started = Instant::now();
 
         let error = readiness_verdict_with_credentials_and_deadline(
@@ -2199,12 +2257,12 @@ mod tests {
             &json!({"model":"slow"}),
             &[],
             &mut test_cache(),
-            Some(crate::agent_task_timeout::now_unix_ms() + 100),
+            Some(crate::agent_task_timeout::now_unix_ms() + 5_000),
         )
         .expect_err("absolute deadline interrupts readiness");
 
         assert_eq!(error.details["classification"], "timeout");
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(60));
         let pid = std::fs::read_to_string(&pid_file)
             .expect("probe recorded its pid")
             .trim()
@@ -2222,6 +2280,7 @@ mod tests {
 
     #[test]
     fn delayed_ready_route_is_cached_across_repeated_admission_probes() {
+        let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let script = root.path().join("delayed-ready.js");

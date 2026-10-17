@@ -1,4 +1,4 @@
-use super::common::{request, script};
+use super::common::{artifact_home, request, script};
 use super::*;
 
 #[test]
@@ -162,6 +162,7 @@ fn lab_runtime_component_ids_follow_selected_agent_task_providers() {
 
 #[test]
 fn repo_local_gate_execution_kind_runs_without_extension_provider() {
+    let _home = artifact_home();
     let temp = tempfile::tempdir().expect("tempdir");
     fs::write(
         temp.path().join("gate.mjs"),
