@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.429.0] - 2026-10-18
+
+### Added
+- one agent-task recover entry point over a typed Cook recovery step (#16049 slice 4, #15925)
+
+### Changed
+- catch Cook-owned candidates up to a moved base inline and delete the moving-base recovery saga (#16049 slice 5)
+
 ## [0.428.34] - 2026-10-18
 
 ### Changed
