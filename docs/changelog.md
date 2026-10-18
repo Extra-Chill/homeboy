@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.33] - 2026-10-18
+
+### Fixed
+- treat Lab gate pre-handoff configuration errors as terminal and surface their cause
+
 ## [0.428.32] - 2026-10-17
 
 ### Changed
