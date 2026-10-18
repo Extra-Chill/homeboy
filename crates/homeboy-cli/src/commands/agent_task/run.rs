@@ -1961,12 +1961,17 @@ mod preview_tests {
         *cook
     }
 
-    fn declare_preview_fixture_capacity() {
-        // These fixtures test preview/replay semantics, not the host volume's
-        // free space. Capacity-specific tests declare their own reserve.
+    /// These fixtures test preview/replay semantics, not the host volume's
+    /// free space: the volume holding `root` reports ample capacity instead
+    /// of whatever the machine running the suite has left, and the configured
+    /// absolute reserve is waived. Capacity-specific tests declare their own.
+    fn declare_preview_fixture_capacity(
+        root: &std::path::Path,
+    ) -> homeboy::core::observation::disk_budget::test_seam::DiskCapacityFixtureGuard {
         let mut config = homeboy::core::defaults::load_config();
         config.retention.reconstructable_artifact_reserve_bytes = 0;
         homeboy::core::defaults::save_config(&config).expect("fixture capacity policy");
+        homeboy::core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(root)
     }
 
     fn linked_preview_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -2743,8 +2748,8 @@ mod preview_tests {
     #[test]
     fn compiled_plan_preview_emits_placement_admission_schema() {
         crate::test_support::with_isolated_home(|_| {
-            declare_preview_fixture_capacity();
-            let (_repository, workspace) = linked_preview_workspace();
+            let (repository, workspace) = linked_preview_workspace();
+            let _capacity = declare_preview_fixture_capacity(repository.path());
             let cli = Cli::try_parse_from([
                 "homeboy".to_string(),
                 "agent-task".to_string(),
@@ -2819,10 +2824,10 @@ mod preview_tests {
     #[test]
     fn preview_with_no_lab_runner_reports_local_placement_and_names_the_reason() {
         crate::test_support::with_isolated_home(|_| {
-            declare_preview_fixture_capacity();
             let source = tempfile::NamedTempFile::new().expect("prompt source");
             std::fs::write(source.path(), "Inspect the task workspace.\n").expect("write prompt");
             let repository = tempfile::tempdir().expect("repository");
+            let _capacity = declare_preview_fixture_capacity(repository.path());
             let primary = repository.path().join("primary");
             let workspace = repository.path().join("task-worktree");
             assert!(std::process::Command::new("git")
@@ -3287,7 +3292,6 @@ mod preview_tests {
     #[test]
     fn local_preview_projects_prompt_evidence_without_execution_admission() {
         crate::test_support::with_isolated_home(|_| {
-            declare_preview_fixture_capacity();
             let source = tempfile::NamedTempFile::new().expect("evidence source");
             std::fs::write(
                 source.path(),
@@ -3295,6 +3299,7 @@ mod preview_tests {
             )
             .expect("write prompt containing a declared path");
             let repository = tempfile::tempdir().expect("repository");
+            let _capacity = declare_preview_fixture_capacity(repository.path());
             let primary = repository.path().join("primary");
             let workspace = repository.path().join("task-worktree");
             assert!(std::process::Command::new("git")
@@ -3573,7 +3578,7 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
 
     #[test]
     fn preview_defers_lab_placement_admission_with_a_structured_phase() {
-        homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+        let _preflight = ResetCapturedPreflight::new();
         let policy = preview_placement_policy_with_admission(&[
             "homeboy".to_string(),
             "--placement".to_string(),
@@ -3593,11 +3598,15 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
         );
     }
 
-    struct ResetCapturedPreflight;
+    /// Scopes the captured controller preflight to this test thread so a
+    /// concurrently running preview test cannot observe or overwrite it.
+    struct ResetCapturedPreflight(
+        #[allow(dead_code)] homeboy::core::parsed_command_preflight::CapturedResultTestScope,
+    );
 
-    impl Drop for ResetCapturedPreflight {
-        fn drop(&mut self) {
-            homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+    impl ResetCapturedPreflight {
+        fn new() -> Self {
+            Self(homeboy::core::parsed_command_preflight::isolate_captured_result_for_test())
         }
     }
 
@@ -3711,7 +3720,11 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
     }
 
     fn preview_cook_with_captured_runner(runner_id: Option<&str>) -> (Value, i32) {
-        let (_repository, workspace) = preview_fixture_worktree();
+        let (repository, workspace) = preview_fixture_worktree();
+        let _capacity =
+            homeboy::core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(
+                repository.path(),
+            );
         let cli = Cli::try_parse_from([
             "homeboy".to_string(),
             "agent-task".to_string(),
@@ -3745,7 +3758,7 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
     #[test]
     fn preview_reports_unresolved_generation_blocker_instead_of_an_unqualified_ready_plan() {
         crate::test_support::with_isolated_home(|_| {
-            let _reset = ResetCapturedPreflight;
+            let _reset = ResetCapturedPreflight::new();
             persist_unresolved_generation_runner("homeboy-lab");
             let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
 
@@ -3793,7 +3806,7 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
     #[test]
     fn preview_that_passes_admission_uses_the_same_connected_ready_evidence_execution_requires() {
         crate::test_support::with_isolated_home(|_| {
-            let _reset = ResetCapturedPreflight;
+            let _reset = ResetCapturedPreflight::new();
             let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
 
             assert_eq!(exit_code, 0);
@@ -3934,7 +3947,7 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
     /// fallback from a disconnected Lab. It blocks on the Lab state and offers
     /// the explicit local replay instead.
     fn auto_preview_with_a_disconnected_lab_blocks_and_offers_local_replay() {
-        let _reset = ResetCapturedPreflight;
+        let _reset = ResetCapturedPreflight::new();
         let cli = Cli::try_parse_from([
             "homeboy",
             "agent-task",
@@ -3978,6 +3991,7 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
 
     #[test]
     fn preview_placement_admission_matches_attached_and_detached_policy_matrix() {
+        let _reset = ResetCapturedPreflight::new();
         for placement in ["auto", "local", "lab-or-local"] {
             for detached in [false, true] {
                 let mut argv = vec![
@@ -4032,8 +4046,8 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
     #[test]
     fn unmaterialized_preview_admits_replay_and_cook_materializes_origin_base() {
         crate::test_support::with_isolated_home(|_| {
-            declare_preview_fixture_capacity();
             let root = tempfile::tempdir().expect("repository root");
+            let _capacity = declare_preview_fixture_capacity(root.path());
             let remote = tempfile::tempdir().expect("bare origin");
             assert!(Command::new("git")
                 .args(["init", "--bare", "--quiet"])
@@ -11810,7 +11824,8 @@ mod tests {
                         pressure: homeboy::core::parsed_command_preflight::ResourceHeat::Hot,
                     },
             };
-        homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+        let _preflight =
+            homeboy::core::parsed_command_preflight::isolate_captured_result_for_test();
         homeboy::core::parsed_command_preflight::capture_result(preflight);
         let captured = homeboy::core::parsed_command_preflight::captured_result()
             .expect("completed CLI preflight captured");

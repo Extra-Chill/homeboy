@@ -978,6 +978,9 @@ pub struct HomeGuard {
     prior_controller_runtime_source: Option<String>,
     prior_controller_runtime_identity: Option<String>,
     context: HermeticTestContext,
+    // Each isolated-home test is its own "CLI invocation": it must not observe
+    // a controller preflight captured by a concurrently running test.
+    _captured_preflight: crate::parsed_command_preflight::CapturedResultTestScope,
     _guard: Option<MutexGuard<'static, ()>>,
 }
 
@@ -1130,6 +1133,8 @@ impl HomeGuard {
             prior_controller_runtime_source,
             prior_controller_runtime_identity,
             context,
+            _captured_preflight: crate::parsed_command_preflight::isolate_captured_result_for_test(
+            ),
             _guard: guard,
         }
     }

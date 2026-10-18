@@ -694,6 +694,10 @@ fn result_storage() -> &'static RwLock<Option<ParsedCommandPreflightResult>> {
 /// Capture exactly one completed controller decision for the process. Routing
 /// consumes this rather than repeating readiness or placement discovery.
 pub fn capture_result(result: ParsedCommandPreflightResult) {
+    #[cfg(any(test, feature = "test-support"))]
+    if test_scope::capture(&result) {
+        return;
+    }
     let mut slot = result_storage()
         .write()
         .unwrap_or_else(|error| error.into_inner());
@@ -703,13 +707,103 @@ pub fn capture_result(result: ParsedCommandPreflightResult) {
 }
 
 pub fn captured_result() -> Option<ParsedCommandPreflightResult> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(scoped) = test_scope::captured() {
+        return scoped;
+    }
     result_storage().read().ok().and_then(|slot| slot.clone())
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_captured_result_for_test() {
+    if test_scope::reset() {
+        return;
+    }
     if let Ok(mut slot) = result_storage().write() {
         *slot = None;
+    }
+}
+
+/// Give the calling thread its own captured-preflight slot until the returned
+/// guard drops.
+///
+/// The production slot is process-global because one CLI process makes
+/// exactly one controller decision. A libtest process runs many "CLI
+/// invocations" concurrently, so without a scope one test's captured Lab
+/// readiness leaks into another test's preview/dispatch. While a scope is
+/// installed, `capture_result`, `captured_result`, and
+/// `reset_captured_result_for_test` on this thread touch only the scoped slot,
+/// which starts empty. `HomeGuard` installs one for every isolated-home test.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use = "the captured-preflight scope ends when the guard drops"]
+pub fn isolate_captured_result_for_test() -> CapturedResultTestScope {
+    CapturedResultTestScope {
+        prior: test_scope::install(),
+        _not_send: std::marker::PhantomData,
+    }
+}
+
+/// Guard returned by [`isolate_captured_result_for_test`]. Restores the
+/// thread's previous scope (or the process-global slot) on drop.
+#[cfg(any(test, feature = "test-support"))]
+pub struct CapturedResultTestScope {
+    prior: Option<Option<ParsedCommandPreflightResult>>,
+    // The scope is thread-local; dropping it on another thread would restore
+    // the wrong thread's slot.
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for CapturedResultTestScope {
+    fn drop(&mut self) {
+        test_scope::restore(self.prior.take());
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+mod test_scope {
+    use super::ParsedCommandPreflightResult;
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// `None`: no scope installed (use the process-global slot).
+        /// `Some(slot)`: this thread's isolated captured result.
+        static SCOPED: RefCell<Option<Option<ParsedCommandPreflightResult>>> =
+            const { RefCell::new(None) };
+    }
+
+    pub(super) fn install() -> Option<Option<ParsedCommandPreflightResult>> {
+        SCOPED.with(|scoped| scoped.borrow_mut().replace(None))
+    }
+
+    pub(super) fn restore(prior: Option<Option<ParsedCommandPreflightResult>>) {
+        SCOPED.with(|scoped| *scoped.borrow_mut() = prior);
+    }
+
+    pub(super) fn capture(result: &ParsedCommandPreflightResult) -> bool {
+        SCOPED.with(|scoped| match scoped.borrow_mut().as_mut() {
+            Some(slot) => {
+                if slot.is_none() {
+                    *slot = Some(result.clone());
+                }
+                true
+            }
+            None => false,
+        })
+    }
+
+    pub(super) fn captured() -> Option<Option<ParsedCommandPreflightResult>> {
+        SCOPED.with(|scoped| scoped.borrow().clone())
+    }
+
+    pub(super) fn reset() -> bool {
+        SCOPED.with(|scoped| match scoped.borrow_mut().as_mut() {
+            Some(slot) => {
+                *slot = None;
+                true
+            }
+            None => false,
+        })
     }
 }
 
