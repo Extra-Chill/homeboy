@@ -36,7 +36,9 @@ use super::utils::args::{
 };
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::CmdResult;
-use crate::command_contract::{LabCommandContract, TEST_LAB_LABEL};
+use crate::command_contract::{
+    LabCommandContract, LAB_COMPONENT_TEST_SECRET_ENV_SOURCES, TEST_LAB_LABEL,
+};
 use crate::core::observation::ObservedWorkflowRunner;
 use homeboy::core::validation_progress::validation_progress_metadata;
 
@@ -158,7 +160,12 @@ impl TestArgs {
                 "test baseline and ratchet modes write source-owned baseline state on the controller",
             );
         }
-        LabCommandContract::portable(TEST_LAB_LABEL, None, true, &[]).release_gate()
+        // Declare the component's extension-declared test secret env names so
+        // an offloaded Lab child resolves them from the runner's own
+        // `secret_env` refs; no controller value crosses (#15938).
+        LabCommandContract::portable(TEST_LAB_LABEL, None, true, &[])
+            .release_gate()
+            .with_secret_env_sources(LAB_COMPONENT_TEST_SECRET_ENV_SOURCES)
     }
 
     pub(crate) fn should_use_self_check_dispatch(&self, cli_passthrough_args: &[String]) -> bool {
@@ -1788,6 +1795,27 @@ mod tests {
             ));
             assert!(!contract.routing_policy.default_lab_offload);
         }
+    }
+
+    /// The portable test contract must declare the ComponentTest secret env
+    /// source so a Lab offload names the component's `test.secret_env` to the
+    /// runner, which resolves them from its own `secret_env` refs (#15938).
+    #[test]
+    fn portable_test_contract_declares_component_test_secret_env_source() {
+        let args = TestCli::try_parse_from(["test", "homeboy"])
+            .expect("test command should parse")
+            .test;
+        let contract = args.lab_contract();
+
+        assert!(contract.is_portable());
+        assert_eq!(
+            contract.secret_env_sources,
+            crate::command_contract::LAB_COMPONENT_TEST_SECRET_ENV_SOURCES
+        );
+        assert_eq!(
+            contract.secret_env_sources,
+            &[homeboy_core::lab_contract::LabSecretEnvSource::ComponentTest]
+        );
     }
 
     #[test]
