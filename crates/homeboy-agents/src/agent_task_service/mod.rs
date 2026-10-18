@@ -16,6 +16,8 @@ pub(crate) mod cook_pre_execution;
 mod cook_prior_candidate;
 mod cook_promotion;
 mod cook_recipe;
+/// The one Cook recovery decision and its `agent-task recover` executor.
+mod cook_recovery;
 /// Detached Cook execution as a daemon `step` with an admitted environment.
 mod cook_step;
 /// Resource supervision of a running Cook against its declared budgets.
@@ -58,6 +60,10 @@ pub use cook_pre_execution::{
 };
 pub use cook_promotion::*;
 pub use cook_recipe::*;
+pub use cook_recovery::{
+    plan_cook_recovery, recover_cook, CookRecoveryPerformer, CookRecoveryPlan, CookRecoveryReport,
+    CookRecoveryStep, COOK_RECOVERY_SCHEMA,
+};
 #[cfg(test)]
 pub(crate) use cook_step::finalize_detached_cook_attempt;
 pub use cook_step::*;

@@ -97,6 +97,13 @@ pub(super) fn agent_task_resource_behavior(
             AgentTaskResourceBehavior::AdmittedWorkload
         }
         agent_task::AgentTaskCommand::Retry(_) => AgentTaskResourceBehavior::LocalControl,
+        // `recover --preflight` only reads durable Cook state to name its step.
+        // Every step it performs (continuation, `retry --run`, `reconcile
+        // --apply`) is an admitted workload, like the verbs it calls.
+        agent_task::AgentTaskCommand::Recover(recover) if recover.preflight => {
+            AgentTaskResourceBehavior::LocalControl
+        }
+        agent_task::AgentTaskCommand::Recover(_) => AgentTaskResourceBehavior::AdmittedWorkload,
         agent_task::AgentTaskCommand::Status(_)
         | agent_task::AgentTaskCommand::ValidatePlan(_)
         // `watch` is an alias for `activity watch`: a bounded, non-reconciling

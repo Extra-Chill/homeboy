@@ -2008,57 +2008,188 @@ fn cli_cook_converges_recipe_lifecycle_and_index_after_transient_first_write_fai
     });
 }
 
+/// Persist a Cook recipe whose single attempt never wrote its lifecycle
+/// record: the state `cook-continue` materializes before provider work.
+fn persist_recipe_only_cook(cook_id: &str, run_id: &str) {
+    let plan = AgentTaskPlan::new(
+        "cook-cli-recipe-only-plan",
+        vec![serde_json::from_value(json!({
+            "task_id": "provider",
+            "executor": { "backend": "fixture", "model": "fixture-model" },
+            "instructions": "recover the durable Cook lifecycle only"
+        }))
+        .expect("provider task")],
+    );
+    let options = homeboy::agents::agent_task_service::CookRequest {
+        identity: homeboy::agents::agent_task_service::CookIdentity {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: plan,
+        },
+        workspace: homeboy::agents::agent_task_service::CookWorkspace {
+            to_worktree: "fixture@recipe-only".to_string(),
+            source_worktree_path: None,
+            task_base_sha: None,
+            source_refs: Vec::new(),
+        },
+        provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
+            provider_invocation: None,
+            attempt_dispatcher: None,
+        },
+        gates: Default::default(),
+        retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
+        finalization: homeboy::agents::agent_task_service::CookFinalization {
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            head: None,
+            title: "Recipe-only Cook".to_string(),
+            commit_message: "Recipe-only Cook".to_string(),
+            protected_branches: Vec::new(),
+        },
+        ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
+            ai_tool: "fixture".to_string(),
+            ai_model: Some("fixture-model".to_string()),
+            ai_used_for: "test".to_string(),
+        },
+        harvest_context:
+            homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+    };
+    homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+        .expect("persist recipe without lifecycle record");
+}
+
+/// Same `cook-continue` arguments `recover` builds for a continuation step.
+fn cook_continue_args(id: &str) -> CookContinueArgs {
+    let mut args = super::super::recover::continuation_args(id, false, None);
+    args.full = true;
+    args
+}
+
+/// `recover` performs continuation through the same handler `cook-continue`
+/// runs, with the fixture executor injected.
+struct FixtureCookRecoveryPerformer {
+    executor: Arc<CountingCookExecutor>,
+}
+
+impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookRecoveryPerformer {
+    fn continue_cook(
+        &self,
+        run_id: &str,
+        rearm: bool,
+        artifact_id: Option<&str>,
+    ) -> homeboy::core::Result<(Value, i32)> {
+        let mut args = super::super::recover::continuation_args(run_id, rearm, artifact_id);
+        args.full = true;
+        continue_cook_with(args, self.executor.clone(), |_| Ok(None))
+    }
+
+    fn retry(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
+        panic!("a recipe-only attempt is continued, not retried: {run_id}")
+    }
+
+    fn reconcile(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
+        panic!("a recipe-only attempt holds no promotion claim: {run_id}")
+    }
+}
+
+#[test]
+fn recover_preflight_is_read_only_and_recover_reaches_the_cook_continue_report() {
+    let cook_id = "cook-cli-recover";
+    let run_id = "cook-cli-recover-attempt-1";
+    let mut expected = None;
+    with_temp_home(|| {
+        persist_recipe_only_cook(cook_id, run_id);
+        let executor = Arc::new(CountingCookExecutor::default());
+        expected = Some(
+            continue_cook_with(cook_continue_args(cook_id), executor.clone(), |_| Ok(None))
+                .expect("cook-continue materializes the attempt"),
+        );
+        assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
+    });
+    let (expected, expected_exit_code) = expected.expect("cook-continue report");
+
+    with_temp_home(|| {
+        persist_recipe_only_cook(cook_id, run_id);
+        let executor = Arc::new(CountingCookExecutor::default());
+        let performer = FixtureCookRecoveryPerformer {
+            executor: executor.clone(),
+        };
+        let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store");
+        // The first durable read initializes an empty lifecycle database; the
+        // comparison below covers everything recover could change after it.
+        assert_eq!(
+            homeboy::agents::agent_task_service::resolve_cook_continuation_run_id(cook_id)
+                .expect("resolve attempt"),
+            run_id
+        );
+        assert!(!store.cook_index_exists(cook_id));
+        let before = homeboy::agents::agent_task_lifecycle::durable_state_for_test(&store);
+        assert!(
+            before.keys().any(|path| path.contains("recipe.json")),
+            "{before:?}"
+        );
+
+        let (preflight, preflight_exit_code) = super::super::recover::recover_with(
+            super::super::RecoverArgs {
+                id: cook_id.to_string(),
+                preflight: true,
+                artifact_id: None,
+            },
+            &performer,
+        )
+        .expect("recover --preflight reports its step");
+        assert_eq!(preflight_exit_code, 0, "{preflight:#}");
+        assert_eq!(preflight["schema"], "homeboy/agent-task-cook-recovery/v1");
+        assert_eq!(preflight["cook_id"], cook_id);
+        assert_eq!(preflight["run_id"], run_id);
+        assert_eq!(preflight["status"], "recipe_only_recovery_required");
+        assert_eq!(preflight["step"], json!({ "kind": "continue" }));
+        assert_eq!(preflight["preflight"], true);
+        assert!(preflight["result"].is_null());
+        assert_eq!(
+            homeboy::agents::agent_task_lifecycle::durable_state_for_test(&store),
+            before,
+            "recover --preflight changed durable state (records, events, work intents or files)"
+        );
+        assert!(!agent_task_lifecycle::run_record_exists_readonly(run_id)
+            .expect("preflight did not admit"));
+        assert!(!agent_task_lifecycle::cook_index_exists(cook_id).expect("preflight did not index"));
+
+        let (recovered, recovered_exit_code) = super::super::recover::recover_with(
+            super::super::RecoverArgs {
+                id: run_id.to_string(),
+                preflight: false,
+                artifact_id: None,
+            },
+            &performer,
+        )
+        .expect("recover performs the continuation");
+        assert_eq!(recovered_exit_code, expected_exit_code, "{recovered:#}");
+        assert_eq!(recovered["cook_id"], cook_id);
+        assert_eq!(recovered["run_id"], run_id);
+        assert_eq!(recovered["step"], json!({ "kind": "continue" }));
+        assert_eq!(recovered["preflight"], false);
+        assert_eq!(
+            recovered["result"], expected,
+            "recover must reach the report cook-continue reaches"
+        );
+        assert_eq!(recovered["result"]["status"], "accepted_unscheduled");
+        assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
+        let index = agent_task_lifecycle::cook_index(cook_id).expect("materialized index");
+        assert_eq!(index.attempts.len(), 1);
+        assert_eq!(index.latest_run_id, run_id);
+    });
+}
+
 #[test]
 fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_work() {
     with_temp_home(|| {
         let cook_id = "cook-cli-recipe-only";
         let run_id = "cook-cli-recipe-only-attempt-1";
-        let plan = AgentTaskPlan::new(
-            "cook-cli-recipe-only-plan",
-            vec![serde_json::from_value(json!({
-                "task_id": "provider",
-                "executor": { "backend": "fixture", "model": "fixture-model" },
-                "instructions": "recover the durable Cook lifecycle only"
-            }))
-            .expect("provider task")],
-        );
-        let options = homeboy::agents::agent_task_service::CookRequest {
-            identity: homeboy::agents::agent_task_service::CookIdentity {
-                cook_id: cook_id.to_string(),
-                initial_run_id: run_id.to_string(),
-                initial_plan: plan,
-            },
-            workspace: homeboy::agents::agent_task_service::CookWorkspace {
-                to_worktree: "fixture@recipe-only".to_string(),
-                source_worktree_path: None,
-                task_base_sha: None,
-                source_refs: Vec::new(),
-            },
-            provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_invocation: None,
-                attempt_dispatcher: None,
-            },
-            gates: Default::default(),
-            retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
-            finalization: homeboy::agents::agent_task_service::CookFinalization {
-                no_finalize: true,
-                draft_pr: false,
-                base: "main".to_string(),
-                head: None,
-                title: "Recipe-only Cook".to_string(),
-                commit_message: "Recipe-only Cook".to_string(),
-                protected_branches: Vec::new(),
-            },
-            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: "fixture".to_string(),
-                ai_model: Some("fixture-model".to_string()),
-                ai_used_for: "test".to_string(),
-            },
-            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
-                .expect("harvest context"),
-        };
-        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
-            .expect("persist recipe without lifecycle record");
+        persist_recipe_only_cook(cook_id, run_id);
         let (status_value, status_exit) = status(StatusArgs {
             run_id: cook_id.to_string(),
             interval: "5s".to_string(),
@@ -2071,7 +2202,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
         assert_eq!(status_value["status"], "recipe_only_recovery_required");
         assert_eq!(
             status_value["guidance"]["command"],
-            format!("homeboy agent-task cook-continue {run_id}")
+            format!("homeboy agent-task recover {run_id}")
         );
         assert!(!agent_task_lifecycle::run_record_exists_readonly(run_id)
             .expect("status did not admit"));

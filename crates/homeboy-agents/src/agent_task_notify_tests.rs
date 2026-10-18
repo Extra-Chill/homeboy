@@ -44,6 +44,7 @@ fn report(status: &str, finalization: Option<serde_json::Value>) -> AgentTaskCoo
 
 fn failure_context() -> AgentTaskCookFailureContext {
     AgentTaskCookFailureContext {
+        recovery_step: None,
         cook_id: "cook-abc".to_string(),
         latest_run_id: "run-1".to_string(),
         selected_run_id: None,
@@ -63,7 +64,7 @@ fn failure_context() -> AgentTaskCookFailureContext {
         recovery_reason: "the durable recipe is intact".to_string(),
         legal_actions: vec![AgentTaskCookRecoveryAction {
             action: "continue".to_string(),
-            command: "homeboy agent-task cook-continue cook-abc".to_string(),
+            command: "homeboy agent-task recover cook-abc".to_string(),
         }],
         next_actions: vec![AgentTaskCookRecoveryAction {
             action: "diagnose".to_string(),
@@ -156,9 +157,12 @@ fn cancelled_cook_cannot_render_as_success_without_failure_recovery_actions() {
     assert!(body.contains("operator replacement"), "{body}");
     assert!(!body.contains("cook succeeded"), "{body}");
     assert!(!cancelled.completed_successfully());
-    assert!(!payload.actions.iter().any(
-        |action| action.command.contains("resume") || action.command.contains("cook-continue")
-    ));
+    assert!(!payload
+        .actions
+        .iter()
+        .any(|action| action.command.contains("resume")
+            || action.command.contains("cook-continue")
+            || action.command.contains("recover")));
 }
 
 #[test]
@@ -194,7 +198,7 @@ fn failed_cook_forwards_its_own_legal_recovery_commands() {
         "{commands:?}"
     );
     assert!(
-        commands.contains(&"homeboy agent-task cook-continue cook-abc"),
+        commands.contains(&"homeboy agent-task recover cook-abc"),
         "{commands:?}"
     );
     assert!(payload
@@ -842,7 +846,7 @@ fn continuation_failed_payload_names_the_stop_and_the_rearm_command() {
     assert!(body.contains("cook continuation retry budget exhausted"));
     assert!(payload.actions.iter().any(|action| action
         .command
-        .contains("cook-continue cook-stalled-attempt-1-abcd1234 --rearm")));
+        .contains("agent-task recover cook-stalled-attempt-1-abcd1234")));
 }
 
 /// A failed automatic terminal continuation is announced once per attempt and

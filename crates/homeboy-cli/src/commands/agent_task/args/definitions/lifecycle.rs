@@ -581,6 +581,18 @@ pub struct ReplayProviderBoundaryArgs {
     pub task: Option<String>,
 }
 #[derive(Args, Debug)]
+pub struct RecoverArgs {
+    /// Durable Cook ID, Cook attempt ID or batch-child run ID.
+    pub id: String,
+    /// Report the step recovery would perform without performing it.
+    #[arg(long)]
+    pub preflight: bool,
+    /// Patch artifact to promote when the step asks to choose among several
+    /// distinct patch candidates.
+    #[arg(long = "artifact-id", value_name = "ID")]
+    pub artifact_id: Option<String>,
+}
+#[derive(Args, Debug)]
 pub struct RetryArgs {
     /// Durable run or Cook ID to retry.
     pub run_id: String,

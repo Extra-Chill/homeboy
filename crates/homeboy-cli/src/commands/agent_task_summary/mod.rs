@@ -664,9 +664,10 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
         }
     }
     // A blocked finalization is recovered by the Cook continuation that owns
-    // publication; resume only re-reads terminal evidence (#15017).
+    // publication; resume only re-reads terminal evidence (#15017). `recover`
+    // performs that continuation as the Cook's one next step (#15925).
     if string_value(payload, &["blocker", "code"]) == Some("finalization") {
-        return format!("homeboy agent-task cook-continue {run_id}");
+        return format!("homeboy agent-task recover {run_id}");
     }
     if string_value(payload, &["blocker", "retry", "disposition"])
         == Some("automatic_reconciliation_scheduled")
@@ -679,13 +680,13 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
     // stalled the gates (#15668).
     if string_value(payload, &["candidate", "state"]) == Some("verification_pending") {
         let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
-        return format!("homeboy agent-task cook-continue {cook_id}");
+        return format!("homeboy agent-task recover {cook_id}");
     }
     if string_value(payload, &["state"]) == Some("candidate_recoverable")
         && string_value(payload, &["owner", "kind"]) == Some("runner")
     {
         if let Some(cook_id) = string_value(payload, &["mission"]) {
-            return format!("homeboy agent-task cook-continue {cook_id}");
+            return format!("homeboy agent-task recover {cook_id}");
         }
     }
     if string_value(payload, &["owner", "kind"]) == Some("runner") {
@@ -2186,7 +2187,7 @@ mod tests {
             "artifacts": []
         });
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-        assert!(summary.contains("Next: homeboy agent-task cook-continue cook-15732\n"));
+        assert!(summary.contains("Next: homeboy agent-task recover cook-15732\n"));
         assert!(!summary.contains("Next: homeboy agent-task resume attempt-1"));
     }
 
@@ -2383,7 +2384,7 @@ mod tests {
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
         assert!(
-            summary.contains("Next: homeboy agent-task cook-continue cook-14357\n"),
+            summary.contains("Next: homeboy agent-task recover cook-14357\n"),
             "{summary}"
         );
         assert!(
@@ -2417,7 +2418,7 @@ mod tests {
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
         assert!(
-            summary.contains("Next: homeboy agent-task cook-continue cook-15668\n"),
+            summary.contains("Next: homeboy agent-task recover cook-15668\n"),
             "{summary}"
         );
         assert!(

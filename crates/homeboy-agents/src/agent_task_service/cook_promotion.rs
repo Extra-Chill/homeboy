@@ -6734,6 +6734,7 @@ pub(crate) fn bind_report_to_stores(
             context.recovery_reason = enriched.recovery_reason;
             context.legal_actions = enriched.legal_actions;
             context.next_actions = enriched.next_actions;
+            context.recovery_step = enriched.recovery_step;
         }
     }
     report.provider_route_notes =
@@ -7156,8 +7157,8 @@ pub(crate) fn cook_failure_context_with_stores(
                     .unwrap_or_else(|| super::retry_admission(&record.run_id))
                     .is_ok()
             });
-            let continuation_pending = record.as_ref().is_some_and(|record| {
-                let state = lifecycle_store
+            let continuation_state = record.as_ref().and_then(|record| {
+                lifecycle_store
                     .map(|store| {
                         super::cook_recipe::continuation_state_in_store(
                             &super::cook_recipe::CookRecipeStore::for_lifecycle_store(store),
@@ -7177,9 +7178,10 @@ pub(crate) fn cook_failure_context_with_stores(
                                 )
                                 .ok()
                             })
-                    });
-                state == Some(super::cook_recipe::CookContinuationState::Pending)
+                    })
             });
+            let continuation_pending =
+                continuation_state == Some(super::cook_recipe::CookContinuationState::Pending);
             let continuation_admitted = continuation_action_admitted(
                 record
                     .as_ref()
@@ -7199,6 +7201,7 @@ pub(crate) fn cook_failure_context_with_stores(
                     promotion_diagnostic.as_ref(),
                     &recipe,
                 ),
+                continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
                 record.as_ref().and_then(lab_handoff_runtime_recovery),
                 record
                     .as_ref()
@@ -7230,6 +7233,7 @@ pub(crate) fn cook_failure_context_with_stores(
         recovery_reason: recovery_actions.reason,
         next_actions: recovery_actions.next_actions,
         legal_actions: recovery_actions.legal_actions,
+        recovery_step: Some(recovery_actions.step),
     })
 }
 
@@ -7413,6 +7417,9 @@ fn capacity_reserve_recovery_actions(
         })
         .collect::<Vec<_>>();
     (!actions.is_empty()).then(|| CookRecoveryActions {
+        step: super::CookRecoveryStep::none(
+            "Filesystem reserve pressure blocked admission; free capacity before recovering.",
+        ),
         reason: "Filesystem reserve pressure blocked admission. Inspect the protected scoped inventory before approving any removal.".to_string(),
         legal_actions: actions.clone(),
         next_actions: actions,
@@ -7484,6 +7491,9 @@ fn dirty_candidate_adoption_recovery_actions(
         },
     ];
     Some(CookRecoveryActions {
+        step: super::CookRecoveryStep::none(
+            "Commit the dirty candidate, review it, then adopt HEAD with `agent-task adopt`.",
+        ),
         reason: "The first provider admission refused a dirty checkout. Commit the immutable candidate, record its tracked review, then adopt HEAD through the durable Cook gates without provider patch replay.".to_string(),
         legal_actions: actions.clone(),
         next_actions: actions,
@@ -7522,6 +7532,9 @@ fn unfingerprinted_timeout_worktree_recovery(
         command: format!("git -C {} status", quote_arg(&worktree)),
     };
     Some(CookRecoveryActions {
+        step: super::CookRecoveryStep::none(
+            "Inspect the unfingerprinted timeout worktree; retry is not eligible.",
+        ),
         reason: "Timeout left uncommitted worktree changes that could not be fingerprinted as the producing run's patch. Inspect the worktree; retry is not eligible.".to_string(),
         legal_actions: vec![
             super::AgentTaskCookRecoveryAction {
@@ -7687,6 +7700,8 @@ struct CookRecoveryActions {
     legal_actions: Vec<super::AgentTaskCookRecoveryAction>,
     next_actions: Vec<super::AgentTaskCookRecoveryAction>,
     reason: String,
+    /// The one step `agent-task recover` performs for this state.
+    step: super::CookRecoveryStep,
 }
 
 #[cfg(test)]
@@ -7710,6 +7725,7 @@ fn cook_recovery_actions(
         retry_admitted,
         exact_checkpoint_candidate_mismatch,
         ambiguous_artifact_ids,
+        false,
         lab_runtime_recovery,
         None,
     )
@@ -7723,30 +7739,35 @@ fn cook_recovery_actions_with_prefix(
     retry_admitted: bool,
     exact_checkpoint_candidate_mismatch: bool,
     ambiguous_artifact_ids: Vec<String>,
+    continuation_rearm_required: bool,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
     prefix: Option<String>,
 ) -> CookRecoveryActions {
+    // The mutating action is never classified here: it is the one recovery
+    // step `agent-task recover` performs, rendered as that command.
+    let step =
+        super::cook_recovery::cook_recovery_step(&super::cook_recovery::CookRecoveryInputs {
+            status,
+            recovery_legal,
+            blocking_claim,
+            retry_admitted,
+            exact_checkpoint_candidate_mismatch,
+            ambiguous_artifact_ids: &ambiguous_artifact_ids,
+            continuation_rearm_required,
+        });
     if !recovery_legal {
+        let reason = match &step {
+            super::CookRecoveryStep::None { reason } => reason.clone(),
+            _ => unreachable!("an illegal recovery has no step"),
+        };
         return CookRecoveryActions {
             legal_actions: Vec::new(),
             next_actions: Vec::new(),
-            reason: "No recovery command is legal because the durable recipe has no lifecycle record. Start a fresh Cook after preserving the recipe reference for investigation.".to_string(),
+            reason,
+            step,
         };
     }
 
-    let continuation_eligible = match CookStatus::from_status(status) {
-        CookStatus::Completed
-        | CookStatus::ReviewReady
-        | CookStatus::GreenNoFinalize
-        | CookStatus::IntentionalNoChange
-        | CookStatus::NoCandidate
-        | CookStatus::Cancelled
-        | CookStatus::ExecutionBudgetExhausted
-        | CookStatus::RetriesExhausted
-        | CookStatus::PreExecutionFailure => false,
-        status if status.is_gate_failure() => retry_admitted,
-        _ => true,
-    };
     let prefix = prefix.unwrap_or_else(|| super::cook_recovery_command_prefix(run_id));
     let command = |args: &[&str]| super::cook_recovery_command_with_prefix(&prefix, args);
     let mut actions = vec![
@@ -7759,44 +7780,7 @@ fn cook_recovery_actions_with_prefix(
             command: command(&["diagnose", run_id]),
         },
     ];
-    if blocking_claim {
-        actions.push(super::AgentTaskCookRecoveryAction {
-            action: "reconcile".to_string(),
-            command: command(&["reconcile", run_id, "--dry-run"]),
-        });
-    }
-    if exact_checkpoint_candidate_mismatch && retry_admitted {
-        // The checkpoint authenticates one exact destination candidate. A
-        // replacement run preserves that immutable evidence without claiming it
-        // can safely continue against a diverged worktree.
-        actions.push(super::AgentTaskCookRecoveryAction {
-            action: "fork_replacement".to_string(),
-            command: command(&["retry", run_id, "--run"]),
-        });
-    } else if !ambiguous_artifact_ids.is_empty() {
-        actions.extend(ambiguous_artifact_ids.into_iter().map(|artifact_id| {
-            super::AgentTaskCookRecoveryAction {
-                action: "resume_with_artifact".to_string(),
-                command: command(&[
-                    "cook-continue",
-                    run_id,
-                    "--rearm",
-                    "--artifact-id",
-                    &artifact_id,
-                ]),
-            }
-        }));
-    } else if status == "pre_execution_failure" && retry_admitted {
-        actions.push(super::AgentTaskCookRecoveryAction {
-            action: "retry".to_string(),
-            command: command(&["retry", run_id, "--run"]),
-        });
-    } else if continuation_eligible {
-        actions.push(super::AgentTaskCookRecoveryAction {
-            action: "resume".to_string(),
-            command: command(&["cook-continue", run_id]),
-        });
-    }
+    actions.extend(step.recovery_actions(&prefix, run_id));
     let next_actions = actions.clone();
     if let Some(recovery) = lab_runtime_recovery {
         actions.push(super::AgentTaskCookRecoveryAction {
@@ -7813,6 +7797,7 @@ fn cook_recovery_actions_with_prefix(
         reason: format!("Legal recovery actions for this Cook state: {names}."),
         legal_actions: actions,
         next_actions,
+        step,
     }
 }
 
@@ -7897,17 +7882,20 @@ mod recovery_action_tests {
             );
             assert!(recovery.legal_actions.iter().all(|action| {
                 action.command.starts_with("homeboy agent-task ")
-                    && (action.command.ends_with("cook-state-matrix-attempt-1")
-                        || action
-                            .command
-                            .ends_with("cook-state-matrix-attempt-1 --run"))
-                    || action.command == "homeboy agent-task status cook-state-matrix-attempt-1"
+                    && action.command.ends_with("cook-state-matrix-attempt-1")
             }));
+            // The one mutating action is always the `recover` entry point, and
+            // it is offered exactly when the step decision names a step.
             assert_eq!(
                 recovery.legal_actions.iter().any(|action| action.command
-                    == "homeboy agent-task cook-continue cook-state-matrix-attempt-1"),
-                expected.contains(&"resume"),
-                "{status} must advertise cook-continue exactly when it can advance"
+                    == "homeboy agent-task recover cook-state-matrix-attempt-1"),
+                !recovery.step.is_none(),
+                "{status} must advertise recover exactly when it can advance"
+            );
+            assert_eq!(
+                recovery.step.action_name().is_some(),
+                expected.len() > 2,
+                "{status} step and legal actions must agree"
             );
             assert!(recovery.legal_actions.iter().all(|action| {
                 !matches!(
@@ -7952,7 +7940,7 @@ mod recovery_action_tests {
                 ),
                 (
                     "fork_replacement".to_string(),
-                    "homeboy agent-task retry checkpoint-mismatch-attempt-1 --run".to_string()
+                    "homeboy agent-task recover checkpoint-mismatch-attempt-1".to_string()
                 ),
             ]
         );
@@ -8053,8 +8041,8 @@ mod recovery_action_tests {
             vec![
                 "homeboy agent-task status ambiguous-attempt-1",
                 "homeboy agent-task diagnose ambiguous-attempt-1",
-                "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id first-patch",
-                "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id second-patch",
+                "homeboy agent-task recover ambiguous-attempt-1 --artifact-id first-patch",
+                "homeboy agent-task recover ambiguous-attempt-1 --artifact-id second-patch",
             ]
         );
     }
@@ -8076,9 +8064,7 @@ mod recovery_action_tests {
                 .legal_actions
                 .last()
                 .map(|action| action.command.as_str()),
-            Some(
-                "homeboy agent-task cook-continue ambiguous-attempt-1 --rearm --artifact-id canonical-patch"
-            )
+            Some("homeboy agent-task recover ambiguous-attempt-1")
         );
         assert!(!recovery
             .legal_actions

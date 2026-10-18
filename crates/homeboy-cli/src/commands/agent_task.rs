@@ -22,6 +22,7 @@ pub(crate) mod feedback;
 pub(crate) mod gate_contract;
 pub mod prompts;
 pub(crate) mod provider_evidence;
+pub(crate) mod recover;
 pub mod retained_artifacts;
 pub mod review;
 pub mod run;
@@ -35,9 +36,10 @@ pub use args::{
     CancelArgs, ContractArgs, ContractFormat, CookContinueArgs, CookFeedbackArgs, DiagnoseArgs,
     EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs,
     PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs,
-    RearmArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
-    RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs, VerifyReplacementArgs,
+    RearmArgs, RecordReplacementGateProofArgs, RecoverArgs, ReplayProviderBoundaryArgs,
+    RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs,
+    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs,
+    VerifyReplacementArgs,
 };
 
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
@@ -405,6 +407,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Rearm(args) => status::rearm(args),
         AgentTaskCommand::Resume(status_args) => run::resume(status_args),
         AgentTaskCommand::Retry(retry_args) => run::retry(retry_args),
+        AgentTaskCommand::Recover(args) => recover::recover(args),
         AgentTaskCommand::Fanout(fanout_args) => cook_batch::fanout(fanout_args),
         AgentTaskCommand::BatchPrepare(args) => cook_batch::batch_prepare(args),
         AgentTaskCommand::Review(review_args) => review::review(review_args),

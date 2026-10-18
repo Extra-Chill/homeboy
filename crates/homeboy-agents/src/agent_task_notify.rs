@@ -668,10 +668,7 @@ fn continuation_failed_payload(cook_id: &str, run_id: &str, diagnostic: &str) ->
         .with_action(
             NotifyAction::new(
                 "continue",
-                crate::agent_task_service::cook_recovery_command(
-                    run_id,
-                    &["cook-continue", run_id, "--rearm"],
-                ),
+                crate::agent_task_service::cook_recovery_command(run_id, &["recover", run_id]),
             )
             .with_kind("repair"),
         );
