@@ -872,8 +872,21 @@ impl WatchPoller for StatusPoller {
             return agent_task_lifecycle::exact_record(&self.args.run_id)
                 .map_or(true, |admission| admission.state.is_terminal());
         }
-        status_is_terminal(&item.0)
+        status_is_terminal(&item.0) && !cook_driver_still_owns(&item.0)
     }
+}
+
+/// A Cook advances an attempt through intermediate states that look terminal
+/// on their own: the provider hands back a patch (`candidate_recoverable` /
+/// `patch_available`) before the same driver applies it and runs the gates.
+/// While a live driver holds the Cook, those states are not its verdict.
+fn cook_driver_still_owns(status: &Value) -> bool {
+    status
+        .get("mission")
+        .and_then(Value::as_str)
+        .is_some_and(|cook_id| {
+            agent_task_service_direct::cook_driver_is_live(cook_id).unwrap_or(false)
+        })
 }
 
 fn watch_status(args: StatusArgs) -> CmdResult<Value> {
@@ -6429,6 +6442,61 @@ mod tests {
     /// `cook --wait` on an unmaterialized admission must not end while the
     /// admission's replay is materializing the attempt: the recipe-only window
     /// is not terminal until the admission itself is.
+    /// The provider handing back its patch (`candidate_recoverable` /
+    /// `patch_available`) is not a Cook verdict while the Cook's driver is
+    /// still alive to apply it and run the gates: a `cook --wait` that
+    /// stopped there reported a failed step for a Cook still verifying.
+    #[test]
+    fn a_live_cook_driver_keeps_an_intermediate_recoverable_state_open() {
+        crate::test_support::with_isolated_home(|_| {
+            use fs4::fs_std::FileExt;
+            let handoff = (
+                json!({
+                    "state": "candidate_recoverable",
+                    "phase": "provider_start",
+                    "mission": "cook-live",
+                    "run": "cook-live-attempt-1",
+                }),
+                1,
+            );
+            let poller = StatusPoller {
+                args: StatusArgs {
+                    run_id: "cook-live".to_string(),
+                    ..Default::default()
+                },
+                await_materialization: true,
+            };
+            assert!(
+                poller.is_terminal(&handoff),
+                "no driver: the state is the answer"
+            );
+
+            let driver_dir = homeboy::core::paths::homeboy_data()
+                .expect("data root")
+                .join("agent-task-cooks")
+                .join("cook-live");
+            std::fs::create_dir_all(&driver_dir).expect("driver lock directory");
+            let driver = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(driver_dir.join("driver.lock"))
+                .expect("driver lock");
+            assert!(driver.try_lock_exclusive().expect("hold driver lock"));
+            assert!(
+                !poller.is_terminal(&handoff),
+                "a live driver still owns the Cook"
+            );
+
+            drop(driver);
+            assert!(
+                poller.is_terminal(&handoff),
+                "the driver exited on this state"
+            );
+        });
+    }
+
     #[test]
     fn a_recipe_only_attempt_ends_a_cook_wait_only_once_its_admission_is_terminal() {
         crate::test_support::with_isolated_home(|_| {
