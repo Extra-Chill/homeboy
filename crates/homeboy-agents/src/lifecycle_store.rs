@@ -647,19 +647,18 @@ impl AgentTaskLifecycleStore {
         super::lifecycle_ops::record_cook_finalization_in_store(self, run_id, finalization)
     }
 
-    pub(crate) fn record_cook_moving_base_recovery(
+    pub(crate) fn record_cook_delivery_blocker(
         &self,
         run_id: &str,
-        recovery: Value,
+        blocker: crate::agent_task_service::CookDeliveryBlocker,
+        base_movements: u32,
     ) -> Result<AgentTaskRunRecord> {
-        super::lifecycle_ops::record_cook_moving_base_recovery_in_store(self, run_id, recovery)
-    }
-
-    pub(crate) fn clear_cook_moving_base_recovery(
-        &self,
-        run_id: &str,
-    ) -> Result<AgentTaskRunRecord> {
-        super::lifecycle_ops::clear_cook_moving_base_recovery_in_store(self, run_id)
+        super::lifecycle_ops::record_cook_delivery_blocker_in_store(
+            self,
+            run_id,
+            blocker,
+            base_movements,
+        )
     }
 
     pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {

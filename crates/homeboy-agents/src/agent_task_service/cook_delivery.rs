@@ -44,9 +44,14 @@ pub const COOK_DELIVERY_SCHEMA: &str = "homeboy/cook-delivery/v1";
 /// Run-metadata key of the persisted delivery record.
 pub(crate) const COOK_DELIVERY_KEY: &str = "cook_delivery";
 
-/// Moving-base recovery stops retrying after this many observed base moves.
-/// Mirrors the writer's continuation budget in the Cook spine.
+/// [`ensure_base_current`] stops catching a candidate up after this many base
+/// movements within one invocation. Historical moving-base recoveries used the
+/// same budget.
 const BASE_MOVEMENT_BUDGET: u32 = 3;
+
+/// Evidence pointer of a blocker [`ensure_published`] records in the
+/// `cook_delivery` record itself, for steps that leave no receipt of their own.
+const RECORDED_BLOCKER_EVIDENCE: &str = "/cook_delivery/blocker";
 
 /// One typed read of where a Cook's candidate is on its way to publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +277,17 @@ impl CookDelivery {
             .zip(promotion_status)
             .map(|(promotion, status)| read_candidate(promotion, status, checkpoint, recovery));
         let gates = promotion.map(read_gates).unwrap_or_default();
+        // A blocker the delivery steps recorded holds while its candidate is
+        // still the latest one.
+        let recorded = present(metadata, "/cook_delivery")
+            .and_then(Self::from_record)
+            .filter(|recorded| {
+                recorded.candidate == candidate
+                    && recorded
+                        .blocker
+                        .as_ref()
+                        .is_some_and(|blocker| blocker.evidence == RECORDED_BLOCKER_EVIDENCE)
+            });
         let publication = finalization.map(|finalization| {
             read_publication(
                 finalization,
@@ -282,7 +298,9 @@ impl CookDelivery {
         let base_movements = recovery
             .and_then(|recovery| recovery.get("base_movements"))
             .and_then(Value::as_u64)
-            .map_or(0, |moves| u32::try_from(moves).unwrap_or(u32::MAX));
+            .map(|moves| u32::try_from(moves).unwrap_or(u32::MAX))
+            .or(recorded.as_ref().map(|recorded| recorded.base_movements))
+            .unwrap_or(0);
 
         let blocked = |blocker: CookDeliveryBlocker| (CookDeliveryState::Blocked, Some(blocker));
         let (state, blocker) = if publication.as_ref().is_some_and(|p| p.published) {
@@ -307,8 +325,9 @@ impl CookDelivery {
                 &gates,
                 promotion_pointer,
             ))
-        } else if let Some(blocker) =
-            recovery.and_then(|recovery| moving_base_blocker(recovery, base_movements, promotion))
+        } else if let Some(blocker) = recovery
+            .and_then(|recovery| moving_base_blocker(recovery, base_movements, promotion))
+            .or_else(|| recorded.and_then(|recorded| recorded.blocker))
         {
             blocked(blocker)
         } else if let Some(blocker) = manual_failure
@@ -791,18 +810,43 @@ impl CookDeliveryContext<'_, '_> {
         })
     }
 
-    fn moving_base_report(
+    /// Record why delivery stopped in the delivery record and end the Cook
+    /// with it. Nothing is queued: the blocker names what must change first.
+    fn blocked<T>(
         &mut self,
-        recovery: MovingBaseCookRecovery,
-        continuation_queued: bool,
-    ) -> AgentTaskRunResult<AgentTaskCookReport> {
-        moving_base_recovery_report(
-            self.cook_id.to_string(),
-            std::mem::take(self.attempts),
-            recovery,
-            continuation_queued,
-            Some(self.run_id),
-        )
+        code: CookDeliveryBlockerCode,
+        message: String,
+        paths: Vec<String>,
+        base_movements: u32,
+    ) -> Result<CookDeliveryStep<T>> {
+        let blocker = CookDeliveryBlocker {
+            code,
+            message,
+            paths,
+            next_action: None,
+            cause: None,
+            evidence: RECORDED_BLOCKER_EVIDENCE.to_string(),
+        };
+        let stop_reason = format!("{}: {}", code.as_str(), blocker.message);
+        (self.lifecycle_store).record_cook_delivery_blocker(
+            self.run_id,
+            blocker,
+            base_movements,
+        )?;
+        let status = CookStatus::Blocked;
+        Ok(ControlFlow::Break(self.report(
+            status.as_str(),
+            None,
+            Some(&stop_reason),
+            1,
+        )))
+    }
+
+    /// Keep this attempt's report on the promotion delivery continues with.
+    fn update_attempt_promotion(&mut self, promotion: &AgentTaskPromotionReport) {
+        if let Some(attempt) = (self.attempts.last_mut()).filter(|a| a.run_id == self.run_id) {
+            attempt.promotion = Some(promotion.clone());
+        }
     }
 }
 
@@ -913,62 +957,172 @@ pub(super) fn ensure_verified(
             return Ok(ControlFlow::Break(report));
         }
     };
-    if promotion.status.gate_failed() {
-        let base_sha = promotion
-            .verified_base
-            .as_ref()
-            .map(|base| base.sha.clone())
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "promotion.verified_base",
-                    "gate-failed Cook promotion has no immutable verified base for differential verification",
-                    None,
-                    None,
-                )
-            })?;
-        let repository_root = promotion.target.path.clone().ok_or_else(|| {
+    compare_failed_gates_to_verified_base(lifecycle_store, options, run_id, &mut promotion)?;
+    Ok(ControlFlow::Continue(promotion))
+}
+
+/// Replay a gate-failed promotion's failing gates on its verified base, so the
+/// report tells the candidate's own failures from inherited ones.
+fn compare_failed_gates_to_verified_base(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+    run_id: &str,
+    promotion: &mut AgentTaskPromotionReport,
+) -> Result<()> {
+    if !promotion.status.gate_failed() {
+        return Ok(());
+    }
+    let base_sha = promotion
+        .verified_base
+        .as_ref()
+        .map(|base| base.sha.clone())
+        .ok_or_else(|| {
             Error::validation_invalid_argument(
-                "promotion.target.path",
-                "gate-failed Cook promotion has no candidate repository path for differential verification",
+                "promotion.verified_base",
+                "gate-failed Cook promotion has no immutable verified base for differential verification",
                 None,
                 None,
             )
         })?;
-        // The differential replays run after the promotion's supervision
-        // scope closed. Reopen the declared scope so a Lab runner enforces
-        // the declared gate budgets instead of its defaults (#15856).
-        crate::agent_task_promotion::with_gate_supervision(
-            options.gates.declared_supervision(),
-            || {
-                compare_gate_failures_to_verified_base(
+    let repository_root = promotion.target.path.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "promotion.target.path",
+            "gate-failed Cook promotion has no candidate repository path for differential verification",
+            None,
+            None,
+        )
+    })?;
+    // The differential replays run after the promotion's supervision
+    // scope closed. Reopen the declared scope so a Lab runner enforces
+    // the declared gate budgets instead of its defaults (#15856).
+    crate::agent_task_promotion::with_gate_supervision(
+        options.gates.declared_supervision(),
+        || {
+            compare_gate_failures_to_verified_base(
+                promotion,
+                std::path::Path::new(&repository_root),
+                std::path::Path::new(&repository_root),
+                &base_sha,
+                options.gates.gate_timeout(),
+                options
+                    .gates
+                    .gate_environment
+                    .admitted_component_id
+                    .as_deref(),
+                |_compared, _total| Ok(()),
+            )
+        },
+    )?;
+    lifecycle_store.record_promotion(run_id, to_json(promotion)?)?;
+    Ok(())
+}
+
+/// Bring a Cook-owned candidate onto its current resolved base (#16049).
+///
+/// A candidate whose base moved is replayed onto the new base. An identical
+/// tree keeps its gate proof; a changed tree is re-gated through the same
+/// promotion path [`ensure_verified`] uses. `moving_base_error` carries
+/// finalization's refusal when the base moved under it, and makes a candidate
+/// that cannot be caught up a blocker instead of a finalization attempt.
+fn ensure_base_current(
+    ctx: &mut CookDeliveryContext<'_, '_>,
+    mut promotion: AgentTaskPromotionReport,
+    base_movements: &mut u32,
+    moving_base_error: Option<&Error>,
+) -> Result<CookDeliveryStep<AgentTaskPromotionReport>> {
+    let (lifecycle_store, options, run_id) = (ctx.lifecycle_store, ctx.options, ctx.run_id);
+    let finalize_message = || moving_base_error.map(|error| error.message.clone());
+    match (ctx.side_effects).catch_up_base(lifecycle_store, options, run_id, &promotion)? {
+        BaseCatchUp::Current | BaseCatchUp::NotOwned(_) if moving_base_error.is_none() => {
+            Ok(ControlFlow::Continue(promotion))
+        }
+        BaseCatchUp::Current => {
+            let message = finalize_message().unwrap_or_default();
+            ctx.blocked(
+                CookDeliveryBlockerCode::BaseConflict,
+                message,
+                Vec::new(),
+                *base_movements,
+            )
+        }
+        BaseCatchUp::NotOwned(reason) => {
+            let message = format!("{}; {reason}", finalize_message().unwrap_or_default());
+            let code = CookDeliveryBlockerCode::ForeignCommits;
+            ctx.blocked(code, message, Vec::new(), *base_movements)
+        }
+        BaseCatchUp::Conflict { base, paths } => {
+            let message = format!(
+                "candidate conflicts with resolved base `{}` at {base}; rebase it onto the moved base before publishing",
+                options.finalization.base
+            );
+            let code = CookDeliveryBlockerCode::BaseConflict;
+            ctx.blocked(code, message, paths, *base_movements)
+        }
+        BaseCatchUp::Rebased { .. } if *base_movements >= BASE_MOVEMENT_BUDGET => {
+            let message = format!(
+                "moving-base recovery exhausted after {} refreshed base observations",
+                *base_movements
+            );
+            let code = CookDeliveryBlockerCode::BaseConflict;
+            ctx.blocked(code, message, Vec::new(), *base_movements)
+        }
+        BaseCatchUp::Rebased {
+            promotion: rebased,
+            regate,
+        } => {
+            *base_movements += 1;
+            promotion = rebased;
+            if regate {
+                ctx.progress(
+                    "promotion",
+                    Some("re-verifying the candidate on its moved base"),
+                )?;
+                promotion = promote_with_gate_setup_retries(
+                    ctx.side_effects,
+                    lifecycle_store,
+                    options,
+                    run_id,
+                    |_, _, _| {},
+                )?;
+                compare_failed_gates_to_verified_base(
+                    lifecycle_store,
+                    options,
+                    run_id,
                     &mut promotion,
-                    std::path::Path::new(&repository_root),
-                    std::path::Path::new(&repository_root),
-                    &base_sha,
-                    options.gates.gate_timeout(),
-                    options
-                        .gates
-                        .gate_environment
-                        .admitted_component_id
-                        .as_deref(),
-                    |_compared, _total| Ok(()),
-                )
-            },
-        )?;
-        lifecycle_store.record_promotion(run_id, to_json(&promotion)?)?;
+                )?;
+            }
+            ctx.update_attempt_promotion(&promotion);
+            if promotion.status != AgentTaskPromotionStatus::Applied {
+                let status = match promotion.status {
+                    AgentTaskPromotionStatus::GateDeferred => CookStatus::GatesDeferred,
+                    _ => CookStatus::GateFailed,
+                };
+                let stop_reason = format!(
+                    "the candidate rebased onto moved base `{}` did not pass the declared deterministic gates; finalization was not attempted",
+                    options.finalization.base
+                );
+                return Ok(ControlFlow::Break(ctx.report(
+                    status.as_str(),
+                    None,
+                    Some(&stop_reason),
+                    1,
+                )));
+            }
+            Ok(ControlFlow::Continue(promotion))
+        }
     }
-    Ok(ControlFlow::Continue(promotion))
 }
 
 /// Converge the base and publish a green candidate (commit, push, PR).
-/// `--no-finalize` stops before any effect; a pending moving-base recovery is
-/// rebased and re-gated first.
+/// `--no-finalize` stops before any effect. A Cook-owned candidate whose base
+/// moved is caught up first, and again whenever finalization finds the base
+/// moved under it, within [`BASE_MOVEMENT_BUDGET`].
 pub(super) fn ensure_published(
     ctx: &mut CookDeliveryContext<'_, '_>,
     promotion: AgentTaskPromotionReport,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let (store, lifecycle_store, options) = (ctx.store, ctx.lifecycle_store, ctx.options);
-    let (cook_id, run_id) = (ctx.cook_id, ctx.run_id);
+    let run_id = ctx.run_id;
     if options.finalization.no_finalize {
         return Ok(ctx.report(
             "green_no_finalize",
@@ -980,87 +1134,47 @@ pub(super) fn ensure_published(
             0,
         ));
     }
-    let mut active_moving_base_recovery = None;
-    let promotion = match moving_base_recovery_for_run_with_stores(store, lifecycle_store, run_id)?
-    {
-        Some(recovery) => {
-            match (ctx.side_effects).recover_moving_base(lifecycle_store, options, &recovery) {
-                Ok(promotion) => {
-                    lifecycle_store.record_promotion(run_id, to_json(&promotion)?)?;
-                    let mut recovery = refreshed_moving_base_recovery(recovery, &promotion);
-                    lifecycle_store
-                        .record_cook_moving_base_recovery(run_id, to_json(&recovery)?)?;
-                    if promotion.status != AgentTaskPromotionStatus::Applied {
-                        recovery.blocker = format!(
-                            "rebased candidate did not pass the declared deterministic gates ({:?}); finalization was not attempted",
-                            promotion.status
-                        );
-                        lifecycle_store
-                            .record_cook_moving_base_recovery(run_id, to_json(&recovery)?)?;
-                        return Ok(ctx.moving_base_report(recovery, false));
-                    }
-                    active_moving_base_recovery = Some(recovery);
-                    promotion
-                }
-                Err(error) => {
-                    let recovery = next_moving_base_recovery(recovery, error.to_string());
-                    lifecycle_store
-                        .record_cook_moving_base_recovery(run_id, to_json(&recovery)?)?;
-                    let continuation_queued = queue_moving_base_continuation(store, &recovery)?;
-                    return Ok(ctx.moving_base_report(recovery, continuation_queued));
-                }
+    let mut base_movements = 0;
+    let mut moving_base_error = None;
+    let mut promotion = promotion;
+    let finalization = loop {
+        promotion = match ensure_base_current(
+            ctx,
+            promotion,
+            &mut base_movements,
+            moving_base_error.as_ref(),
+        )? {
+            ControlFlow::Continue(promotion) => promotion,
+            ControlFlow::Break(report) => return Ok(report),
+        };
+        ctx.progress("finalization", None)?;
+        match (ctx.side_effects).finalize(lifecycle_store, options, run_id, &promotion) {
+            Ok(finalization) => break finalization,
+            Err(error) if is_moving_base_finalization_error(&error) => {
+                moving_base_error = Some(error);
             }
-        }
-        None => promotion,
-    };
-    ctx.progress("finalization", None)?;
-    let finalization = match ctx
-        .side_effects
-        .finalize(lifecycle_store, options, run_id, &promotion)
-    {
-        Ok(finalization) => {
-            if active_moving_base_recovery.is_some() {
-                lifecycle_store.clear_cook_moving_base_recovery(run_id)?;
-            }
-            finalization
-        }
-        Err(error) if is_moving_base_finalization_error(&error) => {
-            let recovery = next_moving_base_recovery(
-                active_moving_base_recovery.unwrap_or_else(|| {
-                    moving_base_recovery_from_promotion_in_store(
-                        lifecycle_store,
-                        cook_id,
-                        run_id,
-                        promotion,
-                    )
-                }),
-                error.to_string(),
-            );
-            lifecycle_store.record_cook_moving_base_recovery(run_id, to_json(&recovery)?)?;
-            let continuation_queued = queue_moving_base_continuation(store, &recovery)?;
-            return Ok(ctx.moving_base_report(recovery, continuation_queued));
-        }
-        Err(error) if error.message.contains("awaiting_acceptance") => {
-            return Ok(ctx.report(
-                "awaiting_acceptance",
-                Some(serde_json::json!({
-                    "status": "awaiting_acceptance",
-                    "reason": error.message,
-                    "run_id": run_id,
-                    "status_command": cook_recovery_command_in_store(
-                        lifecycle_store,
-                        run_id,
-                        &["status", run_id, "--full"],
-                    ),
-                })),
-                Some(
-                    "deterministic gates passed; an independent acceptance verdict \
+            Err(error) if error.message.contains("awaiting_acceptance") => {
+                return Ok(ctx.report(
+                    "awaiting_acceptance",
+                    Some(serde_json::json!({
+                        "status": "awaiting_acceptance",
+                        "reason": error.message,
+                        "run_id": run_id,
+                        "status_command": cook_recovery_command_in_store(
+                            lifecycle_store,
+                            run_id,
+                            &["status", run_id, "--full"],
+                        ),
+                    })),
+                    Some(
+                        "deterministic gates passed; an independent acceptance verdict \
      is required before PR finalization",
-                ),
-                1,
-            ));
+                    ),
+                    1,
+                ));
+            }
+            Err(error) => return Err(error),
         }
-        Err(error) => return Err(error),
     };
     let (final_status, published) = publication_status(&finalization);
     if published {

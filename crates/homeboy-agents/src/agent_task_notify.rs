@@ -648,7 +648,6 @@ pub(crate) fn cook_terminal_for_attempt(
         terminal_phase: None,
         terminal_failure_classification: None,
         primary_failure: None,
-        moving_base_recovery: None,
         provider_route_notes: Vec::new(),
         failure_context: None,
         report_stores: None,

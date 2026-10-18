@@ -7511,8 +7511,7 @@ pub fn record_cook_recovery_checkpoint_in_store(
 /// Re-arm a finalized candidate inside an explicitly rooted store.
 ///
 /// This is the invalidating half of [`record_cook_finalization_in_store`], and
-/// like [`clear_cook_moving_base_recovery_in_store`] it has to erase from the
-/// same root that recorded. Its idempotence guard reads the checkpoint it is
+/// it has to erase from the same root that recorded. Its idempotence guard reads the checkpoint it is
 /// about to write, so an ambient reach would decide "already re-armed" from
 /// another home's evidence and leave this store's finalization standing — the
 /// exact state that lets a stale review be published as if its gates had been
@@ -8764,31 +8763,30 @@ pub fn record_manual_finalization_failure(
     })
 }
 
-pub fn record_cook_moving_base_recovery_in_store(
+/// Record why delivery stopped at a step that leaves no receipt of its own,
+/// e.g. a candidate that cannot catch up to its moved base (#16049). The
+/// blocker binds to the candidate it blocked: a later promotion of a different
+/// candidate, or a publication, supersedes it.
+pub(crate) fn record_cook_delivery_blocker_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    recovery: Value,
+    blocker: crate::agent_task_service::CookDeliveryBlocker,
+    base_movements: u32,
 ) -> Result<AgentTaskRunRecord> {
     record_cook_delivery(lifecycle_store, run_id, |record| {
-        if record.metadata.get("cook_moving_base_recovery") == Some(&recovery) {
+        let mut delivery =
+            crate::agent_task_service::CookDelivery::from_legacy_metadata(&record.metadata)?;
+        if delivery.blocker.as_ref() == Some(&blocker) && delivery.base_movements == base_movements
+        {
             return None;
         }
-        record
-            .ensure_metadata_object()
-            .insert("cook_moving_base_recovery".to_string(), recovery.clone());
+        delivery.state = crate::agent_task_service::CookDeliveryState::Blocked;
+        delivery.blocker = Some(blocker.clone());
+        delivery.base_movements = base_movements;
+        record.ensure_metadata_object().insert(
+            crate::agent_task_service::COOK_DELIVERY_KEY.to_string(),
+            delivery.to_record(),
+        );
         Some(CookDeliveryCommit::FollowDelivery)
-    })
-}
-
-pub(crate) fn clear_cook_moving_base_recovery_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskRunRecord> {
-    record_cook_delivery(lifecycle_store, run_id, |record| {
-        record
-            .metadata
-            .as_object_mut()?
-            .remove("cook_moving_base_recovery")
-            .map(|_| CookDeliveryCommit::FollowDelivery)
     })
 }
