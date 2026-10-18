@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.34] - 2026-10-18
+
+### Changed
+- extract Cook delivery steps from run_cook_spine (#16049 slice 3)
+
+### Fixed
+- deliver work intents past a failing head; honest admission state for ready Lab runners
+- declare component test secret_env names on Lab test offloads
+
 ## [0.428.33] - 2026-10-18
 
 ### Fixed
