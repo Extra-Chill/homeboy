@@ -948,16 +948,31 @@ fn default_gate_lab_runner_from_attempt_dispatch(
     gates.gate_environment.lab_runner = Some(runner_id.to_string());
 }
 
-fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
-    let attempt_dispatch = options
+fn durable_attempt_dispatch(options: &CookRequest) -> Result<Value> {
+    Ok(options
         .provider_transport
         .attempt_dispatcher
         .as_ref()
         .map(|dispatcher| dispatcher.durable_recipe())
         .transpose()?
-        .unwrap_or_else(|| serde_json::json!({ "kind": "local" }));
+        .unwrap_or_else(|| serde_json::json!({ "kind": "local" })))
+}
+
+/// The gate policy a fresh cook admits: its requested gates with the
+/// placement-following default applied. The admitted request and its durable
+/// recipe both use this policy, so a fresh cook gates exactly where a
+/// continuation of the same recipe would.
+pub(super) fn admitted_gate_policy(
+    options: &CookRequest,
+) -> Result<crate::agent_task_gate::VerifyGateOptions> {
     let mut gates = options.gates.clone();
-    default_gate_lab_runner_from_attempt_dispatch(&mut gates, &attempt_dispatch);
+    default_gate_lab_runner_from_attempt_dispatch(&mut gates, &durable_attempt_dispatch(options)?);
+    Ok(gates)
+}
+
+fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
+    let attempt_dispatch = durable_attempt_dispatch(options)?;
+    let gates = admitted_gate_policy(options)?;
     let recipe = AgentTaskCookRecipe {
         schema: COOK_RECIPE_SCHEMA.to_string(),
         cook_id: options.identity.cook_id.clone(),
@@ -4858,6 +4873,29 @@ mod tests {
         request.provider_transport.attempt_dispatcher = Some(Arc::new(LabLikeDispatcher));
         let local_default = initial_recipe(&request).expect("admission recipe");
         assert!(local_default.gate_policy["gate_environment"]["lab_runner"].is_null());
+    }
+
+    /// A fresh Lab cook runs its first promotion from the admitted request,
+    /// not from a reconstruction. That request must carry the same
+    /// placement-following gate runner as its durable recipe; otherwise the
+    /// first attempt's gates run on the controller while only continuations
+    /// gate on the runner.
+    #[test]
+    fn admitted_request_gates_match_the_persisted_recipe_policy() {
+        let mut request = reconstruct_adoption_options(&recipe()).expect("reconstruct fixture");
+        request.provider_transport.attempt_dispatcher = Some(Arc::new(LabRunnerDispatcher));
+
+        let admitted = admitted_gate_policy(&request).expect("admitted gate policy");
+        assert_eq!(
+            admitted.gate_environment.lab_runner.as_deref(),
+            Some("lab-fixture")
+        );
+        assert_eq!(
+            serde_json::to_value(&admitted).expect("serialize admitted gates"),
+            initial_recipe(&request)
+                .expect("admission recipe")
+                .gate_policy
+        );
     }
 
     #[test]

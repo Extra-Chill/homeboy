@@ -5725,6 +5725,10 @@ fn run_cook_spine(
         }
         reconstructed
     } else {
+        // The fresh request is the first attempt's live policy; it must gate
+        // where its persisted recipe says, not only after a reconstruction.
+        let mut options = options;
+        options.gates = super::cook_recipe::admitted_gate_policy(&options)?;
         options
     };
     // Candidate adoption records the concrete external model on the lifecycle
