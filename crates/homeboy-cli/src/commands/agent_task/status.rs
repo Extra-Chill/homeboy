@@ -2633,7 +2633,7 @@ fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRecord) {
         finalization_requested,
         // `cook_completion` resolves this receipt from the selected candidate
         // whenever selection exists. This fallback only serves pre-index reports.
-        record.metadata.get("cook_finalization"),
+        agent_task_service_direct::persisted_finalization_receipt(&record.metadata),
         Some(&record.run_id),
     ) {
         let mut completion = serde_json::to_value(completion).expect("completion serializes");
@@ -2646,21 +2646,12 @@ fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRecord) {
     // The completion projection answers whether a PR exists; it does not carry
     // the PR's identity. Project that beside it so `status` can answer "is there
     // a PR, and where" without a second command (#12571).
-    if let Some(pr_url) = cook_finalization_pr_url(record) {
+    if let Some(pr_url) = CookDelivery::from_run_metadata(&record.metadata)
+        .as_ref()
+        .and_then(CookDelivery::pr_url)
+    {
         value["pr_url"] = Value::String(pr_url.to_string());
     }
-}
-
-/// The published pull request for this Cook attempt, read from the durable
-/// finalization receipt that `has_finalized_pr` accepts as publication proof.
-fn cook_finalization_pr_url(record: &AgentTaskRunRecord) -> Option<&str> {
-    let finalization = record.metadata.get("cook_finalization")?;
-    let url = finalization
-        .get("pr_url")
-        .or_else(|| finalization.get("pull_request_url"))
-        .and_then(Value::as_str)?
-        .trim();
-    (!url.is_empty()).then_some(url)
 }
 
 /// Versioned semantic boundary between one queried lifecycle attempt and the

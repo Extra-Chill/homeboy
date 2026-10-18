@@ -1002,3 +1002,19 @@ fn terminal_announced_ignores_undelivered_outcomes() {
         );
     });
 }
+
+#[test]
+fn pull_request_link_reads_every_tolerated_receipt_identity() {
+    // The link reads the delivery read model's publication: a receipt that
+    // spells its URL `pull_request_url` links it too (#16049).
+    let report = report(
+        "succeeded",
+        Some(serde_json::json!({
+            "status": "review_ready",
+            "pull_request_url": "https://example.test/pull/44",
+        })),
+    );
+    let payload = terminal_payload(&report, None, 0);
+    assert_eq!(payload.links.len(), 1);
+    assert_eq!(payload.links[0].url, "https://example.test/pull/44");
+}

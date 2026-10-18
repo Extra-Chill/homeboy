@@ -433,20 +433,20 @@ mod tests {
     }
 }
 
-/// Resolve the reviewed candidate identity from the durable promotion record.
-/// The fallback fields support both committed and artifact-backed candidates.
+/// Resolve the reviewed candidate identity from the Cook delivery read model.
+/// A run without a delivered candidate falls back to its recorded
+/// `candidate_identity`.
 pub fn candidate_identity(record: &AgentTaskRunRecord) -> Option<String> {
-    [
-        "/latest_promotion/provenance/candidate_ref",
-        "/latest_promotion/provenance/candidate/commit",
-        "/latest_promotion/provenance/candidate/fingerprint/sha256",
-        "/latest_promotion/provenance/candidate/sha256",
-        "/candidate_identity",
-    ]
-    .iter()
-    .find_map(|pointer| record.metadata.pointer(pointer).and_then(Value::as_str))
-    .filter(|value| !value.is_empty())
-    .map(str::to_string)
+    crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
+        .and_then(|delivery| delivery.candidate_identity().map(str::to_string))
+        .or_else(|| {
+            record
+                .metadata
+                .get("candidate_identity")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
 }
 
 pub fn append_to_plan(

@@ -258,9 +258,7 @@ fn hydrate_homeboy_evidence_ref(
                 )
             })?;
             let record = crate::agent_task_lifecycle::status(run_id)?;
-            let promotion = record
-                .metadata
-                .get("latest_promotion")
+            let promotion = super::persisted_promotion_report(&record.metadata)
                 .cloned()
                 .ok_or_else(|| {
                     homeboy_core::Error::validation_invalid_argument(

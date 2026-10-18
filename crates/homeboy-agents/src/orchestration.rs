@@ -1468,7 +1468,10 @@ fn review_promotion_candidates(
                     "--artifact-id".to_string(),
                     artifact_id.clone(),
                 ];
-                let continuation = record.metadata.get("latest_promotion").filter(|promotion| {
+                let continuation = crate::agent_task_service::persisted_promotion_report(
+                    &record.metadata,
+                )
+                .filter(|promotion| {
                     crate::agent_task_service::promotion_is_resumable(promotion, false)
                         && promotion.pointer("/source/task_id").and_then(Value::as_str)
                             == Some(candidate.task_id.as_str())
@@ -1654,7 +1657,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 evidence["contributing_attempt"] = serde_json::json!({
                     "run_id": latest.record.run_id,
                     "review_form": review_form,
-                    "verification": latest.record.metadata.get("latest_promotion"),
+                    "verification": crate::agent_task_service::persisted_promotion_report(&latest.record.metadata),
                 });
             }
             evidence["candidate_selection"] = serde_json::json!(selection);
@@ -2788,12 +2791,10 @@ fn recover_interrupted_action_acknowledgement(
             let request_fingerprint =
                 crate::agent_task_service::promotion_request_fingerprint(&parameters)
                     .map_err(map_lifecycle_error)?;
-            let report = current
-                .metadata
-                .get("latest_promotion")
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok())
-                .filter(
+            let report = crate::agent_task_service::persisted_promotion_report_typed(
+                &current.metadata,
+            )
+            .filter(
                     |report: &crate::agent_task_promotion::AgentTaskPromotionReport| {
                         report.source.run_id.as_deref() == Some(original.run_id.as_str())
                             && report.to_worktree == parameters.to_worktree

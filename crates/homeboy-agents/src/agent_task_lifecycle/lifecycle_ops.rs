@@ -8462,12 +8462,7 @@ pub fn record_acceptance_verdict_with_feedback_in_store(
             None,
         ));
     }
-    if existing
-        .metadata
-        .pointer("/latest_promotion/status")
-        .and_then(Value::as_str)
-        != Some("applied")
-    {
+    if !promotion_is_applied(&existing.metadata) {
         return Err(Error::validation_invalid_argument(
             "acceptance",
             "acceptance requires an applied promotion with green deterministic gates",
@@ -8517,11 +8512,7 @@ pub fn record_acceptance_verdict_with_feedback_in_store(
         if acceptance.requirement != expected_requirement
             || acceptance.candidate != expected_candidate
             || acceptance.base_sha != expected_base_sha
-            || record
-                .metadata
-                .pointer("/latest_promotion/status")
-                .and_then(Value::as_str)
-                != Some("applied")
+            || !promotion_is_applied(&record.metadata)
         {
             promotion_drifted = true;
             return false;
@@ -8576,6 +8567,13 @@ pub fn record_acceptance_verdict_with_feedback_in_store(
         ));
     }
     record.ok_or_else(|| Error::validation_invalid_argument("acceptance", "acceptance is not required for this run, does not match the declared authority/policy, or the identical verdict is already durable", None, None))
+}
+
+/// Acceptance binds to an applied promotion: its candidate's gates are green.
+fn promotion_is_applied(metadata: &Value) -> bool {
+    crate::agent_task_service::CookDelivery::from_run_metadata(metadata).is_some_and(|delivery| {
+        delivery.promotion() == Some(crate::agent_task_promotion::AgentTaskPromotionStatus::Applied)
+    })
 }
 
 /// Persist the controller publication result separately from promotion so a

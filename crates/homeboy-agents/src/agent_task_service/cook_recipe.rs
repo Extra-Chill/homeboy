@@ -1129,10 +1129,13 @@ fn reached_freeze_boundary_in_store(
             // correctable until an applied promotion exists.
             reached = Some(RecipeFreezeBoundary::Candidate);
         }
-        let promotion = serde_json::from_value::<
-            crate::agent_task_promotion::AgentTaskPromotionReport,
-        >(record.metadata["latest_promotion"].clone())
-        .ok();
+        let promotion =
+            serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionReport>(
+                super::persisted_promotion_report(&record.metadata)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+            .ok();
         if promotion
             .as_ref()
             .is_some_and(|promotion| promotion.status.patch_promoted())
@@ -1143,7 +1146,9 @@ fn reached_freeze_boundary_in_store(
             }) {
                 reached = Some(RecipeFreezeBoundary::Gate);
             }
-            if !record.metadata["cook_finalization"].is_null() {
+            if super::CookDelivery::from_run_metadata(&record.metadata)
+                .is_some_and(|delivery| delivery.has_publication_receipt())
+            {
                 reached = Some(RecipeFreezeBoundary::Finalization);
             }
         }
@@ -1852,10 +1857,8 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
     if lifecycle_store.record_exists(run_id)? {
         let existing = lifecycle_store.read_record_bounded(run_id)?;
         validate_recipe_attempt_record_in_store(lifecycle_store, recipe, run_id, &existing)?;
-        if existing
-            .metadata
-            .get("cook_finalization")
-            .is_some_and(|finalization| !finalization.is_null())
+        if super::CookDelivery::from_run_metadata(&existing.metadata)
+            .is_some_and(|delivery| delivery.has_publication_receipt())
         {
             return Ok(existing);
         }
@@ -1938,10 +1941,8 @@ pub fn preflight_recipe_attempt_for_continuation_in_store(
 )> {
     let record = lifecycle_store.read_record_bounded(run_id)?;
     validate_recipe_attempt_record_in_store(lifecycle_store, recipe, run_id, &record)?;
-    if record
-        .metadata
-        .get("cook_finalization")
-        .is_some_and(|finalization| !finalization.is_null())
+    if super::CookDelivery::from_run_metadata(&record.metadata)
+        .is_some_and(|delivery| delivery.has_publication_receipt())
     {
         return Ok((record, None));
     }
@@ -3388,15 +3389,15 @@ pub(crate) fn complete_absorbed_review_form_follow_ups(
         let Ok(record) = lifecycle_store.read_record(&attempt.run_id) else {
             continue;
         };
+        let follow_up = super::persisted_promotion_report(&record.metadata)
+            .and_then(|promotion| promotion.pointer("/provenance/cook_follow_up"));
         if !record.state.is_terminal()
-            || record
-                .metadata
-                .pointer("/latest_promotion/provenance/cook_follow_up/kind")
+            || follow_up
+                .and_then(|follow_up| follow_up.get("kind"))
                 .and_then(Value::as_str)
                 != Some("review_form_only")
-            || record
-                .metadata
-                .pointer("/latest_promotion/provenance/cook_follow_up/source_run_id")
+            || follow_up
+                .and_then(|follow_up| follow_up.get("source_run_id"))
                 .and_then(Value::as_str)
                 != Some(finalized_run_id)
         {

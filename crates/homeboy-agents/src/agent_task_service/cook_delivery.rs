@@ -28,6 +28,7 @@ use serde_json::Value;
 
 use super::cook::*;
 use super::cook_baseline::compare_gate_failures_to_verified_base;
+use super::cook_delivery_artifacts::*;
 use super::cook_promotion::*;
 use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
@@ -143,6 +144,11 @@ pub struct CookDeliveryCandidate {
     pub promotion: AgentTaskPromotionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// The reviewed candidate's identity: its recorded `candidate_ref`, else
+    /// its commit, else its fingerprint. Committed and artifact-backed
+    /// candidates spell it differently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_artifact: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,11 +233,23 @@ impl CookDelivery {
     /// The persisted `cook_delivery` record is authoritative when present and
     /// valid; otherwise delivery is derived from the per-stage keys.
     pub fn from_run_metadata(metadata: &Value) -> Option<Self> {
-        match present(metadata, "/cook_delivery") {
-            Some(record) => {
-                Self::from_record(record).or_else(|| Self::from_legacy_metadata(metadata))
+        match present(metadata, "/cook_delivery").and_then(Self::from_record) {
+            Some(mut delivery) => {
+                delivery.backfill(metadata);
+                Some(delivery)
             }
             None => Self::from_legacy_metadata(metadata),
+        }
+    }
+
+    /// Fill the facts a record written before they existed omits, from the
+    /// per-stage keys every delivery writer still keeps beside it.
+    fn backfill(&mut self, metadata: &Value) {
+        let Some(candidate) = self.candidate.as_mut() else {
+            return;
+        };
+        if candidate.identity.is_none() {
+            candidate.identity = latest_promotion(metadata).1.and_then(candidate_identity);
         }
     }
 
@@ -259,10 +277,10 @@ impl CookDelivery {
     pub(crate) fn from_legacy_metadata(metadata: &Value) -> Option<Self> {
         let (promotion_pointer, promotion) = latest_promotion(metadata);
         let promotion_status = promotion.and_then(promotion_status);
-        let finalization = present(metadata, "/cook_finalization");
-        let recovery = present(metadata, "/cook_moving_base_recovery");
-        let manual_intent = present(metadata, "/manual_finalization_intent");
-        let manual_failure = present(metadata, "/manual_finalization_failure");
+        let finalization = non_null(persisted_finalization_receipt(metadata));
+        let recovery = non_null(persisted_moving_base_recovery(metadata));
+        let manual_intent = non_null(persisted_manual_finalization_intent(metadata));
+        let manual_failure = non_null(persisted_manual_finalization_failure(metadata));
         if promotion_status.is_none()
             && finalization.is_none()
             && recovery.is_none()
@@ -272,7 +290,7 @@ impl CookDelivery {
             return None;
         }
 
-        let checkpoint = present(metadata, "/cook_recovery_source_checkpoint");
+        let checkpoint = non_null(persisted_recovery_source_checkpoint(metadata));
         let candidate = promotion
             .zip(promotion_status)
             .map(|(promotion, status)| read_candidate(promotion, status, checkpoint, recovery));
@@ -281,6 +299,10 @@ impl CookDelivery {
         // still the latest one.
         let recorded = present(metadata, "/cook_delivery")
             .and_then(Self::from_record)
+            .map(|mut recorded| {
+                recorded.backfill(metadata);
+                recorded
+            })
             .filter(|recorded| {
                 recorded.candidate == candidate
                     && recorded
@@ -291,7 +313,7 @@ impl CookDelivery {
         let publication = finalization.map(|finalization| {
             read_publication(
                 finalization,
-                present(metadata, "/cook_force_with_lease_receipt"),
+                non_null(persisted_force_with_lease_receipt(metadata)),
             )
         });
         let destination = read_destination(promotion, finalization.or(manual_intent));
@@ -423,10 +445,55 @@ impl CookDelivery {
     pub fn promotion(&self) -> Option<AgentTaskPromotionStatus> {
         self.candidate.as_ref().map(|candidate| candidate.promotion)
     }
+
+    /// The candidate is applied and waits for its gates to run
+    /// (`verification_pending`), e.g. after a dependency rebase re-armed it.
+    pub fn awaits_verification(&self) -> bool {
+        self.promotion() == Some(AgentTaskPromotionStatus::VerificationPending)
+    }
+
+    /// A publication receipt was recorded, whatever it proves.
+    pub fn has_publication_receipt(&self) -> bool {
+        self.publication.is_some()
+    }
+
+    /// A pull request with a usable identity publishes the candidate.
+    pub fn published(&self) -> bool {
+        self.publication
+            .as_ref()
+            .is_some_and(|publication| publication.published)
+    }
+
+    /// The pull request URL the publication receipt recorded, at any of its
+    /// historical paths, whether or not the receipt proves publication.
+    pub fn pr_url(&self) -> Option<&str> {
+        self.publication
+            .as_ref()
+            .and_then(|publication| publication.pr_url.as_deref())
+    }
+
+    /// The candidate's patch sha, falling back to its first post-apply
+    /// checkpoint.
+    pub fn patch_sha(&self) -> Option<&str> {
+        self.candidate
+            .as_ref()
+            .and_then(|candidate| candidate.patch_sha.as_deref())
+    }
+
+    /// The reviewed candidate's identity (see [`CookDeliveryCandidate::identity`]).
+    pub fn candidate_identity(&self) -> Option<&str> {
+        self.candidate
+            .as_ref()
+            .and_then(|candidate| candidate.identity.as_deref())
+    }
 }
 
 fn present<'a>(metadata: &'a Value, pointer: &str) -> Option<&'a Value> {
     metadata.pointer(pointer).filter(|value| !value.is_null())
+}
+
+fn non_null(value: Option<&Value>) -> Option<&Value> {
+    value.filter(|value| !value.is_null())
 }
 
 fn string_at(value: &Value, pointer: &str) -> Option<String> {
@@ -441,12 +508,10 @@ fn string_at(value: &Value, pointer: &str) -> Option<String> {
 /// `latest_promotion`, or the last entry of the `promotions` history when a
 /// record predates the latest-promotion key.
 fn latest_promotion(metadata: &Value) -> (String, Option<&Value>) {
-    if let Some(promotion) = present(metadata, "/latest_promotion") {
+    if let Some(promotion) = non_null(persisted_promotion_report(metadata)) {
         return ("/latest_promotion".to_string(), Some(promotion));
     }
-    metadata
-        .get("promotions")
-        .and_then(Value::as_array)
+    persisted_promotion_history(metadata)
         .and_then(|history| {
             let index = history.len().checked_sub(1)?;
             Some((format!("/promotions/{index}"), history.get(index)?))
@@ -502,12 +567,28 @@ fn read_candidate(
         task_id: string_at(promotion, "/task_id"),
         promotion: status,
         fingerprint: identity("/provenance/candidate/fingerprint/sha256"),
+        identity: candidate_identity(promotion),
         patch_artifact,
         patch_sha: identity("/patch_artifact/sha256"),
         verified_base: identity("/verified_base/sha")
             .or_else(|| recovery.and_then(|recovery| string_at(recovery, "/prior_verified_base"))),
         target_applied,
     }
+}
+
+/// The first recorded spelling of the candidate's identity. An empty first
+/// spelling records no identity rather than deferring to a later one.
+fn candidate_identity(promotion: &Value) -> Option<String> {
+    [
+        "/provenance/candidate_ref",
+        "/provenance/candidate/commit",
+        "/provenance/candidate/fingerprint/sha256",
+        "/provenance/candidate/sha256",
+    ]
+    .into_iter()
+    .find_map(|pointer| promotion.pointer(pointer).and_then(Value::as_str))
+    .filter(|identity| !identity.is_empty())
+    .map(str::to_string)
 }
 
 fn destination_worktree(promotion: &Value) -> Option<String> {
@@ -702,8 +783,9 @@ fn is_no_change_receipt(finalization: &Value) -> bool {
 }
 
 /// The publication a single `cook_finalization` receipt proves, for callers
-/// that hold the receipt rather than the run metadata.
-pub(crate) fn publication_receipt(finalization: &Value) -> CookDeliveryPublication {
+/// that hold the receipt rather than the run metadata (a Cook report's
+/// `finalization`). Every tolerated PR-identity path is read here.
+pub fn publication_receipt(finalization: &Value) -> CookDeliveryPublication {
     read_publication(finalization, None)
 }
 

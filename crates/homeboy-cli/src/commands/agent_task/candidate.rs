@@ -5,6 +5,8 @@ use std::{
     path::Path,
 };
 
+use homeboy::agents::agent_task_promotion::AgentTaskPromotionStatus;
+use homeboy::agents::agent_task_service::{publication_receipt, CookDelivery};
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -238,16 +240,21 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateResult {
         && counts.conflicting == 0
         && counts.retained_only == 0
         && aggregate_outcomes_are_no_op(payload);
-    let promotion =
-        latest_promotion(payload).or_else(|| payload.get("record").and_then(latest_promotion));
+    let candidate = delivered_candidate(payload)
+        .or_else(|| payload.get("record").and_then(delivered_candidate));
     counts.finalized =
         has_finalized_pr(payload) || payload.get("record").is_some_and(has_finalized_pr);
     counts.retained = has_retained_candidate(payload)
         || payload.get("record").is_some_and(has_retained_candidate)
         || successful_adoption(payload)
         || payload.get("record").is_some_and(successful_adoption);
-    counts.target_applied = promotion.is_some_and(promotion_target_applied);
-    counts.verified = counts.target_applied && promotion.is_some_and(promotion_verified);
+    counts.target_applied = candidate
+        .as_ref()
+        .is_some_and(|candidate| candidate.target_applied);
+    counts.verified = counts.target_applied
+        && candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.promotion == AgentTaskPromotionStatus::Applied);
     counts
 }
 
@@ -650,23 +657,39 @@ fn outcome_artifact_count(outcome: &Value) -> usize {
         .map_or(0, Vec::len)
 }
 
-fn latest_promotion(payload: &Value) -> Option<&Value> {
-    payload
-        .get("latest_promotion")
-        .or_else(|| payload.pointer("/metadata/latest_promotion"))
+/// The Cook deliveries a payload carries: from its own delivery keys (a status
+/// payload), then from its run metadata (a record).
+fn payload_deliveries(payload: &Value) -> impl Iterator<Item = CookDelivery> + '_ {
+    [Some(payload), payload.get("metadata")]
+        .into_iter()
+        .flatten()
+        .filter_map(CookDelivery::from_run_metadata)
+}
+
+/// The latest promoted candidate a payload's delivery read model records.
+fn delivered_candidate(
+    payload: &Value,
+) -> Option<homeboy::agents::agent_task_service::CookDeliveryCandidate> {
+    payload_deliveries(payload).find_map(|delivery| delivery.candidate)
 }
 
 fn has_retained_candidate(payload: &Value) -> bool {
-    promotion_has_candidate(latest_promotion(payload))
-        || payload
-            .get("attempts")
-            .and_then(Value::as_array)
-            .is_some_and(|attempts| {
-                attempts
-                    .iter()
-                    .take(MAX_ATTEMPTS_SCANNED)
-                    .any(|attempt| promotion_has_candidate(attempt.get("promotion")))
-            })
+    delivered_candidate(payload).is_some_and(|candidate| {
+        matches!(
+            candidate.promotion,
+            AgentTaskPromotionStatus::VerificationPending
+                | AgentTaskPromotionStatus::Applied
+                | AgentTaskPromotionStatus::GateFailed
+        ) && candidate.patch_artifact.is_some()
+    }) || payload
+        .get("attempts")
+        .and_then(Value::as_array)
+        .is_some_and(|attempts| {
+            attempts
+                .iter()
+                .take(MAX_ATTEMPTS_SCANNED)
+                .any(|attempt| promotion_has_candidate(attempt.get("promotion")))
+        })
 }
 
 fn successful_adoption(payload: &Value) -> bool {
@@ -681,24 +704,13 @@ fn successful_adoption(payload: &Value) -> bool {
         )
 }
 
+/// A Cook report's own `finalization` receipt, or the delivery its payload or
+/// run metadata records, publishes a pull request.
 fn has_finalized_pr(payload: &Value) -> bool {
-    [
-        payload.get("finalization"),
-        payload.get("cook_finalization"),
-        payload.pointer("/metadata/cook_finalization"),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|finalization| {
-        matches!(
-            finalization.get("status").and_then(Value::as_str),
-            Some("review_ready" | "draft_published")
-        ) && finalization
-            .get("pr_url")
-            .or_else(|| finalization.get("pull_request_url"))
-            .and_then(Value::as_str)
-            .is_some_and(|url| !url.trim().is_empty())
-    })
+    payload
+        .get("finalization")
+        .is_some_and(|finalization| publication_receipt(finalization).published)
+        || payload_deliveries(payload).any(|delivery| delivery.published())
 }
 
 fn promotion_has_candidate(promotion: Option<&Value>) -> bool {
@@ -720,38 +732,6 @@ fn promotion_has_candidate(promotion: Option<&Value>) -> bool {
         .or_else(|| promotion.get("patch_artifact_id").and_then(Value::as_str))
         .or_else(|| promotion.get("artifact_id").and_then(Value::as_str))
         .is_some_and(|id| !id.trim().is_empty()))
-}
-
-/// A promotion status alone is not proof that the target changed: retained
-/// candidates use the same tracker before `agent-task promote` mutates a target.
-pub(crate) fn promotion_target_applied(promotion: &Value) -> bool {
-    matches!(
-        promotion.get("status").and_then(Value::as_str),
-        Some("verification_pending" | "applied" | "gate_failed")
-    ) && promotion
-        .pointer("/provenance/post_apply")
-        .and_then(Value::as_bool)
-        == Some(true)
-        && promotion
-            .pointer("/patch_artifact/id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty())
-        && promotion
-            .pointer("/target/worktree")
-            .or_else(|| promotion.get("to_worktree"))
-            .and_then(Value::as_str)
-            .is_some_and(|target| !target.trim().is_empty())
-        && promotion
-            .pointer("/provenance/candidate")
-            .is_some_and(|candidate| !candidate.is_null())
-}
-
-pub(crate) fn promotion_verified(promotion: &Value) -> bool {
-    promotion_target_applied(promotion)
-        && matches!(
-            promotion.get("status").and_then(Value::as_str),
-            Some("applied")
-        )
 }
 
 fn aggregate_outcomes_are_no_op(payload: &Value) -> bool {
@@ -1210,5 +1190,24 @@ mod tests {
             }}
         }));
         assert_eq!(adopted.state(), CandidateState::ApplyReady);
+    }
+
+    #[test]
+    fn finalization_reads_the_delivery_read_model_publication() {
+        // A receipt that names its PR only by number publishes it, as the
+        // Cook delivery read model decides (#16049).
+        let by_number = classify_candidates(&json!({
+            "record": { "metadata": { "cook_finalization": {
+                "status": "review_ready", "pr_number": 7
+            }}}
+        }));
+        assert_eq!(by_number.state(), CandidateState::Finalized);
+
+        let refused = classify_candidates(&json!({
+            "record": { "metadata": { "cook_finalization": {
+                "status": "failed", "pr_url": "https://example.test/pull/1"
+            }}}
+        }));
+        assert_ne!(refused.state(), CandidateState::Finalized);
     }
 }

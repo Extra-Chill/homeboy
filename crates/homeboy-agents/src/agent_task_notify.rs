@@ -457,8 +457,9 @@ fn terminal_payload(
     // can hand a reviewer, and it was previously discarded along with the rest
     // of the finalization report.
     if let Some(finalization) = &report.finalization {
-        if crate::agent_task_service::cook_finalization_is_pr_receipt(finalization) {
-            if let Some(url) = finalization.get("pr_url").and_then(|url| url.as_str()) {
+        let publication = crate::agent_task_service::publication_receipt(finalization);
+        if publication.published {
+            if let Some(url) = publication.pr_url.as_deref() {
                 payload = payload.with_link(NotifyLink::new("pull request", url));
             }
         }
