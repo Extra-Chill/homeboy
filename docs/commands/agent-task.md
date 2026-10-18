@@ -1041,8 +1041,8 @@ The gate passes when:
 - `review` returns a `homeboy/agent-task-review/v1` envelope with `transport.chat_state_required: false`, aggregate reconciliation, and promotion candidates.
 - `promote <run-id> --dry-run` resolves the aggregate from the durable run id and reports the selected non-empty patch plus changed files without requiring the operator to look up `aggregate_path` manually.
 
-When `promote <run-id>` applies a patch, Homeboy records `metadata.latest_promotion`
-on the durable run. That status event includes the source run id, source task id,
+When `promote <run-id>` applies a patch, Homeboy records the promotion report in
+the run's versioned `metadata.cook_delivery` record. That report includes the source run id, source task id,
 patch artifact id/path, target worktree, discovered target branch/head when
 available, changed files, and an operator notification. `agent-task status
 <run-id>` surfaces the latest promotion so callers can tell whether promotion

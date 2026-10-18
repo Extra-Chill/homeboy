@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::agent_task_service::{
-    CookDelivery, CookDeliveryBlockerCode, CookDeliveryState, COOK_DELIVERY_SCHEMA,
+    recorded_finalization_receipt, recorded_promotion_report, CookDelivery,
+    CookDeliveryBlockerCode, CookDeliveryState, COOK_DELIVERY_SCHEMA,
 };
 use homeboy_core::cook_status::CookStatus;
 
@@ -63,7 +64,7 @@ fn persisted_delivery(record: &AgentTaskRunRecord) -> CookDelivery {
 }
 
 #[test]
-fn the_persisted_record_reads_identically_to_its_legacy_derivation() {
+fn the_record_is_the_only_stored_form_of_delivery() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let run_id = "run-cook-delivery-record";
     let lifecycle_store = store_with_run(&context, run_id);
@@ -78,34 +79,34 @@ fn the_persisted_record_reads_identically_to_its_legacy_derivation() {
         persisted_delivery(&record).state,
         CookDeliveryState::Verified
     );
+    let revision = record.revision;
     for _ in 0..2 {
         record = record_cook_finalization_in_store(&lifecycle_store, run_id, published())
             .expect("finalization recorded");
     }
+    // Recording the same receipt again commits nothing.
+    assert_eq!(record.revision, revision + 1);
 
     let read = persisted_delivery(&record);
     assert_eq!(read.state, CookDeliveryState::Published);
     assert_eq!(
-        Some(read.clone()),
-        CookDelivery::from_legacy_metadata(&record.metadata)
+        recorded_finalization_receipt(&record.metadata),
+        Some(&published())
     );
-
-    // The record is what readers trust: once persisted, a reader that sees
-    // only the record and one that sees only the legacy keys agree.
-    let mut only_record = record.metadata.clone();
-    for key in ["latest_promotion", "promotions", "cook_finalization"] {
-        only_record.as_object_mut().expect("metadata").remove(key);
+    for key in [
+        "latest_promotion",
+        "promotions",
+        "cook_finalization",
+        "cook_recovery_source_checkpoint",
+    ] {
+        assert!(record.metadata.get(key).is_none(), "{key} is not written");
     }
-    assert_eq!(
-        CookDelivery::from_run_metadata(&only_record),
-        Some(read.clone())
-    );
 
-    // A record of an unknown schema is not trusted; the legacy keys are.
+    // A record of an unknown schema is not trusted.
     let mut foreign = record.metadata.clone();
     foreign["cook_delivery"]["schema"] = json!("homeboy/cook-delivery/v0");
-    foreign["cook_delivery"]["state"] = json!("no_change");
-    assert_eq!(CookDelivery::from_run_metadata(&foreign), Some(read));
+    assert_eq!(CookDelivery::from_run_metadata(&foreign), None);
+    assert_eq!(recorded_finalization_receipt(&foreign), None);
 }
 
 /// A writer that read the record before a concurrent writer committed must
@@ -120,7 +121,7 @@ fn concurrent_delivery_writers_do_not_lose_an_update() {
 
     let mut interleaved = false;
     let mut decisions = 0;
-    let record = record_cook_delivery(&lifecycle_store, run_id, |record| {
+    let record = record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
         decisions += 1;
         if !interleaved {
             interleaved = true;
@@ -128,10 +129,7 @@ fn concurrent_delivery_writers_do_not_lose_an_update() {
             record_cook_finalization_in_store(&lifecycle_store, run_id, published())
                 .expect("concurrent finalization recorded");
         }
-        record.ensure_metadata_object().insert(
-            "latest_promotion".to_string(),
-            promotion(run_id, "applied", gate("succeeded")),
-        );
+        draft.artifacts.promotion = Some(promotion(run_id, "applied", gate("succeeded")));
         Some(CookDeliveryCommit::FollowDelivery)
     })
     .expect("promotion recorded");
@@ -141,8 +139,14 @@ fn concurrent_delivery_writers_do_not_lose_an_update() {
         "the stale decision conflicted and was retried"
     );
     assert_eq!(record.revision, before.revision + 2);
-    assert_eq!(record.metadata["cook_finalization"], published());
-    assert_eq!(record.metadata["latest_promotion"]["status"], "applied");
+    assert_eq!(
+        recorded_finalization_receipt(&record.metadata),
+        Some(&published())
+    );
+    assert_eq!(
+        recorded_promotion_report(&record.metadata).expect("promotion")["status"],
+        "applied"
+    );
     assert_eq!(
         persisted_delivery(&record).state,
         CookDeliveryState::Published
@@ -152,7 +156,7 @@ fn concurrent_delivery_writers_do_not_lose_an_update() {
     let writers = ["a", "b", "c", "d"].map(|key| {
         let lifecycle_store = lifecycle_store.clone();
         std::thread::spawn(move || {
-            record_cook_delivery(&lifecycle_store, run_id, |record| {
+            record_cook_delivery(&lifecycle_store, run_id, |record, _| {
                 record
                     .ensure_metadata_object()
                     .insert(format!("concurrent_receipt_{key}"), json!(key));
@@ -224,7 +228,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
             Some(CookDeliveryBlockerCode::GatesDeferred)
         );
         assert_eq!(
-            deferred.metadata["cook_delivery"]["blocker"]["code"],
+            deferred.metadata["cook_delivery"]["delivery"]["blocker"]["code"],
             "gates_deferred"
         );
         assert_eq!(deferred.state, AgentTaskRunState::CandidateRecoverable);

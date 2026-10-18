@@ -343,7 +343,7 @@ fn bound_promotion_progress_output(output: &str) -> String {
 }
 
 /// The phase that failed a run is absent from its own log whenever a
-/// promotion runs deterministic gates: `latest_promotion`/`promotions` were
+/// promotion runs deterministic gates: the recorded promotion reports were
 /// durable evidence, but no gate start, per-gate result, or terminal event
 /// ever reached the control-plane event stream (#14735). Every promotion
 /// checkpoint that reached the gate phase is projected here, so `agent-task
@@ -353,11 +353,11 @@ fn gate_lifecycle_requests(
     record: &AgentTaskRunRecord,
 ) -> Result<Vec<ControlPlaneEventAppendRequest>> {
     let promotions: Vec<Value> =
-        crate::agent_task_service::persisted_promotion_history(&record.metadata)
+        crate::agent_task_service::recorded_promotion_history(&record.metadata)
             .filter(|promotions| !promotions.is_empty())
             .cloned()
             .unwrap_or_else(|| {
-                crate::agent_task_service::persisted_promotion_report(&record.metadata)
+                crate::agent_task_service::recorded_promotion_report(&record.metadata)
                     .cloned()
                     .into_iter()
                     .collect()

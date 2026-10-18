@@ -1,16 +1,19 @@
 //! The single writer of the persisted `cook_delivery` record (#16049).
 //!
-//! Every delivery stage (promotion, finalization, delivery blockers,
-//! manual finalization and force-with-lease receipts) commits through
-//! [`record_cook_delivery`]. It applies the stage's own receipt to the record
-//! it read, re-derives the delivery from the result, stores it as the
-//! versioned `cook_delivery` record, and moves the run state the delivery
-//! asks for, all in one compare-and-swap commit (#15718). A concurrent writer
-//! makes the commit conflict; the retry re-reads and re-derives, so neither
-//! writer's facts are lost.
+//! Every delivery step (promotion, finalization, delivery blockers, manual
+//! publication and force-with-lease receipts) commits through
+//! [`record_cook_delivery`]. The step records its artifact in the record it
+//! read; the writer projects the delivery facts from the result, stores both
+//! as the versioned `cook_delivery` record, and moves the run state the
+//! delivery asks for, all in one compare-and-swap commit (#15718). A step that
+//! changes nothing commits nothing. A concurrent writer makes the commit
+//! conflict; the retry re-reads and re-projects, so neither writer's facts are
+//! lost.
 
 use super::*;
-use crate::agent_task_service::{CookDelivery, CookDeliveryBlockerCode, COOK_DELIVERY_KEY};
+use crate::agent_task_service::{
+    CookDelivery, CookDeliveryArtifacts, CookDeliveryBlockerCode, COOK_DELIVERY_KEY,
+};
 use homeboy_core::cook_status::CookStatus;
 
 /// How a delivery receipt decides the run state it commits.
@@ -23,36 +26,59 @@ pub(crate) enum CookDeliveryCommit {
     Terminal(AgentTaskTerminalOutcome),
 }
 
-/// Commit a delivery receipt and the `cook_delivery` record it implies.
+/// The `cook_delivery` record a delivery step updates.
+pub(crate) struct CookDeliveryDraft {
+    /// The full artifacts the steps recorded; facts are projected from them.
+    pub artifacts: CookDeliveryArtifacts,
+    /// The delivery the record held. A step that records a blocker without a
+    /// receipt of its own sets it here (see [`CookDelivery::project`]).
+    pub recorded: Option<CookDelivery>,
+}
+
+/// Commit a delivery step and the `cook_delivery` record it implies.
 ///
-/// `record_receipt` applies the stage's receipt to a copy of the current
-/// record and returns how to commit it, or `None` when the receipt is already
-/// recorded. It may be called again on a fresher record after a conflict.
+/// `record_step` updates a copy of the current run and its delivery record and
+/// returns how to commit it, or `None` when the step must not be recorded. It
+/// may be called again on a fresher record after a conflict.
 pub(crate) fn record_cook_delivery(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    mut record_receipt: impl FnMut(&mut AgentTaskRunRecord) -> Option<CookDeliveryCommit>,
+    mut record_step: impl FnMut(
+        &mut AgentTaskRunRecord,
+        &mut CookDeliveryDraft,
+    ) -> Option<CookDeliveryCommit>,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let committed = lifecycle_store.transition_when(&run_id, |current| {
         let mut prepared = current.clone();
-        let commit = record_receipt(&mut prepared)?;
-        prepared.updated_at = Some(now_timestamp());
-        let delivery = CookDelivery::from_legacy_metadata(&prepared.metadata);
+        let previous = CookDelivery::from_run_metadata(&current.metadata);
+        let mut draft = CookDeliveryDraft {
+            artifacts: CookDeliveryArtifacts::from_run_metadata(&current.metadata),
+            recorded: previous.clone(),
+        };
+        let commit = record_step(&mut prepared, &mut draft)?;
+        let delivery = CookDelivery::project(&draft.artifacts, draft.recorded.as_ref());
         retire_superseded_deferral(&mut prepared, delivery.as_ref());
         let metadata = prepared.ensure_metadata_object();
-        match &delivery {
-            Some(delivery) => metadata.insert(COOK_DELIVERY_KEY.to_string(), delivery.to_record()),
-            None => metadata.remove(COOK_DELIVERY_KEY),
-        };
+        if delivery.is_none() && draft.artifacts == CookDeliveryArtifacts::default() {
+            metadata.remove(COOK_DELIVERY_KEY);
+        } else {
+            metadata.insert(
+                COOK_DELIVERY_KEY.to_string(),
+                CookDelivery::to_record(delivery.as_ref(), &draft.artifacts),
+            );
+        }
         let next_state = match commit {
             CookDeliveryCommit::Terminal(outcome) => Some(outcome.run_state()),
-            CookDeliveryCommit::FollowDelivery => delivery_run_state(
-                CookDelivery::from_run_metadata(&current.metadata).as_ref(),
-                delivery.as_ref(),
-                current,
-            ),
-        };
+            CookDeliveryCommit::FollowDelivery => {
+                delivery_run_state(previous.as_ref(), delivery.as_ref(), current)
+            }
+        }
+        .filter(|state| *state != current.state);
+        if next_state.is_none() && prepared == *current {
+            return None;
+        }
+        prepared.updated_at = Some(now_timestamp());
         if let Some(state) = next_state {
             set_run_state(&mut prepared, state);
         }

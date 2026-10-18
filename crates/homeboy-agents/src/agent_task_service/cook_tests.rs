@@ -2689,7 +2689,7 @@ fn cook_persists_selection_required_before_promotion_or_gates() {
             agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id).unwrap();
         assert_eq!(result.value.status, "selection_required");
         assert_eq!(promotions.load(Ordering::SeqCst), 1);
-        assert!(record.metadata.get("latest_promotion").is_none());
+        assert!(record.metadata["cook_delivery"]["artifacts"]["promotion"].is_null());
         assert_eq!(
             record.metadata["cook_selection_required"]["state"],
             "selection_required"
@@ -2749,11 +2749,14 @@ fn cook_selection_required_metadata_uses_supplied_lifecycle_store() {
         ],
     );
     supplied_store
-        .record_metadata_value(
-            run_id,
-            "latest_promotion",
-            serde_json::json!({ "status": "verification_pending" }),
-        )
+        .mutate_record(run_id, |record| {
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                serde_json::json!({ "status": "verification_pending" }),
+            );
+            true
+        })
         .expect("seed rooted verification-pending continuation");
     ambient_store
         .record_metadata_value(
@@ -2846,11 +2849,14 @@ fn resume_cook_behind_foreign_promotion_claim(
         )],
     );
     lifecycle_store
-        .record_metadata_value(
-            &run_id,
-            "latest_promotion",
-            serde_json::json!({ "status": "verification_pending" }),
-        )
+        .mutate_record(&run_id, |record| {
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                serde_json::json!({ "status": "verification_pending" }),
+            );
+            true
+        })
         .expect("seed verification-pending continuation");
 
     // The original Cook process owns the promotion claim and is running gates.
@@ -2982,15 +2988,18 @@ fn post_apply_promotion_failure_keeps_cause_and_bounded_resume_action() {
         .record_cook_attempt(cook_id, 1, run_id)
         .expect("record attempt");
     lifecycle_store
-        .record_metadata_value(
-            run_id,
-            "latest_promotion",
-            serde_json::json!({
-                "status": "verification_pending",
-                "target": { "worktree": "synthetic-candidate" },
-                "provenance": { "candidate": { "sha256": "candidate" } }
-            }),
-        )
+        .mutate_record(run_id, |record| {
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                serde_json::json!({
+                    "status": "verification_pending",
+                    "target": { "worktree": "synthetic-candidate" },
+                    "provenance": { "candidate": { "sha256": "candidate" } }
+                }),
+            );
+            true
+        })
         .expect("persist post-apply checkpoint");
     agent_task_lifecycle::record_cook_controller_failure_in_store(
         &lifecycle_store,
@@ -3750,7 +3759,10 @@ fn candidate_adoption_lifecycle_and_promotion_evidence_do_not_alias_across_expli
         assert_eq!(adoption.candidate_sha, candidate_sha);
         assert_eq!(adoption.ai_model, model);
         assert_eq!(adoption.result.unwrap()["root"], root);
-        assert_eq!(record.metadata["latest_promotion"]["root"], root);
+        assert_eq!(
+            record.metadata["cook_delivery"]["artifacts"]["promotion"]["root"],
+            root
+        );
     }
 
     assert_ne!(left_store.run_dir(run_id), right_store.run_dir(run_id));
@@ -3846,7 +3858,9 @@ fn seed_moving_base_attempt(
 /// continuation to resume.
 fn assert_no_moving_base_continuation(run_id: &str) {
     let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
-    assert!(record.metadata.get("cook_moving_base_recovery").is_none());
+    let blocker = crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
+        .and_then(|delivery| delivery.blocker);
+    assert_eq!(blocker.and_then(|blocker| blocker.next_action), None);
 }
 
 /// Finalization's refusal when the resolved base moved under the candidate.
@@ -14865,7 +14879,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             cook_completion(
                 Some(selected_candidate),
                 true,
-                source_record.metadata.get("cook_finalization"),
+                crate::agent_task_service::recorded_finalization_receipt(&source_record.metadata),
                 Some(run_id),
             )
             .expect("exact source status completion")
@@ -14874,11 +14888,11 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             "exact source status resolves the bound form-only receipt"
         );
         agent_task_lifecycle::rewrite_record_for_test(follow_up_run_id, |record| {
-            record
-                .metadata
-                .as_object_mut()
-                .expect("record metadata object")
-                .remove("cook_finalization");
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/finalization",
+                serde_json::Value::Null,
+            );
         })
         .expect("remove form-only receipt");
         let awaiting = result.value.completion().expect("recoverable completion");
@@ -16525,11 +16539,15 @@ fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run
             "nonempty malformed newer artifact\n",
         );
         agent_task_lifecycle::rewrite_record_for_test(selected_run_id, |record| {
-            record.metadata["latest_promotion"] = serde_json::json!({
-                "patch_artifact": { "sha256": "candidate-sha" },
-                "to_worktree": "fixture@destination",
-                "provenance": { "candidate": "candidate-fingerprint" }
-            });
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                serde_json::json!({
+                    "patch_artifact": { "sha256": "candidate-sha" },
+                    "to_worktree": "fixture@destination",
+                    "provenance": { "candidate": "candidate-fingerprint" }
+                }),
+            );
         })
         .expect("persist promotion provenance");
         agent_task_lifecycle::record_promotion(
@@ -16646,7 +16664,7 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
                 "runner_id": "fixture-lab",
                 "provider_execution": 1,
             });
-            record.metadata["latest_promotion"] = serde_json::json!({
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(&mut record.metadata, "/promotion", serde_json::json!({
                 "patch_artifact": { "sha256": homeboy_engine_primitives::content_hash::sha256_hex(patch.as_bytes()) },
                 "to_worktree": "fixture@destination",
                 "command_evidence": [{
@@ -16657,7 +16675,7 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
                     "candidate": { "kind": "git", "fingerprint": { "head": "candidate-head", "tree": "candidate-tree" } },
                     "resumed_post_apply_promotion": true,
                 },
-            });
+            }));
         })
         .expect("persist candidate promotion and metadata");
         agent_task_lifecycle::rewrite_record_for_test(exhausted_run_id, |record| {
@@ -16729,12 +16747,15 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
         );
 
         agent_task_lifecycle::rewrite_record_for_test(candidate_run_id, |record| {
-            record.metadata["latest_promotion"]["command_evidence"][0]["exit_code"] =
-                serde_json::json!(1);
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion/command_evidence/0/exit_code",
+                serde_json::json!(1),
+            );
         })
         .expect("remove destination proof");
         let selected_record = agent_task_lifecycle::reconcile_status(candidate_run_id).unwrap();
-        let promotion = &selected_record.metadata["latest_promotion"];
+        let promotion = &selected_record.metadata["cook_delivery"]["artifacts"]["promotion"];
         assert_eq!(
             promotion["command_evidence"][0]["command"],
             serde_json::json!(["git", "apply", "--reverse", "--check", "-"])
@@ -18231,7 +18252,11 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
             store
                 .mutate_record(run_id, |record| {
                     record.metadata["cook_id"] = serde_json::json!(options.identity.cook_id);
-                    record.metadata["latest_promotion"] = proof.clone();
+                    crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                        &mut record.metadata,
+                        "/promotion",
+                        proof.clone(),
+                    );
                     if name == "intentional-no-change" {
                         record.metadata["cook_progress"] = serde_json::json!({
                             "phase": "terminal", "terminal_status": "intentional_no_change",
@@ -18246,9 +18271,13 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                         );
                     }
                     if receipt {
-                        record.metadata["cook_finalization"] = serde_json::json!({
-                            "status": "review_ready", "pr_url": "https://example.test/pull/42",
-                        });
+                        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                            &mut record.metadata,
+                            "/finalization",
+                            serde_json::json!({
+                                "status": "review_ready", "pr_url": "https://example.test/pull/42",
+                            }),
+                        );
                     }
                     true
                 })
@@ -18681,7 +18710,11 @@ fn terminal_persisted_promotion_loads_without_source_aggregate() {
         pending.status = AgentTaskPromotionStatus::VerificationPending;
         let pending = serde_json::to_value(pending).expect("serialize pending fixture");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["latest_promotion"] = pending.clone();
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                pending.clone(),
+            );
         })
         .unwrap();
         assert!(
@@ -18788,7 +18821,11 @@ fn production_cook_loop_replays_finalization_without_source_aggregate() {
             .record_promotion(run_id, serde_json::to_value(expected).unwrap())
             .expect("persist terminal promotion");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["latest_promotion"] = serde_json::json!({ "status": "applied" });
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                serde_json::json!({ "status": "applied" }),
+            );
         })
         .expect("model stale legacy promotion metadata");
         lifecycle_store
@@ -19021,8 +19058,12 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
                 "requested": target,
                 "effective": target.join("php-transformer"),
             });
-            record.metadata["latest_promotion"]["deterministic_gates"][0]["cwd"] = cwd.clone();
-            let history = record.metadata["promotions"]
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion/deterministic_gates/0/cwd",
+                cwd.clone(),
+            );
+            let history = record.metadata["cook_delivery"]["artifacts"]["promotions"]
                 .as_array_mut()
                 .expect("promotion history");
             history.last_mut().expect("failed promotion history")["deterministic_gates"][0]
@@ -19160,7 +19201,13 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
         );
         let record =
             agent_task_lifecycle::reconcile_status("run-verify-replacement").expect("read record");
-        assert_eq!(record.metadata["promotions"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            record.metadata["cook_delivery"]["artifacts"]["promotions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
         assert_eq!(
             agent_task_lifecycle::operation_claim(
                 "run-verify-replacement",
@@ -19172,21 +19219,22 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             agent_task_lifecycle::ClaimState::Completed
         );
         assert_eq!(
-            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
-                ["original_history"]["status"],
+            record.metadata["cook_delivery"]["artifacts"]["promotion"]["provenance"]
+                ["replacement_gate_proof"]["original_history"]["status"],
             "verification_pending"
         );
         assert_eq!(
-            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]["reason"],
+            record.metadata["cook_delivery"]["artifacts"]["promotion"]["provenance"]
+                ["replacement_gate_proof"]["reason"],
             "interrupted_original_verification"
         );
         assert_eq!(
-            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
-                ["accept_inherited_failures"],
+            record.metadata["cook_delivery"]["artifacts"]["promotion"]["provenance"]
+                ["replacement_gate_proof"]["accept_inherited_failures"],
             true
         );
         assert_eq!(
-            record.metadata["latest_promotion"]["provenance"]
+            record.metadata["cook_delivery"]["artifacts"]["promotion"]["provenance"]
                 ["replacement_gate_execution_recovery"]["operator_authorization"],
             "Chris approved rerunning after the interrupted executor"
         );
@@ -19685,8 +19733,8 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
                     assert_eq!(received_run, expected_run_id);
                     let persisted = agent_task_lifecycle::reconcile_status(received_run).unwrap();
                     assert_eq!(
-                        persisted.metadata["latest_promotion"]["deterministic_gates"][0]
-                            ["baseline_comparison"]["result"],
+                        persisted.metadata["cook_delivery"]["artifacts"]["promotion"]
+                            ["deterministic_gates"][0]["baseline_comparison"]["result"],
                         "baseline_red"
                     );
                     assert_eq!(promotion.verified_base.as_ref().unwrap().sha, expected_base);
@@ -20873,12 +20921,11 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
 
         assert_eq!(finalization["status"], "review_ready");
         assert!(backend.created);
-        assert!(lifecycle_store
-            .read_record(run_id)
-            .unwrap()
-            .metadata
-            .get("cook_finalization")
-            .is_some());
+        assert!(
+            lifecycle_store.read_record(run_id).unwrap().metadata["cook_delivery"]["artifacts"]
+                ["finalization"]
+                .is_object()
+        );
     }
 }
 
@@ -21031,8 +21078,8 @@ fn cook_promotion_finalizes_into_the_injected_stores_across_split_recipe_and_lif
     let record = lifecycle_store
         .read_record(run_id)
         .expect("read the run record in the lifecycle root");
-    assert!(record.metadata.get("cook_finalization").is_some());
-    assert!(record.metadata.get("promotions").is_some());
+    assert!(crate::agent_task_service::recorded_finalization_receipt(&record.metadata).is_some());
+    assert!(crate::agent_task_service::recorded_promotion_history(&record.metadata).is_some());
     assert!(lifecycle_store
         .run_dir(run_id)
         .starts_with(lifecycle_context.data_dir()));
@@ -21146,19 +21193,24 @@ fn direct_manual_publication_failure_records_retry_and_successful_recovery_super
         assert_eq!(record.state, AgentTaskRunState::Failed);
         assert_eq!(record.lifecycle.execution.state, RunExecutionState::Failed);
         assert_eq!(
-            record.metadata["manual_finalization_failure"]["error"]["details"]["command_evidence"]
-                ["command"],
+            record.metadata["cook_delivery"]["artifacts"]["manual"]["failure"]["error"]["details"]
+                ["command_evidence"]["command"],
             "git add"
         );
         assert_eq!(
-            record.metadata["manual_finalization_failure"]["error"]["details"]["command_evidence"]
-                ["stdout"],
+            record.metadata["cook_delivery"]["artifacts"]["manual"]["failure"]["error"]["details"]
+                ["command_evidence"]["stdout"],
             "index is locked"
         );
-        assert_eq!(record.metadata["manual_finalization_retry"], true);
-        assert!(!record.metadata["manual_finalization_failure"]
-            .to_string()
-            .contains("secret-value"));
+        assert_eq!(
+            record.metadata["cook_delivery"]["artifacts"]["manual"]["retry"],
+            true
+        );
+        assert!(
+            !record.metadata["cook_delivery"]["artifacts"]["manual"]["failure"]
+                .to_string()
+                .contains("secret-value")
+        );
 
         crate::agent_task_lifecycle::record_manual_finalization_receipt(
             run_id,
@@ -21172,8 +21224,8 @@ fn direct_manual_publication_failure_records_retry_and_successful_recovery_super
             recovered.lifecycle.execution.state,
             RunExecutionState::Succeeded
         );
-        assert!(recovered.metadata["manual_finalization_failure"].is_null());
-        assert!(recovered.metadata["manual_finalization_retry"].is_null());
+        assert!(recovered.metadata["cook_delivery"]["artifacts"]["manual"]["failure"].is_null());
+        assert!(recovered.metadata["cook_delivery"]["artifacts"]["manual"]["retry"].is_null());
     });
 }
 
@@ -21238,7 +21290,8 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
         assert_eq!(
             agent_task_lifecycle::reconcile_status(run_id)
                 .expect("read retry intent")
-                .metadata["manual_finalization_retry_candidate"]["changed_files"],
+                .metadata["cook_delivery"]["artifacts"]["manual"]["retry_candidate"]
+                ["changed_files"],
             serde_json::json!(intent.changed_files),
             "retry recovery retains the preflight candidate scope even after commit"
         );
@@ -21271,8 +21324,11 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
         assert_eq!(record.state, AgentTaskRunState::Failed);
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             // Simulate the clean-checkout fingerprint written before #14395.
-            record.metadata["manual_finalization_retry_candidate"]["changed_files"] =
-                serde_json::json!([]);
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/manual/retry_candidate/changed_files",
+                serde_json::json!([]),
+            );
         })
         .expect("persist legacy empty retry scope");
         // The rejecting hook staged the original bytes. A real content change
@@ -21319,10 +21375,20 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
         let recovered_record =
             agent_task_lifecycle::reconcile_status(run_id).expect("recovered status");
         assert_eq!(recovered_record.state, AgentTaskRunState::Succeeded);
-        assert!(recovered_record.metadata["manual_finalization_failure"].is_null());
-        assert!(recovered_record.metadata["manual_finalization_retry"].is_null());
-        assert!(recovered_record.metadata["manual_finalization_retry_candidate"].is_null());
-        assert!(recovered_record.metadata["manual_finalization_retry_origin"].is_object());
+        assert!(
+            recovered_record.metadata["cook_delivery"]["artifacts"]["manual"]["failure"].is_null()
+        );
+        assert!(
+            recovered_record.metadata["cook_delivery"]["artifacts"]["manual"]["retry"].is_null()
+        );
+        assert!(
+            recovered_record.metadata["cook_delivery"]["artifacts"]["manual"]["retry_candidate"]
+                .is_null()
+        );
+        assert!(
+            recovered_record.metadata["cook_delivery"]["artifacts"]["manual"]["retry_origin"]
+                .is_object()
+        );
         let repeated = recover_cook_pr_with_backend(
             cook_id,
             Vec::new(),
@@ -22356,7 +22422,7 @@ fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
         persist_manual_finalization_intent(run_id, &intent).expect("persist intent");
         assert!(agent_task_lifecycle::reconcile_status(run_id)
             .expect("status")
-            .metadata["cook_finalization"]
+            .metadata["cook_delivery"]["artifacts"]["finalization"]
             .is_null());
 
         let mut normal_backend = CaptureBackend {
@@ -22457,8 +22523,8 @@ fn failed_attempt_manual_preflight_hydrates_serialized_intent_and_publishes() {
             .expect("persist recoverable serialized intent");
         let record = agent_task_lifecycle::reconcile_status(run_id).expect("read intent");
         assert_eq!(
-            record.metadata["manual_finalization_intent"]["verification"]["dependency_hydration"]
-                [0]["duration_ms"],
+            record.metadata["cook_delivery"]["artifacts"]["manual"]["intent"]["verification"]
+                ["dependency_hydration"][0]["duration_ms"],
             17
         );
 
@@ -22647,7 +22713,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         persist_manual_finalization_intent(run_id, &preflight).expect("persist bound intent");
         let intent = agent_task_lifecycle::reconcile_status(run_id)
             .expect("read bound intent")
-            .metadata["manual_finalization_intent"]
+            .metadata["cook_delivery"]["artifacts"]["manual"]["intent"]
             .clone();
         assert_eq!(
             intent["manual_candidate_binding"]["schema"],
@@ -22713,7 +22779,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         assert!(publish_backend.created);
         let receipt = agent_task_lifecycle::reconcile_status(run_id).expect("read receipt");
         assert_eq!(
-            receipt.metadata["cook_finalization"]["manual_finalization"],
+            receipt.metadata["cook_delivery"]["artifacts"]["finalization"]["manual_finalization"],
             true
         );
 
@@ -22775,7 +22841,7 @@ fn manual_preflight_recovers_without_a_persisted_promotion_and_rejects_tampering
         assert!(error.message.contains("different durable run"));
         assert!(agent_task_lifecycle::reconcile_status(run_id)
             .expect("status")
-            .metadata["manual_finalization_intent"]
+            .metadata["cook_delivery"]["artifacts"]["manual"]["intent"]
             .is_null());
 
         let mut malformed = preflight.clone();
@@ -22787,7 +22853,7 @@ fn manual_preflight_recovers_without_a_persisted_promotion_and_rejects_tampering
             .contains("dossier failed integrity validation"));
         assert!(agent_task_lifecycle::reconcile_status(run_id)
             .expect("status")
-            .metadata["manual_finalization_intent"]
+            .metadata["cook_delivery"]["artifacts"]["manual"]["intent"]
             .is_null());
 
         let preflight = serde_json::to_value(preflight).expect("serialize preflight");
@@ -23023,17 +23089,21 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
                 .expect_err("recovery without an executed model fails closed");
         // A gate-failed promotion whose gate was later marked accepted is
         // internally inconsistent and fails closed before publication checks.
-        assert_eq!(preflight.details["field"], "latest_promotion.status");
+        assert_eq!(
+            preflight.details["field"],
+            "cook_delivery.artifacts.promotion.status"
+        );
         assert!(!preflight_backend.committed);
         assert!(!preflight_backend.pushed);
         assert!(!preflight_backend.created);
         let preflight_record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
         assert_eq!(
-            preflight_record.metadata["latest_promotion"]["status"],
+            preflight_record.metadata["cook_delivery"]["artifacts"]["promotion"]["status"],
             "gate_failed"
         );
         assert_eq!(
-            preflight_record.metadata["latest_promotion"]["operator_notification"]["status"],
+            preflight_record.metadata["cook_delivery"]["artifacts"]["promotion"]
+                ["operator_notification"]["status"],
             "blocked"
         );
 
@@ -23050,7 +23120,10 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         )
         .expect_err("publication without backing gate evidence fails closed");
         // Publication rejects the same inconsistent durable promotion.
-        assert_eq!(publish.details["field"], "latest_promotion.status");
+        assert_eq!(
+            publish.details["field"],
+            "cook_delivery.artifacts.promotion.status"
+        );
         assert!(!publish_backend.committed);
         assert!(!publish_backend.pushed);
         assert!(!publish_backend.created);
@@ -23306,8 +23379,10 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         );
         assert_eq!(
             record.metadata["recovery_review_form"]["provenance"]["deterministic_gates"],
-            serde_json::to_value(&record.metadata["latest_promotion"]["deterministic_gates"])
-                .unwrap()
+            serde_json::to_value(
+                &record.metadata["cook_delivery"]["artifacts"]["promotion"]["deterministic_gates"]
+            )
+            .unwrap()
         );
     });
 }
@@ -23526,10 +23601,16 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         assert_eq!(error.details["gate_id"], "private-unbound");
 
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["latest_promotion"]["provenance"]["candidate_checkout"] =
-                legacy_checkout.clone();
-            record.metadata["promotions"][0]["provenance"]["candidate_checkout"] =
-                legacy_checkout.clone();
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion/provenance/candidate_checkout",
+                legacy_checkout.clone(),
+            );
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotions/0/provenance/candidate_checkout",
+                legacy_checkout.clone(),
+            );
         })
         .expect("restore original immutable checkout evidence");
         replacement.provenance["candidate_checkout"]["commit"] =
@@ -23560,26 +23641,36 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
         );
         let record = agent_task_lifecycle::reconcile_status(run_id).expect("read durable evidence");
-        assert_eq!(record.metadata["promotions"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            record.metadata["cook_delivery"]["artifacts"]["promotions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(
             canonical_cook_recovery_run_id(cook_id).as_deref(),
             Some(run_id),
             "recovery selects the retry attempt that owns the latest accepted proof"
         );
-        let original_history = &record.metadata["promotions"][0];
+        let original_history = &record.metadata["cook_delivery"]["artifacts"]["promotions"][0];
         assert!(original_history["deterministic_gates"][0]["stderr"]
             .as_str()
             .unwrap()
             .contains("rustup infrastructure failure"));
-        let original_reference = &record.metadata["latest_promotion"]["provenance"]
-            ["replacement_gate_proof"]["original_history"];
+        let original_reference = &record.metadata["cook_delivery"]["artifacts"]["promotion"]
+            ["provenance"]["replacement_gate_proof"]["original_history"];
         assert_eq!(original_reference["run_id"], run_id);
-        assert_eq!(original_reference["metadata_key"], "promotions");
+        assert_eq!(
+            original_reference["metadata_key"],
+            "cook_delivery.artifacts.promotions"
+        );
         assert_eq!(original_reference["index"], 0);
         assert_eq!(original_reference["status"], "gate_failed");
         assert_eq!(original_reference["deterministic_gate_count"], 1);
         assert_eq!(
-            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]["reason"],
+            record.metadata["cook_delivery"]["artifacts"]["promotion"]["provenance"]
+                ["replacement_gate_proof"]["reason"],
             "infrastructure_invalid_original_gates"
         );
         assert_eq!(
@@ -23590,13 +23681,14 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             )
         );
         assert!(
-            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
+            record.metadata["cook_delivery"]["artifacts"]["promotion"]["provenance"]
+                ["replacement_gate_proof"]
                 .get("original")
                 .is_none()
         );
         assert_eq!(
-            record.metadata["latest_promotion"]["provenance"]["replacement_gate_proof"]
-                ["environment_policy"][0]["environment"]["mode"],
+            record.metadata["cook_delivery"]["artifacts"]["promotion"]["provenance"]
+                ["replacement_gate_proof"]["environment_policy"][0]["environment"]["mode"],
             "inherit"
         );
 

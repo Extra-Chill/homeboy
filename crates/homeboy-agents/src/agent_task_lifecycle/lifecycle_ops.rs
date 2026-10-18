@@ -7525,13 +7525,14 @@ pub fn invalidate_cook_finalization_for_dependency_in_store(
     dependency_revision: &str,
     next_command: &str,
 ) -> Result<AgentTaskRunRecord> {
-    record_cook_delivery(lifecycle_store, run_id, |record| {
-        let metadata = record.ensure_metadata_object();
+    record_cook_delivery(lifecycle_store, run_id, |record, draft| {
+        let artifacts = &mut draft.artifacts;
         // Retrying the same invalidation after an interrupted coordinator must
         // preserve the original review evidence and leave its timestamp stable.
-        if metadata.get("cook_finalization").is_none()
-            && metadata
-                .get("cook_recovery_source_checkpoint")
+        if artifacts.finalization.is_none()
+            && artifacts
+                .source_checkpoint
+                .as_ref()
                 .is_some_and(|checkpoint| {
                     checkpoint["phase"] == "verification_pending"
                         && checkpoint["dependency_revision"] == dependency_revision
@@ -7539,31 +7540,28 @@ pub fn invalidate_cook_finalization_for_dependency_in_store(
         {
             return None;
         }
-        let prior = metadata.remove("cook_finalization");
-        let original_prior = metadata
-            .get("cook_recovery_source_checkpoint")
+        let prior = artifacts.finalization.take();
+        let original_prior = artifacts
+            .source_checkpoint
+            .as_ref()
             .and_then(|checkpoint| checkpoint.get("prior_finalization"))
             .cloned()
             .unwrap_or_else(|| prior.clone().unwrap_or(Value::Null));
-        let Some(mut promotion) = metadata.get("latest_promotion").cloned() else {
+        let Some(promotion) = artifacts.promotion.as_mut() else {
             // A terminal child can have no promotion only when it was never a
             // review-ready Cook; retain an inspectable invalidation marker.
-            metadata.insert("dependency_rebase".to_string(), json!({ "revision": dependency_revision, "next_command": next_command, "prior_finalization": original_prior }));
+            record.ensure_metadata_object().insert("dependency_rebase".to_string(), json!({ "revision": dependency_revision, "next_command": next_command, "prior_finalization": original_prior }));
             return Some(CookDeliveryCommit::FollowDelivery);
         };
         promotion["status"] = json!("verification_pending");
         promotion["dependency_revision"] = json!(dependency_revision);
-        metadata.insert("latest_promotion".to_string(), promotion);
-        metadata.insert(
-            "cook_recovery_source_checkpoint".to_string(),
-            json!({
-                "schema": "homeboy/agent-task-cook-recovery-checkpoint/v1",
-                "phase": "verification_pending",
-                "next_command": next_command,
-                "dependency_revision": dependency_revision,
-                "prior_finalization": original_prior,
-            }),
-        );
+        artifacts.source_checkpoint = Some(json!({
+            "schema": "homeboy/agent-task-cook-recovery-checkpoint/v1",
+            "phase": "verification_pending",
+            "next_command": next_command,
+            "dependency_revision": dependency_revision,
+            "prior_finalization": original_prior,
+        }));
         Some(CookDeliveryCommit::FollowDelivery)
     })
 }
@@ -8277,30 +8275,23 @@ pub fn record_promotion_in_store(
     // controller-owned verification is recoverable evidence, not a successful
     // completed run (#14315), and a verified one releases a latch its own
     // pending or deferred verification set (homeboy#15008).
-    let record = record_cook_delivery(lifecycle_store, &run_id, |record| {
-        if record.metadata.get("latest_promotion") == Some(&promotion) {
+    let record = record_cook_delivery(lifecycle_store, &run_id, |record, draft| {
+        let artifacts = &mut draft.artifacts;
+        // The history appends each new report once.
+        if artifacts.promotion.as_ref() == Some(&promotion) {
             return None;
         }
-        let metadata = record.ensure_metadata_object();
         // The first post-apply checkpoint is immutable recovery authority. Later
-        // gate/finalization reports advance `latest_promotion` without obscuring
-        // the exact candidate that may be resumed after a coordinator loss.
+        // gate/finalization reports advance the latest promotion without
+        // obscuring the exact candidate that may be resumed after a coordinator
+        // loss.
         if promotion.get("status").and_then(Value::as_str) == Some("verification_pending") {
-            metadata
-                .entry("cook_recovery_source_checkpoint".to_string())
-                .or_insert_with(|| promotion.clone());
+            artifacts
+                .source_checkpoint
+                .get_or_insert_with(|| promotion.clone());
         }
-        let promotions = metadata
-            .entry("promotions".to_string())
-            .or_insert_with(|| json!([]));
-        if !promotions.is_array() {
-            *promotions = json!([]);
-        }
-        promotions
-            .as_array_mut()
-            .expect("promotions array")
-            .push(promotion.clone());
-        metadata.insert("latest_promotion".to_string(), promotion.clone());
+        artifacts.promotions.push(promotion.clone());
+        artifacts.promotion = Some(promotion.clone());
         if let Some(acceptance) = record.acceptance.as_mut() {
             let candidate = acceptance_candidate(&promotion);
             let base_sha = promotion
@@ -8588,13 +8579,8 @@ pub fn record_cook_finalization_in_store(
     run_id: &str,
     finalization: Value,
 ) -> Result<AgentTaskRunRecord> {
-    record_cook_delivery(lifecycle_store, run_id, |record| {
-        if record.metadata.get("cook_finalization") == Some(&finalization) {
-            return None;
-        }
-        record
-            .ensure_metadata_object()
-            .insert("cook_finalization".to_string(), finalization.clone());
+    record_cook_delivery(lifecycle_store, run_id, |_, draft| {
+        draft.artifacts.finalization = Some(finalization.clone());
         Some(CookDeliveryCommit::FollowDelivery)
     })
 }
@@ -8607,13 +8593,8 @@ pub fn record_cook_force_with_lease_receipt_in_store(
     run_id: &str,
     receipt: Value,
 ) -> Result<AgentTaskRunRecord> {
-    record_cook_delivery(lifecycle_store, run_id, |record| {
-        if record.metadata.get("cook_force_with_lease_receipt") == Some(&receipt) {
-            return None;
-        }
-        record
-            .ensure_metadata_object()
-            .insert("cook_force_with_lease_receipt".to_string(), receipt.clone());
+    record_cook_delivery(lifecycle_store, run_id, |_, draft| {
+        draft.artifacts.force_with_lease = Some(receipt.clone());
         Some(CookDeliveryCommit::FollowDelivery)
     })
 }
@@ -8625,18 +8606,10 @@ pub(crate) fn record_manual_finalization_intent(
 ) -> Result<AgentTaskRunRecord> {
     let digest = manual_finalization_intent_digest(&intent);
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_delivery(&lifecycle_store, run_id, |record| {
-        if record.metadata.get("manual_finalization_intent") == Some(&intent)
-            && record.metadata.get("manual_finalization_intent_digest") == Some(&json!(digest))
-        {
-            return None;
-        }
-        let metadata = record.ensure_metadata_object();
-        metadata.insert("manual_finalization_intent".to_string(), intent.clone());
-        metadata.insert(
-            "manual_finalization_intent_digest".to_string(),
-            json!(digest),
-        );
+    record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
+        let manual = &mut draft.artifacts.manual;
+        manual.intent = Some(intent.clone());
+        manual.intent_digest = Some(json!(digest));
         Some(CookDeliveryCommit::FollowDelivery)
     })
 }
@@ -8644,43 +8617,22 @@ pub(crate) fn record_manual_finalization_intent(
 /// Mark a preflight dossier as a retryable direct publication. Unlike an
 /// explicit `--preflight` recovery, this path may still need to commit.
 pub fn record_manual_finalization_retry(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
-        if record.metadata["manual_finalization_retry"] == true {
-            return false;
-        }
-        record.updated_at = Some(now_timestamp());
-        record
-            .ensure_metadata_object()
-            .insert("manual_finalization_retry".to_string(), json!(true));
-        true
-    })?;
-    match record {
-        Some(record) => Ok(record),
-        None => store::read_record(&run_id),
-    }
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
+        draft.artifacts.manual.retry = true;
+        Some(CookDeliveryCommit::FollowDelivery)
+    })
 }
 
 pub fn record_manual_finalization_retry_candidate(
     run_id: &str,
     candidate: Value,
 ) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
-        if record.metadata.get("manual_finalization_retry_candidate") == Some(&candidate) {
-            return false;
-        }
-        record.updated_at = Some(now_timestamp());
-        record.ensure_metadata_object().insert(
-            "manual_finalization_retry_candidate".to_string(),
-            candidate.clone(),
-        );
-        true
-    })?;
-    match record {
-        Some(record) => Ok(record),
-        None => store::read_record(&run_id),
-    }
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
+        draft.artifacts.manual.retry_candidate = Some(candidate.clone());
+        Some(CookDeliveryCommit::FollowDelivery)
+    })
 }
 
 /// Stable digest of the exact validated manual dossier persisted for recovery.
@@ -8696,30 +8648,17 @@ pub(crate) fn record_manual_finalization_receipt(
     receipt: Value,
 ) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_delivery(&lifecycle_store, run_id, |record| {
-        let intent_digest = record.metadata["manual_finalization_intent_digest"].clone();
-        let receipt_matches = record.metadata.get("cook_finalization") == Some(&receipt);
-        let already_succeeded = record.state == AgentTaskRunState::Succeeded;
-        let retry_cleared = record.metadata.get("manual_finalization_retry").is_none();
-        let failure_cleared = record.metadata.get("manual_finalization_failure").is_none();
-        if receipt_matches && already_succeeded && retry_cleared && failure_cleared {
-            return None;
+    record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
+        let artifacts = &mut draft.artifacts;
+        artifacts.finalization = Some(receipt.clone());
+        let manual = &mut artifacts.manual;
+        manual.failure = None;
+        manual.retry = false;
+        if let Some(candidate) = manual.retry_candidate.take() {
+            manual.retry_origin = Some(candidate);
         }
-        let metadata = record.ensure_metadata_object();
-        metadata.insert("cook_finalization".to_string(), receipt.clone());
-        metadata.remove("manual_finalization_failure");
-        metadata.remove("manual_finalization_retry");
-        if let Some(candidate) = metadata.remove("manual_finalization_retry_candidate") {
-            metadata.insert("manual_finalization_retry_origin".to_string(), candidate);
-        }
-        metadata.insert(
-            "manual_finalization_receipt_digest".to_string(),
-            json!(manual_finalization_intent_digest(&receipt)),
-        );
-        metadata.insert(
-            "manual_finalization_receipt_intent_digest".to_string(),
-            intent_digest,
-        );
+        manual.receipt_digest = Some(json!(manual_finalization_intent_digest(&receipt)));
+        manual.receipt_intent_digest = manual.intent_digest.clone();
         Some(CookDeliveryCommit::Terminal(
             AgentTaskTerminalOutcome::Succeeded,
         ))
@@ -8746,15 +8685,8 @@ pub fn record_manual_finalization_failure(
         },
     });
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    record_cook_delivery(&lifecycle_store, &run_id, |record| {
-        if record.metadata.get("manual_finalization_failure") == Some(&failure)
-            && record.state == AgentTaskRunState::Failed
-        {
-            return None;
-        }
-        record
-            .ensure_metadata_object()
-            .insert("manual_finalization_failure".to_string(), failure.clone());
+    record_cook_delivery(&lifecycle_store, &run_id, |_, draft| {
+        draft.artifacts.manual.failure = Some(failure.clone());
         Some(CookDeliveryCommit::Terminal(
             AgentTaskTerminalOutcome::Failed,
         ))
@@ -8771,20 +8703,15 @@ pub(crate) fn record_cook_delivery_blocker_in_store(
     blocker: crate::agent_task_service::CookDeliveryBlocker,
     base_movements: u32,
 ) -> Result<AgentTaskRunRecord> {
-    record_cook_delivery(lifecycle_store, run_id, |record| {
-        let mut delivery =
-            crate::agent_task_service::CookDelivery::from_legacy_metadata(&record.metadata)?;
-        if delivery.blocker.as_ref() == Some(&blocker) && delivery.base_movements == base_movements
-        {
-            return None;
-        }
+    record_cook_delivery(lifecycle_store, run_id, |_, draft| {
+        let mut delivery = crate::agent_task_service::CookDelivery::project(
+            &draft.artifacts,
+            draft.recorded.as_ref(),
+        )?;
         delivery.state = crate::agent_task_service::CookDeliveryState::Blocked;
         delivery.blocker = Some(blocker.clone());
         delivery.base_movements = base_movements;
-        record.ensure_metadata_object().insert(
-            crate::agent_task_service::COOK_DELIVERY_KEY.to_string(),
-            delivery.to_record(),
-        );
+        draft.recorded = Some(delivery);
         Some(CookDeliveryCommit::FollowDelivery)
     })
 }

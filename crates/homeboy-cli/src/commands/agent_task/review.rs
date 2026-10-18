@@ -218,7 +218,7 @@ fn compact_review(value: Value, full: bool) -> Value {
     let run_id = value.get("run").and_then(Value::as_str).unwrap_or_default();
     let promotion = value
         .pointer("/evidence/record/metadata")
-        .and_then(homeboy::agents::agent_task_service::persisted_promotion_report);
+        .and_then(homeboy::agents::agent_task_service::recorded_promotion_report);
     let selected_candidate = promotion
         .map(compact_selected_candidate)
         .or_else(|| compact_apply_candidate(&value))
@@ -514,7 +514,7 @@ pub(crate) fn resolve_promotion_gates(
             )
         })?;
         let durable = agent_task_lifecycle::durable_local_read(run_id)?;
-        let promotion = homeboy::agents::agent_task_service::persisted_promotion_report(
+        let promotion = homeboy::agents::agent_task_service::recorded_promotion_report(
             &durable.record.metadata,
         )
         .ok_or_else(|| {
@@ -3440,8 +3440,8 @@ mod tests {
                 "resource": { "run": "agent-task-11805", "state": "succeeded" },
                 "evidence": {
                     "record": {
-                        "metadata": {
-                            "latest_promotion": {
+                        "metadata": homeboy::agents::agent_task_service::cook_delivery_metadata_for_test(serde_json::json!({
+                            "promotion": {
                                 "status": "applied",
                                 "source": { "task_id": "task-1" },
                                 "patch_artifact": {
@@ -3459,7 +3459,7 @@ mod tests {
                                     "stdout": "large duplicate evidence"
                                 }]
                             }
-                        }
+                        }))
                     },
                     "logs": { "events": ["large lifecycle payload"] },
                     "artifacts": { "artifacts": ["large lifecycle payload"] }
@@ -5195,7 +5195,7 @@ mod tests {
             assert!(
                 agent_task_lifecycle::reconcile_status("manual-cli-unpushed-13053")
                     .expect("manual identity was reserved")
-                    .metadata["manual_finalization_intent"]
+                    .metadata["cook_delivery"]["artifacts"]["manual"]["intent"]
                     .is_null()
             );
             run_git(&checkout, &["push", "-u", "origin", "feature"]);

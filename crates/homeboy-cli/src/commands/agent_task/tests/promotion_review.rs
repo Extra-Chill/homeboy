@@ -298,18 +298,22 @@ fn promotion_resume_reference_keeps_private_gates_out_of_review_commands() {
         run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
             .expect("run completed");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["latest_promotion"] = json!({
-                "status": "gate_failed",
-                "source": { "task_id": "task-a" },
-                "patch_artifact": { "id": "patch-a" },
-                "target": { "worktree": "fixture@resume" },
-                "provenance": {
-                    "resume_contract": {
-                        "inputs": { "base_ref": "main" },
-                        "gates": gates,
+            homeboy_agents::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                json!({
+                    "status": "gate_failed",
+                    "source": { "task_id": "task-a" },
+                    "patch_artifact": { "id": "patch-a" },
+                    "target": { "worktree": "fixture@resume" },
+                    "provenance": {
+                        "resume_contract": {
+                            "inputs": { "base_ref": "main" },
+                            "gates": gates,
+                        }
                     }
-                }
-            });
+                }),
+            );
         })
         .expect("durable resume contract");
 
@@ -372,16 +376,20 @@ fn review_does_not_advertise_a_command_for_an_invalid_resume_gate_contract() {
         run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
             .expect("run completed");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["latest_promotion"] = json!({
-                "status": "gate_failed",
-                "source": { "task_id": "task-a" },
-                "patch_artifact": { "id": "patch-a" },
-                "target": { "worktree": "fixture@resume" },
-                "provenance": { "resume_contract": {
-                    "inputs": { "base_ref": "main" },
-                    "gates": { "gate_timeout_seconds": "not-a-number" }
-                }}
-            });
+            homeboy_agents::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                json!({
+                    "status": "gate_failed",
+                    "source": { "task_id": "task-a" },
+                    "patch_artifact": { "id": "patch-a" },
+                    "target": { "worktree": "fixture@resume" },
+                    "provenance": { "resume_contract": {
+                        "inputs": { "base_ref": "main" },
+                        "gates": { "gate_timeout_seconds": "not-a-number" }
+                    }}
+                }),
+            );
         })
         .expect("invalid durable resume contract");
 

@@ -2128,7 +2128,7 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
         .expect("correction recorded");
 
     let latest: crate::agent_task_promotion::AgentTaskPromotionReport =
-        serde_json::from_value(updated.metadata["latest_promotion"].clone())
+        serde_json::from_value(updated.metadata["cook_delivery"]["artifacts"]["promotion"].clone())
             .expect("latest promotion is finalization proof");
     assert_eq!(
         latest.status,
@@ -2136,7 +2136,7 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
     );
     assert_eq!(latest.patch_artifact.id, "corrected.patch");
     assert_eq!(
-        updated.metadata["promotions"]
+        updated.metadata["cook_delivery"]["artifacts"]["promotions"]
             .as_array()
             .expect("history")
             .len(),
@@ -3073,9 +3073,13 @@ fn live_verification_pending_promotion_heartbeat_is_visible_to_logs_and_status()
         submit_plan(&plan, Some(run_id)).expect("submit run");
         rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
             set_run_state(record, AgentTaskRunState::Running);
-            record.metadata["latest_promotion"] = json!({
-                "status": "verification_pending"
-            });
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                json!({
+                    "status": "verification_pending"
+                }),
+            );
             record.metadata["provider_executions"] = json!([{
                 "state": "succeeded",
                 "task_id": "task-a"

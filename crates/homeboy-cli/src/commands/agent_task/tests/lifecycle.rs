@@ -1967,7 +1967,8 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
         assert_eq!(executions.load(Ordering::SeqCst), 1, "{queued:#?}");
         assert_eq!(completed.metadata["provider_executions_consumed"], 1);
         assert!(
-            completed.metadata["latest_promotion"]["deterministic_gates"].is_array(),
+            completed.metadata["cook_delivery"]["artifacts"]["promotion"]["deterministic_gates"]
+                .is_array(),
             "Cook promotion and gates must run instead of the generic plan runner: {completed:#?}"
         );
         assert_eq!(
@@ -3353,12 +3354,20 @@ fn diagnose_prioritizes_current_finalization_failure_over_controller_history() {
                 "code": "provider.to_worktree_failed",
                 "message": "resolved controller failure"
             });
-            record.metadata["latest_promotion"] = json!({ "status": "applied" });
-            record.metadata["cook_finalization"] = json!({
-                "status": "failed",
-                "code": "finalization.pr_create_failed",
-                "message": "pull request creation was denied"
-            });
+            homeboy_agents::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                json!({ "status": "applied" }),
+            );
+            homeboy_agents::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/finalization",
+                json!({
+                    "status": "failed",
+                    "code": "finalization.pr_create_failed",
+                    "message": "pull request creation was denied"
+                }),
+            );
         })
         .expect("persist finalization failure");
 
@@ -3388,22 +3397,22 @@ fn moving_base_blocker_is_the_reported_reason_without_a_finalization() {
         agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             record.state = AgentTaskRunState::CandidateRecoverable;
-            record.metadata["latest_promotion"] = json!({
-                "status": "applied",
-                "task_id": "task-a",
-                "deterministic_gates": [{ "id": "cargo-test", "status": "succeeded" }]
-            });
-            record.metadata["cook_moving_base_recovery"] = json!({
-                "schema": "homeboy/agent-task-cook-moving-base-recovery/v1",
-                "cook_id": "cook-15017",
-                "run_id": run_id,
-                "promotion": { "changed_files": ["src/lib.rs"] },
-                "prior_verified_base": "base-sha",
-                "passed_gates": [],
-                "blocker": "origin/main moved and src/lib.rs no longer applies cleanly",
-                "continuation": "homeboy agent-task recover run-cli-moving-base-blocker",
-                "base_movements": 1
-            });
+            homeboy_agents::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                json!({
+                    "status": "applied",
+                    "task_id": "task-a",
+                    "deterministic_gates": [{ "id": "cargo-test", "status": "succeeded" }]
+                }),
+            );
+            homeboy_agents::agent_task_service::record_cook_delivery_blocker_for_test(
+                &mut record.metadata,
+                homeboy_agents::agent_task_service::CookDeliveryBlockerCode::BaseConflict,
+                "origin/main moved and src/lib.rs no longer applies cleanly",
+                Some("homeboy agent-task recover run-cli-moving-base-blocker"),
+                1,
+            );
         })
         .expect("persist moving-base blocker");
 
@@ -6753,10 +6762,14 @@ fn every_cook_read_surface_reports_the_same_canonical_verdict() {
             agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
             agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
                 record.state = AgentTaskRunState::Succeeded;
-                record.metadata["latest_promotion"] = json!({
-                    "status": "verification_pending",
-                    "task_id": "task-a",
-                });
+                homeboy_agents::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut record.metadata,
+                    "/promotion",
+                    json!({
+                        "status": "verification_pending",
+                        "task_id": "task-a",
+                    }),
+                );
             })
             .expect("persist unverified candidate");
             let store = ObservationStore::open_initialized().expect("observation store");

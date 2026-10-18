@@ -350,7 +350,7 @@ fn replay_promotion_command(
         "--dry-run".to_string(),
     ];
     // The dry-run replays the exact persisted promotion's selectors.
-    let promotion = persisted_promotion_report(&record.metadata);
+    let promotion = recorded_promotion_report(&record.metadata);
     if let Some(task_id) = promotion
         .and_then(|promotion| promotion.pointer("/source/task_id"))
         .and_then(Value::as_str)
@@ -461,7 +461,7 @@ fn aggregate_transport_report(
 }
 
 fn preserved_candidate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
-    let promotion = persisted_promotion_report(&record.metadata);
+    let promotion = recorded_promotion_report(&record.metadata);
     json!({
         "status": promotion.and_then(|promotion| promotion.get("status")),
         "task_id": promotion.and_then(|promotion| {
@@ -476,7 +476,7 @@ fn preserved_candidate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecor
 }
 
 fn preserved_gate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
-    persisted_promotion_report(&record.metadata)
+    recorded_promotion_report(&record.metadata)
         .and_then(|promotion| promotion.get("deterministic_gates"))
         .cloned()
         .unwrap_or(Value::Null)
@@ -1502,13 +1502,13 @@ pub(super) fn persisted_promotion_from_record(
     requested_run_id: &str,
     record: agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<AgentTaskPromotionReport>> {
-    let Some(value) = persisted_promotion_report(&record.metadata) else {
+    let Some(value) = recorded_promotion_report(&record.metadata) else {
         return Ok(None);
     };
     let mut promotion: AgentTaskPromotionReport =
         serde_json::from_value(value.clone()).map_err(|error| {
             Error::validation_invalid_argument(
-                "latest_promotion",
+                "cook_delivery.artifacts.promotion",
                 format!("persisted cook promotion is invalid: {error}"),
                 Some(requested_run_id.to_string()),
                 None,
@@ -1519,7 +1519,7 @@ pub(super) fn persisted_promotion_from_record(
     // same persisted-promotion contract.
     if promotion.source.run_id.as_deref() != Some(record.run_id.as_str()) {
         let mut error = Error::validation_invalid_argument(
-            "latest_promotion.source.run_id",
+            "cook_delivery.artifacts.promotion.source.run_id",
             "persisted cook promotion does not belong to this attempt",
             Some(requested_run_id.to_string()),
             None,
@@ -1554,7 +1554,7 @@ pub fn record_replacement_gate_proof(
 ) -> Result<AgentTaskPromotionReport> {
     let original = persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
-            "latest_promotion",
+            "cook_delivery.artifacts.promotion",
             "replacement gate proof requires a persisted failed promotion",
             Some(run_id.to_string()),
             None,
@@ -1586,7 +1586,7 @@ pub fn record_replacement_gate_proof(
     ) || !original.status.patch_promoted()
     {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.status",
+            "cook_delivery.artifacts.promotion.status",
             "replacement gate proof is only valid for an already-applied candidate whose verification failed or did not complete",
             Some(run_id.to_string()),
             None,
@@ -1644,9 +1644,9 @@ pub fn record_replacement_gate_proof(
         return Err(error);
     }
     let record = agent_task_lifecycle::reconcile_status(run_id)?;
-    let (original_history_index, original_history) = persisted_promotion_history(&record.metadata)
+    let (original_history_index, original_history) = recorded_promotion_history(&record.metadata)
         .and_then(|promotions| {
-            let latest = persisted_promotion_report(&record.metadata)?;
+            let latest = recorded_promotion_report(&record.metadata)?;
             let index = promotions
                 .iter()
                 .rposition(|promotion| promotion == latest)?;
@@ -1654,7 +1654,7 @@ pub fn record_replacement_gate_proof(
         })
         .ok_or_else(|| {
             Error::validation_invalid_argument(
-                "latest_promotion",
+                "cook_delivery.artifacts.promotion",
                 "replacement gate proof requires the original immutable promotion in history",
                 Some(run_id.to_string()),
                 None,
@@ -1675,7 +1675,7 @@ pub fn record_replacement_gate_proof(
         "schema": "homeboy/agent-task-replacement-gate-proof/v1",
         "original_history": {
             "run_id": record.run_id,
-            "metadata_key": "promotions",
+            "metadata_key": "cook_delivery.artifacts.promotions",
             "index": original_history_index,
             "status": original.status,
             "deterministic_gate_count": original.deterministic_gates.len(),
@@ -1723,10 +1723,10 @@ pub(super) fn validate_replacement_promotion_in_store(
     let reference = &proof["original_history"];
     let original = reference["index"]
         .as_u64()
-        .and_then(|index| persisted_promotion_history(&record.metadata)?.get(index as usize));
+        .and_then(|index| recorded_promotion_history(&record.metadata)?.get(index as usize));
     let valid_history = original.is_some_and(|original| {
         reference["run_id"] == run_id
-            && reference["metadata_key"] == "promotions"
+            && reference["metadata_key"] == "cook_delivery.artifacts.promotions"
             && canonical_json_bytes(original)
                 .is_ok_and(|bytes| reference["sha256"] == content_hash::sha256_hex(&bytes))
             && serde_json::from_value::<AgentTaskPromotionReport>(original.clone()).is_ok_and(
@@ -1778,7 +1778,7 @@ pub(super) fn validate_replacement_promotion_in_store(
     {
         let path = promotion.target.path.as_deref().ok_or_else(|| {
             Error::validation_invalid_argument(
-                "latest_promotion.target.path",
+                "cook_delivery.artifacts.promotion.target.path",
                 "corrected-gate recovery requires its recorded candidate destination",
                 Some(run_id.to_string()),
                 None,
@@ -2071,7 +2071,7 @@ fn verify_replacement_gates_owned(
     let admitted_component_id = gates.gate_environment.admitted_component_id.clone();
     let original = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
-            "latest_promotion",
+            "cook_delivery.artifacts.promotion",
             "replacement gates require a persisted failed promotion",
             Some(run_id.to_string()),
             None,
@@ -2109,7 +2109,7 @@ fn verify_replacement_gates_owned(
     ) || !original.status.patch_promoted()
     {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.status",
+            "cook_delivery.artifacts.promotion.status",
             "replacement gates require an already-applied candidate whose verification failed or did not complete",
             Some(run_id.to_string()),
             None,
@@ -2428,7 +2428,7 @@ fn restore_gate_feedback_baseline(
     {
         return Ok(());
     }
-    let Some(events) = persisted_promotion_history(&record.metadata) else {
+    let Some(events) = recorded_promotion_history(&record.metadata) else {
         return Ok(());
     };
     let mut baselines = events
@@ -2456,7 +2456,7 @@ fn restore_gate_feedback_baseline(
             Ok(())
         }
         _ => Err(Error::validation_invalid_argument(
-            "latest_promotion",
+            "cook_delivery.artifacts.promotion",
             "persisted promotion has ambiguous controller checkpoint gate-feedback baselines",
             Some(record.run_id.clone()),
             None,
@@ -3641,7 +3641,7 @@ pub fn persist_manual_finalization_intent(
     validate_manual_preflight_report(&report, run_id, false)?;
     agent_task_lifecycle::record_manual_finalization_intent(
         run_id,
-        manual_finalization_report_value(&report, run_id, "manual_finalization_intent")?,
+        manual_finalization_report_value(&report, run_id, "cook_delivery.artifacts.manual.intent")?,
     )
 }
 
@@ -3654,7 +3654,7 @@ pub fn persist_manual_finalization_retry_intent(
     validate_manual_preflight_report(report, run_id, true)?;
     let record = agent_task_lifecycle::record_manual_finalization_intent(
         run_id,
-        manual_finalization_report_value(report, run_id, "manual_finalization_intent")?,
+        manual_finalization_report_value(report, run_id, "cook_delivery.artifacts.manual.intent")?,
     )?;
     agent_task_lifecycle::record_manual_finalization_retry(run_id)?;
     let candidate = crate::agent_task_promotion::candidate_fingerprint(&report.path)?;
@@ -3829,17 +3829,17 @@ fn manual_candidate_binding(
     }
     let promotion = persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
-            "latest_promotion",
+            "cook_delivery.artifacts.promotion",
             "candidate-recoverable manual finalization requires a persisted replacement gate proof",
             Some(run_id.to_string()),
             None,
         )
     })?;
-    let candidate: crate::agent_task_promotion::AgentTaskPromotionCandidate = serde_json::from_value(promotion.provenance["candidate"].clone()).map_err(|_| Error::validation_invalid_argument("latest_promotion.provenance.candidate", "candidate-recoverable manual finalization requires a durable Git candidate fingerprint", Some(run_id.to_string()), None))?;
+    let candidate: crate::agent_task_promotion::AgentTaskPromotionCandidate = serde_json::from_value(promotion.provenance["candidate"].clone()).map_err(|_| Error::validation_invalid_argument("cook_delivery.artifacts.promotion.provenance.candidate", "candidate-recoverable manual finalization requires a durable Git candidate fingerprint", Some(run_id.to_string()), None))?;
     let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = candidate
     else {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.provenance.candidate",
+            "cook_delivery.artifacts.promotion.provenance.candidate",
             "candidate-recoverable manual finalization requires a durable Git candidate fingerprint",
             Some(run_id.to_string()),
             None,
@@ -3863,7 +3863,7 @@ fn manual_candidate_binding(
         || promotion.gate_results != report.normalized_gate_results
     {
         return Err(Error::validation_invalid_argument(
-            "manual_finalization_intent",
+            "cook_delivery.artifacts.manual.intent",
             "manual finalization dossier does not match the selected candidate, model provenance, and replacement gate proof",
             Some(run_id.to_string()),
             None,
@@ -3892,7 +3892,7 @@ pub fn persist_manual_finalization_receipt(
     let intent = manual_finalization_intent_for_run(&record, run_id)?;
     if !valid_manual_finalization_receipt(report, &intent, &record, run_id, false) {
         return Err(Error::validation_invalid_argument(
-            "cook_finalization",
+            "cook_delivery.artifacts.finalization",
             "manual finalization receipt failed controller validation",
             Some(run_id.to_string()),
             None,
@@ -3900,7 +3900,7 @@ pub fn persist_manual_finalization_receipt(
     }
     agent_task_lifecycle::record_manual_finalization_receipt(
         run_id,
-        manual_finalization_report_value(report, run_id, "cook_finalization")?,
+        manual_finalization_report_value(report, run_id, "cook_delivery.artifacts.finalization")?,
     )
 }
 
@@ -4042,9 +4042,9 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
                 None,
             ));
         }
-        let retryable = persisted_manual_finalization_retry(
+        let retryable = recorded_manual_finalization_retry(
             &agent_task_lifecycle::reconcile_status(&report.run_id)?.metadata,
-        ) == Some(&Value::Bool(true));
+        );
         if retryable {
             require_manual_retry_candidate(
                 &agent_task_lifecycle::reconcile_status(&report.run_id)?,
@@ -4119,7 +4119,7 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     }
     let promotion = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
-            "latest_promotion",
+            "cook_delivery.artifacts.promotion",
             "recovery requires the attempt's persisted applied promotion",
             Some(run_id.clone()),
             None,
@@ -4150,7 +4150,7 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
             && promotion.finalization_eligible(options.gates.accept_inherited_failures))
     {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.status",
+            "cook_delivery.artifacts.promotion.status",
             "recovery requires an applied promotion, a verified existing-candidate delta, or an explicitly accepted inherited baseline failure",
             Some(run_id),
             None,
@@ -4338,7 +4338,7 @@ fn recover_verified_no_change_finalization(
         })?;
     if !promotion.finalization_eligible(false) {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion",
+            "cook_delivery.artifacts.promotion",
             "verified no-change recovery requires green deterministic gates",
             Some(run_id.to_string()),
             None,
@@ -4358,7 +4358,7 @@ fn recover_verified_no_change_finalization(
         })?;
     if selection["selected_task_id"].as_str() != Some(promotion.source.task_id.as_str()) {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.source.task_id",
+            "cook_delivery.artifacts.promotion.source.task_id",
             "verified no-change recovery requires the promotion source task to match the Cook-bound candidate",
             Some(run_id.to_string()),
             None,
@@ -4373,7 +4373,7 @@ fn recover_verified_no_change_finalization(
     )
     .map_err(|_| {
         Error::validation_invalid_argument(
-            "latest_promotion.provenance.candidate",
+            "cook_delivery.artifacts.promotion.provenance.candidate",
             "verified no-change recovery requires a durable Git candidate fingerprint",
             Some(run_id.to_string()),
             None,
@@ -4381,7 +4381,7 @@ fn recover_verified_no_change_finalization(
     })?;
     let AgentTaskPromotionCandidate::Git { .. } = &expected else {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.provenance.candidate",
+            "cook_delivery.artifacts.promotion.provenance.candidate",
             "verified no-change recovery requires a durable Git candidate fingerprint",
             Some(run_id.to_string()),
             None,
@@ -4393,7 +4393,7 @@ fn recover_verified_no_change_finalization(
         .and_then(Value::as_str)
         .ok_or_else(|| {
             Error::validation_invalid_argument(
-                "latest_promotion.provenance.worktree_path",
+                "cook_delivery.artifacts.promotion.provenance.worktree_path",
                 "verified no-change recovery requires the verified candidate worktree path",
                 Some(run_id.to_string()),
                 None,
@@ -4622,8 +4622,7 @@ fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
         ));
     }
     let report = manual_finalization_intent_for_run(&record, run_id)?;
-    let retryable =
-        persisted_manual_finalization_retry(&record.metadata) == Some(&Value::Bool(true));
+    let retryable = recorded_manual_finalization_retry(&record.metadata);
     if retryable {
         require_manual_retry_candidate(&record, &report.path)?;
     }
@@ -4716,7 +4715,7 @@ fn completed_finalization_receipt_for_recovery(
 
 fn completed_finalization_receipt_for_run(run_id: &str) -> Result<Option<Value>> {
     let record = agent_task_lifecycle::reconcile_status(run_id)?;
-    let Some(value) = persisted_finalization_receipt(&record.metadata) else {
+    let Some(value) = recorded_finalization_receipt(&record.metadata) else {
         return Ok(None);
     };
     if value["status"].as_str() == Some("intentional_no_change_finalized") {
@@ -4737,18 +4736,22 @@ fn manual_finalization_receipt_for_run(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
     run_id: &str,
 ) -> Result<Option<Value>> {
-    let Some(value) = persisted_finalization_receipt(&record.metadata) else {
+    let Some(value) = recorded_finalization_receipt(&record.metadata) else {
         return Ok(None);
     };
     if !cook_finalization_is_pr_receipt(value) || value["manual_finalization"] != true {
         return Ok(None);
     }
-    let report =
-        manual_finalization_report_from_value(value, run_id, "cook_finalization", "receipt")?;
+    let report = manual_finalization_report_from_value(
+        value,
+        run_id,
+        "cook_delivery.artifacts.finalization",
+        "receipt",
+    )?;
     let intent = manual_finalization_intent_for_run(record, run_id)?;
     if !valid_manual_finalization_receipt(&report, &intent, record, run_id, true) {
         return Err(Error::validation_invalid_argument(
-            "cook_finalization",
+            "cook_delivery.artifacts.finalization",
             "persisted manual finalization receipt failed integrity validation",
             Some(run_id.to_string()),
             None,
@@ -4772,7 +4775,7 @@ fn manual_finalization_intent_for_recovery(
     };
     for run_id in run_ids {
         let record = agent_task_lifecycle::reconcile_status(run_id)?;
-        let Some(_) = persisted_manual_finalization_intent(&record.metadata) else {
+        let Some(_) = recorded_manual_finalization_intent(&record.metadata) else {
             continue;
         };
         let report = manual_finalization_intent_for_run(&record, run_id)?;
@@ -4785,20 +4788,20 @@ fn manual_finalization_intent_for_run(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
     run_id: &str,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    let value = persisted_manual_finalization_intent(&record.metadata).ok_or_else(|| {
+    let value = recorded_manual_finalization_intent(&record.metadata).ok_or_else(|| {
         Error::validation_invalid_argument(
-            "manual_finalization_intent",
+            "cook_delivery.artifacts.manual.intent",
             "manual finalization receipt has no persisted validated intent",
             Some(run_id.to_string()),
             None,
         )
     })?;
-    let expected_digest = persisted_manual_finalization_intent_digest(&record.metadata)
+    let expected_digest = recorded_manual_finalization_intent_digest(&record.metadata)
         .and_then(Value::as_str)
         .unwrap_or_default();
     if expected_digest != agent_task_lifecycle::manual_finalization_intent_digest(value) {
         return Err(Error::validation_invalid_argument(
-            "manual_finalization_intent",
+            "cook_delivery.artifacts.manual.intent",
             "persisted manual finalization intent failed integrity validation",
             Some(run_id.to_string()),
             None,
@@ -4807,12 +4810,12 @@ fn manual_finalization_intent_for_run(
     let report = manual_finalization_report_from_value(
         value,
         run_id,
-        "manual_finalization_intent",
+        "cook_delivery.artifacts.manual.intent",
         "intent",
     )?;
     if report.run_id != run_id {
         return Err(Error::validation_invalid_argument(
-            "manual_finalization_intent.run_id",
+            "cook_delivery.artifacts.manual.intent.run_id",
             "persisted manual finalization intent belongs to a different durable run",
             Some(run_id.to_string()),
             None,
@@ -4822,7 +4825,7 @@ fn manual_finalization_intent_for_run(
         == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
     if candidate_recoverable && report.manual_candidate_binding.is_none() {
         return Err(Error::validation_invalid_argument(
-            "manual_finalization_intent",
+            "cook_delivery.artifacts.manual.intent",
             "candidate-recoverable manual finalization intent has no controller candidate binding",
             Some(run_id.to_string()),
             None,
@@ -4834,7 +4837,7 @@ fn manual_finalization_intent_for_run(
             || manual_candidate_binding(run_id, &report)? != *binding
         {
             return Err(Error::validation_invalid_argument(
-                "manual_finalization_intent",
+                "cook_delivery.artifacts.manual.intent",
                 "persisted manual finalization intent no longer matches the selected Cook candidate",
                 Some(run_id.to_string()),
                 None,
@@ -4908,15 +4911,15 @@ fn valid_manual_finalization_receipt(
             record,
         )
         && (!require_persisted_digest
-            || (persisted_manual_finalization_receipt_digest(&record.metadata)
+            || (recorded_manual_finalization_receipt_digest(&record.metadata)
                 == Some(&serde_json::json!(
                     agent_task_lifecycle::manual_finalization_intent_digest(
                         &serde_json::to_value(report).expect("finalization report serializes"),
                     )
                 ))
-                && persisted_manual_finalization_receipt_intent_digest(&record.metadata)
+                && recorded_manual_finalization_receipt_intent_digest(&record.metadata)
                     .unwrap_or(&Value::Null)
-                    == persisted_manual_finalization_intent_digest(&record.metadata)
+                    == recorded_manual_finalization_intent_digest(&record.metadata)
                         .unwrap_or(&Value::Null)))
         && validate_publication_intent(&report.publication_intent).is_ok()
         && report.publication_intent.run_id == run_id
@@ -4948,8 +4951,8 @@ fn valid_manual_finalization_receipt(
         && report.finalization_outcome.publication_action == report.pr_action
         && report.finalization_outcome.publication_status == "review_ready"
         && report.finalization_outcome.published
-        && (persisted_manual_finalization_retry_candidate(&record.metadata)
-            .or_else(|| persisted_manual_finalization_retry_origin(&record.metadata))
+        && (recorded_manual_finalization_retry_candidate(&record.metadata)
+            .or_else(|| recorded_manual_finalization_retry_origin(&record.metadata))
             .is_some()
             || (!report.finalization_outcome.committed && !report.finalization_outcome.pushed))
         && binding.candidate_sha == binding.remote_sha
@@ -4999,8 +5002,8 @@ fn receipt_matches_manual_preflight(
             &receipt.publication_intent.target,
             &intent.publication_intent.target,
         )
-        && (if let Some(candidate) = persisted_manual_finalization_retry_candidate(&record.metadata)
-            .or_else(|| persisted_manual_finalization_retry_origin(&record.metadata))
+        && (if let Some(candidate) = recorded_manual_finalization_retry_candidate(&record.metadata)
+            .or_else(|| recorded_manual_finalization_retry_origin(&record.metadata))
         {
             serde_json::from_value::<crate::agent_task_promotion::AgentTaskCandidateFingerprint>(
                 candidate.clone(),
@@ -5030,11 +5033,11 @@ fn require_manual_retry_candidate(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
     path: &str,
 ) -> Result<()> {
-    let expected = persisted_manual_finalization_retry_candidate(&record.metadata)
+    let expected = recorded_manual_finalization_retry_candidate(&record.metadata)
         .cloned()
         .ok_or_else(|| {
             Error::validation_invalid_argument(
-                "manual_finalization_retry_candidate",
+                "cook_delivery.artifacts.manual.retry_candidate",
                 "retryable manual publication has no durable candidate fingerprint",
                 None,
                 None,
@@ -5043,7 +5046,7 @@ fn require_manual_retry_candidate(
     let expected: crate::agent_task_promotion::AgentTaskCandidateFingerprint =
         serde_json::from_value(expected).map_err(|_| {
             Error::validation_invalid_argument(
-                "manual_finalization_retry_candidate",
+                "cook_delivery.artifacts.manual.retry_candidate",
                 "retryable manual publication candidate fingerprint is invalid",
                 None,
                 None,
@@ -5055,7 +5058,7 @@ fn require_manual_retry_candidate(
     } = actual
     else {
         return Err(Error::validation_invalid_argument(
-            "manual_finalization_retry_candidate",
+            "cook_delivery.artifacts.manual.retry_candidate",
             "manual publication candidate changed after the direct preflight; rerun finalization with the current candidate",
             None,
             None,
@@ -5071,7 +5074,7 @@ fn require_manual_retry_candidate(
         || (actual.changed_files != expected.changed_files && !legacy_scope_matches)
     {
         return Err(Error::validation_invalid_argument(
-            "manual_finalization_retry_candidate",
+            "cook_delivery.artifacts.manual.retry_candidate",
             "manual publication candidate changed after the direct preflight; rerun finalization with the current candidate",
             None,
             None,
@@ -5155,7 +5158,7 @@ fn manual_finalization_options(
         || verified_base_sha.as_deref().unwrap_or_default().is_empty()
     {
         return Err(Error::validation_invalid_argument(
-            "cook_finalization",
+            "cook_delivery.artifacts.finalization",
             "persisted manual finalization dossier is missing its immutable publication target",
             None,
             None,
@@ -5209,7 +5212,7 @@ fn validate_manual_preflight_report(
 ) -> Result<()> {
     if report.run_id != run_id {
         return Err(Error::validation_invalid_argument(
-            "manual_finalization_intent.run_id",
+            "cook_delivery.artifacts.manual.intent.run_id",
             "manual finalization dossier belongs to a different durable run",
             Some(run_id.to_string()),
             None,
@@ -5246,7 +5249,7 @@ fn validate_manual_preflight_report(
         || report.finalization_outcome.pushed
     {
         return Err(Error::validation_invalid_argument(
-            "cook_finalization",
+            "cook_delivery.artifacts.finalization",
             "persisted manual finalization dossier failed integrity validation",
             Some(run_id.to_string()),
             None,
@@ -5269,7 +5272,7 @@ fn validate_manual_preflight_report(
     }
     validate_publication_intent(&report.publication_intent).map_err(|_| {
         Error::validation_invalid_argument(
-            "cook_finalization",
+            "cook_delivery.artifacts.finalization",
             "persisted manual finalization dossier has an invalid publication intent",
             None,
             None,
@@ -5409,7 +5412,7 @@ fn cook_review_dossier_with_stores_and_review_form(
         .read_record(successful_run_id)
         .ok()
         .and_then(|record| {
-            persisted_promotion_history(&record.metadata).and_then(|promotions| {
+            recorded_promotion_history(&record.metadata).and_then(|promotions| {
                 promotions.iter().rev().find_map(|promotion| {
                     promotion
                         .pointer("/provenance/replacement_gate_proof")
@@ -5811,9 +5814,9 @@ fn exact_promotion_for_contribution(
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
     let record = lifecycle_store.read_record(run_id)?;
-    let value = persisted_promotion_report(&record.metadata).ok_or_else(|| {
+    let value = recorded_promotion_report(&record.metadata).ok_or_else(|| {
         Error::validation_invalid_argument(
-            "latest_promotion",
+            "cook_delivery.artifacts.promotion",
             "Cook contribution source has no persisted promotion",
             Some(run_id.to_string()),
             None,
@@ -5822,7 +5825,7 @@ fn exact_promotion_for_contribution(
     let promotion: AgentTaskPromotionReport =
         serde_json::from_value(value.clone()).map_err(|error| {
             Error::validation_invalid_argument(
-                "latest_promotion",
+                "cook_delivery.artifacts.promotion",
                 format!("persisted Cook contribution promotion is invalid: {error}"),
                 Some(run_id.to_string()),
                 None,
@@ -5830,7 +5833,7 @@ fn exact_promotion_for_contribution(
         })?;
     if promotion.source.run_id.as_deref() != Some(run_id) {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.source.run_id",
+            "cook_delivery.artifacts.promotion.source.run_id",
             "persisted Cook contribution promotion belongs to another attempt",
             Some(run_id.to_string()),
             None,
@@ -6594,7 +6597,7 @@ fn cook_selected_candidate_provenance(
         .map(|store| store.read_record(&selection.run_id))
         .unwrap_or_else(|| agent_task_lifecycle::exact_record(&selection.run_id))
         .ok()?;
-    if let Some(promotion) = persisted_promotion_report(&record.metadata) {
+    if let Some(promotion) = recorded_promotion_report(&record.metadata) {
         value["applied_promotion"] = serde_json::json!({
             "identity": promotion.pointer("/patch_artifact/sha256"),
             "destination": promotion.get("to_worktree"),
@@ -6727,7 +6730,7 @@ pub(crate) fn cook_failure_context_with_stores(
         .and_then(|claim| claim.result.clone());
     let promotion = record
         .as_ref()
-        .and_then(|record| persisted_promotion_report(&record.metadata));
+        .and_then(|record| recorded_promotion_report(&record.metadata));
     let delivery = record
         .as_ref()
         .and_then(|record| super::CookDelivery::from_run_metadata(&record.metadata));

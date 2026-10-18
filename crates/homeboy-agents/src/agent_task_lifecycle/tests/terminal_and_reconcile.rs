@@ -3028,13 +3028,16 @@ fn record_promotion_persists_latest_event_on_run_metadata() {
     .expect("status loaded")
     .record;
 
-    assert_eq!(updated.metadata["latest_promotion"], promotion);
     assert_eq!(
-        loaded.metadata["latest_promotion"]["patch_artifact_id"],
+        updated.metadata["cook_delivery"]["artifacts"]["promotion"],
+        promotion
+    );
+    assert_eq!(
+        loaded.metadata["cook_delivery"]["artifacts"]["promotion"]["patch_artifact_id"],
         "patch.diff"
     );
     assert_eq!(
-        loaded.metadata["promotions"]
+        loaded.metadata["cook_delivery"]["artifacts"]["promotions"]
             .as_array()
             .expect("events")
             .len(),
@@ -3598,7 +3601,11 @@ fn terminal_aggregate_projection_owns_provider_models_and_status_leaves_them() {
     let mut running = lifecycle_store
         .mutate_record(run_id, |record| {
             set_run_state(record, AgentTaskRunState::Running);
-            record.metadata["latest_promotion"] = json!({ "status": "applied" });
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut record.metadata,
+                "/promotion",
+                json!({ "status": "applied" }),
+            );
             record.metadata["provider_executions"] = json!([
                 { "task_id": "task-a", "state": "failed", "model": "openai/failed-attempt" },
                 { "task_id": "task-a", "state": "succeeded", "model": null }
@@ -3614,7 +3621,10 @@ fn terminal_aggregate_projection_owns_provider_models_and_status_leaves_them() {
     let committed = lifecycle_store.read_record(run_id).expect("committed");
     assert_eq!(terminal.state, AgentTaskRunState::Succeeded);
     assert_eq!(committed.state, AgentTaskRunState::Succeeded);
-    assert_eq!(committed.metadata["latest_promotion"]["status"], "applied");
+    assert_eq!(
+        committed.metadata["cook_delivery"]["artifacts"]["promotion"]["status"],
+        "applied"
+    );
     assert_eq!(
         committed.tasks[0].model.as_deref(),
         Some("openai/gpt-5.6-terra")

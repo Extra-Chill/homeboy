@@ -14,14 +14,19 @@ fn finalized_receipt_fixture(
         lifecycle_store
             .mutate_record(run_id, |record| {
                 record.state = AgentTaskRunState::Succeeded;
-                record.metadata["cook_finalization"] = serde_json::json!({
-                    "status": "review_ready",
-                    "pr_number": 13968,
-                    "pr_url": "https://example.invalid/pull/13968"
-                });
                 true
             })
-            .expect("persist finalization receipt");
+            .expect("terminalize run");
+        homeboy::agents::agent_task_lifecycle::record_cook_finalization_in_store(
+            lifecycle_store,
+            run_id,
+            serde_json::json!({
+                "status": "review_ready",
+                "pr_number": 13968,
+                "pr_url": "https://example.invalid/pull/13968"
+            }),
+        )
+        .expect("persist finalization receipt");
     });
     assert!(!lifecycle_store.aggregate_path(run_id).exists());
     (context, lifecycle_store)

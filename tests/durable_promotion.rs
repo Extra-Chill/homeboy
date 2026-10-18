@@ -1,3 +1,4 @@
+use homeboy_agents::agent_task_service::{recorded_promotion_history, recorded_promotion_report};
 use homeboy_agents::agent_tasks::lifecycle::{
     record_completed_run, record_promotion, run_id_for_aggregate_path, status,
 };
@@ -68,10 +69,12 @@ fn aggregate_promotion_persists_a_restart_safe_idempotent_finalization_proof() {
     record_promotion(run_id, promotion.clone()).expect("identical promotion is idempotent");
 
     let restarted = status(run_id).expect("reload durable run");
-    assert_eq!(restarted.metadata["latest_promotion"], promotion);
     assert_eq!(
-        restarted.metadata["promotions"]
-            .as_array()
+        recorded_promotion_report(&restarted.metadata),
+        Some(&promotion)
+    );
+    assert_eq!(
+        recorded_promotion_history(&restarted.metadata)
             .expect("promotion history")
             .len(),
         1

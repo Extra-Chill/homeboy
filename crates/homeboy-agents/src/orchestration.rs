@@ -1468,7 +1468,7 @@ fn review_promotion_candidates(
                     "--artifact-id".to_string(),
                     artifact_id.clone(),
                 ];
-                let continuation = crate::agent_task_service::persisted_promotion_report(
+                let continuation = crate::agent_task_service::recorded_promotion_report(
                     &record.metadata,
                 )
                 .filter(|promotion| {
@@ -1657,7 +1657,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 evidence["contributing_attempt"] = serde_json::json!({
                     "run_id": latest.record.run_id,
                     "review_form": review_form,
-                    "verification": crate::agent_task_service::persisted_promotion_report(&latest.record.metadata),
+                    "verification": crate::agent_task_service::recorded_promotion_report(&latest.record.metadata),
                 });
             }
             evidence["candidate_selection"] = serde_json::json!(selection);
@@ -2297,7 +2297,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             if !parameters.dry_run {
                                 result["recorded_on_run"] = serde_json::json!({
                                     "run_id": current.run_id,
-                                    "metadata_key": "latest_promotion",
+                                    "metadata_key": "cook_delivery.artifacts.promotion",
                                 });
                             }
                             (
@@ -2791,7 +2791,7 @@ fn recover_interrupted_action_acknowledgement(
             let request_fingerprint =
                 crate::agent_task_service::promotion_request_fingerprint(&parameters)
                     .map_err(map_lifecycle_error)?;
-            let report = crate::agent_task_service::persisted_promotion_report_typed(
+            let report = crate::agent_task_service::recorded_promotion_report_typed(
                 &current.metadata,
             )
             .filter(
@@ -2817,7 +2817,7 @@ fn recover_interrupted_action_acknowledgement(
                 data["handoff"] = promotion_handoff(&report);
                 data["recorded_on_run"] = serde_json::json!({
                     "run_id": current.run_id,
-                    "metadata_key": "latest_promotion",
+                    "metadata_key": "cook_delivery.artifacts.promotion",
                 });
                 (
                     ControlPlaneActionOutcome::Succeeded,
@@ -6294,21 +6294,23 @@ mod tests {
                 "controller_runtime": {
                     "originating": { "build_identity": "homeboy 0.1.0+test" }
                 },
-                "latest_promotion": {
-                    "status": "applied",
-                    "task_id": "review",
-                    "deterministic_gates": [{ "id": "test", "status": "passed" }]
-                },
-                "cook_finalization": {
-                    "status": "published",
-                    "pr_url": "https://example.invalid/pr/1"
-                },
                 "cook_controller_failure": {
                     "message": "provider failed token=super-secret"
                 }
             }
         }))
         .expect("record");
+        crate::agent_task_service::edit_cook_delivery_for_test(&mut record.metadata, |artifacts| {
+            artifacts.promotion = Some(json!({
+                "status": "applied",
+                "task_id": "review",
+                "deterministic_gates": [{ "id": "test", "status": "passed" }]
+            }));
+            artifacts.finalization = Some(json!({
+                "status": "published",
+                "pr_url": "https://example.invalid/pr/1"
+            }));
+        });
         record.plan_path = "/secret/workspace".to_string();
         record.lifecycle.heartbeat = Some(RunHeartbeat {
             last_seen_at: "2026-01-01T00:00:30Z".to_string(),
@@ -6321,7 +6323,11 @@ mod tests {
     #[test]
     fn public_run_projection_is_not_succeeded_while_verification_is_pending() {
         let mut record = record("verification-pending-public-state");
-        record.metadata["latest_promotion"]["status"] = json!("verification_pending");
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/promotion/status",
+            json!("verification_pending"),
+        );
 
         assert_eq!(
             run_state(&record),
@@ -7615,9 +7621,17 @@ mod tests {
             for (index, (receipt, finalized, identity)) in cases.into_iter().enumerate() {
                 let run_id = format!("receipt-{index}");
                 let mut persisted = record(&run_id);
-                persisted.metadata["cook_finalization"] = receipt.clone();
+                crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut persisted.metadata,
+                    "/finalization",
+                    receipt.clone(),
+                );
                 // A publication receipt cannot prove pending gates completed.
-                persisted.metadata["latest_promotion"]["status"] = json!("verification_pending");
+                crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut persisted.metadata,
+                    "/promotion/status",
+                    json!("verification_pending"),
+                );
                 store.write_record(&persisted).expect("persist receipt");
                 let run = RunId::new(&run_id).expect("run");
                 let rows_before = store.read_record_page(None, 100).expect("rows before");
@@ -7703,11 +7717,23 @@ mod tests {
             let mut candidate = record(candidate_id);
             candidate.state = AgentTaskRunState::CandidateRecoverable;
             candidate.metadata["cook_id"] = json!(cook_id);
-            candidate.metadata["latest_promotion"] = json!({ "status": "gate_failed" });
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut candidate.metadata,
+                "/promotion",
+                json!({ "status": "gate_failed" }),
+            );
             let mut latest = record(latest_id);
             latest.metadata["cook_id"] = json!(cook_id);
-            latest.metadata["latest_promotion"] = Value::Null;
-            latest.metadata["cook_finalization"] = Value::Null;
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut latest.metadata,
+                "/promotion",
+                Value::Null,
+            );
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut latest.metadata,
+                "/finalization",
+                Value::Null,
+            );
             for (attempt, row) in [(1, &candidate), (2, &latest)] {
                 store.write_record(row).expect("rooted record");
                 store
@@ -7723,8 +7749,11 @@ mod tests {
             // Colliding ambient IDs must never supply this service's evidence.
             let ambient = AgentTaskLifecycleStore::from_current_environment().expect("ambient");
             let mut foreign = record(candidate_id);
-            foreign.metadata["cook_finalization"] =
-                json!({ "status": "review_ready", "pr_number": 999 });
+            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                &mut foreign.metadata,
+                "/finalization",
+                json!({ "status": "review_ready", "pr_number": 999 }),
+            );
             ambient.write_record(&foreign).expect("foreign sentinel");
             let foreign_before = ambient.read_record(candidate_id).expect("sentinel before");
             let rows_before = store.read_record_page(None, 20).expect("rows before");
@@ -9147,7 +9176,7 @@ mod tests {
             );
             assert_eq!(
                 first.result.data["recorded_on_run"]["metadata_key"],
-                "latest_promotion"
+                "cook_delivery.artifacts.promotion"
             );
             assert_eq!(replay, first);
             assert_eq!(executions.get(), 1);
@@ -9418,11 +9447,23 @@ mod tests {
         record.state = crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
         record.lifecycle.execution.state =
             homeboy_core::run_lifecycle_record::RunExecutionState::CandidateRecoverable;
-        record.metadata["latest_promotion"]["status"] = json!("gate_failed");
-        record.metadata["latest_promotion"]["deterministic_gates"] = json!([
-            { "id": "test", "status": "failed" }
-        ]);
-        record.metadata["cook_finalization"] = serde_json::Value::Null;
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/promotion/status",
+            json!("gate_failed"),
+        );
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/promotion/deterministic_gates",
+            json!([
+                { "id": "test", "status": "failed" }
+            ]),
+        );
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/finalization",
+            serde_json::Value::Null,
+        );
 
         let resource = project_record(&record, None).expect("project gate failure");
 
@@ -9447,12 +9488,18 @@ mod tests {
         // continuation, read without mutating the record.
         let mut record = record(AGENT_TASK_RUN);
         record.state = crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
-        record.metadata["cook_finalization"] = serde_json::Value::Null;
-        record.metadata["cook_moving_base_recovery"] = json!({
-            "blocker": "origin/main moved and src/lib.rs no longer applies cleanly",
-            "continuation": "homeboy agent-task recover cook-1",
-            "base_movements": 1
-        });
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/finalization",
+            serde_json::Value::Null,
+        );
+        crate::agent_task_service::record_cook_delivery_blocker_for_test(
+            &mut record.metadata,
+            crate::agent_task_service::CookDeliveryBlockerCode::BaseConflict,
+            "origin/main moved and src/lib.rs no longer applies cleanly",
+            Some("homeboy agent-task recover cook-1"),
+            1,
+        );
         let before = record.clone();
 
         let resource = project_record(&record, None).expect("project moving-base blocker");
@@ -9702,23 +9749,27 @@ mod tests {
     fn published_candidate_ignores_a_stale_moving_base_recovery() {
         let mut published = record(AGENT_TASK_RUN);
         published.state = AgentTaskRunState::Succeeded;
-        let metadata = published.metadata.as_object_mut().expect("metadata");
-        metadata.remove("cook_controller_failure");
-        metadata.insert(
-            "cook_finalization".to_string(),
+        published
+            .metadata
+            .as_object_mut()
+            .expect("metadata")
+            .remove("cook_controller_failure");
+        crate::agent_task_service::record_cook_delivery_blocker_for_test(
+            &mut published.metadata,
+            crate::agent_task_service::CookDeliveryBlockerCode::BaseConflict,
+            "HEAD is behind or diverged from resolved base `main`",
+            Some(&format!("homeboy agent-task recover {AGENT_TASK_RUN}")),
+            0,
+        );
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut published.metadata,
+            "/finalization",
             json!({
                 "status": "review_ready",
                 "base": "main",
                 "head": "cook/fix",
                 "pr_number": 42,
                 "pr_url": "https://github.com/Extra-Chill/homeboy/pull/42",
-            }),
-        );
-        metadata.insert(
-            "cook_moving_base_recovery".to_string(),
-            json!({
-                "blocker": "HEAD is behind or diverged from resolved base `main`",
-                "continuation": format!("homeboy agent-task recover {AGENT_TASK_RUN}"),
             }),
         );
 
