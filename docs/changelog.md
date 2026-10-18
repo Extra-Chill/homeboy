@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.429.3] - 2026-10-18
+
+### Changed
+- resume and retry hand Cook IDs to agent-task recover instead of re-deciding
+
+### Fixed
+- isolate load-sensitive agent-task tests and fix two underlying contention bugs
+
 ## [0.429.2] - 2026-10-18
 
 ### Changed
