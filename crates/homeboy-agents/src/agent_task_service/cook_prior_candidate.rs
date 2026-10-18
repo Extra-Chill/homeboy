@@ -45,13 +45,20 @@ pub(crate) struct PriorAttemptOwner {
     pub path: PathBuf,
 }
 
-/// Classify the destination's native lifecycle owner. Returns `None` unless
-/// the worktree is a registry-owned task worktree provisioned by a different
-/// Cook's run that is durably terminal and did not succeed.
-pub(crate) fn prior_failed_attempt_owner(
+/// A different run that provisioned the destination task worktree, and the
+/// Cook it belongs to.
+struct ForeignDestinationOwner {
+    run_id: String,
+    cook_id: Option<String>,
+    handle: String,
+    record: homeboy_core::worktree::TaskWorktreeRecord,
+}
+
+/// The run, outside this Cook, that provisioned the destination task worktree.
+fn foreign_destination_owner(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
-) -> Result<Option<PriorAttemptOwner>> {
+) -> Result<Option<ForeignDestinationOwner>> {
     if super::cook::cook_uses_explicit_cwd_workspace(options) {
         // Explicit CWDs are caller-owned checkouts; never mutate them.
         return Ok(None);
@@ -70,6 +77,7 @@ pub(crate) fn prior_failed_attempt_owner(
         .as_deref()
         .map(str::trim)
         .filter(|owner| !owner.is_empty())
+        .map(str::to_string)
     else {
         return Ok(None);
     };
@@ -83,6 +91,90 @@ pub(crate) fn prior_failed_attempt_owner(
             return Ok(None);
         }
     }
+    let cook_id = super::load_recipe_for_attempt(&owner)?
+        .map(|recipe| recipe.cook_id)
+        .filter(|cook_id| *cook_id != options.identity.cook_id);
+    Ok(Some(ForeignDestinationOwner {
+        run_id: owner,
+        cook_id,
+        handle: handle.to_string(),
+        record,
+    }))
+}
+
+/// The other Cook whose live driver still works in the destination, if any.
+///
+/// The worktree registry names the run that provisioned the destination, but
+/// that run is only one attempt: its Cook's driver can still be applying a
+/// later attempt's candidate there and running gates against it. A second
+/// Cook that shares the destination would apply its own patch on top of that
+/// candidate, so admission refuses it and names the owner instead.
+pub(crate) fn require_destination_free_of_live_cook(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+) -> Result<()> {
+    let Some(owner) = foreign_destination_owner(lifecycle_store, options)? else {
+        return Ok(());
+    };
+    let Some(owner_cook) = owner.cook_id.as_deref() else {
+        return Ok(());
+    };
+    if !cook_driver_is_live(owner_cook)? {
+        return Ok(());
+    }
+    let mut error = Error::validation_invalid_argument(
+        "to_worktree",
+        format!(
+            "destination `{}` belongs to Cook `{owner_cook}`, whose driver is still running in it",
+            owner.handle
+        ),
+        Some(owner.handle.clone()),
+        Some(vec![
+            format!("Wait for `homeboy agent-task status {owner_cook} --wait` to settle, then rerun this Cook."),
+            format!("Or stop it with `homeboy agent-task cancel {owner_cook}` and rerun this Cook."),
+            "Or give this Cook its own destination with a different `--head`.".to_string(),
+        ]),
+    );
+    error.details["destination_owner"] = serde_json::json!({
+        "cook_id": owner_cook,
+        "run_id": owner.run_id,
+        "worktree": owner.handle,
+        "path": owner.record.worktree_path,
+    });
+    Err(error)
+}
+
+/// Whether another process holds the Cook's driver lock.
+fn cook_driver_is_live(cook_id: &str) -> Result<bool> {
+    Ok(super::CookRecipeStore::from_current_data_root()?
+        .foreign_cook_driver(cook_id)?
+        .is_some())
+}
+
+/// Classify the destination's native lifecycle owner. Returns `None` unless
+/// the worktree is a registry-owned task worktree provisioned by a different
+/// Cook's run that is durably terminal and did not succeed, and whose Cook is
+/// not still driving a later attempt in it.
+pub(crate) fn prior_failed_attempt_owner(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+) -> Result<Option<PriorAttemptOwner>> {
+    let Some(ForeignDestinationOwner {
+        run_id: owner,
+        cook_id: owner_cook,
+        handle,
+        record,
+    }) = foreign_destination_owner(lifecycle_store, options)?
+    else {
+        return Ok(None);
+    };
+    if let Some(owner_cook) = owner_cook.as_deref() {
+        if cook_driver_is_live(owner_cook)? {
+            return Ok(None);
+        }
+    }
+    let owner = owner.as_str();
+    let handle = handle.as_str();
     let Ok(owner_record) = lifecycle_store.read_record(owner) else {
         // Without durable owner evidence the dirt cannot be attributed.
         return Ok(None);

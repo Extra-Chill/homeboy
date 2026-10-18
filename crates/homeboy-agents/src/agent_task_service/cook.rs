@@ -5828,6 +5828,29 @@ fn run_cook_spine(
             error
         })?;
     }
+    // A Cook for the same issue derives the same native worktree. While the
+    // Cook that provisioned it still has a live driver, that driver can be
+    // applying a candidate there and gating it, so a second Cook is refused
+    // before it shares the destination.
+    if !persisted_finalization
+        && !verification_pending_continuation
+        && !authenticated_historical_review_continuation
+        && cook_attempt_needs_execution_with_store(
+            lifecycle_store,
+            &options.identity.initial_run_id,
+        )
+        && !cook_workspace_lookup_pending(&options.identity.initial_plan)
+        && !cook_has_provider_execution_in_store(lifecycle_store, &options.identity.cook_id)?
+    {
+        super::cook_prior_candidate::require_destination_free_of_live_cook(
+            lifecycle_store,
+            &options,
+        )
+        .map_err(|mut error| {
+            error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
+            error
+        })?;
+    }
     // A re-cook of the same issue derives the same native worktree, which can
     // still hold the previous failed Cook's uncommitted candidate. Preserve it
     // under a recoverable ref and start from a clean base, before any

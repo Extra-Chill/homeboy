@@ -25513,6 +25513,76 @@ fn recook_preservation_leaves_unattributed_dirt_for_existing_admission() {
     });
 }
 
+/// A second Cook for the same issue derives the destination a still-driving
+/// Cook provisioned. The provisioning attempt being terminal says nothing about
+/// its Cook: the driver can be applying a later attempt's candidate there and
+/// gating it. The second Cook is refused by name, and that candidate is never
+/// preserved-and-reset out from under its driver.
+#[test]
+fn a_destination_whose_cook_is_still_driving_refuses_another_cook() {
+    use fs4::fs_std::FileExt;
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let handle = "fixture@fix-issue-15884-fixture";
+        let prior_cook = "cook-15884-driving";
+        let prior_run = materialize_prior_cook_attempt(prior_cook, AgentTaskRunState::Failed);
+        let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
+        leave_prior_candidate(&target);
+        let dirty = porcelain(&target);
+        let options = recook_options("cook-15884-second", handle, &target);
+        let lifecycle_store =
+            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+
+        let lock_path = homeboy_core::paths::homeboy_data()
+            .expect("data root")
+            .join("agent-task-cooks")
+            .join(prior_cook)
+            .join("driver.lock");
+        let driver = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("driver lock");
+        assert!(driver.try_lock_exclusive().expect("hold driver lock"));
+
+        let error = super::super::cook_prior_candidate::require_destination_free_of_live_cook(
+            &lifecycle_store,
+            &options,
+        )
+        .expect_err("a live owner Cook keeps its destination");
+        assert_eq!(error.details["destination_owner"]["cook_id"], prior_cook);
+        assert_eq!(error.details["destination_owner"]["run_id"], prior_run);
+        assert_eq!(
+            super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
+                &lifecycle_store,
+                &options,
+            )
+            .expect("classify live owner"),
+            None
+        );
+        assert_eq!(porcelain(&target), dirty);
+
+        // Once the owner's driver exits, its failed candidate is the #15775
+        // re-cook case again.
+        drop(driver);
+        super::super::cook_prior_candidate::require_destination_free_of_live_cook(
+            &lifecycle_store,
+            &options,
+        )
+        .expect("a stopped owner Cook no longer holds the destination");
+        assert!(
+            super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
+                &lifecycle_store,
+                &options,
+            )
+            .expect("preserve stopped owner's candidate")
+            .is_some()
+        );
+        assert_eq!(porcelain(&target), "");
+    });
+}
+
 #[test]
 fn recook_preservation_is_a_noop_for_a_clean_prior_destination() {
     homeboy_core::test_support::with_isolated_home(|home| {
