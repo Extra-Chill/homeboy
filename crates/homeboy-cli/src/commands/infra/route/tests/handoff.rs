@@ -5,8 +5,14 @@ use clap::Parser;
 use std::fs;
 use tempfile::tempdir;
 
-fn capture_fixture_preflight(cli: &Cli, normalized: &[String]) {
-    homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+#[must_use = "the captured preflight is scoped to the returned guard"]
+fn capture_fixture_preflight(
+    cli: &Cli,
+    normalized: &[String],
+) -> homeboy::core::parsed_command_preflight::CapturedResultTestScope {
+    // Scope the capture to this test thread so concurrently running route
+    // tests cannot observe (or overwrite) each other's controller decision.
+    let scope = homeboy::core::parsed_command_preflight::isolate_captured_result_for_test();
     homeboy::core::parsed_command_preflight::capture_result(
         homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
             normalized.to_vec(),
@@ -19,6 +25,7 @@ fn capture_fixture_preflight(cli: &Cli, normalized: &[String]) {
             cli.runner.clone(),
         ),
     );
+    scope
 }
 
 #[test]
@@ -69,7 +76,7 @@ fn linked_local_rig_check_stays_local_without_runner() {
         "linked-local".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
-    capture_fixture_preflight(&cli, &normalized);
+    let _preflight = capture_fixture_preflight(&cli, &normalized);
 
     let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("linked local rig check should skip automatic Lab offload");
@@ -114,7 +121,7 @@ fn extension_update_routes_locally_without_explicit_lab_runner() {
         "wordpress".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
-    capture_fixture_preflight(&cli, &normalized);
+    let _preflight = capture_fixture_preflight(&cli, &normalized);
 
     let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("extension update without --runner should not offload");
@@ -141,7 +148,7 @@ fn extension_dev_run_keeps_its_runner_workflow_on_the_controller() {
         "wordpress".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
-    capture_fixture_preflight(&cli, &normalized);
+    let _preflight = capture_fixture_preflight(&cli, &normalized);
 
     let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("dev-run should execute its own runner lifecycle");
@@ -161,7 +168,7 @@ fn fuzz_doctor_routes_locally_without_explicit_lab_runner() {
         "nodejs".to_string(),
     ];
     let cli = Cli::parse_from(&normalized);
-    capture_fixture_preflight(&cli, &normalized);
+    let _preflight = capture_fixture_preflight(&cli, &normalized);
 
     let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
         .expect("fuzz doctor without --runner should remain a local diagnostic");
@@ -448,7 +455,7 @@ fn default_placement_provider_discovery_stays_local_despite_connected_default_ru
 #[test]
 fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
     homeboy::core::resource_policy_context::reset_captured_context_for_test();
-    homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+    let _preflight = homeboy::core::parsed_command_preflight::isolate_captured_result_for_test();
     let context = homeboy::core::resource_policy_context::ResourcePolicyContext {
         command: "agent-task cook".to_string(),
         severity: "hot".to_string(),

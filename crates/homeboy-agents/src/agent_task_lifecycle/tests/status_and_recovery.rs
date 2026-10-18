@@ -3026,11 +3026,22 @@ fn durable_aggregate_read_returns_within_the_readonly_sqlite_contention_budget()
         )
         .expect("exclusive lock");
 
-        let started = std::time::Instant::now();
         let error = durable_local_read(&record.run_id).expect_err("contended read fails bounded");
 
-        assert_eq!(error.code, ErrorCode::ObservationStoreBusy);
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        // The contract is "one read-only busy budget, then a classified busy
+        // refusal", not a wall-clock number: SQLite's busy timeout sums its
+        // requested sleeps, which overshoot by a host-dependent amount
+        // (macOS timer slack), so an absolute bound measured the host. Each
+        // contended read-only step waits exactly one budget and then fails,
+        // so the bound holds iff the first contended step — the Cook-alias
+        // lookup in front of the record — reports busy and the read stops
+        // there instead of spending a second budget on the record (#14832).
+        assert_eq!(error.code, ErrorCode::ObservationStoreBusy, "{error:?}");
+        assert_eq!(
+            error.details["operation"], "read control-plane resource authority",
+            "the read must stop at the first contended step: {error:?}"
+        );
+        assert_eq!(error.details["timeout_ms"], 750);
     });
 }
 

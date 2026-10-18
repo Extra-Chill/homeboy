@@ -64,6 +64,33 @@ impl ObservationStore {
         ).map_err(sqlite_error("ensure control-plane resource authority"))
     }
 
+    /// Whether resource projections can be read from this store.
+    ///
+    /// A writable store creates the projection tables on demand. A read-only
+    /// store must not: `CREATE TABLE IF NOT EXISTS` has to read the schema,
+    /// so against a contended database it spends the whole read-only busy
+    /// budget and then fails as an unclassified internal error. Callers that
+    /// treat "busy" as "stop" (for example Cook-alias resolution in front of
+    /// a durable record read) then could not see it was busy, fell through,
+    /// and paid a second busy budget on the next read (#14832). A read-only
+    /// probe of `sqlite_master` instead reports contention as
+    /// `observation_store.busy` and an absent table as "no projection".
+    fn control_plane_resource_authority_readable(&self) -> Result<bool> {
+        if !self.readonly {
+            self.ensure_control_plane_resource_authority()?;
+            return Ok(true);
+        }
+        let tables: i64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('control_plane_resources', 'control_plane_resource_aliases')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| self.read_error("read control-plane resource authority", error))?;
+        Ok(tables == 2)
+    }
+
     /// Atomically replace a related set of resource projections. This is used
     /// when an alias moves between resources: readers observe either the old
     /// owner or the new owner, never a filesystem-derived intermediate state.
@@ -172,23 +199,27 @@ impl ObservationStore {
         resource_type: &str,
         resource_id: &str,
     ) -> Result<Option<ControlPlaneResourceProjection>> {
-        self.ensure_control_plane_resource_authority()?;
+        if !self.control_plane_resource_authority_readable()? {
+            return Ok(None);
+        }
         let row: Option<(String, String, String, String)> = self.connection.query_row(
             "SELECT version, state, eligibility_json, provenance_json FROM control_plane_resources WHERE resource_type = ?1 AND resource_id = ?2",
             params![resource_type, resource_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).optional().map_err(sqlite_error("read exact control-plane resource projection"))?;
+        ).optional().map_err(|error| self.read_error("read exact control-plane resource projection", error))?;
         let Some((version, state, eligibility, provenance)) = row else {
             return Ok(None);
         };
         let mut statement = self.connection.prepare(
             "SELECT alias FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2 ORDER BY alias",
-        ).map_err(sqlite_error("prepare exact control-plane resource aliases"))?;
+        ).map_err(|error| self.read_error("prepare exact control-plane resource aliases", error))?;
         let aliases: Vec<String> = statement
             .query_map(params![resource_type, resource_id], |row| row.get(0))
-            .map_err(sqlite_error("read exact control-plane resource aliases"))?
+            .map_err(|error| self.read_error("read exact control-plane resource aliases", error))?
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(sqlite_error("decode exact control-plane resource aliases"))?;
+            .map_err(|error| {
+                self.read_error("decode exact control-plane resource aliases", error)
+            })?;
         drop(statement);
         Ok(Some(ControlPlaneResourceProjection {
             resource_type: resource_type.to_string(),
@@ -208,7 +239,9 @@ impl ObservationStore {
         resource_type: &str,
         id_or_alias: &str,
     ) -> Result<Option<ControlPlaneResourceProjection>> {
-        self.ensure_control_plane_resource_authority()?;
+        if !self.control_plane_resource_authority_readable()? {
+            return Ok(None);
+        }
         let row: Option<(String, String, String, String, String)> = self.connection.query_row(
             // A movable alias and a canonical id can name the same string: a
             // detached Cook publishes its handoff parent under the Cook id and
@@ -218,7 +251,7 @@ impl ObservationStore {
             "SELECT r.resource_id, r.version, r.state, r.eligibility_json, r.provenance_json FROM control_plane_resources r LEFT JOIN control_plane_resource_aliases a ON a.resource_type = r.resource_type AND a.resource_id = r.resource_id WHERE r.resource_type = ?1 AND (r.resource_id = ?2 OR a.alias = ?2) ORDER BY CASE WHEN a.alias = ?2 THEN 0 ELSE 1 END, r.resource_id LIMIT 1",
             params![resource_type, id_or_alias],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-        ).optional().map_err(sqlite_error("read control-plane resource projection"))?;
+        ).optional().map_err(|error| self.read_error("read control-plane resource projection", error))?;
         row.map(|(resource_id, version, state, eligibility, provenance)| {
             Ok(ControlPlaneResourceProjection {
                 resource_type: resource_type.to_string(),
@@ -238,12 +271,12 @@ impl ObservationStore {
     fn resource_aliases(&self, resource_type: &str, id_or_alias: &str) -> Result<Vec<String>> {
         let mut statement = self.connection.prepare(
             "SELECT a.alias FROM control_plane_resource_aliases a JOIN control_plane_resources r ON r.resource_type = a.resource_type AND r.resource_id = a.resource_id WHERE a.resource_type = ?1 AND r.resource_id = COALESCE((SELECT resource_id FROM control_plane_resource_aliases WHERE resource_type = ?1 AND alias = ?2), ?2) ORDER BY a.alias"
-        ).map_err(sqlite_error("prepare control-plane resource aliases"))?;
+        ).map_err(|error| self.read_error("prepare control-plane resource aliases", error))?;
         let aliases = statement
             .query_map(params![resource_type, id_or_alias], |row| row.get(0))
-            .map_err(sqlite_error("read control-plane resource aliases"))?
+            .map_err(|error| self.read_error("read control-plane resource aliases", error))?
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(sqlite_error("decode control-plane resource aliases"))?;
+            .map_err(|error| self.read_error("decode control-plane resource aliases", error))?;
         Ok(aliases)
     }
 

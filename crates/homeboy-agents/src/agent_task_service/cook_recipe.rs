@@ -42,8 +42,16 @@ impl Drop for CookDriverGuard {
         if let Some(entry) = held.get_mut(&self.key) {
             entry.1 -= 1;
             if entry.1 == 0 {
-                // Dropping the file releases the OS lock.
-                held.remove(&self.key);
+                if let Some((_, _, file)) = held.remove(&self.key) {
+                    // Release explicitly rather than by closing the file.
+                    // The advisory lock belongs to the open file description,
+                    // and a subprocess forked by any other thread of this
+                    // process (a daemon job, a gate, a concurrent test)
+                    // shares that description until it execs or exits. Close
+                    // alone would leave the Cook "driven" for that window;
+                    // an explicit unlock releases it for every duplicate.
+                    let _ = file.unlock();
+                }
             }
         }
     }
@@ -6781,6 +6789,42 @@ mod cook_driver_tests {
             probe.try_lock_exclusive().unwrap(),
             "released after the last guard"
         );
+    }
+
+    /// A subprocess forked by any other thread inherits the driver lock's open
+    /// file description until it execs. Releasing the last guard must still
+    /// release the Cook immediately, not when that unrelated child gets around
+    /// to exec (the load-dependent failure of the reentrancy test above).
+    #[test]
+    fn last_drop_releases_the_cook_even_while_a_forked_child_shares_the_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let driver = store.try_acquire_cook_driver("cook").unwrap().unwrap();
+
+        let path = store.driver_lock_path("cook");
+        // `try_clone` dups the descriptor: the same open file description a
+        // fork-inherited descriptor refers to.
+        let inherited = super::held_cook_drivers()
+            .lock()
+            .unwrap()
+            .get(&path)
+            .expect("held driver lock")
+            .2
+            .try_clone()
+            .unwrap();
+        let probe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(!probe.try_lock_exclusive().unwrap(), "held while driving");
+
+        drop(driver);
+        assert!(
+            probe.try_lock_exclusive().unwrap(),
+            "released on last drop despite a shared descriptor"
+        );
+        drop(inherited);
     }
 
     /// Daemon jobs run as threads, so another thread is another controller.

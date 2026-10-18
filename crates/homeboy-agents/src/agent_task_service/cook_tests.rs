@@ -6426,6 +6426,11 @@ fn workspace_snapshot_fence_invalidation_is_retryable_without_provider_execution
         git(source.path(), &["push", "-u", "origin", "main"]);
         let root = tempfile::tempdir().unwrap();
         let destination = root.path().join("candidate");
+        // Admission semantics under test, not the host volume's free space.
+        let _capacity =
+            homeboy_core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(
+                root.path(),
+            );
         git(
             source.path(),
             &[
@@ -6548,7 +6553,12 @@ fn porcelain_status(path: &std::path::Path) -> String {
 #[test]
 fn controller_owned_evidence_admits_clean_worktree_through_provider_start_and_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (_remote, _source, _root, destination) = behind_explicit_cwd_destination();
+        let (_remote, _source, root, destination) = behind_explicit_cwd_destination();
+        // Admission semantics under test, not the host volume's free space.
+        let _capacity =
+            homeboy_core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(
+                root.path(),
+            );
         let evidence = destination
             .parent()
             .expect("candidate parent")
@@ -6613,7 +6623,12 @@ fn controller_owned_evidence_admits_clean_worktree_through_provider_start_and_re
 #[test]
 fn failed_pre_provider_run_does_not_leave_unattributed_evidence_dirt() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (_remote, _source, _root, destination) = behind_explicit_cwd_destination();
+        let (_remote, _source, root, destination) = behind_explicit_cwd_destination();
+        // Admission semantics under test, not the host volume's free space.
+        let _capacity =
+            homeboy_core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(
+                root.path(),
+            );
         let evidence = destination
             .parent()
             .expect("candidate parent")
