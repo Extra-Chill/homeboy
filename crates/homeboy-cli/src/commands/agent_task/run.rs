@@ -4677,9 +4677,7 @@ where
         } else {
             let claim = recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?;
             if claim.is_none()
-                && record
-                    .metadata
-                    .get("latest_promotion")
+                && agent_task_service_direct::persisted_promotion_report(&record.metadata)
                     .is_some_and(Value::is_object)
             {
                 // A direct operator continuation must remain admissible even
@@ -4900,11 +4898,11 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         ) {
             Ok(observation) => {
                 let record = &observation.0;
-                candidate_fingerprint = record
-                    .metadata
-                    .pointer("/latest_promotion/provenance/candidate")
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                candidate_fingerprint =
+                    agent_task_service_direct::persisted_promotion_report(&record.metadata)
+                        .and_then(|promotion| promotion.pointer("/provenance/candidate"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
                 phases.push(serde_json::json!({ "phase": "lifecycle", "status": "passed", "reason": "ok", "state": format!("{:?}", record.state) }));
                 observation
             }
@@ -4949,18 +4947,17 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         report["failure_context"]["next_action"]["command"] = Value::Null;
         return Ok((report, 1));
     }
-    if let Some(finalization) = record
-        .metadata
-        .get("cook_finalization")
-        .filter(|finalization| !finalization.is_null())
-        .filter(|_| {
-            matches!(
-                record.state,
-                agent_task_lifecycle::AgentTaskRunState::Succeeded
-                    | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-                    | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-            )
-        })
+    if let Some(finalization) =
+        agent_task_service_direct::persisted_finalization_receipt(&record.metadata)
+            .filter(|finalization| !finalization.is_null())
+            .filter(|_| {
+                matches!(
+                    record.state,
+                    agent_task_lifecycle::AgentTaskRunState::Succeeded
+                        | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                        | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+                )
+            })
     {
         phases.push(serde_json::json!({
             "phase": "finalization_receipt",
@@ -5283,10 +5280,9 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             ));
         }
     }
-    if let Some(finalization) = record
-        .metadata
-        .get("cook_finalization")
-        .filter(|finalization| !finalization.is_null())
+    if let Some(finalization) =
+        agent_task_service_direct::persisted_finalization_receipt(&record.metadata)
+            .filter(|finalization| !finalization.is_null())
     {
         phases.push(serde_json::json!({
             "phase": "finalization_receipt",

@@ -352,20 +352,16 @@ fn bound_promotion_progress_output(output: &str) -> String {
 fn gate_lifecycle_requests(
     record: &AgentTaskRunRecord,
 ) -> Result<Vec<ControlPlaneEventAppendRequest>> {
-    let promotions: Vec<Value> = record
-        .metadata
-        .get("promotions")
-        .and_then(Value::as_array)
-        .filter(|promotions| !promotions.is_empty())
-        .cloned()
-        .unwrap_or_else(|| {
-            record
-                .metadata
-                .get("latest_promotion")
-                .cloned()
-                .into_iter()
-                .collect()
-        });
+    let promotions: Vec<Value> =
+        crate::agent_task_service::persisted_promotion_history(&record.metadata)
+            .filter(|promotions| !promotions.is_empty())
+            .cloned()
+            .unwrap_or_else(|| {
+                crate::agent_task_service::persisted_promotion_report(&record.metadata)
+                    .cloned()
+                    .into_iter()
+                    .collect()
+            });
     let task_id = record
         .tasks
         .first()

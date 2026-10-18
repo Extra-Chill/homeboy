@@ -216,7 +216,9 @@ fn compact_review(value: Value, full: bool) -> Value {
         return value;
     }
     let run_id = value.get("run").and_then(Value::as_str).unwrap_or_default();
-    let promotion = value.pointer("/evidence/record/metadata/latest_promotion");
+    let promotion = value
+        .pointer("/evidence/record/metadata")
+        .and_then(homeboy::agents::agent_task_service::persisted_promotion_report);
     let selected_candidate = promotion
         .map(compact_selected_candidate)
         .or_else(|| compact_apply_candidate(&value))
@@ -512,18 +514,17 @@ pub(crate) fn resolve_promotion_gates(
             )
         })?;
         let durable = agent_task_lifecycle::durable_local_read(run_id)?;
-        let promotion = durable
-            .record
-            .metadata
-            .get("latest_promotion")
-            .ok_or_else(|| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "gates-from-resume-contract",
-                    "source run has no durable promotion resume contract",
-                    Some(run_id.to_string()),
-                    None,
-                )
-            })?;
+        let promotion = homeboy::agents::agent_task_service::persisted_promotion_report(
+            &durable.record.metadata,
+        )
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "gates-from-resume-contract",
+                "source run has no durable promotion resume contract",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
         let matches_task =
             promotion.pointer("/source/task_id").and_then(Value::as_str) == Some(task_id);
         let matches_artifact = promotion

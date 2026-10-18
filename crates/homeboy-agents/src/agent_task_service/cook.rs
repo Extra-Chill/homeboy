@@ -1848,10 +1848,8 @@ pub(crate) fn project_cook_observation(
     let no_finalize = recipe
         .as_ref()
         .is_some_and(|recipe| recipe.finalization["no_finalize"] == true);
-    let finalized = record
-        .metadata
-        .get("cook_finalization")
-        .is_some_and(cook_finalization_is_pr_receipt);
+    let finalized =
+        super::CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published());
     if !cook_success(true, verified, no_finalize, finalized) {
         projected.state = AgentTaskRunState::CandidateRecoverable;
     }
@@ -2114,7 +2112,7 @@ pub(crate) fn canonical_candidate_finalization_with_stores(
         .unwrap_or_else(|| agent_task_lifecycle::exact_record(run_id))
         .ok()?;
     if record.metadata["cook_id"].as_str() == Some(cook_id) {
-        if let Some(finalization) = record.metadata.get("cook_finalization") {
+        if let Some(finalization) = super::persisted_finalization_receipt(&record.metadata) {
             return Some(finalization.clone());
         }
     }
@@ -2171,7 +2169,7 @@ pub(crate) fn canonical_candidate_finalization_with_stores(
         {
             continue;
         }
-        if let Some(finalization) = record.metadata.get("cook_finalization") {
+        if let Some(finalization) = super::persisted_finalization_receipt(&record.metadata) {
             return Some(finalization.clone());
         }
     }
@@ -4616,11 +4614,9 @@ pub fn preflight_cook_continuation_admission_for_observation(
     }
     let mut options = options.clone();
     canonicalize_native_cook_workspace(&mut options)?;
-    let verification_pending_continuation = record
-        .metadata
-        .pointer("/latest_promotion/status")
-        .and_then(Value::as_str)
-        == Some("verification_pending");
+    let verification_pending_continuation =
+        super::CookDelivery::from_run_metadata(&record.metadata)
+            .is_some_and(|delivery| delivery.awaits_verification());
     let review_form_continuation = {
         review_form_attempt_is_ready_for_cook_continuation(&options.identity.initial_plan, record)
             .unwrap_or(false)
@@ -5647,27 +5643,22 @@ fn run_cook_spine(
         .read_record(&options.identity.initial_run_id)
         .ok()
         .is_some_and(|record| {
-            record
-                .metadata
-                .get("cook_recovery_source_checkpoint")
+            // A dependency rebase re-arms verification on the recovery
+            // checkpoint itself; that phase is recovery authority, not a
+            // delivery fact.
+            super::persisted_recovery_source_checkpoint(&record.metadata)
                 .and_then(|checkpoint| checkpoint.get("phase"))
                 .and_then(Value::as_str)
                 == Some("verification_pending")
-                || record
-                    .metadata
-                    .get("latest_promotion")
-                    .and_then(|promotion| promotion.get("status"))
-                    .and_then(Value::as_str)
-                    == Some("verification_pending")
+                || super::CookDelivery::from_run_metadata(&record.metadata)
+                    .is_some_and(|delivery| delivery.awaits_verification())
         });
     let persisted_finalization = lifecycle_store
         .read_record(&options.identity.initial_run_id)
         .ok()
         .is_some_and(|record| {
-            record
-                .metadata
-                .get("cook_finalization")
-                .is_some_and(|finalization| !finalization.is_null())
+            super::CookDelivery::from_run_metadata(&record.metadata)
+                .is_some_and(|delivery| delivery.has_publication_receipt())
         });
     let authenticated_historical_review_continuation =
         if mode.allows_historical_terminal() && !persisted_finalization {
@@ -7080,9 +7071,7 @@ fn run_cook_spine(
             }));
         };
         validate_cook_candidate_group(&plan)?;
-        if let Some(finalization) = record
-            .metadata
-            .get("cook_finalization")
+        if let Some(finalization) = super::persisted_finalization_receipt(&record.metadata)
             .filter(|finalization| !finalization.is_null())
             .cloned()
         {
@@ -7110,19 +7099,17 @@ fn run_cook_spine(
                 invocation_latest_run_id: Some(&run_id),
             }));
         }
-        let persisted_terminal_promotion = if record
-            .metadata
-            .pointer("/latest_promotion/status")
-            .and_then(Value::as_str)
-            == Some("verification_pending")
-        {
-            None
-        } else {
-            super::cook_promotion::persisted_promotion_for_attempt_in_store(
-                lifecycle_store,
-                &run_id,
-            )?
-        };
+        let persisted_terminal_promotion =
+            if super::CookDelivery::from_run_metadata(&record.metadata)
+                .is_some_and(|delivery| delivery.awaits_verification())
+            {
+                None
+            } else {
+                super::cook_promotion::persisted_promotion_for_attempt_in_store(
+                    lifecycle_store,
+                    &run_id,
+                )?
+            };
         let aggregate = match lifecycle_store.read_aggregate(&run_id) {
             Ok(aggregate) => aggregate,
             // An aggregate path is authoritative evidence that an aggregate was
@@ -9568,11 +9555,12 @@ fn tracked_promotion_continuation_in_store(
     if !lifecycle_store.record_exists(&options.identity.initial_run_id)? {
         return Ok(None);
     }
-    if lifecycle_store
-        .read_record(&options.identity.initial_run_id)?
-        .metadata
-        .get("cook_finalization")
-        .is_some_and(|finalization| !finalization.is_null())
+    if super::CookDelivery::from_run_metadata(
+        &lifecycle_store
+            .read_record(&options.identity.initial_run_id)?
+            .metadata,
+    )
+    .is_some_and(|delivery| delivery.has_publication_receipt())
     {
         return Ok(None);
     }

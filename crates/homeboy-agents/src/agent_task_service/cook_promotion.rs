@@ -48,6 +48,7 @@ use super::cook::{
     cook_finalization_is_pr_receipt, review_form_attempt_is_ready_for_cook_continuation,
     AgentTaskCookAttemptReport, AgentTaskCookReport, CookRequest,
 };
+use super::cook_delivery_artifacts::*;
 use super::AgentTaskRunResult;
 
 pub fn source_worktree_path(cwd: Option<String>, workspace: Option<String>) -> Option<PathBuf> {
@@ -348,16 +349,16 @@ fn replay_promotion_command(
         "--gates-from-cook-recipe".to_string(),
         "--dry-run".to_string(),
     ];
-    if let Some(task_id) = record
-        .metadata
-        .pointer("/latest_promotion/source/task_id")
+    // The dry-run replays the exact persisted promotion's selectors.
+    let promotion = persisted_promotion_report(&record.metadata);
+    if let Some(task_id) = promotion
+        .and_then(|promotion| promotion.pointer("/source/task_id"))
         .and_then(Value::as_str)
     {
         command.extend(["--task-id".to_string(), task_id.to_string()]);
     }
-    if let Some(artifact_id) = record
-        .metadata
-        .pointer("/latest_promotion/patch_artifact/id")
+    if let Some(artifact_id) = promotion
+        .and_then(|promotion| promotion.pointer("/patch_artifact/id"))
         .and_then(Value::as_str)
     {
         command.extend(["--artifact-id".to_string(), artifact_id.to_string()]);
@@ -460,7 +461,7 @@ fn aggregate_transport_report(
 }
 
 fn preserved_candidate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
-    let promotion = record.metadata.get("latest_promotion");
+    let promotion = persisted_promotion_report(&record.metadata);
     json!({
         "status": promotion.and_then(|promotion| promotion.get("status")),
         "task_id": promotion.and_then(|promotion| {
@@ -475,9 +476,8 @@ fn preserved_candidate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecor
 }
 
 fn preserved_gate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
-    record
-        .metadata
-        .pointer("/latest_promotion/deterministic_gates")
+    persisted_promotion_report(&record.metadata)
+        .and_then(|promotion| promotion.get("deterministic_gates"))
         .cloned()
         .unwrap_or(Value::Null)
 }
@@ -1502,7 +1502,7 @@ pub(super) fn persisted_promotion_from_record(
     requested_run_id: &str,
     record: agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<AgentTaskPromotionReport>> {
-    let Some(value) = record.metadata.get("latest_promotion") else {
+    let Some(value) = persisted_promotion_report(&record.metadata) else {
         return Ok(None);
     };
     let mut promotion: AgentTaskPromotionReport =
@@ -1644,15 +1644,13 @@ pub fn record_replacement_gate_proof(
         return Err(error);
     }
     let record = agent_task_lifecycle::reconcile_status(run_id)?;
-    let original_history_index = record
-        .metadata
-        .get("promotions")
-        .and_then(Value::as_array)
+    let (original_history_index, original_history) = persisted_promotion_history(&record.metadata)
         .and_then(|promotions| {
-            record
-                .metadata
-                .get("latest_promotion")
-                .and_then(|latest| promotions.iter().rposition(|promotion| promotion == latest))
+            let latest = persisted_promotion_report(&record.metadata)?;
+            let index = promotions
+                .iter()
+                .rposition(|promotion| promotion == latest)?;
+            Some((index, &promotions[index]))
         })
         .ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -1662,7 +1660,6 @@ pub fn record_replacement_gate_proof(
                 None,
             )
         })?;
-    let original_history = &record.metadata["promotions"][original_history_index];
     let original_digest =
         content_hash::sha256_hex(&canonical_json_bytes(original_history).map_err(|error| {
             Error::internal_json(
@@ -1726,7 +1723,7 @@ pub(super) fn validate_replacement_promotion_in_store(
     let reference = &proof["original_history"];
     let original = reference["index"]
         .as_u64()
-        .and_then(|index| record.metadata["promotions"].get(index as usize));
+        .and_then(|index| persisted_promotion_history(&record.metadata)?.get(index as usize));
     let valid_history = original.is_some_and(|original| {
         reference["run_id"] == run_id
             && reference["metadata_key"] == "promotions"
@@ -1776,7 +1773,9 @@ pub(super) fn validate_replacement_promotion_in_store(
     )?;
     // A completed publication can change HEAD and consume the dirty candidate.
     // Its durable receipt, rather than the pre-publication tree, owns replay.
-    if record.metadata.get("cook_finalization").is_none() {
+    if !super::CookDelivery::from_run_metadata(&record.metadata)
+        .is_some_and(|delivery| delivery.has_publication_receipt())
+    {
         let path = promotion.target.path.as_deref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "latest_promotion.target.path",
@@ -2429,7 +2428,7 @@ fn restore_gate_feedback_baseline(
     {
         return Ok(());
     }
-    let Some(events) = record.metadata.get("promotions").and_then(Value::as_array) else {
+    let Some(events) = persisted_promotion_history(&record.metadata) else {
         return Ok(());
     };
     let mut baselines = events
@@ -3743,7 +3742,7 @@ pub fn prepare_manual_finalization_identity(requested_id: &str) -> Result<String
 
 fn require_manual_finalization_run(run_id: &str) -> Result<String> {
     let record = crate::agent_task_lifecycle::status(run_id)?;
-    if record.metadata["manual_finalization_identity"] == true {
+    if persisted_manual_finalization_identity(&record.metadata) == Some(&Value::Bool(true)) {
         return Ok(run_id.to_string());
     }
     if record.state == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable {
@@ -4043,9 +4042,9 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
                 None,
             ));
         }
-        let retryable = agent_task_lifecycle::reconcile_status(&report.run_id)?.metadata
-            ["manual_finalization_retry"]
-            == true;
+        let retryable = persisted_manual_finalization_retry(
+            &agent_task_lifecycle::reconcile_status(&report.run_id)?.metadata,
+        ) == Some(&Value::Bool(true));
         if retryable {
             require_manual_retry_candidate(
                 &agent_task_lifecycle::reconcile_status(&report.run_id)?,
@@ -4623,7 +4622,8 @@ fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
         ));
     }
     let report = manual_finalization_intent_for_run(&record, run_id)?;
-    let retryable = record.metadata["manual_finalization_retry"] == true;
+    let retryable =
+        persisted_manual_finalization_retry(&record.metadata) == Some(&Value::Bool(true));
     if retryable {
         require_manual_retry_candidate(&record, &report.path)?;
     }
@@ -4716,7 +4716,7 @@ fn completed_finalization_receipt_for_recovery(
 
 fn completed_finalization_receipt_for_run(run_id: &str) -> Result<Option<Value>> {
     let record = agent_task_lifecycle::reconcile_status(run_id)?;
-    let Some(value) = record.metadata.get("cook_finalization") else {
+    let Some(value) = persisted_finalization_receipt(&record.metadata) else {
         return Ok(None);
     };
     if value["status"].as_str() == Some("intentional_no_change_finalized") {
@@ -4737,7 +4737,7 @@ fn manual_finalization_receipt_for_run(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
     run_id: &str,
 ) -> Result<Option<Value>> {
-    let Some(value) = record.metadata.get("cook_finalization") else {
+    let Some(value) = persisted_finalization_receipt(&record.metadata) else {
         return Ok(None);
     };
     if !cook_finalization_is_pr_receipt(value) || value["manual_finalization"] != true {
@@ -4772,7 +4772,7 @@ fn manual_finalization_intent_for_recovery(
     };
     for run_id in run_ids {
         let record = agent_task_lifecycle::reconcile_status(run_id)?;
-        let Some(_) = record.metadata.get("manual_finalization_intent") else {
+        let Some(_) = persisted_manual_finalization_intent(&record.metadata) else {
             continue;
         };
         let report = manual_finalization_intent_for_run(&record, run_id)?;
@@ -4785,20 +4785,15 @@ fn manual_finalization_intent_for_run(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
     run_id: &str,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    let value = record
-        .metadata
-        .get("manual_finalization_intent")
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "manual_finalization_intent",
-                "manual finalization receipt has no persisted validated intent",
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
-    let expected_digest = record
-        .metadata
-        .get("manual_finalization_intent_digest")
+    let value = persisted_manual_finalization_intent(&record.metadata).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "manual_finalization_intent",
+            "manual finalization receipt has no persisted validated intent",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let expected_digest = persisted_manual_finalization_intent_digest(&record.metadata)
         .and_then(Value::as_str)
         .unwrap_or_default();
     if expected_digest != agent_task_lifecycle::manual_finalization_intent_digest(value) {
@@ -4913,12 +4908,16 @@ fn valid_manual_finalization_receipt(
             record,
         )
         && (!require_persisted_digest
-            || (record.metadata["manual_finalization_receipt_digest"]
-                == serde_json::json!(agent_task_lifecycle::manual_finalization_intent_digest(
-                    &serde_json::to_value(report).expect("finalization report serializes"),
+            || (persisted_manual_finalization_receipt_digest(&record.metadata)
+                == Some(&serde_json::json!(
+                    agent_task_lifecycle::manual_finalization_intent_digest(
+                        &serde_json::to_value(report).expect("finalization report serializes"),
+                    )
                 ))
-                && record.metadata["manual_finalization_receipt_intent_digest"]
-                    == record.metadata["manual_finalization_intent_digest"]))
+                && persisted_manual_finalization_receipt_intent_digest(&record.metadata)
+                    .unwrap_or(&Value::Null)
+                    == persisted_manual_finalization_intent_digest(&record.metadata)
+                        .unwrap_or(&Value::Null)))
         && validate_publication_intent(&report.publication_intent).is_ok()
         && report.publication_intent.run_id == run_id
         && report.publication_proof.run_id == run_id
@@ -4949,10 +4948,8 @@ fn valid_manual_finalization_receipt(
         && report.finalization_outcome.publication_action == report.pr_action
         && report.finalization_outcome.publication_status == "review_ready"
         && report.finalization_outcome.published
-        && (record
-            .metadata
-            .get("manual_finalization_retry_candidate")
-            .or_else(|| record.metadata.get("manual_finalization_retry_origin"))
+        && (persisted_manual_finalization_retry_candidate(&record.metadata)
+            .or_else(|| persisted_manual_finalization_retry_origin(&record.metadata))
             .is_some()
             || (!report.finalization_outcome.committed && !report.finalization_outcome.pushed))
         && binding.candidate_sha == binding.remote_sha
@@ -5002,10 +4999,8 @@ fn receipt_matches_manual_preflight(
             &receipt.publication_intent.target,
             &intent.publication_intent.target,
         )
-        && (if let Some(candidate) = record
-            .metadata
-            .get("manual_finalization_retry_candidate")
-            .or_else(|| record.metadata.get("manual_finalization_retry_origin"))
+        && (if let Some(candidate) = persisted_manual_finalization_retry_candidate(&record.metadata)
+            .or_else(|| persisted_manual_finalization_retry_origin(&record.metadata))
         {
             serde_json::from_value::<crate::agent_task_promotion::AgentTaskCandidateFingerprint>(
                 candidate.clone(),
@@ -5035,9 +5030,7 @@ fn require_manual_retry_candidate(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
     path: &str,
 ) -> Result<()> {
-    let expected = record
-        .metadata
-        .get("manual_finalization_retry_candidate")
+    let expected = persisted_manual_finalization_retry_candidate(&record.metadata)
         .cloned()
         .ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -5416,17 +5409,13 @@ fn cook_review_dossier_with_stores_and_review_form(
         .read_record(successful_run_id)
         .ok()
         .and_then(|record| {
-            record
-                .metadata
-                .get("promotions")
-                .and_then(Value::as_array)
-                .and_then(|promotions| {
-                    promotions.iter().rev().find_map(|promotion| {
-                        promotion
-                            .pointer("/provenance/replacement_gate_proof")
-                            .cloned()
-                    })
+            persisted_promotion_history(&record.metadata).and_then(|promotions| {
+                promotions.iter().rev().find_map(|promotion| {
+                    promotion
+                        .pointer("/provenance/replacement_gate_proof")
+                        .cloned()
                 })
+            })
         })
     {
         let original_gates = replacement["original_history"]["deterministic_gate_count"]
@@ -5822,7 +5811,7 @@ fn exact_promotion_for_contribution(
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
     let record = lifecycle_store.read_record(run_id)?;
-    let value = record.metadata.get("latest_promotion").ok_or_else(|| {
+    let value = persisted_promotion_report(&record.metadata).ok_or_else(|| {
         Error::validation_invalid_argument(
             "latest_promotion",
             "Cook contribution source has no persisted promotion",
@@ -6605,7 +6594,7 @@ fn cook_selected_candidate_provenance(
         .map(|store| store.read_record(&selection.run_id))
         .unwrap_or_else(|| agent_task_lifecycle::exact_record(&selection.run_id))
         .ok()?;
-    if let Some(promotion) = record.metadata.get("latest_promotion") {
+    if let Some(promotion) = persisted_promotion_report(&record.metadata) {
         value["applied_promotion"] = serde_json::json!({
             "identity": promotion.pointer("/patch_artifact/sha256"),
             "destination": promotion.get("to_worktree"),
@@ -6738,13 +6727,13 @@ pub(crate) fn cook_failure_context_with_stores(
         .and_then(|claim| claim.result.clone());
     let promotion = record
         .as_ref()
-        .and_then(|record| record.metadata.get("latest_promotion"));
-    let finalization_claim = promotion
-        .and_then(|promotion| {
-            promotion
-                .pointer("/patch_artifact/sha256")
-                .and_then(Value::as_str)
-        })
+        .and_then(|record| persisted_promotion_report(&record.metadata));
+    let delivery = record
+        .as_ref()
+        .and_then(|record| super::CookDelivery::from_run_metadata(&record.metadata));
+    let finalization_claim = delivery
+        .as_ref()
+        .and_then(super::CookDelivery::patch_sha)
         .and_then(|sha| {
             lifecycle_store
                 .map(|store| {
@@ -6777,12 +6766,9 @@ pub(crate) fn cook_failure_context_with_stores(
         .as_ref()
         .filter(|claim| claim.state == agent_task_lifecycle::ClaimState::Failed)
         .and_then(|claim| claim.result.clone());
-    let promotion_gate_failed = record
-        .as_ref()
-        .and_then(|record| super::CookDelivery::from_run_metadata(&record.metadata))
-        .is_some_and(|delivery| {
-            delivery.blocker_code() == Some(super::CookDeliveryBlockerCode::GateFailed)
-        });
+    let promotion_gate_failed = delivery.as_ref().is_some_and(|delivery| {
+        delivery.blocker_code() == Some(super::CookDeliveryBlockerCode::GateFailed)
+    });
     let cook_status = CookStatus::from_status(status);
     let progress_phase = record
         .as_ref()

@@ -483,7 +483,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             )?,
             metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
         });
-        let finalization = record.metadata.get("cook_finalization").cloned();
+        let finalization = super::persisted_finalization_receipt(&record.metadata).cloned();
         let status = finalization
             .as_ref()
             .and_then(|value| value["status"].as_str())

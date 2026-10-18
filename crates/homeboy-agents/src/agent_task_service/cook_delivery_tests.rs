@@ -376,3 +376,190 @@ fn runs_without_delivery_evidence_have_no_delivery() {
         );
     }
 }
+
+/// The same delivery as a persisted `cook_delivery` record alone, without the
+/// per-stage keys the legacy adapter derives it from.
+fn record_only(metadata: &Value) -> Value {
+    let delivery = CookDelivery::from_legacy_metadata(metadata).expect("delivery");
+    json!({ "cook_delivery": delivery.to_record() })
+}
+
+#[test]
+fn read_model_accessors_answer_alike_from_the_record_and_legacy_metadata() {
+    let mut failed_receipt = published("failed");
+    failed_receipt["pr_url"] = Value::Null;
+    failed_receipt["pull_request_url"] = json!("https://example.invalid/pr/9");
+    failed_receipt["pr_number"] = Value::Null;
+    let cases = [
+        (
+            "verification pending",
+            json!({ "latest_promotion": promotion("verification_pending", json!([])) }),
+            (true, false, false, None),
+        ),
+        (
+            "published",
+            json!({
+                "latest_promotion": promotion("applied", passed_gate()),
+                "cook_finalization": published("review_ready"),
+            }),
+            (
+                false,
+                true,
+                true,
+                Some("https://github.com/Extra-Chill/homeboy/pull/42"),
+            ),
+        ),
+        (
+            "refused receipt",
+            json!({
+                "latest_promotion": promotion("applied", passed_gate()),
+                "cook_finalization": failed_receipt,
+            }),
+            (false, true, false, Some("https://example.invalid/pr/9")),
+        ),
+    ];
+    for (name, legacy, (awaits, receipt, published, pr_url)) in cases {
+        for (source, metadata) in [("legacy", legacy.clone()), ("record", record_only(&legacy))] {
+            let delivery = CookDelivery::from_run_metadata(&metadata).expect("delivery");
+            assert_eq!(delivery.awaits_verification(), awaits, "{name} {source}");
+            assert_eq!(
+                delivery.has_publication_receipt(),
+                receipt,
+                "{name} {source}"
+            );
+            assert_eq!(delivery.published(), published, "{name} {source}");
+            assert_eq!(delivery.pr_url(), pr_url, "{name} {source}");
+            assert_eq!(delivery.patch_sha(), Some("patchsha"), "{name} {source}");
+            assert_eq!(
+                delivery.candidate_identity(),
+                Some("fingerprint-sha"),
+                "{name} {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn candidate_identity_reads_its_first_recorded_spelling() {
+    let identity = |provenance: Value| {
+        let mut latest = promotion("applied", passed_gate());
+        latest["provenance"] = provenance;
+        let legacy = json!({ "latest_promotion": latest });
+        let from_legacy = CookDelivery::from_run_metadata(&legacy)
+            .and_then(|delivery| delivery.candidate_identity().map(str::to_string));
+        let from_record = CookDelivery::from_run_metadata(&record_only(&legacy))
+            .and_then(|delivery| delivery.candidate_identity().map(str::to_string));
+        assert_eq!(from_legacy, from_record);
+        from_legacy
+    };
+    assert_eq!(
+        identity(json!({
+            "candidate_ref": "refs/cook/1",
+            "candidate": { "commit": "commit-1", "fingerprint": { "sha256": "fp" } }
+        }))
+        .as_deref(),
+        Some("refs/cook/1")
+    );
+    assert_eq!(
+        identity(
+            json!({ "candidate": { "commit": "commit-1", "fingerprint": { "sha256": "fp" } } })
+        )
+        .as_deref(),
+        Some("commit-1")
+    );
+    assert_eq!(
+        identity(json!({ "candidate": { "sha256": "artifact-sha" } })).as_deref(),
+        Some("artifact-sha")
+    );
+    // An empty first spelling records no identity rather than a later one.
+    assert_eq!(
+        identity(json!({ "candidate_ref": "", "candidate": { "commit": "commit-1" } })),
+        None
+    );
+}
+
+#[test]
+fn a_record_written_before_candidate_identity_is_backfilled_from_the_per_stage_keys() {
+    let legacy = json!({ "latest_promotion": promotion("applied", passed_gate()) });
+    let mut stale = CookDelivery::from_legacy_metadata(&legacy).expect("delivery");
+    stale.candidate.as_mut().expect("candidate").identity = None;
+    stale.state = CookDeliveryState::Blocked;
+    stale.blocker = Some(CookDeliveryBlocker {
+        code: CookDeliveryBlockerCode::BaseConflict,
+        message: "base moved".to_string(),
+        paths: Vec::new(),
+        next_action: None,
+        cause: None,
+        evidence: RECORDED_BLOCKER_EVIDENCE.to_string(),
+    });
+    let mut record = stale.to_record();
+    record["candidate"]
+        .as_object_mut()
+        .expect("candidate")
+        .remove("identity");
+
+    // Alone, the record has nothing to backfill from.
+    let alone = CookDelivery::from_run_metadata(&json!({ "cook_delivery": record.clone() }))
+        .expect("delivery");
+    assert_eq!(alone.candidate_identity(), None);
+
+    // Beside the per-stage keys, it reads the identity they record, and the
+    // blocker it recorded still binds to its (same) candidate.
+    let mut metadata = legacy;
+    metadata["cook_delivery"] = record;
+    let read = CookDelivery::from_run_metadata(&metadata).expect("delivery");
+    assert_eq!(read.candidate_identity(), Some("fingerprint-sha"));
+    let derived = CookDelivery::from_legacy_metadata(&metadata).expect("delivery");
+    assert_eq!(
+        derived.blocker_code(),
+        Some(CookDeliveryBlockerCode::BaseConflict)
+    );
+    assert_eq!(derived, read);
+}
+
+#[test]
+fn every_tolerated_pr_identity_path_reads_through_the_publication_receipt() {
+    for (receipt, number, url) in [
+        (
+            json!({ "status": "review_ready", "pr_number": 7 }),
+            Some(7),
+            None,
+        ),
+        (
+            json!({ "status": "review_ready", "pr": { "number": 7 } }),
+            Some(7),
+            None,
+        ),
+        (
+            json!({ "status": "review_ready", "pr_url": "https://x/pr/7" }),
+            None,
+            Some("https://x/pr/7"),
+        ),
+        (
+            json!({ "status": "review_ready", "pull_request_url": "https://x/pr/7" }),
+            None,
+            Some("https://x/pr/7"),
+        ),
+        (
+            json!({ "status": "review_ready", "pr": { "url": "https://x/pr/7" } }),
+            None,
+            Some("https://x/pr/7"),
+        ),
+        // A blank URL is not an identity, and never hides one at another path.
+        (
+            json!({ "status": "review_ready", "pr_url": " ", "pull_request_url": "https://x/pr/7" }),
+            None,
+            Some("https://x/pr/7"),
+        ),
+    ] {
+        let publication = publication_receipt(&receipt);
+        assert!(publication.published, "{receipt}");
+        assert_eq!(publication.pr_number, number, "{receipt}");
+        assert_eq!(publication.pr_url.as_deref(), url, "{receipt}");
+        let delivery =
+            CookDelivery::from_run_metadata(&json!({ "cook_finalization": receipt.clone() }))
+                .expect("delivery");
+        assert!(delivery.published(), "{receipt}");
+        assert_eq!(delivery.pr_url(), url, "{receipt}");
+    }
+}

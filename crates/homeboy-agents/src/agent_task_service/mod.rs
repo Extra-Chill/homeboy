@@ -11,6 +11,8 @@ mod cook_adoption;
 mod cook_baseline;
 mod cook_budget;
 mod cook_delivery;
+/// The named raw readers of per-stage delivery artifacts (#16049).
+mod cook_delivery_artifacts;
 mod cook_lineage;
 pub(crate) mod cook_pre_execution;
 mod cook_prior_candidate;
@@ -46,12 +48,14 @@ pub use cook_activity::{worktree_files_changed, CookActivityProbe, CookProviderA
 pub use cook_adoption::*;
 pub use cook_baseline::*;
 pub use cook_budget::*;
+pub use cook_delivery::publication_receipt;
 pub(crate) use cook_delivery::COOK_DELIVERY_KEY;
 pub use cook_delivery::{
     CookDelivery, CookDeliveryBlocker, CookDeliveryBlockerCode, CookDeliveryCandidate,
     CookDeliveryDestination, CookDeliveryGate, CookDeliveryLifecycle, CookDeliveryPublication,
     CookDeliveryState, COOK_DELIVERY_SCHEMA,
 };
+pub use cook_delivery_artifacts::*;
 pub use cook_lineage::{CookAttemptLineage, CookLineageKind};
 #[cfg(test)]
 pub(crate) use cook_pre_execution::*;
