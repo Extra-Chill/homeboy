@@ -167,7 +167,7 @@ impl CookRecipeStore {
     ///
     /// Exactly one controller may advance a Cook at a time: a foreground
     /// supervisor, a detached child, a continuation consumer or a
-    /// `cook-continue`. Before this, ownership was inferred per attempt from
+    /// `agent-task recover`. Before this, ownership was inferred per attempt from
     /// metadata — a timed `local_cook_supervisor` lease that a detached
     /// handoff never writes — so the continuation scheduler judged a
     /// supervised Cook unowned and drove it beside its live supervisor,
@@ -1913,7 +1913,7 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
     )? {
         let continuation = super::cook_recovery_command_with_prefix(
             &super::cook_recovery_command_prefix_for_record(&record),
-            &["cook-continue", run_id],
+            &["recover", run_id],
         );
         return Err(Error::validation_invalid_argument(
             "cook_continuation.artifact_projection",
@@ -1960,7 +1960,7 @@ pub fn preflight_recipe_attempt_for_continuation_in_store(
     {
         let continuation = super::cook_recovery_command_with_prefix(
             &super::cook_recovery_command_prefix_for_record(&record),
-            &["cook-continue", run_id],
+            &["recover", run_id],
         );
         return Err(Error::validation_invalid_argument(
             "cook_continuation.artifact_projection",
@@ -2707,7 +2707,7 @@ fn observe_continuation_state(
     Ok(CookContinuationState::Absent)
 }
 
-/// Observe whether the exact lifecycle continuation claim that `cook-continue`
+/// Observe whether the exact lifecycle continuation claim that `agent-task recover`
 /// will make is currently admissible without mutating the record.
 pub fn preflight_continuation_claim(
     cook_id: &str,
@@ -2734,7 +2734,7 @@ pub fn preflight_continuation_claim_in_store(
             ),
             Some(run_id.to_string()),
             Some(vec![format!(
-                "Watch it with `homeboy agent-task status {cook_id}`, or retry `homeboy agent-task cook-continue {cook_id} --preflight` after that controller exits."
+                "Watch it with `homeboy agent-task status {cook_id}`, or retry `homeboy agent-task recover {cook_id} --preflight` after that controller exits."
             )]),
         ));
     }
@@ -2747,7 +2747,7 @@ pub fn preflight_continuation_claim_in_store(
             ),
             Some(run_id.to_string()),
             Some(vec![format!(
-                "Retry `homeboy agent-task cook-continue {cook_id} --preflight` after the active controller finishes."
+                "Retry `homeboy agent-task recover {cook_id} --preflight` after the active controller finishes."
             )]),
         ));
     }
@@ -3763,7 +3763,7 @@ fn validate_continuation(continuation: &AgentTaskCookContinuation) -> Result<()>
 /// deduplicated `executor.secret_env` names of the attempt plans, which remain
 /// the authority. A recipe persisted with a stale projection (an in-place plan
 /// rewrite that did not recompute it) would otherwise fail validation on every
-/// load and strand its Cook, including `cook-continue`. Explicitly empty names
+/// load and strand its Cook, including `agent-task recover`. Explicitly empty names
 /// are still rejected by validation.
 fn normalize_sensitive_mapping_projection(recipe: &mut AgentTaskCookRecipe) -> Result<()> {
     if recipe
@@ -5242,7 +5242,7 @@ mod tests {
         );
         claim.retry().unwrap();
 
-        // An explicit operator `cook-continue` ignores the automatic backoff.
+        // An explicit operator `agent-task recover` ignores the automatic backoff.
         assert!(store
             .claim_continuation_for("cook", "run")
             .unwrap()
@@ -5856,7 +5856,7 @@ mod tests {
                     .is_some_and(|tried| tried.iter().any(|remediation| remediation
                         .as_str()
                         .is_some_and(|remediation| remediation
-                            .contains("homeboy --placement local agent-task cook-continue run")))),
+                            .contains("homeboy --placement local agent-task recover run")))),
                 "{:?}",
                 error.details
             );

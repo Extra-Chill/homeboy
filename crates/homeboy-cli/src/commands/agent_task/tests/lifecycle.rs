@@ -1699,7 +1699,7 @@ fn cook_runner_preflight_failure_is_visible_through_public_commands() {
 }
 
 #[test]
-fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
+fn continuation_rearm_reserves_a_retryable_pre_execution_successor() {
     for block_capacity in [false, true] {
         assert_cook_rearm_queue_ownership(block_capacity);
     }
@@ -1824,10 +1824,16 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
                 .metadata["provider_executions_consumed"],
             0
         );
+        let (probe, probe_exit_code) = recover_preflight_probe(source_run_id);
+        // A retryable pre-execution failure used to need `cook-continue
+        // --rearm`; recover names the retry step and validates no continuation.
+        assert_eq!(probe_exit_code, 0, "{probe:#}");
+        assert_eq!(probe["status"], "pre_execution_failure");
+        assert_eq!(probe["step"], json!({ "kind": "retry" }));
+        assert!(probe["admission"].is_null(), "{probe:#}");
         let refusal = continue_cook_with(
             CookContinueArgs {
                 cook_or_attempt_id: source_run_id.to_string(),
-                preflight: false,
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
@@ -1842,12 +1848,11 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             |_| Ok(None),
         )
         .expect_err("non-rearm continuation cannot reuse a terminal attempt");
-        assert!(refusal.message.contains("requires --rearm"));
+        assert!(refusal.message.contains("must be rearmed"));
 
         let (continued, continued_exit_code) = continue_cook_with(
             CookContinueArgs {
                 cook_or_attempt_id: source_run_id.to_string(),
-                preflight: false,
                 rearm: true,
                 artifact_id: None,
                 timeout_ms: None,
@@ -1886,7 +1891,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             events.events.iter().any(|event| {
                 event.kind == "action.accepted" && event.data["action"] == "retry"
             }),
-            "cook-continue must reserve its successor through the Retry action"
+            "Cook continuation must reserve its successor through the Retry action"
         );
 
         let executions = Arc::new(AtomicUsize::new(0));
@@ -2009,7 +2014,7 @@ fn cli_cook_converges_recipe_lifecycle_and_index_after_transient_first_write_fai
 }
 
 /// Persist a Cook recipe whose single attempt never wrote its lifecycle
-/// record: the state `cook-continue` materializes before provider work.
+/// record: the state Cook continuation (`agent-task recover`) materializes before provider work.
 fn persist_recipe_only_cook(cook_id: &str, run_id: &str) {
     let plan = AgentTaskPlan::new(
         "cook-cli-recipe-only-plan",
@@ -2060,15 +2065,15 @@ fn persist_recipe_only_cook(cook_id: &str, run_id: &str) {
         .expect("persist recipe without lifecycle record");
 }
 
-/// Same `cook-continue` arguments `recover` builds for a continuation step.
+/// Same Cook continuation arguments `recover` builds for a continuation step.
 fn cook_continue_args(id: &str) -> CookContinueArgs {
-    let mut args = super::super::recover::continuation_args(id, false, None);
+    let mut args = super::super::recover::continuation_args(id, false, None, &Default::default());
     args.full = true;
     args
 }
 
-/// `recover` performs continuation through the same handler `cook-continue`
-/// runs, with the fixture executor injected.
+/// `recover` performs continuation through the Cook continuation handler, with
+/// the fixture executor injected.
 struct FixtureCookRecoveryPerformer {
     executor: Arc<CountingCookExecutor>,
 }
@@ -2079,10 +2084,26 @@ impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookR
         run_id: &str,
         rearm: bool,
         artifact_id: Option<&str>,
+        overrides: &homeboy::agents::agent_task_service::CookRecoveryOverrides,
     ) -> homeboy::core::Result<(Value, i32)> {
-        let mut args = super::super::recover::continuation_args(run_id, rearm, artifact_id);
+        let mut args =
+            super::super::recover::continuation_args(run_id, rearm, artifact_id, overrides);
         args.full = true;
         continue_cook_with(args, self.executor.clone(), |_| Ok(None))
+    }
+
+    fn preflight_continue_cook(
+        &self,
+        run_id: &str,
+        rearm: bool,
+        artifact_id: Option<&str>,
+    ) -> homeboy::core::Result<(Value, i32)> {
+        super::super::run::preflight_continue_cook(super::super::recover::continuation_args(
+            run_id,
+            rearm,
+            artifact_id,
+            &Default::default(),
+        ))
     }
 
     fn retry(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
@@ -2094,8 +2115,29 @@ impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookR
     }
 }
 
+/// `agent-task recover --preflight` for `id`, through the same continuation
+/// preflight handler the CLI performer calls. It never performs a step.
+fn recover_preflight_probe(id: &str) -> (Value, i32) {
+    let performer = FixtureCookRecoveryPerformer {
+        executor: Arc::new(CountingCookExecutor::default()),
+    };
+    let report = super::super::recover::recover_with(
+        super::super::RecoverArgs {
+            id: id.to_string(),
+            preflight: true,
+            ..Default::default()
+        },
+        &performer,
+    )
+    .expect("recover --preflight reports its step");
+    assert_eq!(performer.executor.executions.load(Ordering::SeqCst), 0);
+    assert_eq!(report.0["preflight"], true);
+    assert!(report.0["result"].is_null(), "{:#}", report.0);
+    report
+}
+
 #[test]
-fn recover_preflight_is_read_only_and_recover_reaches_the_cook_continue_report() {
+fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() {
     let cook_id = "cook-cli-recover";
     let run_id = "cook-cli-recover-attempt-1";
     let mut expected = None;
@@ -2104,11 +2146,11 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_cook_continue_report()
         let executor = Arc::new(CountingCookExecutor::default());
         expected = Some(
             continue_cook_with(cook_continue_args(cook_id), executor.clone(), |_| Ok(None))
-                .expect("cook-continue materializes the attempt"),
+                .expect("Cook continuation materializes the attempt"),
         );
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
     });
-    let (expected, expected_exit_code) = expected.expect("cook-continue report");
+    let (expected, expected_exit_code) = expected.expect("Cook continuation report");
 
     with_temp_home(|| {
         persist_recipe_only_cook(cook_id, run_id);
@@ -2136,7 +2178,7 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_cook_continue_report()
             super::super::RecoverArgs {
                 id: cook_id.to_string(),
                 preflight: true,
-                artifact_id: None,
+                ..Default::default()
             },
             &performer,
         )
@@ -2161,8 +2203,7 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_cook_continue_report()
         let (recovered, recovered_exit_code) = super::super::recover::recover_with(
             super::super::RecoverArgs {
                 id: run_id.to_string(),
-                preflight: false,
-                artifact_id: None,
+                ..Default::default()
             },
             &performer,
         )
@@ -2174,7 +2215,7 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_cook_continue_report()
         assert_eq!(recovered["preflight"], false);
         assert_eq!(
             recovered["result"], expected,
-            "recover must reach the report cook-continue reaches"
+            "recover must reach the Cook continuation report"
         );
         assert_eq!(recovered["result"]["status"], "accepted_unscheduled");
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
@@ -2185,7 +2226,7 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_cook_continue_report()
 }
 
 #[test]
-fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_work() {
+fn status_and_continuation_materialize_recipe_only_attempt_without_provider_work() {
     with_temp_home(|| {
         let cook_id = "cook-cli-recipe-only";
         let run_id = "cook-cli-recipe-only-attempt-1";
@@ -2211,7 +2252,6 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
         let continued = continue_cook_with(
             CookContinueArgs {
                 cook_or_attempt_id: cook_id.to_string(),
-                preflight: false,
                 rearm: false,
                 artifact_id: None,
                 timeout_ms: None,
@@ -2225,7 +2265,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
             executor.clone(),
             |_| Ok(None),
         )
-        .expect("cook-continue observes repaired queued attempt");
+        .expect("Cook continuation observes repaired queued attempt");
         assert_eq!(continued.0["status"], "accepted_unscheduled");
         assert_eq!(continued.0["latest_run_id"], run_id);
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
@@ -2236,7 +2276,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
 }
 
 #[test]
-fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_provenance() {
+fn continuation_preflight_rejects_legacy_terminal_candidate_without_model_provenance() {
     with_temp_home(|| {
         let cook_id = "cook-legacy-null-model";
         let run_id = "cook-legacy-null-model-attempt-1";
@@ -2340,7 +2380,6 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
         let before = filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root"));
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),
-            preflight: true,
             rearm: false,
             artifact_id: Some("retained-patch".to_string()),
             timeout_ms: None,
@@ -2360,11 +2399,11 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
         assert_eq!(report["selected_artifact"]["artifact_id"], "retained-patch");
         assert_eq!(
             report["continuation_command"],
-            format!("homeboy --placement local agent-task cook-continue {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task recover {run_id} --artifact-id retained-patch")
         );
         assert_eq!(
             report["failure_context"]["next_action"]["command"],
-            format!("homeboy --placement local agent-task cook-continue {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task recover {run_id} --artifact-id retained-patch")
         );
         assert!(report["failure_context"]["diagnostic"]["message"]
             .as_str()
@@ -2372,6 +2411,24 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             .contains("no concrete executed model"));
         assert_eq!(report["evidence_refs"][0]["run_id"], run_id);
         assert!(!report.to_string().contains("<run-id>"));
+        assert_eq!(
+            filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
+            before
+        );
+        let (probe, probe_exit_code) = recover_preflight_probe(cook_id);
+        // A terminal candidate used to need `cook-continue --preflight`;
+        // recover names continuation and reports the same admission blocker.
+        assert_eq!(probe_exit_code, 1, "{probe:#}");
+        assert_eq!(probe["status"], "candidate_recoverable");
+        assert_eq!(probe["step"], json!({ "kind": "continue" }));
+        assert_eq!(probe["admission"]["admitted"], false);
+        assert_eq!(
+            probe["admission"]["schema"],
+            "homeboy/agent-task-cook-continuation-preflight/v1"
+        );
+        assert!(probe["admission"]["phases"]
+            .to_string()
+            .contains("no concrete executed model"));
         assert_eq!(
             filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
             before
@@ -2407,7 +2464,6 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
         let (live_report, live_exit_code) =
             super::super::run::preflight_continue_cook(CookContinueArgs {
                 cook_or_attempt_id: cook_id.to_string(),
-                preflight: true,
                 rearm: false,
                 artifact_id: Some("retained-patch".to_string()),
                 timeout_ms: None,
@@ -2429,11 +2485,11 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
         assert!(live_report["continuation_command"].is_null());
         assert!(live_report["failure_context"]["next_action"]["command"].is_null());
         let bounded =
-            super::super::status::bounded_full_operation_report(report.clone(), "cook-continue");
+            super::super::status::bounded_full_operation_report(report.clone(), "recover");
         assert_eq!(bounded["run_id"], run_id);
         assert_eq!(
             bounded["actionable"]["next_action"]["command"],
-            format!("homeboy --placement local agent-task cook-continue {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task recover {run_id} --artifact-id retained-patch")
         );
         assert!(bounded["actionable"]["blocker"]
             .as_str()
@@ -2461,7 +2517,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
 }
 
 #[test]
-fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution_attempt() {
+fn continuation_preflight_bypasses_model_provenance_for_retryable_pre_execution_attempt() {
     with_temp_home(|| {
         let workspace = tempfile::tempdir().expect("workspace");
         init_runtime_component_checkout(workspace.path());
@@ -2576,7 +2632,6 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
 
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),
-            preflight: true,
             rearm: false,
             artifact_id: None,
             timeout_ms: None,
@@ -2768,10 +2823,6 @@ fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_ex
                 run: false,
                 force: false,
                 idempotency_key: Some("historical-retry-1".to_string()),
-                backend: None,
-                selector: None,
-                model: None,
-                acknowledge_model_override: false,
             },
             executor.clone(),
             |_| Ok(Some(dispatcher.clone())),
@@ -3350,7 +3401,7 @@ fn moving_base_blocker_is_the_reported_reason_without_a_finalization() {
                 "prior_verified_base": "base-sha",
                 "passed_gates": [],
                 "blocker": "origin/main moved and src/lib.rs no longer applies cleanly",
-                "continuation": "homeboy agent-task cook-continue run-cli-moving-base-blocker",
+                "continuation": "homeboy agent-task recover run-cli-moving-base-blocker",
                 "base_movements": 1
             });
         })
@@ -3369,7 +3420,7 @@ fn moving_base_blocker_is_the_reported_reason_without_a_finalization() {
             diagnosis["root_cause"]["message"],
             "origin/main moved and src/lib.rs no longer applies cleanly"
         );
-        let expected = "base_conflict: origin/main moved and src/lib.rs no longer applies cleanly; next: homeboy agent-task cook-continue run-cli-moving-base-blocker";
+        let expected = "base_conflict: origin/main moved and src/lib.rs no longer applies cleanly; next: homeboy agent-task recover run-cli-moving-base-blocker";
         assert_eq!(diagnosis["cook_verdict"]["reason"], expected);
 
         let (status_value, _) = status(StatusArgs {
@@ -4297,11 +4348,17 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
             full: true,
         })
         .expect("diagnose timed-out review form");
+        let (probe, probe_exit_code) = recover_preflight_probe(run_id);
+        // A timed-out review form used to need `cook-continue`; recover names
+        // the continuation and admits it read-only.
+        assert_eq!(probe_exit_code, 0, "{probe:#}");
+        assert_eq!(probe["step"], json!({ "kind": "continue" }));
+        assert_eq!(probe["admission"]["admitted"], true, "{probe:#}");
 
         assert_eq!(exit_code, 0);
         assert_eq!(value["retry_replay"]["readiness"], "unavailable");
         assert!(value["retry_replay"]["action"].is_null());
-        assert!(value.to_string().contains("cook-continue"));
+        assert!(value.to_string().contains("agent-task recover"));
         assert!(!value.to_string().contains("agent-task retry"));
     });
 }
@@ -5824,10 +5881,6 @@ fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
             run: false,
             force: false,
             idempotency_key: Some("retry-cli-1".to_string()),
-            backend: None,
-            selector: None,
-            model: None,
-            acknowledge_model_override: false,
         })
         .expect("retry queued");
         let acknowledgement: homeboy_control_plane_contract::ControlPlaneActionAcknowledgement =
@@ -5862,10 +5915,6 @@ fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
             run: false,
             force: false,
             idempotency_key: Some("retry-cli-1".to_string()),
-            backend: None,
-            selector: None,
-            model: None,
-            acknowledge_model_override: false,
         })
         .expect("replayed retry")
         .0;
@@ -5947,10 +5996,6 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
                 run: false,
                 force: false,
                 idempotency_key: Some("cook-retry-run-1".to_string()),
-                backend: None,
-                selector: None,
-                model: None,
-                acknowledge_model_override: false,
             },
             executor.clone(),
             |_| Ok(Some(Arc::new(RetryRunDispatcher))),

@@ -33,13 +33,12 @@ pub use args::{
     AcceptArgs, ActiveArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
     AgentTaskBatchPrepareArgs, AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
-    CancelArgs, ContractArgs, ContractFormat, CookContinueArgs, CookFeedbackArgs, DiagnoseArgs,
-    EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs,
-    PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs,
-    RearmArgs, RecordReplacementGateProofArgs, RecoverArgs, ReplayProviderBoundaryArgs,
-    RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs,
-    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs,
-    VerifyReplacementArgs,
+    CancelArgs, ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, EvidenceArgs,
+    FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PlacementUpdateArgs,
+    PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs,
+    RecordReplacementGateProofArgs, RecoverArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
+    RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
+    RuntimeValidateArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs, VerifyReplacementArgs,
 };
 
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
@@ -319,10 +318,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 run::run_cook(*cook_args)
             }
         }
-        AgentTaskCommand::CookContinue(args) if args.preflight => {
-            run::preflight_continue_cook(args)
-        }
-        AgentTaskCommand::CookContinue(args) => run::continue_cook(args),
         AgentTaskCommand::CookFeedback(args) => feedback::feedback(args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::ExecutionStep { intent_id } => {

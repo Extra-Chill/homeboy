@@ -68,7 +68,7 @@ fn moving_base(blocker: &str, base_movements: u32) -> Value {
         "prior_verified_base": "base-sha",
         "passed_gates": [],
         "blocker": blocker,
-        "continuation": "homeboy agent-task cook-continue run-1",
+        "continuation": "homeboy agent-task recover run-1",
         "base_movements": base_movements
     })
 }
@@ -245,7 +245,7 @@ fn moving_base_blocker_carries_its_message_paths_and_continuation() {
     assert_eq!(blocker.paths, vec!["src/lib.rs".to_string()]);
     assert_eq!(
         blocker.next_action.as_deref(),
-        Some("homeboy agent-task cook-continue run-1")
+        Some("homeboy agent-task recover run-1")
     );
 
     // An exhausted or foreign destination is never offered a continuation.

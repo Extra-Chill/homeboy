@@ -2,8 +2,6 @@
 mod agent_task_provider_flag_diagnostic;
 #[path = "cli_binary/agent_tool_dispatch.rs"]
 mod agent_tool_dispatch;
-#[path = "cli_binary/cook_continue_preflight.rs"]
-mod cook_continue_preflight;
 #[path = "cli_binary/cook_model_routes.rs"]
 mod cook_model_routes;
 #[path = "cli_binary/cook_preview_lifecycle.rs"]
@@ -32,6 +30,8 @@ mod output_errors;
 mod product_identity_test;
 #[path = "cli_binary/promotion_provider_stdin.rs"]
 mod promotion_provider_stdin;
+#[path = "cli_binary/recover_preflight.rs"]
+mod recover_preflight;
 #[path = "cli_binary/refactor_rename_test.rs"]
 mod refactor_rename_test;
 #[path = "cli_binary/review_dirty_preflight.rs"]

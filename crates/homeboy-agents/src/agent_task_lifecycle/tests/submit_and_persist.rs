@@ -1612,7 +1612,7 @@ fn cook_write_siblings_persist_into_the_injected_store_and_not_a_second_root() {
         &seeded,
         run_id,
         "verification_pending",
-        "homeboy agent-task cook-continue",
+        "homeboy agent-task recover",
     )
     .expect("record a recovery checkpoint into the injected store");
     record_cook_force_with_lease_receipt_in_store(
@@ -2524,7 +2524,7 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
         &seeded,
         run_id,
         "dependency-sha",
-        "homeboy agent-task cook-continue",
+        "homeboy agent-task recover",
     )
     .expect("re-arm the finalization in the injected store");
     assert_eq!(
@@ -2660,7 +2660,7 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
         &other,
         run_id,
         "dependency-sha",
-        "homeboy agent-task cook-continue",
+        "homeboy agent-task recover",
     )
     .expect("the second root's finalization is still invalidatable");
     assert!(

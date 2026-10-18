@@ -7300,7 +7300,7 @@ fn dirty_candidate_adoption_recovery_actions(
 }
 
 /// Timeout left a real worktree candidate that could not be bound to its
-/// producing run. Retry and cook-continue --artifact-id are both ineligible
+/// producing run. Retry and recover --artifact-id are both ineligible
 /// until an operator inspects that checkout.
 fn unfingerprinted_timeout_worktree_recovery(
     recipe: &super::AgentTaskCookRecipe,

@@ -843,7 +843,7 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
     );
     assert_eq!(
         context.legal_actions[0].command,
-        "homeboy --placement local agent-task cook-continue timeout-run --timeout-ms 2400000"
+        "homeboy --placement local agent-task recover timeout-run --timeout-ms 2400000"
     );
 
     report.value.failure_context = Some(context);
@@ -859,12 +859,12 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
     );
     assert_eq!(
         rebound.legal_actions[0].command,
-        "homeboy --placement local agent-task cook-continue timeout-run --timeout-ms 2400000"
+        "homeboy --placement local agent-task recover timeout-run --timeout-ms 2400000"
     );
 }
 
 /// Regression for #14732: the terminal failure previously advertised a
-/// `cook-continue --timeout-ms` resume command in `next_actions` even while
+/// `recover --timeout-ms` resume command in `next_actions` even while
 /// `recovery_legal` was false because deferred cleanup had not gone terminal.
 /// An operator following the printed guidance hit a durable retry that the
 /// run's own admission had already refused. Only a command that is admitted
@@ -964,7 +964,7 @@ fn provider_timeout_resume_is_not_offered_while_deferred_cleanup_is_pending() {
     );
     assert!(
         context.next_actions.iter().all(|action| {
-            action.action.as_str() != "resume" && !action.command.contains("cook-continue")
+            action.action.as_str() != "resume" && !action.command.contains("agent-task recover")
         }),
         "next_actions must not offer a resume command while cleanup is pending: {:?}",
         context.next_actions
@@ -1027,7 +1027,7 @@ fn unfingerprinted_timeout_next_action_is_worktree_git_status_not_retry() {
             .iter()
             .chain(&context.legal_actions)
             .all(|action| {
-                !action.command.contains("retry") && !action.command.contains("cook-continue")
+                !action.command.contains("retry") && !action.command.contains("agent-task recover")
             }));
     });
 }
@@ -1510,7 +1510,7 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
     );
     assert_eq!(
         context.legal_actions[0].command,
-        "homeboy agent-task cook-continue review-form-timeout-report-attempt-2 --review-form-timeout-ms 600000"
+        "homeboy agent-task recover review-form-timeout-report-attempt-2 --review-form-timeout-ms 600000"
     );
 }
 
@@ -3588,7 +3588,7 @@ fn fresh_cook_review_form_has_bounded_budget_independent_of_code_execution() {
         persisted_authority.clone();
     assert_eq!(
         follow_up_request.inputs["cook_loop"]["execution_budget_authority"], persisted_authority,
-        "cook-continue carries the exact authority instead of minting one"
+        "Cook continuation carries the exact authority instead of minting one"
     );
 
     let timed_out_usage = ExecutionBudgetUsage {
@@ -9337,7 +9337,7 @@ fn approved_empty_provider_failure_retry_stays_attached_and_becomes_continuation
         assert_eq!(selection.reason, "latest_substantive_candidate_pointer");
         assert_eq!(
             super::super::resolve_cook_continuation_run_id(cook_id)
-                .expect("cook-continue resolves the retry candidate"),
+                .expect("Cook continuation resolves the retry candidate"),
             retry_run_id
         );
         assert_eq!(
@@ -9525,7 +9525,7 @@ fn timeout_override_retry_is_reserved_through_the_control_plane_action() {
         .expect("record provider timeout");
         assert_eq!(failed.exit_code, 1);
 
-        // `cook-continue --timeout-ms` reserves through the Retry action, so
+        // `recover --timeout-ms` reserves through the Retry action, so
         // the override carries an acknowledgement and an `action.accepted`
         // event like every other retry.
         let source = options.identity.initial_run_id.clone();
@@ -24483,7 +24483,7 @@ fn exact_checkpoint_destination_mismatch_projects_a_fork_replacement_response() 
             .legal_actions
             .iter()
             .chain(&context.next_actions)
-            .all(|action| action.action != "resume" && !action.command.contains("cook-continue")));
+            .all(|action| action.action != "resume"));
     });
 }
 
@@ -24949,7 +24949,7 @@ fn dependency_tool_preflight_is_a_noop_without_dependencies() {
 
 /// #15364: a gate setup failure during promotion is environmental, so Cook
 /// retries promotion automatically instead of stranding the durable candidate
-/// until an operator runs `cook-continue`. Other promotion errors are final.
+/// until an operator runs `agent-task recover`. Other promotion errors are final.
 #[test]
 fn gate_setup_failures_are_retried_and_other_promotion_errors_are_not() {
     let context = homeboy_core::test_support::HermeticTestContext::new();

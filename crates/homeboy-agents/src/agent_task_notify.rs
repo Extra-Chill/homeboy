@@ -54,7 +54,7 @@ fn should_deliver(kind: NotifyEventKind, has_explicit_route: bool) -> bool {
 ///
 /// `notification_route::current()` is a **thread-local**, so it only answers in
 /// the process and on the thread that accepted `--notification-route`. A cook
-/// resumed elsewhere — `cook-continue`, controller adoption, a claimed
+/// resumed elsewhere — operator `agent-task recover`, controller adoption, a claimed
 /// continuation — starts with an empty one, which silently downgraded the whole
 /// arc: `Started`/`Progress` were dropped by `should_deliver`, and the terminal
 /// event went to the ambient default transport instead of the thread that
@@ -83,7 +83,7 @@ fn should_deliver(kind: NotifyEventKind, has_explicit_route: bool) -> bool {
 ///
 /// The durable fallback is not made redundant by environment propagation. It
 /// covers resumption paths that inherit neither argv nor environment from the
-/// launching process — `cook-continue`, controller adoption, a claimed
+/// launching process — operator `agent-task recover`, controller adoption, a claimed
 /// continuation — so both remain load-bearing.
 fn effective_route(run_id: &str) -> Option<NotificationRoute> {
     notification_route::current()
@@ -681,7 +681,7 @@ fn continuation_failed_payload(cook_id: &str, run_id: &str, diagnostic: &str) ->
 /// Before #15831 this stop was silent: the provider produced a candidate, the
 /// continuation that would gate, finalize, and open the PR failed inside a
 /// daemon work job, and the Cook sat at `candidate_recoverable` until someone
-/// happened to run `cook-continue`. Delivered at most once per attempt through
+/// happened to run `agent-task recover`. Delivered at most once per attempt through
 /// its own marker, so it never consumes the Cook's terminal announcement.
 pub fn cook_continuation_failed(cook_id: &str, run_id: &str, diagnostic: &str) {
     cook_continuation_failed_with(cook_id, run_id, diagnostic, tracker::resolved_tracker);

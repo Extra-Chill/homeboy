@@ -5,12 +5,12 @@
 
 pub(crate) use std::process::Command;
 
-pub(in crate::commands::agent_task) use super::super::args::CookContinueArgs;
 pub(in crate::commands::agent_task) use super::super::args::ReconcileArgs;
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskCookArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, LogsArgs,
     ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs, StatusArgs, ValidatePlanArgs,
 };
+pub(in crate::commands::agent_task) use super::super::run::CookContinueArgs;
 pub(in crate::commands::agent_task) use super::super::run::{
     continue_cook_with, resume, retry, retry_with, run_cook_with_executor,
     run_cook_with_executor_and_dispatcher, run_loaded_plan, run_resume_with_executor,

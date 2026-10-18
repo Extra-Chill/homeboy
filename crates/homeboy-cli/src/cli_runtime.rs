@@ -2503,7 +2503,7 @@ fn agent_task_lifecycle_delegation_run_id(cli: &Cli) -> Option<String> {
             // Resume on a terminal record only re-reads or reprojects terminal
             // evidence; it never reopens execution. Run it under the current
             // runtime so recovery fixes reach runs admitted by an older one
-            // (#15732: a 0.417.6 pin hid the #15668 cook-continue guard).
+            // (#15732: a 0.417.6 pin hid the #15668 Cook continuation guard).
             crate::commands::agent_task::AgentTaskCommand::Resume(args)
                 if crate::agents::agent_tasks::lifecycle::status(&args.run_id)
                     .is_ok_and(|record| record.state.is_terminal()) =>
@@ -2521,11 +2521,11 @@ fn agent_task_lifecycle_delegation_run_id(cli: &Cli) -> Option<String> {
             // runner pin here bypasses its controller-owned portability contract
             // and moves recipe/target resolution onto the producing runner.
             crate::commands::agent_task::AgentTaskCommand::Promote(_) => None,
-            // Cook continuation owns the controller-local recipe in every
-            // lifecycle state. Its dispatcher preserves provider execution
+            // Cook recovery (continuation) owns the controller-local recipe in
+            // every lifecycle state. Its dispatcher preserves provider execution
             // ownership; the provider's runtime pin must never move the whole
             // coordinator to Lab (#9181, #10670).
-            crate::commands::agent_task::AgentTaskCommand::CookContinue(_) => None,
+            crate::commands::agent_task::AgentTaskCommand::Recover(_) => None,
             _ => None,
         },
         _ => None,
@@ -4243,11 +4243,11 @@ mod tests {
     }
 
     #[test]
-    fn cook_continue_preflight_never_delegates_to_a_pinned_runtime() {
+    fn recover_preflight_never_delegates_to_a_pinned_runtime() {
         let argv = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
-            "cook-continue".to_string(),
+            "recover".to_string(),
             "missing-attempt".to_string(),
             "--preflight".to_string(),
         ];
@@ -6584,7 +6584,7 @@ mod tests {
             "--placement",
             "local",
             "agent-task",
-            "cook-continue",
+            "recover",
             "controller-owned-cook",
         ]);
         let args = vec![
@@ -6592,7 +6592,7 @@ mod tests {
             "--placement".to_string(),
             "local".to_string(),
             "agent-task".to_string(),
-            "cook-continue".to_string(),
+            "recover".to_string(),
             "controller-owned-cook".to_string(),
         ];
 
@@ -6891,8 +6891,8 @@ mod tests {
                 // Both the Cook ID and exact attempt ID must resolve on the
                 // controller before observing, retrying, or harvesting work.
                 for id in [cook_id, run_id] {
-                    let args = ["homeboy", "agent-task", "cook-continue", id, "--full"]
-                        .map(str::to_string);
+                    let args =
+                        ["homeboy", "agent-task", "recover", id, "--full"].map(str::to_string);
                     let cli = Cli::parse_from(&args);
                     assert_eq!(
                         delegate_agent_task_lifecycle_to_pinned_runtime(&cli, &args)
@@ -6994,11 +6994,11 @@ mod tests {
 
             assert_eq!(
                 delegate_agent_task_lifecycle_to_pinned_runtime(
-                    &Cli::parse_from(["homeboy", "agent-task", "cook-continue", cook_id]),
+                    &Cli::parse_from(["homeboy", "agent-task", "recover", cook_id]),
                     &[
                         "homeboy".to_string(),
                         "agent-task".to_string(),
-                        "cook-continue".to_string(),
+                        "recover".to_string(),
                         cook_id.to_string(),
                     ],
                 )

@@ -3047,20 +3047,20 @@ fn list_latest_selects_the_newest_complete_filtered_match_or_an_empty_result() {
 
 #[test]
 fn agent_task_timeout_ms_flags_parse_for_cook_run_and_run_plan() {
-    let cook_continue = Cli::try_parse_from([
+    let recover = Cli::try_parse_from([
         "homeboy",
         "agent-task",
-        "cook-continue",
+        "recover",
         "cook-123",
         "--timeout-ms",
         "2400000",
     ])
-    .expect("cook-continue timeout parses");
-    let Commands::AgentTask(agent_task) = cook_continue.command else {
+    .expect("recover timeout parses");
+    let Commands::AgentTask(agent_task) = recover.command else {
         panic!("expected agent-task command");
     };
-    let AgentTaskCommand::CookContinue(args) = agent_task.command else {
-        panic!("expected cook-continue command");
+    let AgentTaskCommand::Recover(args) = agent_task.command else {
+        panic!("expected recover command");
     };
     assert_eq!(args.timeout_ms, Some(2_400_000));
 

@@ -1622,7 +1622,7 @@ mod tests {
         let args = [
             "homeboy",
             "agent-task",
-            "cook-continue",
+            "recover",
             "missing-cook",
             "--preflight",
         ]

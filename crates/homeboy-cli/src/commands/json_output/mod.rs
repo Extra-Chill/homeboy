@@ -893,7 +893,7 @@ fn agent_task_bounded_operation(
     match &args.command {
         AgentTaskCommand::FinalizePr(_) => Some("finalize-pr"),
         AgentTaskCommand::Cook(args) if args.full => Some("cook"),
-        AgentTaskCommand::CookContinue(args) if args.full => Some("cook-continue"),
+        AgentTaskCommand::Recover(args) if args.full => Some("recover"),
         AgentTaskCommand::Cancel(args) if !args.full => Some("cancel"),
         _ => None,
     }
@@ -904,7 +904,7 @@ fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTask
 
     match &args.command {
         AgentTaskCommand::Cook(args) => args.full,
-        AgentTaskCommand::CookContinue(args) => args.full,
+        AgentTaskCommand::Recover(args) => args.full,
         AgentTaskCommand::Artifacts(args) => args.full,
         AgentTaskCommand::Resume(args) => args.full,
         AgentTaskCommand::Evidence(args) => args.full,

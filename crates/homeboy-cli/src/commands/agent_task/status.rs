@@ -1191,7 +1191,7 @@ pub(super) fn parse_event_cursor(
 }
 
 /// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
-/// its exact attempt id, but only `cook-continue` may materialize that attempt.
+/// its exact attempt id, but only `agent-task recover` may materialize that attempt.
 fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Result<Option<Value>> {
     let recipe = match agent_task_service_direct::load_recipe(run_or_cook_id) {
         Ok(recipe) => recipe,
@@ -2162,7 +2162,7 @@ fn preserve_controller_owner_placement_with_prefix(
                             | "retry"
                             | "reconcile"
                             | "cancel"
-                            | "cook-continue"
+                            | "recover"
                             | "finalize-pr"
                     )
                 });
@@ -6258,8 +6258,8 @@ fn cook_continuation_action(record: &AgentTaskRunRecord) -> homeboy::core::Resul
 
 fn cook_continuation_command(run_id: &str) -> CommandNextAction {
     CommandNextAction::new(
-        "resume the authenticated Cook continuation",
-        agent_task_service_direct::cook_continue_command(None, run_id, false, None),
+        "recover the authenticated Cook",
+        agent_task_service_direct::cook_recover_command(None, run_id, None),
     )
     .with_kind(CommandNextActionKind::Repair)
 }
@@ -6861,8 +6861,8 @@ mod tests {
             action: None,
             continuation: Some(
                 CommandNextAction::new(
-                    "resume the authenticated Cook continuation",
-                    "homeboy agent-task cook-continue review-form-timeout",
+                    "recover the authenticated Cook",
+                    "homeboy agent-task recover review-form-timeout",
                 )
                 .with_kind(CommandNextActionKind::Repair),
             ),
@@ -6878,9 +6878,7 @@ mod tests {
 
         assert_eq!(retry.projection()["readiness"], "unavailable");
         assert!(retry.projection()["action"].is_null());
-        assert!(
-            commands.contains(&"homeboy agent-task cook-continue review-form-timeout".to_string())
-        );
+        assert!(commands.contains(&"homeboy agent-task recover review-form-timeout".to_string()));
         assert!(commands
             .iter()
             .all(|command| !command.contains("agent-task retry")));
