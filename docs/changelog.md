@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.429.2] - 2026-10-18
+
+### Changed
+- the cook_delivery record is the only stored form of Cook delivery facts; delete legacy per-stage writes and derivation (#16049 slice 6b)
+
+### Fixed
+- treat a zombie-only process group as gone on Darwin
+- fresh Lab cooks gate on their runner like continuations
+
 ## [0.429.1] - 2026-10-18
 
 ### Changed
