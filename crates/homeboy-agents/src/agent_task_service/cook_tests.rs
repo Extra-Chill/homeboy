@@ -795,6 +795,7 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
             moving_base_recovery: None,
             provider_route_notes: Vec::new(),
             failure_context: Some(AgentTaskCookFailureContext {
+                recovery_step: None,
                 cook_id: "timeout-report".to_string(),
                 latest_run_id: "timeout-run".to_string(),
                 selected_run_id: None,
@@ -916,6 +917,7 @@ fn provider_timeout_resume_is_not_offered_while_deferred_cleanup_is_pending() {
         invocation_latest_run_id: Some("timeout-pending-run"),
     });
     report.value.failure_context = Some(AgentTaskCookFailureContext {
+        recovery_step: None,
         cook_id: "timeout-pending-cleanup".to_string(),
         latest_run_id: "timeout-pending-run".to_string(),
         selected_run_id: None,
@@ -1088,6 +1090,7 @@ fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
         invocation_latest_run_id: Some("startup-without-output-run"),
     });
     report.value.failure_context = Some(AgentTaskCookFailureContext {
+        recovery_step: None,
         cook_id: "startup-without-output-report".to_string(),
         latest_run_id: "startup-without-output-run".to_string(),
         selected_run_id: None,
@@ -1283,6 +1286,7 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
             moving_base_recovery: None,
             provider_route_notes: Vec::new(),
             failure_context: Some(AgentTaskCookFailureContext {
+                recovery_step: None,
                 cook_id: "rotation-projection".to_string(),
                 latest_run_id: "rotation-run".to_string(),
                 selected_run_id: None,
@@ -1430,6 +1434,7 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
             moving_base_recovery: None,
             provider_route_notes: Vec::new(),
             failure_context: Some(AgentTaskCookFailureContext {
+                recovery_step: None,
                 cook_id: "review-form-timeout-report".to_string(),
                 latest_run_id: "review-form-timeout-report-attempt-2".to_string(),
                 selected_run_id: Some(selected_run_id.to_string()),
@@ -3033,7 +3038,7 @@ fn post_apply_promotion_failure_keeps_cause_and_bounded_resume_action() {
     assert!(context
         .next_actions
         .iter()
-        .any(|action| action.command.contains("cook-continue")));
+        .any(|action| action.command == format!("homeboy agent-task recover {run_id}")));
 }
 
 #[test]
@@ -10774,9 +10779,13 @@ fn wrapped_storage_failure_is_retryable_and_guidance_advertises_the_retry() {
         .expect("Cook failure context");
         assert!(context.next_actions.iter().any(|action| action.command
             == format!(
-                "homeboy agent-task retry {} --run",
+                "homeboy agent-task recover {}",
                 options.identity.initial_run_id
             )));
+        assert_eq!(
+            context.recovery_step,
+            Some(super::super::CookRecoveryStep::Retry)
+        );
     });
 }
 
@@ -24676,7 +24685,7 @@ fn exact_checkpoint_destination_mismatch_projects_a_fork_replacement_response() 
             action.action == "fork_replacement"
                 && action.command
                     == format!(
-                        "homeboy agent-task retry {} --run",
+                        "homeboy agent-task recover {}",
                         options.identity.initial_run_id
                     )
         }));
@@ -24888,7 +24897,7 @@ fn post_materialization_failure_families_expose_only_durable_identity_and_legal_
                 serde_json::json!([
                     { "action": "status", "command": format!("homeboy agent-task status {}", options.identity.initial_run_id) },
                     { "action": "diagnose", "command": format!("homeboy agent-task diagnose {}", options.identity.initial_run_id) },
-                    { "action": "resume", "command": format!("homeboy agent-task cook-continue {}", options.identity.initial_run_id) },
+                    { "action": "resume", "command": format!("homeboy agent-task recover {}", options.identity.initial_run_id) },
                 ]),
                 "{status}"
             );

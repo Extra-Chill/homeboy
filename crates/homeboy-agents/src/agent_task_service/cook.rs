@@ -75,6 +75,7 @@ use super::cook_promotion::{
     CookReportInput, MovingBaseCookRecovery,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
+use super::cook_recovery::CookRecoveryStep;
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
 #[cfg(test)]
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
@@ -2247,6 +2248,10 @@ pub struct AgentTaskCookFailureContext {
     pub legal_actions: Vec<AgentTaskCookRecoveryAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<AgentTaskCookRecoveryAction>,
+    /// The single step `agent-task recover` performs for this state; the
+    /// mutating entries of `legal_actions` are derived from it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_step: Option<CookRecoveryStep>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2456,6 +2461,7 @@ mod run_lifecycle_projection_tests {
             exit_code: 1,
         };
         failed.value.failure_context = Some(AgentTaskCookFailureContext {
+            recovery_step: None,
             cook_id: "cook".to_string(),
             latest_run_id: "run".to_string(),
             selected_run_id: None,
@@ -4136,6 +4142,9 @@ fn make_startup_without_output_actionable(
                 .to_string();
         context.legal_actions = vec![status.clone(), diagnose.clone()];
         context.next_actions = vec![status, diagnose];
+        context.recovery_step = Some(CookRecoveryStep::none(
+            "Provider startup produced no output; inspect status and diagnostics before choosing a recovery path.",
+        ));
     }
 }
 
@@ -4240,6 +4249,15 @@ fn make_provider_timeout_actionable(
         };
         context.legal_actions.clear();
         context.next_actions.clear();
+        // A timeout retry spends budget on an explicitly larger deadline: an
+        // operator decision `recover` does not make on its own.
+        context.recovery_step = Some(CookRecoveryStep::none(
+            command
+                .as_deref()
+                .filter(|_| !deferred_cleanup_pending)
+                .map(|command| format!("Retry with an explicit timeout increase: `{command}`."))
+                .unwrap_or_else(|| context.recovery_reason.clone()),
+        ));
         if deferred_cleanup_pending {
             context.next_actions.push(AgentTaskCookRecoveryAction {
                 action: "status".to_string(),
@@ -4492,6 +4510,15 @@ fn make_review_form_timeout_actionable(
         };
         context.legal_actions.clear();
         context.next_actions.clear();
+        // A timeout retry spends budget on an explicitly larger deadline: an
+        // operator decision `recover` does not make on its own.
+        context.recovery_step = Some(CookRecoveryStep::none(
+            command
+                .as_deref()
+                .filter(|_| !deferred_cleanup_pending)
+                .map(|command| format!("Retry with an explicit timeout increase: `{command}`."))
+                .unwrap_or_else(|| context.recovery_reason.clone()),
+        ));
         if deferred_cleanup_pending {
             context.next_actions.push(AgentTaskCookRecoveryAction {
                 action: "status".to_string(),

@@ -1229,7 +1229,8 @@ fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Resul
         "provider_executions_consumed": 0,
         "guidance": {
             "action": "materialize_recipe_attempt",
-            "command": agent_task_service_direct::cook_continue_command(None, &attempt.run_id, false, None),
+            // `recover` continues the exact attempt for this state (#15925).
+            "command": agent_task_service_direct::cook_recovery_command(&attempt.run_id, &["recover", &attempt.run_id]),
             "message": "The immutable Cook recipe is durable but its lifecycle record is absent. Continue the exact attempt to materialize the controller lifecycle before provider work."
         }
     })))

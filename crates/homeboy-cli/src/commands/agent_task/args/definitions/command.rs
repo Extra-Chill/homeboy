@@ -21,9 +21,9 @@ use super::fanout::{AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs};
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
     LifecycleReadArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs,
-    RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs,
-    RunArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, ValidatePlanArgs,
-    VerifyReplacementArgs,
+    RecordReplacementGateProofArgs, RecoverArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs,
+    ReviewArgs, RunArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
+    ValidatePlanArgs, VerifyReplacementArgs,
 };
 
 pub use super::super::auth::{
@@ -164,6 +164,14 @@ pub enum AgentTaskCommand {
     PlacementUpdate(PlacementUpdateArgs),
     /// Submit a fresh durable run from an existing run's plan.
     Retry(RetryArgs),
+    /// Perform the one correct next recovery step for a stopped Cook.
+    ///
+    /// Accepts a Cook ID, attempt ID or batch-child run ID and performs the
+    /// step its durable state names: continue, continue with the canonical
+    /// patch artifact, rearm a failed continuation, retry, fork a replacement,
+    /// or reconcile a held claim. `--preflight` reports the step without
+    /// effects. `agent-task status` "Next:" lines name this command.
+    Recover(RecoverArgs),
     /// Cook a batch of independent issues as one workflow instance.
     ///
     /// `fanout cook-batch` compiles to a `homeboy/workflow/v1` fan-out: each

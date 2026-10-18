@@ -271,7 +271,7 @@ mod tests {
             .is_some_and(|reason| reason.contains("not published")));
         assert_eq!(
             verdict.next_action,
-            "homeboy agent-task cook-continue agent-task-verdict"
+            "homeboy agent-task recover agent-task-verdict"
         );
     }
 
@@ -294,7 +294,7 @@ mod tests {
         );
         assert_eq!(
             verdict.next_action,
-            "homeboy agent-task cook-continue agent-task-verdict"
+            "homeboy agent-task recover agent-task-verdict"
         );
     }
 
