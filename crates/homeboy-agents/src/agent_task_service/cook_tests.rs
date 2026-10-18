@@ -11,22 +11,18 @@ use super::super::cook_baseline::git_output;
 use super::super::cook_pre_execution::recover_recipe_attempt_with_stores;
 use super::super::cook_promotion::{
     bind_report_to_stores, canonical_cook_patch_artifact_id_in_store,
-    canonical_cook_recovery_run_id, cook_candidate_base_sha, cook_finalization_options,
-    cook_finalization_options_with_stores, cook_promotion_argv, cook_report,
-    finalize_cook_pr_with_backend, finalize_cook_pr_with_backend_with_stores,
-    finalize_or_load_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend_with_stores,
-    mark_replacement_gate_execution_started, moving_base_recovery_for_run,
-    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion,
-    moving_base_recovery_from_promotion_in_store, moving_base_recovery_report,
-    next_moving_base_recovery, persist_manual_finalization_intent,
-    persist_manual_finalization_receipt, persisted_promotion_for_attempt,
-    persisted_promotion_for_attempt_in_store, preflight_cook_promotion_in_store,
-    prepare_manual_finalization_identity, promote_attempt_in_store,
-    promote_or_load_attempt_in_store, record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_cook_pr_with_backend_and_review_form, recover_moving_base_cook_candidate_in_store,
-    refreshed_moving_base_recovery, replacement_gate_execution_started,
-    selected_candidate_task_id_in_store, verify_replacement_gates, AgentTaskSuppliedReviewForm,
-    CookReportInput, MovingBaseCookRecovery,
+    canonical_cook_recovery_run_id, catch_up_cook_candidate_to_base_in_store,
+    cook_candidate_base_sha, cook_finalization_options, cook_finalization_options_with_stores,
+    cook_promotion_argv, cook_report, finalize_cook_pr_with_backend,
+    finalize_cook_pr_with_backend_with_stores, finalize_or_load_cook_pr_with_backend,
+    finalize_or_load_cook_pr_with_backend_with_stores, mark_replacement_gate_execution_started,
+    persist_manual_finalization_intent, persist_manual_finalization_receipt,
+    persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
+    preflight_cook_promotion_in_store, prepare_manual_finalization_identity,
+    promote_attempt_in_store, promote_or_load_attempt_in_store, record_replacement_gate_proof,
+    recover_cook_pr_with_backend, recover_cook_pr_with_backend_and_review_form,
+    replacement_gate_execution_started, selected_candidate_task_id_in_store,
+    verify_replacement_gates, AgentTaskSuppliedReviewForm, BaseCatchUp, CookReportInput,
 };
 use super::super::execution_step::execution_step_fixtures::{
     current_intent, kill_test_child_at_marker, step_harness, terminal_delivery, QueuedRunTransport,
@@ -792,7 +788,6 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
             terminal_phase: None,
             terminal_failure_classification: None,
             primary_failure: None,
-            moving_base_recovery: None,
             provider_route_notes: Vec::new(),
             failure_context: Some(AgentTaskCookFailureContext {
                 recovery_step: None,
@@ -1283,7 +1278,6 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
             terminal_phase: None,
             terminal_failure_classification: None,
             primary_failure: None,
-            moving_base_recovery: None,
             provider_route_notes: Vec::new(),
             failure_context: Some(AgentTaskCookFailureContext {
                 recovery_step: None,
@@ -1431,7 +1425,6 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
             terminal_phase: None,
             terminal_failure_classification: None,
             primary_failure: None,
-            moving_base_recovery: None,
             provider_route_notes: Vec::new(),
             failure_context: Some(AgentTaskCookFailureContext {
                 recovery_step: None,
@@ -3707,205 +3700,6 @@ fn persisted_review_budget_authority_preserves_lower_bounds_and_caps_larger_valu
 }
 
 #[test]
-fn moving_base_recovery_report_retains_typed_evidence_and_exact_continuation() {
-    let recovery = MovingBaseCookRecovery {
-        schema: "homeboy/agent-task-cook-moving-base-recovery/v1".to_string(),
-        cook_id: "cook-9267".to_string(),
-        run_id: "run-9267".to_string(),
-        promotion: promotion("run-9267"),
-        prior_verified_base: "a".repeat(40),
-        passed_gates: serde_json::json!([{"status": "passed"}]),
-        blocker: "HEAD is behind or diverged from resolved base".to_string(),
-        continuation: "homeboy agent-task cook-continue run-9267".to_string(),
-        base_movements: 0,
-    };
-    let report =
-        moving_base_recovery_report("cook-9267".to_string(), Vec::new(), recovery, true, None);
-
-    assert_eq!(report.value.status, "candidate_recoverable");
-    let recovery = report
-        .value
-        .moving_base_recovery
-        .expect("typed recovery state");
-    assert_eq!(recovery.run_id, "run-9267");
-    assert_eq!(
-        recovery.continuation,
-        "homeboy agent-task cook-continue run-9267"
-    );
-    assert_eq!(recovery.prior_verified_base, "a".repeat(40));
-    assert!(report
-        .value
-        .stop_reason
-        .unwrap()
-        .contains("without provider dispatch"));
-}
-
-#[test]
-fn moving_base_recovery_persists_across_restart_without_provider_replay() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "moving-base-restart";
-        let mut options =
-            batch_cook_options("cook-restart", Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.identity.initial_run_id = run_id.to_string();
-        persist_initial_recipe(&options).unwrap();
-        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
-        agent_task_lifecycle::record_cook_attempt_in_store(
-            &test_lifecycle_store(),
-            "cook-restart",
-            1,
-            run_id,
-        )
-        .unwrap();
-        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
-        })
-        .unwrap();
-        let mut recovery =
-            moving_base_recovery_from_promotion("cook-restart", run_id, promotion(run_id));
-        // Historical recovery records emitted the global scheduler command.
-        recovery.continuation = "homeboy agent-task run-next".to_string();
-
-        agent_task_lifecycle::record_cook_moving_base_recovery_in_store(
-            &test_lifecycle_store(),
-            run_id,
-            serde_json::to_value(&recovery).unwrap(),
-        )
-        .unwrap();
-
-        let restarted = moving_base_recovery_for_run(run_id)
-            .unwrap()
-            .expect("durable recovery");
-        let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
-        assert_eq!(restarted.cook_id, "cook-restart");
-        assert_eq!(restarted.run_id, run_id);
-        assert_eq!(
-            restarted.continuation,
-            format!("homeboy agent-task cook-continue {run_id}")
-        );
-        assert_eq!(record.metadata["provider_executions_consumed"], 1);
-    });
-}
-
-#[test]
-fn moving_base_recovery_refreshes_authenticated_candidate_before_retrying_finalization() {
-    let mut original = promotion("moving-base-refresh");
-    original.provenance["candidate"] =
-        serde_json::json!({"kind": "git", "fingerprint": {"tree": "old"}});
-    let recovery =
-        moving_base_recovery_from_promotion("cook-refresh", "moving-base-refresh", original);
-    let mut refreshed = promotion("moving-base-refresh");
-    refreshed.verified_base.as_mut().unwrap().sha = "fresh-base".to_string();
-    refreshed.provenance["candidate"] =
-        serde_json::json!({"kind": "git", "fingerprint": {"tree": "rebased"}});
-
-    let refreshed = refreshed_moving_base_recovery(recovery, &refreshed);
-
-    assert_eq!(refreshed.prior_verified_base, "fresh-base");
-    assert_eq!(
-        refreshed.promotion.provenance["candidate"]["fingerprint"]["tree"],
-        "rebased"
-    );
-    assert_eq!(refreshed.base_movements, 0);
-}
-
-#[test]
-fn moving_base_recovery_isolates_identical_attempts_across_explicit_stores() {
-    let left_context = homeboy_core::test_support::HermeticTestContext::new();
-    let right_context = homeboy_core::test_support::HermeticTestContext::new();
-    let left_recipe_store = CookRecipeStore::new(left_context.path_roots());
-    let right_recipe_store = CookRecipeStore::new(right_context.path_roots());
-    let left_lifecycle_store = AgentTaskLifecycleStore::new(left_context.path_roots());
-    let right_lifecycle_store = AgentTaskLifecycleStore::new(right_context.path_roots());
-    let cook_id = "same-moving-base-cook";
-    let run_id = "same-moving-base-run";
-    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-    options.identity.initial_run_id = run_id.to_string();
-
-    for (recipe_store, lifecycle_store, blocker) in [
-        (&left_recipe_store, &left_lifecycle_store, "left blocker"),
-        (&right_recipe_store, &right_lifecycle_store, "right blocker"),
-    ] {
-        recipe_store.persist_initial_recipe(&options).unwrap();
-        lifecycle_store
-            .submit_plan_with_runtime_admission(&options.identity.initial_plan, run_id, |_| {
-                Ok(serde_json::json!({}))
-            })
-            .unwrap();
-        lifecycle_store
-            .mutate_record(run_id, |record| {
-                record.metadata["cook_id"] = serde_json::json!(cook_id);
-                true
-            })
-            .unwrap();
-        let mut recovery = moving_base_recovery_from_promotion(cook_id, run_id, promotion(run_id));
-        recovery.blocker = blocker.to_string();
-        lifecycle_store
-            .record_cook_moving_base_recovery(run_id, serde_json::to_value(recovery).unwrap())
-            .unwrap();
-    }
-
-    left_lifecycle_store
-        .mutate_record(run_id, |record| {
-            let identity = homeboy_lab_contract::ExecutionPlacementIdentity {
-                repository: "fixture".to_string(),
-                workspace: "fixture".to_string(),
-                task: "task".to_string(),
-                candidate: None,
-                base: None,
-            };
-            record.metadata["execution_placement_decision"] = serde_json::to_value(
-                homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
-                    "fixture",
-                    "v1",
-                    identity,
-                    homeboy_lab_contract::Placement::Local,
-                ),
-            )
-            .unwrap();
-            true
-        })
-        .unwrap();
-
-    let rooted = moving_base_recovery_from_promotion_in_store(
-        &left_lifecycle_store,
-        cook_id,
-        run_id,
-        promotion(run_id),
-    );
-    assert_eq!(
-        rooted.continuation,
-        format!("homeboy --placement local agent-task cook-continue {run_id}")
-    );
-
-    let left =
-        moving_base_recovery_for_run_with_stores(&left_recipe_store, &left_lifecycle_store, run_id)
-            .unwrap()
-            .expect("left recovery");
-    let right = moving_base_recovery_for_run_with_stores(
-        &right_recipe_store,
-        &right_lifecycle_store,
-        run_id,
-    )
-    .unwrap()
-    .expect("right recovery");
-
-    assert_eq!(left.blocker, "left blocker");
-    assert_eq!(right.blocker, "right blocker");
-    assert_eq!(
-        left.continuation,
-        format!("homeboy --placement local agent-task cook-continue {run_id}")
-    );
-    assert_eq!(
-        right.continuation,
-        format!("homeboy agent-task cook-continue {run_id}")
-    );
-    assert_ne!(
-        left_lifecycle_store.run_dir(run_id),
-        right_lifecycle_store.run_dir(run_id)
-    );
-}
-
-#[test]
 fn candidate_adoption_lifecycle_and_promotion_evidence_do_not_alias_across_explicit_roots() {
     let left_context = homeboy_core::test_support::HermeticTestContext::new();
     let right_context = homeboy_core::test_support::HermeticTestContext::new();
@@ -3961,36 +3755,6 @@ fn candidate_adoption_lifecycle_and_promotion_evidence_do_not_alias_across_expli
 
     assert_ne!(left_store.run_dir(run_id), right_store.run_dir(run_id));
     assert_ne!(left_store.cook_dir(cook_id), right_store.cook_dir(cook_id));
-}
-
-#[test]
-fn divergent_destination_and_repeated_base_movement_are_terminalized() {
-    let recovery = moving_base_recovery_from_promotion(
-        "cook-bound",
-        "moving-base-bound",
-        promotion("moving-base-bound"),
-    );
-    let divergent = next_moving_base_recovery(
-        recovery.clone(),
-        "moving-base recovery destination differs from the exact promoted candidate".to_string(),
-    );
-    assert_eq!(divergent.base_movements, 3);
-    assert!(moving_base_recovery_report(
-        "cook-bound".to_string(),
-        Vec::new(),
-        divergent,
-        false,
-        None
-    )
-    .value
-    .stop_reason
-    .unwrap()
-    .contains("exhausted"));
-
-    let first = next_moving_base_recovery(recovery, "base advanced".to_string());
-    let second = next_moving_base_recovery(first, "base advanced again".to_string());
-    let exhausted = next_moving_base_recovery(second, "base advanced a third time".to_string());
-    assert_eq!(exhausted.base_movements, 3);
 }
 
 /// Seed a Cook attempt whose provider ran once and whose gate-green candidate
@@ -4078,184 +3842,226 @@ fn seed_moving_base_attempt(
     (options, applied)
 }
 
-#[test]
-fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "cook-9267-attempt-1";
-        let (options, applied) = seed_moving_base_attempt("cook-9267", run_id);
+/// Delivery ends the Cook in place: it persists no moving-base recovery for a
+/// continuation to resume.
+fn assert_no_moving_base_continuation(run_id: &str) {
+    let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
+    assert!(record.metadata.get("cook_moving_base_recovery").is_none());
+}
 
-        let first = run_cook(CookContext {
-            side_effects: Some(CookSideEffects::new(|_, _, _, _| {
-                Err(Error::validation_invalid_argument(
-                    "base",
-                    "HEAD is behind or diverged from resolved base `main`",
-                    None,
-                    None,
-                ))
-            })),
-            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
-        })
-        .unwrap();
-        assert_eq!(first.value.status, "candidate_recoverable");
-        let claim = crate::agent_task_service::claim_continuation()
+/// Finalization's refusal when the resolved base moved under the candidate.
+fn behind_base_error() -> Error {
+    Error::validation_invalid_argument(
+        "base",
+        "HEAD is behind or diverged from resolved base `main`",
+        None,
+        None,
+    )
+}
+
+/// `promotion` caught up to `base`, as the catch-up step records it.
+fn rebased_onto(promotion: &AgentTaskPromotionReport, base: &str) -> AgentTaskPromotionReport {
+    let mut rebased = promotion.clone();
+    rebased.verified_base.as_mut().unwrap().sha = base.to_string();
+    rebased.provenance["candidate"] =
+        serde_json::json!({"kind":"git","fingerprint":{"tree":"rebased"}});
+    rebased
+}
+
+fn delivery_of(run_id: &str) -> crate::agent_task_service::CookDelivery {
+    crate::agent_task_service::CookDelivery::from_run_metadata(
+        &agent_task_lifecycle::reconcile_status(run_id)
             .unwrap()
-            .expect("run-next continuation");
-        let rebase_count = Arc::new(AtomicUsize::new(0));
-        let finalization_count = Arc::new(AtomicUsize::new(0));
-        let rebase_count_for_recover = Arc::clone(&rebase_count);
-        let finalization_count_for_finalize = Arc::clone(&finalization_count);
-        let second = run_cook(CookContext {
+            .metadata,
+    )
+    .expect("cook delivery record")
+}
+
+/// #16049: a clean rebase that leaves the verified tree byte-identical keeps
+/// the candidate's gate proof and publishes without re-running the gates.
+#[test]
+fn moved_base_with_identical_tree_publishes_without_regating() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-16049-identical-attempt-1";
+        let (options, _) = seed_moving_base_attempt("cook-16049-identical", run_id);
+        let promotions = Arc::new(AtomicUsize::new(0));
+        let catch_ups = Arc::new(AtomicUsize::new(0));
+        let (promotions_seen, catch_ups_seen) = (Arc::clone(&promotions), Arc::clone(&catch_ups));
+        let report = run_cook(CookContext {
             side_effects: Some(CookSideEffects::for_test(
-                |store, options, run_id| promote_or_load_attempt_in_store(store, options, run_id),
-                move |_, options: &CookRequest, recovery: &MovingBaseCookRecovery| {
-                    rebase_count_for_recover.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(
-                        options.gates.private_gate_reveal,
-                        crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence
-                    );
-                    let mut refreshed = recovery.promotion.clone();
-                    refreshed.verified_base.as_mut().unwrap().sha =
-                        "pinned-refreshed-base".to_string();
-                    refreshed.provenance["candidate"] =
-                        serde_json::json!({"kind":"git","fingerprint":{"tree":"rebased"}});
-                    Ok(refreshed)
+                move |store, options, run_id| {
+                    promotions_seen.fetch_add(1, Ordering::SeqCst);
+                    promote_or_load_attempt_in_store(store, options, run_id)
+                },
+                move |_, _: &CookRequest, promotion: &AgentTaskPromotionReport| {
+                    Ok(match catch_ups_seen.fetch_add(1, Ordering::SeqCst) {
+                        0 => BaseCatchUp::Rebased {
+                            promotion: rebased_onto(promotion, "moved-base"),
+                            regate: false,
+                        },
+                        _ => BaseCatchUp::Current,
+                    })
                 },
                 move |_, _: &_, _: &_, promotion: &AgentTaskPromotionReport| {
-                    finalization_count_for_finalize.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(
-                        promotion.verified_base.as_ref().unwrap().sha,
-                        "pinned-refreshed-base"
-                    );
+                    assert_eq!(promotion.verified_base.as_ref().unwrap().sha, "moved-base");
                     Ok(serde_json::json!({"status":"review_ready", "run_id": run_id}))
                 },
             )),
-            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
-        })
-        .unwrap();
-        claim.complete().unwrap();
-        assert_eq!(second.value.status, "review_ready");
-        assert_eq!(rebase_count.load(Ordering::SeqCst), 1);
-        assert_eq!(finalization_count.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            agent_task_lifecycle::reconcile_status(run_id)
-                .unwrap()
-                .metadata["provider_executions_consumed"],
-            1
-        );
-        let remaining = crate::agent_task_service::claim_continuation().unwrap();
-        assert!(
-            remaining.is_none(),
-            "unexpected continuation for {:?}",
-            remaining.map(|claim| claim.continuation().clone())
-        );
-        assert!(second.value.moving_base_recovery.is_none());
-
-        // A rebase must not turn a failed declared gate into an attempted
-        // finalization or a second provider dispatch.
-        agent_task_lifecycle::record_cook_moving_base_recovery_in_store(
-            &test_lifecycle_store(),
-            run_id,
-            serde_json::to_value(moving_base_recovery_from_promotion(
-                "cook-9267",
-                run_id,
-                applied,
-            ))
-            .unwrap(),
-        )
-        .unwrap();
-        let third = run_cook(CookContext {
-            side_effects: Some(CookSideEffects::for_test(
-                |store, options, run_id| promote_or_load_attempt_in_store(store, options, run_id),
-                |_, _: &CookRequest, recovery: &MovingBaseCookRecovery| {
-                    let mut failed = recovery.promotion.clone();
-                    failed.status = AgentTaskPromotionStatus::GateFailed;
-                    Ok(failed)
-                },
-                |_, _: &_, _: &_, _: &_| panic!("failed rebased gates must not finalize"),
-            )),
             ..CookContext::new(options, Arc::new(UnusedExecutor))
         })
         .unwrap();
-        assert_eq!(third.value.status, "candidate_recoverable");
-        assert!(third
-            .value
-            .stop_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("finalization was not attempted")));
-        assert_eq!(
-            moving_base_recovery_for_run(run_id)
-                .unwrap()
-                .expect("failed gate recovery remains durable")
-                .promotion
-                .status,
-            AgentTaskPromotionStatus::GateFailed
-        );
-        assert!(crate::agent_task_service::claim_continuation()
-            .unwrap()
-            .is_none());
+
+        assert_eq!(report.value.status, "review_ready");
+        assert_eq!(promotions.load(Ordering::SeqCst), 1, "gates ran once");
+        assert_eq!(catch_ups.load(Ordering::SeqCst), 1);
+        assert_no_moving_base_continuation(run_id);
     });
 }
 
-/// #15017: a moving-base report claims a queued continuation only when one
-/// will really run. A pending continuation will; one another owner holds
-/// cannot be queued again, so the report says the recovery stopped instead of
-/// promising a retry.
+/// #16049: a rebase that changes the tree re-gates through promotion before
+/// it publishes; finalization's moving-base refusal catches up again.
 #[test]
-fn moving_base_report_claims_a_queued_continuation_only_when_one_was_queued() {
+fn moved_base_with_changed_tree_regates_then_publishes() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "cook-15017-attempt-1";
-        let (options, _) = seed_moving_base_attempt("cook-15017", run_id);
-        let behind_base = || {
-            Error::validation_invalid_argument(
-                "base",
-                "HEAD is behind or diverged from resolved base `main`",
-                None,
-                None,
-            )
-        };
-
-        let first = run_cook(CookContext {
-            side_effects: Some(CookSideEffects::new(move |_, _, _, _| Err(behind_base()))),
-            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
-        })
-        .unwrap();
-        assert!(first
-            .value
-            .stop_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("continuation is queued")));
-
-        // Another live owner now holds the continuation.
-        let _claim = crate::agent_task_service::claim_continuation()
-            .unwrap()
-            .expect("queued moving-base continuation");
-        let mut owner = Command::new("sleep").arg("30").spawn().expect("live owner");
-        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["cook_continuation"]["owner_pid"] = serde_json::json!(owner.id());
-        })
-        .unwrap();
-        let second = run_cook(CookContext {
+        let run_id = "cook-16049-changed-attempt-1";
+        let (options, applied) = seed_moving_base_attempt("cook-16049-changed", run_id);
+        let promotions = Arc::new(AtomicUsize::new(0));
+        let finalizations = Arc::new(AtomicUsize::new(0));
+        let (promotions_seen, finalizations_seen) =
+            (Arc::clone(&promotions), Arc::clone(&finalizations));
+        let report = run_cook(CookContext {
             side_effects: Some(CookSideEffects::for_test(
-                |store, options, run_id| promote_or_load_attempt_in_store(store, options, run_id),
-                |_, _: &CookRequest, _: &MovingBaseCookRecovery| Err(behind_base()),
-                |_, _: &_, _: &_, _: &_| panic!("a blocked recovery must not finalize"),
+                move |store, options, run_id| match promotions_seen.fetch_add(1, Ordering::SeqCst) {
+                    0 => promote_or_load_attempt_in_store(store, options, run_id),
+                    _ => Ok(rebased_onto(&applied, "moved-base")),
+                },
+                move |_, _: &CookRequest, promotion: &AgentTaskPromotionReport| {
+                    // The base is current until finalization finds it moved.
+                    let base = &promotion.verified_base.as_ref().unwrap().sha;
+                    if finalizations_seen.load(Ordering::SeqCst) == 0 || base == "moved-base" {
+                        return Ok(BaseCatchUp::Current);
+                    }
+                    let mut pending = rebased_onto(promotion, "moved-base");
+                    pending.status = AgentTaskPromotionStatus::VerificationPending;
+                    Ok(BaseCatchUp::Rebased {
+                        promotion: pending,
+                        regate: true,
+                    })
+                },
+                {
+                    let finalizations = Arc::clone(&finalizations);
+                    move |_, _: &_, _: &_, promotion: &AgentTaskPromotionReport| match finalizations
+                        .fetch_add(1, Ordering::SeqCst)
+                    {
+                        0 => Err(behind_base_error()),
+                        _ => {
+                            assert_eq!(promotion.verified_base.as_ref().unwrap().sha, "moved-base");
+                            assert_eq!(promotion.status, AgentTaskPromotionStatus::Applied);
+                            Ok(serde_json::json!({"status":"review_ready", "run_id": run_id}))
+                        }
+                    }
+                },
             )),
             ..CookContext::new(options, Arc::new(UnusedExecutor))
         })
         .unwrap();
-        owner.kill().expect("stop live owner");
-        owner.wait().expect("reap live owner");
 
-        assert_eq!(second.value.status, "candidate_recoverable");
-        assert!(second
-            .value
-            .stop_reason
-            .as_deref()
-            .is_some_and(|reason| reason.starts_with("moving-base recovery stopped")));
+        assert_eq!(report.value.status, "review_ready");
+        assert_eq!(
+            promotions.load(Ordering::SeqCst),
+            2,
+            "the rebased tree re-gated"
+        );
+        assert_eq!(finalizations.load(Ordering::SeqCst), 2);
+        assert_no_moving_base_continuation(run_id);
     });
 }
 
-#[cfg(unix)]
+/// #16049: a candidate that does not apply to the moved base is a typed
+/// `base_conflict` blocker naming the conflicting paths. Nothing is queued.
+#[test]
+fn moved_base_rebase_conflict_blocks_with_paths_and_no_continuation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-16049-conflict-attempt-1";
+        let (options, _) = seed_moving_base_attempt("cook-16049-conflict", run_id);
+        let report = run_cook(CookContext {
+            side_effects: Some(CookSideEffects::for_test(
+                |store, options, run_id| promote_or_load_attempt_in_store(store, options, run_id),
+                |_, _: &CookRequest, _: &AgentTaskPromotionReport| {
+                    Ok(BaseCatchUp::Conflict {
+                        base: "moved-base".to_string(),
+                        paths: vec!["src/lib.rs".to_string()],
+                    })
+                },
+                |_, _: &_, _: &_, _: &_| panic!("a conflicting candidate must not finalize"),
+            )),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .unwrap();
+
+        assert_eq!(report.value.status, "blocked");
+        assert_eq!(report.exit_code, 1);
+        assert!(report
+            .value
+            .stop_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("base_conflict: ")));
+        let delivery = delivery_of(run_id);
+        let blocker = delivery.blocker.expect("base conflict blocker");
+        assert_eq!(
+            blocker.code,
+            crate::agent_task_service::CookDeliveryBlockerCode::BaseConflict
+        );
+        assert_eq!(blocker.paths, vec!["src/lib.rs".to_string()]);
+        assert_no_moving_base_continuation(run_id);
+    });
+}
+
+/// #16049: a base that keeps moving under finalization exhausts the
+/// per-invocation budget as a `base_conflict` blocker.
+#[test]
+fn moved_base_budget_exhaustion_blocks_with_base_conflict() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-16049-budget-attempt-1";
+        let (options, _) = seed_moving_base_attempt("cook-16049-budget", run_id);
+        let finalizations = Arc::new(AtomicUsize::new(0));
+        let finalizations_seen = Arc::clone(&finalizations);
+        let report = run_cook(CookContext {
+            side_effects: Some(CookSideEffects::for_test(
+                |store, options, run_id| promote_or_load_attempt_in_store(store, options, run_id),
+                |_, _: &CookRequest, promotion: &AgentTaskPromotionReport| {
+                    Ok(BaseCatchUp::Rebased {
+                        promotion: rebased_onto(promotion, "moved-base"),
+                        regate: false,
+                    })
+                },
+                move |_, _: &_, _: &_, _: &_| {
+                    finalizations_seen.fetch_add(1, Ordering::SeqCst);
+                    Err(behind_base_error())
+                },
+            )),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .unwrap();
+
+        assert_eq!(report.value.status, "blocked");
+        assert_eq!(finalizations.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            report.value.stop_reason.as_deref(),
+            Some(
+                "base_conflict: moving-base recovery exhausted after 3 refreshed base observations"
+            )
+        );
+        let delivery = delivery_of(run_id);
+        assert_eq!(delivery.base_movements, 3);
+        assert_eq!(
+            delivery.blocker.map(|blocker| blocker.code),
+            Some(crate::agent_task_service::CookDeliveryBlockerCode::BaseConflict)
+        );
+        assert_no_moving_base_continuation(run_id);
+    });
+}
+
 #[test]
 fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
     use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
@@ -4427,7 +4233,7 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
 }
 
 #[test]
-fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_divergence() {
+fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
     use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -4602,48 +4408,26 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
             record.metadata["provider_executions_consumed"] = serde_json::json!(1);
         })
         .unwrap();
-        let first = run_cook(CookContext {
-            side_effects: Some(CookSideEffects::new(|_, _, _, _| {
-                Err(Error::validation_invalid_argument(
-                    "base",
-                    "HEAD is behind or diverged from resolved base `main`",
-                    None,
-                    None,
-                ))
-            })),
-            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
-        })
-        .unwrap();
-        assert_eq!(first.value.status, "candidate_recoverable");
-        assert!(moving_base_recovery_for_run(run_id).unwrap().is_some());
-        let claim = crate::agent_task_service::claim_continuation()
-            .unwrap()
-            .expect("durable moving-base continuation");
-        // Model an operator resolving the moving base by rebasing and
-        // committing the exact candidate before continuation is consumed.
-        git(&destination, &["reset", "--hard", &advanced_base]);
-        git(&destination, &["apply", patch.to_str().unwrap()]);
-        git(&destination, &["add", "src/lib.rs"]);
-        git(
-            &destination,
-            &["commit", "-m", "rebase candidate onto refreshed base"],
-        );
         let finalization_calls = Arc::new(AtomicUsize::new(0));
         let finalization_calls_for_finalizer = Arc::clone(&finalization_calls);
         let expected_base = advanced_base.clone();
-        let second = run_cook(CookContext {
-            side_effects: Some(CookSideEffects::new(move |_, _, _, recovered| {
+        let report = run_cook(CookContext {
+            side_effects: Some(CookSideEffects::new(move |_, _, _, caught_up| {
                 finalization_calls_for_finalizer.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(recovered.status, AgentTaskPromotionStatus::Applied);
-                assert_eq!(recovered.verified_base.as_ref().unwrap().sha, expected_base);
+                assert_eq!(caught_up.status, AgentTaskPromotionStatus::Applied);
+                assert_eq!(caught_up.verified_base.as_ref().unwrap().sha, expected_base);
                 Ok(serde_json::json!({"status": "review_ready"}))
             })),
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
         .unwrap();
-        assert_eq!(second.value.status, "review_ready");
-        claim.complete().unwrap();
+        assert_eq!(report.value.status, "review_ready");
         assert_eq!(finalization_calls.load(Ordering::SeqCst), 1);
+        let caught_up = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
+        assert_eq!(
+            caught_up.provenance["resume_contract"]["kind"], "base_catch_up",
+            "the rebased tree carries the base's files, so its gates ran again"
+        );
         assert_eq!(
             git_output(&destination, &["diff", "--name-only", &advanced_base]).unwrap(),
             "src/lib.rs",
@@ -4655,12 +4439,8 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
             "base-only files must not be projected into the candidate worktree"
         );
         assert_eq!(
-            git_output(
-                &destination,
-                &["merge-base", "--is-ancestor", &advanced_base, "HEAD"]
-            )
-            .unwrap(),
-            ""
+            git_output(&destination, &["rev-parse", "HEAD"]).unwrap(),
+            advanced_base
         );
         assert_eq!(
             agent_task_lifecycle::reconcile_status(run_id)
@@ -4668,25 +4448,29 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
                 .metadata["provider_executions_consumed"],
             1
         );
-        assert!(moving_base_recovery_for_run(run_id).unwrap().is_none());
         assert!(crate::agent_task_service::claim_continuation()
             .unwrap()
             .is_none());
 
+        // Content Cook did not promote makes the destination foreign: it is
+        // never rebased.
+        std::fs::write(advance.join("base-advanced-5.txt"), "advanced 5\n").unwrap();
+        git(&advance, &["add", "."]);
+        git(&advance, &["commit", "-m", "advance base 5"]);
+        git(&advance, &["push", "origin", "main"]);
         std::fs::write(destination.join("divergent.txt"), "not authorized\n").unwrap();
-        let rebased_promotion = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
-        let rebased_recovery =
-            moving_base_recovery_from_promotion("moving-base-real-git", run_id, rebased_promotion);
-        let error = recover_moving_base_cook_candidate_in_store(
+        let catch_up = catch_up_cook_candidate_to_base_in_store(
             &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
                 .expect("lifecycle store"),
             &options,
-            &rebased_recovery,
+            run_id,
+            &caught_up,
         )
-        .unwrap_err();
-        assert!(error
-            .message
-            .contains("differs from the exact promoted candidate"));
+        .unwrap();
+        assert!(
+            matches!(&catch_up, BaseCatchUp::NotOwned(reason) if reason.contains("differs from the exact promoted candidate")),
+            "{catch_up:?}"
+        );
     });
 }
 

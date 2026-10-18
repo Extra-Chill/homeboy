@@ -1,6 +1,6 @@
 //! The single writer of the persisted `cook_delivery` record (#16049).
 //!
-//! Every delivery stage (promotion, finalization, moving-base recovery,
+//! Every delivery stage (promotion, finalization, delivery blockers,
 //! manual finalization and force-with-lease receipts) commits through
 //! [`record_cook_delivery`]. It applies the stage's own receipt to the record
 //! it read, re-derives the delivery from the result, stores it as the

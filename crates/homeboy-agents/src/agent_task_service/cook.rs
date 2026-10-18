@@ -68,11 +68,11 @@ use super::cook_pre_execution::{
     CookExecutionPreparation,
 };
 use super::cook_promotion::{
-    attempt_needs_execution_with_store, cook_report, cook_report_with_stores,
-    finalize_or_load_cook_pr_with_stores, persisted_promotion_for_attempt_in_store,
-    pre_provider_diagnostic_cause, promote_or_load_attempt_in_store,
-    recover_moving_base_cook_candidate_in_store, retryable_provider_discovery_failure_with_store,
-    CookReportInput, MovingBaseCookRecovery,
+    attempt_needs_execution_with_store, catch_up_cook_candidate_to_base_in_store, cook_report,
+    cook_report_with_stores, finalize_or_load_cook_pr_with_stores,
+    persisted_promotion_for_attempt_in_store, pre_provider_diagnostic_cause,
+    promote_or_load_attempt_in_store, retryable_provider_discovery_failure_with_store, BaseCatchUp,
+    CookReportInput,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_recovery::CookRecoveryStep;
@@ -1229,24 +1229,24 @@ type TestCookPromoteFn<'a> = Box<
 >;
 
 #[cfg(test)]
-type TestCookRecoverFn<'a> = Box<
+type TestCookCatchUpFn<'a> = Box<
     dyn FnMut(
             &AgentTaskLifecycleStore,
             &CookRequest,
-            &MovingBaseCookRecovery,
-        ) -> Result<AgentTaskPromotionReport>
+            &AgentTaskPromotionReport,
+        ) -> Result<BaseCatchUp>
         + 'a,
 >;
 
-/// Concrete production side effects. Promotion and recovery have one native
-/// implementation; only finalization varies because callers bind different
-/// durable recipe stores and backends.
+/// Concrete production side effects. Promotion and base catch-up have one
+/// native implementation; only finalization varies because callers bind
+/// different durable recipe stores and backends.
 pub(crate) struct CookSideEffects<'a> {
     finalize: CookFinalizeFn<'a>,
     #[cfg(test)]
     test_promote: Option<TestCookPromoteFn<'a>>,
     #[cfg(test)]
-    test_recover: Option<TestCookRecoverFn<'a>>,
+    test_catch_up: Option<TestCookCatchUpFn<'a>>,
 }
 
 impl<'a> CookSideEffects<'a> {
@@ -1265,20 +1265,20 @@ impl<'a> CookSideEffects<'a> {
             #[cfg(test)]
             test_promote: None,
             #[cfg(test)]
-            test_recover: None,
+            test_catch_up: None,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test<P, R, F>(promote: P, recover: R, finalize: F) -> Self
+    pub(crate) fn for_test<P, C, F>(promote: P, catch_up: C, finalize: F) -> Self
     where
         P: FnMut(&AgentTaskLifecycleStore, &CookRequest, &str) -> Result<AgentTaskPromotionReport>
             + 'a,
-        R: FnMut(
+        C: FnMut(
                 &AgentTaskLifecycleStore,
                 &CookRequest,
-                &MovingBaseCookRecovery,
-            ) -> Result<AgentTaskPromotionReport>
+                &AgentTaskPromotionReport,
+            ) -> Result<BaseCatchUp>
             + 'a,
         F: FnMut(
                 &AgentTaskLifecycleStore,
@@ -1291,7 +1291,7 @@ impl<'a> CookSideEffects<'a> {
         Self {
             finalize: Box::new(finalize),
             test_promote: Some(Box::new(promote)),
-            test_recover: Some(Box::new(recover)),
+            test_catch_up: Some(Box::new(catch_up)),
         }
     }
 
@@ -1308,17 +1308,19 @@ impl<'a> CookSideEffects<'a> {
         promote_with_operation_claim_in_store(lifecycle_store, options, run_id)
     }
 
-    pub(super) fn recover_moving_base(
+    /// Catch a Cook-owned candidate up to its moved resolved base.
+    pub(super) fn catch_up_base(
         &mut self,
         lifecycle_store: &AgentTaskLifecycleStore,
         options: &CookRequest,
-        recovery: &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport> {
+        run_id: &str,
+        promotion: &AgentTaskPromotionReport,
+    ) -> Result<BaseCatchUp> {
         #[cfg(test)]
-        if let Some(recover) = self.test_recover.as_mut() {
-            return recover(lifecycle_store, options, recovery);
+        if let Some(catch_up) = self.test_catch_up.as_mut() {
+            return catch_up(lifecycle_store, options, promotion);
         }
-        recover_moving_base_cook_candidate_in_store(lifecycle_store, options, recovery)
+        catch_up_cook_candidate_to_base_in_store(lifecycle_store, options, run_id, promotion)
     }
 
     pub(super) fn finalize(
@@ -1618,7 +1620,6 @@ pub struct AgentTaskCookReport {
     /// Bounded causal facts for an initial provider-command failure. Complete
     /// command evidence remains in the durable run named by `evidence_ref`.
     pub primary_failure: Option<AgentTaskCookPrimaryFailure>,
-    pub moving_base_recovery: Option<MovingBaseCookRecovery>,
     /// One bounded, operator-facing line per provider route this run skipped
     /// as unready before dispatch, prefixed once with the route that actually
     /// ran (#15881). A credentials-dead primary is an operator-visible
@@ -1754,8 +1755,6 @@ impl serde::Serialize for AgentTaskCookReport {
             terminal_failure_classification: Option<&'a String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             primary_failure: Option<&'a AgentTaskCookPrimaryFailure>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            moving_base_recovery: Option<&'a MovingBaseCookRecovery>,
             #[serde(skip_serializing_if = "slice_is_empty")]
             provider_route_notes: &'a [String],
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -1781,7 +1780,6 @@ impl serde::Serialize for AgentTaskCookReport {
             terminal_phase: self.terminal_phase.as_ref(),
             terminal_failure_classification: self.terminal_failure_classification.as_ref(),
             primary_failure: self.primary_failure.as_ref(),
-            moving_base_recovery: self.moving_base_recovery.as_ref(),
             provider_route_notes: &self.provider_route_notes,
             failure_context: self.failure_context.as_ref(),
             completion,
@@ -2447,7 +2445,6 @@ mod run_lifecycle_projection_tests {
             terminal_phase: None,
             terminal_failure_classification: None,
             primary_failure: None,
-            moving_base_recovery: None,
             provider_route_notes: Vec::new(),
             failure_context: None,
             report_stores: None,
@@ -4619,7 +4616,6 @@ pub fn preflight_cook_continuation_admission_for_observation(
     }
     let mut options = options.clone();
     canonicalize_native_cook_workspace(&mut options)?;
-    let moving_base_continuation = record.metadata.get("cook_moving_base_recovery").is_some();
     let verification_pending_continuation = record
         .metadata
         .pointer("/latest_promotion/status")
@@ -4655,8 +4651,7 @@ pub fn preflight_cook_continuation_admission_for_observation(
     let mut execution_only = Vec::new();
     if review_form_continuation {
         execution_only.push("historical_workspace_authentication");
-    } else if !moving_base_continuation
-        && !verification_pending_continuation
+    } else if !verification_pending_continuation
         && !cook_workspace_lookup_pending(&options.identity.initial_plan)
         && options.provider_transport.attempt_dispatcher.is_none()
     {
@@ -5647,14 +5642,7 @@ fn run_cook_spine(
     validate_reviewer_visible_gates(&options.gates.verify, Some(&options.identity.cook_id))?;
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
-    // caller-owned overrides and retain their existing behavior. A typed
-    // moving-base continuation has already completed provider work and must
-    // not require a provider merely to rebase and reverify its candidate.
-    let moving_base_continuation = lifecycle_store
-        .read_record(&options.identity.initial_run_id)
-        .ok()
-        .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
-        .is_some();
+    // caller-owned overrides and retain their existing behavior.
     let verification_pending_continuation = lifecycle_store
         .read_record(&options.identity.initial_run_id)
         .ok()
@@ -5689,10 +5677,7 @@ fn run_cook_spine(
         };
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
-    let adopted_model = if persisted_finalization
-        || moving_base_continuation
-        || verification_pending_continuation
-    {
+    let adopted_model = if persisted_finalization || verification_pending_continuation {
         None
     } else {
         lifecycle_store
@@ -5844,7 +5829,6 @@ fn run_cook_spine(
     })?;
     if !existing_recipe
         && !persisted_finalization
-        && !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
         && !cook_workspace_lookup_pending(&options.identity.initial_plan)
@@ -5870,7 +5854,6 @@ fn run_cook_spine(
     // under a recoverable ref and start from a clean base, before any
     // workspace validation, adoption, or Lab snapshot observes it (#15775).
     if !persisted_finalization
-        && !moving_base_continuation
         && !verification_pending_continuation
         && !authenticated_historical_review_continuation
         && cook_attempt_needs_execution_with_store(
@@ -7008,8 +6991,7 @@ fn run_cook_spine(
             }
         }
         lifecycle_store.record_cook_attempt(&cook_id, attempt, &run_id)?;
-        let rooted_promotion_continuation =
-            moving_base_continuation || verification_pending_continuation;
+        let rooted_promotion_continuation = verification_pending_continuation;
         let mut record = if rooted_promotion_continuation {
             lifecycle_store.read_record(&run_id)?
         } else {
@@ -8495,10 +8477,14 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
         // gates never ran on, and finalization then refuses with "candidate
         // changed after promotion". The tracked promotion is the authority for
         // the destination, so leave it where the candidate was verified;
-        // finalization's candidate fingerprint check still guards drift.
+        // finalization's candidate fingerprint check still guards drift. The
+        // same holds when the base moved past the authenticated candidate:
+        // Cook owns that branch and catches it up at publication (#16049).
         Err(error)
-            if error.details["workspace_base_ancestry"]["direction"] == "behind"
-                && tracked_candidate =>
+            if matches!(
+                error.details["workspace_base_ancestry"]["direction"].as_str(),
+                Some("behind" | "diverged")
+            ) && tracked_candidate =>
         {
             Ok(None)
         }

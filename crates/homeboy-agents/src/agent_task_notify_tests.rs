@@ -35,7 +35,6 @@ fn report(status: &str, finalization: Option<serde_json::Value>) -> AgentTaskCoo
         terminal_phase: None,
         terminal_failure_classification: None,
         primary_failure: None,
-        moving_base_recovery: None,
         provider_route_notes: Vec::new(),
         failure_context: None,
         report_stores: None,

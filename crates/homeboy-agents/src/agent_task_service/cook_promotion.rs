@@ -2551,352 +2551,136 @@ pub(crate) fn is_moving_base_finalization_error(error: &Error) -> bool {
             .contains("HEAD is behind or diverged from resolved base")
 }
 
-/// A controller-only continuation for a candidate whose declared destination
-/// base advanced after its original deterministic gates completed green.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MovingBaseCookRecovery {
-    pub schema: String,
-    pub cook_id: String,
-    pub run_id: String,
-    pub promotion: AgentTaskPromotionReport,
-    pub prior_verified_base: String,
-    pub passed_gates: Value,
-    pub blocker: String,
-    pub continuation: String,
-    #[serde(default)]
-    pub base_movements: u32,
+/// What catching a Cook-owned candidate up to its resolved base did (#16049).
+#[derive(Debug, Clone)]
+pub(crate) enum BaseCatchUp {
+    /// The resolved base is still the candidate's verified base, or it cannot
+    /// be observed. Finalization decides on the candidate as it stands.
+    Current,
+    /// The destination is not exactly this Cook's promoted candidate, so Cook
+    /// does not own it and never rewrites it.
+    NotOwned(String),
+    /// The candidate was replayed onto the moved base and recorded as the
+    /// latest promotion. `regate` is set when the rebased tree differs from
+    /// the verified tree: the recorded promotion is then a verification-pending
+    /// checkpoint for promotion to re-gate. Otherwise it keeps its gate proof.
+    Rebased {
+        promotion: AgentTaskPromotionReport,
+        regate: bool,
+    },
+    /// The candidate does not apply to the moved base. `paths` are the
+    /// candidate files the base also changed; the destination is untouched.
+    Conflict { base: String, paths: Vec<String> },
 }
 
-#[cfg(test)]
-pub(crate) fn moving_base_recovery_for_run(run_id: &str) -> Result<Option<MovingBaseCookRecovery>> {
-    let recipe_store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    moving_base_recovery_for_run_with_stores(&recipe_store, &lifecycle_store, run_id)
-}
-
-pub(crate) fn moving_base_recovery_for_run_with_stores(
-    store: &super::cook_recipe::CookRecipeStore,
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<Option<MovingBaseCookRecovery>> {
-    let record = lifecycle_store.read_record(run_id)?;
-    record
-        .metadata
-        .get("cook_moving_base_recovery")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| {
-            Error::validation_invalid_argument(
-                "cook_moving_base_recovery",
-                format!("invalid durable moving-base recovery: {error}"),
-                Some(run_id.to_string()),
-                None,
-            )
-        })
-        .and_then(|recovery: Option<MovingBaseCookRecovery>| {
-            let Some(mut recovery) = recovery else {
-                return Ok(None);
-            };
-            if recovery.run_id != run_id
-                || record.metadata.get("cook_id").and_then(Value::as_str)
-                    != Some(recovery.cook_id.as_str())
-            {
-                return Err(Error::validation_invalid_argument(
-                    "cook_moving_base_recovery",
-                    "durable moving-base recovery does not match its immutable Cook attempt",
-                    Some(run_id.to_string()),
-                    None,
-                ));
-            }
-            let recipe = store.load_recipe(&recovery.cook_id)?;
-            if !recipe
-                .attempts
-                .iter()
-                .any(|attempt| attempt.run_id == run_id)
-            {
-                return Err(Error::validation_invalid_argument(
-                    "cook_moving_base_recovery",
-                    "durable moving-base recovery run is not declared by its Cook recipe",
-                    Some(run_id.to_string()),
-                    None,
-                ));
-            }
-            // Recoveries written before scoped continuation used `run-next`.
-            // The run ID remains authoritative, so expose the safe command
-            // without requiring an unsafe migration of historical records.
-            let prefix = super::cook_recovery_command_prefix_for_record(&record);
-            recovery.continuation =
-                super::cook_recovery_command_with_prefix(&prefix, &["cook-continue", run_id]);
-            Ok(Some(recovery))
-        })
-}
-
-pub(crate) fn next_moving_base_recovery(
-    mut recovery: MovingBaseCookRecovery,
-    blocker: String,
-) -> MovingBaseCookRecovery {
-    recovery.base_movements = recovery.base_movements.saturating_add(1);
-    // The exact authenticated destination changed outside this controller. It
-    // is not a moving-base retry; retain the proof but never retry or rebase it.
-    if blocker.contains("differs from the exact promoted candidate") {
-        recovery.base_movements = 3;
-    }
-    recovery.blocker = blocker;
-    recovery
-}
-
-/// Queue the continuation that retries a moving-base recovery, reporting
-/// whether one will actually run: queued now, already pending, or re-armed on
-/// the claim of the continuation driving this pass. An exhausted budget queues
-/// nothing.
-pub(crate) fn queue_moving_base_continuation(
-    store: &super::cook_recipe::CookRecipeStore,
-    recovery: &MovingBaseCookRecovery,
-) -> Result<bool> {
-    if recovery.base_movements >= 3 {
-        return Ok(false);
-    }
-    Ok(
-        store.enqueue_terminal_continuation(&recovery.cook_id, &recovery.run_id)?
-            || super::cook_recipe::continuation_state_in_store(
-                store,
-                &recovery.cook_id,
-                &recovery.run_id,
-            )? == super::cook_recipe::CookContinuationState::Pending,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn moving_base_recovery_from_promotion(
-    cook_id: &str,
-    run_id: &str,
-    promotion: AgentTaskPromotionReport,
-) -> MovingBaseCookRecovery {
-    moving_base_recovery_from_promotion_with_command(
-        cook_id,
-        run_id,
-        promotion,
-        super::cook_recovery_command(run_id, &["cook-continue", run_id]),
-    )
-}
-
-pub(crate) fn moving_base_recovery_from_promotion_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    cook_id: &str,
-    run_id: &str,
-    promotion: AgentTaskPromotionReport,
-) -> MovingBaseCookRecovery {
-    moving_base_recovery_from_promotion_with_command(
-        cook_id,
-        run_id,
-        promotion,
-        super::cook_recovery_command_in_store(lifecycle_store, run_id, &["cook-continue", run_id]),
-    )
-}
-
-fn moving_base_recovery_from_promotion_with_command(
-    cook_id: &str,
-    run_id: &str,
-    promotion: AgentTaskPromotionReport,
-    continuation: String,
-) -> MovingBaseCookRecovery {
-    MovingBaseCookRecovery {
-        schema: "homeboy/agent-task-cook-moving-base-recovery/v1".to_string(),
-        cook_id: cook_id.to_string(),
-        run_id: run_id.to_string(),
-        prior_verified_base: promotion
-            .verified_base
-            .as_ref()
-            .map(|base| base.sha.clone())
-            .unwrap_or_default(),
-        passed_gates: serde_json::to_value(&promotion.gate_results).unwrap_or(Value::Null),
-        promotion,
-        blocker: String::new(),
-        // This recovery belongs to one immutable Cook attempt. `run-next` is a
-        // global scheduler operation and must never be offered as its recovery.
-        continuation,
-        base_movements: 0,
-    }
-}
-
-pub(crate) fn refreshed_moving_base_recovery(
-    mut recovery: MovingBaseCookRecovery,
-    promotion: &AgentTaskPromotionReport,
-) -> MovingBaseCookRecovery {
-    recovery.prior_verified_base = promotion
-        .verified_base
-        .as_ref()
-        .map(|base| base.sha.clone())
-        .unwrap_or_default();
-    recovery.passed_gates = serde_json::to_value(&promotion.gate_results).unwrap_or(Value::Null);
-    recovery.promotion = promotion.clone();
-    recovery
-}
-
-pub(crate) fn moving_base_recovery_report(
-    cook_id: String,
-    attempts: Vec<AgentTaskCookAttemptReport>,
-    recovery: MovingBaseCookRecovery,
-    continuation_queued: bool,
-    invocation_latest_run_id: Option<&str>,
-) -> AgentTaskRunResult<AgentTaskCookReport> {
-    let stop_reason = if recovery.base_movements >= 3 {
-        Some(format!(
-            "moving-base recovery exhausted after {} refreshed base observations: {}; inspect the retained recovery evidence and reconcile the destination before retrying",
-            recovery.base_movements, recovery.blocker
-        ))
-    } else if !continuation_queued {
-        Some(format!(
-            "moving-base recovery stopped: {}; inspect the retained recovery evidence before retrying",
-            recovery.blocker
-        ))
-    } else {
-        Some(format!(
-            "{}; continuation is queued without provider dispatch: {}",
-            recovery.blocker, recovery.continuation
-        ))
-    };
-    let mut report = cook_report(CookReportInput {
-        cook_id,
-        status: "candidate_recoverable",
-        disposition: CookDisposition::Terminal,
-        attempts,
-        finalization: None,
-        stop_reason,
-        exit_code: 1,
-        invocation_latest_run_id,
-    });
-    report.value.moving_base_recovery = Some(recovery);
-    report
-}
-
-// The ambient `recover_moving_base_cook_candidate()` shim that used to sit here is
-// gone; one moving-base recovery test was its only caller and now resolves its own store (#7505).
-
-pub(crate) fn recover_moving_base_cook_candidate_in_store(
+/// Replay a gate-verified candidate Cook owns onto its moved resolved base.
+///
+/// Cook owns the destination when it holds exactly the promoted candidate, or
+/// that candidate rebased byte-for-byte onto the fresh base. The candidate's
+/// verified delta is projected onto the fresh base in a temporary index first,
+/// so a conflict leaves the destination as it was.
+pub(crate) fn catch_up_cook_candidate_to_base_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &CookRequest,
-    recovery: &MovingBaseCookRecovery,
-) -> Result<AgentTaskPromotionReport> {
-    if recovery.base_movements >= 3 {
-        return Err(Error::validation_invalid_argument(
-            "base",
-            "moving-base recovery budget is exhausted; inspect the retained recovery evidence before retrying",
-            None,
-            None,
-        ));
+    run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+) -> Result<BaseCatchUp> {
+    let not_owned = |reason: &str| Ok(BaseCatchUp::NotOwned(reason.to_string()));
+    if promotion.status != AgentTaskPromotionStatus::Applied {
+        return not_owned("only an applied promotion with green gates catches up to its base");
     }
-    let path = recovery
-        .promotion
+    let Some(path) = promotion
         .provenance
         .get("worktree_path")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "promotion.provenance.worktree_path",
-                "moving-base recovery requires the authenticated promotion destination",
-                None,
-                None,
-            )
-        })?;
-    if recovery.promotion.status != AgentTaskPromotionStatus::Applied {
-        return Err(Error::validation_invalid_argument(
-            "promotion",
-            "moving-base recovery requires an applied promotion with green gates",
-            None,
-            None,
-        ));
-    }
-    let expected = recovery
-        .promotion
+    else {
+        return not_owned("the promotion records no authenticated destination");
+    };
+    let Some(expected) = promotion
         .provenance
         .get("candidate")
         .cloned()
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "promotion.provenance.candidate",
-                "moving-base recovery requires the exact promoted candidate fingerprint",
-                None,
-                None,
-            )
-        })?;
-    let expected = serde_json::from_value(expected).map_err(|_| {
-        Error::validation_invalid_argument(
-            "promotion.provenance.candidate",
-            "moving-base recovery candidate fingerprint is invalid",
-            None,
-            None,
-        )
-    })?;
-    let fresh_base = observe_and_fetch_base(path, &options.finalization.base)?;
+        .and_then(|candidate| serde_json::from_value(candidate).ok())
+        .filter(|candidate| matches!(candidate, AgentTaskPromotionCandidate::Git { .. }))
+    else {
+        return not_owned("the promotion records no exact Git candidate fingerprint");
+    };
+    let Some(prior_base) = promotion
+        .verified_base
+        .as_ref()
+        .map(|base| base.sha.clone())
+        .filter(|sha| !sha.trim().is_empty())
+    else {
+        return not_owned("the promotion records no immutable verified base");
+    };
+    let Some(fresh_base) = observe_and_fetch_base(path, &options.finalization.base)? else {
+        return Ok(BaseCatchUp::Current);
+    };
+    if fresh_base == prior_base {
+        return Ok(BaseCatchUp::Current);
+    }
     let current = candidate_fingerprint(path)?;
     if current != expected
-        && !is_exact_rebased_candidate(
-            path,
-            &expected,
-            &current,
-            &recovery.prior_verified_base,
-            &fresh_base,
-        )?
+        && !is_exact_rebased_candidate(path, &expected, &current, &prior_base, &fresh_base)?
     {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "moving-base recovery destination differs from the exact promoted candidate; refusing to rebase divergent content",
-            Some(path.to_string()),
-            None,
-        ));
+        return not_owned(
+            "destination differs from the exact promoted candidate; refusing to rebase divergent content",
+        );
     }
-    apply_immutable_candidate_to_base(
+    let tree = match apply_immutable_candidate_to_base(
         path,
         &expected,
         &current,
-        &recovery.prior_verified_base,
-        &recovery.promotion.changed_files,
+        &prior_base,
+        &promotion.changed_files,
         &fresh_base,
-    )?;
-    let mut checkpoint = serde_json::to_value(&recovery.promotion)
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    checkpoint["status"] = serde_json::json!("verification_pending");
-    checkpoint["verified_base"] =
-        serde_json::json!({ "base": options.finalization.base, "sha": fresh_base });
-    checkpoint["provenance"]["candidate"] = serde_json::to_value(candidate_fingerprint(path)?)
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    checkpoint["provenance"]["resume_inputs"] = serde_json::json!({ "base_ref": options.finalization.base, "task_base_sha": options.workspace.task_base_sha, "candidate_ref": null });
-    checkpoint["provenance"]["resume_contract"] = serde_json::json!({
-        "kind": "moving_base_recovery",
+    )? {
+        CandidateProjection::Applied { tree } => tree,
+        CandidateProjection::Conflict { paths } => {
+            return Ok(BaseCatchUp::Conflict {
+                base: fresh_base,
+                paths,
+            })
+        }
+    };
+    let AgentTaskPromotionCandidate::Git {
+        fingerprint: verified,
+    } = &expected
+    else {
+        unreachable!("ownership requires a Git candidate");
+    };
+    let regate = tree != verified.tree;
+    let json_error = |error: serde_json::Error| Error::internal_json(error.to_string(), None);
+    let mut caught_up = serde_json::to_value(promotion).map_err(json_error)?;
+    caught_up["verified_base"] = json!({ "base": options.finalization.base, "sha": fresh_base });
+    caught_up["provenance"]["candidate"] =
+        serde_json::to_value(candidate_fingerprint(path)?).map_err(json_error)?;
+    caught_up["provenance"]["base_catch_up"] = json!({
         "source_candidate": expected,
-        "source_verified_base": recovery.prior_verified_base,
+        "source_verified_base": prior_base,
         "resolved_base": fresh_base,
-        "previous": recovery.promotion.provenance.get("resume_contract"),
+        "regated": regate,
     });
-    let (source, source_path) = promotion_source_in_store(lifecycle_store, &recovery.run_id)?;
-    let observation_store = lifecycle_store.open_observation_initialized()?;
-    let refreshed = resume_promoted_patch_in_observation_store(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some(recovery.run_id.clone()),
-            source_path,
-            source_worktree_path: component_workspace_path(options)?
-                .or_else(|| options.workspace.source_worktree_path.clone()),
-            base_ref: Some(options.finalization.base.clone()),
-            task_base_sha: options.workspace.task_base_sha.clone(),
-            candidate_ref: None,
-            to_worktree: options.workspace.to_worktree.clone(),
-            task_id: selected_candidate_task_id_in_store(lifecycle_store, &recovery.run_id)?,
-            // Moving-base recovery re-verifies the original promoted candidate.
-            artifact_id: Some(recovery.promotion.patch_artifact.id.clone()),
-            dry_run: false,
-            gates: options.gates.clone(),
-            provider_invocation: options.provider_transport.provider_invocation.clone(),
-            repository_integrity_evidence: recovery.promotion.repository_integrity_evidence.clone(),
-        },
-        std::path::Path::new(path),
-        &checkpoint,
-        &observation_store,
-    )?;
-    Ok(refreshed)
+    if regate {
+        caught_up["status"] = json!("verification_pending");
+        caught_up["provenance"]["resume_inputs"] = json!({
+            "base_ref": options.finalization.base,
+            "task_base_sha": cook_candidate_base_sha(options),
+            "candidate_ref": null,
+        });
+        caught_up["provenance"]["resume_contract"] = json!({
+            "kind": "base_catch_up",
+            "source_candidate": expected,
+            "source_verified_base": prior_base,
+            "resolved_base": fresh_base,
+            "previous": promotion.provenance.get("resume_contract"),
+        });
+    }
+    lifecycle_store.record_promotion(run_id, caught_up.clone())?;
+    Ok(BaseCatchUp::Rebased {
+        promotion: serde_json::from_value(caught_up).map_err(json_error)?,
+        regate,
+    })
 }
 
 /// Accept an operator-rebased candidate only when its single commit is based on
@@ -2953,6 +2737,17 @@ fn is_exact_rebased_candidate(
     Ok(original == rebased)
 }
 
+/// The result of projecting a verified candidate onto a newer base.
+#[derive(Debug, PartialEq, Eq)]
+enum CandidateProjection {
+    /// The destination now holds the candidate on the newer base; `tree` is
+    /// the projected candidate tree.
+    Applied { tree: String },
+    /// The candidate does not apply to the newer base; the destination is
+    /// untouched. `paths` are the candidate files the base also changed.
+    Conflict { paths: Vec<String> },
+}
+
 /// Re-materialize an authenticated dirty candidate on a newer base. The
 /// temporary index proves both applicability and candidate-owned file scope
 /// before the destination is reset, so intervening base changes never become a
@@ -2964,7 +2759,7 @@ fn apply_immutable_candidate_to_base(
     prior_verified_base: &str,
     recorded_changed_files: &[String],
     fresh_base: &str,
-) -> Result<()> {
+) -> Result<CandidateProjection> {
     let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = candidate
     else {
         return Err(Error::validation_invalid_argument(
@@ -3037,7 +2832,7 @@ fn apply_immutable_candidate_to_base(
     let index = tempfile::NamedTempFile::new()
         .map_err(|error| Error::internal_io(error.to_string(), None))?;
     git_with_index(path, &["read-tree", fresh_base], index.path())?;
-    git_with_index(
+    if git_with_index(
         path,
         &[
             "apply",
@@ -3047,7 +2842,21 @@ fn apply_immutable_candidate_to_base(
             patch.path().to_str().unwrap_or_default(),
         ],
         index.path(),
-    )?;
+    )
+    .is_err()
+    {
+        let base_files = git_changed_files(path, prior_verified_base, fresh_base)?;
+        let overlapping = candidate_files
+            .iter()
+            .filter(|file| base_files.contains(file))
+            .cloned()
+            .collect::<Vec<_>>();
+        let paths = match overlapping.is_empty() {
+            true => candidate_files,
+            false => overlapping,
+        };
+        return Ok(CandidateProjection::Conflict { paths });
+    }
     git_with_index(
         path,
         &[
@@ -3088,7 +2897,9 @@ fn apply_immutable_candidate_to_base(
             patch.path().to_str().unwrap_or_default(),
         ],
     )?;
-    Ok(())
+    Ok(CandidateProjection::Applied {
+        tree: projected_tree,
+    })
 }
 
 fn remove_untracked_candidate_paths(path: &str, candidate_files: &[String]) -> Result<()> {
@@ -3225,7 +3036,9 @@ fn git_with_index(path: &str, args: &[&str], index: &std::path::Path) -> Result<
     ))
 }
 
-fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
+/// The resolved base's current SHA, materialized locally. `None` when origin
+/// does not report the base.
+fn observe_and_fetch_base(path: &str, base: &str) -> Result<Option<String>> {
     let observed = std::process::Command::new("git")
         .args([
             "ls-remote",
@@ -3236,19 +3049,14 @@ fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
         .current_dir(path)
         .output()
         .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    let sha = String::from_utf8_lossy(&observed.stdout)
+    let Some(sha) = String::from_utf8_lossy(&observed.stdout)
         .split_whitespace()
         .next()
         .filter(|sha| !sha.is_empty())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "base",
-                format!("could not observe destination base `{base}` for moving-base recovery"),
-                None,
-                None,
-            )
-        })?
-        .to_string();
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
     let fetched = homeboy_core::git::with_remote_tracking_authority_until(
         Path::new(path),
         "materialize refreshed destination base",
@@ -3277,7 +3085,7 @@ fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
             None,
         ));
     }
-    Ok(sha)
+    Ok(Some(sha))
 }
 
 #[cfg(test)]
@@ -3335,7 +3143,7 @@ mod moving_base_tests {
         let fresh_base = git(&upstream, &["rev-parse", "HEAD"]);
         git(&destination, &["fetch", "origin", &fresh_base]);
 
-        let error = apply_immutable_candidate_to_base(
+        let projection = apply_immutable_candidate_to_base(
             destination.to_str().unwrap(),
             &expected,
             &expected,
@@ -3343,8 +3151,13 @@ mod moving_base_tests {
             &["candidate.txt".to_string()],
             &fresh_base,
         )
-        .expect_err("overlapping candidate must fail before mutation");
-        assert!(error.message.contains("conflicts with resolved base"));
+        .expect("overlapping candidate is a typed conflict");
+        assert_eq!(
+            projection,
+            CandidateProjection::Conflict {
+                paths: vec!["candidate.txt".to_string()]
+            }
+        );
         assert_eq!(
             candidate_fingerprint(destination.to_str().unwrap()).unwrap(),
             expected
@@ -3410,7 +3223,7 @@ mod moving_base_tests {
         let fresh_base = git(&upstream, &["rev-parse", "HEAD"]);
         git(&destination, &["fetch", "origin", &fresh_base]);
 
-        apply_immutable_candidate_to_base(
+        let projection = apply_immutable_candidate_to_base(
             destination.to_str().unwrap(),
             &candidate,
             &candidate,
@@ -3419,6 +3232,7 @@ mod moving_base_tests {
             &fresh_base,
         )
         .expect("project complete candidate lineage");
+        assert!(matches!(projection, CandidateProjection::Applied { .. }));
 
         assert_eq!(
             git(&destination, &["status", "--porcelain"]),
@@ -6630,7 +6444,6 @@ pub(crate) fn cook_report_with_stores(
             terminal_phase: None,
             terminal_failure_classification: None,
             primary_failure: None,
-            moving_base_recovery: None,
             provider_route_notes: notes,
             failure_context,
             report_stores: recipe_store

@@ -5162,7 +5162,6 @@ fn enforce_compact_status_budget(mut value: Value) -> Value {
         "candidate_adoption",
         "cook_finalization",
         "latest_promotion",
-        "moving_base_recovery",
         "failure_context",
         "finalization",
         "selected_candidate",
@@ -5417,20 +5416,6 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         if let Some(diagnostic) = failure_context.get("diagnostic") {
             summary["failure_context"]["diagnostic"] = compact_cook_diagnostic(diagnostic);
         }
-    }
-    // The promotion report this carries is full evidence, so keep only the
-    // blocker and the continuation the caller is expected to act on.
-    if let Some(moving_base_recovery) = value.get("moving_base_recovery") {
-        summary["moving_base_recovery"] = compact_fields(
-            moving_base_recovery,
-            &[
-                "run_id",
-                "prior_verified_base",
-                "blocker",
-                "continuation",
-                "base_movements",
-            ],
-        );
     }
     if let Some(run_id) = latest_run_id {
         summary["full_command"] = json!(format!("homeboy agent-task status {run_id}"));
@@ -7248,7 +7233,6 @@ mod tests {
                 "recovery_reason": large,
                 "legal_actions": [{ "action": "status", "command": "homeboy agent-task status run-budget" }]
             },
-            "moving_base_recovery": { "blocker": large },
             "provider": { "evidence": large },
             "remaining_phases": [large],
             "continuation_command": large
@@ -7268,45 +7252,5 @@ mod tests {
             "homeboy agent-task status run-budget"
         );
         assert!(omitted.iter().any(|item| item["section"] == "provider"));
-    }
-
-    /// The moving-base recovery carries a full promotion report. Compact keeps
-    /// the blocker and the continuation, not the evidence.
-    #[test]
-    fn compact_cook_report_keeps_moving_base_continuation_without_promotion_evidence() {
-        let report = json!({
-            "schema": "homeboy/agent-task-cook/v1",
-            "cook_id": "cook-11113-moving-base",
-            "latest_run_id": "run-3",
-            "status": "candidate_recoverable",
-            "attempts": [],
-            "moving_base_recovery": {
-                "schema": "homeboy/agent-task-cook-moving-base-recovery/v1",
-                "cook_id": "cook-11113-moving-base",
-                "run_id": "run-3",
-                "prior_verified_base": "abc123",
-                "blocker": "base moved during promotion",
-                "continuation": "homeboy agent-task cook-continue run-3",
-                "base_movements": 2,
-                "promotion": { "nested_evidence": "x".repeat(COMPACT_TEXT_LIMIT + 1) },
-                "passed_gates": { "nested_evidence": "x".repeat(COMPACT_TEXT_LIMIT + 1) }
-            }
-        });
-
-        let compact = compact_cook_report(report.clone(), false);
-        let recovery = &compact["moving_base_recovery"];
-
-        assert_eq!(recovery["blocker"], "base moved during promotion");
-        assert_eq!(
-            recovery["continuation"],
-            "homeboy agent-task cook-continue run-3"
-        );
-        assert_eq!(recovery["base_movements"], 2);
-        assert!(recovery.get("promotion").is_none());
-        assert!(recovery.get("passed_gates").is_none());
-
-        let full = compact_cook_report(report.clone(), true);
-        assert_eq!(full["moving_base_recovery"], report["moving_base_recovery"]);
-        assert_eq!(full["durable_candidate"]["status"], "unavailable");
     }
 }
