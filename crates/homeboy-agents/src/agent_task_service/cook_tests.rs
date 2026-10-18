@@ -5841,7 +5841,7 @@ fn batch_cook_options(
     }
 }
 
-fn compile_options(cook_id: &str) -> CookRequest {
+pub(crate) fn compile_options(cook_id: &str) -> CookRequest {
     batch_cook_options(
         cook_id,
         Arc::new(BatchAttemptDispatcher {
@@ -17737,7 +17737,7 @@ fn promotion_worktree_path() -> String {
     path.display().to_string()
 }
 
-fn promotion(run_id: &str) -> AgentTaskPromotionReport {
+pub(crate) fn promotion(run_id: &str) -> AgentTaskPromotionReport {
     let worktree_path = promotion_worktree_path();
     serde_json::from_value(serde_json::json!({
             "schema": "homeboy/agent-task-promotion-report/v1",

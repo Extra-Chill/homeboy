@@ -11,14 +11,32 @@
 //!
 //! [`CookDelivery::lifecycle`] is the one place a delivery decides what it
 //! contributes to its run's state and its Cook's status.
+//!
+//! The delivery steps run it (#16049 slice 3): [`ensure_verified`] applies the
+//! candidate and runs its gates, and [`ensure_published`] converges the base
+//! and finalizes. Each step either continues with its result or ends the Cook
+//! with the spine's report. The spine calls them around `evaluate_cook_loop`,
+//! since loop feedback decides whether a verified candidate is publishable;
+//! [`publish_accepted`] finalizes policy-accepted ones.
 
-use homeboy_core::cook_status::CookStatus;
+use std::ops::ControlFlow;
+
+use homeboy_core::cook_status::{CookDisposition, CookStatus};
+use homeboy_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::cook::*;
+use super::cook_baseline::compare_gate_failures_to_verified_base;
+use super::cook_promotion::*;
+use super::cook_recipe::CookRecipeStore;
+use super::AgentTaskRunResult;
 use crate::agent_task_gate::AgentTaskGateStatus;
-use crate::agent_task_lifecycle::AgentTaskRunState;
-use crate::agent_task_promotion::AgentTaskPromotionStatus;
+use crate::agent_task_lifecycle::{
+    self, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
+};
+use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
+use crate::agent_task_timeout::expired_cook_deadline;
 
 /// Schema of the persisted `cook_delivery` run-metadata record.
 pub const COOK_DELIVERY_SCHEMA: &str = "homeboy/cook-delivery/v1";
@@ -708,6 +726,429 @@ fn read_publication(
     }
 }
 
+/// Everything a delivery step borrows from its Cook spine attempt.
+pub(super) struct CookDeliveryContext<'a, 'e> {
+    pub store: &'a CookRecipeStore,
+    pub lifecycle_store: &'a AgentTaskLifecycleStore,
+    pub options: &'a CookRequest,
+    pub side_effects: &'a mut CookSideEffects<'e>,
+    pub observer: Option<&'a CookProgressObserver<'a>>,
+    pub cook_id: &'a str,
+    pub run_id: &'a str,
+    pub attempt: u32,
+    pub attempts: &'a mut Vec<AgentTaskCookAttemptReport>,
+}
+
+/// A step's result: hand the value to the next step, or end the Cook.
+pub(super) type CookDeliveryStep<T> = ControlFlow<AgentTaskRunResult<AgentTaskCookReport>, T>;
+
+impl CookDeliveryContext<'_, '_> {
+    fn progress(&self, phase: &str, detail: Option<&str>) -> Result<()> {
+        let (store, observer) = (self.lifecycle_store, self.observer);
+        report_cook_progress(
+            store,
+            observer,
+            self.cook_id,
+            self.run_id,
+            phase,
+            self.attempt,
+            detail,
+        )
+    }
+
+    fn push_attempt(
+        &mut self,
+        record: &AgentTaskRunRecord,
+        promotion: Option<AgentTaskPromotionReport>,
+    ) {
+        self.attempts.push(AgentTaskCookAttemptReport {
+            attempt: self.attempt,
+            run_id: self.run_id.to_string(),
+            run_state: format!("{:?}", record.state),
+            aggregate_path: record.aggregate_path.clone(),
+            promotion,
+            feedback: None,
+        });
+    }
+
+    /// End the Cook with this attempt's terminal report.
+    fn report(
+        &mut self,
+        status: &str,
+        finalization: Option<Value>,
+        stop_reason: Option<&str>,
+        exit_code: i32,
+    ) -> AgentTaskRunResult<AgentTaskCookReport> {
+        cook_report(CookReportInput {
+            cook_id: self.cook_id.to_string(),
+            status,
+            disposition: CookDisposition::Terminal,
+            attempts: std::mem::take(self.attempts),
+            finalization,
+            stop_reason: stop_reason.map(str::to_string),
+            exit_code,
+            invocation_latest_run_id: Some(self.run_id),
+        })
+    }
+
+    fn moving_base_report(
+        &mut self,
+        recovery: MovingBaseCookRecovery,
+        continuation_queued: bool,
+    ) -> AgentTaskRunResult<AgentTaskCookReport> {
+        moving_base_recovery_report(
+            self.cook_id.to_string(),
+            std::mem::take(self.attempts),
+            recovery,
+            continuation_queued,
+            Some(self.run_id),
+        )
+    }
+}
+
+/// A finalization's status, and whether it published the candidate.
+pub(super) fn publication_status(finalization: &Value) -> (String, bool) {
+    let status = finalization["status"].as_str().unwrap_or("unknown");
+    let published = matches!(status, "review_ready" | "draft_published");
+    (status.to_string(), published)
+}
+
+fn to_json<T: Serialize>(value: &T) -> Result<Value> {
+    serde_json::to_value(value).map_err(|error| Error::internal_json(error.to_string(), None))
+}
+
+/// Apply the candidate and run its gates (promotion). Continues with the
+/// report, a gate-failed one compared against its verified base; ends the
+/// Cook when another live owner holds the claim or promotion was rejected.
+pub(super) fn ensure_verified(
+    ctx: &mut CookDeliveryContext<'_, '_>,
+    record: &AgentTaskRunRecord,
+) -> Result<CookDeliveryStep<AgentTaskPromotionReport>> {
+    let (lifecycle_store, options, observer) = (ctx.lifecycle_store, ctx.options, ctx.observer);
+    let (cook_id, run_id, attempt) = (ctx.cook_id, ctx.run_id, ctx.attempt);
+    // Gate dispatch boundary. Promotion is where the deterministic gates
+    // run, and gates are the expensive half of the budget: five gates at
+    // the default 30-minute timeout outlast the provider execution that
+    // produced the candidate. Checked before dispatch so an expired budget
+    // does not start a fresh multi-hour gate sweep.
+    //
+    // The provider's candidate is already durable at this point, so this
+    // stops without discarding work: the Cook is recoverable by the normal
+    // continuation route once the operator grants more budget.
+    if let Some(deadline) = expired_cook_deadline() {
+        ctx.push_attempt(record, None);
+        let boundary = format!("attempt {attempt} could enter promotion and run its gates");
+        let attempts = std::mem::take(ctx.attempts);
+        let report =
+            cook_deadline_report(cook_id.to_string(), attempts, run_id, &deadline, &boundary);
+        return Ok(ControlFlow::Break(report));
+    }
+    ctx.progress("promotion", None)?;
+    let mut promotion = match promote_with_gate_setup_retries(
+        ctx.side_effects,
+        lifecycle_store,
+        options,
+        run_id,
+        |retry, delay, error| {
+            let _ = report_cook_progress(
+                lifecycle_store,
+                observer,
+                cook_id,
+                run_id,
+                "promotion",
+                attempt,
+                Some(&format!(
+                    "gate setup failed; retrying promotion automatically ({retry} of {GATE_SETUP_PROMOTION_RETRIES}) in {}s: {}",
+                    delay.as_secs(),
+                    error.message
+                )),
+            );
+        },
+    ) {
+        Ok(report) => report,
+        Err(error) if promotion_claim_held_by_live_owner(lifecycle_store, run_id, &error) => {
+            // Another live owner holds the exactly-once promotion claim and
+            // is still running the gates. It owns the outcome and its
+            // terminal notification; this pass must not record a
+            // controller failure or declare the Cook terminal (#15472).
+            ctx.push_attempt(record, None);
+            return Ok(ControlFlow::Break(cook_report(CookReportInput {
+                cook_id: cook_id.to_string(),
+                status: CookStatus::InFlight.as_str(),
+                disposition: CookDisposition::InFlight,
+                attempts: std::mem::take(ctx.attempts),
+                finalization: None,
+                stop_reason: Some(format!(
+                    "promotion is in progress under its live owner; watch with `homeboy agent-task status {run_id}`"
+                )),
+                exit_code: 0,
+                invocation_latest_run_id: Some(run_id),
+            })));
+        }
+        Err(error) => {
+            ctx.push_attempt(record, None);
+            let selection_required = error.details["selection_required"] == Value::Bool(true);
+            let recovery = if selection_required {
+                agent_task_lifecycle::record_metadata_value_in_store(
+                    lifecycle_store,
+                    run_id,
+                    "cook_selection_required",
+                    error.details.clone(),
+                )?;
+                "Cook found distinct canonical patch candidates. Select one of the exact commands in failure_context before promotion.".to_string()
+            } else {
+                "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string()
+            };
+            agent_task_lifecycle::record_cook_controller_failure_in_store(
+                lifecycle_store,
+                run_id,
+                &bounded_error_diagnostic(&error),
+            )?;
+            let status = if selection_required {
+                "selection_required"
+            } else {
+                "durable_failure"
+            };
+            let report = ctx.report(status, None, Some(&recovery), 1);
+            return Ok(ControlFlow::Break(report));
+        }
+    };
+    if promotion.status.gate_failed() {
+        let base_sha = promotion
+            .verified_base
+            .as_ref()
+            .map(|base| base.sha.clone())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "promotion.verified_base",
+                    "gate-failed Cook promotion has no immutable verified base for differential verification",
+                    None,
+                    None,
+                )
+            })?;
+        let repository_root = promotion.target.path.clone().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.target.path",
+                "gate-failed Cook promotion has no candidate repository path for differential verification",
+                None,
+                None,
+            )
+        })?;
+        // The differential replays run after the promotion's supervision
+        // scope closed. Reopen the declared scope so a Lab runner enforces
+        // the declared gate budgets instead of its defaults (#15856).
+        crate::agent_task_promotion::with_gate_supervision(
+            options.gates.declared_supervision(),
+            || {
+                compare_gate_failures_to_verified_base(
+                    &mut promotion,
+                    std::path::Path::new(&repository_root),
+                    std::path::Path::new(&repository_root),
+                    &base_sha,
+                    options.gates.gate_timeout(),
+                    options
+                        .gates
+                        .gate_environment
+                        .admitted_component_id
+                        .as_deref(),
+                    |_compared, _total| Ok(()),
+                )
+            },
+        )?;
+        lifecycle_store.record_promotion(run_id, to_json(&promotion)?)?;
+    }
+    Ok(ControlFlow::Continue(promotion))
+}
+
+/// Converge the base and publish a green candidate (commit, push, PR).
+/// `--no-finalize` stops before any effect; a pending moving-base recovery is
+/// rebased and re-gated first.
+pub(super) fn ensure_published(
+    ctx: &mut CookDeliveryContext<'_, '_>,
+    promotion: AgentTaskPromotionReport,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let (store, lifecycle_store, options) = (ctx.store, ctx.lifecycle_store, ctx.options);
+    let (cook_id, run_id) = (ctx.cook_id, ctx.run_id);
+    if options.finalization.no_finalize {
+        return Ok(ctx.report(
+            "green_no_finalize",
+            None,
+            Some(
+                "deterministic gates completed green; --no-finalize skipped \
+     commit, push, and PR finalization",
+            ),
+            0,
+        ));
+    }
+    let mut active_moving_base_recovery = None;
+    let promotion = match moving_base_recovery_for_run_with_stores(store, lifecycle_store, run_id)?
+    {
+        Some(recovery) => {
+            match (ctx.side_effects).recover_moving_base(lifecycle_store, options, &recovery) {
+                Ok(promotion) => {
+                    lifecycle_store.record_promotion(run_id, to_json(&promotion)?)?;
+                    let mut recovery = refreshed_moving_base_recovery(recovery, &promotion);
+                    lifecycle_store
+                        .record_cook_moving_base_recovery(run_id, to_json(&recovery)?)?;
+                    if promotion.status != AgentTaskPromotionStatus::Applied {
+                        recovery.blocker = format!(
+                            "rebased candidate did not pass the declared deterministic gates ({:?}); finalization was not attempted",
+                            promotion.status
+                        );
+                        lifecycle_store
+                            .record_cook_moving_base_recovery(run_id, to_json(&recovery)?)?;
+                        return Ok(ctx.moving_base_report(recovery, false));
+                    }
+                    active_moving_base_recovery = Some(recovery);
+                    promotion
+                }
+                Err(error) => {
+                    let recovery = next_moving_base_recovery(recovery, error.to_string());
+                    lifecycle_store
+                        .record_cook_moving_base_recovery(run_id, to_json(&recovery)?)?;
+                    let continuation_queued = queue_moving_base_continuation(store, &recovery)?;
+                    return Ok(ctx.moving_base_report(recovery, continuation_queued));
+                }
+            }
+        }
+        None => promotion,
+    };
+    ctx.progress("finalization", None)?;
+    let finalization = match ctx
+        .side_effects
+        .finalize(lifecycle_store, options, run_id, &promotion)
+    {
+        Ok(finalization) => {
+            if active_moving_base_recovery.is_some() {
+                lifecycle_store.clear_cook_moving_base_recovery(run_id)?;
+            }
+            finalization
+        }
+        Err(error) if is_moving_base_finalization_error(&error) => {
+            let recovery = next_moving_base_recovery(
+                active_moving_base_recovery.unwrap_or_else(|| {
+                    moving_base_recovery_from_promotion_in_store(
+                        lifecycle_store,
+                        cook_id,
+                        run_id,
+                        promotion,
+                    )
+                }),
+                error.to_string(),
+            );
+            lifecycle_store.record_cook_moving_base_recovery(run_id, to_json(&recovery)?)?;
+            let continuation_queued = queue_moving_base_continuation(store, &recovery)?;
+            return Ok(ctx.moving_base_report(recovery, continuation_queued));
+        }
+        Err(error) if error.message.contains("awaiting_acceptance") => {
+            return Ok(ctx.report(
+                "awaiting_acceptance",
+                Some(serde_json::json!({
+                    "status": "awaiting_acceptance",
+                    "reason": error.message,
+                    "run_id": run_id,
+                    "status_command": cook_recovery_command_in_store(
+                        lifecycle_store,
+                        run_id,
+                        &["status", run_id, "--full"],
+                    ),
+                })),
+                Some(
+                    "deterministic gates passed; an independent acceptance verdict \
+     is required before PR finalization",
+                ),
+                1,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let (final_status, published) = publication_status(&finalization);
+    if published {
+        let absorbed_source_run_id = promotion
+            .provenance
+            .pointer("/cook_follow_up/source_run_id")
+            .and_then(Value::as_str)
+            .unwrap_or(run_id);
+        super::cook_recipe::complete_absorbed_review_form_follow_ups(
+            store,
+            lifecycle_store,
+            absorbed_source_run_id,
+        )?;
+    }
+    let stop_reason = (final_status == "no_changes").then_some(
+        "cook completed provider execution and gates, but finalization found no changed files; task likely still requires review or retry",
+    );
+    let exit_code = if published { 0 } else { 1 };
+    Ok(ctx.report(&final_status, Some(finalization), stop_reason, exit_code))
+}
+
+/// Publish a candidate a loop policy accepted off the green path (an existing
+/// candidate behind a verified no-change review, or an accepted inherited
+/// baseline-red gate). A published outcome reports `published_status` when set.
+pub(super) fn publish_accepted(
+    ctx: &mut CookDeliveryContext<'_, '_>,
+    promotion: &AgentTaskPromotionReport,
+    detail: &str,
+    published_status: Option<&str>,
+    stop_reason: Option<&str>,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    ctx.progress("finalization", Some(detail))?;
+    let (lifecycle_store, options, run_id) = (ctx.lifecycle_store, ctx.options, ctx.run_id);
+    let finalization = (ctx.side_effects).finalize(lifecycle_store, options, run_id, promotion)?;
+    let (final_status, published) = publication_status(&finalization);
+    let status = published_status
+        .filter(|_| published)
+        .unwrap_or(&final_status);
+    let exit_code = if published { 0 } else { 1 };
+    Ok(ctx.report(status, Some(finalization), stop_reason, exit_code))
+}
+
 #[cfg(test)]
 #[path = "cook_delivery_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod step_tests {
+
+    use super::super::cook::tests::{compile_options, promotion};
+    use super::*;
+
+    /// `--no-finalize` ends a green Cook before any publication effect.
+    #[test]
+    fn ensure_published_honors_no_finalize_without_finalizing() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = CookRecipeStore::from_current_data_root().expect("recipe store");
+            let lifecycle_store =
+                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+            let options = compile_options("delivery-no-finalize");
+            assert!(options.finalization.no_finalize);
+            let mut side_effects = CookSideEffects::for_test(
+                |_, _, _| unreachable!("publication does not promote"),
+                |_, _, _| unreachable!("no-finalize must not recover a moving base"),
+                |_, _, _, _| unreachable!("no-finalize must not finalize"),
+            );
+            let mut attempts = Vec::new();
+            let run_id = options.identity.initial_run_id.clone();
+
+            let report = ensure_published(
+                &mut CookDeliveryContext {
+                    store: &store,
+                    lifecycle_store: &lifecycle_store,
+                    options: &options,
+                    side_effects: &mut side_effects,
+                    observer: None,
+                    cook_id: &options.identity.cook_id,
+                    run_id: &run_id,
+                    attempt: 1,
+                    attempts: &mut attempts,
+                },
+                promotion(&run_id),
+            )
+            .expect("no-finalize publication");
+
+            assert_eq!(report.value.status, "green_no_finalize");
+            assert_eq!(report.exit_code, 0);
+            assert!(report.value.finalization.is_none());
+        });
+    }
+}
