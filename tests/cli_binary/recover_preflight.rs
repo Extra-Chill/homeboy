@@ -314,3 +314,50 @@ fn recover_preflight_names_the_retry_step_retry_route_overrides_used_to_reach() 
         "preflight and refused retries reserve nothing"
     );
 }
+
+/// `retry` stays for non-Cook runs. Given the Cook ID of a Cook whose step
+/// `recover --preflight` names, a non-plain retry is refused toward `recover`
+/// instead of re-deciding the Cook's step, and reserves nothing.
+#[test]
+fn retry_of_a_cook_id_with_a_recovery_step_is_refused_toward_recover() {
+    use homeboy::agents::agent_task_lifecycle::{
+        record_cook_attempt_in_store, record_pre_execution_failure_in_store,
+    };
+
+    let cook_id = "public-retry-delegates-to-recover";
+    let run_id = "public-retry-delegates-to-recover-attempt-1";
+    let (context, lifecycle_store) = cook_fixture(cook_id, run_id, |lifecycle_store, plan| {
+        record_cook_attempt_in_store(lifecycle_store, cook_id, 1, run_id)
+            .expect("bind attempt to Cook");
+        record_pre_execution_failure_in_store(
+            lifecycle_store,
+            run_id,
+            plan,
+            "provider_readiness",
+            &homeboy::core::Error::internal_unexpected("injected readiness timeout")
+                .with_retryable(true),
+        )
+        .expect("persist retryable readiness failure");
+    });
+
+    let (code, envelope, _) =
+        run_json(&context, &["agent-task", "recover", cook_id, "--preflight"]);
+    assert_eq!(code, Some(0), "{envelope:#}");
+    assert_eq!(envelope["data"]["step"]["kind"], "retry", "{envelope:#}");
+
+    for extra in [&[][..], &["--run", "--force"][..]] {
+        let mut args = vec!["agent-task", "retry", cook_id];
+        args.extend_from_slice(extra);
+        let (code, envelope, _) = run_json(&context, &args);
+        assert_eq!(code, Some(2), "{extra:?}: {envelope:#}");
+        let rendered = envelope.to_string();
+        assert!(
+            rendered.contains(&format!("homeboy agent-task recover {cook_id}")),
+            "{extra:?}: {envelope:#}"
+        );
+        assert!(rendered.contains(run_id), "{extra:?}: {envelope:#}");
+    }
+    let records = homeboy::agents::agent_task_lifecycle::list_records_in_store(&lifecycle_store)
+        .expect("records");
+    assert_eq!(records.len(), 1, "refused Cook-ID retries reserve nothing");
+}

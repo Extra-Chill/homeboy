@@ -2137,6 +2137,64 @@ fn recover_preflight_probe(id: &str) -> (Value, i32) {
     report
 }
 
+/// `resume` and `retry` also serve non-Cook runs, so they stay. Given a Cook
+/// ID whose durable state names a recovery step they hand it to `recover`
+/// instead of deciding one; an exact attempt ID keeps their own behavior.
+#[test]
+fn resume_and_retry_delegate_a_cook_id_to_recover_instead_of_re_deciding() {
+    let cook_id = "cook-cli-recover-delegation";
+    let run_id = "cook-cli-recover-delegation-attempt-1";
+    with_temp_home(|| {
+        persist_recipe_only_cook(cook_id, run_id);
+        let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store");
+        let plan = homeboy::agents::agent_task_service::cook_recovery_delegation(cook_id)
+            .expect("a Cook ID with a recovery step is delegated");
+        assert_eq!(plan.run_id, run_id);
+        assert_eq!(
+            plan.step,
+            homeboy::agents::agent_task_service::CookRecoveryStep::Continue
+        );
+        // The step `recover --preflight` reports is the one delegation hands over.
+        let (preflight, _) = recover_preflight_probe(cook_id);
+        assert_eq!(preflight["step"], json!({ "kind": "continue" }));
+        assert!(
+            homeboy::agents::agent_task_service::cook_recovery_delegation(run_id).is_none(),
+            "an exact attempt ID keeps the verb's own behavior"
+        );
+        assert!(
+            homeboy::agents::agent_task_service::cook_recovery_delegation("not-a-cook").is_none()
+        );
+
+        let before = homeboy::agents::agent_task_lifecycle::durable_state_for_test(&store);
+        for (run, force, new_run_id) in [
+            (false, false, None),
+            (true, true, None),
+            (true, false, Some("replacement".to_string())),
+        ] {
+            let error = super::super::run::retry(super::super::RetryArgs {
+                run_id: cook_id.to_string(),
+                new_run_id,
+                run,
+                force,
+                idempotency_key: None,
+            })
+            .expect_err("a non-plain retry of a Cook ID is refused toward recover");
+            let rendered = format!("{error:?}");
+            assert!(
+                rendered.contains(&format!("homeboy agent-task recover {cook_id}")),
+                "{rendered}"
+            );
+            assert!(rendered.contains(run_id), "{rendered}");
+        }
+        assert_eq!(
+            homeboy::agents::agent_task_lifecycle::durable_state_for_test(&store),
+            before,
+            "a refused Cook-ID retry must not mutate durable state"
+        );
+    });
+}
+
 #[test]
 fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() {
     let cook_id = "cook-cli-recover";

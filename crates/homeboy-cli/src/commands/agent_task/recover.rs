@@ -4,7 +4,7 @@
 //! The step is decided once in `homeboy-agents` from the Cook's durable state.
 //! This module only supplies the handlers that step names: the Cook
 //! continuation handler (`run::continue_cook` / `run::preflight_continue_cook`),
-//! `retry --run` and `reconcile --apply`, so recovery adds no orchestration of
+//! `retry --run` (exact attempt) and `reconcile --apply`, so recovery adds no orchestration of
 //! its own. It is the only public Cook continuation command.
 
 use serde_json::Value;
@@ -94,7 +94,7 @@ impl CookRecoveryPerformer for CliCookRecoveryPerformer {
     }
 
     fn retry(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
-        super::run::retry(RetryArgs {
+        super::run::retry_exact(RetryArgs {
             run_id: run_id.to_string(),
             new_run_id: None,
             run: true,
@@ -188,6 +188,44 @@ mod tests {
 
     #[test]
     fn retired_cook_continuation_verb_is_not_a_command() {
-        assert!(Cli::try_parse_from(["homeboy", "agent-task", "cook-continue", "cook-1"]).is_err());
+        for retired in [
+            vec!["cook-continue", "cook-1"],
+            vec!["cook-continue", "cook-1", "--preflight"],
+            vec!["cook-continue", "cook-1", "--rearm"],
+            vec!["cook-continue", "cook-1", "--artifact-id", "patch-a"],
+        ] {
+            let mut argv = vec!["homeboy", "agent-task"];
+            argv.extend(retired.iter().copied());
+            assert!(Cli::try_parse_from(argv).is_err(), "{retired:?}");
+        }
+    }
+
+    /// The remaining recovery-adjacent verbs serve non-Cook runs or an
+    /// explicit operator input `recover` never supplies on its own (#15925),
+    /// so they stay commands. `resume` and `retry` hand a Cook ID with a
+    /// recovery step to `recover` instead of deciding one.
+    #[test]
+    fn recovery_adjacent_verbs_recover_does_not_perform_remain_commands() {
+        for kept in [
+            vec!["resume", "run-1"],
+            vec!["retry", "run-1", "--run"],
+            vec!["reconcile", "run-1", "--apply"],
+            vec!["adopt", "cook-1", "--candidate-ref", "abc123"],
+            vec!["promote", "run-1", "--to-worktree", "wt"],
+            vec!["runtime-recover", "run-1", "--artifact", "/tmp/homeboy"],
+            vec!["finalize-pr", "--recover", "cook-1"],
+            vec![
+                "record-replacement-gate-proof",
+                "cook-1-attempt-1",
+                "--promotion",
+                "{}",
+            ],
+        ] {
+            let mut argv = vec!["homeboy", "agent-task"];
+            argv.extend(kept.iter().copied());
+            if let Err(error) = Cli::try_parse_from(argv) {
+                panic!("{kept:?}: {error}");
+            }
+        }
     }
 }

@@ -120,7 +120,7 @@ fn cook_terminal_progress_message(
             " Diagnose: `homeboy agent-task diagnose {run_id} --full`."
         ));
         if let Some(retry_command) = retry_command {
-            message.push_str(&format!(" Retry: `{retry_command}`."));
+            message.push_str(&format!(" Recover: `{retry_command}`."));
         }
     }
     message
@@ -679,13 +679,13 @@ mod progress_tests {
             None,
             Some("run-123"),
             Some("failed"),
-            Some("homeboy agent-task retry run-123 --run"),
+            Some("homeboy agent-task recover run-123"),
         )
         .expect("terminal outcome remains visible");
 
         assert_eq!(
             terminal,
-            "Cook terminal: durable run `run-123`. Phase: terminal. Outcome: failed. Next: `homeboy agent-task status run-123`. Diagnose: `homeboy agent-task diagnose run-123 --full`. Retry: `homeboy agent-task retry run-123 --run`."
+            "Cook terminal: durable run `run-123`. Phase: terminal. Outcome: failed. Next: `homeboy agent-task status run-123`. Diagnose: `homeboy agent-task diagnose run-123 --full`. Recover: `homeboy agent-task recover run-123`."
         );
         assert_eq!(state.emitted_lines, MAX_MACHINE_PROGRESS_LINES + 1);
         assert!(next_machine_progress_message(
@@ -694,7 +694,7 @@ mod progress_tests {
             None,
             Some("run-123"),
             Some("failed"),
-            Some("homeboy agent-task retry run-123 --run"),
+            Some("homeboy agent-task recover run-123"),
         )
         .is_none());
         assert_eq!(state.emitted_lines, MAX_MACHINE_PROGRESS_LINES + 1);
@@ -710,7 +710,7 @@ mod progress_tests {
             None,
             Some("run-123"),
             Some("failed"),
-            Some("homeboy agent-task retry run-123 --run"),
+            Some("homeboy agent-task recover run-123"),
         )
         .is_some());
         assert!(next_machine_progress_message(
@@ -719,7 +719,7 @@ mod progress_tests {
             None,
             Some("run-123"),
             Some("failed"),
-            Some("homeboy agent-task retry run-123 --run"),
+            Some("homeboy agent-task recover run-123"),
         )
         .is_none());
         assert_eq!(state.emitted_lines, 1);
@@ -751,7 +751,7 @@ mod progress_tests {
         let cases = [
             (
                 "pre-execution",
-                Some("homeboy agent-task retry run-123 --run"),
+                Some("homeboy agent-task recover run-123"),
                 true,
             ),
             ("provider", None, false),
@@ -778,7 +778,7 @@ mod progress_tests {
 
             assert_eq!(tty, non_tty, "{path} uses one terminal contract");
             assert_eq!(
-                tty.contains("agent-task retry run-123 --run"),
+                tty.contains("agent-task recover run-123"),
                 expects_retry,
                 "{path} retry guidance follows durable legal_actions"
             );
