@@ -155,13 +155,19 @@ pub enum AgentTaskCommand {
     /// Return one exact quarantined queued record to normal queue eligibility.
     Rearm(RearmArgs),
     /// Resume a queued or stale-running durable run.
+    ///
+    /// Given a Cook ID whose durable state names a recovery step, `resume`
+    /// performs that step through `agent-task recover` instead of deciding
+    /// one itself.
     Resume(ResumeArgs),
     /// Change an unexecuted queued Cook's placement after explicit confirmation.
     PlacementUpdate(PlacementUpdateArgs),
     /// Submit a fresh durable run from an existing run's plan.
     ///
     /// A stopped Cook is recovered with `agent-task recover`, which also owns
-    /// the Cook's next-attempt provider-route overrides.
+    /// the Cook's next-attempt provider-route overrides. `retry <cook-id>
+    /// --run` performs the Cook's recovery step through `recover`; any other
+    /// retry of a Cook ID is refused toward it.
     Retry(RetryArgs),
     /// Perform the one correct next recovery step for a stopped Cook.
     ///

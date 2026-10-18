@@ -315,6 +315,21 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
     })
 }
 
+/// The recovery plan a verb that also serves non-Cook runs must hand to
+/// [`recover_cook`] instead of deciding a Cook's next step itself.
+///
+/// `Some` only when `id` is a durable Cook ID (the Cook alias, not one exact
+/// attempt) whose durable state names a step `recover` performs. `None` keeps
+/// the calling verb's own behavior: a non-Cook run, an exact attempt ID, an
+/// in-flight Cook (for example a queued admission `resume` re-arms), a Cook
+/// whose state admits no step, or a Cook whose recovery plan cannot be read.
+pub fn cook_recovery_delegation(id: &str) -> Option<CookRecoveryPlan> {
+    super::load_recipe(id).ok()?;
+    plan_cook_recovery(id)
+        .ok()
+        .filter(|plan| !plan.step.is_none())
+}
+
 /// Perform (or, with `preflight`, only report) the one next recovery step.
 ///
 /// `artifact_id` resolves a [`CookRecoveryStep::ChooseArtifact`] decision; it
