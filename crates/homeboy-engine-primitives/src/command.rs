@@ -2823,12 +2823,40 @@ fn signal_process_group(root_pid: u32, signal: libc::c_int) -> io::Result<()> {
         let pgid = -(root_pid as libc::pid_t);
         if libc::kill(pgid, signal) != 0 {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error);
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
             }
+            // Darwin reports EPERM, not ESRCH, for a group whose only members
+            // are zombies — e.g. a gate shell that exited a moment before the
+            // supervisor drains it and has not been reaped yet. Nothing in
+            // such a group can receive a signal, so it is already gone.
+            #[cfg(not(target_os = "linux"))]
+            if error.raw_os_error() == Some(libc::EPERM)
+                && !process_group_has_non_zombie_member(root_pid)?
+            {
+                return Ok(());
+            }
+            return Err(error);
         }
         Ok(())
     }
+}
+
+/// Whether process group `pgid` has a member that is not a zombie.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_group_has_non_zombie_member(pgid: u32) -> io::Result<bool> {
+    let output = Command::new("ps")
+        .env("PATH", "/usr/bin:/bin")
+        .args(["-axo", "pgid=,stat="])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("ps could not list process groups"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next().and_then(|group| group.parse::<u32>().ok()) == Some(pgid)
+            && fields.next().is_some_and(|stat| !stat.starts_with('Z'))
+    }))
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -4231,6 +4259,36 @@ impl CapturedOutput {
 
 #[cfg(test)]
 mod tests {
+    /// Darwin answers EPERM when a process group holds only zombies. A
+    /// supervisor that drains a gate whose shell just exited (unreaped) must
+    /// treat that group as gone, not fail the gate with "Operation not
+    /// permitted".
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn signalling_a_zombie_only_process_group_is_not_an_error() {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn group leader");
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while process_group_has_non_zombie_member(pid).expect("list groups") {
+            assert!(std::time::Instant::now() < deadline, "leader never exited");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        signal_process_group(pid, libc::SIGTERM).expect("zombie-only group is gone");
+        signal_process_group(pid, libc::SIGKILL).expect("zombie-only group is gone");
+        assert!(child.wait().expect("reap leader").success());
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
