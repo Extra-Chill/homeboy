@@ -483,7 +483,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             )?,
             metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
         });
-        let finalization = super::persisted_finalization_receipt(&record.metadata).cloned();
+        let finalization = super::recorded_finalization_receipt(&record.metadata).cloned();
         let status = finalization
             .as_ref()
             .and_then(|value| value["status"].as_str())
@@ -1135,7 +1135,7 @@ fn reusable_applied_adoption_promotion(
     }
     let Some(worktree_path) = promotion.target.path.as_deref() else {
         return Some(Err(Error::validation_invalid_argument(
-            "latest_promotion.target.path",
+            "cook_delivery.artifacts.promotion.target.path",
             "applied candidate adoption has no controller-recorded destination path",
             Some(record.run_id.clone()),
             None,
@@ -1143,7 +1143,7 @@ fn reusable_applied_adoption_promotion(
     };
     let Some(mut baseline) = promotion.provenance.get("gate_feedback_baseline").cloned() else {
         return Some(Err(Error::validation_invalid_argument(
-            "latest_promotion",
+            "cook_delivery.artifacts.promotion",
             "applied candidate adoption has no authenticated gate-feedback baseline",
             Some(record.run_id.clone()),
             None,

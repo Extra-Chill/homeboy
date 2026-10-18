@@ -1131,7 +1131,7 @@ fn reached_freeze_boundary_in_store(
         }
         let promotion =
             serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionReport>(
-                super::persisted_promotion_report(&record.metadata)
+                super::recorded_promotion_report(&record.metadata)
                     .cloned()
                     .unwrap_or(Value::Null),
             )
@@ -3389,7 +3389,7 @@ pub(crate) fn complete_absorbed_review_form_follow_ups(
         let Ok(record) = lifecycle_store.read_record(&attempt.run_id) else {
             continue;
         };
-        let follow_up = super::persisted_promotion_report(&record.metadata)
+        let follow_up = super::recorded_promotion_report(&record.metadata)
             .and_then(|promotion| promotion.pointer("/provenance/cook_follow_up"));
         if !record.state.is_terminal()
             || follow_up
@@ -5773,8 +5773,16 @@ mod tests {
             })
             .unwrap();
         record.state = agent_task_lifecycle::AgentTaskRunState::Succeeded;
-        record.metadata["latest_promotion"] = serde_json::json!({ "status": "applied" });
-        record.metadata["cook_finalization"] = serde_json::json!({ "status": "review_ready" });
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/promotion",
+            serde_json::json!({ "status": "applied" }),
+        );
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/finalization",
+            serde_json::json!({ "status": "review_ready" }),
+        );
         lifecycle_store.write_record(&record).unwrap();
 
         let reconciled = reconcile_recipe_attempt_for_continuation_in_stores(
@@ -5785,14 +5793,14 @@ mod tests {
         )
         .expect("execution reconciliation honors finalization receipt");
         assert_eq!(
-            reconciled.metadata["cook_finalization"]["status"],
+            reconciled.metadata["cook_delivery"]["artifacts"]["finalization"]["status"],
             "review_ready"
         );
         let (preflight, aggregate) =
             preflight_recipe_attempt_for_continuation_in_store(&lifecycle_store, &recipe, "run")
                 .expect("read-only reconciliation honors finalization receipt");
         assert_eq!(
-            preflight.metadata["cook_finalization"]["status"],
+            preflight.metadata["cook_delivery"]["artifacts"]["finalization"]["status"],
             "review_ready"
         );
         assert!(aggregate.is_none());
@@ -6407,8 +6415,11 @@ mod tests {
             assert!(error.message.contains("source_refs"));
 
             crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["latest_promotion"] =
-                    promotion_value("applied", serde_json::json!([]));
+                crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut record.metadata,
+                    "/promotion",
+                    promotion_value("applied", serde_json::json!([])),
+                );
             })
             .expect("record applied promotion");
             let mut destination_corrected = existing.clone();
@@ -6423,7 +6434,11 @@ mod tests {
             assert!(error.message.contains("finalization.to_worktree"));
 
             crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["latest_promotion"]["gate_results"] = serde_json::json!([]);
+                crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut record.metadata,
+                    "/promotion/gate_results",
+                    serde_json::json!([]),
+                );
             })
             .expect("record empty gate projection");
             let mut gate_corrected = existing.clone();
@@ -6435,9 +6450,13 @@ mod tests {
             )
             .expect("empty gate arrays do not freeze gate policy");
             crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["latest_promotion"]["deterministic_gates"] = serde_json::json!([
-                    { "id": "gate", "status": "succeeded", "command": [], "exit_code": 0 }
-                ]);
+                crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut record.metadata,
+                    "/promotion/deterministic_gates",
+                    serde_json::json!([
+                        { "id": "gate", "status": "succeeded", "command": [], "exit_code": 0 }
+                    ]),
+                );
             })
             .expect("record gate execution");
             let error = ensure_correction_is_safe(
@@ -6450,8 +6469,11 @@ mod tests {
             assert!(error.message.contains("gate_policy"));
 
             crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["cook_finalization"] =
-                    serde_json::json!({ "status": "review_ready" });
+                crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut record.metadata,
+                    "/finalization",
+                    serde_json::json!({ "status": "review_ready" }),
+                );
             })
             .expect("record finalization");
             let mut finalization_corrected = existing;
@@ -6595,8 +6617,11 @@ mod tests {
                 &lifecycle_store,
                 "run",
                 |record| {
-                    record.metadata["latest_promotion"] =
-                        promotion_value(status, serde_json::json!([]));
+                    crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                        &mut record.metadata,
+                        "/promotion",
+                        promotion_value(status, serde_json::json!([])),
+                    );
                 },
             )
             .expect("record non-applied promotion");

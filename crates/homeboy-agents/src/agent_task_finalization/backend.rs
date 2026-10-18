@@ -26,7 +26,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
     fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof> {
         let record = crate::agent_task_lifecycle::reconcile_status(run_id)?;
-        let promotion = crate::agent_task_service::persisted_promotion_report(&record.metadata).cloned().ok_or_else(|| Error::validation_invalid_argument("run_id", "normal finalization requires the run's persisted applied promotion; run agent-task promote first or use --manual-finalization", None, None))?;
+        let promotion = crate::agent_task_service::recorded_promotion_report(&record.metadata).cloned().ok_or_else(|| Error::validation_invalid_argument("run_id", "normal finalization requires the run's persisted applied promotion; run agent-task promote first or use --manual-finalization", None, None))?;
         let promotion: AgentTaskPromotionReport =
             serde_json::from_value(promotion).map_err(|_| {
                 Error::validation_invalid_argument(
@@ -64,7 +64,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         run_id: &str,
     ) -> Result<AgentTaskPrDurableGateProof> {
         let record = lifecycle_store.read_record(run_id)?;
-        let promotion = crate::agent_task_service::persisted_promotion_report(&record.metadata).cloned().ok_or_else(|| Error::validation_invalid_argument("run_id", "normal finalization requires the run's persisted applied promotion; run agent-task promote first or use --manual-finalization", None, None))?;
+        let promotion = crate::agent_task_service::recorded_promotion_report(&record.metadata).cloned().ok_or_else(|| Error::validation_invalid_argument("run_id", "normal finalization requires the run's persisted applied promotion; run agent-task promote first or use --manual-finalization", None, None))?;
         let promotion: AgentTaskPromotionReport =
             serde_json::from_value(promotion).map_err(|_| {
                 Error::validation_invalid_argument(
@@ -762,7 +762,7 @@ fn optional_gate_proof(
     record: crate::agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<AgentTaskPrDurableGateProof>> {
     let Some(value) =
-        crate::agent_task_service::persisted_promotion_report(&record.metadata).cloned()
+        crate::agent_task_service::recorded_promotion_report(&record.metadata).cloned()
     else {
         return Ok(None);
     };
@@ -1102,9 +1102,9 @@ fn validate_real_candidate_fingerprint_from_record(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<()> {
     let promotion: AgentTaskPromotionReport = deserialize_persisted_value(
-        crate::agent_task_service::persisted_promotion_report(&record.metadata).cloned(),
-        "normal finalization requires persisted latest_promotion",
-        "persisted latest_promotion is invalid",
+        crate::agent_task_service::recorded_promotion_report(&record.metadata).cloned(),
+        "normal finalization requires a persisted Cook delivery promotion",
+        "persisted Cook delivery promotion is invalid",
     )?;
     let expected: AgentTaskPromotionCandidate = deserialize_persisted_value(
         promotion.provenance.get("candidate").cloned(),

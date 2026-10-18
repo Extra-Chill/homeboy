@@ -1,12 +1,13 @@
 //! The Cook delivery record (#16049).
 //!
 //! Delivery is everything after the provider finishes: apply, gates, base
-//! convergence, commit, push and PR. Its facts are persisted as one versioned
-//! `cook_delivery` record (schema [`COOK_DELIVERY_SCHEMA`]) that the lifecycle
-//! store's single delivery writer keeps current beside the older per-stage
-//! keys. [`CookDelivery::from_run_metadata`] reads that record, and falls back
-//! to deriving the same value from the per-stage keys (and their historical
-//! spellings) for runs recorded before it existed. Reporters read the typed
+//! convergence, commit, push and PR. It is persisted as one versioned
+//! `cook_delivery` record (schema [`COOK_DELIVERY_SCHEMA`]), the only stored
+//! form of delivery: its facts ([`CookDelivery`]) and the full artifacts
+//! callers replay or authenticate ([`CookDeliveryArtifacts`]). The lifecycle
+//! store's single delivery writer projects the facts from the artifacts when a
+//! step records them; [`CookDelivery::from_run_metadata`] only reads them back.
+//! A run without the record has no delivery facts. Reporters read the typed
 //! result instead of the raw JSON, so they agree on one answer.
 //!
 //! [`CookDelivery::lifecycle`] is the one place a delivery decides what it
@@ -28,7 +29,6 @@ use serde_json::Value;
 
 use super::cook::*;
 use super::cook_baseline::compare_gate_failures_to_verified_base;
-use super::cook_delivery_artifacts::*;
 use super::cook_promotion::*;
 use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
@@ -40,14 +40,13 @@ use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionSt
 use crate::agent_task_timeout::expired_cook_deadline;
 
 /// Schema of the persisted `cook_delivery` run-metadata record.
-pub const COOK_DELIVERY_SCHEMA: &str = "homeboy/cook-delivery/v1";
+pub const COOK_DELIVERY_SCHEMA: &str = "homeboy/cook-delivery/v2";
 
 /// Run-metadata key of the persisted delivery record.
 pub(crate) const COOK_DELIVERY_KEY: &str = "cook_delivery";
 
 /// [`ensure_base_current`] stops catching a candidate up after this many base
-/// movements within one invocation. Historical moving-base recoveries used the
-/// same budget.
+/// movements within one invocation.
 const BASE_MOVEMENT_BUDGET: u32 = 3;
 
 /// Evidence pointer of a blocker [`ensure_published`] records in the
@@ -73,12 +72,101 @@ pub struct CookDelivery {
     pub blocker: Option<CookDeliveryBlocker>,
 }
 
-/// The persisted `cook_delivery` record: the delivery under a schema tag.
+/// The persisted `cook_delivery` record: the delivery facts under a schema
+/// tag, beside the full artifacts the delivery steps recorded.
 #[derive(Serialize, Deserialize)]
 struct CookDeliveryRecord {
     schema: String,
-    #[serde(flatten)]
-    delivery: CookDelivery,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery: Option<CookDelivery>,
+    #[serde(default)]
+    artifacts: CookDeliveryArtifacts,
+}
+
+/// The full artifacts delivery steps recorded, kept verbatim in the
+/// `cook_delivery` record because callers replay or authenticate them: the
+/// exact promotion report a finalize or resume executes, the manual
+/// publication dossier and its digests, and the publication receipt. Facts
+/// are projected from them when they are recorded; readers of facts read
+/// [`CookDelivery`] instead.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CookDeliveryArtifacts {
+    /// The most recent promotion report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<Value>,
+    /// The append-only history of promotion reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub promotions: Vec<Value>,
+    /// The first post-apply (`verification_pending`) promotion checkpoint,
+    /// kept as immutable recovery authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_checkpoint: Option<Value>,
+    /// The publication receipt exactly as the publisher recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization: Option<Value>,
+    /// The lease-guarded push receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_with_lease: Option<Value>,
+    #[serde(default, skip_serializing_if = "CookManualPublication::is_empty")]
+    pub manual: CookManualPublication,
+}
+
+/// An operator's manual publication of the candidate.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CookManualPublication {
+    /// The validated manual publication dossier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<Value>,
+    /// Integrity digest of [`Self::intent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_digest: Option<Value>,
+    /// The failed manual publication receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<Value>,
+    /// The preflight dossier is a retryable direct publication.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry: bool,
+    /// The retry's candidate fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_candidate: Option<Value>,
+    /// The retry candidate a completed receipt consumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_origin: Option<Value>,
+    /// Digest of the completed receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_digest: Option<Value>,
+    /// The intent digest the completed receipt was bound to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_intent_digest: Option<Value>,
+}
+
+impl CookManualPublication {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+impl CookDeliveryArtifacts {
+    /// The artifacts a run's `cook_delivery` record holds; empty without one.
+    pub fn from_run_metadata(metadata: &Value) -> Self {
+        CookDeliveryRecord::read(metadata)
+            .map(|record| record.artifacts)
+            .unwrap_or_default()
+    }
+}
+
+/// Builders that record a `cook_delivery` fixture the way the writer does.
+#[cfg(any(test, feature = "test-support"))]
+#[path = "cook_delivery_test_support.rs"]
+pub mod test_support;
+
+impl CookDeliveryRecord {
+    /// The record a run's metadata holds, if it is one this binary understands.
+    fn read(metadata: &Value) -> Option<Self> {
+        serde_json::from_value::<Self>(metadata.get(COOK_DELIVERY_KEY)?.clone())
+            .ok()
+            .filter(|record| record.schema == COOK_DELIVERY_SCHEMA)
+    }
 }
 
 /// What a delivery contributes to its run's lifecycle, decided only by
@@ -227,102 +315,65 @@ pub struct CookDeliveryBlocker {
 }
 
 impl CookDelivery {
-    /// Read delivery from a run's persisted metadata. `None` when the run has
-    /// no delivery evidence (no promotion, publication or recovery record).
-    ///
-    /// The persisted `cook_delivery` record is authoritative when present and
-    /// valid; otherwise delivery is derived from the per-stage keys.
+    /// Read delivery from a run's `cook_delivery` record. `None` when the run
+    /// has no record, or a record without delivery evidence (no promotion,
+    /// publication or manual publication).
     pub fn from_run_metadata(metadata: &Value) -> Option<Self> {
-        match present(metadata, "/cook_delivery").and_then(Self::from_record) {
-            Some(mut delivery) => {
-                delivery.backfill(metadata);
-                Some(delivery)
-            }
-            None => Self::from_legacy_metadata(metadata),
-        }
+        let record = metadata.get(COOK_DELIVERY_KEY).filter(|record| {
+            record.get("schema").and_then(Value::as_str) == Some(COOK_DELIVERY_SCHEMA)
+        })?;
+        serde_json::from_value(record.get("delivery")?.clone()).ok()
     }
 
-    /// Fill the facts a record written before they existed omits, from the
-    /// per-stage keys every delivery writer still keeps beside it.
-    fn backfill(&mut self, metadata: &Value) {
-        let Some(candidate) = self.candidate.as_mut() else {
-            return;
-        };
-        if candidate.identity.is_none() {
-            candidate.identity = latest_promotion(metadata).1.and_then(candidate_identity);
-        }
-    }
-
-    /// The delivery a persisted `cook_delivery` record holds, if it is one this
-    /// binary understands.
-    fn from_record(record: &Value) -> Option<Self> {
-        serde_json::from_value::<CookDeliveryRecord>(record.clone())
-            .ok()
-            .filter(|record| record.schema == COOK_DELIVERY_SCHEMA)
-            .map(|record| record.delivery)
-    }
-
-    /// The versioned `cook_delivery` record persisting this delivery.
-    pub(crate) fn to_record(&self) -> Value {
+    /// The versioned `cook_delivery` record persisting `delivery` and the
+    /// artifacts it was projected from.
+    pub(crate) fn to_record(delivery: Option<&Self>, artifacts: &CookDeliveryArtifacts) -> Value {
         serde_json::to_value(CookDeliveryRecord {
             schema: COOK_DELIVERY_SCHEMA.to_string(),
-            delivery: self.clone(),
+            delivery: delivery.cloned(),
+            artifacts: artifacts.clone(),
         })
         .expect("a Cook delivery always serializes")
     }
 
-    /// Derive delivery from the per-stage keys the delivery writers persist
-    /// beside the record. The single writer projects the record from this, so
-    /// the two always agree.
-    pub(crate) fn from_legacy_metadata(metadata: &Value) -> Option<Self> {
-        let (promotion_pointer, promotion) = latest_promotion(metadata);
+    /// Project delivery facts from the artifacts the delivery steps recorded.
+    /// `recorded` is the delivery the record held before: a blocker a delivery
+    /// step recorded without a receipt of its own holds while its candidate is
+    /// still the latest one. Only the single writer calls this.
+    pub(crate) fn project(
+        artifacts: &CookDeliveryArtifacts,
+        recorded: Option<&Self>,
+    ) -> Option<Self> {
+        let promotion = non_null(artifacts.promotion.as_ref());
         let promotion_status = promotion.and_then(promotion_status);
-        let finalization = non_null(persisted_finalization_receipt(metadata));
-        let recovery = non_null(persisted_moving_base_recovery(metadata));
-        let manual_intent = non_null(persisted_manual_finalization_intent(metadata));
-        let manual_failure = non_null(persisted_manual_finalization_failure(metadata));
+        let finalization = non_null(artifacts.finalization.as_ref());
+        let manual_intent = non_null(artifacts.manual.intent.as_ref());
+        let manual_failure = non_null(artifacts.manual.failure.as_ref());
         if promotion_status.is_none()
             && finalization.is_none()
-            && recovery.is_none()
             && manual_intent.is_none()
             && manual_failure.is_none()
         {
             return None;
         }
 
-        let checkpoint = non_null(persisted_recovery_source_checkpoint(metadata));
+        let checkpoint = non_null(artifacts.source_checkpoint.as_ref());
         let candidate = promotion
             .zip(promotion_status)
-            .map(|(promotion, status)| read_candidate(promotion, status, checkpoint, recovery));
+            .map(|(promotion, status)| read_candidate(promotion, status, checkpoint));
         let gates = promotion.map(read_gates).unwrap_or_default();
-        // A blocker the delivery steps recorded holds while its candidate is
-        // still the latest one.
-        let recorded = present(metadata, "/cook_delivery")
-            .and_then(Self::from_record)
-            .map(|mut recorded| {
-                recorded.backfill(metadata);
-                recorded
-            })
-            .filter(|recorded| {
-                recorded.candidate == candidate
-                    && recorded
-                        .blocker
-                        .as_ref()
-                        .is_some_and(|blocker| blocker.evidence == RECORDED_BLOCKER_EVIDENCE)
-            });
+        let recorded = recorded.filter(|recorded| {
+            recorded.candidate == candidate
+                && recorded
+                    .blocker
+                    .as_ref()
+                    .is_some_and(|blocker| blocker.evidence == RECORDED_BLOCKER_EVIDENCE)
+        });
         let publication = finalization.map(|finalization| {
-            read_publication(
-                finalization,
-                non_null(persisted_force_with_lease_receipt(metadata)),
-            )
+            read_publication(finalization, non_null(artifacts.force_with_lease.as_ref()))
         });
         let destination = read_destination(promotion, finalization.or(manual_intent));
-        let base_movements = recovery
-            .and_then(|recovery| recovery.get("base_movements"))
-            .and_then(Value::as_u64)
-            .map(|moves| u32::try_from(moves).unwrap_or(u32::MAX))
-            .or(recorded.as_ref().map(|recorded| recorded.base_movements))
-            .unwrap_or(0);
+        let base_movements = recorded.map_or(0, |recorded| recorded.base_movements);
 
         let blocked = |blocker: CookDeliveryBlocker| (CookDeliveryState::Blocked, Some(blocker));
         let (state, blocker) = if publication.as_ref().is_some_and(|p| p.published) {
@@ -336,24 +387,12 @@ impl CookDelivery {
                     | AgentTaskPromotionStatus::NoChangesGateFailed
             )
         ) {
-            blocked(gate_blocker(
-                CookDeliveryBlockerCode::GateFailed,
-                &gates,
-                promotion_pointer,
-            ))
+            blocked(gate_blocker(CookDeliveryBlockerCode::GateFailed, &gates))
         } else if promotion_status == Some(AgentTaskPromotionStatus::GateDeferred) {
-            blocked(gate_blocker(
-                CookDeliveryBlockerCode::GatesDeferred,
-                &gates,
-                promotion_pointer,
-            ))
-        } else if let Some(blocker) = recovery
-            .and_then(|recovery| moving_base_blocker(recovery, base_movements, promotion))
-            .or_else(|| recorded.and_then(|recorded| recorded.blocker))
-        {
-            blocked(blocker)
-        } else if let Some(blocker) = manual_failure
-            .map(manual_failure_blocker)
+            blocked(gate_blocker(CookDeliveryBlockerCode::GatesDeferred, &gates))
+        } else if let Some(blocker) = recorded
+            .and_then(|recorded| recorded.blocker.clone())
+            .or_else(|| manual_failure.map(manual_failure_blocker))
             .or_else(|| finalization.and_then(finalization_blocker))
         {
             blocked(blocker)
@@ -488,10 +527,6 @@ impl CookDelivery {
     }
 }
 
-fn present<'a>(metadata: &'a Value, pointer: &str) -> Option<&'a Value> {
-    metadata.pointer(pointer).filter(|value| !value.is_null())
-}
-
 fn non_null(value: Option<&Value>) -> Option<&Value> {
     value.filter(|value| !value.is_null())
 }
@@ -505,24 +540,6 @@ fn string_at(value: &Value, pointer: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `latest_promotion`, or the last entry of the `promotions` history when a
-/// record predates the latest-promotion key.
-fn latest_promotion(metadata: &Value) -> (String, Option<&Value>) {
-    if let Some(promotion) = non_null(persisted_promotion_report(metadata)) {
-        return ("/latest_promotion".to_string(), Some(promotion));
-    }
-    persisted_promotion_history(metadata)
-        .and_then(|history| {
-            let index = history.len().checked_sub(1)?;
-            Some((format!("/promotions/{index}"), history.get(index)?))
-        })
-        .filter(|(_, promotion)| !promotion.is_null())
-        .map_or(
-            ("/latest_promotion".to_string(), None),
-            |(pointer, promotion)| (pointer, Some(promotion)),
-        )
-}
-
 /// Dry runs are not delivery, and an unknown status is not evidence.
 fn promotion_status(promotion: &Value) -> Option<AgentTaskPromotionStatus> {
     let status: AgentTaskPromotionStatus =
@@ -534,7 +551,6 @@ fn read_candidate(
     promotion: &Value,
     status: AgentTaskPromotionStatus,
     checkpoint: Option<&Value>,
-    recovery: Option<&Value>,
 ) -> CookDeliveryCandidate {
     // The first post-apply checkpoint keeps the candidate's identity when a
     // later report omits it.
@@ -570,8 +586,7 @@ fn read_candidate(
         identity: candidate_identity(promotion),
         patch_artifact,
         patch_sha: identity("/patch_artifact/sha256"),
-        verified_base: identity("/verified_base/sha")
-            .or_else(|| recovery.and_then(|recovery| string_at(recovery, "/prior_verified_base"))),
+        verified_base: identity("/verified_base/sha"),
         target_applied,
     }
 }
@@ -683,11 +698,7 @@ fn gate_name(gate: &Value) -> Option<String> {
         })
 }
 
-fn gate_blocker(
-    code: CookDeliveryBlockerCode,
-    gates: &[CookDeliveryGate],
-    evidence: String,
-) -> CookDeliveryBlocker {
+fn gate_blocker(code: CookDeliveryBlockerCode, gates: &[CookDeliveryGate]) -> CookDeliveryBlocker {
     let (gate_state, verb) = match code {
         CookDeliveryBlockerCode::GatesDeferred => (AgentTaskGateStatus::Deferred, "deferred"),
         _ => (AgentTaskGateStatus::Failed, "failed"),
@@ -713,44 +724,8 @@ fn gate_blocker(
         paths: Vec::new(),
         next_action: None,
         cause: None,
-        evidence,
+        evidence: "/cook_delivery/artifacts/promotion".to_string(),
     }
-}
-
-fn moving_base_blocker(
-    recovery: &Value,
-    base_movements: u32,
-    promotion: Option<&Value>,
-) -> Option<CookDeliveryBlocker> {
-    let message = string_at(recovery, "/blocker")?;
-    // The writer gives up on a destination that changed outside the
-    // controller; it is foreign work, not a base that moved.
-    let code = if message.contains("differs from the exact promoted candidate") {
-        CookDeliveryBlockerCode::ForeignCommits
-    } else {
-        CookDeliveryBlockerCode::BaseConflict
-    };
-    let paths = recovery
-        .pointer("/promotion/changed_files")
-        .or_else(|| promotion.and_then(|promotion| promotion.get("changed_files")))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect();
-    let next_action = (code == CookDeliveryBlockerCode::BaseConflict
-        && base_movements < BASE_MOVEMENT_BUDGET)
-        .then(|| string_at(recovery, "/continuation"))
-        .flatten();
-    Some(CookDeliveryBlocker {
-        code,
-        message,
-        paths,
-        next_action,
-        cause: None,
-        evidence: "/cook_moving_base_recovery".to_string(),
-    })
 }
 
 fn manual_failure_blocker(failure: &Value) -> CookDeliveryBlocker {
@@ -761,7 +736,7 @@ fn manual_failure_blocker(failure: &Value) -> CookDeliveryBlocker {
         paths: Vec::new(),
         next_action: None,
         cause: string_at(failure, "/error/code"),
-        evidence: "/manual_finalization_failure".to_string(),
+        evidence: "/cook_delivery/artifacts/manual/failure".to_string(),
     }
 }
 
@@ -774,7 +749,7 @@ fn finalization_blocker(finalization: &Value) -> Option<CookDeliveryBlocker> {
         paths: Vec::new(),
         next_action: None,
         cause: string_at(finalization, "/code"),
-        evidence: "/cook_finalization".to_string(),
+        evidence: "/cook_delivery/artifacts/finalization".to_string(),
     })
 }
 

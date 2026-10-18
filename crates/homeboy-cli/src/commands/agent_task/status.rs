@@ -2633,7 +2633,7 @@ fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRecord) {
         finalization_requested,
         // `cook_completion` resolves this receipt from the selected candidate
         // whenever selection exists. This fallback only serves pre-index reports.
-        agent_task_service_direct::persisted_finalization_receipt(&record.metadata),
+        agent_task_service_direct::recorded_finalization_receipt(&record.metadata),
         Some(&record.run_id),
     ) {
         let mut completion = serde_json::to_value(completion).expect("completion serializes");
@@ -5151,8 +5151,6 @@ fn enforce_compact_status_budget(mut value: Value) -> Value {
         "failure_reasons",
         "execution_states",
         "candidate_adoption",
-        "cook_finalization",
-        "latest_promotion",
         "failure_context",
         "finalization",
         "selected_candidate",

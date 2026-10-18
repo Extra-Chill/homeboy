@@ -986,7 +986,7 @@ fn inherit_promotion_gates(
         || promotion.target.worktree != promotion.to_worktree
     {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion",
+            "cook_delivery.artifacts.promotion",
             "green promotion reuse requires a current receipt bound to one exact target worktree",
             None,
             None,
@@ -994,7 +994,7 @@ fn inherit_promotion_gates(
     }
     let verified_base = promotion.verified_base.clone().ok_or_else(|| {
         Error::validation_invalid_argument(
-            "latest_promotion.verified_base",
+            "cook_delivery.artifacts.promotion.verified_base",
             "green promotion reuse requires the immutable base captured before its gates ran",
             None,
             None,
@@ -1014,7 +1014,7 @@ fn inherit_promotion_gates(
         || promotion.gate_outcome().gate_results != promotion.gate_results
     {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.gate_results",
+            "cook_delivery.artifacts.promotion.gate_results",
             "manual finalization can inherit only authoritative green promotion gates; run fresh verification",
             None,
             None,
@@ -1025,7 +1025,7 @@ fn inherit_promotion_gates(
     )
     .map_err(|_| {
         Error::validation_invalid_argument(
-            "latest_promotion.provenance.candidate_checkout",
+            "cook_delivery.artifacts.promotion.provenance.candidate_checkout",
             "green promotion reuse requires an immutable candidate checkout identity",
             None,
             None,
@@ -1034,7 +1034,7 @@ fn inherit_promotion_gates(
     let promoted_candidate: crate::agent_task_promotion::AgentTaskPromotionCandidate =
         serde_json::from_value(promotion.provenance["candidate"].clone()).map_err(|_| {
             Error::validation_invalid_argument(
-                "latest_promotion.provenance.candidate",
+                "cook_delivery.artifacts.promotion.provenance.candidate",
                 "green promotion reuse requires the exact promoted Git candidate fingerprint",
                 None,
                 None,
@@ -1044,7 +1044,7 @@ fn inherit_promotion_gates(
         promoted_candidate
     else {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.provenance.candidate",
+            "cook_delivery.artifacts.promotion.provenance.candidate",
             "green promotion reuse requires the exact promoted Git candidate fingerprint",
             None,
             None,
@@ -1058,7 +1058,7 @@ fn inherit_promotion_gates(
         || candidate.candidate_sha256 != fingerprint.sha256
     {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.provenance.candidate_checkout",
+            "cook_delivery.artifacts.promotion.provenance.candidate_checkout",
             "green promotion gate checkout does not match the exact promoted candidate tree and digest; run fresh verification",
             None,
             None,
@@ -1073,7 +1073,7 @@ fn inherit_promotion_gates(
                 || gate.candidate_checkout.as_ref() != Some(&candidate)
             {
                 return Err(Error::validation_invalid_argument(
-                    "latest_promotion.deterministic_gates",
+                    "cook_delivery.artifacts.promotion.deterministic_gates",
                     "green promotion gate commands and candidate identities do not match their durable receipt; run fresh verification",
                     None,
                     None,
@@ -1089,7 +1089,7 @@ fn inherit_promotion_gates(
         gate_bindings.iter().cloned().collect();
     if gate_command_sha256.len() != gate_bindings.len() {
         return Err(Error::validation_invalid_argument(
-            "latest_promotion.deterministic_gates.id",
+            "cook_delivery.artifacts.promotion.deterministic_gates.id",
             "green promotion reuse requires unique non-empty retained gate ids",
             None,
             None,

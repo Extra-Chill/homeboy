@@ -2101,7 +2101,7 @@ pub(crate) fn canonical_candidate_finalization_with_stores(
         .unwrap_or_else(|| agent_task_lifecycle::exact_record(run_id))
         .ok()?;
     if record.metadata["cook_id"].as_str() == Some(cook_id) {
-        if let Some(finalization) = super::persisted_finalization_receipt(&record.metadata) {
+        if let Some(finalization) = super::recorded_finalization_receipt(&record.metadata) {
             return Some(finalization.clone());
         }
     }
@@ -2158,7 +2158,7 @@ pub(crate) fn canonical_candidate_finalization_with_stores(
         {
             continue;
         }
-        if let Some(finalization) = super::persisted_finalization_receipt(&record.metadata) {
+        if let Some(finalization) = super::recorded_finalization_receipt(&record.metadata) {
             return Some(finalization.clone());
         }
     }
@@ -5634,10 +5634,9 @@ fn run_cook_spine(
             // A dependency rebase re-arms verification on the recovery
             // checkpoint itself; that phase is recovery authority, not a
             // delivery fact.
-            super::persisted_recovery_source_checkpoint(&record.metadata)
-                .and_then(|checkpoint| checkpoint.get("phase"))
-                .and_then(Value::as_str)
-                == Some("verification_pending")
+            super::CookDeliveryArtifacts::from_run_metadata(&record.metadata)
+                .source_checkpoint
+                .is_some_and(|checkpoint| checkpoint["phase"] == "verification_pending")
                 || super::CookDelivery::from_run_metadata(&record.metadata)
                     .is_some_and(|delivery| delivery.awaits_verification())
         });
@@ -7059,7 +7058,7 @@ fn run_cook_spine(
             }));
         };
         validate_cook_candidate_group(&plan)?;
-        if let Some(finalization) = super::persisted_finalization_receipt(&record.metadata)
+        if let Some(finalization) = super::recorded_finalization_receipt(&record.metadata)
             .filter(|finalization| !finalization.is_null())
             .cloned()
         {
@@ -9599,7 +9598,7 @@ fn tracked_promotion_continuation_in_store(
     }
     let path = promotion.target.path.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
-            "latest_promotion.target.path",
+            "cook_delivery.artifacts.promotion.target.path",
             "Cook continuation requires the tracked post-apply promotion destination path",
             Some(options.identity.initial_run_id.clone()),
             None,
@@ -9611,7 +9610,7 @@ fn tracked_promotion_continuation_in_store(
         .filter(|branch| !branch.is_empty())
         .ok_or_else(|| {
             Error::validation_invalid_argument(
-                "latest_promotion.target.branch",
+                "cook_delivery.artifacts.promotion.target.branch",
                 "Cook continuation requires the tracked post-apply promotion destination branch",
                 Some(options.identity.initial_run_id.clone()),
                 None,
@@ -9623,7 +9622,7 @@ fn tracked_promotion_continuation_in_store(
         .cloned()
         .ok_or_else(|| {
             Error::validation_invalid_argument(
-                "latest_promotion.provenance.candidate",
+                "cook_delivery.artifacts.promotion.provenance.candidate",
                 "Cook continuation requires the tracked post-apply candidate fingerprint",
                 Some(options.identity.initial_run_id.clone()),
                 None,
@@ -9631,7 +9630,7 @@ fn tracked_promotion_continuation_in_store(
         })?;
     let candidate = serde_json::from_value(candidate).map_err(|_| {
         Error::validation_invalid_argument(
-            "latest_promotion.provenance.candidate",
+            "cook_delivery.artifacts.promotion.provenance.candidate",
             "Cook continuation tracked candidate fingerprint is invalid",
             Some(options.identity.initial_run_id.clone()),
             None,
@@ -9972,7 +9971,7 @@ mod cook_deadline_tests {
 
     #[test]
     fn dead_owner_does_not_block_persisted_continuation_states() {
-        let record: agent_task_lifecycle::AgentTaskRunRecord =
+        let mut record: agent_task_lifecycle::AgentTaskRunRecord =
             serde_json::from_value(serde_json::json!({
                 "schema": "homeboy/agent-task-run/v1",
                 "run_id": "run-dead-owner",
@@ -9980,12 +9979,14 @@ mod cook_deadline_tests {
                 "state": "candidate_recoverable",
                 "submitted_at": "2026-01-01T00:00:00Z",
                 "plan_path": "/plan",
-                "metadata": {
-                    "latest_promotion": { "status": "verification_pending" },
-                    "runner_pid": u32::MAX
-                }
+                "metadata": { "runner_pid": u32::MAX }
             }))
             .expect("record");
+        super::super::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/promotion",
+            serde_json::json!({ "status": "verification_pending" }),
+        );
         assert!(live_owner_continuation_denial(&record).is_none());
     }
 

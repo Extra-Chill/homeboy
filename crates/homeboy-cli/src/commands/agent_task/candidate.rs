@@ -1003,14 +1003,19 @@ mod tests {
         );
     }
 
+    /// Run metadata holding a `cook_delivery` record of these artifacts.
+    fn delivery(artifacts: Value) -> Value {
+        homeboy::agents::agent_task_service::cook_delivery_metadata_for_test(artifacts)
+    }
+
     #[test]
     fn candidate_lifecycle_requires_post_apply_evidence_before_target_or_gate_claims() {
         let retained = classify_candidates(&json!({
-            "metadata": { "latest_promotion": {
+            "metadata": delivery(json!({ "promotion": {
                 "status": "verification_pending",
                 "patch_artifact": { "id": "patch" },
                 "target": { "worktree": "fixture@target" }
-            } }
+            } }))
         }));
         assert_eq!(retained.state(), CandidateState::ApplyReady);
         assert!(retained.retained);
@@ -1018,24 +1023,24 @@ mod tests {
         assert!(!retained.verified);
 
         let target_applied = classify_candidates(&json!({
-            "metadata": { "latest_promotion": {
+            "metadata": delivery(json!({ "promotion": {
                 "status": "verification_pending",
                 "patch_artifact": { "id": "patch" },
                 "target": { "worktree": "fixture@target" },
                 "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
-            } }
+            } }))
         }));
         assert!(target_applied.retained);
         assert!(target_applied.target_applied);
         assert!(!target_applied.verified);
 
         let verified = classify_candidates(&json!({
-            "metadata": { "latest_promotion": {
+            "metadata": delivery(json!({ "promotion": {
                 "status": "applied",
                 "patch_artifact": { "id": "patch" },
                 "target": { "worktree": "fixture@target" },
                 "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
-            } }
+            } }))
         }));
         assert!(verified.target_applied);
         assert!(verified.verified);
@@ -1171,16 +1176,16 @@ mod tests {
     #[test]
     fn review_envelope_reads_terminal_facts_from_its_record() {
         let retained = classify_candidates(&json!({
-            "record": { "metadata": { "latest_promotion": {
+            "record": { "metadata": delivery(json!({ "promotion": {
                 "status": "applied", "patch_artifact": { "id": "patch" }
-            }}}
+            }})) }
         }));
         assert_eq!(retained.state(), CandidateState::ApplyReady);
 
         let finalized = classify_candidates(&json!({
-            "record": { "metadata": { "cook_finalization": {
+            "record": { "metadata": delivery(json!({ "finalization": {
                 "status": "review_ready", "pr_url": "https://example.test/pull/1"
-            }}}
+            }})) }
         }));
         assert_eq!(finalized.state(), CandidateState::Finalized);
 
@@ -1197,16 +1202,16 @@ mod tests {
         // A receipt that names its PR only by number publishes it, as the
         // Cook delivery read model decides (#16049).
         let by_number = classify_candidates(&json!({
-            "record": { "metadata": { "cook_finalization": {
+            "record": { "metadata": delivery(json!({ "finalization": {
                 "status": "review_ready", "pr_number": 7
-            }}}
+            }})) }
         }));
         assert_eq!(by_number.state(), CandidateState::Finalized);
 
         let refused = classify_candidates(&json!({
-            "record": { "metadata": { "cook_finalization": {
+            "record": { "metadata": delivery(json!({ "finalization": {
                 "status": "failed", "pr_url": "https://example.test/pull/1"
-            }}}
+            }})) }
         }));
         assert_ne!(refused.state(), CandidateState::Finalized);
     }

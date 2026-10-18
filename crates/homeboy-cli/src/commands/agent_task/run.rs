@@ -4702,7 +4702,7 @@ where
         } else {
             let claim = recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?;
             if claim.is_none()
-                && agent_task_service_direct::persisted_promotion_report(&record.metadata)
+                && agent_task_service_direct::recorded_promotion_report(&record.metadata)
                     .is_some_and(Value::is_object)
             {
                 // A direct operator continuation must remain admissible even
@@ -4922,7 +4922,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             Ok(observation) => {
                 let record = &observation.0;
                 candidate_fingerprint =
-                    agent_task_service_direct::persisted_promotion_report(&record.metadata)
+                    agent_task_service_direct::recorded_promotion_report(&record.metadata)
                         .and_then(|promotion| promotion.pointer("/provenance/candidate"))
                         .cloned()
                         .unwrap_or(Value::Null);
@@ -4968,7 +4968,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         return Ok((report, 1));
     }
     if let Some(finalization) =
-        agent_task_service_direct::persisted_finalization_receipt(&record.metadata)
+        agent_task_service_direct::recorded_finalization_receipt(&record.metadata)
             .filter(|finalization| !finalization.is_null())
             .filter(|_| {
                 matches!(
@@ -5291,7 +5291,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         }
     }
     if let Some(finalization) =
-        agent_task_service_direct::persisted_finalization_receipt(&record.metadata)
+        agent_task_service_direct::recorded_finalization_receipt(&record.metadata)
             .filter(|finalization| !finalization.is_null())
     {
         phases.push(serde_json::json!({

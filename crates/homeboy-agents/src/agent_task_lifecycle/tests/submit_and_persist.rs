@@ -1661,7 +1661,7 @@ fn cook_write_siblings_persist_into_the_injected_store_and_not_a_second_root() {
         "verification_pending"
     );
     assert_eq!(
-        persisted.metadata["cook_force_with_lease_receipt"]["remote_sha"],
+        persisted.metadata["cook_delivery"]["artifacts"]["force_with_lease"]["remote_sha"],
         "abc123"
     );
     assert_eq!(
@@ -1685,7 +1685,7 @@ fn cook_write_siblings_persist_into_the_injected_store_and_not_a_second_root() {
         "cook_resource_timeline",
         "cook_supervision_events",
         "cook_recovery_checkpoint",
-        "cook_force_with_lease_receipt",
+        "cook_delivery",
     ] {
         assert!(
             untouched.metadata.get(key).is_none(),
@@ -2528,7 +2528,7 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
     )
     .expect("re-arm the finalization in the injected store");
     assert_eq!(
-        invalidated.metadata["latest_promotion"]["status"],
+        invalidated.metadata["cook_delivery"]["artifacts"]["promotion"]["status"],
         "verification_pending"
     );
     assert!(
@@ -2565,13 +2565,14 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
     assert_eq!(acceptance.actor.as_deref(), Some("rooted-reviewer"));
     assert_eq!(acceptance.signature.as_deref(), Some("rooted-signature"));
     assert!(persisted.metadata.get("cook_controller_failure").is_none());
-    assert!(persisted.metadata.get("cook_finalization").is_none());
+    assert!(persisted.metadata["cook_delivery"]["artifacts"]["finalization"].is_null());
     assert_eq!(
-        persisted.metadata["cook_recovery_source_checkpoint"]["dependency_revision"],
+        persisted.metadata["cook_delivery"]["artifacts"]["source_checkpoint"]
+            ["dependency_revision"],
         "dependency-sha"
     );
     assert_eq!(
-        persisted.metadata["latest_promotion"]["status"],
+        persisted.metadata["cook_delivery"]["artifacts"]["promotion"]["status"],
         "verification_pending"
     );
     assert_eq!(
@@ -2593,13 +2594,16 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
         "execution_placement_normalized",
         "execution_placement_outcome",
         "artifact_projection",
-        "cook_recovery_source_checkpoint",
     ] {
         assert!(
             untouched.metadata.get(key).is_none(),
             "second root must not observe `{key}` written through the injected store"
         );
     }
+    assert!(
+        untouched.metadata["cook_delivery"]["artifacts"]["source_checkpoint"].is_null(),
+        "second root must not observe the source checkpoint written through the injected store"
+    );
     assert!(
         untouched.metadata["provider_executions"][0]
             .get("owner_pid")
@@ -2617,10 +2621,13 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
         "clearing the injected store's failure must not clear the second root's"
     );
     assert_eq!(
-        untouched.metadata["cook_finalization"]["status"],
+        untouched.metadata["cook_delivery"]["artifacts"]["finalization"]["status"],
         "published"
     );
-    assert_eq!(untouched.metadata["latest_promotion"]["status"], "applied");
+    assert_eq!(
+        untouched.metadata["cook_delivery"]["artifacts"]["promotion"]["status"],
+        "applied"
+    );
     assert_eq!(
         untouched
             .acceptance
@@ -2664,10 +2671,7 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
     )
     .expect("the second root's finalization is still invalidatable");
     assert!(
-        second_invalidated
-            .metadata
-            .get("cook_finalization")
-            .is_none(),
+        second_invalidated.metadata["cook_delivery"]["artifacts"]["finalization"].is_null(),
         "the second root still had a finalization of its own to re-arm"
     );
 
