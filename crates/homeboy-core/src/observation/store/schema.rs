@@ -17,7 +17,7 @@ use crate::{paths, Result};
 /// Changing the schema means editing the baseline, bumping this version, and
 /// renaming [`paths::OBSERVATION_DB_FILENAME`] to match, so the new schema gets
 /// its own store file while binaries on the old schema keep theirs.
-pub(crate) const SCHEMA_VERSION: i64 = 31;
+pub(crate) const SCHEMA_VERSION: i64 = 32;
 
 /// The full observation-store schema at [`SCHEMA_VERSION`].
 ///
@@ -291,6 +291,8 @@ CREATE INDEX idx_control_plane_resource_aliases_target
 
 -- A domain's pending work and its lifecycle record are committed together.
 -- The daemon drains this indexed outbox into its separate durable job store.
+-- A failed delivery keeps custody with its own durable backoff so it never
+-- blocks newer intents.
 CREATE TABLE control_plane_work_intents (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -300,6 +302,9 @@ CREATE TABLE control_plane_work_intents (
     state TEXT NOT NULL DEFAULT 'pending',
     receipt_json TEXT,
     created_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_ms INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
     CHECK(state IN ('pending', 'submitted')),
     CHECK(version > 0)
@@ -865,10 +870,10 @@ mod tests {
     /// baseline_schema_matches_the_pinned_fixture` after an intended change.
     const SCHEMA_FIXTURE_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/observation-schema/v31-baseline-schema.json"
+        "/tests/fixtures/observation-schema/v32-baseline-schema.json"
     );
     const MIGRATED_SCHEMA_FIXTURE: &str =
-        include_str!("../../../tests/fixtures/observation-schema/v31-baseline-schema.json");
+        include_str!("../../../tests/fixtures/observation-schema/v32-baseline-schema.json");
 
     fn migrated_schema_fixture() -> serde_json::Value {
         serde_json::from_str(MIGRATED_SCHEMA_FIXTURE).expect("schema fixture")

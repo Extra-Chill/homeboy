@@ -17,7 +17,7 @@ pub const CONTROLLER_SCRATCH_STORE: &str = "controller-scratch";
 /// serving controllers that upgrade at different times — each with its own
 /// store, instead of recreating a store the other refuses to open (#15944).
 /// The observation schema pins this name to its `SCHEMA_VERSION`.
-pub const OBSERVATION_DB_FILENAME: &str = "homeboy-v31.sqlite";
+pub const OBSERVATION_DB_FILENAME: &str = "homeboy-v32.sqlite";
 
 /// Immutable filesystem roots resolved at an application boundary.
 ///

@@ -219,7 +219,7 @@ caller-owned `submission_key`; a body without one is refused with a
 not the sandbox-agent contract.
 
 The daemon durable job store is the observation store
-(`homeboy-v31.sqlite` under the Homeboy data directory). The ledger keeps
+(`homeboy-v32.sqlite` under the Homeboy data directory). The ledger keeps
 bounded per-job events and supports restart recovery for queued staged jobs. It
 is operational state, not a durable audit archive; important evidence should
 still be persisted as Homeboy observations or artifacts.

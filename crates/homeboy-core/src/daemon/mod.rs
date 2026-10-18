@@ -2137,8 +2137,8 @@ fn orchestration_tick_loop(
 
 /// Outbox delivery is a progress path: a committed work intent is the only
 /// thing that starts its job, so delivery polls at a short cadence and drains
-/// every pending intent per pass. A failed delivery keeps custody and is
-/// reported; the next pass retries it.
+/// every due intent per pass. A failed delivery keeps custody with its own
+/// durable backoff and is reported; the pass continues with newer intents.
 ///
 /// Step terminal delivery is the inbound half of the same progress path: its
 /// consumer is what commits a crashed step's recovery successor. It therefore
@@ -2151,21 +2151,21 @@ fn spawn_work_intent_deliverer(
     shutdown: mpsc::Receiver<()>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || loop {
-        isolated_tick(|| loop {
+        isolated_tick(|| {
             #[cfg(feature = "test-support")]
             if let Err(error) =
                 crate::test_support::wait_at_file_gate("HOMEBOY_TEST_WORK_INTENT_DELIVERY_GATE")
             {
                 eprintln!("homeboy daemon: {error}");
-                break;
+                return;
             }
             match orchestration::drain_work_intents() {
-                Ok(receipt) if receipt["scheduled"] == true => continue,
-                Ok(_) => break,
-                Err(error) => {
-                    eprintln!("homeboy daemon: work intent delivery failed: {error}");
-                    break;
+                Ok(pass) => {
+                    for deferral in pass["deferred"].as_array().into_iter().flatten() {
+                        eprintln!("homeboy daemon: work intent delivery deferred: {deferral}");
+                    }
                 }
+                Err(error) => eprintln!("homeboy daemon: work intent delivery failed: {error}"),
             }
         });
         // Consumer failures keep custody with their own durable backoff.
