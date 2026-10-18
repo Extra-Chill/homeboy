@@ -28,8 +28,8 @@ use homeboy::core::Error;
 use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
-    AgentTaskCookArgs, AgentTaskProviderEvidenceInput, CookContinueArgs, PlacementUpdateArgs,
-    PromotionProviderArgs, ResumeArgs, RetryArgs, RunArgs, RunPlanArgs, ValidatePlanArgs,
+    AgentTaskCookArgs, AgentTaskProviderEvidenceInput, PlacementUpdateArgs, PromotionProviderArgs,
+    ResumeArgs, RetryArgs, RunArgs, RunPlanArgs, ValidatePlanArgs,
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
 use super::gate_contract::{
@@ -4414,6 +4414,31 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
     }
 }
 
+/// One Cook continuation request. `agent-task recover` builds it from the
+/// recovery step it performs (and any explicit operator overrides); it is no
+/// longer a public command of its own.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CookContinueArgs {
+    /// Durable Cook ID or one of its provider attempt IDs.
+    pub cook_or_attempt_id: String,
+    /// Rearm one failed terminal continuation before consuming it.
+    pub rearm: bool,
+    /// Patch artifact to promote when the durable attempt produced more than
+    /// one patch candidate.
+    pub artifact_id: Option<String>,
+    /// Explicit provider timeout increase for a new retry attempt.
+    pub timeout_ms: Option<u64>,
+    /// Explicit review-form deadline increase for a new retry attempt.
+    pub review_form_timeout_ms: Option<u64>,
+    /// Provider route for a rearmed retry.
+    pub backend: Option<String>,
+    pub selector: Option<String>,
+    pub model: Option<String>,
+    pub acknowledge_model_override: bool,
+    /// Include the complete Cook report rather than the compact lifecycle view.
+    pub full: bool,
+}
+
 /// Resume a Cook from its immutable recipe rather than asking the operator to
 /// replay prompt, provider, gate, workspace, or disclosure arguments.
 pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
@@ -4552,7 +4577,7 @@ where
         if !args.rearm || !record.state.is_terminal() {
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "provider-route",
-                "Cook provider-route overrides require --rearm on a terminal attempt",
+                "Cook provider-route overrides require a terminal attempt to rearm",
                 Some(run_id),
                 None,
             ));
@@ -4631,7 +4656,7 @@ where
         if !args.rearm {
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "rearm",
-                "a retryable pre-execution Cook failure requires --rearm to reserve a durable successor attempt",
+                "a retryable pre-execution Cook failure must be rearmed to reserve a durable successor attempt; run `agent-task recover`",
                 Some(run_id),
                 None,
             ));
@@ -4853,7 +4878,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         None,
                         None,
                         args.artifact_id.as_deref(),
-                        args.rearm,
                         Value::Null,
                         phases,
                         "recipe",
@@ -4878,7 +4902,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         selected_run_id,
                         None,
                         args.artifact_id.as_deref(),
-                        args.rearm,
                         Value::Null,
                         phases,
                         "selection",
@@ -4912,7 +4935,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         selected_run_id,
                         None,
                         args.artifact_id.as_deref(),
-                        args.rearm,
                         candidate_fingerprint,
                         phases,
                         "lifecycle",
@@ -4923,10 +4945,9 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             }
         };
     let continuation_command = || {
-        agent_task_service_direct::cook_continue_command_for_record(
+        agent_task_service_direct::cook_recover_command_for_record(
             &record,
             &run_id,
-            args.rearm,
             args.artifact_id.as_deref(),
         )
     };
@@ -4937,7 +4958,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             selected_run_id,
             None,
             args.artifact_id.as_deref(),
-            args.rearm,
             candidate_fingerprint,
             phases,
             "continuation_admission",
@@ -4976,7 +4996,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         selected_run_id,
                         Some(continuation_command()),
                         args.artifact_id.as_deref(),
-                        args.rearm,
                         candidate_fingerprint,
                         phases,
                         "continuation_claim",
@@ -4996,7 +5015,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             }));
             return Ok((
                 serde_json::json!({
-                    "schema": "homeboy/agent-task-cook-continue-preflight/v1",
+                    "schema": "homeboy/agent-task-cook-continuation-preflight/v1",
                     "admitted": false,
                     "pre_dispatch_admitted": false,
                     "status": "continuation_not_scheduled",
@@ -5042,7 +5061,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         selected_run_id,
                         Some(continuation_command()),
                         args.artifact_id.as_deref(),
-                        args.rearm,
                         candidate_fingerprint,
                         phases,
                         "transport",
@@ -5069,7 +5087,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     selected_run_id,
                     Some(continuation_command()),
                     args.artifact_id.as_deref(),
-                    args.rearm,
                     candidate_fingerprint,
                     phases,
                     "recipe",
@@ -5101,7 +5118,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 selected_run_id,
                 Some(continuation_command()),
                 args.artifact_id.as_deref(),
-                args.rearm,
                 candidate_fingerprint,
                 phases,
                 "lifecycle",
@@ -5135,7 +5151,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         selected_run_id,
                         Some(continuation_command()),
                         args.artifact_id.as_deref(),
-                        args.rearm,
                         candidate_fingerprint,
                         phases,
                         "continuation_claim",
@@ -5159,7 +5174,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     selected_run_id,
                     Some(continuation_command()),
                     args.artifact_id.as_deref(),
-                    args.rearm,
                     candidate_fingerprint,
                     phases,
                     "transport",
@@ -5190,7 +5204,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     selected_run_id,
                     Some(continuation_command()),
                     args.artifact_id.as_deref(),
-                    args.rearm,
                     candidate_fingerprint,
                     phases,
                     "transport",
@@ -5218,7 +5231,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         selected_run_id,
                         Some(continuation_command()),
                         args.artifact_id.as_deref(),
-                        args.rearm,
                         candidate_fingerprint,
                         phases,
                         "candidate_admission",
@@ -5251,7 +5263,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     selected_run_id,
                     Some(continuation_command()),
                     args.artifact_id.as_deref(),
-                    args.rearm,
                     candidate_fingerprint,
                     phases,
                     "recipe",
@@ -5270,7 +5281,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     selected_run_id,
                     Some(continuation_command()),
                     args.artifact_id.as_deref(),
-                    args.rearm,
                     candidate_fingerprint,
                     phases,
                     "transport",
@@ -5313,7 +5323,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         selected_run_id,
                         Some(continuation_command()),
                         args.artifact_id.as_deref(),
-                        args.rearm,
                         candidate_fingerprint,
                         phases,
                         "continuation_admission",
@@ -5355,7 +5364,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                             selected_run_id,
                             Some(continuation_command()),
                             args.artifact_id.as_deref(),
-                            args.rearm,
                             candidate_fingerprint,
                             phases,
                             "candidate_admission",
@@ -5389,7 +5397,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
     let execution_required = !execution_only_checks.is_empty();
     Ok((
         serde_json::json!({
-            "schema": "homeboy/agent-task-cook-continue-preflight/v1",
+            "schema": "homeboy/agent-task-cook-continuation-preflight/v1",
             "admitted": true,
             "pre_dispatch_admitted": true,
             "status": "admitted",
@@ -5437,7 +5445,7 @@ fn cook_finalization_receipt_preflight_report(
     let replay_succeeded = matches!(status, "review_ready" | "draft_published");
     (
         serde_json::json!({
-            "schema": "homeboy/agent-task-cook-continue-preflight/v1",
+            "schema": "homeboy/agent-task-cook-continuation-preflight/v1",
             "admitted": replay_succeeded,
             "pre_dispatch_admitted": replay_succeeded,
             "status": status,
@@ -5475,7 +5483,6 @@ fn cook_continuation_preflight_report(
     selected_run_id: Option<String>,
     continuation_command: Option<String>,
     artifact_id: Option<&str>,
-    rearm: bool,
     candidate_fingerprint: Value,
     mut phases: Vec<Value>,
     phase: &str,
@@ -5485,7 +5492,7 @@ fn cook_continuation_preflight_report(
     let run_id = selected_run_id.clone();
     let continuation_command = continuation_command.or_else(|| {
         run_id.as_deref().map(|run_id| {
-            agent_task_service_direct::cook_continue_command(None, run_id, rearm, artifact_id)
+            agent_task_service_direct::cook_recover_command(None, run_id, artifact_id)
         })
     });
     let evidence_refs = run_id
@@ -5498,7 +5505,7 @@ fn cook_continuation_preflight_report(
         })
         .unwrap_or_default();
     serde_json::json!({
-        "schema": "homeboy/agent-task-cook-continue-preflight/v1",
+        "schema": "homeboy/agent-task-cook-continuation-preflight/v1",
         "admitted": false,
         "pre_dispatch_admitted": false,
         "status": "blocked",
@@ -5533,7 +5540,7 @@ fn cook_terminal_continuation_status(
             "continuation_pending",
             serde_json::json!({
                 "action": "await_continuation_claim",
-                "command": agent_task_service_direct::cook_continue_command(None, run_id, false, None),
+                "command": agent_task_service_direct::cook_recover_command(None, run_id, None),
             }),
         ),
         agent_task_service::CookContinuationState::Claimed => (
@@ -5547,7 +5554,7 @@ fn cook_terminal_continuation_status(
             "continuation_recovery_required",
             serde_json::json!({
                 "action": "rearm_failed_continuation",
-                "command": agent_task_service_direct::cook_continue_command(None, run_id, true, None),
+                "command": agent_task_service_direct::cook_recover_command(None, run_id, None),
             }),
         ),
         agent_task_service::CookContinuationState::Completed => (
@@ -5693,8 +5700,8 @@ fn cook_report_with_continuation(mut value: Value) -> Value {
         );
         report.insert(
             "continuation_command".to_string(),
-            serde_json::json!(agent_task_service_direct::cook_continue_command(
-                None, &run_id, false, None
+            serde_json::json!(agent_task_service_direct::cook_recover_command(
+                None, &run_id, None
             )),
         );
     }
@@ -11182,7 +11189,7 @@ fn reconstruct_local_cook_attempt_dispatcher(
 
 /// Reserve a retry successor through the control-plane Retry action: the one
 /// legal-action entry point with idempotent acknowledgement, eligibility and
-/// audit. `agent-task retry` and `cook-continue` both reserve through here, so
+/// audit. `agent-task retry` and `agent-task recover` both reserve through here, so
 /// a Cook continuation is no longer a side door around the action outbox.
 fn reserve_retry_through_action(
     run_id: &str,
@@ -11254,21 +11261,17 @@ where
         &args.run_id,
         reconstruct_dispatcher,
     )?;
-    let route_override = cook_provider_route_override(
-        args.backend.clone(),
-        args.selector.clone(),
-        args.model.clone(),
-        args.acknowledge_model_override,
-    );
     let idempotency_key = args
         .idempotency_key
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // A Cook's next-attempt provider route is an explicit `recover` override,
+    // reserved through the continuation path; plain retry keeps its route.
     let (acknowledgement, retry) = reserve_retry_through_action(
         &args.run_id,
         args.new_run_id.clone(),
         args.force,
-        &route_override,
+        &Default::default(),
         None,
         idempotency_key,
     )?;
@@ -11348,6 +11351,7 @@ pub(super) fn resolve_ai_tool_disclosure(
 
 #[cfg(test)]
 mod tests {
+    use super::CookContinueArgs;
     use super::{
         apply_preview_worktree_capacity, component_cook_gates, component_lint_gate,
         cook_continuation_status, cook_preview_result, cook_provider_timeout_disclosure,
@@ -11357,7 +11361,6 @@ mod tests {
         project_preview_dirty_admission, ComponentCookGateInputs, PreviewReplayArgv,
     };
     use crate::cli_surface::{Cli, Commands};
-    use crate::commands::agent_task::args::CookContinueArgs;
     use crate::commands::agent_task::AgentTaskCommand;
     use clap::Parser;
 
@@ -11996,7 +11999,7 @@ mod tests {
         );
         assert_eq!(
             report["continuation_command"],
-            "homeboy agent-task cook-continue cook-1-attempt-1"
+            "homeboy agent-task recover cook-1-attempt-1"
         );
     }
 
@@ -12105,22 +12108,13 @@ mod tests {
     }
 
     #[test]
-    fn cook_continue_preflight_reports_a_read_only_rejection_without_creating_a_run() {
+    fn continuation_preflight_reports_a_read_only_rejection_without_creating_a_run() {
         crate::test_support::with_isolated_home(|_| {
             let before = homeboy::agents::agent_tasks::lifecycle::list_records()
                 .expect("read initial lifecycle records");
             let (report, exit_code) = preflight_continue_cook(CookContinueArgs {
                 cook_or_attempt_id: "missing-cook".to_string(),
-                preflight: true,
-                rearm: false,
-                artifact_id: None,
-                timeout_ms: None,
-                review_form_timeout_ms: None,
-                backend: None,
-                selector: None,
-                model: None,
-                acknowledge_model_override: false,
-                full: false,
+                ..Default::default()
             })
             .expect("preflight returns a machine-readable rejection");
             let after = homeboy::agents::agent_tasks::lifecycle::list_records()

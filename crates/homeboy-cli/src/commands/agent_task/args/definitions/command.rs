@@ -84,10 +84,6 @@ pub enum AgentTaskCommand {
         after_help = "Quick start:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'homeboy review test homeboy'\n\nBackend selection: pass --backend explicitly, configure agent_task.default_backend, or use --preview to see the ready backend routes. Preview adds --backend to its replay command only when exactly one ready route is eligible; multiple ready routes require an explicit choice.\n\nNo default configured (agent_task.default_backend unset, e.g. a fresh or reset agent_task: {}): run `homeboy agent-task providers --set-default` to live-probe every declared backend and write a working default_backend/rotation from what actually authenticates here.\n\nInspect inferred inputs without side effects:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'homeboy review test homeboy' --preview\n\nUse --help-full for the complete advanced option reference."
     )]
     Cook(Box<AgentTaskCookArgs>),
-    /// Continue a detached Cook from its durable Cook ID or provider attempt ID.
-    /// The persisted recipe supplies the original prompt, transport, gates,
-    /// worktree, and disclosure policy.
-    CookContinue(CookContinueArgs),
     /// Attach candidate-bound review findings to an existing Cook.
     CookFeedback(CookFeedbackArgs),
     /// Run an `AgentTaskPlan` through extension-declared executor providers.
@@ -163,6 +159,9 @@ pub enum AgentTaskCommand {
     /// Change an unexecuted queued Cook's placement after explicit confirmation.
     PlacementUpdate(PlacementUpdateArgs),
     /// Submit a fresh durable run from an existing run's plan.
+    ///
+    /// A stopped Cook is recovered with `agent-task recover`, which also owns
+    /// the Cook's next-attempt provider-route overrides.
     Retry(RetryArgs),
     /// Perform the one correct next recovery step for a stopped Cook.
     ///
@@ -275,56 +274,6 @@ pub struct AcceptArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct CookContinueArgs {
-    /// Durable Cook ID or one of its provider attempt IDs.
-    pub cook_or_attempt_id: String,
-    /// Validate continuation admission without dispatching a provider or mutating lifecycle state.
-    #[arg(long)]
-    pub preflight: bool,
-    /// Explicitly rearm one failed terminal continuation before consuming it.
-    #[arg(long)]
-    pub rearm: bool,
-    /// Select the patch artifact to promote when the durable attempt produced
-    /// more than one patch candidate. This resumes controller-side promotion
-    /// without dispatching another provider execution.
-    #[arg(long = "artifact-id", value_name = "ID")]
-    pub artifact_id: Option<String>,
-    /// Explicitly increase the provider timeout for a new retry attempt. The
-    /// override and its operator authority are retained in the Cook recipe.
-    #[arg(
-        long = "timeout-ms",
-        value_name = "MS",
-        conflicts_with_all = ["preflight", "rearm", "artifact_id"]
-    )]
-    pub timeout_ms: Option<u64>,
-    /// Explicitly increase the optional review-form deadline for a new retry
-    /// attempt. Distinct from `--timeout-ms`; capped at 600000ms.
-    #[arg(
-        long = "review-form-timeout-ms",
-        value_name = "MS",
-        conflicts_with_all = ["preflight", "rearm", "artifact_id", "timeout_ms"]
-    )]
-    pub review_form_timeout_ms: Option<u64>,
-    /// Backend for a rearmed Cook retry. The original Cook recipe remains
-    /// authoritative for prompt, gates, worktree, notification, and disclosure.
-    #[arg(long, value_name = "BACKEND", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
-    pub backend: Option<String>,
-    /// Provider-specific selector for a rearmed Cook retry.
-    #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
-    pub selector: Option<String>,
-    /// Model for a rearmed Cook retry. Confirm the pinned route with
-    /// --acknowledge-model-override.
-    #[arg(long, value_name = "MODEL", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
-    pub model: Option<String>,
-    /// Confirm an explicit model override that pins this retry.
-    #[arg(long, requires = "model", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
-    pub acknowledge_model_override: bool,
-    /// Include the complete Cook report rather than the compact lifecycle view.
-    #[arg(long)]
-    pub full: bool,
-}
-
-#[derive(Args, Debug)]
 pub struct CookFeedbackArgs {
     /// Durable Cook ID receiving the review.
     pub cook_id: String,
@@ -355,7 +304,7 @@ pub struct CookFeedbackArgs {
 }
 
 #[cfg(test)]
-mod cook_continue_tests {
+mod command_parse_tests {
     use clap::Parser;
 
     use crate::{
@@ -389,80 +338,6 @@ mod cook_continue_tests {
             .to_string();
         assert!(!help.contains("execution-step"));
         assert!(Cli::try_parse_from(["homeboy", "agent-task", "execution-step"]).is_err());
-    }
-
-    #[test]
-    fn continuation_preflight_parses_the_public_rearm_and_artifact_path() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "cook-continue",
-            "run-a",
-            "--preflight",
-            "--rearm",
-            "--artifact-id",
-            "patch-a",
-            "--full",
-        ])
-        .expect("continuation rearm preflight parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::CookContinue(args) = agent_task.command else {
-            panic!("expected cook-continue command");
-        };
-        assert!(args.preflight);
-        assert!(args.rearm);
-        assert_eq!(args.artifact_id.as_deref(), Some("patch-a"));
-        assert!(args.full);
-
-        for rejected in [
-            vec!["--preflight", "--timeout-ms", "1000"],
-            vec!["--rearm", "--timeout-ms", "1000"],
-            vec!["--artifact-id", "patch-a", "--timeout-ms", "1000"],
-        ] {
-            let mut argv = vec!["homeboy", "agent-task", "cook-continue", "run-a"];
-            argv.extend(rejected);
-            assert!(Cli::try_parse_from(argv).is_err());
-        }
-    }
-
-    #[test]
-    fn continuation_route_override_requires_rearm_and_preserves_rotation_semantics() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "cook-continue",
-            "run-a",
-            "--rearm",
-            "--backend",
-            "replacement",
-            "--selector",
-            "replacement-selector",
-            "--model",
-            "replacement-model",
-            "--acknowledge-model-override",
-        ])
-        .expect("route override parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::CookContinue(args) = agent_task.command else {
-            panic!("expected cook-continue command");
-        };
-        assert_eq!(args.backend.as_deref(), Some("replacement"));
-        assert_eq!(args.selector.as_deref(), Some("replacement-selector"));
-        assert_eq!(args.model.as_deref(), Some("replacement-model"));
-        assert!(args.acknowledge_model_override);
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "cook-continue",
-            "run-a",
-            "--model",
-            "replacement-model",
-        ])
-        .is_err());
     }
 
     #[test]

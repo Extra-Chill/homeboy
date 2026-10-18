@@ -1089,19 +1089,21 @@ mod tests {
     }
 
     #[test]
-    fn generated_cook_continuation_commands_parse_against_the_live_cli() {
-        use homeboy_agents::agent_task_service::{cook_continue_command, cook_recovery_command};
+    fn generated_cook_recovery_commands_parse_against_the_live_cli() {
+        use homeboy_agents::agent_task_service::{cook_recover_command, cook_recovery_command};
 
         for command in [
-            cook_continue_command(None, "cook-1", false, None),
-            cook_continue_command(None, "cook-1-attempt-2", false, None),
-            cook_continue_command(None, "cook-1-attempt-2", true, None),
-            cook_continue_command(None, "cook-1-attempt-2", true, Some("selected patch")),
-            cook_continue_command(
+            cook_recover_command(None, "cook-1", None),
+            cook_recover_command(None, "cook-1-attempt-2", None),
+            cook_recover_command(None, "cook-1-attempt-2", Some("selected patch")),
+            cook_recover_command(
                 Some("/tmp/controller runtimes/homeboy"),
                 "cook-1-attempt-2",
-                false,
                 None,
+            ),
+            cook_recovery_command(
+                "cook-1-attempt-2",
+                &["recover", "cook-1-attempt-2", "--timeout-ms", "2400000"],
             ),
             cook_recovery_command(
                 "cook-1-attempt-2",

@@ -159,9 +159,7 @@ fn cancelled_cook_cannot_render_as_success_without_failure_recovery_actions() {
     assert!(!payload
         .actions
         .iter()
-        .any(|action| action.command.contains("resume")
-            || action.command.contains("cook-continue")
-            || action.command.contains("recover")));
+        .any(|action| action.command.contains("resume") || action.command.contains("recover")));
 }
 
 #[test]
@@ -750,7 +748,7 @@ fn resumed_terminal_delivery_uses_the_durable_route_and_stays_deduplicated() {
 #[test]
 fn a_cook_resumed_in_a_new_process_recovers_its_route_from_the_durable_record() {
     // #11115: `notification_route::current()` is a thread-local, so a
-    // process that did not launch the cook (`cook-continue`, controller
+    // process that did not launch the cook (`agent-task recover`, controller
     // adoption, claimed continuation) has none. Without the durable
     // fallback the whole arc degrades: Started/Progress are dropped and the
     // terminal event lands on the ambient default transport instead of the

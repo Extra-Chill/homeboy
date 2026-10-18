@@ -2173,7 +2173,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_recoverable_runner_status_recommends_cook_continue() {
+    fn candidate_recoverable_runner_status_recommends_recover() {
         let payload = json!({
             "schema": "homeboy/control-plane-run/v1",
             "run": "attempt-1",
@@ -2182,7 +2182,7 @@ mod tests {
             "owner": { "id": "runner-7", "kind": "runner" },
             "action_eligibility": { "actions": [{
                 "action": "resume", "availability": "unavailable",
-                "reason": "candidate_recoverable requires cook-continue"
+                "reason": "candidate_recoverable requires agent-task recover"
             }] },
             "artifacts": []
         });

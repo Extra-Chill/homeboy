@@ -580,21 +580,74 @@ pub struct ReplayProviderBoundaryArgs {
     #[arg(long = "task", value_name = "TASK_ID")]
     pub task: Option<String>,
 }
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct RecoverArgs {
     /// Durable Cook ID, Cook attempt ID or batch-child run ID.
     pub id: String,
-    /// Report the step recovery would perform without performing it.
+    /// Report the step recovery would perform without performing it. A
+    /// continuation step also validates continuation admission read-only.
     #[arg(long)]
     pub preflight: bool,
     /// Patch artifact to promote when the step asks to choose among several
     /// distinct patch candidates.
     #[arg(long = "artifact-id", value_name = "ID")]
     pub artifact_id: Option<String>,
+    /// Explicitly increase the provider timeout for a new retry attempt of a
+    /// terminal provider timeout. The override and its operator authority are
+    /// retained in the Cook recipe.
+    #[arg(
+        long = "timeout-ms",
+        value_name = "MS",
+        conflicts_with_all = ["preflight", "artifact_id"]
+    )]
+    pub timeout_ms: Option<u64>,
+    /// Explicitly increase the optional review-form deadline for a new retry
+    /// attempt of a timed-out review form. Distinct from `--timeout-ms`;
+    /// capped at 600000ms.
+    #[arg(
+        long = "review-form-timeout-ms",
+        value_name = "MS",
+        conflicts_with_all = ["preflight", "artifact_id", "timeout_ms"]
+    )]
+    pub review_form_timeout_ms: Option<u64>,
+    /// Backend for a rearmed retry of a terminal attempt. The original Cook
+    /// recipe remains authoritative for prompt, gates, worktree, notification
+    /// and disclosure.
+    #[arg(long, value_name = "BACKEND", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub backend: Option<String>,
+    /// Provider-specific selector for a rearmed retry of a terminal attempt.
+    #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub selector: Option<String>,
+    /// Model for a rearmed retry of a terminal attempt. Confirm the pinned
+    /// route with --acknowledge-model-override.
+    #[arg(long, value_name = "MODEL", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub model: Option<String>,
+    /// Confirm an explicit model override that pins this retry.
+    #[arg(long, requires = "model")]
+    pub acknowledge_model_override: bool,
+    /// Include the complete Cook report rather than the compact lifecycle view.
+    #[arg(long)]
+    pub full: bool,
+}
+
+impl RecoverArgs {
+    /// The explicit operator overrides this invocation supplies.
+    pub fn overrides(&self) -> homeboy::agents::agent_task_service::CookRecoveryOverrides {
+        homeboy::agents::agent_task_service::CookRecoveryOverrides {
+            timeout_ms: self.timeout_ms,
+            review_form_timeout_ms: self.review_form_timeout_ms,
+            backend: self.backend.clone(),
+            selector: self.selector.clone(),
+            model: self.model.clone(),
+            acknowledge_model_override: self.acknowledge_model_override,
+        }
+    }
 }
 #[derive(Args, Debug)]
 pub struct RetryArgs {
-    /// Durable run or Cook ID to retry.
+    /// Durable run ID to retry. A stopped Cook is recovered with
+    /// `agent-task recover <cook-or-attempt-id>`, which also takes explicit
+    /// provider-route overrides for its next attempt.
     pub run_id: String,
     /// Durable ID to assign to the new retry run.
     #[arg(long, value_name = "ID")]
@@ -608,63 +661,33 @@ pub struct RetryArgs {
     /// Stable caller key for safely replaying this retry reservation.
     #[arg(long, value_name = "KEY")]
     pub idempotency_key: Option<String>,
-    /// Backend for the next Cook attempt. This explicit route change is recorded
-    /// with its prior route and operator authority in the Cook lineage.
-    #[arg(long, value_name = "BACKEND")]
-    pub backend: Option<String>,
-    /// Provider-specific selector for the next Cook attempt.
-    #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR")]
-    pub selector: Option<String>,
-    /// Model for the next Cook attempt. Confirm the pinned route with
-    /// --acknowledge-model-override.
-    #[arg(long, value_name = "MODEL")]
-    pub model: Option<String>,
-    /// Confirm an explicit model override that pins this retry.
-    #[arg(long, requires = "model")]
-    pub acknowledge_model_override: bool,
 }
 
 #[cfg(test)]
 mod retry_tests {
-    use clap::{CommandFactory, Parser};
+    use clap::Parser;
 
-    use crate::{
-        cli_surface::{Cli, Commands},
-        commands::agent_task::AgentTaskCommand,
-    };
+    use crate::cli_surface::Cli;
 
+    /// A Cook's next-attempt provider route is an explicit `recover`
+    /// override; `retry` carries no Cook route surface of its own.
     #[test]
-    fn retry_help_and_parser_expose_cook_route_recovery() {
-        let help = Cli::command()
-            .find_subcommand("agent-task")
-            .expect("agent-task command")
-            .find_subcommand("retry")
-            .expect("retry command")
-            .clone()
-            .render_long_help()
-            .to_string();
-        assert!(help.contains("--backend"), "{help}");
-        assert!(help.contains("--acknowledge-model-override"), "{help}");
-        assert!(help.contains("operator authority"), "{help}");
-
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "retry",
-            "cook-a",
-            "--model",
-            "replacement-model",
-            "--acknowledge-model-override",
-        ])
-        .expect("route override parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Retry(args) = agent_task.command else {
-            panic!("expected retry command");
-        };
-        assert_eq!(args.model.as_deref(), Some("replacement-model"));
-        assert!(args.acknowledge_model_override);
+    fn retry_has_no_cook_route_override_surface() {
+        for flag in [
+            vec!["--backend", "replacement"],
+            vec!["--selector", "replacement-selector"],
+            vec!["--provider-id", "replacement-selector"],
+            vec![
+                "--model",
+                "replacement-model",
+                "--acknowledge-model-override",
+            ],
+        ] {
+            let mut argv = vec!["homeboy", "agent-task", "retry", "cook-a"];
+            argv.extend(flag.iter().copied());
+            assert!(Cli::try_parse_from(argv).is_err(), "{flag:?}");
+        }
+        assert!(Cli::try_parse_from(["homeboy", "agent-task", "retry", "run-a", "--run"]).is_ok());
     }
 }
 

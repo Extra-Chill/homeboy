@@ -13,7 +13,7 @@
 //! per-resolved-path `resource_behavior`, alongside the Lab help-visibility
 //! table (converted) and `command_capability` (see that module's note).
 //!
-//! It does not fit. `CommandPathSafetySpec` keys on a command PATH; five rows
+//! It does not fit. `CommandPathSafetySpec` keys on a command PATH; six rows
 //! here key on parsed ARGUMENT VALUES at a single path, and flip classification
 //! across the admission boundary when they do:
 //!
@@ -21,6 +21,7 @@
 //! - `retry --run` — `AdmittedWorkload`, otherwise `LocalControl`
 //! - `active --reconcile` — `AdmittedWorkload`, otherwise `BoundedMetadataRead`
 //! - `reconcile --apply` — `AdmittedWorkload`, otherwise `BoundedMetadataRead`
+//! - `recover --preflight` — `BoundedMetadataRead`, otherwise `AdmittedWorkload`
 //! - `fanout cook-batch --dry-run` — `is_plan_only_command` below
 //!
 //! `path_safety` resolves one entry per path, so each of these pairs would
@@ -72,15 +73,11 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Cook(cook) if cook.dispatch.core.queue_only => {
             AgentTaskResourceBehavior::LocalControl
         }
-        agent_task::AgentTaskCommand::CookContinue(args) if args.preflight => {
-            AgentTaskResourceBehavior::BoundedMetadataRead
-        }
         agent_task::AgentTaskCommand::CookFeedback(args) if args.status => {
             AgentTaskResourceBehavior::BoundedMetadataRead
         }
         agent_task::AgentTaskCommand::CookFeedback(_) => AgentTaskResourceBehavior::LocalControl,
         agent_task::AgentTaskCommand::Cook(_)
-        | agent_task::AgentTaskCommand::CookContinue(_)
         | agent_task::AgentTaskCommand::RunPlan(_)
         | agent_task::AgentTaskCommand::Run(_)
         | agent_task::AgentTaskCommand::ReplayProviderBoundary(_)
@@ -97,11 +94,12 @@ pub(super) fn agent_task_resource_behavior(
             AgentTaskResourceBehavior::AdmittedWorkload
         }
         agent_task::AgentTaskCommand::Retry(_) => AgentTaskResourceBehavior::LocalControl,
-        // `recover --preflight` only reads durable Cook state to name its step.
-        // Every step it performs (continuation, `retry --run`, `reconcile
-        // --apply`) is an admitted workload, like the verbs it calls.
+        // `recover --preflight` only reads durable Cook state to name its step
+        // and validate continuation admission read-only. Every step it
+        // performs (continuation, `retry --run`, `reconcile --apply`) is an
+        // admitted workload, like the handlers it calls.
         agent_task::AgentTaskCommand::Recover(recover) if recover.preflight => {
-            AgentTaskResourceBehavior::LocalControl
+            AgentTaskResourceBehavior::BoundedMetadataRead
         }
         agent_task::AgentTaskCommand::Recover(_) => AgentTaskResourceBehavior::AdmittedWorkload,
         agent_task::AgentTaskCommand::Status(_)

@@ -2460,7 +2460,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             ControlPlaneActionPayload::empty(),
                             Some(redacted_bounded(
                                 &format!(
-                                    "run is candidate_recoverable holding an unpromoted candidate; resume only re-reads terminal evidence and cannot verify it: continue the cook with `homeboy agent-task cook-continue {}`",
+                                    "run is candidate_recoverable holding an unpromoted candidate; resume only re-reads terminal evidence and cannot verify it: recover the cook with `homeboy agent-task recover {}`",
                                     record.metadata["cook_id"]
                                         .as_str()
                                         .unwrap_or(record.run_id.as_str())
@@ -8898,7 +8898,7 @@ mod tests {
     /// attempt cannot verify or promote anything. It names the cook
     /// continuation as the recovery instead of exiting 1 without a cause.
     #[test]
-    fn resume_on_candidate_recoverable_names_the_cook_continue_recovery() {
+    fn resume_on_candidate_recoverable_names_the_recover_entry_point() {
         with_isolated_home(|_| {
             let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
             let mut stranded = record(AGENT_TASK_RUN);
@@ -8955,7 +8955,7 @@ mod tests {
             );
             let message = acknowledgement.message.expect("named failure cause");
             assert!(message.contains("candidate_recoverable"), "{message}");
-            assert!(message.contains("cook-continue"), "{message}");
+            assert!(message.contains("agent-task recover"), "{message}");
             assert!(message.contains("cook-15668"), "{message}");
         });
     }
@@ -9450,7 +9450,7 @@ mod tests {
         record.metadata["cook_finalization"] = serde_json::Value::Null;
         record.metadata["cook_moving_base_recovery"] = json!({
             "blocker": "origin/main moved and src/lib.rs no longer applies cleanly",
-            "continuation": "homeboy agent-task cook-continue cook-1",
+            "continuation": "homeboy agent-task recover cook-1",
             "base_movements": 1
         });
         let before = record.clone();
@@ -9468,7 +9468,7 @@ mod tests {
         );
         assert_eq!(
             blocker.reason.as_deref(),
-            Some("homeboy agent-task cook-continue cook-1")
+            Some("homeboy agent-task recover cook-1")
         );
     }
 
@@ -9718,7 +9718,7 @@ mod tests {
             "cook_moving_base_recovery".to_string(),
             json!({
                 "blocker": "HEAD is behind or diverged from resolved base `main`",
-                "continuation": format!("homeboy agent-task cook-continue {AGENT_TASK_RUN}"),
+                "continuation": format!("homeboy agent-task recover {AGENT_TASK_RUN}"),
             }),
         );
 

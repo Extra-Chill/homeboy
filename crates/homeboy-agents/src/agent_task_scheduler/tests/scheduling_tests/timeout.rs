@@ -303,7 +303,7 @@ mod timeout_tests {
                     .open_observation_initialized()
                     .expect("observation store"),
             )
-            .expect("cook-continue --artifact-id admits the fingerprinted timeout patch");
+            .expect("recover --artifact-id admits the fingerprinted timeout patch");
             assert_eq!(admitted.id, patch.id);
         });
     }

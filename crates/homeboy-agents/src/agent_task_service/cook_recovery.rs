@@ -1,17 +1,19 @@
 //! The one Cook recovery decision and its executor (#16049 slice 4, #15925).
 //!
 //! A stopped Cook used to leave its operator choosing between overlapping
-//! verbs (`resume`, `cook-continue [--rearm] [--artifact-id]`, `retry --run`,
-//! `reconcile`, ...). [`cook_recovery_step`] is the single typed decision over
+//! verbs (`resume`, the retired `cook-continue [--rearm] [--artifact-id]`,
+//! `retry --run`, the retired `retry --backend/--selector/--model` Cook route
+//! rearm, `reconcile`, ...). [`cook_recovery_step`] is the single typed
+//! decision over
 //! the same inputs the legal-action classifier reads, and the classifier
 //! derives its mutating action from it, so `status` "Next:" and
 //! `agent-task recover` can never disagree.
 //!
 //! [`recover_cook`] resolves a Cook, attempt or batch-child ID to its Cook,
 //! computes the step, and either reports it (`preflight`) or performs it by
-//! calling the verb the step names through a [`CookRecoveryPerformer`]. It adds
-//! no delivery logic of its own: continuation re-enters the Cook spine exactly
-//! as `cook-continue` does.
+//! calling the handler the step names through a [`CookRecoveryPerformer`]. It
+//! adds no delivery logic of its own: continuation re-enters the Cook spine
+//! through the CLI's Cook continuation handler.
 
 use homeboy_core::cook_status::CookStatus;
 use homeboy_core::{Error, Result};
@@ -27,17 +29,16 @@ pub const COOK_RECOVERY_SCHEMA: &str = "homeboy/agent-task-cook-recovery/v1";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CookRecoveryStep {
-    /// Continue the Cook from its durable recipe (`cook-continue`). This also
+    /// Continue the Cook from its durable recipe. This also
     /// materializes a recipe-only attempt whose lifecycle record is absent.
     Continue,
     /// Continue promotion with the one canonical patch artifact the failed
-    /// selection named (`cook-continue --rearm --artifact-id`).
+    /// selection named.
     ContinueWithArtifact { artifact_id: String },
     /// Several distinct patch artifacts remain; the operator must name one
     /// (`recover --artifact-id <id>`).
     ChooseArtifact { artifact_ids: Vec<String> },
-    /// Rearm the attempt's failed terminal continuation
-    /// (`cook-continue --rearm`).
+    /// Rearm the attempt's failed terminal continuation.
     Rearm,
     /// Reserve and run a fresh successor attempt (`retry --run`).
     Retry,
@@ -195,12 +196,59 @@ pub struct CookRecoveryPlan {
     pub step: CookRecoveryStep,
 }
 
-/// The verbs a recovery step performs. Implemented by the CLI with the exact
-/// functions its `cook-continue`, `retry` and `reconcile` commands call, so
-/// recovery has no orchestration of its own.
+/// Explicit operator inputs `recover` accepts in addition to the step. Each
+/// reserves a fresh provider attempt with a changed parameter, so `recover`
+/// never applies one on its own: the operator names it, and the continuation
+/// handler validates it against the attempt's terminal state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CookRecoveryOverrides {
+    /// Larger provider timeout for the successor attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Larger review-form deadline for a timed-out review-form attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_form_timeout_ms: Option<u64>,
+    /// Provider route for the successor attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub acknowledge_model_override: bool,
+}
+
+impl CookRecoveryOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.timeout_ms.is_none()
+            && self.review_form_timeout_ms.is_none()
+            && !self.has_route_override()
+    }
+
+    /// A provider route override is a rearm of the terminal attempt.
+    pub fn has_route_override(&self) -> bool {
+        self.backend.is_some() || self.selector.is_some() || self.model.is_some()
+    }
+}
+
+/// The handlers a recovery step performs. Implemented by the CLI with the
+/// exact Cook continuation, retry and reconcile handlers, so recovery has no
+/// orchestration of its own.
 pub trait CookRecoveryPerformer {
-    /// `cook-continue <run_id> [--rearm] [--artifact-id <id>]`.
+    /// Continue the Cook from `run_id`, optionally rearming its failed
+    /// terminal continuation, promoting one named patch artifact, or reserving
+    /// a successor attempt with explicit operator overrides.
     fn continue_cook(
+        &self,
+        run_id: &str,
+        rearm: bool,
+        artifact_id: Option<&str>,
+        overrides: &CookRecoveryOverrides,
+    ) -> Result<(Value, i32)>;
+    /// Validate continuation admission for `run_id` without dispatching a
+    /// provider or mutating lifecycle state.
+    fn preflight_continue_cook(
         &self,
         run_id: &str,
         rearm: bool,
@@ -221,6 +269,12 @@ pub struct CookRecoveryReport {
     pub status: String,
     pub step: CookRecoveryStep,
     pub preflight: bool,
+    /// Explicit operator overrides this recovery applied instead of the step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<CookRecoveryOverrides>,
+    /// Continuation admission `--preflight` validated for a continuation step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission: Option<Value>,
     pub result: Option<Value>,
 }
 
@@ -265,14 +319,28 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
 ///
 /// `artifact_id` resolves a [`CookRecoveryStep::ChooseArtifact`] decision; it
 /// is refused for every other step so it can never redirect recovery.
+/// `overrides` are explicit operator inputs that reserve a successor attempt
+/// with a changed parameter; they are refused where the step forbids a fresh
+/// provider attempt (a held claim, an artifact choice, a replacement fork).
+///
+/// With `preflight`, a continuation step also runs the continuation admission
+/// checks and reports them as `admission`; its exit code is the report's.
 pub fn recover_cook(
     id: &str,
     preflight: bool,
     artifact_id: Option<&str>,
+    overrides: &CookRecoveryOverrides,
     performer: &dyn CookRecoveryPerformer,
 ) -> Result<(CookRecoveryReport, i32)> {
     let plan = plan_cook_recovery(id)?;
-    let selected_artifact = selected_artifact(&plan, artifact_id)?;
+    if !overrides.is_empty() {
+        validate_overrides(&plan, preflight, artifact_id)?;
+    }
+    let selected_artifact = match (&plan.step, artifact_id, preflight) {
+        // Preflight reports an unresolved artifact choice instead of failing.
+        (CookRecoveryStep::ChooseArtifact { .. }, None, true) => None,
+        _ => selected_artifact(&plan, artifact_id)?,
+    };
     let mut report = CookRecoveryReport {
         schema: COOK_RECOVERY_SCHEMA,
         cook_id: plan.cook_id,
@@ -280,18 +348,48 @@ pub fn recover_cook(
         status: plan.status,
         step: plan.step,
         preflight,
+        overrides: (!overrides.is_empty()).then(|| overrides.clone()),
+        admission: None,
         result: None,
     };
-    if preflight {
-        return Ok((report, 0));
+    let run_id = report.run_id.clone();
+    let run_id = run_id.as_str();
+    if !overrides.is_empty() {
+        let (result, exit_code) =
+            performer.continue_cook(run_id, overrides.has_route_override(), None, overrides)?;
+        report.result = Some(result);
+        return Ok((report, exit_code));
     }
-    let run_id = report.run_id.as_str();
+    if preflight {
+        let continuation = match &report.step {
+            CookRecoveryStep::Continue => Some((false, None)),
+            CookRecoveryStep::ContinueWithArtifact { .. } => {
+                Some((true, selected_artifact.as_deref()))
+            }
+            CookRecoveryStep::ChooseArtifact { .. } => selected_artifact
+                .as_deref()
+                .map(|artifact_id| (true, Some(artifact_id))),
+            CookRecoveryStep::Rearm => Some((true, None)),
+            _ => None,
+        };
+        // A recipe-only attempt has no lifecycle record to admit yet: the
+        // continuation materializes it, which the plan already states.
+        let continuation = continuation.filter(|_| report.status != RECIPE_ONLY_STATUS);
+        let Some((rearm, artifact_id)) = continuation else {
+            return Ok((report, 0));
+        };
+        let (admission, exit_code) =
+            performer.preflight_continue_cook(run_id, rearm, artifact_id)?;
+        report.admission = Some(admission);
+        return Ok((report, exit_code));
+    }
+    let none = CookRecoveryOverrides::default();
     let (result, exit_code) = match &report.step {
-        CookRecoveryStep::Continue => performer.continue_cook(run_id, false, None)?,
+        CookRecoveryStep::Continue => performer.continue_cook(run_id, false, None, &none)?,
         CookRecoveryStep::ContinueWithArtifact { .. } | CookRecoveryStep::ChooseArtifact { .. } => {
-            performer.continue_cook(run_id, true, selected_artifact.as_deref())?
+            performer.continue_cook(run_id, true, selected_artifact.as_deref(), &none)?
         }
-        CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, None)?,
+        CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, None, &none)?,
         CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => performer.retry(run_id)?,
         CookRecoveryStep::Reconcile => performer.reconcile(run_id)?,
         CookRecoveryStep::None { .. } => {
@@ -301,6 +399,46 @@ pub fn recover_cook(
     };
     report.result = Some(result);
     Ok((report, exit_code))
+}
+
+/// Overrides reserve a fresh provider attempt. They never combine with a
+/// preflight or an artifact selection, and a step that forbids a fresh attempt
+/// refuses them rather than silently ignoring them.
+fn validate_overrides(
+    plan: &CookRecoveryPlan,
+    preflight: bool,
+    artifact_id: Option<&str>,
+) -> Result<()> {
+    let refuse = |message: &str| {
+        Err(Error::validation_invalid_argument(
+            "recovery-override",
+            message.to_string(),
+            Some(plan.run_id.clone()),
+            None,
+        ))
+    };
+    if preflight {
+        return refuse("timeout and provider-route overrides cannot be combined with --preflight");
+    }
+    if artifact_id.is_some() {
+        return refuse(
+            "timeout and provider-route overrides cannot be combined with --artifact-id",
+        );
+    }
+    match &plan.step {
+        CookRecoveryStep::Reconcile => refuse(
+            "a promotion claim is still held; run `agent-task recover` without overrides to reconcile it first",
+        ),
+        CookRecoveryStep::ContinueWithArtifact { .. } | CookRecoveryStep::ChooseArtifact { .. } => {
+            refuse(
+                "the recovery step promotes an existing patch artifact; it reserves no provider attempt to override",
+            )
+        }
+        CookRecoveryStep::ForkReplacement => refuse(
+            "the recovery step forks a replacement attempt that preserves the checkpoint; it accepts no overrides",
+        ),
+        _ => Ok(()),
+    }
 }
 
 fn selected_artifact(plan: &CookRecoveryPlan, artifact_id: Option<&str>) -> Result<Option<String>> {

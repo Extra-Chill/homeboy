@@ -2519,8 +2519,8 @@ fn retryable_cook_attempt(
             "retryable pre-provider failure is not owned by its durable Cook recipe",
             Some(source.run_id.clone()),
             Some(vec![format!(
-                "Continue the owning Cook with: {}",
-                super::cook_continue_command_for_record(source, &source.run_id, false, None)
+                "Recover the owning Cook with: {}",
+                super::cook_recover_command_for_record(source, &source.run_id, None)
             )]),
         ));
     };

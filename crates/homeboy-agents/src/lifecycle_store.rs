@@ -825,7 +825,7 @@ impl AgentTaskLifecycleStore {
 
     /// Exactly-once marker for announcing that one attempt's automatic terminal
     /// continuation failed. Kept separate from the Cook terminal marker so a
-    /// later operator `cook-continue` can still announce the final outcome.
+    /// later operator `agent-task recover` can still announce the final outcome.
     pub fn claim_cook_continuation_failed_notification(
         &self,
         cook_id: &str,

@@ -101,58 +101,47 @@ struct WorkspaceBaseCaptureHook {
     fail_after_recipe_persistence: std::sync::atomic::AtomicBool,
 }
 
-/// Render the public CLI continuation route.
+/// Render the one public Cook recovery route, `agent-task recover`.
 ///
 /// Cook IDs deliberately preserve normal current-attempt selection, while
 /// attempt IDs preserve exact lifecycle lineage for recovery. `executable`
-/// permits a controller-pinned runtime to own the continuation without
-/// changing the public command shape.
-pub fn cook_continue_command(
+/// permits a controller-pinned runtime to own the recovery without changing
+/// the public command shape. `artifact_id` names one canonical patch candidate
+/// when the recovery step is a choice between several.
+pub fn cook_recover_command(
     executable: Option<&str>,
     cook_or_attempt_id: &str,
-    rearm: bool,
     artifact_id: Option<&str>,
 ) -> String {
     let executable = executable
         .map(quote_arg)
         .unwrap_or_else(|| cook_recovery_command_prefix(cook_or_attempt_id));
-    cook_continue_command_with_prefix(&executable, cook_or_attempt_id, rearm, artifact_id)
+    cook_recover_command_with_prefix(&executable, cook_or_attempt_id, artifact_id)
 }
 
-/// Render a continuation from placement already authenticated by its record.
-pub fn cook_continue_command_for_record(
+/// Render recovery from placement already authenticated by its record.
+pub fn cook_recover_command_for_record(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     cook_or_attempt_id: &str,
-    rearm: bool,
     artifact_id: Option<&str>,
 ) -> String {
-    cook_continue_command_with_prefix(
+    cook_recover_command_with_prefix(
         &cook_recovery_command_prefix_for_record(record),
         cook_or_attempt_id,
-        rearm,
         artifact_id,
     )
 }
 
-fn cook_continue_command_with_prefix(
+fn cook_recover_command_with_prefix(
     executable: &str,
     cook_or_attempt_id: &str,
-    rearm: bool,
     artifact_id: Option<&str>,
 ) -> String {
-    let mut command = format!(
-        "{} agent-task cook-continue {}",
-        executable,
-        quote_arg(cook_or_attempt_id)
-    );
-    if rearm {
-        command.push_str(" --rearm");
-    }
+    let mut args = vec!["recover", cook_or_attempt_id];
     if let Some(artifact_id) = artifact_id {
-        command.push_str(" --artifact-id ");
-        command.push_str(&quote_arg(artifact_id));
+        args.extend(["--artifact-id", artifact_id]);
     }
-    command
+    cook_recovery_command_with_prefix(executable, &args)
 }
 
 /// Render recovery on the Cook's controller. Provider placement is retained in
@@ -942,7 +931,7 @@ fn is_gate_setup_failure(error: &Error) -> bool {
 
 /// Run promotion, retrying a bounded number of times with backoff when gate
 /// setup fails, so an environmental setup failure no longer strands a finished
-/// candidate until an operator runs `cook-continue`. Any other error, and the
+/// candidate until an operator runs `agent-task recover`. Any other error, and the
 /// final setup failure, are returned unchanged.
 pub(super) fn promote_with_gate_setup_retries(
     side_effects: &mut CookSideEffects<'_>,
@@ -1038,7 +1027,7 @@ fn promote_with_operation_claim_in_store(
                 Some(vec![cook_recovery_command_in_store(
                     lifecycle_store,
                     run_id,
-                    &["cook-continue", run_id],
+                    &["recover", run_id],
                 )]),
             );
             error.details["claim"] = serde_json::to_value(claim).unwrap_or(Value::Null);
@@ -1549,7 +1538,7 @@ pub struct CookAiDisclosure {
 
 const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route/v1";
 
-/// Record that the `cook-continue` lifecycle route selected this exact attempt.
+/// Record that the Cook continuation lifecycle route (`agent-task recover`) selected this exact attempt.
 /// This is durable route authority, not caller-controlled plan metadata.
 pub fn authorize_cook_continue_route(options: &CookRequest) -> Result<()> {
     authorize_cook_continue_route_with_artifact(options, None)
@@ -2409,13 +2398,12 @@ mod run_lifecycle_projection_tests {
             "homeboy"
         );
         assert_eq!(
-            cook_continue_command_with_prefix(
+            cook_recover_command_with_prefix(
                 &cook_recovery_command_prefix_for_decision(Some(&lab)),
                 "cook-attempt-1",
-                true,
                 Some("patch"),
             ),
-            "homeboy agent-task cook-continue cook-attempt-1 --rearm --artifact-id patch"
+            "homeboy agent-task recover cook-attempt-1 --artifact-id patch"
         );
         assert_eq!(
             lab.runner
@@ -4190,8 +4178,8 @@ fn make_provider_timeout_actionable(
         && !deadline_expired;
     let command = can_retry.then(|| {
         let continuation = lifecycle_store.map_or_else(
-            || cook_continue_command(None, run_id, false, None),
-            |store| cook_recovery_command_in_store(store, run_id, &["cook-continue", run_id]),
+            || cook_recover_command(None, run_id, None),
+            |store| cook_recovery_command_in_store(store, run_id, &["recover", run_id]),
         );
         format!("{} --timeout-ms {next_timeout_ms}", continuation)
     });
@@ -4414,8 +4402,8 @@ fn make_review_form_timeout_actionable(
         && !deadline_expired;
     let command = can_retry.then(|| {
         let continuation = lifecycle_store.map_or_else(
-            || cook_continue_command(None, run_id, false, None),
-            |store| cook_recovery_command_in_store(store, run_id, &["cook-continue", run_id]),
+            || cook_recover_command(None, run_id, None),
+            |store| cook_recovery_command_in_store(store, run_id, &["recover", run_id]),
         );
         format!(
             "{} --review-form-timeout-ms {next_timeout_ms}",
