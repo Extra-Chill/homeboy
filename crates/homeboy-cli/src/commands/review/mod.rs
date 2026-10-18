@@ -1851,6 +1851,29 @@ mod tests {
         review
     }
 
+    /// `review test <component>` offloaded to a Lab runner must declare the
+    /// component's test secret env source so the runner resolves the declared
+    /// names from its own `secret_env` refs (#15938).
+    #[test]
+    fn review_test_contract_declares_component_test_secret_env_source() {
+        let review = projected_review(&[
+            "homeboy",
+            "review",
+            "test",
+            "homeboy",
+            "--changed-since",
+            "origin/main",
+        ]);
+        let contract = review.lab_contract().expect("review test lab contract");
+
+        assert!(contract.is_portable());
+        assert_eq!(contract.hot_label, "review test");
+        assert_eq!(
+            contract.secret_env_sources,
+            &[homeboy_core::lab_contract::LabSecretEnvSource::ComponentTest]
+        );
+    }
+
     #[test]
     fn review_action_projection_makes_parent_and_action_options_identical() {
         let lint_scoped_before = projected_review(&[

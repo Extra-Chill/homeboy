@@ -16,6 +16,12 @@ pub const LAB_NO_EXTRA_CAPABILITIES: &[&str] = &[];
 pub const LAB_AGENT_TASK_SECRET_ENV_SOURCES: &[LabSecretEnvSource] =
     &[LabSecretEnvSource::AgentTask];
 pub const LAB_TRACE_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[LabSecretEnvSource::Trace];
+/// `test` / `review test` declare the target component's extension-declared
+/// `test.secret_env` names so an offloaded Lab child can resolve them from the
+/// runner's own `secret_env` refs (#15938); values never cross from the
+/// controller.
+pub const LAB_COMPONENT_TEST_SECRET_ENV_SOURCES: &[LabSecretEnvSource] =
+    &[LabSecretEnvSource::ComponentTest];
 pub const LAB_TUNNEL_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[LabSecretEnvSource::Tunnel];
 pub const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror. For Lab/offloaded dependency preparation and verification, run `homeboy rig check <rig-id> --runner <runner-id>` or the rig's benchmark profile through `homeboy rig run <rig-id> --runner <runner-id>`.";
 pub const RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON: &str = "rig source-management commands (`rig install`, `rig update`, and `rig sources`) manage the controller's local rig registry and may read arbitrary local package paths. They are not Lab-portable yet. Install or refresh the rig locally first, then run Lab-compatible verification with `homeboy rig check <rig-id> --runner <runner-id>` or `homeboy rig run <rig-id> --runner <runner-id>`.";
@@ -108,6 +114,11 @@ pub enum LabRigWorkloadKind {
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum LabSecretEnvSource {
     AgentTask,
+    /// Secret identity names declared by the test target component's
+    /// extension test capability (`test.secret_env` /
+    /// `test.secret_env_projections`). Runner-deferred: the Lab runner
+    /// resolves them from its own `secret_env` refs (#15938).
+    ComponentTest,
     Trace,
     Tunnel,
 }

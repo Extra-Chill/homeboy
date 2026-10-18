@@ -569,3 +569,168 @@ fn hydrate_tunnel_secret_env_reports_runner_deferred_names_without_values() {
     assert!(rendered.contains("HOMEBOY_PREVIEW_TUNNEL_TOKEN"));
     assert!(rendered.contains("runner"));
 }
+
+fn write_component_test_secret_fixture(home: &std::path::Path, source: &std::path::Path) {
+    let extension_dir = home.join(".config/homeboy/extensions/lab-test-secret-fixture");
+    std::fs::create_dir_all(&extension_dir).expect("extension dir");
+    std::fs::write(
+        extension_dir.join("lab-test-secret-fixture.json"),
+        r#"{
+            "name":"Lab test secret fixture",
+            "version":"1.0.0",
+            "test":{
+                "extension_script":"test.sh",
+                "secret_env":{
+                    "WP_CODEBOX_DB_HOST":"WP_CODEBOX_DB_HOST",
+                    "WP_CODEBOX_DB_USER":"WP_CODEBOX_DB_USER"
+                }
+            }
+        }"#,
+    )
+    .expect("extension manifest");
+    std::fs::write(extension_dir.join("test.sh"), "#!/bin/sh\nexit 0\n").expect("extension script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = extension_dir.join("test.sh");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).expect("executable script");
+    }
+    std::fs::write(
+        source.join("homeboy.json"),
+        r#"{"id":"lab-test-secret-consumer","extensions":{"lab-test-secret-fixture":{}}}"#,
+    )
+    .expect("component config");
+}
+
+fn review_test_args(source: &std::path::Path) -> Vec<String> {
+    vec![
+        "homeboy".to_string(),
+        "review".to_string(),
+        "test".to_string(),
+        "lab-test-secret-consumer".to_string(),
+        "--path".to_string(),
+        source.to_string_lossy().to_string(),
+        "--changed-since".to_string(),
+        "origin/main".to_string(),
+    ]
+}
+
+/// `review test <component>` offloaded with the ComponentTest source declares
+/// the component's extension-declared `test.secret_env` names as
+/// runner-deferred so the Lab child resolves them from the runner's own
+/// `secret_env` refs; no controller value crosses (#15938).
+#[test]
+fn component_test_secret_env_declares_component_names_as_runner_deferred() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        write_component_test_secret_fixture(home.path(), source.path());
+        let args = review_test_args(source.path());
+
+        let plan = build_lab_secret_env_handoff_plan(
+            &[LabSecretEnvSource::ComponentTest],
+            &args,
+            HashMap::new(),
+        )
+        .expect("handoff plan");
+
+        assert_eq!(
+            plan.secret_env_names,
+            vec![
+                "WP_CODEBOX_DB_HOST".to_string(),
+                "WP_CODEBOX_DB_USER".to_string(),
+            ]
+        );
+        assert_eq!(plan.runner_deferred_secret_env, plan.secret_env_names);
+        assert!(
+            plan.env_delta.is_empty(),
+            "no controller value crosses for runner-deferred test secrets"
+        );
+        let entries: Vec<SecretEnvHandoffEntry> =
+            serde_json::from_value(plan.diagnostics["entries"].clone()).expect("typed entries");
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            assert_eq!(entry.owner, "runner");
+            assert_eq!(entry.source, "runner");
+            assert_eq!(entry.destination, "runner");
+            assert_eq!(entry.status, "deferred");
+        }
+        assert_eq!(
+            plan.diagnostics["component_test_secret_env"]["schema"],
+            "homeboy/lab-component-test-secret-env/v1"
+        );
+        let owners = plan
+            .secret_env_plan
+            .env_materialization
+            .as_ref()
+            .expect("env materialization plan")
+            .secret_refs
+            .iter()
+            .map(|secret_ref| secret_ref.owner.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(owners, vec![Some("runner"), Some("runner")]);
+    });
+}
+
+/// The same `review test` argv without the ComponentTest source — i.e. any
+/// command whose contract does not declare it — keeps yielding no names.
+#[test]
+fn component_test_secret_env_requires_declared_source() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        write_component_test_secret_fixture(home.path(), source.path());
+        let args = review_test_args(source.path());
+
+        let plan =
+            build_lab_secret_env_handoff_plan(&[], &args, HashMap::new()).expect("handoff plan");
+
+        assert!(plan.secret_env_names.is_empty());
+        assert!(plan.runner_deferred_secret_env.is_empty());
+    });
+}
+
+#[test]
+fn component_test_secret_env_yields_no_names_for_unresolvable_component() {
+    homeboy_core::test_support::with_isolated_home(|_home| {
+        let args = vec![
+            "homeboy".to_string(),
+            "review".to_string(),
+            "test".to_string(),
+            "homeboy-15938-no-such-component".to_string(),
+        ];
+
+        let plan = build_lab_secret_env_handoff_plan(
+            &[LabSecretEnvSource::ComponentTest],
+            &args,
+            HashMap::new(),
+        )
+        .expect("handoff plan");
+
+        assert!(plan.secret_env_names.is_empty());
+        assert!(plan.runner_deferred_secret_env.is_empty());
+    });
+}
+
+/// Unrelated commands never reach the test target parser even when a contract
+/// erroneously declares the source: no `test` subcommand, no names.
+#[test]
+fn declared_component_test_secret_env_ignores_non_test_commands() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        write_component_test_secret_fixture(home.path(), source.path());
+        let args = vec![
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "compare".to_string(),
+            "lab-test-secret-consumer".to_string(),
+            "real-wallet".to_string(),
+            "--path".to_string(),
+            source.path().to_string_lossy().to_string(),
+        ];
+
+        assert!(declared_component_test_secret_env(&args).is_empty());
+    });
+}

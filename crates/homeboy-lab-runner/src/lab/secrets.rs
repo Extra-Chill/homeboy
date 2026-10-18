@@ -67,6 +67,12 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
     } else {
         empty_tunnel_secret_env_metadata()
     };
+    let component_test_secret_env =
+        if secret_env_sources.contains(&LabSecretEnvSource::ComponentTest) {
+            hydrate_component_test_secret_env(args, &mut env_delta)?
+        } else {
+            empty_component_test_secret_env_metadata()
+        };
     let mut secret_env_names = Vec::new();
     if secret_env_sources.contains(&LabSecretEnvSource::AgentTask) {
         secret_env_names.extend(declared_agent_task_secret_env_for_handoff(args)?);
@@ -76,6 +82,9 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
     }
     if secret_env_sources.contains(&LabSecretEnvSource::Tunnel) {
         secret_env_names.extend(declared_tunnel_secret_env(args));
+    }
+    if secret_env_sources.contains(&LabSecretEnvSource::ComponentTest) {
+        secret_env_names.extend(declared_component_test_secret_env(args));
     }
     secret_env_names.sort();
     secret_env_names.dedup();
@@ -103,6 +112,7 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
     let mut runner_deferred_secret_env = Vec::new();
     runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&agent_task_secret_env));
     runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&tunnel_secret_env));
+    runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&component_test_secret_env));
     runner_deferred_secret_env.sort();
     runner_deferred_secret_env.dedup();
     // Preserve authority with the durable name-only plan. Only values resolved
@@ -131,6 +141,7 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
         &agent_task_secret_env,
         &trace_secret_env,
         &tunnel_secret_env,
+        &component_test_secret_env,
     );
 
     let diagnostics = serde_json::json!({
@@ -150,6 +161,7 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
         "agent_task_secret_env": agent_task_secret_env,
         "trace_secret_env": trace_secret_env,
         "tunnel_secret_env": tunnel_secret_env,
+        "component_test_secret_env": component_test_secret_env,
     });
 
     Ok(LabSecretEnvHandoffPlan {
@@ -305,6 +317,13 @@ fn empty_tunnel_secret_env_metadata() -> serde_json::Value {
     })
 }
 
+fn empty_component_test_secret_env_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "schema": "homeboy/lab-component-test-secret-env/v1",
+        "runner_deferred_secret_env": [],
+    })
+}
+
 fn materialized_lab_secret_env_plan(
     public_env: BTreeMap<String, String>,
     secret_env_names: Vec<String>,
@@ -383,6 +402,7 @@ fn lab_secret_env_handoff_entries(
     agent_task_secret_env: &serde_json::Value,
     trace_secret_env: &serde_json::Value,
     tunnel_secret_env: &serde_json::Value,
+    component_test_secret_env: &serde_json::Value,
 ) -> Vec<SecretEnvHandoffEntry> {
     let mut names = env_delta.keys().cloned().collect::<Vec<_>>();
     names.sort();
@@ -404,8 +424,15 @@ fn lab_secret_env_handoff_entries(
             continue;
         }
         entries.push(SecretEnvHandoffEntry {
-            source: secret_env_source_for_name(name, &[agent_task_secret_env, tunnel_secret_env])
-                .unwrap_or_else(|| "runner".to_string()),
+            source: secret_env_source_for_name(
+                name,
+                &[
+                    agent_task_secret_env,
+                    tunnel_secret_env,
+                    component_test_secret_env,
+                ],
+            )
+            .unwrap_or_else(|| "runner".to_string()),
             name: name.clone(),
             owner: "runner".to_string(),
             destination: "runner".to_string(),
@@ -1033,6 +1060,67 @@ pub(crate) fn declared_trace_secret_env(args: &[String]) -> Vec<String> {
     }
 
     declared_secret_env_args(args)
+}
+
+pub(super) fn hydrate_component_test_secret_env(
+    args: &[String],
+    _env: &mut HashMap<String, String>,
+) -> Result<serde_json::Value> {
+    let names = declared_component_test_secret_env(args);
+    if names.is_empty() {
+        return Ok(empty_component_test_secret_env_metadata());
+    }
+
+    Ok(serde_json::json!({
+        "schema": "homeboy/lab-component-test-secret-env/v1",
+        "runner_deferred_secret_env": names
+            .into_iter()
+            .map(|name| serde_json::json!({
+                "name": name,
+                "source": "runner",
+            }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+/// Secret identity names the offloaded test target's test capability declares.
+///
+/// `homeboy test <component>` / `homeboy review test <component>` run an
+/// extension child on the Lab runner that requires its declared
+/// `test.secret_env` (for example a test database). Declaring the names on the
+/// handoff lets the runner resolve them from its own runner-deferred
+/// `secret_env` refs; no controller value crosses, matching the Lab gate path
+/// (#15824, #15938). Only names the component's test extension declares are
+/// requested, so unrelated runner secrets never reach a test child. An
+/// unresolvable component or declaration yields no names, as before.
+pub(crate) fn declared_component_test_secret_env(args: &[String]) -> Vec<String> {
+    let Some((component_id, path_override)) = component_test_target_from_args(args) else {
+        return Vec::new();
+    };
+    let Ok(component) = homeboy_core::component::resolve_effective(
+        component_id.as_deref(),
+        path_override.as_deref(),
+        None,
+    ) else {
+        return Vec::new();
+    };
+    let mut names =
+        homeboy_core::extension::test::declared_secret_env_names(&component).unwrap_or_default();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The test command's component target: the positional component id right
+/// after the `test` subcommand (also matching `review test`) plus the optional
+/// `--path` checkout override, mirroring the local command's resolution.
+fn component_test_target_from_args(args: &[String]) -> Option<(Option<String>, Option<String>)> {
+    let test_index = subcommand_index(args, "test")?;
+    let component_id = args
+        .get(test_index + 1)
+        .and_then(|value| non_empty_arg(value));
+    let path_override = option_arg_after(args, test_index + 1, "--path");
+    Some((component_id, path_override))
 }
 
 pub(crate) fn declared_tunnel_secret_env(args: &[String]) -> Vec<String> {
