@@ -69,21 +69,24 @@ rejected with a clear error.
 
 Standalone PHP smoke files can live under `tests/**/*-smoke.php`. They are
 diagnostic/operator targets, not default release gates. Declare smoke
-environments in a root `homeboy-test-manifest.json` using schema
-`homeboy/test-manifest/v1`. `default_environment` applies to undeclared files,
-and the `tests` object maps exact test paths to overrides. Both accept
-`standalone-php` or `wordpress`; omitting `default_environment` preserves the
-`wordpress` default. `standalone-php` scripts run directly with PHP;
-`wordpress` scripts use the selected runtime backend with component mounts,
+environments in the component's `homeboy.json` WordPress extension settings;
+the extension reads no other consumer-repo file. `standalone_php_test_paths`
+selects scripts that run directly with PHP, and `wordpress_test_paths` selects
+smokes that need the selected runtime backend with component mounts,
 dependency mounts, drop-in handling, WordPress version selection, and
-`wordpress.run-php`:
+`wordpress.run-php`. Both accept component-relative paths or shell-glob
+patterns. A file matching both runs in booted WordPress; undeclared smokes keep
+the `wordpress` environment. Full-suite runs execute both declarations:
 
 ```json
 {
-  "schema": "homeboy/test-manifest/v1",
-  "default_environment": "standalone-php",
-  "tests": {
-    "tests/runtime-smoke.php": { "environment": "wordpress" }
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "standalone_php_test_paths": ["tests/smoke/*-smoke.php"],
+        "wordpress_test_paths": ["tests/smoke/runtime-smoke.php"]
+      }
+    }
   }
 }
 ```

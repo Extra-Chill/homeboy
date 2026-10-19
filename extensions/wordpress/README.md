@@ -149,23 +149,27 @@ Available factories from the WordPress test framework: `user`, `post`,
 ### Real-WordPress host smokes
 
 Standalone smoke files matching `tests/**/*-smoke.php` are diagnostic/operator
-targets, not default release gates. A component can declare a default and exact
-per-file environment overrides in a root `homeboy-test-manifest.json`:
+targets, not default release gates. A component declares test environments in
+its `homeboy.json` WordPress extension settings:
 
 ```json
 {
-  "schema": "homeboy/test-manifest/v1",
-  "default_environment": "standalone-php",
-  "tests": {
-    "tests/runtime-smoke.php": { "environment": "wordpress" }
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "standalone_php_test_paths": ["tests/smoke/*-smoke.php"],
+        "wordpress_test_paths": ["tests/smoke/runtime-smoke.php"]
+      }
+    }
   }
 }
 ```
 
-`standalone-php` files run directly with PHP, while `wordpress` files are
-mounted with the component and executed via `wordpress.run-php`. An exact
-`tests` entry overrides `default_environment`. Omitting `default_environment`
-keeps the existing `wordpress` default.
+`standalone_php_test_paths` files run directly with PHP, while
+`wordpress_test_paths` files are mounted with the component and executed via
+`wordpress.run-php`. Both accept component-relative paths or shell-glob
+patterns, and full-suite runs execute both declarations. A file matching both
+runs in booted WordPress. Undeclared smokes keep the `wordpress` environment.
 
 Standalone PHP smokes receive `HOMEBOY_WORDPRESS_CORE_ROOT`, a WordPress core
 source tree resolved through `wp-codebox wordpress-source` at the configured
@@ -179,7 +183,7 @@ To rerun one existing smoke on demand before pushing:
 homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
-Use `--file` for a manifest-declared standalone PHP smoke. The focused command
+Use `--file` for a `standalone_php_test_paths`-declared standalone PHP smoke. The focused command
 does not change default test discovery or add smokes to CI.
 Output preserves the machine-readable `HOST_SMOKE_BEGIN`,
 `HOST_SMOKE_PROGRESS`, `HOST_SMOKE_OK`, `HOST_SMOKE_FAIL`, and

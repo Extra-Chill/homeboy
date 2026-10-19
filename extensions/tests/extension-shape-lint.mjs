@@ -310,6 +310,85 @@ function validateExtension(extensionId) {
   });
 }
 
+// Homeboy adds only `homeboy.json` to a consumer repository (Extra-Chill/homeboy#16143).
+// Extensions must declare consumer configuration as homeboy.json extension
+// settings, never as a second Homeboy-named file in the consumer repo. This rule
+// scans every extension text file for Homeboy-named declaration files.
+const homeboyNamedFilePattern = /(?<![A-Za-z0-9_-])(?:\.homeboy\/[A-Za-z0-9_.-]+\.(?:json|jsonc|ya?ml|toml)|\.?homeboy[-_][A-Za-z0-9_-]+\.(?:json|jsonc|ya?ml|toml))(?![A-Za-z0-9_])/g;
+
+// Homeboy-named files that are not consumer-repo declarations.
+const allowedHomeboyNamedFiles = new Map([
+  ['homeboy-extension-root.json', 'this extension repository root manifest'],
+  ['homeboy-artifact-manifest.json', 'runtime artifact Homeboy writes per invocation'],
+  ['.homeboy-runtime-identity.json', 'managed runtime cache identity outside the consumer repo'],
+  ['homeboy-agent-task-core-contract.json', 'agent-runtimes fixture in this repository'],
+]);
+
+// Existing consumer-repo declaration readers awaiting migration to homeboy.json
+// settings under Extra-Chill/homeboy#16143. Entries are pinned to the file that
+// reads them, so new readers still fail. Do not add to this list.
+const consumerFileMigrationDebt = new Map([
+  ['wordpress/lib/wordpress-rest-fuzz-surface-discovery.js', new Set([
+    '.homeboy/wordpress-fuzz-surfaces.json',
+    '.homeboy/wordpress-rest-fuzz-surfaces.json',
+    'homeboy-wordpress-fuzz-surfaces.json',
+  ])],
+]);
+
+// Retired consumer-repo declaration contracts. Any mention fails outright.
+const retiredConsumerFileContracts = [
+  'homeboy/test-manifest/v1',
+  'HOMEBOY_WORDPRESS_TEST_MANIFEST',
+];
+
+const scannedTextExtensions = new Set([
+  '.sh', '.bash', '.js', '.mjs', '.cjs', '.ts', '.php', '.py', '.rs', '.go', '.swift',
+  '.json', '.md', '.txt', '.yml', '.yaml', '.toml',
+]);
+
+function listExtensionTextFiles(dir) {
+  const files = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'vendor' || entry.name === 'target') {
+      continue;
+    }
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listExtensionTextFiles(full));
+    } else if (entry.isFile() && scannedTextExtensions.has(path.extname(entry.name))) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+function validateConsumerRepoFiles(extensionId) {
+  const extensionDir = path.join(rootDir, extensionId);
+  if (!fs.existsSync(extensionDir)) {
+    return;
+  }
+  for (const file of listExtensionTextFiles(extensionDir)) {
+    const relative = path.relative(rootDir, file).split(path.sep).join('/');
+    const text = fs.readFileSync(file, 'utf8');
+    for (const contract of retiredConsumerFileContracts) {
+      if (text.includes(contract)) {
+        fail(`${relative}: references retired consumer-repo declaration ${contract}; declare it in homeboy.json extension settings`);
+      }
+    }
+    const debt = consumerFileMigrationDebt.get(relative) || new Set();
+    const reported = new Set();
+    for (const match of text.matchAll(homeboyNamedFilePattern)) {
+      const name = match[0];
+      const baseName = name.startsWith('.homeboy/') ? name : path.posix.basename(name);
+      if (allowedHomeboyNamedFiles.has(baseName) || debt.has(name) || reported.has(name)) {
+        continue;
+      }
+      reported.add(name);
+      fail(`${relative}: reads or documents consumer-repo file ${name}; Homeboy adds only homeboy.json to a repository, so declare it in homeboy.json extension settings`);
+    }
+  }
+}
+
 for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
   if (entry.isDirectory() && !allowedTopLevelDirs.has(entry.name)) {
     fail(`undeclared top-level directory: ${entry.name}`);
@@ -318,6 +397,7 @@ for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
 
 for (const extensionId of extensionIds) {
   validateExtension(extensionId);
+  validateConsumerRepoFiles(extensionId);
 }
 
 if (failures.length > 0) {

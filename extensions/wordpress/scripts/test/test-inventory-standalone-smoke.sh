@@ -123,6 +123,8 @@ print("PASS: a standalone-only component inventories its declared suite")
 PY
 
 # --- A mixed suite emits deterministic identities for both runners ----------
+# The standalone member is declared by exact path in homeboy.json settings, and
+# a wordpress_test_paths match never joins the standalone inventory.
 
 mixed="${WORKDIR}/mixed"
 mkdir -p "${mixed}/tests/Unit" "${mixed}/checks"
@@ -130,21 +132,15 @@ printf '{}\n' > "${mixed}/composer.json"
 printf '<?php\n' > "${mixed}/tests/Unit/ZetaTest.php"
 printf '<?php\n' > "${mixed}/tests/test-eta.php"
 printf '<?php echo "spec";\n' > "${mixed}/checks/behavior-spec.php"
-cat > "${mixed}/homeboy-test-manifest.json" <<'JSON'
-{
-    "schema": "homeboy/test-manifest/v1",
-    "tests": {
-        "checks/behavior-spec.php": {"environment": "standalone-php"}
-    }
-}
-JSON
+printf '<?php echo "booted";\n' > "${mixed}/checks/booted-smoke.php"
+mixed_settings='{"standalone_php_test_paths":["checks/behavior-spec.php","checks/booted-smoke.php"],"wordpress_test_paths":["checks/booted-smoke.php"]}'
 
 mixed_discovery="${WORKDIR}/mixed-discovery.json"
 discovery_doc mixed "$mixed_discovery" \
     "/wordpress/wp-content/plugins/mixed/tests/Unit/ZetaTest.php" \
     "/wordpress/wp-content/plugins/mixed/tests/test-eta.php"
 
-run_runner_inventory "$mixed" "${WORKDIR}/mixed.json" "$mixed_discovery" '{}' \
+run_runner_inventory "$mixed" "${WORKDIR}/mixed.json" "$mixed_discovery" "$mixed_settings" \
     || fail "mixed inventory failed: $(cat "${WORKDIR}/mixed.json.err")"
 
 python3 - "${WORKDIR}/mixed.json" <<'PY' || fail "mixed inventory assertions failed"
@@ -161,7 +157,7 @@ print("PASS: a mixed suite emits deterministic identities for both runners")
 PY
 
 # Determinism across runs, including the standalone members.
-run_runner_inventory "$mixed" "${WORKDIR}/mixed-again.json" "$mixed_discovery" '{}' \
+run_runner_inventory "$mixed" "${WORKDIR}/mixed-again.json" "$mixed_discovery" "$mixed_settings" \
     || fail "second mixed inventory failed"
 cmp -s "${WORKDIR}/mixed.json" "${WORKDIR}/mixed-again.json" || fail "mixed producer is not deterministic"
 printf 'PASS: mixed inventories are deterministic across runs\n'
@@ -173,7 +169,7 @@ discovery_doc mixed "$both_discovery" \
     "/wordpress/wp-content/plugins/mixed/checks/behavior-spec.php" \
     "/wordpress/wp-content/plugins/mixed/tests/Unit/ZetaTest.php"
 
-run_runner_inventory "$mixed" "${WORKDIR}/both.json" "$both_discovery" '{}' \
+run_runner_inventory "$mixed" "${WORKDIR}/both.json" "$both_discovery" "$mixed_settings" \
     || fail "overlapping-declaration inventory failed: $(cat "${WORKDIR}/both.json.err")"
 
 python3 - "${WORKDIR}/both.json" <<'PY' || fail "overlapping-declaration assertions failed"

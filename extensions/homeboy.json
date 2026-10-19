@@ -32,6 +32,7 @@
       "node tests/secret-env-plan-smoke.mjs",
       "node tests/extension-shape-lint.mjs",
       "node tests/extension-shape-lint-toolchain-probes.test.mjs",
+      "node tests/extension-shape-lint-consumer-files.test.mjs",
       "node tests/runtime-settings-helper-declaration-contract.mjs",
       "bash tests/settings-helper-smoke.sh",
       "bash tests/wordpress-install-command-smoke.sh",

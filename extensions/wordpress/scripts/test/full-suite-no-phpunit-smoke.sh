@@ -84,42 +84,10 @@ if grep -Fq "PHPUNIT_RUNTIME_INVOKED" "${TMPDIR}/standalone.out"; then
 fi
 jq -e '.total == 1 and .passed == 1 and .failed == 0 and .skipped == 0 and .source == "full-suite-host-php"' "${TMPDIR}/standalone-results.json" >/dev/null
 
-# The test manifest is a second declaration source beside
-# standalone_php_test_paths: entries resolving to standalone-php are selected
-# with no glob declaration at all, and the manifest-declared standalone-only
-# suite satisfies the no-PHPUnit contract exactly like the glob case above.
-cat > "${component}/homeboy-test-manifest.json" <<'JSON'
-{
-    "schema": "homeboy/test-manifest/v1",
-    "tests": {
-        "tests/contract-smoke.php": {"environment": "standalone-php"}
-    }
-}
-JSON
-HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail"}' \
-HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
-HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/manifest-results.json" \
-run_router > "${TMPDIR}/manifest.out"
-grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=2 selected=1 routed=1 excluded=1 passed=1 failed=0" "${TMPDIR}/manifest.out"
-if grep -Fq "PHPUNIT_RUNTIME_INVOKED" "${TMPDIR}/manifest.out"; then
-    echo "Manifest-declared standalone full suite must not invoke PHPUnit when no PHPUnit tests exist." >&2
-    exit 1
-fi
-jq -e '.total == 1 and .passed == 1 and .failed == 0 and .skipped == 0 and .source == "full-suite-host-php"' "${TMPDIR}/manifest-results.json" >/dev/null
-
-# The sources union per file: a file both the manifest and the glob
-# declaration claim is selected and executed exactly once.
-printf '%s\n' '<?php // Standalone smoke, declared by both sources.' > "${component}/tests/overlapping-smoke.php"
-cat > "${component}/homeboy-test-manifest.json" <<'JSON'
-{
-    "schema": "homeboy/test-manifest/v1",
-    "tests": {
-        "tests/contract-smoke.php": {"environment": "standalone-php"},
-        "tests/overlapping-smoke.php": {"environment": "standalone-php"}
-    }
-}
-JSON
-HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","standalone_php_test_paths":["tests/overlapping-smoke.php"]}' \
+# Glob declarations select every matching standalone file exactly once, and
+# the glob-declared standalone-only suite satisfies the no-PHPUnit contract.
+printf '%s\n' '<?php // Standalone smoke, matched by the same glob.' > "${component}/tests/overlapping-smoke.php"
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","standalone_php_test_paths":["tests/*-smoke.php","tests/overlapping-smoke.php"]}' \
 HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
 HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/overlap-results.json" \
 run_router > "${TMPDIR}/overlap.out"
@@ -127,42 +95,53 @@ grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=3 selected=2 routed=2 exc
 overlap_routes="$(grep -cF "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/overlapping-smoke.php:" "${TMPDIR}/overlap.out" || true)"
 [ "$overlap_routes" -eq 1 ] || { echo "Expected exactly one route for the overlapping standalone file, got ${overlap_routes}." >&2; exit 1; }
 contract_routes="$(grep -cF "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/contract-smoke.php:" "${TMPDIR}/overlap.out" || true)"
-[ "$contract_routes" -eq 1 ] || { echo "Expected exactly one route for the manifest-declared file, got ${contract_routes}." >&2; exit 1; }
-jq -e '.total == 2 and .passed == 2 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/overlap-results.json" >/dev/null
-
-# default_environment makes listed entries standalone unless a per-file
-# environment overrides it. The override leaves the standalone suite and is
-# dispatched to the booted-WordPress backend in the same full-suite run, so a
-# declared WordPress smoke is executed rather than silently skipped.
-cat > "${component}/homeboy-test-manifest.json" <<'JSON'
-{
-    "schema": "homeboy/test-manifest/v1",
-    "default_environment": "standalone-php",
-    "tests": {
-        "tests/contract-smoke.php": {},
-        "tests/overlapping-smoke.php": {"environment": "wordpress"},
-        "tests/_stub-wp-and-rest.php": {"environment": "wordpress"}
-    }
-}
-JSON
-HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail"}' \
-HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
-HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/default-env-results.json" \
-run_router > "${TMPDIR}/default-env.out"
-grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=3 selected=1 routed=1 excluded=2 passed=1 failed=0" "${TMPDIR}/default-env.out"
-if grep -Fq "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/overlapping-smoke.php:" "${TMPDIR}/default-env.out"; then
-    echo "A per-file wordpress override must be excluded from the standalone suite." >&2
+[ "$contract_routes" -eq 1 ] || { echo "Expected exactly one route for the glob-declared file, got ${contract_routes}." >&2; exit 1; }
+if grep -Fq "PHPUNIT_RUNTIME_INVOKED" "${TMPDIR}/overlap.out"; then
+    echo "Declared standalone full suite must not invoke PHPUnit when no PHPUnit tests exist." >&2
     exit 1
 fi
-# The override is not merely excluded: it reaches the booted-WordPress backend.
-grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_ROUTE:tests/overlapping-smoke.php:runner=host-smoke-wp" "${TMPDIR}/default-env.out"
-grep -Fq "HOST_SMOKE_WP_INVOKED:tests/overlapping-smoke.php" "${TMPDIR}/default-env.out"
+jq -e '.total == 2 and .passed == 2 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/overlap-results.json" >/dev/null
+
+# wordpress_test_paths declares booted-WordPress smokes. A file it matches
+# leaves the standalone suite even when a broad standalone glob also matches,
+# and is dispatched to the booted-WordPress backend in the same full-suite run,
+# so a declared WordPress smoke is executed rather than silently skipped.
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","standalone_php_test_paths":["tests/*-smoke.php"],"wordpress_test_paths":["tests/overlapping-smoke.php","tests/_stub-wp-and-rest.php"]}' \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
+HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/wordpress-paths-results.json" \
+run_router > "${TMPDIR}/wordpress-paths.out"
+grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=3 selected=1 routed=1 excluded=2 passed=1 failed=0" "${TMPDIR}/wordpress-paths.out"
+if grep -Fq "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/overlapping-smoke.php:" "${TMPDIR}/wordpress-paths.out"; then
+    echo "A wordpress_test_paths file must be excluded from the standalone suite." >&2
+    exit 1
+fi
+# The declaration is not merely excluded: it reaches the booted-WordPress backend.
+grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_ROUTE:tests/overlapping-smoke.php:runner=host-smoke-wp" "${TMPDIR}/wordpress-paths.out"
+grep -Fq "HOST_SMOKE_WP_INVOKED:tests/overlapping-smoke.php" "${TMPDIR}/wordpress-paths.out"
 # A declared support file is an explicit, counted exclusion rather than a
 # selection the backend would reject.
-grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED:tests/_stub-wp-and-rest.php:reason=unsupported_test_shape" "${TMPDIR}/default-env.out"
-grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_SUMMARY:candidates=2 selected=1 routed=1 excluded=1" "${TMPDIR}/default-env.out"
-# Both halves of the manifest reconcile into one executed-test ledger.
-jq -e '.total == 2 and .passed == 2 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/default-env-results.json" >/dev/null
+grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED:tests/_stub-wp-and-rest.php:reason=unsupported_test_shape" "${TMPDIR}/wordpress-paths.out"
+grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_SUMMARY:candidates=2 selected=1 routed=1 excluded=1" "${TMPDIR}/wordpress-paths.out"
+# Both declarations reconcile into one executed-test ledger.
+jq -e '.total == 2 and .passed == 2 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/wordpress-paths-results.json" >/dev/null
+
+# A wordpress_test_paths-only component still runs its declared smoke even with
+# no standalone declaration and no PHPUnit tests.
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","wordpress_test_paths":["tests/overlapping-smoke.php"]}' \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
+HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/wordpress-only-results.json" \
+run_router > "${TMPDIR}/wordpress-only.out"
+grep -Fq "HOST_SMOKE_WP_INVOKED:tests/overlapping-smoke.php" "${TMPDIR}/wordpress-only.out"
+jq -e '.total == 1 and .passed == 1 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/wordpress-only-results.json" >/dev/null
+
+# Invalid declarations fail closed instead of silently dropping tests.
+set +e
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","wordpress_test_paths":"tests/overlapping-smoke.php"}' run_router > "${TMPDIR}/invalid.out" 2>&1
+invalid_status=$?
+set -e
+[ "$invalid_status" -ne 0 ] || { echo "A non-array wordpress_test_paths must fail." >&2; exit 1; }
+grep -Fq "ERROR: wordpress_test_paths must be an array of strings." "${TMPDIR}/invalid.out"
+rm -f "${component}/tests/overlapping-smoke.php"
 
 HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"skip","wp_codebox_phpunit_test_root":"/unresolved/tests"}' run_router > "${TMPDIR}/explicit.out"
 grep -Fq "PHPUNIT_RUNTIME_INVOKED" "${TMPDIR}/explicit.out"

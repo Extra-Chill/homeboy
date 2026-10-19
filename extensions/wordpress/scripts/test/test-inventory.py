@@ -24,13 +24,13 @@ Two details are load-bearing and easy to get wrong:
 
 The suite is the same one normal full-suite execution runs: canonical PHPUnit
 discovery from WP Codebox, plus the component's declared standalone PHP tests
-(the union of `standalone_php_test_paths` and `homeboy-test-manifest.json`
-entries resolving to standalone-php, resolved by the runner and handed over as
-component-relative paths). Core validates members structurally and refuses
-unknown fields, so a member's runner/environment identity is carried in the
-existing `target` field — `phpunit` for discovered PHPUnit files,
-`standalone-php` for declared standalone tests — rather than in a new field.
-A file both sources claim is a standalone member, matching the classifier
+(the files `standalone_php_test_paths` declares in homeboy.json extension
+settings, resolved by the runner and handed over as component-relative
+paths). Core validates members structurally and refuses unknown fields, so a
+member's runner/environment identity is carried in the existing `target` field
+— `phpunit` for discovered PHPUnit files, `standalone-php` for declared
+standalone tests — rather than in a new field. A file both PHPUnit discovery
+and the declaration claim is a standalone member, matching the classifier
 precedence the runner itself applies. Empty PHPUnit discovery is valid when
 the standalone list is non-empty; both empty is refused.
 
@@ -190,8 +190,8 @@ def host_test_path(project, plugin_slug, sandbox_path):
 def standalone_test_paths(standalone_list, project):
     """Read the runner-resolved standalone PHP suite (component-relative paths).
 
-    The runner computes the union of `standalone_php_test_paths` and the test
-    manifest's standalone-php entries with its own classifier, so this producer
+    The runner resolves `standalone_php_test_paths` with its own classifier
+    (a `wordpress_test_paths` match overrides it), so this producer
     only has to validate shape: relative, inside the component, present on
     disk. Duplicates are collapsed because members are keyed by id anyway.
     """

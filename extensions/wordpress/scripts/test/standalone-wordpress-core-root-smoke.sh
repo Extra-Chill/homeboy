@@ -43,15 +43,9 @@ echo "standalone smoke received core root\n";
 PHP
 done
 
-cat > "${component}/homeboy-test-manifest.json" <<'JSON'
-{
-    "schema": "homeboy/test-manifest/v1",
-    "tests": {
-        "tests/core-root-first-smoke.php": {"environment": "standalone-php"},
-        "tests/core-root-second-smoke.php": {"environment": "standalone-php"}
-    }
-}
-JSON
+# Both smokes are declared standalone in the component's homeboy.json settings;
+# run_case merges this declaration into every case's settings payload.
+standalone_declaration='{"standalone_php_test_paths":["tests/core-root-first-smoke.php","tests/core-root-second-smoke.php"]}'
 
 cat > "$runtime_stub" <<'SH'
 #!/usr/bin/env bash
@@ -122,7 +116,7 @@ run_case() {
     HOMEBOY_COMPONENT_PATH="$component" \
     HOMEBOY_COMPONENT_SHAPE="plugin" \
     HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="$runtime_stub" \
-    HOMEBOY_SETTINGS_JSON="$settings" \
+    HOMEBOY_SETTINGS_JSON="$(jq -nc --argjson base "$settings" --argjson declared "$standalone_declaration" '$base + $declared')" \
         bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/${mode}.out" 2> "${TMPDIR}/${mode}.err"
     status=$?
     set -e

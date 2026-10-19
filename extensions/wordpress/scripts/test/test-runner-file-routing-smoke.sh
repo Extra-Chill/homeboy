@@ -370,7 +370,7 @@ run_changed_scope() {
     HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
     HOMEBOY_TEST_RESULTS_FILE="${outfile}.results.json" \
     HOMEBOY_CHANGED_TEST_FILES="$changed" \
-    HOMEBOY_SETTINGS_JSON='{"standalone_php_test_paths":["tests/*-command-help-snapshots.php"]}' \
+    HOMEBOY_SETTINGS_JSON="${CHANGED_SCOPE_SETTINGS:-$component_test_settings}" \
         bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "$outfile" 2>&1
     status=$?
     set -e
@@ -390,17 +390,14 @@ assert_contains "${TMPDIR}/smoke-file.out" "HOST_SMOKE_BEGIN:tests/import-agent-
 assert_contains "${TMPDIR}/smoke-file.out" "standalone smoke ran"
 assert_not_contains "${TMPDIR}/smoke-file.out" "WP_CODEBOX_STUB"
 
-cat > "${component}/homeboy-test-manifest.json" <<'JSON'
-{
-  "schema": "homeboy/test-manifest/v1",
-  "default_environment": "standalone-php",
-  "tests": {
-    "tests/queue-routing-smoke.php": {
-      "environment": "wordpress"
-    }
-  }
-}
-JSON
+# From here on the component declares its test environments in homeboy.json
+# extension settings. queue-routing-smoke.php matches the standalone glob too,
+# but its wordpress_test_paths declaration wins and routes it to booted
+# WordPress. The deliberately failing smoke is declared only by the cases that
+# exercise it, because declared standalone tests also join the full suite.
+component_test_settings='{"standalone_php_test_paths":["tests/import-agent-ability-smoke.php","tests/queue-routing-smoke.php","tests/*-command-help-snapshots.php"],"wordpress_test_paths":["tests/queue-routing-smoke.php"]}'
+failing_test_settings='{"standalone_php_test_paths":["tests/*-smoke.php","tests/*-command-help-snapshots.php"],"wordpress_test_paths":["tests/queue-routing-smoke.php"]}'
+export HOMEBOY_SETTINGS_JSON="$component_test_settings"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
@@ -449,7 +446,7 @@ jq -e '.total == 1 and .passed == 1 and .failed == 0 and .skipped == 0 and .sour
 # Standalone failure remains authoritative both alone and when followed by a
 # passing PHPUnit backend.
 standalone_failure_status=0
-run_changed_scope "${TMPDIR}/standalone-failure.out" 'tests/failing-smoke.php' || standalone_failure_status=$?
+CHANGED_SCOPE_SETTINGS="$failing_test_settings" run_changed_scope "${TMPDIR}/standalone-failure.out" 'tests/failing-smoke.php' || standalone_failure_status=$?
 if [ "$standalone_failure_status" -eq 0 ]; then
     echo "Expected a failing standalone-only changed scope to fail" >&2
     exit 1
@@ -458,7 +455,7 @@ assert_contains "${TMPDIR}/standalone-failure.out" "PHP_SMOKE_FAIL:tests/failing
 jq -e '.total == 1 and .passed == 0 and .failed == 1 and .skipped == 0 and .source == "changed-scope-host-php"' "${TMPDIR}/standalone-failure.out.results.json" >/dev/null
 
 mixed_failure_status=0
-run_changed_scope "${TMPDIR}/mixed-failure.out" $'tests/Unit/ImportAgentAbilityTest.php\ntests/failing-smoke.php' || mixed_failure_status=$?
+CHANGED_SCOPE_SETTINGS="$failing_test_settings" run_changed_scope "${TMPDIR}/mixed-failure.out" $'tests/Unit/ImportAgentAbilityTest.php\ntests/failing-smoke.php' || mixed_failure_status=$?
 if [ "$mixed_failure_status" -eq 0 ]; then
     echo "Expected a passing PHPUnit backend not to erase a standalone failure" >&2
     exit 1

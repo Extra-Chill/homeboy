@@ -44,16 +44,7 @@ echo "PHPUNIT_RUNTIME_INVOKED"
 SH
 chmod +x "$runtime_stub"
 
-cat > "${component}/homeboy-test-manifest.json" <<'JSON'
-{
-    "schema": "homeboy/test-manifest/v1",
-    "tests": {
-        "tests/dependency-env-smoke.php": {"environment": "standalone-php"}
-    }
-}
-JSON
-
-settings_json="$(jq -nc --arg path "$dependency" '{validation_dependencies: [{path: $path, plugin_slug: "declared-dependency"}]}')"
+settings_json="$(jq -nc --arg path "$dependency" '{validation_dependencies: [{path: $path, plugin_slug: "declared-dependency"}], standalone_php_test_paths: ["tests/dependency-env-smoke.php"]}')"
 
 set +e
 EXPECTED_DEPENDENCY_ROOT="$dependency" \

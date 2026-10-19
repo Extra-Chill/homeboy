@@ -626,7 +626,14 @@
       "label": "Standalone PHP test paths",
       "type": "array",
       "default": [],
-      "description": "Component-relative PHP paths or shell-glob patterns that identify executable standalone PHP tests in changed-file scopes. Matching files run through the bounded host-PHP runner; PHPUnit and *-smoke.php conventions remain available without this declaration."
+      "description": "Component-relative PHP paths or shell-glob patterns that identify executable standalone PHP tests. Matching files run through the bounded host-PHP runner with no booted WordPress in full suites, changed-file scopes, and shard replay; PHPUnit and *-smoke.php conventions remain available without this declaration."
+    },
+    {
+      "id": "wordpress_test_paths",
+      "label": "Booted-WordPress test paths",
+      "type": "array",
+      "default": [],
+      "description": "Component-relative PHP paths or shell-glob patterns that identify booted-WordPress smokes outside canonical PHPUnit locations. Full-suite runs execute matching tests/**/*-smoke.php files through the host-smoke WordPress backend. A file matching both this and standalone_php_test_paths runs in booted WordPress."
     },
     {
       "id": "validation_dependencies",
