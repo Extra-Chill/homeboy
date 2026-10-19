@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.429.5] - 2026-10-19
+
+### Changed
+- Keep redacted structured text parseable
+
+### Fixed
+- keep a status wait open while the Cook driver still owns the attempt
+- judge provider liveness at observation time, snapshot inherited env, bound read-only busy waits by wall clock
+
 ## [0.429.4] - 2026-10-19
 
 ### Fixed
