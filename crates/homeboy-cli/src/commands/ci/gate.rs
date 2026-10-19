@@ -130,7 +130,7 @@ mod tests {
             head: DifferentialGateSide {
                 command: "homeboy test homeboy".to_string(),
                 exit_code: head_exit_code,
-                evidence: vec!["homeboy-ci-results/test.log".to_string()],
+                evidence: vec!["/runner-temp/homeboy-ci-results/test.log".to_string()],
             },
         }
     }

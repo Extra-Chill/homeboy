@@ -21,7 +21,6 @@ dist-manifest.json
 
 # CI artifacts
 .homeboy-action/
-/homeboy-ci-results/
 .release-last-failed
 /homeboy-observations/
 /homeboy-test-shard.json

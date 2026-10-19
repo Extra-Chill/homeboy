@@ -147,7 +147,7 @@ homeboy runner exec --cwd /srv/homeboy/checkouts/<component-id> <runner-id> \
 Treat runner stdout as operator context. Use command JSON, persisted runs, and artifact promotion for reviewer-facing evidence:
 
 ```bash
-homeboy --output homeboy-results/review.json \
+homeboy --output /tmp/homeboy-results/review.json \
   --runner <runner-id> review <component-id> --changed-since origin/main
 
 homeboy runs show <run-id>

@@ -2325,7 +2325,7 @@ mod tests {
     #[test]
     fn write_artifact_to_file_writes_direct_artifact_and_creates_parent_dir() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("homeboy-ci-results").join("review.json");
+        let path = dir.path().join("ci-results").join("review.json");
         let result = Ok(serde_json::json!({
             "command": "review",
             "artifact": {

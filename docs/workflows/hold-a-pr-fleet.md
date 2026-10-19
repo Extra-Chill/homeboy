@@ -15,7 +15,7 @@ List the worktrees before checking GitHub. The list output is the local source o
 
 ```bash
 homeboy worktree list
-homeboy --output homeboy-results/worktrees.json worktree list
+homeboy --output /tmp/homeboy-results/worktrees.json worktree list
 ```
 
 For each branch that looks stale, dirty, or ready to remove, inspect the safety report instead of guessing from directory names:
@@ -39,8 +39,8 @@ Use the JSON output as the orchestration ledger. The useful fleet-holding fields
 When a fleet is close to landing, repeat this loop until every PR is either landed or has one concrete blocker. Keep the PR order explicit when there are dependent branches.
 
 ```bash
-homeboy git pr readiness <component-id> --number 123 --output homeboy-results/123-readiness.json
-homeboy git pr land owner/repo 123 124 125 --dry-run --output homeboy-results/land-dry-run.json
+homeboy git pr readiness <component-id> --number 123 --output /tmp/homeboy-results/123-readiness.json
+homeboy git pr land owner/repo 123 124 125 --dry-run --output /tmp/homeboy-results/land-dry-run.json
 ```
 
 Use readiness for the first PR you intend to merge next. It gives a narrow merge/no-merge answer without probing by attempting a merge.
@@ -61,7 +61,7 @@ Run review from the worktree path so the evidence matches the branch being held:
 
 ```bash
 homeboy review <component-id> --path <worktree-path> --changed-since origin/main --summary
-homeboy --output homeboy-results/<branch>-review.json review <component-id> --path <worktree-path> --changed-since origin/main --summary
+homeboy --output /tmp/homeboy-results/<branch>-review.json review <component-id> --path <worktree-path> --changed-since origin/main --summary
 ```
 
 When a branch has a recorded `run_id`, read the stable proof and evidence registry before rerunning expensive checks:

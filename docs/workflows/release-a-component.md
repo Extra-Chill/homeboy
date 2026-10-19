@@ -32,7 +32,7 @@ homeboy release <component-id> --dry-run
 For automation, capture the plan:
 
 ```bash
-homeboy --output homeboy-results/release-plan.json \
+homeboy --output /tmp/homeboy-results/release-plan.json \
   release <component-id> --dry-run
 ```
 

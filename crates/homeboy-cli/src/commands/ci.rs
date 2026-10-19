@@ -722,7 +722,7 @@ mod tests {
             baseline_evidence: Vec::new(),
             head_command: "homeboy review test homeboy".to_string(),
             head_exit_code: 1,
-            head_evidence: vec!["homeboy-ci-results/test.log".to_string()],
+            head_evidence: vec!["/runner-temp/homeboy-ci-results/test.log".to_string()],
         };
 
         let (output, exit) = run_differential_gate(args).expect("gate classifies");

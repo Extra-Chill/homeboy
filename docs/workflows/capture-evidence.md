@@ -14,10 +14,10 @@ Homeboy commands should leave durable evidence that humans, CI, scheduled jobs, 
 Most Homeboy commands support the global `--output <path>` flag. Use it for the first layer of durable evidence:
 
 ```bash
-homeboy --output homeboy-results/review.json \
+homeboy --output /tmp/homeboy-results/review.json \
   review my-component --changed-since origin/main
 
-homeboy --output homeboy-results/bench.json \
+homeboy --output /tmp/homeboy-results/bench.json \
   bench my-component --baseline
 ```
 
@@ -43,7 +43,7 @@ Use benchmarks when performance is part of the acceptance criteria:
 ```bash
 homeboy bench my-component --baseline
 homeboy bench my-component --ratchet
-homeboy bench my-component --output homeboy-results/bench.json
+homeboy bench my-component --output /tmp/homeboy-results/bench.json
 ```
 
 For comparisons across rigs or histories, keep the run id and inspect it through `homeboy runs` instead of copying stdout.
@@ -83,7 +83,7 @@ For runner, static HTML, and matrix workflows, publish stdout and generated file
 When an evidence command depends on a fixture file that only exists on the controller filesystem, run it intentionally on the controller instead of letting automatic Lab routing move the command to a runner:
 
 ```bash
-homeboy --placement local --output homeboy-results/fixture.json \
+homeboy --placement local --output /tmp/homeboy-results/fixture.json \
   <hot-command> --fixture /absolute/path/to/local.fixture
 ```
 

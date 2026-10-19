@@ -63,7 +63,7 @@ Use `homeboy ssh <project-id> -- <command>` for one-off remote inspection, for e
 For automation or incident review, write JSON output:
 
 ```bash
-homeboy --output homeboy-results/deploy-check.json deploy <project-id> --check
+homeboy --output /tmp/homeboy-results/deploy-check.json deploy <project-id> --check
 ```
 
 Pair deployment evidence with release evidence when a reviewer needs to understand merged -> released -> deployed state.

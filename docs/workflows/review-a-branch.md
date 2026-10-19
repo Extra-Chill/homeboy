@@ -37,7 +37,7 @@ homeboy review my-component --changed-since origin/main
 For CI or agent handoff, write the structured envelope:
 
 ```bash
-homeboy --output homeboy-results/review.json \
+homeboy --output /tmp/homeboy-results/review.json \
   review my-component --changed-since origin/main --summary
 ```
 
@@ -46,7 +46,7 @@ For a PR-comment body:
 ```bash
 homeboy review my-component \
   --changed-since origin/main \
-  --report pr-comment > homeboy-results/review-comment.md
+  --report pr-comment > /tmp/homeboy-results/review-comment.md
 ```
 
 ## 3. Read Failures

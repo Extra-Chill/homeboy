@@ -7,6 +7,25 @@ upload those files as artifacts instead of asking downstream tools to scrape log
 
 This document names the stable contract a PR review agent can consume.
 
+## Evidence location
+
+CI evidence never lives inside the repository checkout. Homeboy adds exactly one
+file to a repository (`homeboy.json`); every other byte it produces, including CI
+and review evidence, lives in Homeboy-owned state or a runner-owned scratch
+directory outside the tree. Homeboy core has no in-tree evidence default: the
+`--output <path>` flag writes exactly where it is pointed.
+
+CI wrappers resolve one results directory outside the checkout and pass absolute
+paths under it to `--output`:
+
+- an explicit `HOMEBOY_CI_RESULTS_DIR` set by the wrapper, or
+- `$RUNNER_TEMP/homeboy-ci-results` on GitHub Actions.
+
+There is no repo-relative `homeboy-ci-results/` directory and no fallback that
+reads one. After `homeboy ci`, `homeboy ci gate`, or `homeboy review` on a clean
+checkout, `git status --porcelain --ignored` stays empty, and every evidence path
+reported in command output points outside the tree.
+
 ## Envelope
 
 Every artifact file is a standard Homeboy CLI response:
@@ -48,20 +67,22 @@ unknown fields.
 For PR review agents, the preferred artifact is a single `homeboy review` output:
 
 ```sh
-mkdir -p "$RUNNER_TEMP/homeboy-results"
+HOMEBOY_CI_RESULTS_DIR="${HOMEBOY_CI_RESULTS_DIR:-$RUNNER_TEMP/homeboy-ci-results}"
+mkdir -p "$HOMEBOY_CI_RESULTS_DIR"
 
 homeboy \
-  --output "$RUNNER_TEMP/homeboy-results/review.json" \
+  --output "$HOMEBOY_CI_RESULTS_DIR/review.json" \
   review "$COMPONENT_ID" \
   --path "$GITHUB_WORKSPACE" \
   --changed-since "$BASE_REF" \
   --summary
 ```
 
-Upload `$RUNNER_TEMP/homeboy-results` as a GitHub Actions artifact named
-`homeboy-ci-results`.
+Upload `$HOMEBOY_CI_RESULTS_DIR` as a GitHub Actions artifact named
+`homeboy-ci-results`. The artifact name is a transport label, not a path in the
+checkout.
 
-Recommended artifact layout:
+Recommended artifact layout (artifact root, i.e. `$HOMEBOY_CI_RESULTS_DIR`):
 
 ```text
 homeboy-ci-results/
@@ -159,11 +180,12 @@ Existing CI wrappers may still run individual commands and upload one JSON file 
 command. That shape remains valid, but it is a lower-level contract:
 
 ```sh
-homeboy --output "$RUNNER_TEMP/homeboy-results/lint.json"  lint  "$COMPONENT_ID" --path "$GITHUB_WORKSPACE" --changed-since "$BASE_REF" --summary
-homeboy --output "$RUNNER_TEMP/homeboy-results/test.json"  test  "$COMPONENT_ID" --path "$GITHUB_WORKSPACE" --changed-since "$BASE_REF" --json-summary
+homeboy --output "$HOMEBOY_CI_RESULTS_DIR/lint.json"  lint  "$COMPONENT_ID" --path "$GITHUB_WORKSPACE" --changed-since "$BASE_REF" --summary
+homeboy --output "$HOMEBOY_CI_RESULTS_DIR/test.json"  test  "$COMPONENT_ID" --path "$GITHUB_WORKSPACE" --changed-since "$BASE_REF" --json-summary
 ```
 
-Recommended artifact layout for per-command mode:
+Recommended artifact layout for per-command mode (artifact root, outside the
+checkout):
 
 ```text
 homeboy-ci-results/
