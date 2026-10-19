@@ -811,13 +811,17 @@ mod tests {
 
     #[test]
     fn managed_worktree_refuses_repository_global_stash_and_guides_safe_recovery() {
-        let request = dispatch_request(DispatchRequestOverrides::default());
-        let policy = resolve_dispatch_command_policy(&request, true).expect("managed policy");
+        // Policy resolution reads the ambient Homeboy config. Without an
+        // isolated home it could read another test's malformed policy (#14832).
+        with_isolated_home(|_| {
+            let request = dispatch_request(DispatchRequestOverrides::default());
+            let policy = resolve_dispatch_command_policy(&request, true).expect("managed policy");
 
-        let decision = policy.evaluate("git stash push -u");
-        let denial = decision.denial().expect("stash denied");
-        assert_eq!(denial.matched_pattern.as_deref(), Some("git stash*"));
-        assert!(denial.reason.contains("repository-global"));
+            let decision = policy.evaluate("git stash push -u");
+            let denial = decision.denial().expect("stash denied");
+            assert_eq!(denial.matched_pattern.as_deref(), Some("git stash*"));
+            assert!(denial.reason.contains("repository-global"));
+        });
     }
 
     #[test]

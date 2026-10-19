@@ -704,11 +704,10 @@ pub(crate) fn foreign_keys_enforced(connection: &Connection) -> Result<bool> {
 /// This deliberately skips schema initialization and journal-mode configuration: both can
 /// acquire writer locks even though the caller only needs persisted metadata.
 pub(crate) fn open_readonly_connection(path: &Path) -> Result<Connection> {
-    const READ_TIMEOUT: Duration = Duration::from_millis(750);
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| read_store_error(path, "open read-only observation store", error))?;
     connection
-        .busy_timeout(READ_TIMEOUT)
+        .busy_handler(Some(super::read_only_busy_wait))
         .map_err(|error| read_store_error(path, "configure read-only observation store", error))?;
     Ok(connection)
 }
@@ -744,7 +743,11 @@ pub(crate) fn open_maintenance_connection(path: &Path) -> Result<Connection> {
 
 fn read_store_error(path: &Path, operation: &str, error: rusqlite::Error) -> crate::Error {
     if super::is_transient_lock_error(&error) {
-        return crate::Error::observation_store_busy(path.to_string_lossy(), operation, 750);
+        return crate::Error::observation_store_busy(
+            path.to_string_lossy(),
+            operation,
+            super::SQLITE_READ_ONLY_TIMEOUT.as_millis() as u64,
+        );
     }
     sqlite_error(format!("{operation} {}", path.display()))(error)
 }

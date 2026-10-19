@@ -1356,6 +1356,18 @@ fn run_materialized_provider_command_once_contained(
                 let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let mut progressed = false;
                 let mut workspace_progressed = false;
+                // Liveness is judged at this pass's observation instant, never
+                // after the samples below: on macOS each one forks `ps` and the
+                // workspace sample forks `git` twice, and charging that monitor
+                // cost to the provider killed providers that were writing the
+                // whole time (#14832). A window about to close also forces a
+                // fresh workspace sample, so no stall is declared on stale
+                // evidence.
+                let liveness_expiring = liveness_timeout.is_some_and(|liveness| {
+                    elapsed.saturating_sub(Duration::from_millis(
+                        last_progress_ms.load(Ordering::SeqCst),
+                    )) >= liveness
+                });
                 let current_runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
                 if runtime_progress_advanced(&runtime_progress, &current_runtime_progress) {
                     progressed = true;
@@ -1365,7 +1377,9 @@ fn run_materialized_provider_command_once_contained(
                 // Liveness is the only consumer of the workspace signal, so it
                 // is only worth the `git` fork when a liveness deadline is
                 // actually in force and due for a fresh sample.
-                if liveness_timeout.is_some() && elapsed_ms >= next_workspace_progress_check_ms {
+                if liveness_timeout.is_some()
+                    && (liveness_expiring || elapsed_ms >= next_workspace_progress_check_ms)
+                {
                     next_workspace_progress_check_ms =
                         elapsed_ms.saturating_add(workspace_progress_check_interval_ms);
                     let current_activity = child.descendant_activity();
@@ -1436,7 +1450,7 @@ fn run_materialized_provider_command_once_contained(
                     }
                 }
                 if let Some(liveness_timeout) = liveness_timeout {
-                    let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
+                    let progress_age = elapsed.saturating_sub(Duration::from_millis(
                         last_progress_ms.load(Ordering::SeqCst),
                     ));
                     if progress_age >= liveness_timeout {
