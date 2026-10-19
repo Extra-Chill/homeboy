@@ -1217,6 +1217,7 @@ fn prepare_local_review_dependencies(
         elapsed_ms: 0,
         last_progress_ms_ago: None,
         deadline_ms,
+        liveness: None,
     });
     progress(observation, "dependency_setup", "dependencies", "running");
 
@@ -1236,6 +1237,7 @@ fn prepare_local_review_dependencies(
                 elapsed_ms: progress.elapsed_ms,
                 last_progress_ms_ago: progress.last_progress_ms_ago,
                 deadline_ms,
+                liveness: None,
             });
             if let Some(run_id) = run_id.as_deref() {
                 update_progress(
@@ -1274,6 +1276,7 @@ fn prepare_local_review_dependencies(
             elapsed_ms: started.elapsed().as_millis(),
             last_progress_ms_ago: None,
             deadline_ms,
+            liveness: None,
         });
         progress(
             observation,
@@ -1307,6 +1310,7 @@ fn prepare_local_review_dependencies(
         elapsed_ms: started.elapsed().as_millis(),
         last_progress_ms_ago: None,
         deadline_ms,
+        liveness: Some(homeboy_engine_primitives::command::CommandLiveness::Output),
     });
     progress(observation, "dependency_setup", "dependencies", "completed");
     Ok(())
@@ -1410,6 +1414,9 @@ struct LocalReviewSetupProgress<'a> {
     elapsed_ms: u128,
     last_progress_ms_ago: Option<u128>,
     deadline_ms: u128,
+    /// Set on completed setup: the extension stage that follows emits no
+    /// markers, so liveness goes back to its output (#16152).
+    liveness: Option<homeboy_engine_primitives::command::CommandLiveness>,
 }
 
 fn emit_local_review_setup_progress(progress: LocalReviewSetupProgress<'_>) {
@@ -1425,6 +1432,7 @@ fn emit_local_review_setup_progress(progress: LocalReviewSetupProgress<'_>) {
             "elapsed_ms": progress.elapsed_ms,
             "last_progress_ms_ago": progress.last_progress_ms_ago,
             "deadline_ms": progress.deadline_ms,
+            "liveness": progress.liveness,
         })
     );
 }
@@ -2555,6 +2563,7 @@ mod tests {
             elapsed_ms: 12_500,
             last_progress_ms_ago: Some(250),
             deadline_ms: 1_800_000,
+            liveness: None,
         });
 
         assert_eq!(
