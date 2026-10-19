@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.429.7] - 2026-10-19
+
+### Fixed
+- read the dependency manifest from homeboy.json instead of homeboy-deps.json
+- let review hand liveness back to output after setup
+
 ## [0.429.6] - 2026-10-19
 
 ### Changed
