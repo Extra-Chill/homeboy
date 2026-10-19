@@ -344,7 +344,13 @@ pub(super) fn cleanup_with_store_page(
             continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
             break;
         }
-        let skip_reasons = cleanup_skip_reasons(&record, &safety, options.force, &live_owners);
+        let skip_reasons = cleanup_skip_reasons(
+            &record,
+            &safety,
+            &branch_cleanup,
+            options.force,
+            &live_owners,
+        );
         if !skip_reasons.is_empty() {
             skipped.push(WorktreeCleanupSkipped {
                 record,
@@ -456,14 +462,24 @@ fn deadline_exhausted(deadline: Option<std::time::Instant>) -> bool {
 fn cleanup_skip_reasons(
     record: &TaskWorktreeRecord,
     safety: &WorktreeSafetyReport,
+    branch_cleanup: &WorktreeBranchCleanupReport,
     force: bool,
     live_owners: &[String],
 ) -> Vec<String> {
     let mut reasons = Vec::new();
+    // A branch merged into the cleanup base ref is the same terminal evidence
+    // plain `worktree remove` accepts without --force (#16147): the landed
+    // content already lives in the base (including GitHub squash/rebase
+    // merges, via the shared content-containment probe), so cleanup nominates
+    // the worktree whether or not its lifecycle owner recorded a succeeded
+    // finalization. Unmerged owned work still waits for that finalization so
+    // in-flight loops are never reaped out from under their owner.
+    let branch_merged = branch_cleanup.status == BranchCleanupStatus::Merged;
     if let Some(owner) = record
         .run_id
         .as_deref()
         .filter(|_| record.terminal_disposition.as_deref() != Some("succeeded"))
+        .filter(|_| !branch_merged)
     {
         reasons.push(format!(
             "cleanup requires explicit succeeded finalization from lifecycle owner `{owner}`"

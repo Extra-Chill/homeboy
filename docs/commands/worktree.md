@@ -31,6 +31,6 @@ An active record is an *orphan* only when its worktree path **and** its recorded
 
 If either the worktree directory or the source checkout still exists, the record is not an orphan and every gate above still applies.
 
-`worktree cleanup` reports a task-worktree cleanup plan by default. Pass `--apply` to remove planned worktrees after the existing safety gates pass. `--dry-run` names the plan-only default explicitly, as on every plan-default mutation command; it conflicts with `--apply`.
+`worktree cleanup` reports a task-worktree cleanup plan by default. Pass `--apply` to remove planned worktrees after the existing safety gates pass. `--dry-run` names the plan-only default explicitly, as on every plan-default mutation command; it conflicts with `--apply`. Cleanup nominates every worktree plain `worktree remove` would accept without `--force`: a branch merged into the cleanup base ref (including GitHub squash/rebase merges, via the shared content-containment probe) is terminal evidence on its own, so a merged, clean, unclaimed worktree is nominated whether or not its lifecycle owner recorded a succeeded finalization. Unmerged run-owned work still waits for that explicit finalization, and dirty or claimed worktrees stay retained.
 
 Use `homeboy cleanup artifacts` to plan rebuildable artifact cleanup, then pass `--apply` when the plan is acceptable. `worktree cleanup --cleanup-artifacts` includes declared rebuildable artifacts from the Homeboy checkout that built the active binary; it remains plan-only unless `--apply` is also passed.
