@@ -406,6 +406,15 @@ fn normalize_key(key: &str) -> String {
     key.trim().to_ascii_lowercase().replace('-', "_")
 }
 
+/// A credential value found in free text. Redacted text is often JSON (runner
+/// stdout carries serialized documents nested inside JSON strings), so the
+/// value stops at a backslash, quote, or closing bracket as well as the
+/// usual separators: one that ran on
+/// through `\"]}` would delete that structure along with the credential and
+/// leave the document unparseable. A bracketed marker such as `[REDACTED]` is
+/// an already-redacted value, which keeps redaction idempotent.
+const CREDENTIAL_VALUE: &str = r#"(?:\[[A-Z_]+\]|[^\s,;&"\\\]}]+)"#;
+
 fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
     // An explicit authorization key is unambiguous provenance: whatever
     // follows it is a credential no matter what it looks like. Redact it
@@ -418,7 +427,7 @@ fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
     // because the latter deliberately skips `authorization` keys.
     static HEADER: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(
-        r"(?i)\b((?:proxy-)?authorization)(\s*[:=]\s*)((?:bearer|basic|token|digest|negotiate)\s+)?([^\s,;]+)",
+        &format!(r"(?i)\b((?:proxy-)?authorization)(\s*[:=]\s*)((?:bearer|basic|token|digest|negotiate)\s+)?({CREDENTIAL_VALUE})"),
     )
     .expect("authorization header redaction regex is valid")
     });
@@ -439,12 +448,14 @@ fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
     // when the following token is not plain prose. Credentials reachable this
     // way (JWTs, base64, `sk-`/`ghp_` tokens, hex) all fail the prose test.
     static PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?i)\b(bearer|basic|token)\s+([^\s,;]+)")
-            .expect("authorization redaction regex is valid")
+        Regex::new(&format!(
+            r"(?i)\b(bearer|basic|token)\s+({CREDENTIAL_VALUE})"
+        ))
+        .expect("authorization redaction regex is valid")
     });
     let value = PATTERN
         .replace_all(&value, |captures: &Captures<'_>| {
-            if looks_like_prose_word(&captures[2]) {
+            if looks_like_prose_word(captures[2].trim_end_matches(['.', ':', '!', '?'])) {
                 captures[0].to_string()
             } else {
                 format!("{} {replacement}", &captures[1])
@@ -464,8 +475,10 @@ fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
 
 fn redact_inline_assignments(value: &str, policy: &RedactionPolicy) -> String {
     static PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"([A-Za-z0-9_.-]+)(\s*[:=]\s*)([^&\s,;]+)")
-            .expect("inline secret redaction regex is valid")
+        Regex::new(&format!(
+            r"([A-Za-z0-9_.-]+)(\s*[:=]\s*)({CREDENTIAL_VALUE})"
+        ))
+        .expect("inline secret redaction regex is valid")
     });
     PATTERN
         .replace_all(value, |captures: &Captures<'_>| {
@@ -580,6 +593,43 @@ mod tests {
             policy.redact_string("Authorization: ToKeN ghp_secret"),
             "Authorization: ToKeN [REDACTED]"
         );
+    }
+
+    /// Runner stdout is a JSON document whose strings can hold serialized
+    /// JSON, such as a provider's review form. Prose that ends a nested string
+    /// with "token <word>" put the closing quotes and brackets inside the
+    /// matched value, which redaction deleted, leaving stdout unparseable.
+    #[test]
+    fn redaction_keeps_structured_text_parseable() {
+        let policy = RedactionPolicy::default();
+        let review_form = json!({
+            "what_changed": ["Updated colorSlug() to match exact token slugs."],
+            "auth": "Authorization: Bearer abc.def.ghi",
+            "note": "retry with token sk-live-123",
+            "env": "api_key=k3y-value",
+        })
+        .to_string();
+        let stdout = json!({ "data": { "review_form": review_form } }).to_string();
+
+        let redacted = policy.redact_string(&stdout);
+        let outer: Value = serde_json::from_str(&redacted).expect("outer document parses");
+        let inner: Value = serde_json::from_str(
+            outer["data"]["review_form"]
+                .as_str()
+                .expect("nested document stays a string"),
+        )
+        .expect("nested document parses");
+
+        assert_eq!(
+            inner["what_changed"][0],
+            "Updated colorSlug() to match exact token slugs."
+        );
+        assert_eq!(inner["auth"], "Authorization: Bearer [REDACTED]");
+        assert_eq!(inner["note"], "retry with token [REDACTED]");
+        assert_eq!(inner["env"], "api_key=[REDACTED]");
+        assert!(!redacted.contains("abc.def.ghi"));
+        assert!(!redacted.contains("sk-live-123"));
+        assert!(!redacted.contains("k3y-value"));
     }
 
     #[test]
