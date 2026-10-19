@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.52.2] - 2026-10-19
+
+### Fixed
+- declare test environments in homeboy.json settings; delete the test-manifest reader
+
 ## [3.52.1] - 2026-10-19
 
 ### Fixed
