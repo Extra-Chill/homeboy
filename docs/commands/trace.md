@@ -25,7 +25,7 @@ homeboy trace <component> <scenario> --runs 5 --aggregate spans --schedule inter
 homeboy trace <component> <scenario> --attach logfile:/tmp/service.log --attach pid:1234
 homeboy trace compare before.json after.json --focus-span phase.wp_boot_start_to_wp_boot_ready
 homeboy trace compare <component> <scenario> --baseline-target develop --candidate HEAD --runs 5 --report markdown
-homeboy trace compare-variant --rig studio --scenario studio-app-create-site --runs 5 --overlay overlays/change.patch --output-dir .homeboy/experiments/change
+homeboy trace compare-variant --rig studio --scenario studio-app-create-site --runs 5 --overlay overlays/change.patch --output-dir /tmp/trace-experiments/change
 homeboy trace <component> <scenario> --report=markdown
 homeboy trace <component> <scenario> --baseline
 homeboy trace <component> <scenario> --ratchet
@@ -185,7 +185,7 @@ homeboy trace compare woocommerce-gateway-stripe ece-product-page-waterfall \
 
 `--baseline-target` accepts an existing path or a git ref in the resolved component checkout. The flag is intentionally named `--baseline-target` because `--baseline` already saves a trace baseline for the baseline engine. `--candidate` accepts the same path-or-ref shape. Ref targets are checked out into temporary detached git worktrees for the run and removed afterward.
 
-The compare command writes `baseline.aggregate.json`, `candidate.aggregate.json`, `compare.json`, and `summary.md` under `.homeboy/trace-compare/<scenario>-<timestamp>` unless `--output-dir` is provided. The JSON comparison includes target labels, git SHAs when available, pass/fail status for both sides, artifact paths, span deltas, percentage deltas, focus-span status, guardrail status, and missing metrics as `null`/omitted values rather than invented numbers.
+The compare command writes `baseline.aggregate.json`, `candidate.aggregate.json`, `compare.json`, and `summary.md` under `<artifact-root>/trace/compare/<scenario>-<timestamp>` in the Homeboy artifact store unless `--output-dir` is provided. Homeboy never writes trace bundles into the checkout. The JSON comparison includes target labels, git SHAs when available, pass/fail status for both sides, artifact paths, span deltas, percentage deltas, focus-span status, guardrail status, and missing metrics as `null`/omitted values rather than invented numbers.
 
 Target compares run baseline and candidate through the same scheduler. Use `--schedule interleaved` to alternate `baseline, candidate, baseline, candidate` for the configured repetition count, or `--schedule grouped` to run one side then the other. `compare.json` and `summary.md` include a `proof_run_order` / `A/B Run Matrix` section with each run's group, iteration, status, exit code, raw trace artifact path, and failure message when a run fails. Failed runs are retained in the aggregate and comparison instead of being silently dropped.
 
@@ -587,7 +587,7 @@ homeboy trace matrix woocommerce-gateway-stripe ece-product-page-waterfall \
   --axis viewport=desktop,mobile \
   --axis ece_locations=product,none \
   --axis methods=card-link,card-only \
-  --output-dir .homeboy/experiments/ece-product-matrix
+  --output-dir /tmp/trace-experiments/ece-product-matrix
 ```
 
 For every cell, Homeboy passes axis values through both runner config and environment:
@@ -595,7 +595,7 @@ For every cell, Homeboy passes axis values through both runner config and enviro
 - Config settings include each axis key as a string value plus a `trace_matrix` object containing all cell values.
 - Environment includes `HOMEBOY_TRACE_MATRIX_CELL`, `HOMEBOY_TRACE_MATRIX_LABEL`, `HOMEBOY_TRACE_MATRIX_JSON`, and one `HOMEBOY_TRACE_MATRIX_<AXIS>` variable per axis. Non-alphanumeric axis characters become underscores in env-var names.
 
-The output directory keeps a stable artifact set:
+Without `--output-dir`, the matrix lands in `<artifact-root>/trace/experiments/<scenario>-matrix-<timestamp>`. The output directory keeps a stable artifact set:
 
 - `matrix.json` is the machine-readable matrix summary with cell-level pass/fail, axis values, run artifact paths, and per-cell output paths.
 - `summary.md` is a Markdown table for human review.
@@ -615,10 +615,10 @@ homeboy trace compare-variant \
   --repeat 5 \
   --overlay overlays/fresh-install-mode.patch \
   --overlay overlays/disable-install-mail.patch \
-  --output-dir .homeboy/experiments/fast-install
+  --output-dir /tmp/trace-experiments/fast-install
 ```
 
-The bundle contains `baseline.json`, `variant.json`, `compare.json`, and `summary.md`. The summary includes component SHAs from rig state when available plus the files touched by each variant overlay.
+Without `--output-dir`, the bundle lands in `<artifact-root>/trace/experiments/<scenario>-<timestamp>`. The bundle contains `baseline.json`, `variant.json`, `compare.json`, and `summary.md`. `trace compare --experiment NAME` writes its bundle to `<artifact-root>/trace/experiments/NAME` (or `<output-dir>/NAME`), and `trace compare-bundle` defaults to `<artifact-root>/trace/compare-bundles/<component>-<timestamp>`. All default trace bundle locations resolve through one artifact-store resolver; nothing is written into the checkout. The summary includes component SHAs from rig state when available plus the files touched by each variant overlay.
 
 ## Markdown Reports
 

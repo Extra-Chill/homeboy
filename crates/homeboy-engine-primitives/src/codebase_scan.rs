@@ -19,7 +19,6 @@ pub const ALWAYS_SKIP_DIRS: &[&str] = &[
     ".git",
     ".homeboy-build",
     ".homeboy-bin",
-    ".homeboy",
     ".svn",
     ".hg",
     "__pycache__",
@@ -242,14 +241,12 @@ mod tests {
         let _ = std::fs::create_dir_all(dir.join("vendor"));
         let _ = std::fs::create_dir_all(dir.join(".homeboy-build/component"));
         let _ = std::fs::create_dir_all(dir.join(".homeboy-bin"));
-        let _ = std::fs::create_dir_all(dir.join(".homeboy/cache"));
         let _ = std::fs::create_dir_all(dir.join("src"));
 
         std::fs::write(dir.join("node_modules/lib.js"), "x").unwrap();
         std::fs::write(dir.join("vendor/lib.php"), "x").unwrap();
         std::fs::write(dir.join(".homeboy-build/component/copied.rs"), "x").unwrap();
         std::fs::write(dir.join(".homeboy-bin/helper.rs"), "x").unwrap();
-        std::fs::write(dir.join(".homeboy/cache/source.rs"), "x").unwrap();
         std::fs::write(dir.join("src/main.rs"), "x").unwrap();
 
         let files = walk_files(&dir, &ScanConfig::default());
@@ -263,7 +260,9 @@ mod tests {
         assert!(!names.contains(&"lib.php".to_string()));
         assert!(!names.contains(&"copied.rs".to_string()));
         assert!(!names.contains(&"helper.rs".to_string()));
-        assert!(!names.contains(&"source.rs".to_string()));
+        // Homeboy keeps no state inside source trees, so it needs no skip rule.
+        assert!(!ALWAYS_SKIP_DIRS.contains(&".homeboy"));
+        assert!(!dir.join(".homeboy").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

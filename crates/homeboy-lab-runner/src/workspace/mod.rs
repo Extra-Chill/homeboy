@@ -26,6 +26,7 @@ pub(crate) use sync::sync_workspace_controlled;
 pub(crate) use sync::update_workspace_resource_lifecycle;
 #[cfg(test)]
 pub(crate) use sync::workspace_resource_lifecycle;
+pub(crate) use sync::write_runner_state_file;
 pub use sync::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, prune_workspaces,
     reap_run_workspace, resolve_workspace_ref, reuse_compatible_snapshot_workspace,

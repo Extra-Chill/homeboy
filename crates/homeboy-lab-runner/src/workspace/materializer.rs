@@ -243,7 +243,7 @@ fn verify_git_baseline_command(
     changed_since_base: Option<&str>,
 ) -> String {
     let status = format!(
-        "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; if [ \"$path\" = .homeboy ] || [ \"${{path#.homeboy/}}\" != \"$path\" ]; then :; else printf '%s\\n' \"$line\"; fi; done || true",
+        "git -C {dest} status --porcelain=v1 2>/dev/null || true",
         dest = dest,
     );
     let changed_since = changed_since_base.map_or_else(String::new, |base| {
@@ -279,7 +279,7 @@ fn git_checkout_command(head: &str, branch: Option<&str>) -> String {
 
 pub(super) fn dirty_git_workspace_guard(dest: &str, allow_dirty: bool) -> String {
     let status = format!(
-        "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; if [ \"$path\" = .homeboy ] || [ \"${{path#.homeboy/}}\" != \"$path\" ]; then :; else printf '%s\\n' \"$line\"; fi; done || true",
+        "git -C {dest} status --porcelain=v1 2>/dev/null || true",
         dest = dest,
     );
     // Grouped so the guard composes inside an `&&` chain: its internal `;`

@@ -1142,7 +1142,7 @@ mod tests {
         let state = ReleaseState {
             artifacts: vec![ReleaseArtifact {
                 path: "build/plugin.zip".to_string(),
-                durable_path: Some(".homeboy/artifacts/missing-plugin.zip".to_string()),
+                durable_path: Some("durable/missing-plugin.zip".to_string()),
                 artifact_type: None,
                 platform: None,
                 phase: "final".to_string(),

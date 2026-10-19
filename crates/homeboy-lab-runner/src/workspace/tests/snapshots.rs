@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ use crate::workspace::types::{
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 use crate::workspace::{WorkspaceContentManifest, WorkspaceContentManifestEntry};
+use homeboy_lab_contract::lab::handoff::runner_workspace_prepared_source_marker_path;
 
 static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -677,13 +679,23 @@ fn prepared_source_cache_retains_a_bounded_completed_working_set() {
             .expect("prepared cache root")
             .filter_map(Result::ok)
             .filter(|entry| {
-                entry
-                    .path()
-                    .join(".homeboy/prepared-source-ready")
-                    .is_file()
+                Path::new(&runner_workspace_prepared_source_marker_path(
+                    &entry.path().display().to_string(),
+                ))
+                .is_file()
             })
             .count();
         assert_eq!(completed, 8);
+        for entry in cache_root
+            .read_dir()
+            .expect("prepared cache root")
+            .flatten()
+        {
+            assert!(
+                !entry.path().join(".homeboy").exists(),
+                "prepared source cache entries carry no in-tree Homeboy state"
+            );
+        }
         make_cache_fixture_writable(&cache_root);
     });
 }
@@ -700,13 +712,13 @@ fn prepared_source_cache_uses_one_lock_for_views_and_pruning() {
     let root = tempfile::tempdir().expect("cache root");
     let cache_root = root.path().join("_lab_prepared_sources");
     let cache = cache_root.join("cache-locked");
-    fs::create_dir_all(cache.join(".homeboy")).expect("cache");
-    fs::write(cache.join(".homeboy/prepared-source-ready"), "").expect("ready marker");
+    fs::create_dir_all(&cache).expect("cache");
+    write_prepared_source_marker(&cache);
     fs::write(cache.join("marker"), "cached\n").expect("cache marker");
     for index in 0..8 {
         let entry = cache_root.join(format!("cache-new-{index}"));
-        fs::create_dir_all(entry.join(".homeboy")).expect("newer cache");
-        fs::write(entry.join(".homeboy/prepared-source-ready"), "").expect("ready marker");
+        fs::create_dir_all(&entry).expect("newer cache");
+        write_prepared_source_marker(&entry);
     }
     let tools = tempfile::tempdir().expect("tool shims");
     let started = root.path().join("copy-started");
@@ -755,6 +767,18 @@ fn prepared_source_cache_uses_one_lock_for_views_and_pruning() {
     fs::write(&release, "").expect("release copy");
     assert!(view.wait().expect("wait materialization").success());
     assert!(destination.join("marker").is_file());
+    assert!(!destination.join(".homeboy").exists());
+    assert!(Path::new(&runner_workspace_prepared_source_marker_path(
+        destination.to_str().unwrap()
+    ))
+    .is_file());
+}
+
+fn write_prepared_source_marker(tree: &Path) {
+    let marker = runner_workspace_prepared_source_marker_path(&tree.display().to_string());
+    let marker = Path::new(&marker);
+    fs::create_dir_all(marker.parent().expect("state dir")).expect("state dir");
+    fs::write(marker, "").expect("ready marker");
 }
 
 #[test]
@@ -777,7 +801,7 @@ fn prepared_source_cache_rechecks_for_a_concurrent_publisher_after_locking() {
     let mkdir = tools.path().join("mkdir");
     fs::write(
         &mkdir,
-        "#!/bin/sh\ncase \"$1\" in\n  *.lock)\n    /bin/mkdir -p \"$HOMEBOY_RACE_CACHE/.homeboy\"\n    printf 'winner\\n' > \"$HOMEBOY_RACE_CACHE/marker\"\n    : > \"$HOMEBOY_RACE_CACHE/.homeboy/prepared-source-ready\"\n    /bin/chmod -R a-w \"$HOMEBOY_RACE_CACHE\"\n    ;;\nesac\nexec /bin/mkdir \"$@\"\n",
+        "#!/bin/sh\ncase \"$1\" in\n  *.lock)\n    /bin/mkdir -p \"$HOMEBOY_RACE_CACHE\" \"$HOMEBOY_RACE_CACHE-homeboy-state\"\n    printf 'winner\\n' > \"$HOMEBOY_RACE_CACHE/marker\"\n    /bin/chmod -R a-w \"$HOMEBOY_RACE_CACHE\"\n    : > \"$HOMEBOY_RACE_CACHE-homeboy-state/prepared-source-ready\"\n    ;;\nesac\nexec /bin/mkdir \"$@\"\n",
     )
     .expect("mkdir shim");
     fs::set_permissions(&mkdir, fs::Permissions::from_mode(0o755)).expect("mkdir shim permissions");

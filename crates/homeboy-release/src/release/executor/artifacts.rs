@@ -228,7 +228,7 @@ fn copy_release_notes_control_artifact(
             source.clone(),
         )
     } else {
-        let relative = ".homeboy/release-notes.md";
+        let relative = "homeboy-release-notes.md";
         (relative.to_string(), artifact_dir.join(relative))
     };
     if source != destination {
@@ -1685,7 +1685,7 @@ mod tests {
         assert_eq!(manifest["artifacts"].as_array().unwrap().len(), 1);
         assert_eq!(
             manifest["release_notes"]["path"],
-            ".homeboy/release-notes.md"
+            "homeboy-release-notes.md"
         );
         assert_eq!(manifest["release_notes"]["sha256"], sha256(source.path()));
 
@@ -1707,7 +1707,7 @@ mod tests {
         establish_publication_authority(&mut state).expect("authority");
         assert_eq!(github_release_publications(&state).unwrap().len(), 1);
 
-        std::fs::write(temp.path().join(".homeboy/release-notes.md"), "tampered")
+        std::fs::write(temp.path().join("homeboy-release-notes.md"), "tampered")
             .expect("tamper notes");
         let error = run_artifact_inventory(
             &mut ReleaseState::default(),

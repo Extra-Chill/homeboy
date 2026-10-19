@@ -569,11 +569,11 @@ fn declared_evidence_policy_denial_is_terminal_without_provider_retry() {
     let count = tempfile::NamedTempFile::new().expect("count file");
     let command = format!(
         "node {} {}",
-        script(&format!("const fs=require('fs');const count=process.argv[2];fs.writeFileSync(count,String((Number(fs.readFileSync(count,'utf8')||0))+1));process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:'task-evidence-policy-denied',status:'failed',diagnostics:[{{class:'provider.permission',message:'denied',data:{{kind:'permission_denied',path:'/workspace/.homeboy/evidence/input.json'}}}}]}}));")),
+        script(&format!("const fs=require('fs');const count=process.argv[2];fs.writeFileSync(count,String((Number(fs.readFileSync(count,'utf8')||0))+1));process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:'task-evidence-policy-denied',status:'failed',diagnostics:[{{class:'provider.permission',message:'denied',data:{{kind:'permission_denied',path:'/state/provider-evidence/files/abc/input'}}}}]}}));")),
         count.path().display(),
     );
     let (mut request, provider) = request("task-evidence-policy-denied", command);
-    request.executor.config = json!({"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/input.json","read_only":true}]});
+    request.executor.config = json!({"evidence_inputs":[{"path":"/state/provider-evidence/files/abc/input","read_only":true}]});
 
     let outcome = run_provider_command(&request, &provider, None);
 
@@ -595,10 +595,10 @@ fn declared_evidence_policy_denial_is_terminal_without_provider_retry() {
 fn policy_denial_prose_without_a_declared_structured_path_is_not_reclassified() {
     let command = format!(
         "node {}",
-        script("process.stdout.write(JSON.stringify({status:'failed',summary:'permission policy denied external_directory /workspace/.homeboy/evidence/input.json'}));")
+        script("process.stdout.write(JSON.stringify({status:'failed',summary:'permission policy denied external_directory /state/provider-evidence/files/abc/input'}));")
     );
     let (mut request, provider) = request("task-evidence-policy-prose", command);
-    request.executor.config = json!({"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/input.json","read_only":true}]});
+    request.executor.config = json!({"evidence_inputs":[{"path":"/state/provider-evidence/files/abc/input","read_only":true}]});
     let outcome = run_provider_command(&request, &provider, None);
     assert_ne!(
         outcome.failure_classification,

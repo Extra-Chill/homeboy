@@ -232,8 +232,14 @@ fn workspace_ref_inspects_hydrates_and_executes_one_physical_snapshot() {
             !remote.join("node_modules").exists(),
             "snapshot sync must not transfer excluded dependency outputs"
         );
-        fs::create_dir_all(remote.join(".homeboy")).expect("prepared marker directory");
-        fs::write(remote.join(".homeboy/prepared-source-ready"), "").expect("prepared marker");
+        let prepared_marker =
+            homeboy_lab_contract::lab::handoff::runner_workspace_prepared_source_marker_path(
+                &synced.remote_path,
+            );
+        let prepared_marker = std::path::Path::new(&prepared_marker);
+        fs::create_dir_all(prepared_marker.parent().expect("runner state dir"))
+            .expect("runner state dir");
+        fs::write(prepared_marker, "").expect("prepared marker");
         fs::create_dir_all(remote.join("node_modules")).expect("prepared dependency output");
         fs::write(remote.join("node_modules/build.txt"), "sealed build\n")
             .expect("prepared build output");
@@ -256,7 +262,8 @@ fn workspace_ref_inspects_hydrates_and_executes_one_physical_snapshot() {
         assert_eq!(output.remote_cwd, synced.remote_path);
         assert_eq!(output.stdout, synced.remote_path);
         let hydration_probe = fs::read_to_string(&hydration_log).expect("hydration probe log");
-        assert!(hydration_probe.contains(".homeboy/prepared-source-ready"));
+        assert!(hydration_probe.contains(&prepared_marker.display().to_string()));
+        assert!(!remote.join(".homeboy").exists());
         assert!(hydration_probe.contains(&synced.remote_path));
         let source_snapshot = output.source_snapshot.expect("source provenance");
         assert_eq!(

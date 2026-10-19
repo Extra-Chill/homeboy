@@ -368,6 +368,11 @@ mod tests {
         assert!(excludes.contains(&".git/".to_string()));
         assert!(excludes.contains(&".homeboy-build/".to_string()));
         assert!(excludes.contains(&".env".to_string()));
+        // Homeboy writes nothing under `.homeboy` in a workspace, so no
+        // compensating exclude exists; a user's `.homeboy` is ordinary content.
+        assert!(!excludes
+            .iter()
+            .any(|exclude| exclude.trim_end_matches('/') == ".homeboy"));
         assert!(!excludes.contains(&"node_modules/".to_string()));
         assert!(!excludes.contains(&"target/".to_string()));
         assert!(!excludes.contains(&"vendor/".to_string()));

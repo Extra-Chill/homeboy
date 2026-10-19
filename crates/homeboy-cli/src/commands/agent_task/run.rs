@@ -9965,9 +9965,7 @@ mod provider_evidence_tests {
         std::fs::write(&exact, [0u8, 1, 2, 255]).expect("write exact fixture");
         std::fs::write(&above, [0u8, 1, 2, 255, 3]).expect("write above-limit fixture");
 
-        let destination = temp
-            .path()
-            .join("workspace/.homeboy/evidence/fixture/exact.bin");
+        let destination = temp.path().join("provider-evidence/staging/exact.bin");
         let exact_admitted =
             admit_provider_evidence_source(exact.to_str().expect("exact fixture path is UTF-8"))
                 .expect("admit exact fixture");
@@ -9990,9 +9988,7 @@ mod provider_evidence_tests {
 
         let error = secure_provider_evidence_copy_with_limit(
             &above_admitted,
-            &temp
-                .path()
-                .join("workspace/.homeboy/evidence/fixture/above.bin"),
+            &temp.path().join("provider-evidence/staging/above.bin"),
             4,
         )
         .expect_err("one byte above the limit is rejected");
@@ -10292,17 +10288,17 @@ Use / as a separator and retain https://example.test/response plus `// NOTE: imp
     #[test]
     fn accepts_only_exact_admitted_projected_evidence_paths() {
         let admitted = std::collections::BTreeSet::from([
-            "/workspace/.homeboy/evidence/issue/context.json".to_string(),
+            "/state/provider-evidence/files/abc/input".to_string(),
         ]);
         validate_provider_evidence_prompt(
-            Some("Read /workspace/.homeboy/evidence/issue/context.json"),
+            Some("Read /state/provider-evidence/files/abc/input"),
             &admitted,
         )
         .expect("exact admitted projection is allowed");
 
         for path in [
-            "/tmp/.homeboy/evidence/secret",
-            "/workspace/.homeboy/evidence/issue/context.json.backup",
+            "/tmp/provider-evidence/files/abc/secret",
+            "/state/provider-evidence/files/abc/input.backup",
         ] {
             let error = validate_provider_evidence_prompt(Some(&format!("Read {path}")), &admitted)
                 .expect_err("unadmitted projected-looking path is rejected");
@@ -10766,9 +10762,7 @@ let path = "/private/fenced-code.json";
         )
         .expect_err("removed source aborts projection");
         assert!(error.message.contains("identity changed after validation"));
-        assert!(!workspace
-            .join(".homeboy/evidence/source/source.json")
-            .exists());
+        assert!(!workspace.join(".homeboy").exists());
     }
 
     #[test]

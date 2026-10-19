@@ -475,7 +475,7 @@ mod tests {
         git(&origin, &["config", "user.name", "Homeboy Test"]);
         std::fs::write(
             origin.join(".gitignore"),
-            ".claude/\n.datamachine/\n.homeboy/\n",
+            ".claude/\n.datamachine/\n.cursor/\n",
         )
         .expect("write gitignore");
         std::fs::write(origin.join("README.md"), "canonical\n").expect("write readme");
@@ -496,7 +496,7 @@ mod tests {
         for path in [
             ".claude/settings.json",
             ".datamachine/context.json",
-            ".homeboy/context.json",
+            ".cursor/context.json",
             "AGENTS.md",
         ] {
             let path = clone.join(path);
@@ -525,7 +525,7 @@ mod tests {
             origin.to_string_lossy()
         );
         assert_eq!(git(&clone, &["status", "--porcelain", "--ignored"]), "");
-        for path in [".claude", ".datamachine", ".homeboy", "AGENTS.md"] {
+        for path in [".claude", ".datamachine", ".cursor", "AGENTS.md"] {
             assert!(!clone.join(path).exists(), "{path} must be removed");
         }
         assert_eq!(

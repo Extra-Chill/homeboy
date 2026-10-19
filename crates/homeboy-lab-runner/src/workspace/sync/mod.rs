@@ -61,6 +61,7 @@ use homeboy_core::server::{
     execute_local_command_in_dir_with_timeout, is_transient_ssh_error, CommandOutput,
 };
 use homeboy_lab_contract::lab::handoff::{
+    runner_workspace_prepared_source_marker_path, runner_workspace_state_dir,
     RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUNNER_WORKSPACE_METADATA_FILE_NAME,
     RUNNER_WORKSPACE_STATE_DIR_SUFFIX,
 };
@@ -800,9 +801,32 @@ pub(crate) fn save_prepared_source_cache(
 }
 
 pub(super) fn prepared_source_cache_command(cache: &str, cache_root: &str, source: &str) -> String {
+    // The readiness marker lives in the cache entry's sibling Homeboy state
+    // directory, never inside the cached source tree, so a view copied from
+    // the cache carries only source bytes.
+    let candidate_marker = prepared_source_marker_shell("$candidate");
     format!(
-        "cache={cache}; cache_root={cache_root}; source={source}; lock=\"$cache.lock\"; {capture_owner}; mkdir -p \"$cache_root\"; if test -f \"$cache/.homeboy/prepared-source-ready\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\n' \"$cache\"; elif mkdir \"$lock\" 2>/dev/null; then trap 'rmdir \"$lock\"' EXIT; if test -f \"$cache/.homeboy/prepared-source-ready\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\n' \"$cache\"; else tmp=\"$cache.tmp.$$\"; rm -rf \"$tmp\"; cp -a \"$source\" \"$tmp\" && mkdir -p \"$tmp/.homeboy\" && : > \"$tmp/.homeboy/prepared-source-ready\" && chmod -R a-w \"$tmp\" && mv \"$tmp\" \"$cache\" && printf 'homeboy_prepared_source_cache event=created cache=%s\n' \"$cache\" || exit 1; fi; else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=busy\n' \"$cache\"; fi; {restore_owner}; kept=0; failures=0; ls -1dt \"$cache_root\"/* 2>/dev/null | while IFS= read -r candidate; do test -f \"$candidate/.homeboy/prepared-source-ready\" || continue; if [ \"$kept\" -lt {max_entries} ]; then kept=$((kept + 1)); continue; fi; candidate_lock=\"$candidate.lock\"; mkdir \"$candidate_lock\" 2>/dev/null || continue; if test -f \"$candidate/.homeboy/prepared-source-ready\"; then if ! chmod -R u+w \"$candidate\" >/dev/null 2>&1 || ! rm -rf \"$candidate\" >/dev/null 2>&1; then failures=$((failures + 1)); if [ \"$failures\" -le {max_failures} ]; then printf 'homeboy_prepared_source_cache event=prune_failed cache=%s reason=undeletable\n' \"$candidate\" >&2; elif [ \"$failures\" -eq $(({max_failures} + 1)) ]; then printf 'homeboy_prepared_source_cache event=prune_failed_summary reason=additional_failures_suppressed\n' >&2; fi; else printf 'homeboy_prepared_source_cache event=pruned cache=%s\n' \"$candidate\"; fi; fi; rmdir \"$candidate_lock\"; done",
-        cache = shell::quote_arg(cache), cache_root = shell::quote_arg(cache_root), source = shell::quote_arg(source), capture_owner = super::util::owner_capture_shell("$cache_root"), restore_owner = super::util::owner_restore_path_shell("$cache_root"), max_entries = PREPARED_SOURCE_CACHE_MAX_ENTRIES, max_failures = 8,
+        "cache={cache}; cache_root={cache_root}; source={source}; marker={marker}; marker_dir={marker_dir}; lock=\"$cache.lock\"; {capture_owner}; mkdir -p \"$cache_root\"; if test -f \"$marker\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\n' \"$cache\"; elif mkdir \"$lock\" 2>/dev/null; then trap 'rmdir \"$lock\"' EXIT; if test -f \"$marker\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\n' \"$cache\"; else tmp=\"$cache.tmp.$$\"; rm -rf \"$tmp\"; if test -e \"$cache\"; then chmod -R u+w \"$cache\" >/dev/null 2>&1; rm -rf \"$cache\"; fi; cp -a \"$source\" \"$tmp\" && chmod -R a-w \"$tmp\" && mv \"$tmp\" \"$cache\" && mkdir -p \"$marker_dir\" && : > \"$marker\" && printf 'homeboy_prepared_source_cache event=created cache=%s\n' \"$cache\" || exit 1; fi; else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=busy\n' \"$cache\"; fi; {restore_owner}; kept=0; failures=0; ls -1dt \"$cache_root\"/* 2>/dev/null | while IFS= read -r candidate; do test -f {candidate_marker} || continue; if [ \"$kept\" -lt {max_entries} ]; then kept=$((kept + 1)); continue; fi; candidate_lock=\"$candidate.lock\"; mkdir \"$candidate_lock\" 2>/dev/null || continue; if test -f {candidate_marker}; then if ! chmod -R u+w \"$candidate\" >/dev/null 2>&1 || ! rm -rf \"$candidate\" >/dev/null 2>&1; then failures=$((failures + 1)); if [ \"$failures\" -le {max_failures} ]; then printf 'homeboy_prepared_source_cache event=prune_failed cache=%s reason=undeletable\n' \"$candidate\" >&2; elif [ \"$failures\" -eq $(({max_failures} + 1)) ]; then printf 'homeboy_prepared_source_cache event=prune_failed_summary reason=additional_failures_suppressed\n' >&2; fi; else rm -rf {candidate_state} >/dev/null 2>&1; printf 'homeboy_prepared_source_cache event=pruned cache=%s\n' \"$candidate\"; fi; fi; rmdir \"$candidate_lock\"; done",
+        cache = shell::quote_arg(cache), cache_root = shell::quote_arg(cache_root), source = shell::quote_arg(source),
+        marker = shell::quote_arg(&runner_workspace_prepared_source_marker_path(cache)),
+        marker_dir = shell::quote_arg(&runner_workspace_state_dir(cache)),
+        candidate_state = prepared_source_state_dir_shell("$candidate"),
+        capture_owner = super::util::owner_capture_shell("$cache_root"), restore_owner = super::util::owner_restore_path_shell("$cache_root"), max_entries = PREPARED_SOURCE_CACHE_MAX_ENTRIES, max_failures = 8,
+    )
+}
+
+/// Double-quoted shell expression for the Homeboy state directory beside the
+/// tree named by the shell variable `variable` (e.g. `"$candidate"`).
+fn prepared_source_state_dir_shell(variable: &str) -> String {
+    format!("\"{}\"", runner_workspace_state_dir(variable))
+}
+
+/// Double-quoted shell expression for the prepared-source readiness marker of
+/// the tree named by the shell variable `variable`.
+fn prepared_source_marker_shell(variable: &str) -> String {
+    format!(
+        "\"{}\"",
+        runner_workspace_prepared_source_marker_path(variable)
     )
 }
 
@@ -862,8 +886,11 @@ fn materialize_prepared_source_view_controlled(
 
 pub(super) fn prepared_source_view_command(cache: &str, destination: &str) -> String {
     format!(
-        "cache={cache}; destination={destination}; lock=\"$cache.lock\"; test -f \"$cache/.homeboy/prepared-source-ready\" && test ! -e \"$destination\" && mkdir \"$lock\" 2>/dev/null || exit 1; trap 'rmdir \"$lock\"' EXIT HUP INT TERM; test -f \"$cache/.homeboy/prepared-source-ready\" && mkdir -p \"$(dirname \"$destination\")\" && cp -a \"$cache\" \"$destination\" && chmod -R u+w \"$destination\" || {{ rm -rf \"$destination\"; exit 1; }}",
+        "cache={cache}; destination={destination}; cache_marker={cache_marker}; destination_state={destination_state}; destination_marker={destination_marker}; lock=\"$cache.lock\"; test -f \"$cache_marker\" && test ! -e \"$destination\" && mkdir \"$lock\" 2>/dev/null || exit 1; trap 'rmdir \"$lock\"' EXIT HUP INT TERM; test -f \"$cache_marker\" && mkdir -p \"$(dirname \"$destination\")\" && cp -a \"$cache\" \"$destination\" && chmod -R u+w \"$destination\" && mkdir -p \"$destination_state\" && : > \"$destination_marker\" || {{ rm -rf \"$destination\" \"$destination_marker\"; exit 1; }}",
         cache = shell::quote_arg(cache), destination = shell::quote_arg(destination),
+        cache_marker = shell::quote_arg(&runner_workspace_prepared_source_marker_path(cache)),
+        destination_state = shell::quote_arg(&runner_workspace_state_dir(destination)),
+        destination_marker = shell::quote_arg(&runner_workspace_prepared_source_marker_path(destination)),
     )
 }
 
@@ -2829,6 +2856,18 @@ fn write_workspace_metadata(
     let json = serde_json::to_string_pretty(&metadata)
         .map_err(|err| Error::internal_json(err.to_string(), None))?;
     let metadata_path = workspace_metadata_path(&metadata.remote_path);
+    write_runner_state_file(runner, &metadata_path, &json)
+}
+
+/// Atomically publish `contents` at `metadata_path` on the runner. Callers pass
+/// a path inside a Homeboy-owned runner state directory (never inside a
+/// workspace tree); the parent directory is created on demand.
+pub(crate) fn write_runner_state_file(
+    runner: &super::super::Runner,
+    metadata_path: &str,
+    json: &str,
+) -> Result<()> {
+    let metadata_path = metadata_path.to_string();
     match runner.kind {
         RunnerKind::Local => {
             let path = Path::new(&metadata_path);
@@ -4462,7 +4501,6 @@ pub(crate) fn prune_scan_command(
             "if [ -L \"$dir\" ] || [ ! -d \"$dir\" ]; then printf \"unknown\\tnot_a_directory\\t%s\\n\" \"$dir\"; continue; fi; ",
             "meta=\"$dir$state_suffix/$meta_name\"; ",
             "if [ -f \"$meta\" ]; then ",
-            "if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then printf \"retained\\tpending_apply_back\\t%s\\n\" \"$dir\"; continue; fi; ",
             "kind=workspace; ",
             "else case \"$dir\" in ",
             "*\"$suffix\") checkout=${{dir%\"$suffix\"}}; if [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; then printf \"retained\\tartifact_dir_owned_by_checkout\\t%s\\n\" \"$dir\"; continue; fi; kind=artifact ;; ",

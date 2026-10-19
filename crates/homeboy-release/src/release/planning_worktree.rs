@@ -185,8 +185,6 @@ const HOMEBOY_MANAGED_PREFIXES: &[&str] = &[
     ".homeboy-build",
     ".homeboy-bin/",
     ".homeboy-bin",
-    ".homeboy/",
-    ".homeboy",
 ];
 
 fn is_homeboy_managed_path(rel_path: &str) -> bool {
@@ -467,7 +465,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 fn should_skip_artifact_scan_dir(path: &Path) -> bool {
     matches!(
         path.file_name().and_then(|name| name.to_str()),
-        Some(".git" | ".homeboy" | "target" | "node_modules" | "vendor")
+        Some(".git" | "target" | "node_modules" | "vendor")
     )
 }
 
@@ -762,8 +760,10 @@ mod tests {
     }
 
     #[test]
-    fn homeboy_scratch_dir_is_managed_path() {
-        assert!(is_homeboy_managed_path(".homeboy/cache"));
+    fn homeboy_state_dir_is_not_compensated() {
+        // Homeboy keeps no state in the checkout, so a `.homeboy` path is user drift.
+        assert!(!is_homeboy_managed_path(".homeboy/cache"));
+        assert!(!is_homeboy_managed_path(".homeboy"));
     }
 
     #[test]

@@ -317,10 +317,9 @@ fn execute_owned(
         &serde_json::to_vec(&resources)
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
     )?;
-    let receipt_file = format!(
-        "{}/gate-receipts/{}.json",
-        homeboy_lab_contract::lab::handoff::runner_workspace_state_dir(&snapshot.remote_path),
-        uuid::Uuid::new_v4()
+    let receipt_file = homeboy_lab_contract::lab::handoff::runner_workspace_gate_receipt_path(
+        &snapshot.remote_path,
+        &uuid::Uuid::new_v4().to_string(),
     );
     let mut command = vec![
         binary.to_string(),

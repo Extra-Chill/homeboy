@@ -2098,18 +2098,18 @@ fn snapshot_selection_preserves_nested_multi_component_paths() {
 #[test]
 fn snapshot_transport_metadata_honors_nested_excludes() {
     let source = tempfile::tempdir().expect("source");
-    fs::create_dir_all(source.path().join(".homeboy/private/logs")).expect("metadata directory");
-    fs::write(source.path().join(".homeboy/kept.json"), "kept\n").expect("kept metadata");
+    fs::create_dir_all(source.path().join(".config-dir/private/logs")).expect("config directory");
+    fs::write(source.path().join(".config-dir/kept.json"), "kept\n").expect("kept config");
     fs::write(
-        source.path().join(".homeboy/private/logs/secret.log"),
+        source.path().join(".config-dir/private/logs/secret.log"),
         "excluded\n",
     )
-    .expect("excluded metadata");
-    let excludes = vec!["./.homeboy/private/**".to_string(), "*.log".to_string()];
+    .expect("excluded config");
+    let excludes = vec!["./.config-dir/private/**".to_string(), "*.log".to_string()];
 
     let manifest = snapshot_input_manifest(source.path(), &excludes).expect("selected manifest");
     let stage = materialize_snapshot_stage(source.path(), &manifest, None).expect("stage");
-    let staged = stage.path().join("source/.homeboy");
+    let staged = stage.path().join("source/.config-dir");
 
     assert!(staged.join("kept.json").is_file());
     assert!(!staged.join("private/logs/secret.log").exists());
@@ -3146,16 +3146,19 @@ fn snapshot_content_hash_binds_user_owned_homeboy_files_but_ignores_runner_state
 }
 
 #[test]
-fn snapshot_content_hash_matches_tar_when_homeboy_is_excluded() {
-    for pattern in [".homeboy", ".homeboy/", ".homeboy/**"] {
+fn snapshot_content_hash_matches_tar_when_a_directory_is_excluded() {
+    for pattern in [".config-dir", ".config-dir/", ".config-dir/**"] {
         let controller = tempfile::tempdir().expect("controller");
         let source = controller.path().join("source");
         let destination = controller.path().join("materialized");
         let excludes = vec![pattern.to_string()];
-        fs::create_dir_all(source.join(".homeboy")).expect("user metadata directory");
+        fs::create_dir_all(source.join(".config-dir")).expect("config directory");
         fs::create_dir_all(source.join("src")).expect("source directory");
-        fs::write(source.join(".homeboy/user-settings.json"), "user-owned\n")
-            .expect("user metadata");
+        fs::write(
+            source.join(".config-dir/user-settings.json"),
+            "user-owned\n",
+        )
+        .expect("user config");
         fs::write(source.join("src/lib.rs"), "pub fn fixture() {}\n").expect("source file");
 
         let expected = workspace_content_hash(&source, &excludes).expect("controller hash");

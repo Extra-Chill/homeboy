@@ -9,7 +9,7 @@ use homeboy_core::{git::clone_repo, paths};
 
 use super::workspace::{
     materialize_snapshot_with_scratch_controlled, parent_remote_path, sanitize_path_segment,
-    WorkspaceControl,
+    write_runner_state_file, WorkspaceControl,
 };
 use super::Runner;
 
@@ -55,6 +55,16 @@ pub(super) fn sync_validation_dependency_workspaces(
             None,
             control,
         )?;
+        control.checkpoint()?;
+        // Source evidence is Homeboy-owned state: it lands in the dependency
+        // checkout's sibling state directory, never in the checkout tree.
+        write_runner_state_file(
+            runner,
+            &homeboy_lab_contract::lab::handoff::runner_workspace_lab_source_evidence_path(
+                &remote_dependency_path,
+            ),
+            &dependency.source_evidence,
+        )?;
         synced.push(RunnerValidationDependencySyncOutput {
             id: dependency.remote_name,
             role: "validation_dependency".to_string(),
@@ -74,6 +84,8 @@ struct PreparedValidationDependencyWorkspace {
     /// Excludes for shipping this prepared tree (#15797). See
     /// [`prepared_dependency_snapshot_excludes`].
     snapshot_excludes: Vec<String>,
+    /// Clean git source evidence, published beside the runner checkout.
+    source_evidence: String,
     prepared: crate::validation_dependency_cache::PreparedDependencyCopy,
 }
 
@@ -215,8 +227,7 @@ fn prepare_validation_dependency_workspace(
 
     // The copy + install + build is content-addressed and shared across calls,
     // transport retries, transitive syncs, and concurrent Cooks (#15253).
-    // Every consumer still gets a private copy, because the source evidence
-    // below is written into it.
+    // Every consumer still gets a private copy of the prepared tree.
     let declared_outputs = homeboy_core::hygiene::validation_dependency_output_paths(&component);
     // Never ships, so never copied out of the cache either (#15797).
     let consumer_excludes = prepared_dependency_snapshot_excludes(&[], &declared_outputs);
@@ -229,11 +240,8 @@ fn prepare_validation_dependency_workspace(
             run_dependency_lifecycle(prepared_component, prepared_path)
         },
     )?;
-    homeboy_core::hygiene::write_validation_dependency_source_evidence(
-        &component.id,
-        &path,
-        &prepared.path,
-    )?;
+    let source_evidence =
+        homeboy_core::hygiene::validation_dependency_source_evidence(&component.id, &path)?;
 
     let prepared_path = canonicalize_dependency_path(&prepared.path, dependency_id)?;
     let snapshot_excludes = prepared_dependency_snapshot_excludes(excludes, &declared_outputs);
@@ -243,6 +251,7 @@ fn prepare_validation_dependency_workspace(
         local_path: path,
         prepared_path,
         snapshot_excludes,
+        source_evidence,
         prepared,
     })
 }

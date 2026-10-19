@@ -21,15 +21,13 @@ pub(super) fn run_compare_bundle(args: TraceArgs) -> CmdResult<TraceCommandOutpu
         homeboy::core::Error::validation_missing_argument(vec!["component".to_string()])
     })?;
     let scenarios = compare_bundle_scenarios(&args)?;
-    let output_dir = args.output_dir.clone().unwrap_or_else(|| {
-        PathBuf::from(".homeboy")
-            .join("trace-compare-bundles")
-            .join(format!(
-                "{}-{}",
-                sanitize_path_component(&component),
-                chrono::Utc::now().format("%Y%m%d%H%M%S")
-            ))
-    });
+    let output_dir = super::trace_output_dir(args.output_dir.as_ref(), "compare-bundles", || {
+        format!(
+            "{}-{}",
+            sanitize_path_component(&component),
+            chrono::Utc::now().format("%Y%m%d%H%M%S")
+        )
+    })?;
     crate::commands::trace::compare_artifacts::prepare_compare_bundle_dir(&output_dir)?;
 
     let mut cells = Vec::new();

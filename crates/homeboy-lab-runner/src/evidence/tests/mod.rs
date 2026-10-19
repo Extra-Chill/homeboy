@@ -1243,7 +1243,7 @@ fn test_mirrored_patch_result_reports_accessible_artifact_token() {
 
     let patch = json!({
         "patch_artifact_id": artifact_id,
-        "patch_artifact_path": "/srv/homeboy/.homeboy/artifacts/remote.diff",
+        "patch_artifact_path": "/srv/homeboy-homeboy-artifacts/remote.diff",
     });
 
     let mirrored = mirrored_patch_result(&store, &runner, &job, Some(&patch))
@@ -1287,7 +1287,7 @@ fn test_mirrored_patch_result_fails_when_patch_artifact_was_not_mirrored() {
     let artifact_id = format!("runner-fix-patch-{job_id}");
     let patch = json!({
         "patch_artifact_id": artifact_id,
-        "patch_artifact_path": "/srv/homeboy/.homeboy/artifacts/remote.diff",
+        "patch_artifact_path": "/srv/homeboy-homeboy-artifacts/remote.diff",
     });
 
     let err = mirrored_patch_result(&store, &runner, &job, Some(&patch))

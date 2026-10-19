@@ -56,7 +56,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                         "schema": AGENT_TASK_ARTIFACT_SCHEMA,
                         "id": artifact_id,
                         "kind": "patch",
-                        "path": "/home/runner/.homeboy/executor-finalized/patch.diff",
+                        "path": "/home/runner/.local/share/homeboy/artifacts/executor-finalized/patch.diff",
                         "url": "homeboy://agent-task/run/recovered-typed-lab-run/artifacts#task=implement&artifact=patch",
                         "size_bytes": VALID_PATCH.len(),
                         "sha256": sha256_hex(VALID_PATCH),
@@ -68,7 +68,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                         "schema": AGENT_TASK_ARTIFACT_SCHEMA,
                         "id": "transcript",
                         "kind": "transcript",
-                        "path": "/home/runner/.homeboy/executor-finalized/transcript.json",
+                        "path": "/home/runner/.local/share/homeboy/artifacts/executor-finalized/transcript.json",
                         "size_bytes": 10,
                         "sha256": "a".repeat(64),
                         "metadata": { "executor_artifact_finalized": true }
@@ -76,7 +76,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                         "schema": AGENT_TASK_ARTIFACT_SCHEMA,
                         "id": "result",
                         "kind": "result",
-                        "path": "/home/runner/.homeboy/executor-finalized/result.json",
+                        "path": "/home/runner/.local/share/homeboy/artifacts/executor-finalized/result.json",
                         "size_bytes": 10,
                         "sha256": "b".repeat(64),
                         "metadata": { "executor_artifact_finalized": true }
@@ -84,7 +84,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                         "schema": AGENT_TASK_ARTIFACT_SCHEMA,
                         "id": "runtime-log",
                         "kind": "runtime-log",
-                        "path": "/home/runner/.homeboy/executor-finalized/runtime.log",
+                        "path": "/home/runner/.local/share/homeboy/artifacts/executor-finalized/runtime.log",
                         "size_bytes": 10,
                         "sha256": "c".repeat(64),
                         "metadata": { "executor_artifact_finalized": true }
@@ -95,7 +95,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                         "payload": {
                             "artifact_id": artifact_id,
                             "kind": "patch",
-                            "path": "/home/runner/.homeboy/executor-finalized/patch.diff",
+                            "path": "/home/runner/.local/share/homeboy/artifacts/executor-finalized/patch.diff",
                             "sha256": sha256_hex(VALID_PATCH),
                             "size_bytes": VALID_PATCH.len(),
                             "url": "homeboy://agent-task/run/recovered-typed-lab-run/artifacts#task=implement&artifact=patch"
@@ -104,7 +104,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                             "schema": AGENT_TASK_ARTIFACT_SCHEMA,
                             "id": artifact_id,
                             "kind": "patch",
-                            "path": "/home/runner/.homeboy/executor-finalized/patch.diff",
+                            "path": "/home/runner/.local/share/homeboy/artifacts/executor-finalized/patch.diff",
                             "size_bytes": VALID_PATCH.len(),
                             "sha256": sha256_hex(VALID_PATCH),
                             "metadata": { "executor_artifact_finalized": true }

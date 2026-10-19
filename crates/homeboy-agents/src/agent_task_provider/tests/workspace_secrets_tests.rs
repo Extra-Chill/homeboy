@@ -238,7 +238,7 @@ fn provider_workspace_materialization_declares_requires_git_requirement() {
         cwd: None,
         requires_git: Some(true),
         write_scope: Some("artifacts".to_string()),
-        artifact_paths: vec![".homeboy/provider".to_string()],
+        artifact_paths: vec!["provider-artifacts".to_string()],
         spec: None,
         mounts: Vec::new(),
         apply_back: AgentTaskRuntimeApplyBack::default(),

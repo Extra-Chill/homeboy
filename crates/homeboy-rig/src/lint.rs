@@ -18,7 +18,6 @@ const STRUCTURAL_IGNORED_DIRECTORIES: &[&str] = &[
     ".claude",
     ".datamachine",
     ".git",
-    ".homeboy",
     ".next",
     ".opencode",
     ".sampleplugin",
@@ -1753,8 +1752,8 @@ mod tests {
     }
 
     #[test]
-    fn lint_ignores_homeboy_metadata_directory() {
-        assert!(IgnorePolicy::new(&[]).ignored_directory(OsStr::new(".homeboy")));
+    fn lint_carries_no_homeboy_state_directory_compensation() {
+        assert!(!IgnorePolicy::new(&[]).ignored_directory(OsStr::new(".homeboy")));
     }
 
     #[test]

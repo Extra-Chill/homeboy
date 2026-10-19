@@ -327,6 +327,19 @@ environment variables.
 
 #### Runner-managed dependency sources
 
+### Workspace state location
+
+Homeboy may add only `homeboy.json` to a repository. Every other byte it
+produces lives outside the checkout. For a runner workspace at `<checkout>`,
+runner-owned state lives in the sibling `<checkout>-homeboy-state/` directory:
+workspace metadata, `@file` scratch, the `prepared-source-ready` marker,
+`lab-source-evidence.json`, `gate-receipts/<uuid>.json`, and `lab-stacks/`
+checkouts. Run artifacts (provider evidence inputs, rig registries) live in
+`<checkout>-homeboy-artifacts/`. Each location has one shared resolver in
+`homeboy_lab_contract::lab::handoff`, and workspace removal and pruning clean
+these siblings. Source snapshots carry no `.homeboy` exclude: a `.homeboy`
+directory in a checkout is ordinary user content.
+
 Portable Lab/evidence runs should declare runner dependency sources instead of
 smuggling local checkout paths through workflow-specific environment variables.
 Homeboy's generic contract is the extension/component setting
@@ -341,7 +354,10 @@ For each declared dependency, `homeboy runner workspace sync`:
 - materializes the prepared dependency beside the primary runner workspace; and
 The JSON output includes `validation_dependencies`, with each dependency's
 `id`, `role`, controller `local_path`, runner `remote_path`, and
-`evidence_path`. Bench, trace, eval, and provider layers can consume that
+`evidence_path`. The `evidence_path` points into the dependency's sibling
+`<remote_path>-homeboy-state/lab-source-evidence.json`; dependency lifecycle
+records land in the artifact store under
+`<artifact-root>/dependency-lifecycle/<run-id>/`. Bench, trace, eval, and provider layers can consume that
 generic output to populate their own path settings without knowing Lab
 filesystem layouts or dependency-specific environment variable names.
 
