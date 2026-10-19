@@ -4572,6 +4572,183 @@ fn cleanup_retains_squash_merged_worktree_claimed_by_a_live_owner() {
     assert!(worktree.exists());
 }
 
+// -- #16147: cleanup nominates what plain `remove` accepts -------------------
+//
+// On the Extra Chill controller, `worktree cleanup` listed one candidate
+// while fifteen more task worktrees with a merged PR and a clean tree were
+// removed by plain `homeboy worktree remove <handle>` (no --force), each
+// reporting "branch is merged into the cleanup base ref". Cleanup's
+// succeeded-finalization gate was the drift: a merged branch is the same
+// terminal evidence `remove` accepts, so cleanup must nominate it whether or
+// not the lifecycle owner recorded a succeeded finalization. Unmerged owned
+// work still waits for that finalization, and dirty trees stay retained.
+#[test]
+fn cleanup_nominates_squash_merged_clean_owned_worktree_without_succeeded_finalization() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let main = stable_main_branch(source.path());
+    let store = dir.path().join("store");
+
+    // Merged + clean: one commit, squash-merged into main (ancestry rewritten
+    // like a GitHub "Squash and merge"), run-owned without a succeeded
+    // finalization — exactly what plain `remove` accepted in the field.
+    let merged_worktree = sibling_worktree_path(source.path(), "owned-squash-merged");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "task-merged",
+            &merged_worktree.to_string_lossy(),
+        ],
+    );
+    fs::write(merged_worktree.join("merged.txt"), "merged work\n").unwrap();
+    run_git(&merged_worktree, &["add", "."]);
+    run_git(
+        &merged_worktree,
+        &["commit", "-q", "-m", "merged task work"],
+    );
+    run_git(source.path(), &["merge", "--squash", "task-merged"]);
+    run_git(
+        source.path(),
+        &["commit", "-q", "-m", "squashed merged task work (#16147)"],
+    );
+    assert!(
+        run_git_status(
+            source.path(),
+            &["merge-base", "--is-ancestor", "task-merged", main]
+        )
+        .is_err(),
+        "the squash rewrite must actually defeat plain ancestry, or this test proves nothing"
+    );
+    let mut merged_record = fixture_record(source.path(), &merged_worktree);
+    merged_record.id = "fixture@task-merged".to_string();
+    merged_record.branch = "task-merged".to_string();
+    merged_record.base_ref = main.to_string();
+    merged_record.run_id = Some("cook-owner-1".to_string());
+    merged_record.terminal_disposition = Some("failed".to_string());
+    write_record(&store, &merged_record).unwrap();
+
+    // Unmerged + owned: genuine in-flight work that still waits for its
+    // lifecycle owner's succeeded finalization.
+    let unmerged_worktree = sibling_worktree_path(source.path(), "owned-unmerged");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "task-unmerged",
+            &unmerged_worktree.to_string_lossy(),
+        ],
+    );
+    fs::write(unmerged_worktree.join("unmerged.txt"), "in flight\n").unwrap();
+    run_git(&unmerged_worktree, &["add", "."]);
+    run_git(
+        &unmerged_worktree,
+        &["commit", "-q", "-m", "unmerged task work"],
+    );
+    let mut unmerged_record = fixture_record(source.path(), &unmerged_worktree);
+    unmerged_record.id = "fixture@task-unmerged".to_string();
+    unmerged_record.branch = "task-unmerged".to_string();
+    unmerged_record.base_ref = main.to_string();
+    unmerged_record.run_id = Some("cook-owner-2".to_string());
+    unmerged_record.terminal_disposition = None;
+    write_record(&store, &unmerged_record).unwrap();
+
+    // Merged + dirty: containment answers "is the committed work landed?",
+    // never "is this checkout safe to delete right now?".
+    let dirty_worktree = sibling_worktree_path(source.path(), "owned-dirty-merged");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "task-dirty",
+            &dirty_worktree.to_string_lossy(),
+        ],
+    );
+    fs::write(dirty_worktree.join("dirty.txt"), "dirty work\n").unwrap();
+    run_git(&dirty_worktree, &["add", "."]);
+    run_git(&dirty_worktree, &["commit", "-q", "-m", "dirty task work"]);
+    run_git(source.path(), &["merge", "--squash", "task-dirty"]);
+    run_git(
+        source.path(),
+        &["commit", "-q", "-m", "squashed dirty task work (#16147)"],
+    );
+    fs::write(dirty_worktree.join("scratch.txt"), "not committed\n").unwrap();
+    let mut dirty_record = fixture_record(source.path(), &dirty_worktree);
+    dirty_record.id = "fixture@task-dirty".to_string();
+    dirty_record.branch = "task-dirty".to_string();
+    dirty_record.base_ref = main.to_string();
+    dirty_record.run_id = Some("cook-owner-3".to_string());
+    dirty_record.terminal_disposition = Some("failed".to_string());
+    write_record(&store, &dirty_record).unwrap();
+
+    // Plain `remove` (no --force) accepts the merged, clean worktree: the
+    // shared predicate `cleanup` must nominate the same set.
+    let merged_safety = safety_report(&merged_record).unwrap();
+    assert!(merged_safety.safe, "reasons: {:?}", merged_safety.reasons);
+
+    let options = WorktreeCleanupOptions {
+        force: false,
+        dry_run: true,
+        cleanup_branches: false,
+        allow_unmerged_branches: false,
+        reaper: None,
+    };
+    let plan = cleanup_with_store(options.clone(), &store).unwrap();
+    assert_eq!(plan.counts.candidates, 1, "skipped: {:?}", plan.skipped);
+    assert_eq!(plan.candidates[0].record.id, "fixture@task-merged");
+    assert_eq!(plan.counts.removed, 0, "dry run must not remove");
+    assert_eq!(plan.counts.skipped, 2);
+    assert!(merged_worktree.exists());
+
+    let applied = cleanup_with_store(
+        WorktreeCleanupOptions {
+            dry_run: false,
+            ..options
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(applied.counts.candidates, 1);
+    assert_eq!(applied.counts.removed, 1);
+    assert_eq!(applied.removed[0].record.id, "fixture@task-merged");
+    assert!(
+        !merged_worktree.exists(),
+        "merged, clean worktree must be reclaimed without a succeeded finalization"
+    );
+
+    assert_eq!(applied.counts.skipped, 2);
+    let skipped_reasons = |id: &str| -> Vec<String> {
+        applied
+            .skipped
+            .iter()
+            .find(|skipped| skipped.record.id == id)
+            .unwrap_or_else(|| panic!("{id} must be skipped"))
+            .reasons
+            .clone()
+    };
+    assert!(
+        skipped_reasons("fixture@task-unmerged")
+            .iter()
+            .any(|reason| reason.contains("explicit succeeded finalization from lifecycle owner")),
+        "unmerged owned work still waits for its lifecycle owner"
+    );
+    assert!(unmerged_worktree.exists());
+    assert!(
+        skipped_reasons("fixture@task-dirty")
+            .iter()
+            .any(|reason| reason == "dirty worktree"),
+        "a dirty tree stays retained even when its branch is merged"
+    );
+    assert!(dirty_worktree.exists());
+}
+
 /// `run_git` (this module's test helper) panics on a nonzero exit; these
 /// tests need the exit code itself to assert what plain ancestry does and
 /// does not see, so shell out directly instead.
