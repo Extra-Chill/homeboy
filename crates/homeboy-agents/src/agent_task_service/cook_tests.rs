@@ -19,10 +19,11 @@ use super::super::cook_promotion::{
     persist_manual_finalization_intent, persist_manual_finalization_receipt,
     persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
     preflight_cook_promotion_in_store, prepare_manual_finalization_identity,
-    promote_attempt_in_store, promote_or_load_attempt_in_store, record_replacement_gate_proof,
-    recover_cook_pr_with_backend, recover_cook_pr_with_backend_and_review_form,
-    replacement_gate_execution_started, selected_candidate_task_id_in_store,
-    verify_replacement_gates, AgentTaskSuppliedReviewForm, BaseCatchUp, CookReportInput,
+    promote_attempt_in_store, promote_or_load_attempt_in_store, promotion_executed_model_in_store,
+    record_replacement_gate_proof, recover_cook_pr_with_backend,
+    recover_cook_pr_with_backend_and_review_form, replacement_gate_execution_started,
+    selected_candidate_task_id_in_store, verify_replacement_gates, AgentTaskSuppliedReviewForm,
+    BaseCatchUp, CookReportInput,
 };
 use super::super::execution_step::execution_step_fixtures::{
     current_intent, kill_test_child_at_marker, step_harness, terminal_delivery, QueuedRunTransport,
@@ -3906,6 +3907,208 @@ fn seed_moving_base_attempt(
     })
     .unwrap();
     (options, applied)
+}
+
+/// #15112: a Cook dispatched without `--model` executes under the provider's
+/// resolved default. Seed a terminal attempt whose selected outcome never
+/// recorded `metadata.model` so promotion must resolve the executed model from
+/// the attempt's remaining durable evidence.
+fn seed_default_model_attempt(
+    cook_id: &str,
+    run_id: &str,
+    outcome: crate::agent_task::AgentTaskOutcome,
+) -> CookRequest {
+    use crate::agent_task_scheduler::{
+        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+        AgentTaskProgressEvent,
+    };
+
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.identity.initial_run_id = run_id.to_string();
+    agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+        .expect("submit default-model attempt");
+    agent_task_lifecycle::record_run_aggregate(
+        run_id,
+        &options.identity.initial_plan,
+        &AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: options.identity.initial_plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                succeeded: 1,
+                ..Default::default()
+            },
+            outcomes: vec![outcome],
+            events: vec![AgentTaskProgressEvent {
+                task_id: "provider".to_string(),
+                state: AgentTaskState::Succeeded,
+                attempt: 1,
+                message: None,
+            }],
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        },
+    )
+    .expect("record default-model aggregate");
+    options
+}
+
+fn modelless_outcome(
+    outputs: serde_json::Value,
+    artifacts: Vec<crate::agent_task::AgentTaskArtifact>,
+) -> crate::agent_task::AgentTaskOutcome {
+    crate::agent_task::AgentTaskOutcome {
+        task_id: "provider".to_string(),
+        status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+        summary: Some("provider resolved its own default model".to_string()),
+        outputs,
+        artifacts,
+        metadata: serde_json::Value::Null,
+        ..Default::default()
+    }
+}
+
+fn selected_outcome_of(run_id: &str) -> crate::agent_task::AgentTaskOutcome {
+    test_lifecycle_store()
+        .read_aggregate(run_id)
+        .expect("seeded aggregate")
+        .outcomes
+        .first()
+        .cloned()
+        .expect("seeded outcome")
+}
+
+/// #15112 (local placement): the scheduler's durable provider execution ledger
+/// recorded the executed model even though the normalized outcome lost it.
+#[test]
+fn promotion_resolves_executed_model_from_local_provider_execution_ledger() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-15112-local-run";
+        seed_default_model_attempt(
+            "cook-15112-local",
+            run_id,
+            modelless_outcome(serde_json::Value::Null, Vec::new()),
+        );
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"] = serde_json::json!([{
+                "key": "provider:1",
+                "task_id": "provider",
+                "attempt": 1,
+                "state": "succeeded",
+                "model": "anthropic/claude-sonnet-5",
+            }]);
+        })
+        .expect("record executed-model ledger");
+
+        let model = promotion_executed_model_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            &selected_outcome_of(run_id),
+        )
+        .expect("ledger-backed attempt promotes");
+
+        assert_eq!(model, "anthropic/claude-sonnet-5");
+    });
+}
+
+/// #15112 (Lab placement): the candidate harvested from the runner carries the
+/// executed model on the patch artifact (`metadata.provider_model`) even when
+/// no ledger entry and no normalized outcome model survived the handoff.
+#[test]
+fn promotion_resolves_executed_model_from_lab_harvested_candidate_artifact() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-15112-lab-run";
+        seed_default_model_attempt(
+            "cook-15112-lab",
+            run_id,
+            modelless_outcome(
+                serde_json::Value::Null,
+                vec![crate::agent_task::AgentTaskArtifact {
+                    id: "attempt-1-uncommitted-changes".to_string(),
+                    kind: "patch".to_string(),
+                    role: Some("patch".to_string()),
+                    metadata: serde_json::json!({
+                        "change_source": "uncommitted_attempt_workspace",
+                        "provider_backend": "opencode",
+                        "provider_model": "anthropic/claude-sonnet-5",
+                    }),
+                    ..Default::default()
+                }],
+            ),
+        );
+
+        let model = promotion_executed_model_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            &selected_outcome_of(run_id),
+        )
+        .expect("harvested candidate binding promotes");
+
+        assert_eq!(model, "anthropic/claude-sonnet-5");
+    });
+}
+
+/// #15112: the provider's generic run-result envelope is execution evidence
+/// when neither the ledger nor the artifact binding retained the model.
+#[test]
+fn promotion_resolves_executed_model_from_provider_run_result_evidence() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-15112-run-result-run";
+        seed_default_model_attempt(
+            "cook-15112-run-result",
+            run_id,
+            modelless_outcome(
+                serde_json::json!({
+                    "provider_run_result": { "metadata": { "model": "anthropic/claude-sonnet-5" } }
+                }),
+                Vec::new(),
+            ),
+        );
+
+        let model = promotion_executed_model_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            &selected_outcome_of(run_id),
+        )
+        .expect("run-result evidence promotes");
+
+        assert_eq!(model, "anthropic/claude-sonnet-5");
+    });
+}
+
+/// #15112: a truly unknown executed model still refuses promotion, and the
+/// refusal names every durable authority it consulted plus a recovery that
+/// re-dispatches with an explicit model.
+#[test]
+fn promotion_refusal_names_each_model_authority_and_a_dispatchable_recovery() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-15112-unknown-run";
+        let options = seed_default_model_attempt(
+            "cook-15112-unknown",
+            run_id,
+            modelless_outcome(serde_json::Value::Null, Vec::new()),
+        );
+
+        let error = promote_or_load_attempt_in_store(&test_lifecycle_store(), &options, run_id)
+            .expect_err("an unknown executed model refuses promotion");
+
+        assert_eq!(error.details["field"], "provider_model");
+        let message = error.to_string();
+        for authority in [
+            "metadata.model",
+            "provider_executions",
+            "metadata.provider_model",
+            "agent-task recover",
+            "--model",
+        ] {
+            assert!(
+                message.contains(authority),
+                "refusal names `{authority}`: {message}"
+            );
+        }
+    });
 }
 
 /// Delivery ends the Cook in place: it persists no moving-base recovery for a

@@ -1399,14 +1399,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                 None,
             )
         })?;
-    if concrete_provider_model(outcome.selected_model()).is_none() {
-        return Err(Error::validation_invalid_argument(
-            "provider_model",
-            "Cook promotion requires a concrete executed model",
-            Some(run_id.to_string()),
-            None,
-        ));
-    }
+    promotion_executed_model_in_store(lifecycle_store, run_id, outcome)?;
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
         if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             let target_path = promotion.target.path.as_deref().or_else(|| {
@@ -5523,6 +5516,117 @@ fn concrete_provider_model(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Executed-model evidence the attempt itself retained when the normalized
+/// `metadata.model` never landed on the outcome (#15112). A Cook dispatched
+/// without `--model` lets the provider resolve its own default; local and Lab
+/// placements have both produced terminal outcomes whose `selected_model()` is
+/// empty while the provider's model identity or its generic run-result
+/// envelope still carries the concrete executed model.
+fn outcome_model_identity_evidence(
+    outcome: &crate::agent_task::AgentTaskOutcome,
+) -> Option<String> {
+    [
+        outcome
+            .metadata
+            .pointer("/model_identity/provider_reported"),
+        outcome.metadata.pointer("/model_identity/actual"),
+        outcome
+            .outputs
+            .pointer("/provider_run_result/metadata/model"),
+        outcome.outputs.pointer("/provider_run_result/model"),
+        outcome
+            .metadata
+            .pointer("/provider_run_result/metadata/model"),
+        outcome.metadata.pointer("/provider_run_result/model"),
+    ]
+    .into_iter()
+    .find_map(|value| concrete_provider_model(value.and_then(Value::as_str)))
+}
+
+/// The harvested candidate patch artifact records `metadata.provider_model`
+/// for the execution that produced it. When every other model authority is
+/// empty that binding is still execution evidence (#15112): it is written by
+/// the same scheduler pass that normalizes the outcome, and on the Lab path it
+/// travels with the harvested candidate. Distinct concrete models across the
+/// candidate artifacts are ambiguous and fail closed.
+fn candidate_artifact_model_evidence(
+    outcome: &crate::agent_task::AgentTaskOutcome,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let mut models = outcome
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "patch" || artifact.role.as_deref() == Some("patch"))
+        .filter_map(|artifact| {
+            concrete_provider_model(artifact.metadata["provider_model"].as_str())
+        })
+        .collect::<Vec<_>>();
+    models.sort();
+    models.dedup();
+    match models.as_slice() {
+        [] => Ok(None),
+        [model] => Ok(Some(model.clone())),
+        _ => Err(Error::validation_invalid_argument(
+            "provider_model",
+            "Cook candidate patch artifacts record ambiguous concrete provider models",
+            Some(run_id.to_string()),
+            None,
+        )),
+    }
+}
+
+/// Resolve the concrete executed model for promotion from every durable model
+/// authority the attempt produced, in order of strength: the normalized
+/// outcome (`metadata.model`), the provider execution ledger
+/// (`record.metadata.provider_executions`), the outcome's own model identity /
+/// provider run-result evidence, and the harvested candidate patch artifact
+/// binding (`metadata.provider_model`).
+///
+/// A Cook with no `--model` override executes under the provider's resolved
+/// default; both local and Lab placements have produced attempts whose
+/// selected outcome lost `metadata.model` while that evidence chain still knew
+/// the executed model (#15112). Promotion only refuses when the model is
+/// truly unknown everywhere, and that refusal names where it looked and a
+/// recovery that re-dispatches with an explicit model.
+pub(crate) fn promotion_executed_model_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    outcome: &crate::agent_task::AgentTaskOutcome,
+) -> Result<String> {
+    if let Some(model) = concrete_provider_model(outcome.selected_model()) {
+        return Ok(model);
+    }
+    let record = lifecycle_store.read_record(run_id)?;
+    if let Some(model) = selected_execution_model(
+        record
+            .metadata
+            .get("provider_executions")
+            .unwrap_or(&Value::Null),
+        outcome,
+        None,
+        run_id,
+    )? {
+        return Ok(model);
+    }
+    if let Some(model) = outcome_model_identity_evidence(outcome) {
+        return Ok(model);
+    }
+    if let Some(model) = candidate_artifact_model_evidence(outcome, run_id)? {
+        return Ok(model);
+    }
+    Err(Error::validation_invalid_argument(
+        "provider_model",
+        "Cook promotion requires a concrete executed model, and none was recorded on \
+         the selected outcome (metadata.model), the provider execution ledger \
+         (run record metadata.provider_executions), the outcome's model identity or \
+         provider run-result evidence, or its candidate patch artifacts \
+         (metadata.provider_model). Re-dispatch the attempt with an explicit model: \
+         `homeboy agent-task recover <cook-or-attempt-id> --model <model>`.",
+        Some(run_id.to_string()),
+        None,
+    ))
+}
+
 /// Resolve the model from the terminal provider execution for the scheduler's
 /// selected candidate task. Older controllers did not persist the execution
 /// ledger, so their provider-reported outcome model remains a compatible
@@ -5665,6 +5769,18 @@ fn authoritative_execution_identity(
             None,
         ));
     }
+    // The ledger and the normalized outcome can both miss the executed model
+    // when the provider resolved its own default (#15112). The outcome's own
+    // identity evidence and the harvested candidate's model binding are the
+    // remaining durable authorities; disclosure uses the same chain promotion
+    // admits so an attempt that promotes also finalizes.
+    let model = match model {
+        Some(model) => Some(model),
+        None => outcome_model_identity_evidence(outcome)
+            .map(Ok)
+            .or_else(|| candidate_artifact_model_evidence(outcome, run_id).transpose())
+            .transpose()?,
+    };
     Ok((
         terminal
             .map(|identity| identity.backend)
@@ -8002,6 +8118,86 @@ mod provider_model_tests {
 
         assert_eq!(initial, continuation);
         assert_eq!(initial.as_deref(), Some("openai/gpt-5.6-terra"));
+    }
+
+    #[test]
+    fn outcome_model_identity_evidence_reads_provider_report_and_run_result() {
+        let provider_reported = crate::agent_task::AgentTaskOutcome {
+            task_id: "selected".to_string(),
+            metadata: serde_json::json!({
+                "model_identity": { "provider_reported": "anthropic/claude-sonnet-5" }
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            outcome_model_identity_evidence(&provider_reported).as_deref(),
+            Some("anthropic/claude-sonnet-5")
+        );
+
+        let run_result = crate::agent_task::AgentTaskOutcome {
+            task_id: "selected".to_string(),
+            outputs: serde_json::json!({
+                "provider_run_result": { "metadata": { "model": "anthropic/claude-sonnet-5" } }
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            outcome_model_identity_evidence(&run_result).as_deref(),
+            Some("anthropic/claude-sonnet-5")
+        );
+
+        // Placeholder identities never satisfy the concrete-model requirement.
+        let placeholder = crate::agent_task::AgentTaskOutcome {
+            task_id: "selected".to_string(),
+            metadata: serde_json::json!({
+                "model_identity": { "provider_reported": "unknown" }
+            }),
+            ..Default::default()
+        };
+        assert!(outcome_model_identity_evidence(&placeholder).is_none());
+        assert!(outcome_model_identity_evidence(&selected_outcome(None)).is_none());
+    }
+
+    fn patch_artifact(id: &str, model: Option<&str>) -> crate::agent_task::AgentTaskArtifact {
+        crate::agent_task::AgentTaskArtifact {
+            id: id.to_string(),
+            kind: "patch".to_string(),
+            role: Some("patch".to_string()),
+            metadata: model.map_or(
+                Value::Null,
+                |model| serde_json::json!({ "provider_model": model }),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn candidate_artifact_model_evidence_resolves_one_model_and_fails_closed_on_ambiguity() {
+        let mut outcome = selected_outcome(None);
+        outcome.artifacts = vec![
+            patch_artifact("uncommitted", Some("anthropic/claude-sonnet-5")),
+            patch_artifact("committed", Some("anthropic/claude-sonnet-5")),
+            patch_artifact("unbound", None),
+        ];
+        assert_eq!(
+            candidate_artifact_model_evidence(&outcome, "run")
+                .expect("harvested candidate binding resolves")
+                .as_deref(),
+            Some("anthropic/claude-sonnet-5")
+        );
+
+        outcome.artifacts = vec![
+            patch_artifact("uncommitted", Some("model-a")),
+            patch_artifact("committed", Some("model-b")),
+        ];
+        let error = candidate_artifact_model_evidence(&outcome, "run")
+            .expect_err("distinct artifact models fail closed");
+        assert_eq!(error.details["field"], "provider_model");
+
+        outcome.artifacts = vec![patch_artifact("unbound", None)];
+        assert!(candidate_artifact_model_evidence(&outcome, "run")
+            .expect("absent binding is unresolved, not an error")
+            .is_none());
     }
 
     #[test]
