@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.429.8] - 2026-10-19
+
+### Changed
+- Skip continuation alerts once the cook's terminal outcome is announced
+
+### Fixed
+- classify nested Homeboy gates with an unresolved target as gate declaration
+
 ## [0.429.7] - 2026-10-19
 
 ### Fixed
