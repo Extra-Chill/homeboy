@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.430.0] - 2026-10-19
+
+### Added
+- declared release gates run against the published artifact before tagging
+
+### Fixed
+- size Lab-placed Cook admission to the controller checkout
+- bind a relative --path to the caller's cwd before durable staging, and report the checked directory
+- promote a Cook whose provider resolved its own model
+- size the attached Cook wait from the dispatched command when no plan was materialized
+- keep runner workspace metadata and @file scratch outside the workspace tree
+
 ## [0.429.8] - 2026-10-19
 
 ### Changed
