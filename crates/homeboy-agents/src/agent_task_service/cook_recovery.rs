@@ -124,6 +124,12 @@ pub(crate) struct CookRecoveryInputs<'a> {
     pub ambiguous_artifact_ids: &'a [String],
     /// The attempt's terminal continuation failed and must be rearmed.
     pub continuation_rearm_required: bool,
+    /// The attempt whose recorded review form is consulted below.
+    pub run_id: &'a str,
+    /// `incomplete_reason` of a recorded review form that declares the task
+    /// incomplete. Continuation re-reads that same terminal verdict, so it
+    /// can never publish the candidate.
+    pub agent_incomplete_reason: Option<&'a str>,
 }
 
 /// Decide the single next recovery step from durable Cook evidence.
@@ -156,6 +162,15 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
             return CookRecoveryStep::ChooseArtifact {
                 artifact_ids: artifact_ids.to_vec(),
             }
+        }
+    }
+    if status == CookStatus::CandidateRecoverable {
+        if let Some(reason) = inputs.agent_incomplete_reason {
+            return CookRecoveryStep::none(format!(
+                "The agent's review form declares the task incomplete: {reason}. Continuing would re-read the same verdict, so `recover` cannot publish this candidate. Inspect it with `agent-task diagnose {run}`; if the task is in fact done, publish it with a complete review form via `agent-task finalize-pr --recover {run} --review-form @FORM.json`, otherwise start a fresh Cook.",
+                reason = reason.trim_end_matches('.'),
+                run = inputs.run_id
+            ));
         }
     }
     if status == CookStatus::PreExecutionFailure && inputs.retry_admitted {
@@ -579,6 +594,30 @@ mod tests {
         };
         configure(&mut inputs);
         cook_recovery_step(&inputs)
+    }
+
+    #[test]
+    fn agent_reported_incomplete_candidate_has_no_continuation_step() {
+        let reason = "the PR could not be opened";
+        let decided = step("candidate_recoverable", |inputs| {
+            inputs.run_id = "cook-attempt-1";
+            inputs.agent_incomplete_reason = Some(reason);
+        });
+        let CookRecoveryStep::None { reason: message } = decided else {
+            panic!(
+                "an agent-declared incomplete candidate must not advertise continuation: {decided:?}"
+            );
+        };
+        assert!(message.contains(reason), "{message}");
+        assert!(
+            message.contains("finalize-pr --recover cook-attempt-1 --review-form @FORM.json"),
+            "{message}"
+        );
+        assert_eq!(
+            step("candidate_recoverable", |_| {}),
+            CookRecoveryStep::Continue,
+            "other recoverable candidates still continue"
+        );
     }
 
     #[test]
