@@ -4724,6 +4724,15 @@ pub fn live_owner_continuation_denial(
 /// Refuse continuation while this Cook has a canonical runtime driver. The
 /// kernel lock is Cook-scoped, so unlike a lifecycle `runner_pid` it cannot
 /// confuse a live batch coordinator driving siblings with this child's owner.
+/// Whether a live controller (another process, or another thread of this one)
+/// is driving `cook_id` right now. Observers use this to tell a Cook that is
+/// between attempt states from one that has stopped.
+pub fn cook_driver_is_live(cook_id: &str) -> Result<bool> {
+    Ok(CookRecipeStore::from_current_data_root()?
+        .foreign_cook_driver(cook_id)?
+        .is_some())
+}
+
 pub fn cook_continuation_owner_denial(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     cook_id: &str,
