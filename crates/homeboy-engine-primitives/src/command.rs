@@ -1435,6 +1435,23 @@ pub struct CommandProgress {
     pub total: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unfinished: Vec<String>,
+    /// What counts as liveness after this marker. `output` hands supervision
+    /// back to ordinary output, for a phase delegated to an uninstrumented
+    /// child (a compiler, an extension test runner); the next marker without
+    /// it restores marker-only liveness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<CommandLiveness>,
+}
+
+/// The liveness signal a `HOMEBOY_PROGRESS` marker selects.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandLiveness {
+    /// Only markers count, so chatty output cannot mask a stalled test case.
+    #[default]
+    Progress,
+    /// Any output counts.
+    Output,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1450,8 +1467,9 @@ pub struct SupervisedCommandHeartbeat {
 pub struct SupervisedCommandOutput {
     pub output: BoundedCommandOutput,
     pub termination: SupervisedCommandTermination,
-    /// The command emitted at least one valid `HOMEBOY_PROGRESS` marker, so
-    /// only markers (not ordinary output) counted as liveness afterwards.
+    /// Only `HOMEBOY_PROGRESS` markers (not ordinary output) counted as
+    /// liveness when the command ended: it emitted a marker and the latest
+    /// marker did not hand liveness back to output.
     pub progress_instrumented: bool,
 }
 
@@ -1740,9 +1758,7 @@ pub fn wait_with_bounded_output_supervised_guarded(
             },
         },
         termination,
-        progress_instrumented: live_output
-            .lock()
-            .is_ok_and(|live| live.last_progress.is_some()),
+        progress_instrumented: live_output.lock().is_ok_and(|live| live.marker_only()),
     })
 }
 
@@ -1884,9 +1900,7 @@ pub fn wait_with_bounded_output_supervised_with_progress_until(
             },
         },
         termination,
-        progress_instrumented: live_output
-            .lock()
-            .is_ok_and(|live| live.last_progress.is_some()),
+        progress_instrumented: live_output.lock().is_ok_and(|live| live.marker_only()),
     })
 }
 
@@ -1986,9 +2000,7 @@ pub fn wait_with_bounded_output_supervised_with_progress_and_passthrough(
             },
         },
         termination,
-        progress_instrumented: live_output
-            .lock()
-            .is_ok_and(|live| live.last_progress.is_some()),
+        progress_instrumented: live_output.lock().is_ok_and(|live| live.marker_only()),
     })
 }
 
@@ -2109,9 +2121,7 @@ pub fn wait_with_bounded_output_supervised_with_progress_owned(
             },
         },
         termination,
-        progress_instrumented: live_output
-            .lock()
-            .is_ok_and(|live| live.last_progress.is_some()),
+        progress_instrumented: live_output.lock().is_ok_and(|live| live.marker_only()),
     })
 }
 
@@ -2187,16 +2197,27 @@ impl LiveOutputTail {
         self.last_progress = Some((progress, std::time::Instant::now()));
     }
 
+    /// Only markers count as liveness: the command emitted a marker and the
+    /// latest one did not hand liveness back to output.
+    fn marker_only(&self) -> bool {
+        self.last_progress
+            .as_ref()
+            .is_some_and(|(progress, _)| progress.liveness != Some(CommandLiveness::Output))
+    }
+
     /// Time since the last liveness signal. Until the first valid
     /// `HOMEBOY_PROGRESS` marker any output counts; once a command has emitted
     /// a marker it is instrumented, and only markers count, so chatty output
-    /// cannot mask a stalled test case.
+    /// cannot mask a stalled test case. A marker with `"liveness":"output"`
+    /// makes output count again until the next marker.
     fn quiet_for(&self, elapsed: Duration) -> Duration {
-        self.last_progress
-            .as_ref()
-            .map(|(_, at)| *at)
-            .or(self.last_output_at)
-            .map_or(elapsed, |at| at.elapsed())
+        let marker_at = self.last_progress.as_ref().map(|(_, at)| *at);
+        let last_signal = if self.marker_only() {
+            marker_at
+        } else {
+            marker_at.max(self.last_output_at)
+        };
+        last_signal.map_or(elapsed, |at| at.elapsed())
     }
 
     fn heartbeat(&self, elapsed: Duration) -> SupervisedCommandHeartbeat {

@@ -1070,9 +1070,12 @@ Supervised gates persist `gate_output_tail`, `gate_elapsed_ms`, and the age of
 their most recent structured progress update in the active adoption record. A
 portable gate may emit this ordinary output line on stdout or stderr to mark
 forward progress: `HOMEBOY_PROGRESS {"phase":"test","current":"case name"}`.
-`phase` is required and `current` is optional. The configured no-progress
-deadline applies from launch until the first marker and between later markers;
-ordinary output remains evidence but cannot mask a stalled test case. Markers
+`phase` is required and `current` is optional. Until the first marker any
+output counts as liveness for the configured no-progress deadline; after it
+only markers count, so ordinary output remains evidence but cannot mask a
+stalled test case. A marker with `"liveness":"output"` hands a delegated phase
+(a compiler, an uninstrumented test runner) back to output liveness until the
+next marker; `homeboy review` emits one for each lint and test stage. Markers
 add durable phase/current context to that liveness signal. It is separate from
 the wall-clock gate timeout. A nonzero command exit remains
 `termination: "completed"`, while controller deadline outcomes have distinct

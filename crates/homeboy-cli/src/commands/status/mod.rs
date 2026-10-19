@@ -185,6 +185,7 @@ fn run_unisolated(
                     completed: Some(progress.completed),
                     total: Some(progress.total),
                     unfinished: progress.unfinished,
+                    ..Default::default()
                 };
                 if let Ok(progress) = serde_json::to_string(&progress) {
                     eprintln!("HOMEBOY_PROGRESS {progress}");
@@ -1802,6 +1803,7 @@ mod tests {
             completed: Some(2),
             total: Some(4),
             unfinished: vec!["slow-component".to_string(), "queued-component".to_string()],
+            ..Default::default()
         };
 
         assert_eq!(

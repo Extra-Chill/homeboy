@@ -7391,6 +7391,62 @@ mod tests {
         );
     }
 
+    /// A marker with `"liveness":"output"` hands a delegated phase (a cargo
+    /// build, an extension test runner) back to output liveness, so an
+    /// instrumented command can run an uninstrumented child (#16152).
+    #[cfg(unix)]
+    #[test]
+    fn output_liveness_marker_keeps_a_delegated_phase_alive() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let report = run_gate_command_with_supervision(
+            worktree.path(),
+            1,
+            // The exact setup markers `homeboy review` emits.
+            concat!(
+                "printf '%s\\n' 'HOMEBOY_PROGRESS {\"component\":\"c\",\"current\":\"c\",\"deadline_ms\":1,\"elapsed_ms\":0,\"last_progress_ms_ago\":null,\"liveness\":null,\"phase\":\"dependency_setup\",\"provider\":null,\"status\":\"running\"}'; ",
+                "printf '%s\\n' 'HOMEBOY_PROGRESS {\"component\":\"c\",\"current\":\"c\",\"deadline_ms\":1,\"elapsed_ms\":1,\"last_progress_ms_ago\":null,\"liveness\":\"output\",\"phase\":\"dependency_setup\",\"provider\":null,\"status\":\"completed\"}'; ",
+                "for i in $(seq 1 40); do echo \"case $i passed\"; sleep 0.02; done",
+            ),
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&chatty_gate_supervision()),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+        )
+        .expect("gate report");
+        assert_eq!(report.termination, AgentTaskGateTermination::Completed);
+        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+    }
+
+    /// The next plain marker restores marker-only liveness after a handoff.
+    #[cfg(unix)]
+    #[test]
+    fn plain_marker_after_output_handoff_restores_marker_only_liveness() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let report = run_gate_command_with_supervision(
+            worktree.path(),
+            1,
+            "printf 'HOMEBOY_PROGRESS {\"phase\":\"build\",\"liveness\":\"output\"}\\n'; printf 'HOMEBOY_PROGRESS {\"phase\":\"test\"}\\n'; for i in $(seq 1 100); do echo \"line $i\"; sleep 0.02; done",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&chatty_gate_supervision()),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+        )
+        .expect("gate report");
+        assert_eq!(report.termination, AgentTaskGateTermination::NoProgress);
+        let evidence = report.failure_evidence.as_ref().expect("failure evidence");
+        assert!(
+            evidence
+                .summary
+                .contains("no HOMEBOY_PROGRESS marker for 250 ms"),
+            "{}",
+            evidence.summary
+        );
+    }
+
     #[test]
     fn semantic_failure_remains_completed_with_reviewer_resolvable_command() {
         let worktree = tempfile::tempdir().expect("worktree");
