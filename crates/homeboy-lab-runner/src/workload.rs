@@ -189,6 +189,7 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
             ),
             wait_budget_ms: agent_task_wait_budget_ms(
                 plan,
+                args,
                 cook_gate_budget_ms(args, agent_task_index),
             ),
         }),
@@ -201,7 +202,7 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
             handoff_mirror_policy: Some(
                 LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff,
             ),
-            wait_budget_ms: agent_task_wait_budget_ms(plan, 0),
+            wait_budget_ms: agent_task_wait_budget_ms(plan, args, 0),
         }),
         "run-plan" => {
             let plan_ref = option_value_after(args, agent_task_index + 1, "--plan")?;
@@ -219,7 +220,7 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
                 // than leaving the field unset keeps "no handoff to mirror"
                 // distinguishable from "emitter predates the field".
                 handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
-                wait_budget_ms: agent_task_wait_budget_ms(plan, 0),
+                wait_budget_ms: agent_task_wait_budget_ms(plan, args, 0),
             })
         }
         _ => None,
@@ -227,24 +228,51 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
 }
 
 /// The agent-task workload's own declared budget: every task's effective
-/// provider max timeout plus the Cook gate budget. `None` without a
-/// controller-materialized plan, so the handoff wait keeps its default.
-fn agent_task_wait_budget_ms(plan: Option<&AgentTaskPlan>, gate_budget_ms: u64) -> Option<u64> {
-    let plan = plan.filter(|plan| !plan.tasks.is_empty())?;
-    let provider_ms = plan
-        .tasks
-        .iter()
-        .map(|task| {
-            effective_provider_max_timeout_ms(
-                effective_provider_timeout_ms(
-                    task.limits.timeout_ms.or(plan.options.timeout_ms),
-                    task.limits.max_runtime_ms,
-                ),
-                task.limits.max_timeout_ms,
-            )
-        })
-        .fold(0, u64::saturating_add);
+/// provider max timeout plus the Cook gate budget.
+///
+/// An agent-task dispatch can reach Lab without a controller-materialized
+/// plan: a fanout cook child routed by `--placement lab` selects its runner
+/// inside the offload, so the controller never compiles the plan. This
+/// function used to return `None` for that shape, which dropped the attached
+/// `--wait` handoff onto the 20-minute transport default — the controller then
+/// cancelled the runner job over its HTTP API while the provider's own
+/// extended deadline (#15564: base timeout, extended in steps up to 3x while
+/// there is progress) was still live, discarding the work (#16168). Without a
+/// plan the same budget shape is derived from the dispatched command instead:
+/// the effective provider max timeout for the command's `--timeout-ms` (or the
+/// provider default) plus the gate budget.
+fn agent_task_wait_budget_ms(
+    plan: Option<&AgentTaskPlan>,
+    args: &[String],
+    gate_budget_ms: u64,
+) -> Option<u64> {
+    let provider_ms = match plan.filter(|plan| !plan.tasks.is_empty()) {
+        Some(plan) => plan
+            .tasks
+            .iter()
+            .map(|task| {
+                effective_provider_max_timeout_ms(
+                    effective_provider_timeout_ms(
+                        task.limits.timeout_ms.or(plan.options.timeout_ms),
+                        task.limits.max_runtime_ms,
+                    ),
+                    task.limits.max_timeout_ms,
+                )
+            })
+            .fold(0, u64::saturating_add),
+        None => effective_provider_max_timeout_ms(
+            effective_provider_timeout_ms(command_provider_timeout_ms(args), None),
+            None,
+        ),
+    };
     Some(provider_ms.saturating_add(gate_budget_ms))
+}
+
+/// The dispatched command's own `--timeout-ms`, when present. This is the same
+/// base the remote provider resolves, so a plan-less wait budget caps where
+/// the provider's extension cap does.
+fn command_provider_timeout_ms(args: &[String]) -> Option<u64> {
+    option_value_after(args, 0, "--timeout-ms").and_then(|value| value.parse::<u64>().ok())
 }
 
 fn cook_gate_budget_ms(args: &[String], agent_task_index: usize) -> u64 {
@@ -1837,11 +1865,70 @@ mod tests {
             agent_task.wait_budget_ms,
             Some(3 * 30 * 60 * 1_000 + 600 * 1_000)
         );
+    }
+
+    /// A fanout cook child reaches Lab without a controller-materialized plan
+    /// (`--placement lab` selects the runner inside the offload, so the
+    /// controller never compiles one). Its wait budget must still be the
+    /// provider's extension cap plus the gate budget — not `None`, which let
+    /// the handoff wait fall back to the 20-minute transport default and
+    /// cancel the runner job while the provider's extended deadline was still
+    /// live (#16168).
+    #[test]
+    fn plan_less_cook_wait_budget_matches_the_provider_extension_cap() {
+        use homeboy_agents::agent_task_timeout::{
+            DEFAULT_PROVIDER_TIMEOUT_EXTENSION_FACTOR, DEFAULT_PROVIDER_TIMEOUT_MS,
+        };
+        let args = [
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--gate-timeout-seconds",
+            "600",
+        ]
+        .map(str::to_string);
+
         assert_eq!(
             lab_runner_workload_agent_task_from_command(&args, Some("cook-run"), None)
                 .expect("cook workload contract")
                 .wait_budget_ms,
-            None
+            Some(
+                DEFAULT_PROVIDER_TIMEOUT_MS * DEFAULT_PROVIDER_TIMEOUT_EXTENSION_FACTOR
+                    + 600 * 1_000
+            ),
+            "a plan-less cook keeps the default provider extension cap plus its gate budget"
+        );
+
+        let dispatch_args = ["homeboy", "agent-task", "dispatch"].map(str::to_string);
+        assert_eq!(
+            lab_runner_workload_agent_task_from_command(&dispatch_args, Some("dispatch-run"), None)
+                .expect("dispatch workload contract")
+                .wait_budget_ms,
+            Some(DEFAULT_PROVIDER_TIMEOUT_MS * DEFAULT_PROVIDER_TIMEOUT_EXTENSION_FACTOR),
+            "a plan-less dispatch keeps the default provider extension cap"
+        );
+    }
+
+    /// A plan-less cook that states its own `--timeout-ms` caps where the
+    /// remote provider's extension cap does: 3x that base.
+    #[test]
+    fn plan_less_cook_wait_budget_follows_the_commands_timeout_ms() {
+        let args = [
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--timeout-ms",
+            "1800000",
+            "--gate-timeout-seconds",
+            "600",
+        ]
+        .map(str::to_string);
+
+        assert_eq!(
+            lab_runner_workload_agent_task_from_command(&args, Some("cook-run"), None)
+                .expect("cook workload contract")
+                .wait_budget_ms,
+            Some(3 * 1_800_000 + 600 * 1_000)
         );
     }
 
