@@ -297,12 +297,14 @@ For CI artifact consumers and PR review agents, prefer writing this envelope to 
 file with the global `--output` flag:
 
 ```bash
-homeboy --output "$RUNNER_TEMP/homeboy-results/review.json" \
+homeboy --output "$RUNNER_TEMP/homeboy-ci-results/review.json" \
   review my-plugin --path "$GITHUB_WORKSPACE" --changed-since=origin/main --summary
 ```
 
 See [CI result JSON contract](../architecture/ci-results-contract.md) for the
-recommended `homeboy-ci-results` artifact layout and consumer rules.
+recommended `homeboy-ci-results` artifact layout and consumer rules. Evidence
+always lives outside the checkout; there is no in-tree `homeboy-ci-results/`
+directory.
 
 ## Output formats
 

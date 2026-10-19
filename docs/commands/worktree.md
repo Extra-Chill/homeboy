@@ -15,7 +15,7 @@ policy in that registry.
 - `homeboy worktree remove <id> [--force]`
 - `homeboy worktree cleanup [--apply] [--force] [--cleanup-artifacts]`
 
-For multi-PR orchestration, start with `homeboy --output homeboy-results/worktrees.json worktree list`, then pair each branch with `homeboy git pr readiness <component-id> --number <n>` and any recorded `homeboy runs evidence <run-id>` output. See [Hold a PR fleet](../workflows/hold-a-pr-fleet.md) for the full local-plus-remote handoff loop.
+For multi-PR orchestration, start with `homeboy --output /tmp/homeboy-results/worktrees.json worktree list`, then pair each branch with `homeboy git pr readiness <component-id> --number <n>` and any recorded `homeboy runs evidence <run-id>` output. See [Hold a PR fleet](../workflows/hold-a-pr-fleet.md) for the full local-plus-remote handoff loop.
 
 ## Safety
 

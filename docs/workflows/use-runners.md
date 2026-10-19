@@ -58,7 +58,7 @@ This keeps the proof tied to the runner-side workspace.
 Runner stdout is not enough for durable evidence. Prefer command JSON, persisted runs, or promoted artifact directories:
 
 ```bash
-homeboy --output homeboy-results/review.json \
+homeboy --output /tmp/homeboy-results/review.json \
   --runner <runner-id> review my-component --changed-since origin/main
 
 homeboy runs show <run-id>

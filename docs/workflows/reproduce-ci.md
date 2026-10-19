@@ -47,7 +47,7 @@ homeboy review <component-id> --changed-since origin/main --ci-profile pr
 Use `--output` when a CI reproduction is intended for automation or agents:
 
 ```bash
-homeboy --output homeboy-results/ci-test.json \
+homeboy --output /tmp/homeboy-results/ci-test.json \
   test <component-id> --ci-job <job-id>
 ```
 

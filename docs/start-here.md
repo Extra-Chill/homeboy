@@ -40,9 +40,9 @@ Homeboy core stays generic. Extensions provide ecosystem behavior such as Cargo,
 Most commands can write JSON evidence while still printing human output:
 
 ```bash
-homeboy review --changed-since origin/main --output homeboy-results/review.json
-homeboy bench my-project --output homeboy-results/bench.json
-homeboy runs show <run-id> --output homeboy-results/run.json
+homeboy review --changed-since origin/main --output /tmp/homeboy-results/review.json
+homeboy bench my-project --output /tmp/homeboy-results/bench.json
+homeboy runs show <run-id> --output /tmp/homeboy-results/run.json
 ```
 
 That JSON is the handoff point for CI, scheduled automation, and coding agents.

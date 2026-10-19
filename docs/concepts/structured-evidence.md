@@ -11,7 +11,7 @@ Commands print readable summaries to stdout so local developers can act quickly.
 Most commands can also write structured JSON:
 
 ```bash
-homeboy review --changed-since origin/main --output homeboy-results/review.json
+homeboy review --changed-since origin/main --output /tmp/homeboy-results/review.json
 ```
 
 CI jobs, scheduled automation, and coding agents should read this JSON instead of scraping stdout.
