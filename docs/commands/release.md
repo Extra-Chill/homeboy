@@ -227,6 +227,41 @@ Commits release changes (version bumps, changelog updates) before tagging.
 }
 ```
 
+### Declared release gates
+
+A component may declare release gates in `homeboy.json` (`release.gates`).
+Each gate is a command Homeboy runs from the component root against the exact
+artifact the release will publish — after `release.package` (and artifact
+authority) completes, and before the release tag is created. A failing gate
+blocks the tag the way a failing test does.
+
+```json
+"release": {
+  "gates": [
+    { "id": "html-site-import",
+      "artifact": { "profile": "html-site-import" },
+      "run": "node tools/run-release-import-gate.mjs --zip {artifact}",
+      "evidence": "release-import-gate-evidence" }
+  ]
+}
+```
+
+- Gates run in declaration order, fail-fast. A non-zero exit fails the release
+  with the gate id and the tail of the gate's output; no tag or publication
+  happens after a failed gate.
+- `{artifact}` in `run` is replaced with the shell-quoted path of the selected
+  artifact. Without an `artifact` selector the gate receives the release's
+  primary artifact; `artifact.profile` matches built artifact file names (it
+  must select exactly one), and `artifact.path` names an exact
+  component-relative artifact path.
+- `evidence` names a component-relative directory the gate writes. Homeboy
+  copies it into the release run's durable artifacts under
+  `release/<component>/<version>/gates/<gate-id>/` whether the gate passes or
+  fails.
+- `--dry-run` lists the planned gate steps without running them.
+- A release that plans no packaged artifact (for example tag-only releases)
+  skips declared gates with a warning instead of failing against nothing.
+
 ### Working tree requirements
 
 Release requires a clean working tree, with two exceptions:

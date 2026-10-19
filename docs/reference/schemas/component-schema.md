@@ -109,6 +109,26 @@ Component configuration defines buildable and deployable units stored in `compon
     - **`source_roots`** (array): One or more non-overlapping repository-relative source directories
     - **`archive_root`** (string): Archive-relative directory where each selected source root's contents are packaged
     - Unmapped ZIP artifacts use the identity-layout completeness check. Mapped archive paths are checked exactly.
+  - **`gates`** (array): Declared release gates run against the packaged artifact after packaging and before tagging. Gates run in declaration order, fail-fast; a non-zero exit blocks the release before any tag or publication, the way a failing test does. `--dry-run` lists the gates without running them.
+    - **`id`** (string, required): Unique gate identifier
+    - **`run`** (string, required): Command run from the component root after packaging; `{artifact}` is replaced with the shell-quoted path of the selected built artifact
+    - **`artifact`** (object, optional): Selects which built artifact the gate receives; absent selects the release's primary artifact
+      - **`profile`** (string): Packaging profile matched against built artifact file names; must select exactly one artifact
+      - **`path`** (string): Exact component-relative artifact path
+    - **`evidence`** (string, optional): Component-relative directory the gate writes; Homeboy copies it into the release run's durable artifacts (`<artifacts>/release/<component>/<version>/gates/<gate-id>/`) whether the gate passes or fails
+
+    ```json
+    "release": {
+      "gates": [
+        {
+          "id": "html-site-import",
+          "artifact": { "profile": "html-site-import" },
+          "run": "node tools/run-release-import-gate.mjs --zip {artifact}",
+          "evidence": "release-import-gate-evidence"
+        }
+      ]
+    }
+    ```
 
 ### Runtime Requirements
 

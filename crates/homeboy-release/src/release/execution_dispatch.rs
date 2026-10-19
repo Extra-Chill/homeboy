@@ -214,6 +214,25 @@ pub(super) fn execute_release_plan_step(
                     failed_result("artifacts.authority", "artifacts.authority", err)
                 }),
         )),
+        "release.gate" => {
+            let gate: homeboy_core::component::ReleaseGateConfig = step
+                .inputs
+                .get("gate")
+                .cloned()
+                .ok_or_else(|| Error::internal_unexpected("release.gate step missing gate config"))
+                .and_then(|value| {
+                    serde_json::from_value(value).map_err(|error| {
+                        Error::validation_invalid_argument(
+                            "release.gates",
+                            error.to_string(),
+                            None,
+                            None,
+                        )
+                    })
+                })?;
+            executor::run_release_gate(&context.roots, context.component, &context.state, &gate)
+                .map(Some)
+        }
         "git.tag" => {
             let tag_name = step
                 .inputs
@@ -850,6 +869,9 @@ pub(super) fn release_step_is_show_stopper(result: &ReleaseStepResult) -> bool {
             | "package"
             | "artifacts.inventory"
             | "artifacts.authority"
+            // A failed declared release gate blocks the release before any
+            // tag or publication, the way a failing test does (#16165).
+            | "release.gate"
             | "git.tag"
             | "git.push"
             // A failed github.release means the GitHub Release object was not
@@ -2695,6 +2717,74 @@ mod tests {
 
     fn plan_step(step_type: &str) -> PlanStep {
         PlanStep::ready(step_type, step_type).build()
+    }
+
+    #[test]
+    fn release_gate_step_dispatches_and_a_failing_gate_is_a_show_stopper() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let component_path = tempfile::tempdir().expect("component path");
+            std::fs::create_dir_all(component_path.path().join("build")).expect("build dir");
+            std::fs::write(component_path.path().join("build/fixture.zip"), "artifact")
+                .expect("artifact");
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: component_path.path().to_string_lossy().to_string(),
+                ..Component::default()
+            };
+            let options = ReleaseOptions::default();
+            let mut context = ReleaseExecutionContext {
+                component: &component,
+                extensions: &[],
+                component_id: "fixture",
+                options: &options,
+                roots: test_roots(),
+                state: ReleaseState {
+                    version: Some("1.2.3".to_string()),
+                    artifacts: vec![crate::release::types::ReleaseArtifact {
+                        path: "build/fixture.zip".to_string(),
+                        durable_path: None,
+                        artifact_type: None,
+                        platform: None,
+                        phase: "final".to_string(),
+                        producer: "test".to_string(),
+                        sha256: None,
+                        publication_authority: true,
+                    }],
+                    ..ReleaseState::default()
+                },
+                publish_failed: false,
+            };
+
+            let passing = PlanStep::ready("release.gate.import", "release.gate")
+                .input_value(
+                    "gate",
+                    serde_json::json!({ "id": "import", "run": "test -f {artifact}" }),
+                )
+                .build();
+            let result = execute_release_plan_step(&passing, &mut context)
+                .expect("gate dispatch")
+                .expect("gate result");
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert!(!release_step_is_show_stopper(&result));
+
+            let failing = PlanStep::ready("release.gate.import", "release.gate")
+                .input_value(
+                    "gate",
+                    serde_json::json!({ "id": "import", "run": "echo bad artifact >&2; exit 3" }),
+                )
+                .build();
+            let result = execute_release_plan_step(&failing, &mut context)
+                .expect("gate dispatch")
+                .expect("gate result");
+            assert_eq!(result.status, ReleaseStepStatus::Failed);
+            assert!(
+                release_step_is_show_stopper(&result),
+                "a failed release gate must halt the plan before git.tag"
+            );
+            let error = result.error.expect("gate error");
+            assert!(error.contains("Release gate 'import' failed (exit 3)"));
+            assert!(error.contains("bad artifact"));
+        });
     }
 
     fn failed_step_result(step_type: &str) -> ReleaseStepResult {

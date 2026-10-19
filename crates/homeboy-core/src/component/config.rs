@@ -294,6 +294,46 @@ pub struct ComponentReleaseConfig {
     /// Git subtree split publications performed as part of a release.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subtree: Vec<SubtreePublicationConfig>,
+    /// Release gates run against the packaged artifact before tagging.
+    ///
+    /// Gates run after packaging, in declaration order, fail-fast. A non-zero
+    /// exit blocks the release before any tag or publication.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<ReleaseGateConfig>,
+}
+
+/// One declared release gate (`release.gates[]`).
+///
+/// A gate is a command run from the component root against the exact artifact
+/// the release will publish. `{artifact}` in `run` is replaced with the
+/// shell-quoted path of the selected artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ReleaseGateConfig {
+    /// Unique gate identifier.
+    pub id: String,
+    /// Command run from the component root after packaging. `{artifact}` is
+    /// replaced with the shell-quoted path of the built artifact.
+    pub run: String,
+    /// Selects which built artifact the gate receives. Absent selects the
+    /// release's primary artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ReleaseGateArtifactSelector>,
+    /// Component-relative directory the gate writes; Homeboy attaches it to
+    /// the release run's durable artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+/// Artifact selector for a [`ReleaseGateConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ReleaseGateArtifactSelector {
+    /// Packaging profile whose artifact the gate receives, matched against the
+    /// built artifact file names. Must select exactly one artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Exact component-relative artifact path to hand the gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -365,6 +405,53 @@ impl ComponentReleaseConfig {
     /// Whether the component declares CI as the owner of its releases.
     pub fn ci_owns_release(&self) -> bool {
         self.release_owner() == ReleaseOwner::Ci
+    }
+
+    /// Validate declared release gates: every gate names a unique, non-empty
+    /// `id` and a non-empty `run` command, and any evidence directory is a
+    /// safe relative path.
+    pub fn validate_gates(&self) -> HomeboyResult<()> {
+        let mut ids: Vec<&str> = Vec::new();
+        for gate in &self.gates {
+            let id = gate.id.trim();
+            if id.is_empty() {
+                return Err(release_gate_error("every release gate requires an id"));
+            }
+            if ids.contains(&id) {
+                return Err(release_gate_error(&format!(
+                    "release gate ids must be unique; '{}' is declared more than once",
+                    id
+                )));
+            }
+            ids.push(id);
+            if gate.run.trim().is_empty() {
+                return Err(release_gate_error(&format!(
+                    "release gate '{}' requires a non-empty run command",
+                    id
+                )));
+            }
+            if let Some(selector) = gate.artifact.as_ref() {
+                let has_profile = selector
+                    .profile
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty());
+                let has_path = selector
+                    .path
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty());
+                if !has_profile && !has_path {
+                    return Err(release_gate_error(&format!(
+                        "release gate '{}' declares an artifact selector without a profile or path",
+                        id
+                    )));
+                }
+            }
+            if let Some(evidence) = gate.evidence.as_deref() {
+                validate_canonical_coverage_path(evidence, "evidence")
+                    .map_err(|err| release_gate_error(&err.message))?;
+            }
+        }
+        Ok(())
     }
 
     pub fn validate_package_coverage(&self) -> HomeboyResult<()> {
@@ -500,6 +587,17 @@ fn validate_canonical_coverage_path(value: &str, field: &str) -> HomeboyResult<(
         )));
     }
     Ok(())
+}
+
+fn release_gate_error(message: &str) -> Error {
+    Error::validation_invalid_argument(
+        "release.gates",
+        message,
+        None,
+        Some(vec![
+            "Declare each gate with a unique id and a run command; optional artifact selector and evidence directory.".to_string(),
+        ]),
+    )
 }
 
 fn package_coverage_error(message: &str) -> Error {
@@ -638,6 +736,70 @@ mod tests {
         assert!(value.get("allow_manual_changelog_edits").is_none());
         assert!(value.get("manual_version_targets").is_none());
         assert!(value.get("manual_release_lockfiles").is_none());
+    }
+
+    #[test]
+    fn release_gates_are_absent_when_defaulted_and_round_trip_when_declared() {
+        let value = serde_json::to_value(ComponentReleaseConfig::default()).expect("serialize");
+        assert!(value.get("gates").is_none());
+
+        let config: ComponentReleaseConfig = serde_json::from_value(serde_json::json!({
+            "gates": [{
+                "id": "html-site-import",
+                "artifact": { "profile": "html-site-import" },
+                "run": "node tools/run-release-import-gate.mjs --zip {artifact}",
+                "evidence": "release-import-gate-evidence"
+            }]
+        }))
+        .expect("release gates configuration");
+
+        assert_eq!(config.gates.len(), 1);
+        assert_eq!(config.gates[0].id, "html-site-import");
+        assert_eq!(
+            config.gates[0]
+                .artifact
+                .as_ref()
+                .and_then(|selector| selector.profile.as_deref()),
+            Some("html-site-import")
+        );
+        config.validate_gates().expect("valid gates");
+    }
+
+    #[test]
+    fn release_gate_validation_requires_unique_ids_and_run_commands() {
+        let duplicate: ComponentReleaseConfig = serde_json::from_value(serde_json::json!({
+            "gates": [
+                { "id": "import", "run": "true" },
+                { "id": "import", "run": "true" }
+            ]
+        }))
+        .expect("configuration");
+        assert!(duplicate.validate_gates().is_err());
+
+        let empty_run: ComponentReleaseConfig = serde_json::from_value(serde_json::json!({
+            "gates": [{ "id": "import", "run": "  " }]
+        }))
+        .expect("configuration");
+        assert!(empty_run.validate_gates().is_err());
+
+        let empty_id: ComponentReleaseConfig = serde_json::from_value(serde_json::json!({
+            "gates": [{ "id": "", "run": "true" }]
+        }))
+        .expect("configuration");
+        assert!(empty_id.validate_gates().is_err());
+
+        let empty_selector: ComponentReleaseConfig = serde_json::from_value(serde_json::json!({
+            "gates": [{ "id": "import", "run": "true", "artifact": {} }]
+        }))
+        .expect("configuration");
+        assert!(empty_selector.validate_gates().is_err());
+
+        let traversal_evidence: ComponentReleaseConfig =
+            serde_json::from_value(serde_json::json!({
+                "gates": [{ "id": "import", "run": "true", "evidence": "../evidence" }]
+            }))
+            .expect("configuration");
+        assert!(traversal_evidence.validate_gates().is_err());
     }
 
     #[test]
