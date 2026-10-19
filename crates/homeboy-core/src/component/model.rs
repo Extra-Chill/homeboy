@@ -193,6 +193,14 @@ pub struct Component {
     /// capability runs for this component. Per-run env overrides win on conflict.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Declarative dependency manifest: how this repo's dependencies install,
+    /// update, and report status (`provider`, `commands`, `outputs`,
+    /// `packages`, `dependency_identities`). Dependency provider resolution
+    /// reads it from the repo-level `homeboy.json` at the checkout being
+    /// operated on; it is carried here opaquely so component mutations
+    /// round-trip the declaration instead of dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deps: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_stack: Vec<DependencyStackEdge>,
     /// Component IDs that must be deployed in the same operation as this component.
@@ -306,6 +314,7 @@ impl Component {
             scripts: None,
             managed_execution: ComponentManagedExecution::default(),
             env: BTreeMap::new(),
+            deps: None,
             dependency_stack: Vec::new(),
             deploy_together: Vec::new(),
             artifact_inputs: Vec::new(),

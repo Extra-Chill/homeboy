@@ -205,8 +205,8 @@ fn skips_declared_overlay_dependency_hydration_only_when_opted_out() {
         .expect("create local runner");
         let overlay_dir = tempfile::tempdir().expect("overlay tempdir");
         std::fs::write(
-            overlay_dir.path().join("homeboy-deps.json"),
-            r#"{"provider":"composer","commands":{"install":{"argv":["not-installed-composer","install"]}}}"#,
+            overlay_dir.path().join("homeboy.json"),
+            r#"{"id":"fixture-deps","deps":{"provider":"composer","commands":{"install":{"argv":["not-installed-composer","install"]}}}}"#,
         )
         .expect("dependency contract");
         let primary = tempfile::tempdir().expect("primary tempdir");

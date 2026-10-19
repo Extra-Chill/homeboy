@@ -7020,8 +7020,8 @@ mod tests {
             let checkout = tempfile::tempdir().expect("checkout");
             let root = checkout.path();
             fs::write(
-                root.join("homeboy-deps.json"),
-                r#"{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}"#,
+                root.join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}}"#,
             )
             .expect("dependency provider");
             for directory in [".claude", "docs", "packages", "scripts", "tests"] {
@@ -7055,10 +7055,10 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let checkout = tempfile::tempdir().expect("checkout");
             let root = checkout.path();
-            let provider = r#"{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}"#;
+            let provider = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}}"#;
             for directory in ["package", "vendor"] {
                 fs::create_dir(root.join(directory)).expect("child");
-                fs::write(root.join(directory).join("homeboy-deps.json"), provider)
+                fs::write(root.join(directory).join("homeboy.json"), provider)
                     .expect("child provider");
             }
             fs::write(root.join("vendor/.git"), "gitdir: ../.git/modules/vendor\n")

@@ -63,6 +63,52 @@ component/workspace, then calls a generic adapter contract for status, package
 matching, updates, and installs. Composer, npm/pnpm, component scripts, and
 extension-backed providers are implementation details behind that boundary.
 
+### Declarative dependency manifest (`deps` in `homeboy.json`)
+
+A repo declares how its dependencies install, update, and report status under
+a top-level `deps` object in its `homeboy.json` — the one repo-level config
+file. There is no side-file manifest; a checkout still carrying the retired
+side file gets a hard error pointing at `homeboy.json`.
+
+```json
+{
+  "id": "my-component",
+  "deps": {
+    "provider": "composer",
+    "dependency_identities": ["example-org/my-component"],
+    "packages": [
+      {
+        "name": "example-org/library",
+        "manifest_section": "require",
+        "constraint": "^1.0",
+        "locked_version": "1.2.3"
+      }
+    ],
+    "commands": {
+      "install": { "argv": ["composer", "install", "--no-interaction"] },
+      "update": { "argv": ["composer", "update", "{package}", "{constraint}"] },
+      "reusable": { "argv": ["composer", "check-platform-reqs"] }
+    },
+    "outputs": [{ "path": "vendor", "kind": "directory" }]
+  }
+}
+```
+
+- `provider` (required) labels the package manager in results.
+- `commands.install`/`update`/`reusable` declare argv-form commands with an
+  optional `cwd` (relative to the workspace) and `success_exit_codes`.
+  `{package}` and `{constraint}` expand in `update` argv entries.
+- `outputs` list workspace-relative paths (`path`, `file`, or `directory`
+  kinds) that a successful install must materialize.
+- `packages` and `dependency_identities` make status and stack resolution
+  declarative.
+
+Provider resolution order: the `deps` declaration in `homeboy.json` (either
+the declarative manifest above or a full dependency adapter manifest carrying
+the `homeboy-extension/dependency-adapter-manifest/v1` schema), then installed
+dependency adapters, then the component's `scripts.deps`, then extension deps
+providers.
+
 Callers should use `homeboy deps status`, `homeboy deps install`, `homeboy deps
 update`, or `homeboy component setup` instead of scripting package-manager
 literals directly. New ecosystems should add or move provider adapters without

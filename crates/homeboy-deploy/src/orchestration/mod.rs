@@ -3237,15 +3237,15 @@ mod tests {
         std::fs::write(component_path.join("target-marker.txt"), "target\n")
             .expect("target marker");
         std::fs::write(
-            root.join("homeboy-deps.json"),
-            r#"{
+            root.join("homeboy.json"),
+            r#"{"id":"fixture-deps","deps":{
                 "provider": "fixture-workspace",
                 "commands": {
                     "install": {
                         "argv": ["sh", "-c", "mkdir -p packages/plugin/node_modules/.bin && printf '#!/bin/sh\\ncat target-marker.txt\\n' > packages/plugin/node_modules/.bin/fixture-tool && chmod +x packages/plugin/node_modules/.bin/fixture-tool"]
                     }
                 }
-            }"#,
+            }}"#,
         )
         .expect("workspace dependency provider");
         run_git(root, &["add", "."]);

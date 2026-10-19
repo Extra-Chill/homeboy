@@ -1970,8 +1970,8 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
             std::fs::write(
-                root.path().join("homeboy-deps.json"),
-                r#"{
+                root.path().join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{
                     "provider":"fixture-provider",
                     "commands":{
                         "reusable":{
@@ -1981,7 +1981,7 @@ mod tests {
                         },
                         "install":{"argv":["sh","-c","printf installed > install-ran"]}
                     }
-                }"#,
+                }}"#,
             )
             .expect("provider manifest");
             let outcomes = hydrate_declared_dependencies(
@@ -2023,8 +2023,8 @@ mod tests {
             )
             .expect("fixture permissions");
             std::fs::write(
-                root.path().join("homeboy-deps.json"),
-                r#"{
+                root.path().join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{
                     "provider":"fixture-provider",
                     "commands":{
                         "reusable":{
@@ -2035,7 +2035,7 @@ mod tests {
                         "install":{"argv":["./install-fixture","--mode","declared"]}
                     },
                     "outputs":[{"path":"prepared.state","kind":"file"}]
-                }"#,
+                }}"#,
             )
             .expect("provider manifest");
             let progress = Arc::new(Mutex::new(Vec::new()));
@@ -2082,8 +2082,8 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
             std::fs::write(
-                root.path().join("homeboy-deps.json"),
-                r#"{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","sleep 5"]}}}"#,
+                root.path().join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","sleep 5"]}}}}"#,
             )
             .expect("provider manifest");
             let started = Instant::now();
@@ -2196,12 +2196,12 @@ mod tests {
             let root = tempfile::tempdir().expect("workspace");
             std::fs::create_dir_all(root.path().join("stage")).unwrap();
             std::fs::write(root.path().join("ready"), "wrong root").unwrap();
-            let manifest = root.path().join("homeboy-deps.json");
-            std::fs::write(&manifest, r#"{
+            let manifest = root.path().join("homeboy.json");
+            std::fs::write(&manifest, r#"{"id":"fixture-deps","deps":{
                 "provider":"fixture",
                 "commands":{"install":{"argv":["sh","-c","printf installed > ready"],"cwd":"stage"}},
                 "outputs":[{"path":"ready","kind":"file"}]
-            }"#).unwrap();
+            }}"#).unwrap();
             let policy = hydration_policy(
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(Mutex::new(Vec::new())),
@@ -2217,11 +2217,11 @@ mod tests {
             std::fs::remove_file(root.path().join("stage/ready")).unwrap();
             std::fs::write(
                 &manifest,
-                r#"{
+                r#"{"id":"fixture-deps","deps":{
                 "provider":"fixture",
                 "commands":{"install":{"argv":["sh","-c","true"],"cwd":"stage"}},
                 "outputs":[{"path":"ready","kind":"file"}]
-            }"#,
+            }}"#,
             )
             .unwrap();
             let outcomes =
@@ -2240,12 +2240,12 @@ mod tests {
             std::fs::create_dir(root.path().join("stage/empty")).unwrap();
             std::fs::write(
                 &manifest,
-                r#"{
+                r#"{"id":"fixture-deps","deps":{
                 "provider":"fixture",
                 "commands":{"reusable":{"argv":["sh","-c","true"]},
                     "install":{"argv":["sh","-c","true"],"cwd":"stage"}},
                 "outputs":[{"path":"empty","kind":"directory"}]
-            }"#,
+            }}"#,
             )
             .unwrap();
             let outcomes =
@@ -2266,8 +2266,8 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
             std::fs::write(
-                root.path().join("homeboy-deps.json"),
-                r#"{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","printf 'install output'; printf 'install failure' >&2; exit 23"]}}}"#,
+                root.path().join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","printf 'install output'; printf 'install failure' >&2; exit 23"]}}}}"#,
             )
             .expect("provider manifest");
 
@@ -2295,8 +2295,8 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
             std::fs::write(
-                root.path().join("homeboy-deps.json"),
-                r#"{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","sleep 5"]}}}"#,
+                root.path().join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","sleep 5"]}}}}"#,
             )
             .expect("provider manifest");
             let started = Instant::now();
@@ -2415,8 +2415,8 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
             std::fs::write(
-                root.path().join("homeboy-deps.json"),
-                r#"{
+                root.path().join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{
                     "provider":"fixture-provider",
                     "commands":{
                         "reusable":{
@@ -2427,7 +2427,7 @@ mod tests {
                         "install":{"argv":["sh","-c","sleep 0.08; printf ready > prepared.state"]}
                     },
                     "outputs":[{"path":"prepared.state","kind":"file"}]
-                }"#,
+                }}"#,
             )
             .expect("provider manifest");
             let started = Instant::now();
@@ -2463,14 +2463,14 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
             std::fs::write(
-                root.path().join("homeboy-deps.json"),
-                r#"{
+                root.path().join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{
                     "provider":"fixture-provider",
                     "commands":{
                         "install":{"argv":["/bin/sh","-c","printf '%s|%s|%s' \"$GATE_MARKER\" \"${GATE_REMOVED-unset}\" \"$CI\" > prepared.state"]}
                     },
                     "outputs":[{"path":"prepared.state","kind":"file"}]
-                }"#,
+                }}"#,
             )
             .expect("provider manifest");
             let mut environment = DependencyHydrationEnvironment::default();
@@ -2517,12 +2517,12 @@ mod tests {
             )
             .expect("fixture permissions");
             std::fs::write(
-                root.path().join("homeboy-deps.json"),
-                r#"{
+                root.path().join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{
                     "provider":"fixture-provider",
                     "commands":{"install":{"argv":["./install-fixture","--token","fixture-secret-value"]}},
                     "outputs":[{"path":"prepared.state","kind":"file"}]
-                }"#,
+                }}"#,
             )
             .expect("provider manifest");
             let outcomes = hydrate_declared_dependencies(

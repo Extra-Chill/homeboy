@@ -225,7 +225,7 @@ pub(crate) fn resolve_dependency_providers(
             format!("No dependency provider found for {}", path.display()),
             None,
             Some(vec![
-                "Declare a dependency provider with homeboy-deps.json, an installed dependency adapter, a component deps script, or an extension deps provider".to_string(),
+                "Declare a dependency provider with a top-level \"deps\" manifest in homeboy.json, an installed dependency adapter, a component deps script, or an extension deps provider".to_string(),
                 "Core no longer detects built-in dependency providers; package ecosystems must be declared outside core".to_string(),
             ]),
         ));
@@ -256,6 +256,23 @@ pub(crate) fn resolve_dependency_providers_optional_with_control(
 ) -> Result<Vec<DependencyProvider>> {
     if control.is_cancelled() {
         return Ok(Vec::new());
+    }
+    // The repo-level config contract is one file. The retired side file is a
+    // hard error instead of silently ignored config, so a checkout that still
+    // ships one learns where its manifest now lives.
+    if path.join(LEGACY_DEPENDENCY_MANIFEST).is_file() {
+        return Err(Error::validation_invalid_argument(
+            "dependency_provider",
+            format!(
+                "{} is no longer read; declare the dependency manifest under \"deps\" in {}",
+                LEGACY_DEPENDENCY_MANIFEST, COMPONENT_CONFIG_FILE
+            ),
+            Some(path.join(LEGACY_DEPENDENCY_MANIFEST).display().to_string()),
+            Some(vec![format!(
+                "Move the manifest object into a top-level \"deps\" key in {} and delete {}",
+                COMPONENT_CONFIG_FILE, LEGACY_DEPENDENCY_MANIFEST
+            )]),
+        ));
     }
     let mut providers = Vec::new();
 
@@ -352,11 +369,18 @@ pub(crate) struct AdapterDependencyProvider {
 
 impl AdapterDependencyProvider {
     fn load_local(path: &Path) -> Result<Vec<Self>> {
-        let manifest_path = path.join(DEPENDENCY_ADAPTER_MANIFEST);
-        if !manifest_path.is_file() || !is_dependency_adapter_manifest(&manifest_path)? {
+        let Some(declaration) = read_component_deps_declaration(path)? else {
+            return Ok(Vec::new());
+        };
+        if declaration
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            != Some(DEPENDENCY_ADAPTER_MANIFEST_SCHEMA)
+        {
             return Ok(Vec::new());
         }
-        let adapter = read_installed_dependency_adapter(&manifest_path)?;
+        let adapter =
+            parse_installed_dependency_adapter(declaration, &path.join(COMPONENT_CONFIG_FILE))?;
         Ok((if adapter.matches(path) {
             adapter.providers(path)
         } else {
@@ -584,14 +608,23 @@ impl AdapterDependencyProvider {
     }
 }
 
-fn is_dependency_adapter_manifest(path: &Path) -> Result<bool> {
-    let raw = fs::read_to_string(path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some(path.display().to_string())))?;
+/// Read the `deps` object a component declares in its repo-level
+/// `homeboy.json`. `homeboy.json` is the only place a component declares how
+/// its dependencies install, update, and report status.
+fn read_component_deps_declaration(path: &Path) -> Result<Option<serde_json::Value>> {
+    let config_path = path.join(COMPONENT_CONFIG_FILE);
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&config_path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(config_path.display().to_string())))?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-        Error::validation_invalid_json(e, Some(path.display().to_string()), Some(raw))
+        Error::validation_invalid_json(e, Some(config_path.display().to_string()), Some(raw))
     })?;
-    Ok(value.get("schema").and_then(serde_json::Value::as_str)
-        == Some(DEPENDENCY_ADAPTER_MANIFEST_SCHEMA))
+    Ok(value
+        .get(COMPONENT_DEPS_KEY)
+        .filter(|deps| !deps.is_null())
+        .cloned())
 }
 
 #[derive(Debug, Deserialize)]
@@ -757,9 +790,18 @@ impl InstalledDependencyAdapter {
 fn read_installed_dependency_adapter(path: &Path) -> Result<InstalledDependencyAdapter> {
     let raw = fs::read_to_string(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(path.display().to_string())))?;
-    let adapter: InstalledDependencyAdapter = serde_json::from_str(&raw).map_err(|e| {
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
         Error::validation_invalid_json(e, Some(path.display().to_string()), Some(raw))
     })?;
+    parse_installed_dependency_adapter(value, path)
+}
+
+fn parse_installed_dependency_adapter(
+    value: serde_json::Value,
+    source: &Path,
+) -> Result<InstalledDependencyAdapter> {
+    let adapter: InstalledDependencyAdapter = serde_json::from_value(value)
+        .map_err(|e| Error::validation_invalid_json(e, Some(source.display().to_string()), None))?;
     if adapter.schema != DEPENDENCY_ADAPTER_MANIFEST_SCHEMA
         || adapter.id.trim().is_empty()
         || adapter.ecosystem.trim().is_empty()
@@ -1003,7 +1045,13 @@ fn read_adapter_json(path: &Path) -> Result<serde_json::Value> {
         .map_err(|e| Error::validation_invalid_json(e, Some(path.display().to_string()), Some(raw)))
 }
 
-const DEPENDENCY_ADAPTER_MANIFEST: &str = "homeboy-deps.json";
+/// The repo-level config file that carries the component's `deps` manifest.
+const COMPONENT_CONFIG_FILE: &str = "homeboy.json";
+/// The `homeboy.json` key the dependency manifest lives under.
+const COMPONENT_DEPS_KEY: &str = "deps";
+/// The retired side file. The only remaining reference: its presence is an
+/// error pointing at `homeboy.json`.
+const LEGACY_DEPENDENCY_MANIFEST: &str = "homeboy-deps.json";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ManifestDependencyProvider {
@@ -1012,12 +1060,17 @@ pub(crate) struct ManifestDependencyProvider {
 
 impl ManifestDependencyProvider {
     fn load(path: &Path) -> Result<Option<Self>> {
-        let manifest_path = path.join(DEPENDENCY_ADAPTER_MANIFEST);
-        if !manifest_path.is_file() {
+        let Some(declaration) = read_component_deps_declaration(path)? else {
+            return Ok(None);
+        };
+        // Declarations carrying the adapter manifest schema resolve through
+        // `AdapterDependencyProvider::load_local` instead.
+        if declaration.get("schema").is_some() {
             return Ok(None);
         }
 
-        let manifest = read_dependency_adapter_manifest(&manifest_path)?;
+        let manifest =
+            parse_dependency_adapter_manifest(declaration, &path.join(COMPONENT_CONFIG_FILE))?;
         Ok(Some(Self { manifest }))
     }
 
@@ -1247,16 +1300,16 @@ impl DependencyAdapterCommand {
     }
 }
 
-fn read_dependency_adapter_manifest(path: &Path) -> Result<DependencyAdapterManifest> {
-    let raw = fs::read_to_string(path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some(path.display().to_string())))?;
-    let manifest: DependencyAdapterManifest = serde_json::from_str(&raw).map_err(|e| {
-        Error::validation_invalid_json(e, Some(path.display().to_string()), Some(raw))
-    })?;
+fn parse_dependency_adapter_manifest(
+    value: serde_json::Value,
+    source: &Path,
+) -> Result<DependencyAdapterManifest> {
+    let manifest: DependencyAdapterManifest = serde_json::from_value(value)
+        .map_err(|e| Error::validation_invalid_json(e, Some(source.display().to_string()), None))?;
     if manifest.provider.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
-            "provider",
-            "Dependency adapter manifest provider must not be empty".to_string(),
+            "deps.provider",
+            "Dependency manifest provider must not be empty".to_string(),
             None,
             None,
         ));
@@ -2036,8 +2089,8 @@ esac
             ));
 
             fs::write(
-                project.join(DEPENDENCY_ADAPTER_MANIFEST),
-                r#"{
+                project.join(COMPONENT_CONFIG_FILE),
+                r#"{"id": "fixture", "deps": {
                     "schema": "homeboy-extension/dependency-adapter-manifest/v1",
                     "id": "fixture",
                     "version": 1,
@@ -2051,7 +2104,7 @@ esac
                         "commands": {},
                         "outputs": [{ "kind": "directory", "path": "deps" }]
                     }]
-                }"#,
+                }}"#,
             )
             .unwrap();
             let providers = resolve_dependency_providers_optional(&component, &project).unwrap();
@@ -2059,7 +2112,7 @@ esac
                 providers.as_slice(),
                 [DependencyProvider::Adapter(_)]
             ));
-            fs::remove_file(project.join(DEPENDENCY_ADAPTER_MANIFEST)).unwrap();
+            fs::remove_file(project.join(COMPONENT_CONFIG_FILE)).unwrap();
 
             let adapter_dir = paths::extensions()
                 .unwrap()
@@ -2100,11 +2153,11 @@ esac
             ));
 
             fs::write(
-                project.join(DEPENDENCY_ADAPTER_MANIFEST),
-                r#"{
+                project.join(COMPONENT_CONFIG_FILE),
+                r#"{"id": "fixture", "deps": {
                     "provider": "legacy-fixture",
                     "commands": { "install": { "argv": ["true"] } }
-                }"#,
+                }}"#,
             )
             .unwrap();
             let providers = resolve_dependency_providers_optional(&component, &project).unwrap();
@@ -2112,6 +2165,32 @@ esac
                 providers.as_slice(),
                 [DependencyProvider::Manifest(_)]
             ));
+        });
+    }
+
+    #[test]
+    fn retired_side_file_is_a_hard_error_pointing_at_homeboy_json() {
+        crate::test_support::with_isolated_home(|_| {
+            let dir = tempdir().unwrap();
+            fs::write(
+                dir.path().join(LEGACY_DEPENDENCY_MANIFEST),
+                r#"{"provider":"fixture","commands":{"install":{"argv":["true"]}}}"#,
+            )
+            .unwrap();
+            let component = Component::new(
+                "fixture".to_string(),
+                dir.path().display().to_string(),
+                String::new(),
+                None,
+            );
+
+            let error = match resolve_dependency_providers_optional(&component, dir.path()) {
+                Ok(_) => panic!("the retired side file must not be silently ignored"),
+                Err(error) => error,
+            };
+            let message = error.to_string();
+            assert!(message.contains("no longer read"), "{message}");
+            assert!(message.contains("homeboy.json"), "{message}");
         });
     }
 

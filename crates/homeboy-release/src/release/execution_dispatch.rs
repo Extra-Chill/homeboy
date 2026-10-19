@@ -1650,8 +1650,8 @@ mod tests {
     fn dependency_preflight_hydrates_before_lint_self_check() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
-            temp.path().join("homeboy-deps.json"),
-            r#"{
+            temp.path().join("homeboy.json"),
+            r#"{"id":"fixture-deps","deps":{
                 "provider": "fixture",
                 "commands": {
                     "install": {
@@ -1662,7 +1662,7 @@ mod tests {
                         ]
                     }
                 }
-            }"#,
+            }}"#,
         )
         .expect("write deps manifest");
 
@@ -1794,19 +1794,16 @@ mod tests {
         configure_git_user(repo.path());
         std::fs::write(repo.path().join(".gitignore"), "composer.lock\n").expect("gitignore");
         std::fs::write(
-            repo.path().join("homeboy-deps.json"),
-            r#"{
+            repo.path().join("homeboy.json"),
+            r#"{"id":"fixture-deps","deps":{
                 "provider": "fixture",
                 "commands": {
                     "install": { "argv": ["sh", "-c", "test ! -e composer.lock"] }
                 }
-            }"#,
+            }}"#,
         )
         .expect("write deps manifest");
-        run_in(
-            repo.path(),
-            &["git", "add", ".gitignore", "homeboy-deps.json"],
-        );
+        run_in(repo.path(), &["git", "add", ".gitignore", "homeboy.json"]);
         run_in(repo.path(), &["git", "commit", "-qm", "Initial commit"]);
         std::fs::write(repo.path().join("composer.lock"), "stale generated lock\n")
             .expect("stale lock");
