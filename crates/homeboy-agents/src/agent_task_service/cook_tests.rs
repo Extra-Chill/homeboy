@@ -3201,6 +3201,60 @@ fn pre_artifact_interruption_classifies_provider_ledger_without_phantom_executio
     });
 }
 
+/// A runner-placed attempt keeps its provider ledger on the runner. When its
+/// job succeeded but no aggregate could be projected from the result, the
+/// provider already ran: the Cook stops with the result retained instead of
+/// classifying the attempt as never started and running the provider again.
+#[test]
+fn a_succeeded_runner_result_without_an_aggregate_does_not_rerun_the_provider() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut options = batch_cook_options(
+            "cook-runner-result-not-projected",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.retry_policy.max_attempts = 2;
+        let run_id = options.identity.initial_run_id.clone();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
+        agent_task_lifecycle::cancel_run(&run_id, Some("runner result projected")).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.state = AgentTaskRunState::Succeeded;
+            if let Some(metadata) = record.metadata.as_object_mut() {
+                metadata.retain(|key, _| !key.starts_with("cancel"));
+            }
+            record.metadata["runner_job_status"] = serde_json::json!("succeeded");
+            record.metadata["runner_job_events"] = serde_json::json!([
+                {"kind": "progress", "data": {"phase": "running"}},
+                {"kind": "result", "data": {"exit_code": 0, "stdout": "{unparseable"}},
+            ]);
+        })
+        .unwrap();
+        let record = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
+        assert!(record.aggregate_path.is_none());
+        assert_eq!(
+            pre_artifact_interruption_phase(&record),
+            PreArtifactInterruptionPhase::RunnerResultNotProjected
+        );
+
+        let result = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("Cook reports the unprojected runner result");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status, "pre_artifact_interruption");
+        assert_eq!(
+            result.value.terminal_phase.as_deref(),
+            Some("runner_result_not_projected")
+        );
+        assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id.as_str()));
+        let recipe = super::super::load_recipe(&options.identity.cook_id).unwrap();
+        assert_eq!(
+            recipe.attempts.len(),
+            1,
+            "no successor attempt was appended"
+        );
+    });
+}
+
 #[test]
 fn pre_artifact_interruption_does_not_bypass_an_authoritative_aggregate_path() {
     homeboy_core::test_support::with_isolated_home(|_| {

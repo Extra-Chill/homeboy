@@ -332,6 +332,11 @@ enum PreArtifactInterruptionPhase {
     BeforeProviderStart,
     DuringProviderExecution,
     AfterProviderReturn,
+    /// The runner reported the attempt's remote command succeeded, so the
+    /// provider ran and published its aggregate, but none could be projected
+    /// from the runner result. A new attempt would repeat the paid provider
+    /// work and discard the candidate the runner result still holds.
+    RunnerResultNotProjected,
 }
 
 impl PreArtifactInterruptionPhase {
@@ -340,16 +345,22 @@ impl PreArtifactInterruptionPhase {
             Self::BeforeProviderStart => "before_provider_start",
             Self::DuringProviderExecution => "during_provider_execution",
             Self::AfterProviderReturn => "after_provider_return_before_aggregate_persistence",
+            Self::RunnerResultNotProjected => "runner_result_not_projected",
         }
     }
 }
 
 /// Classify a terminal attempt without an aggregate from the durable provider
 /// ledger. A reservation is proof that a provider started; absent reservations
-/// consume nothing. This deliberately does not manufacture aggregate events.
+/// consume nothing. A runner-placed attempt keeps its provider ledger on the
+/// runner, so its succeeded terminal result is the proof there instead. This
+/// deliberately does not manufacture aggregate events.
 fn pre_artifact_interruption_phase(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> PreArtifactInterruptionPhase {
+    if runner_reported_success(record) {
+        return PreArtifactInterruptionPhase::RunnerResultNotProjected;
+    }
     let executions = record.metadata["provider_executions"]
         .as_array()
         .map(Vec::as_slice)
@@ -364,6 +375,19 @@ fn pre_artifact_interruption_phase(
     } else {
         PreArtifactInterruptionPhase::AfterProviderReturn
     }
+}
+
+/// Whether the runner job finished successfully and returned its remote
+/// command's terminal result with a zero exit code.
+fn runner_reported_success(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    record.metadata["runner_job_status"] == "succeeded"
+        && record.metadata["runner_job_events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["kind"] == "result" && event["data"]["exit_code"] == 0)
+            })
 }
 
 pub(crate) fn intentional_no_change_from_aggregate(
@@ -7210,6 +7234,26 @@ fn run_cook_spine(
                     }));
                 }
                 let phase = pre_artifact_interruption_phase(&record);
+                if phase == PreArtifactInterruptionPhase::RunnerResultNotProjected {
+                    attempts.push(AgentTaskCookAttemptReport {
+                        attempt,
+                        run_id: run_id.clone(),
+                        run_state: format!("{:?}", record.state),
+                        aggregate_path: None,
+                        promotion: None,
+                        feedback: None,
+                    });
+                    return Ok(pre_artifact_interruption_report(
+                        cook_id,
+                        attempts,
+                        &run_id,
+                        phase,
+                        format!(
+                            "attempt {attempt}'s runner job succeeded, but no agent-task aggregate could be projected from its result; the provider's work is retained in the runner result, so the Cook stopped instead of running the provider again. Inspect it with `homeboy runs show {run_id}`"
+                        ),
+                        1,
+                    ));
+                }
                 // Aggregates normally provide this accounting. A missing
                 // aggregate must still carry only ledger-proven executions
                 // into later remediation budget decisions.
