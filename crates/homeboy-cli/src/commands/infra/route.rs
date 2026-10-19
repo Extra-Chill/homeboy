@@ -2164,12 +2164,6 @@ fn run_terminal_cook_continuation(
             };
         }
     };
-    // A continuation that reaches its own Cook terminal announces the failure
-    // through that one-time event. Remember whether it was already spent so
-    // only an otherwise silent stop gets a second, continuation-level alert
-    // (#15984).
-    let terminal_announced_before =
-        crate::agents::agent_task_notify::cook_terminal_announced(&request.cook_id);
     let outcome = crate::agents::agent_task_service::consume_claimed_terminal_with_dispatcher(
         claim,
         reconstruct_cook_attempt_dispatcher,
@@ -2209,11 +2203,7 @@ fn run_terminal_cook_continuation(
         &request.run_id,
     )?;
     terminal_continuation_failure_step(state, failure, || {
-        let announced_by_this_run = !terminal_announced_before
-            && crate::agents::agent_task_notify::cook_terminal_announced(&request.cook_id);
-        if !announced_by_this_run {
-            announce_failed_terminal_continuation(&store, request);
-        }
+        announce_failed_terminal_continuation(&store, request);
     })
 }
 
