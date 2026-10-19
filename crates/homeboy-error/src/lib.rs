@@ -166,6 +166,23 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// The command could not resolve the target it was asked to act on: the
+    /// named component, project, rig, or extension does not exist in the
+    /// invoking environment, or provides no support for the operation. Such a
+    /// failure happens before any of the target's code is examined, so it says
+    /// nothing about that code.
+    pub fn is_unresolved_target(&self) -> bool {
+        matches!(
+            self,
+            ErrorCode::ProjectNotFound
+                | ErrorCode::ComponentNotFound
+                | ErrorCode::ComponentNotAttached
+                | ErrorCode::ExtensionNotFound
+                | ErrorCode::ExtensionUnsupported
+                | ErrorCode::RigNotFound
+        )
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             ErrorCode::ConfigMissingKey => "config.missing_key",
