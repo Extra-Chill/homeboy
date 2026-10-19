@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.429.6] - 2026-10-19
+
+### Changed
+- Stop instead of re-running the provider when a succeeded runner result has no aggregate
+
 ## [0.429.5] - 2026-10-19
 
 ### Changed
