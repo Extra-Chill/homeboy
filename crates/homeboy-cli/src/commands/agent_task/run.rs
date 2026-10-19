@@ -11777,7 +11777,7 @@ mod tests {
             "reserved_bytes": 20 * GIB,
             "shortfall_bytes": 10 * GIB,
         });
-        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), Some(&identity));
+        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), Some(&identity), || None);
         assert!(
             resolved["placement"].get("admission").is_none(),
             "a checkout-sized allocation must not be blocked by the flat reserve: {resolved}"
@@ -11810,7 +11810,7 @@ mod tests {
             "reserved_bytes": 20_u64 * 1024 * 1024 * 1024,
             "shortfall_bytes": 20_u64 * 1024 * 1024 * 1024 - 1024,
         });
-        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), Some(&identity));
+        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), Some(&identity), || None);
         let admission = &resolved["placement"]["admission"];
         assert_eq!(admission["state"], "blocked", "{resolved}");
         let blocker = admission["remaining_blocker"]
