@@ -698,6 +698,11 @@ fn cook_continuation_failed_with(
     else {
         return;
     };
+    // The Cook-level terminal outcome is the authoritative needs-attention
+    // alert. Only add a continuation alert when that outcome is still silent.
+    if cook_terminal_announced(cook_id) {
+        return;
+    }
     let claimed = lifecycle_store
         .claim_cook_continuation_failed_notification(cook_id, run_id)
         .unwrap_or(false);

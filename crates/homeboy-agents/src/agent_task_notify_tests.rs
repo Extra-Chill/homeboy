@@ -881,6 +881,48 @@ fn failed_terminal_continuation_is_announced_once_without_consuming_cook_termina
 }
 
 #[test]
+fn terminal_outcome_suppresses_continuation_alerts_across_attempts() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let marker = install_counting_transport(home.path());
+        let store = test_lifecycle_store();
+        let cook_id = "cook-abc";
+
+        cook_terminal_with(&report("durable_failure", None), None, 1, |_| None);
+        assert_eq!(latest_delivery(cook_id)["status"], "delivered");
+        cook_continuation_failed(cook_id, "cook-abc-attempt-3", "failed");
+        cook_continuation_failed(cook_id, "cook-abc-attempt-1", "failed");
+        assert_eq!(deliveries(&marker), 1);
+        for run_id in ["cook-abc-attempt-3", "cook-abc-attempt-1"] {
+            assert!(store
+                .claim_cook_continuation_failed_notification(cook_id, run_id)
+                .unwrap());
+        }
+    });
+}
+
+#[test]
+fn suppressed_terminal_outcome_suppresses_continuation_alerts() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let marker = install_counting_transport(home.path());
+        let store = test_lifecycle_store();
+        let cook_id = "cook-abc";
+
+        cook_terminal_with(&report("durable_failure", None), None, 1, |_| {
+            Some("https://github.com/o/r/issues/628".to_string())
+        });
+        assert_eq!(latest_delivery(cook_id)["status"], "suppressed");
+        cook_continuation_failed(cook_id, "cook-abc-attempt-3", "failed");
+        cook_continuation_failed(cook_id, "cook-abc-attempt-1", "failed");
+        assert_eq!(deliveries(&marker), 0);
+        for run_id in ["cook-abc-attempt-3", "cook-abc-attempt-1"] {
+            assert!(store
+                .claim_cook_continuation_failed_notification(cook_id, run_id)
+                .unwrap());
+        }
+    });
+}
+
+#[test]
 fn undelivered_continuation_failure_stays_eligible() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let store = test_lifecycle_store();
