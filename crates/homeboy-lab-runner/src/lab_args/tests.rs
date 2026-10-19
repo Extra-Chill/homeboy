@@ -34,6 +34,54 @@ mod lab_source_path_tests {
         );
     }
 
+    /// Regression for #16166: `--placement lab … --path .` recorded the
+    /// relative path verbatim into durable staging state, so the staging
+    /// daemon later ran its Git evidence reads in its own working directory
+    /// (`git config --get remote.origin.url failed: ` with empty stderr)
+    /// instead of the checkout the operator invoked from.
+    #[test]
+    fn lab_source_path_resolves_relative_path_flag_against_invocation_cwd() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let expected = homeboy_core::paths::normalize_local_path(&cwd);
+
+        for args in [
+            vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "--path".to_string(),
+                ".".to_string(),
+                "--changed-since".to_string(),
+                "origin/main".to_string(),
+            ],
+            vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "--path=.".to_string(),
+            ],
+            vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "dispatch".to_string(),
+                "--cwd".to_string(),
+                "./nested".to_string(),
+            ],
+        ] {
+            let resolved = lab_offload_source_path(&args).expect("source path");
+            assert!(
+                resolved.is_absolute(),
+                "resolved source path must be absolute, got {}",
+                resolved.display()
+            );
+            assert!(
+                resolved.starts_with(&expected),
+                "resolved source path must bind to the invocation cwd, got {}",
+                resolved.display()
+            );
+        }
+    }
+
     #[test]
     fn lab_source_path_uses_agent_task_loop_to_worktree() {
         homeboy_core::test_support::with_isolated_home(|home| {

@@ -534,6 +534,32 @@ pub fn normalize_local_path(path: impl AsRef<Path>) -> PathBuf {
     }
 }
 
+/// Resolve a possibly-relative local path against the current working
+/// directory, then normalize it lexically.
+///
+/// Durable Lab staging persists the resolved controller source path and later
+/// replays it inside a controller daemon whose working directory is unrelated
+/// to the operator's checkout. A relative `--path .` recorded verbatim makes
+/// that replay run its Git evidence commands in the daemon's directory instead
+/// of the checkout the operator named (#16166). Resolve relative paths while
+/// the invoking process still owns the right working directory.
+pub fn absolute_local_path(path: impl AsRef<Path>) -> Result<PathBuf> {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        return Ok(normalize_local_path(path));
+    }
+    let cwd = env::current_dir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "resolve relative local path `{}` against the current directory",
+                path.display()
+            )),
+        )
+    })?;
+    Ok(normalize_local_path(cwd.join(path)))
+}
+
 /// Resolve an existing local path to its filesystem identity, falling back to
 /// lexical normalization when the path does not exist yet.
 ///
@@ -1727,6 +1753,36 @@ mod config_root_tests {
         assert_eq!(
             absolute,
             PathBuf::from("/tmp/hb-daemon-root/daemon/state.json")
+        );
+    }
+}
+
+#[cfg(test)]
+mod absolute_local_path_tests {
+    use super::*;
+
+    /// Regression for #16166: Lab offload recorded `--path .` verbatim into
+    /// durable staging state, and the staging daemon later resolved it against
+    /// its own working directory instead of the operator's checkout.
+    #[test]
+    fn relative_paths_bind_to_the_current_working_directory() {
+        let cwd = env::current_dir().expect("cwd");
+
+        assert_eq!(
+            absolute_local_path(".").expect("dot resolves"),
+            normalize_local_path(&cwd)
+        );
+        assert_eq!(
+            absolute_local_path("sub/dir").expect("relative resolves"),
+            normalize_local_path(cwd.join("sub/dir"))
+        );
+    }
+
+    #[test]
+    fn absolute_paths_are_normalized_without_touching_cwd() {
+        assert_eq!(
+            absolute_local_path("/repo/./packages/../src").expect("absolute resolves"),
+            PathBuf::from("/repo/src")
         );
     }
 }

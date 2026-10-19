@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use homeboy_core::{Error, Result};
+use homeboy_core::{Error, ErrorCode, Result};
 
 use super::super::lab_offload_changed_since_ref;
 use super::super::source_materialization::{
@@ -61,15 +61,67 @@ pub(super) fn lab_workspace_sync_mode_with_source_policy(
         return Ok(RunnerWorkspaceSyncMode::Git);
     }
 
-    let remote_url = super::super::workspace::git_output(
-        source_path,
-        &["config", "--get", "remote.origin.url"],
-    )?;
+    let remote_url = source_checkout_remote_origin_url(source_path)?;
     if requires_controller_routed_workspace_sync_with_policy(&remote_url, source_policy) {
         return Ok(RunnerWorkspaceSyncMode::Snapshot);
     }
 
     Ok(requested)
+}
+
+/// Read `remote.origin.url` from the source checkout with full evidence.
+///
+/// `git config --get` exits 1 with empty stderr both when the key is unset and
+/// when the directory is not a repository, so the bare command failure used to
+/// surface as `git config --get remote.origin.url failed: ` — an
+/// `internal.unexpected` with no directory and no stderr, misclassified as
+/// invalid input (#16166). Name the directory that was checked and classify
+/// each failure shape:
+/// - not a Git work tree: staging ran its evidence read in the wrong directory
+///   (or the recorded source path is gone) — a controller staging failure, not
+///   caller input;
+/// - a work tree without `remote.origin.url`: actionable caller input with a
+///   fix hint.
+fn source_checkout_remote_origin_url(source_path: &Path) -> Result<String> {
+    if let Ok(remote_url) =
+        super::super::workspace::git_output(source_path, &["config", "--get", "remote.origin.url"])
+    {
+        return Ok(remote_url);
+    }
+
+    let path = source_path.display().to_string();
+    let inside_work_tree =
+        super::super::workspace::git_output(source_path, &["rev-parse", "--is-inside-work-tree"])
+            .map(|value| value == "true")
+            .unwrap_or(false);
+    if !inside_work_tree {
+        // `internal_io` classifies as controller infrastructure (a staging
+        // failure), not caller input. Build it directly so the message itself
+        // names the directory instead of a generic "IO error".
+        return Err(Error::new(
+            ErrorCode::InternalIoError,
+            format!(
+                "Lab staging could not read Git evidence: `{path}` is not a Git work tree. The staged source path no longer names the operator's checkout."
+            ),
+            serde_json::json!({
+                "source_path": path,
+                "context": "read remote.origin.url for Lab workspace sync-mode selection",
+            }),
+        ));
+    }
+
+    Err(Error::validation_invalid_argument(
+        "remote.origin.url",
+        format!(
+            "git-backed Lab offload requires remote.origin.url on the source checkout `{path}`"
+        ),
+        Some(path.clone()),
+        Some(vec![
+            format!("Set remote.origin.url on `{path}` before retrying Lab offload."),
+            "Use a Homeboy worktree or another checkout cloned from the canonical remote."
+                .to_string(),
+        ]),
+    ))
 }
 
 pub(super) fn preflight_required_git_checkout_workspace(

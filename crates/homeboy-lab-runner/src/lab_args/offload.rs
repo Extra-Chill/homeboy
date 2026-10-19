@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use homeboy_core::{git, worktree};
+use homeboy_core::{git, paths, worktree};
 use homeboy_core::{Error, Result};
 
 use super::path_remap::{remap_local_path, LabPathRemap};
@@ -11,7 +11,7 @@ use super::EXPLICIT_PASSTHROUGH_SENTINEL;
 
 pub(crate) fn lab_offload_source_path(args: &[String]) -> Result<PathBuf> {
     if let Some(source) = extension_refresh_local_source_path(args) {
-        return Ok(source);
+        return paths::absolute_local_path(source);
     }
 
     let mut iter = args.iter().skip(1).peekable();
@@ -29,7 +29,7 @@ pub(crate) fn lab_offload_source_path(args: &[String]) -> Result<PathBuf> {
                     None,
                 )
             })?;
-            return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
+            return absolute_source_path(value);
         }
         if arg == "--workspace" {
             let value = iter.next().ok_or_else(|| {
@@ -54,10 +54,10 @@ pub(crate) fn lab_offload_source_path(args: &[String]) -> Result<PathBuf> {
             return resolve_to_worktree_source_path(value);
         }
         if let Some(value) = arg.strip_prefix("--path=") {
-            return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
+            return absolute_source_path(value);
         }
         if let Some(value) = arg.strip_prefix("--cwd=") {
-            return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
+            return absolute_source_path(value);
         }
         if let Some(value) = arg.strip_prefix("--workspace=") {
             return resolve_workspace_source_path(value);
@@ -81,9 +81,19 @@ fn resolve_to_worktree_source_path(value: &str) -> Result<PathBuf> {
 fn resolve_workspace_source_path(value: &str) -> Result<PathBuf> {
     let path = PathBuf::from(shellexpand::tilde(value).to_string());
     if path.exists() {
-        return Ok(path);
+        return paths::absolute_local_path(&path);
     }
     resolve_to_worktree_source_path(value)
+}
+
+/// Resolve a `--path`/`--cwd` value to an absolute controller source path.
+///
+/// The resolved path is persisted into the durable staging recipe and replayed
+/// by a controller daemon whose working directory is unrelated to the
+/// operator's checkout, so a relative value such as `--path .` must bind to
+/// the invoking process's working directory here (#16166).
+fn absolute_source_path(value: &str) -> Result<PathBuf> {
+    paths::absolute_local_path(PathBuf::from(shellexpand::tilde(value).to_string()))
 }
 
 fn extension_refresh_local_source_path(args: &[String]) -> Option<PathBuf> {

@@ -745,13 +745,16 @@ fn authoritative_lab_source_path(args: &[String]) -> homeboy::core::Result<PathB
                     None,
                 )
             })?;
-            return Ok(PathBuf::from(value));
+            // The resolved path outlives this process: durable staging replays
+            // it from a controller daemon whose cwd is unrelated to the
+            // operator's checkout, so `--path .` must bind here (#16166).
+            return homeboy::core::paths::absolute_local_path(PathBuf::from(value));
         }
         if let Some(value) = argument
             .strip_prefix("--path=")
             .or_else(|| argument.strip_prefix("--cwd="))
         {
-            return Ok(PathBuf::from(value));
+            return homeboy::core::paths::absolute_local_path(PathBuf::from(value));
         }
     }
     std::env::current_dir().map_err(|error| {
@@ -3901,13 +3904,19 @@ fn source_path_for_generic_detached_lab_handoff(args: &[String]) -> homeboy::cor
                     None,
                 )
             })?;
-            return Ok(PathBuf::from(shellexpand::tilde(path).to_string()));
+            // Bind relative values (`--path .`) to this process's cwd before
+            // the path is persisted into durable staging state (#16166).
+            return homeboy::core::paths::absolute_local_path(PathBuf::from(
+                shellexpand::tilde(path).to_string(),
+            ));
         }
         if let Some(path) = arg
             .strip_prefix("--path=")
             .or_else(|| arg.strip_prefix("--cwd="))
         {
-            return Ok(PathBuf::from(shellexpand::tilde(path).to_string()));
+            return homeboy::core::paths::absolute_local_path(PathBuf::from(
+                shellexpand::tilde(path).to_string(),
+            ));
         }
     }
     std::env::current_dir().map_err(|error| {
