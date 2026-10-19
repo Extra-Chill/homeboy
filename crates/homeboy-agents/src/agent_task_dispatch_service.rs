@@ -1358,6 +1358,10 @@ mod tests {
 
     #[test]
     fn generic_preflight_admits_a_ready_fallback_when_primary_credentials_are_missing() {
+        // Preflight materializes provider refs under the home. The ambient home
+        // is whichever one a parallel test isolated last, and it vanishes when
+        // that test exits (#14832).
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
         let primary = serde_json::from_value(serde_json::json!({
             "id": "test.primary",

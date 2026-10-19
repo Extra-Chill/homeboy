@@ -471,6 +471,11 @@ pub(crate) const SQLITE_WRITE_BASE_BACKOFF_MS: u64 = 25;
 pub(crate) const SQLITE_CONTROL_PLANE_WRITE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
 
+/// Bounded wait for read-only inspection connections. Inspection must give up
+/// well before a writer would, so status stays responsive under contention.
+pub(crate) const SQLITE_READ_ONLY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(750);
+
 /// Install the [`SQLITE_CONTROL_PLANE_WRITE_TIMEOUT`] busy wait, measured in
 /// wall-clock time.
 ///
@@ -485,6 +490,18 @@ pub(crate) fn install_control_plane_busy_wait(connection: &rusqlite::Connection)
 }
 
 fn control_plane_busy_wait(attempt: i32) -> bool {
+    wall_clock_busy_wait(attempt, SQLITE_CONTROL_PLANE_WRITE_TIMEOUT)
+}
+
+/// [`SQLITE_READ_ONLY_TIMEOUT`] busy wait, measured in wall-clock time for the
+/// same reason as [`install_control_plane_busy_wait`]. On a loaded host each of
+/// `busy_timeout`'s ~20 short sleeps oversleeps by the time it takes to be
+/// rescheduled, so a nominal 750ms read wait overran its bound (#14832).
+pub(crate) fn read_only_busy_wait(attempt: i32) -> bool {
+    wall_clock_busy_wait(attempt, SQLITE_READ_ONLY_TIMEOUT)
+}
+
+fn wall_clock_busy_wait(attempt: i32, budget: std::time::Duration) -> bool {
     use std::cell::Cell;
     use std::time::{Duration, Instant};
 
@@ -500,7 +517,7 @@ fn control_plane_busy_wait(attempt: i32) -> bool {
         }
         started.get().unwrap_or(now)
     });
-    let remaining = SQLITE_CONTROL_PLANE_WRITE_TIMEOUT.saturating_sub(now - started);
+    let remaining = budget.saturating_sub(now - started);
     if remaining.is_zero() {
         return false;
     }

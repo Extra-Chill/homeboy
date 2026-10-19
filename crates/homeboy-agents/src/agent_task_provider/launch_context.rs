@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
@@ -65,6 +66,23 @@ pub struct AgentTaskProviderLaunchContext {
     pub portable: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub portability_blockers: Vec<String>,
+    /// The values behind `inherited_env_names`, read once at materialization.
+    /// The spawn inherits exactly these, so the process environment changing
+    /// between materialization and spawn cannot make the provider's
+    /// environment diverge from the recorded names (#14832). Never serialized.
+    #[serde(skip)]
+    inherited_env: InheritedEnv,
+}
+
+/// Inherited environment values. `Debug` lists names only: an inherited value
+/// is not a declared secret, but it has no business in diagnostics either.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct InheritedEnv(BTreeMap<String, OsString>);
+
+impl std::fmt::Debug for InheritedEnv {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_set().entries(self.0.keys()).finish()
+    }
 }
 
 impl AgentTaskProviderLaunchContext {
@@ -75,11 +93,10 @@ impl AgentTaskProviderLaunchContext {
         cwd: Option<&Path>,
         declared_env: &[(String, String)],
     ) -> Result<Self> {
-        let mut inherited_env_names = BASE_INHERITED_ENV
+        let mut inherited_env = BASE_INHERITED_ENV
             .iter()
-            .filter(|name| std::env::var_os(name).is_some())
-            .map(|name| (*name).to_string())
-            .collect::<BTreeSet<_>>();
+            .filter_map(|name| Some(((*name).to_string(), std::env::var_os(name)?)))
+            .collect::<BTreeMap<_, _>>();
         let secret_env_plan =
             super::secrets::provider_secret_env_plan_with_status(provider, request);
         let secret_env_names = secret_env_plan
@@ -105,7 +122,8 @@ impl AgentTaskProviderLaunchContext {
                 continue;
             }
             if matches!(env_ref.source.as_deref(), Some("env" | "inherit")) {
-                if std::env::var_os(&env_ref.name).is_none() && env_ref.required.unwrap_or(false) {
+                let value = std::env::var_os(&env_ref.name);
+                if value.is_none() && env_ref.required.unwrap_or(false) {
                     return Err(Error::validation_invalid_argument(
                         "provider.invocation.env",
                         "provider launch context is missing a required inherited environment variable",
@@ -113,8 +131,8 @@ impl AgentTaskProviderLaunchContext {
                         None,
                     ));
                 }
-                if std::env::var_os(&env_ref.name).is_some() {
-                    inherited_env_names.insert(env_ref.name.clone());
+                if let Some(value) = value {
+                    inherited_env.insert(env_ref.name.clone(), value);
                 }
             }
         }
@@ -146,11 +164,12 @@ impl AgentTaskProviderLaunchContext {
             runtime_id: provider.runtime_id.clone(),
             workspace_root: request.workspace.root.clone(),
             execution_cwd: cwd.map(|path| path.display().to_string()),
-            inherited_env_names: inherited_env_names.into_iter().collect(),
+            inherited_env_names: inherited_env.keys().cloned().collect(),
             public_env,
             secret_env_plan,
             portable: portability_blockers.is_empty(),
             portability_blockers,
+            inherited_env: InheritedEnv(inherited_env),
         })
     }
 
@@ -166,14 +185,22 @@ impl AgentTaskProviderLaunchContext {
 
         command.env_clear();
         for name in &self.inherited_env_names {
-            let value = std::env::var_os(name).ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "provider_launch_context.inherited_env_names",
-                    "declared inherited environment changed before provider spawn",
-                    Some(name.clone()),
-                    None,
-                )
-            })?;
+            // A deserialized context carries names only; it inherits the live
+            // value and fails closed if that is gone.
+            let value = self
+                .inherited_env
+                .0
+                .get(name)
+                .cloned()
+                .or_else(|| std::env::var_os(name))
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "provider_launch_context.inherited_env_names",
+                        "declared inherited environment changed before provider spawn",
+                        Some(name.clone()),
+                        None,
+                    )
+                })?;
             command.env(name, value);
         }
         command.envs(&self.public_env);

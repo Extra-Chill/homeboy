@@ -1423,7 +1423,11 @@ impl ObservationStore {
 
     pub(crate) fn read_error(&self, operation: &'static str, error: rusqlite::Error) -> Error {
         if self.readonly && is_transient_lock_error(&error) {
-            Error::observation_store_busy(self.path.to_string_lossy(), operation, 750)
+            Error::observation_store_busy(
+                self.path.to_string_lossy(),
+                operation,
+                super::SQLITE_READ_ONLY_TIMEOUT.as_millis() as u64,
+            )
         } else {
             sqlite_error(operation)(error)
         }
