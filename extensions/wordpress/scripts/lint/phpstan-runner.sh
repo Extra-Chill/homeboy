@@ -425,7 +425,6 @@ homeboy_resolve_phpstan_context_directories() {
     local candidate
 
     find "$component_path" -mindepth 1 -maxdepth 1 -type d \
-        -not -name '.homeboy-build' \
         -not -name 'vendor' \
         -not -name 'vendor_prefixed' \
         -not -name 'node_modules' \
@@ -576,7 +575,6 @@ generate_scoped_context_config() {
             fi
             printf '        - %s\n' "$(printf '%s' "$context_file" | jq -Rsa .)"
         done < <(find "$PLUGIN_PATH" -type f -name '*.php' \
-            -not -path "*/.homeboy-build/*" \
             -not -path "*/vendor/*" \
             -not -path "*/vendor_prefixed/*" \
             -not -path "*/node_modules/*" \
@@ -669,7 +667,6 @@ resolve_phpstan_targets() {
                 printf '%s\0' "$target_path"
             elif [ -d "$target_path" ]; then
                 find "$target_path" -type f -name '*.php' \
-                    -not -path "*/.homeboy-build/*" \
                     -not -path "*/vendor/*" \
                     -not -path "*/vendor_prefixed/*" \
                     -not -path "*/node_modules/*" \
@@ -699,7 +696,6 @@ resolve_phpstan_full_targets() {
             printf '%s\0' "$target_path"
         fi
     done < <(find "$PLUGIN_PATH" -type f -name '*.php' \
-        -not -path "*/.homeboy-build/*" \
         -not -path "*/vendor/*" \
         -not -path "*/vendor_prefixed/*" \
         -not -path "*/node_modules/*" \

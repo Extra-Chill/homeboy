@@ -8,9 +8,8 @@
 # Output Structure:
 #   /build/[project-name].zip    - Production ZIP file
 #
-# Staging uses .homeboy-build/ to avoid colliding with @wordpress/scripts
-# which outputs to build/ by convention. The staging dir is cleaned up after
-# the ZIP is created.
+# Staging lives outside the component tree to avoid leaking into deploys and
+# to keep builds from mutating component state.
 #
 # Features:
 # - Auto-detects plugin/theme from file headers
@@ -25,27 +24,17 @@
 
 set -e
 
-# Staging directory for the intermediate production copy.
-# Intentionally NOT build/ — @wordpress/scripts outputs to build/ by convention
-# and using the same directory causes compiled JS/CSS to be silently dropped.
-STAGING_ROOT=".homeboy-build"
+# Staging is a per-run directory outside the component tree. Deployment rsyncs
+# the component directory verbatim, so anything staged inside it would ship;
+# a private temp directory keeps the component byte-identical across builds.
+STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wordpress-build.XXXXXX")"
 
-# Remove the staging tree, including the staging root itself.
-#
-# The root has to go too, not just the project subdirectory. Deployment does not
-# use the ZIP exclude list — homeboy rsyncs the component directory to the
-# server — so anything left beside the built output is copied verbatim. An empty
-# `.homeboy-build/` therefore reaches production, where WordPress plugins that
-# walk the plugin/theme tree descend into it. Imagify's media scanner did
-# exactly that on extrachill.com and fatalled with
-# `RecursiveDirectoryIterator ... Failed to open directory: Permission denied`,
-# which accounted for every PHP fatal on the network (#2861).
 remove_staging_tree() {
     [ -n "${STAGING_ROOT:-}" ] || return 0
-    rm -rf "${STAGING_ROOT:?}/${PROJECT_NAME:-}" 2>/dev/null || true
-    # Only when empty: a non-empty root means something unexpected lives there
-    # and deleting it blindly would be worse than leaving it.
-    rmdir "${STAGING_ROOT}" 2>/dev/null || true
+    # The copy keeps source modes, so read-only directories need write
+    # permission back before they can be emptied.
+    chmod -R u+w "${STAGING_ROOT:?}" 2>/dev/null || true
+    rm -rf "${STAGING_ROOT:?}" 2>/dev/null || true
 }
 
 # Cleanup on exit (restore dev deps if build fails unexpectedly)
@@ -374,8 +363,6 @@ extract_metadata() {
 # stronger cleanup strategies before failing with an actionable message.
 clean_previous_builds() {
     print_status "Cleaning previous build artifacts..."
-
-    remove_stale_dir "$STAGING_ROOT"
 
     # Remove previous ZIP artifact (lives in build/ alongside npm output)
     if [ -n "$PROJECT_NAME" ] && [ -f "build/$PROJECT_NAME.zip" ]; then
@@ -750,7 +737,6 @@ create_rsync_excludes() {
         # Default excludes if no .buildignore file
         # Note: /build/ is intentionally NOT excluded — @wordpress/scripts outputs
         # compiled JS/CSS there, and it must be included in the production ZIP.
-        # The staging directory (.homeboy-build/) is excluded instead.
         cat > "$exclude_file" << 'EOF'
 .git
 .gitignore
@@ -764,7 +750,6 @@ AGENTS.md
 *.swp
 *.swo
 *~
-/.homeboy-build/
 /dist/
 *.zip
 *.tar.gz
@@ -820,11 +805,6 @@ foreach ( $patterns as $pattern ) {
 }
 PHP
 
-    # Homeboy-managed staging must never be copied into itself. Keep this
-    # mandatory even when a project supplies custom .buildignore or excludes.
-    cat >> "$exclude_file" << 'EOF'
-/.homeboy-build/
-EOF
 }
 
 resolve_package_artifacts() {
@@ -893,9 +873,6 @@ function package_artifact_matches( $pattern ) {
 	foreach ( $iterator as $file ) {
 		$relative = str_replace( '\\', '/', $file->getPathname() );
 		$relative = preg_replace( '#^\./#', '', $relative );
-		if ( preg_match( '#^\.homeboy-build(?:/|$)#', $relative ) ) {
-			continue;
-		}
 		if ( preg_match( '#^' . $regex . '$#', $relative ) ) {
 			$matches[] = $relative;
 		}
@@ -923,9 +900,6 @@ foreach ( $patterns as $pattern ) {
 			$relative = str_replace( '\\', '/', $match );
 			if ( str_starts_with( $relative, './' ) ) {
 				$relative = substr( $relative, 2 );
-			}
-			if ( preg_match( '#^\.homeboy-build(?:/|$)#', $relative ) ) {
-				continue;
 			}
 			$files[]  = $relative;
 		}
@@ -1077,7 +1051,6 @@ function homeboy_wordpress_package_relative_path( $path, $label ) {
 		|| str_starts_with( $normalized, '//' )
 		|| preg_match( '#^[A-Za-z]:/#', $normalized )
 		|| preg_match( '#(^|/)\.\.(/|$)#', $normalized )
-		|| preg_match( '#^\.homeboy-build(?:/|$)#', $normalized )
 		|| str_contains( $normalized, "\0" )
 	) {
 		fwrite( STDERR, "{$label} must be component-relative and cannot contain traversal or filesystem-absolute paths: {$path}\n" );
@@ -1169,10 +1142,6 @@ function homeboy_wordpress_package_prefix_files( $prefix ) {
 
 		$relative = str_replace( '\\', '/', $file->getPathname() );
 		$relative = preg_replace( '#^\./#', '', $relative );
-		if ( preg_match( '#^\.homeboy-build(?:/|$)#', $relative ) ) {
-			continue;
-		}
-
 		homeboy_wordpress_package_contained_relative( $relative, 'Package profile selected file' );
 		$files[] = $relative;
 	}
@@ -1444,7 +1413,8 @@ create_production_zip() {
     # Ensure build/ output dir exists (may contain npm build output too)
     mkdir -p build
 
-    local zip_file="build/$PROJECT_NAME.zip"
+    local component_root="$(pwd)"
+    local zip_file="${component_root}/build/$PROJECT_NAME.zip"
     local staging_dir="${STAGING_ROOT}/$PROJECT_NAME"
 
     # Remove existing ZIP if it exists
@@ -1453,9 +1423,7 @@ create_production_zip() {
     fi
 
     # Create ZIP from staging directory (must be in staging root for correct paths)
-    cd "$STAGING_ROOT"
-    zip -r "../$zip_file" "$PROJECT_NAME/" -q
-    cd - > /dev/null
+    (cd "$STAGING_ROOT" && zip -r "$zip_file" "$PROJECT_NAME/" -q)
 
     # Get file size
     local file_size=$(ls -lh "$zip_file" | awk '{print $5}')
@@ -1465,10 +1433,6 @@ create_production_zip() {
 
     print_success "Production ZIP created: $zip_file ($file_size, $total_files files)"
 
-    # Clean up staging directory now that ZIP is created
-    print_status "Cleaning up staging directory..."
-    rm -rf "$staging_dir"
-    print_success "Staging directory removed (production files are in ZIP)"
 }
 
 # Main build process
@@ -1494,7 +1458,6 @@ build_project() {
 
     if ! validate_php_syntax; then
         print_error "PHP syntax validation failed"
-        rm -rf "${STAGING_ROOT}/$PROJECT_NAME"
         restore_dev_deps
         exit 1
     fi
@@ -1509,7 +1472,6 @@ build_project() {
     if [ -f "${EXTENSION_PATH}/scripts/build/validate-psr4.sh" ]; then
         if ! bash "${EXTENSION_PATH}/scripts/build/validate-psr4.sh" "${STAGING_ROOT}/$PROJECT_NAME"; then
             print_error "PSR-4 autoload validation failed"
-            rm -rf "${STAGING_ROOT}/$PROJECT_NAME"
             restore_dev_deps
             exit 1
         fi
@@ -1517,8 +1479,7 @@ build_project() {
 
     create_production_zip
     restore_dev_deps
-    # The artifact is written; the staging copy has no further use. Leaving it
-    # is what shipped `.homeboy-build/` to production (#2861).
+    # The artifact is written; the staging copy has no further use.
     remove_staging_tree
 
     print_success "Build process completed successfully!"

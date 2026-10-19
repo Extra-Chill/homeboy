@@ -1,102 +1,103 @@
 #!/usr/bin/env bash
-# The build must not leave its staging tree in the component directory.
+# A build leaves the component tree exactly as it found it, apart from the
+# declared ZIP artifact.
 #
-# Deployment does not use the production ZIP's exclude list — homeboy rsyncs the
-# component directory to the server — so anything left beside the built output
-# is copied verbatim. `.homeboy-build/` therefore reached production on five
-# components, where Imagify's media scanner descended into it and fatalled:
-#
-#   PHP Fatal error: Uncaught UnexpectedValueException:
-#     RecursiveDirectoryIterator::__construct(.../.homeboy-build/<project>/.homeboy-build):
-#     Failed to open directory: Permission denied
-#
-# That was every PHP fatal on the network. Excluding the path from the ZIP was
-# never enough, because the ZIP is only one of two routes to a server (#2861).
+# Deployment rsyncs the component directory to the server verbatim, so anything
+# a build stages inside it ships. An in-tree `.homeboy-build/` once reached
+# production on five components, where Imagify's media scanner descended into
+# it and fatalled (#2861). Staging now lives in a private temp directory; this
+# smoke runs real builds (success and failure) against a git component and
+# asserts the tree and the temp area are clean afterwards. The component root is
+# read-only during the build, so in-tree staging fails loudly.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_SH="${SCRIPT_DIR}/build.sh"
+EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ROOT_DIR="$(cd "${EXTENSION_DIR}/.." && pwd)"
+# shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
+source "${ROOT_DIR}/scripts/lib/runtime-helper-resolver.sh"
+RESOLVE_CONTEXT_CORE_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_RESOLVE_CONTEXT resolve-context.sh)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-staging-cleanup.XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT
+trap 'chmod -R u+w "$TMP_DIR" 2>/dev/null; rm -rf "$TMP_DIR"' EXIT
 
 fail=0
 pass() { echo "PASS: $1"; }
 bad() { echo "FAIL: $1" >&2; fail=1; }
 
-# ---------------------------------------------------------------------------
-# Behaviour: the helper removes the staging root, not just the project inside.
-# Exercised directly, because a full build needs a WordPress toolchain.
-# ---------------------------------------------------------------------------
-STAGING_ROOT=".homeboy-build"
-PROJECT_NAME="demo-plugin"
-
-remove_staging_tree() {
-    [ -n "${STAGING_ROOT:-}" ] || return 0
-    rm -rf "${STAGING_ROOT:?}/${PROJECT_NAME:-}" 2>/dev/null || true
-    rmdir "${STAGING_ROOT}" 2>/dev/null || true
+make_component() {
+    local dir="$1" name="$2" body="$3"
+    mkdir -p "${dir}/inc"
+    cat > "${dir}/${name}.php" <<PHP
+<?php
+/**
+ * Plugin Name: ${name}
+ * Version: 1.0.0
+ */
+PHP
+    printf '%s\n' "$body" > "${dir}/inc/thing.php"
+    printf '%s\n' 'build/' > "${dir}/.gitignore"
+    git -C "$dir" init -q
+    git -C "$dir" add -A
+    git -C "$dir" -c user.name=smoke -c user.email=smoke@example.invalid commit -qm init
+    # Only the declared artifact directory is writable: any attempt to stage
+    # inside the component root fails the build instead of passing silently.
+    mkdir -p "${dir}/build"
+    chmod a-w "$dir" "${dir}/inc"
 }
 
-cd "${TMP_DIR}"
+# Runs build.sh with an isolated TMPDIR so leftover staging is observable.
+run_build() {
+    local dir="$1" build_tmp="$2"
+    mkdir -p "$build_tmp"
+    (
+        cd "$dir"
+        TMPDIR="$build_tmp" \
+        HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+        HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
+        HOMEBOY_SKIP_TESTS=1 \
+            bash "${EXTENSION_DIR}/scripts/build/build.sh"
+    )
+}
 
-# A completed build: staging root holding a populated project copy.
-mkdir -p "${STAGING_ROOT}/${PROJECT_NAME}/inc"
-printf 'x' > "${STAGING_ROOT}/${PROJECT_NAME}/demo-plugin.php"
-printf 'x' > "${STAGING_ROOT}/${PROJECT_NAME}/inc/thing.php"
+# Everything git sees, ignored files included, other than the declared artifact.
+tree_residue() {
+    git -C "$1" status --porcelain --ignored | grep -vE "^!! build/$" || true
+}
 
-remove_staging_tree
-
-if [ ! -e "${STAGING_ROOT}" ]; then
-    pass "a completed build leaves no staging root behind"
+# Success: the ZIP is produced and nothing else is left behind.
+good_dir="${TMP_DIR}/good-plugin"
+good_tmp="${TMP_DIR}/good-tmp"
+make_component "$good_dir" good-plugin '<?php function good_plugin_thing() { return true; }'
+if run_build "$good_dir" "$good_tmp" > "${TMP_DIR}/good.out" 2>&1; then
+    pass "a valid component builds"
 else
-    bad "staging root survived: $(find "${STAGING_ROOT}" | head -5 | tr '\n' ' ')"
+    bad "a valid component failed to build"; sed 's/^/  /' "${TMP_DIR}/good.out" >&2
 fi
-
-# Idempotent: cleanup also runs from the EXIT trap, so it must tolerate a
-# staging root that is already gone.
-remove_staging_tree
-pass "removing an absent staging tree is not an error"
-
-# A staging root containing something unexpected must not be blindly deleted.
-mkdir -p "${STAGING_ROOT}"
-printf 'unexpected' > "${STAGING_ROOT}/not-ours.txt"
-remove_staging_tree
-if [ -f "${STAGING_ROOT}/not-ours.txt" ]; then
-    pass "a non-empty staging root is left alone rather than force-removed"
+if unzip -Z1 "${good_dir}/build/good-plugin.zip" 2>/dev/null | grep -qx 'good-plugin/inc/thing.php'; then
+    pass "the ZIP holds the staged component"
 else
-    bad "unrelated content under the staging root was destroyed"
+    bad "the ZIP is missing or incomplete"
 fi
-rm -rf "${STAGING_ROOT}"
+residue="$(tree_residue "$good_dir")"
+[ -z "$residue" ] && pass "a successful build leaves the component tree clean" \
+    || bad "a successful build left: ${residue}"
+[ -z "$(ls -A "$good_tmp")" ] && pass "a successful build removes its staging directory" \
+    || bad "a successful build left staging: $(ls -A "$good_tmp")"
 
-# ---------------------------------------------------------------------------
-# Source guards: both exit paths must call the helper.
-# ---------------------------------------------------------------------------
-if grep -q 'remove_staging_tree()' "${BUILD_SH}"; then
-    pass "build.sh defines a single staging-removal helper"
+# Failure: a syntax error aborts the build and still leaves nothing behind.
+bad_dir="${TMP_DIR}/bad-plugin"
+bad_tmp="${TMP_DIR}/bad-tmp"
+make_component "$bad_dir" bad-plugin '<?php function bad_plugin_thing( { return true; }'
+if run_build "$bad_dir" "$bad_tmp" > "${TMP_DIR}/bad.out" 2>&1; then
+    bad "a component with a PHP syntax error built successfully"
 else
-    bad "build.sh has no remove_staging_tree helper"
+    pass "a component with a PHP syntax error fails the build"
 fi
-
-# The success path previously removed nothing at all, which is how a populated
-# staging tree survived into the deployed directory.
-if awk '/^    create_production_zip/,/print_success "Build process completed/' "${BUILD_SH}" \
-    | grep -q 'remove_staging_tree'; then
-    pass "the success path removes the staging tree after packaging"
-else
-    bad "the success path does not remove the staging tree"
-fi
-
-# The trap previously only fired on a non-zero exit.
-if awk '/^cleanup\(\) \{/,/^\}/' "${BUILD_SH}" | grep -q 'remove_staging_tree'; then
-    pass "the exit trap removes the staging tree"
-else
-    bad "the exit trap does not remove the staging tree"
-fi
-
-if awk '/^cleanup\(\) \{/,/^\}/' "${BUILD_SH}" | grep -q 'exit_code -ne 0'; then
-    bad "staging removal is still conditional on a failing exit code"
-else
-    pass "staging removal is unconditional, not failure-only"
-fi
+residue="$(tree_residue "$bad_dir")"
+[ -z "$residue" ] && pass "a failed build leaves the component tree clean" \
+    || bad "a failed build left: ${residue}"
+[ -z "$(ls -A "$bad_tmp")" ] && pass "a failed build removes its staging directory" \
+    || bad "a failed build left staging: $(ls -A "$bad_tmp")"
 
 if [ "${fail}" -ne 0 ]; then
     echo "staging cleanup checks FAILED" >&2

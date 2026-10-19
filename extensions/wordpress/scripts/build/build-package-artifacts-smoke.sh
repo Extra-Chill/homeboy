@@ -106,20 +106,6 @@ if [ "$(grep -Fc '"path":"runtime/packages/static-site-importer.zip"' "${TMP_DIR
     exit 1
 fi
 
-mkdir -p "${component_dir}/.homeboy-build/stale/packages"
-printf '%s\n' 'stale staging zip' > "${component_dir}/.homeboy-build/stale/packages/stale.zip"
-(
-    cd "$component_dir"
-    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
-    HOMEBOY_COMPONENT_ID="package-artifact-plugin" \
-    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
-    HOMEBOY_SKIP_TESTS=1 \
-    HOMEBOY_SETTINGS_JSON='{"package_artifacts":["**/*.zip"]}' \
-        bash "${EXTENSION_DIR}/scripts/build/build.sh" > "${TMP_DIR}/staging-build.out"
-)
-
-staging_zip="${component_dir}/build/package-artifact-plugin.zip"
-assert_zip_not_contains "$staging_zip" "package-artifact-plugin/.homeboy-build/stale/packages/stale.zip"
 
 if (
     cd "$component_dir"
@@ -218,7 +204,7 @@ if ! grep -Fq 'package_excludes entries must be non-empty strings' "${TMP_DIR}/e
 fi
 
 profile_dir="${TMP_DIR}/profile-plugin"
-mkdir -p "${profile_dir}/includes" "${profile_dir}/docs" "${profile_dir}/.homeboy-build/stale"
+mkdir -p "${profile_dir}/includes" "${profile_dir}/docs"
 
 cat > "${profile_dir}/profile-plugin.php" <<'PHP'
 <?php
@@ -231,7 +217,6 @@ PHP
 printf '%s\n' '<?php' > "${profile_dir}/includes/bootstrap.php"
 printf '%s\n' '<?php' > "${profile_dir}/includes/keep.php"
 printf '%s\n' 'unselected docs' > "${profile_dir}/docs/guide.md"
-printf '%s\n' 'stale staging' > "${profile_dir}/.homeboy-build/stale/skip.txt"
 
 cat > "${profile_dir}/package-manifest.json" <<'JSON'
 {
@@ -268,7 +253,6 @@ assert_zip_contains "$profile_zip" "profile-plugin/includes/bootstrap.php"
 assert_zip_contains "$profile_zip" "profile-plugin/includes/keep.php"
 assert_zip_contains "$profile_zip" "profile-plugin/package-manifest.json"
 assert_zip_not_contains "$profile_zip" "profile-plugin/docs/guide.md"
-assert_zip_not_contains "$profile_zip" "profile-plugin/.homeboy-build/stale/skip.txt"
 
 if ! grep -Fq '"type":"wordpress.package_profile"' "${TMP_DIR}/profile-build.out"; then
     echo "Expected structured package profile output" >&2

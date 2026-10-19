@@ -37,14 +37,12 @@ mkdir -p \
     "${COMPONENT_DIR}/tests" \
     "${COMPONENT_DIR}/assets" \
     "${COMPONENT_DIR}/includes" \
-    "${COMPONENT_DIR}/vendor_prefixed" \
-    "${COMPONENT_DIR}/.homeboy-build/static-site-importer/includes"
+    "${COMPONENT_DIR}/vendor_prefixed"
 touch "${EXTENSION_DIR}/phpstan.neon.dist"
 printf '%s\n' '<?php missing_function();' > "${COMPONENT_DIR}/main.php"
 printf '%s\n' 'parameters:' '    ignoreErrors: []' > "${COMPONENT_DIR}/phpstan-baseline.neon"
 touch "${COMPONENT_DIR}/tests/FooTest.php" "${COMPONENT_DIR}/assets/app.js"
 touch "${COMPONENT_DIR}/includes/interface-example.php" "${COMPONENT_DIR}/includes/extra.php" "${COMPONENT_DIR}/vendor_prefixed/autoload.php"
-touch "${COMPONENT_DIR}/.homeboy-build/static-site-importer/includes/stale-copy.php"
 
 cat > "$DEPENDENCY_HELPER" <<'SH'
 homeboy_resolve_validation_dependency_paths() {
@@ -240,8 +238,6 @@ HOMEBOY_PHP_VERSION=8.1 run_phpstan
 assert_contains "--configuration=" "release-style PHP version run still passes a generated PHPStan config"
 assert_file_contains "$CONFIG_CAPTURE" "maximumNumberOfProcesses: 1" "release-style generated dependency config forces single-process PHPStan by default"
 assert_file_contains "$CONFIG_CAPTURE" "phpVersion: 80100" "release-style generated dependency config preserves PHP version override"
-assert_not_contains ".homeboy-build" "full-component PHPStan run excludes Homeboy release build artifacts"
-assert_file_not_contains "$CONFIG_CAPTURE" ".homeboy-build" "release-style PHPStan context excludes Homeboy release build artifacts"
 
 HOMEBOY_LINT_GLOB='{main.php,assets/app.js,includes/extra.php}' run_phpstan
 assert_contains "${COMPONENT_DIR}/main.php" "glob scope includes matching PHP source file"

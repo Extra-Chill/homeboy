@@ -443,7 +443,7 @@ homeboy build <component>
     ├─ Extract version
     ├─ Build frontend assets     (@wordpress/scripts when present)
     ├─ Install production deps   (composer --no-dev)
-    ├─ Stage into .homeboy-build/  (avoids @wordpress/scripts build/ collision)
+    ├─ Stage into a private temp dir (the component tree is never written)
     ├─ Copy files                (rsync, or an exact package profile)
     ├─ Validate build structure  (php -l, PSR-4)
     ├─ ZIP → build/<component-id>.zip
@@ -477,7 +477,7 @@ artifacts inside the deployed plugin or theme can declare explicit include globs
 matching, must not contain absolute or traversal paths, and must match at least
 one regular file. Matching files are sorted, deduplicated, copied into staging
 after the default rsync excludes, and reported with SHA-256 values in the build
-output. The managed `.homeboy-build/` staging directory is never eligible.
+output.
 
 `package_excludes` adds rsync exclusions without replacing `.buildignore`, the
 defaults, or mandatory Homeboy safety exclusions. Use component-root rsync
@@ -506,8 +506,7 @@ names an entry under `profiles`. Each profile provides `selectors` with
 `type` `file` or `prefix` and a component-relative `path`, plus optional
 `required_files`. Selection runs after production dependency preparation so
 generated `vendor/` files are eligible. When the setting is present, staging
-copies exactly the selected regular files under the existing package root.
-Homeboy still excludes `.homeboy-build/`. Invalid manifest or profile names,
+copies exactly the selected regular files under the existing package root. Invalid manifest or profile names,
 absolute paths, traversal, malformed selectors, unmatched explicit files, and
 missing required files fail closed. Components without this setting keep the
 current rsync behavior. The build writes a deterministic selected-file

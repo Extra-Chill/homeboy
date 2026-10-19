@@ -133,6 +133,7 @@
       "bash tests/wp-codebox-phpunit-failure-artifacts-smoke.sh",
       "bash scripts/build/build-before-production-prune-smoke.sh",
       "bash scripts/build/build-package-artifacts-smoke.sh",
+      "bash scripts/build/build-staging-cleanup-smoke.sh",
       "bash scripts/build/build-tooling-php-floor-smoke.sh",
       "bash scripts/lint/eslint-build-ignore-smoke.sh",
       "bash scripts/test/host-smoke-wp-runner-smoke.sh",
