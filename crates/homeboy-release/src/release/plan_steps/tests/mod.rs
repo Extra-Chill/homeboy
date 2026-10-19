@@ -1489,6 +1489,175 @@ fn fixture_component() -> Component {
     }
 }
 
+fn gate(id: &str) -> homeboy_core::component::ReleaseGateConfig {
+    homeboy_core::component::ReleaseGateConfig {
+        id: id.to_string(),
+        run: format!("node tools/{id}.mjs --zip {{artifact}}"),
+        artifact: None,
+        evidence: None,
+    }
+}
+
+#[test]
+fn declared_release_gates_run_after_commit_and_before_tag_in_declaration_order() {
+    let mut component = github_fixture_component();
+    component.release.gates = vec![gate("html-site-import"), gate("smoke")];
+    let extension = release_extension("artifact-packager", &["release.package"]);
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[extension],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+    let commit_index = step_index(&ids, "git.commit");
+    let first_gate_index = step_index(&ids, "release.gate.html-site-import");
+    let second_gate_index = step_index(&ids, "release.gate.smoke");
+    let tag_index = step_index(&ids, "git.tag");
+
+    assert!(commit_index < first_gate_index);
+    assert!(first_gate_index < second_gate_index);
+    assert!(second_gate_index < tag_index);
+    assert_eq!(steps[first_gate_index].needs, vec!["git.commit"]);
+    assert_eq!(
+        steps[second_gate_index].needs,
+        vec!["release.gate.html-site-import"]
+    );
+    assert_eq!(steps[tag_index].needs, vec!["release.gate.smoke"]);
+    assert_eq!(steps[first_gate_index].kind, "release.gate");
+    assert_eq!(
+        steps[first_gate_index]
+            .inputs
+            .get("gate")
+            .and_then(|value| value.get("id"))
+            .and_then(|value| value.as_str()),
+        Some("html-site-import")
+    );
+}
+
+#[test]
+fn release_gates_without_packaged_artifacts_are_skipped_with_a_warning() {
+    let mut component = fixture_component();
+    component.release.gates = vec![gate("html-site-import")];
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        skip_github_release: true,
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    assert!(steps.iter().all(|step| step.kind != "release.gate"));
+    let tag = steps
+        .iter()
+        .find(|step| step.id == "git.tag")
+        .expect("tag step");
+    assert_eq!(tag.needs, vec!["git.commit"]);
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.contains("release gates were skipped")));
+}
+
+#[test]
+fn duplicate_release_gate_ids_fail_planning() {
+    let mut component = github_fixture_component();
+    component.release.gates = vec![gate("import"), gate("import")];
+    let extension = release_extension("artifact-packager", &["release.package"]);
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        ..Default::default()
+    };
+
+    let error = build_release_steps(
+        &component,
+        &[extension],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect_err("duplicate gate ids must fail planning");
+
+    assert!(error.message.contains("unique"));
+}
+
+#[test]
+fn head_release_gates_run_after_artifacts_and_before_github_release() {
+    let mut component = github_fixture_component();
+    component.release.gates = vec![gate("html-site-import")];
+    let extension = release_extension("artifact-packager", &["release.package"]);
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        pipeline: ReleasePipelineOptions {
+            head: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[extension],
+        "1.0.1",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+    let authority_index = step_index(&ids, "artifacts.authority");
+    let gate_index = step_index(&ids, "release.gate.html-site-import");
+    let github_index = step_index(&ids, "github.release");
+
+    assert!(authority_index < gate_index);
+    assert!(gate_index < github_index);
+    assert_eq!(steps[gate_index].needs, vec!["artifacts.authority"]);
+    let github = &steps[github_index];
+    assert_eq!(github.needs, vec!["release.gate.html-site-import"]);
+}
+
 fn fixture_changelog_plan() -> ReleaseChangelogPlan {
     ReleaseChangelogPlan {
         policy: "generated".to_string(),

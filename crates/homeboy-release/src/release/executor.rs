@@ -23,6 +23,7 @@ use super::utils::extract_latest_notes;
 pub(crate) mod artifacts;
 mod candidate;
 pub(crate) mod changelog;
+pub(crate) mod gate;
 mod git_push;
 mod github_release;
 pub(crate) mod lockfile_guard;
@@ -35,6 +36,7 @@ mod tagging;
 pub(crate) mod version_targets;
 
 pub use candidate::{publish_candidate, CandidatePublication};
+pub(crate) use gate::run_release_gate;
 pub(crate) use git_push::{run_git_branch_push, run_git_push, run_git_tag_push};
 pub use github_release::release_notes_path;
 pub(crate) use github_release::release_notes_path as github_release_notes_path;

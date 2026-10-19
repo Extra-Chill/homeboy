@@ -201,11 +201,23 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
         return Ok(steps);
     }
 
+    // Declared release gates run against the packaged artifact after the
+    // release commit and before the tag: a failing gate blocks the tag the way
+    // a failing test does (#16165).
+    let gate_step = add_release_gate_steps(
+        &mut steps,
+        component,
+        "git.commit",
+        package_step_needed,
+        warnings,
+    )?;
+    let tag_needs = gate_step.unwrap_or_else(|| "git.commit".to_string());
+
     steps.push(ready_step(
         "git.tag",
         "git.tag",
         format!("Tag {}", tag_name),
-        vec!["git.commit".to_string()],
+        vec![tag_needs],
         string_config("name", tag_name),
     ));
 
@@ -463,6 +475,19 @@ fn build_head_release_steps(
         artifact_need = "artifacts.authority".to_string();
     }
 
+    // Declared release gates run against the packaged (or inventoried)
+    // artifacts before any publication step (#16165).
+    let gates_have_artifacts = package_step_needed || options.pipeline.from_artifacts.is_some();
+    if let Some(gate_step) = add_release_gate_steps(
+        &mut steps,
+        component,
+        &artifact_need,
+        gates_have_artifacts,
+        warnings,
+    )? {
+        artifact_need = gate_step;
+    }
+
     if options.pipeline.skip_publish && !publish_targets.is_empty() {
         homeboy_core::log_status!(
             "release",
@@ -576,6 +601,47 @@ fn build_head_release_steps(
     }
 
     Ok(steps)
+}
+
+/// Append one plan step per declared release gate, chained in declaration
+/// order so execution is fail-fast. Returns the final gate's step id when any
+/// gates were planned.
+///
+/// Gates require packaged artifacts; when the release plans no packaging the
+/// gates are skipped with a warning instead of failing against nothing.
+fn add_release_gate_steps(
+    steps: &mut Vec<PlanStep>,
+    component: &Component,
+    needs: &str,
+    artifacts_available: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Option<String>> {
+    if component.release.gates.is_empty() {
+        return Ok(None);
+    }
+    component.release.validate_gates()?;
+
+    if !artifacts_available {
+        warnings.push(
+            "Declared release gates were skipped: this release plans no packaged artifact to run them against."
+                .to_string(),
+        );
+        return Ok(None);
+    }
+
+    let mut need = needs.to_string();
+    for gate in &component.release.gates {
+        let step_id = crate::release::executor::gate::release_gate_step_id(&gate.id);
+        steps.push(ready_step(
+            &step_id,
+            crate::release::executor::gate::RELEASE_GATE_STEP_KIND,
+            format!("Run release gate {} against the packaged artifact", gate.id),
+            vec![need],
+            StepConfig::new().json("gate", gate),
+        ));
+        need = step_id;
+    }
+    Ok(Some(need))
 }
 
 fn add_package_preflight_step(

@@ -171,6 +171,11 @@ fn build_step_summary_line(result: &ReleaseStepResult) -> Option<String> {
         "git.push" => Some("Pushed to origin (with tags)".to_string()),
         "release.prepare" => Some("Prepared release files".to_string()),
         "package" => Some("Created release artifacts".to_string()),
+        "release.gate" => data
+            .and_then(|d| d.get("gate"))
+            .and_then(|v| v.as_str())
+            .map(|gate| format!("Release gate {} passed", gate))
+            .or_else(|| Some("Release gate passed".to_string())),
         "cleanup" => None,
         "github.release" => {
             let skipped = data

@@ -24,8 +24,8 @@ pub use config::{
     ComponentScriptsConfig, DependencyStackEdge, DependencyStackEdgeSource,
     DeploymentProviderAttachment, GitDeployConfig, GithubConfig, GithubHostConfig,
     GithubReleaseOwner, PackageArtifact, PackageCoverageArtifactMatch, PackageCoverageConfig,
-    ReleaseOwner, ScopeConfig, ScopedExtensionConfig, SubtreeBranchPolicy,
-    SubtreePublicationConfig, VersionTarget,
+    ReleaseGateArtifactSelector, ReleaseGateConfig, ReleaseOwner, ScopeConfig,
+    ScopedExtensionConfig, SubtreeBranchPolicy, SubtreePublicationConfig, VersionTarget,
 };
 pub use inventory::{
     exists, exists_in_root, extension_provides_artifact_pattern,
