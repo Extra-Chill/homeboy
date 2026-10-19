@@ -409,7 +409,7 @@ Run `homeboy bench` in CI and preserve the raw structured output for downstream 
     iterations: 10
 ```
 
-Bench runs write the exact `homeboy bench --output` payload to `homeboy-ci-results/bench.json`, upload it as a `homeboy-ci-results-<component>-<commands>-<job>-<os>-<runtime>` artifact, and render a compact PR-summary section when PR comments are enabled.
+Bench runs write the exact `homeboy bench --output` payload to `$RUNNER_TEMP/homeboy-ci-results/bench.json` (outside the checkout; Homeboy adds only `homeboy.json` to a repository), upload it as a `homeboy-ci-results-<component>-<commands>-<job>-<os>-<runtime>` artifact, and render a compact PR-summary section when PR comments are enabled.
 
 Homeboy Action also runs `homeboy runs export --since 24h --output homeboy-observations` after command execution and uploads the result as a separate `homeboy-observations-<component>-<commands>-<job>-<os>-<runtime>` artifact. This export is best-effort: if the current Homeboy version does not support observation export or no observations exist, the CI result is unchanged.
 

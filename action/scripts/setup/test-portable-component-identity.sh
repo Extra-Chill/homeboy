@@ -49,7 +49,7 @@ set +a
   cd "${FIXTURE_DIR}"
   PATH="${TMP_DIR}/bin:${PATH}" \
   GITHUB_ACTION_PATH="${ROOT_DIR}" \
-  GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+  GITHUB_WORKSPACE="${TMP_DIR}/workspace" RUNNER_TEMP="${TMP_DIR}/workspace-runner-temp" \
   GITHUB_OUTPUT="${TMP_DIR}/command-output" \
   GITHUB_ENV="${TMP_DIR}/command-env" \
   HOMEBOY_ARGS_FILE="${TMP_DIR}/homeboy-args" \
@@ -59,7 +59,7 @@ set +a
   bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh"
 )
 
-expected="--output ${TMP_DIR}/workspace/homeboy-ci-results/review-build.json review build wp-native-gutenberg --path ${FIXTURE_DIR}/packages/gutenberg"
+expected="--output ${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/review-build.json review build wp-native-gutenberg --path ${FIXTURE_DIR}/packages/gutenberg"
 actual="$(cat "${TMP_DIR}/homeboy-args")"
 if [ "${actual}" != "${expected}" ]; then
   printf 'FAIL: subdirectory review command does not separate identity from path\nexpected: %s\nactual:   %s\n' "${expected}" "${actual}"

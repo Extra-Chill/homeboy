@@ -12,7 +12,7 @@ timeout_seconds="${HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS:-900}"
 cleanup_seconds="${HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS:-15}"
 log_file="$(mktemp)"
 trap 'rm -f "${log_file}"' EXIT
-results_dir="${HOMEBOY_CI_RESULTS_DIR:-${GITHUB_WORKSPACE:-$(pwd)}/homeboy-ci-results}"
+results_dir="${HOMEBOY_CI_RESULTS_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/homeboy-ci-results}"
 if [ -d "${results_dir}" ] && [ ! -L "${results_dir}" ]; then
   rm -f "${results_dir}/setup.json"
 fi

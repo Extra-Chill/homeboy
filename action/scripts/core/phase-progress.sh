@@ -184,7 +184,7 @@ phase_run() {
 phase_summary() {
   local file output_dir output
   file="$(phase_progress_file)"
-  output_dir="${HOMEBOY_CI_RESULTS_DIR:-${GITHUB_WORKSPACE:-$(pwd)}/homeboy-ci-results}"
+  output_dir="${HOMEBOY_CI_RESULTS_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/homeboy-ci-results}"
   output="${output_dir}/phase-progress.json"
   mkdir -p "${output_dir}"
   if [ ! -f "${file}" ]; then

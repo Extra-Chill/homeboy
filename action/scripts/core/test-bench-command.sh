@@ -44,6 +44,7 @@ chmod +x "${TMP_DIR}/bin/homeboy"
 export PATH="${TMP_DIR}/bin:${PATH}"
 export GITHUB_ACTION_PATH="${ROOT_DIR}"
 export GITHUB_WORKSPACE="${TMP_DIR}/workspace"
+export RUNNER_TEMP="${TMP_DIR}/runner-temp"
 export GITHUB_OUTPUT="${TMP_DIR}/github-output"
 export GITHUB_ENV="${TMP_DIR}/github-env"
 export GITHUB_REPOSITORY="Extra-Chill/homeboy-action"
@@ -56,13 +57,13 @@ export BENCH_ITERATIONS="2"
 
 (cd "${TMP_DIR}/workspace" && bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh")
 
-assert_file "${TMP_DIR}/workspace/homeboy-ci-results/bench.json" "stable bench artifact"
+assert_file "${TMP_DIR}/runner-temp/homeboy-ci-results/bench.json" "stable bench artifact"
 
 # The comment summary now reads the same durable results path as every other
 # consumer instead of a duplicate copy in HOMEBOY_OUTPUT_DIR, so assert the
 # path it actually reads.
 results_dir="$(grep '^HOMEBOY_CI_RESULTS_DIR=' "${TMP_DIR}/github-env" | cut -d= -f2-)"
-: "${results_dir:="${TMP_DIR}/workspace/homeboy-ci-results"}"
+: "${results_dir:="${TMP_DIR}/runner-temp/homeboy-ci-results"}"
 assert_file "${results_dir}/bench.json" "comment-summary bench artifact source"
 
 if ! grep -q '^results={"bench":"pass"}$' "${TMP_DIR}/github-output"; then

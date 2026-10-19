@@ -12,7 +12,7 @@ run_setup() {
   HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS=1 \
   HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS=1 \
   HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=false \
-  GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+  GITHUB_WORKSPACE="${TMP_DIR}/workspace" RUNNER_TEMP="${TMP_DIR}/workspace-runner-temp" \
   GITHUB_ENV="${TMP_DIR}/github-env" \
   bash "${RUNNER}" "$@"
 }
@@ -59,8 +59,8 @@ jq -e '
   and .exit_code == 124
   and .diagnostic == "network download timed out during action setup after 1s"
   and (.replay_command | startswith("bash -c ") and contains("sleep"))
-' "${TMP_DIR}/workspace/homeboy-ci-results/setup.json" >/dev/null || { printf 'FAIL: network stall did not persist a typed setup result\n'; exit 1; }
-grep -Fqx "HOMEBOY_SETUP_RESULT_FILE=${TMP_DIR}/workspace/homeboy-ci-results/setup.json" "${TMP_DIR}/github-env" || { printf 'FAIL: typed setup result was not exported\n'; exit 1; }
+' "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/setup.json" >/dev/null || { printf 'FAIL: network stall did not persist a typed setup result\n'; exit 1; }
+grep -Fqx "HOMEBOY_SETUP_RESULT_FILE=${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/setup.json" "${TMP_DIR}/github-env" || { printf 'FAIL: typed setup result was not exported\n'; exit 1; }
 printf 'PASS: network stall terminates with actionable evidence\n'
 
 set +e
@@ -80,5 +80,5 @@ jq -e '
   and .owner == "Homeboy extension setup"
   and .step == "install Homeboy extension"
   and .diagnostic == "source SHA mismatch: expected abc, got def"
-' "${TMP_DIR}/workspace/homeboy-ci-results/setup.json" >/dev/null || { printf 'FAIL: extension setup cause was not preserved\n'; exit 1; }
+' "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/setup.json" >/dev/null || { printf 'FAIL: extension setup cause was not preserved\n'; exit 1; }
 printf 'PASS: extension setup failure preserves its typed owner and diagnostic\n'

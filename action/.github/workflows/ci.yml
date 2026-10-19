@@ -582,7 +582,7 @@ jobs:
           ACTION_REVISION="$(git -C .homeboy-action rev-parse HEAD)"
           export ACTION_REVISION
           bash .homeboy-action/scripts/core/write-differential-phase-manifest.sh
-          cp -R homeboy-ci-results differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
+          cp -R "${RUNNER_TEMP}/homeboy-ci-results" differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
           cp -R homeboy-observations differential-phase/candidate/homeboy-observations 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-observations
 
       - name: Upload candidate phase evidence
@@ -702,7 +702,7 @@ jobs:
           ACTION_REVISION="$(git -C .homeboy-action rev-parse HEAD)"
           export ACTION_REVISION
           bash .homeboy-action/scripts/core/write-differential-phase-manifest.sh
-          cp -R homeboy-ci-results differential-phase/baseline/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/baseline/homeboy-ci-results
+          cp -R "${RUNNER_TEMP}/homeboy-ci-results" differential-phase/baseline/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/baseline/homeboy-ci-results
       - name: Upload baseline phase evidence
         if: always() && steps.baseline-policy.outputs.run == 'true' && steps.provenance.outcome == 'success'
         uses: actions/upload-artifact@v7
@@ -851,7 +851,7 @@ jobs:
             if [ -f homeboy-test-budget.json ]; then
               cp homeboy-test-budget.json homeboy-test-inventory-failure/budget.json
             fi
-            cp -R homeboy-ci-results homeboy-test-inventory-failure/homeboy-ci-results 2>/dev/null || true
+            cp -R "${RUNNER_TEMP}/homeboy-ci-results" homeboy-test-inventory-failure/homeboy-ci-results 2>/dev/null || true
       - name: Upload candidate Test inventory failure provenance
         if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
         uses: actions/upload-artifact@v7
@@ -980,7 +980,7 @@ jobs:
           mkdir -p differential-phase/candidate
           results="${RESULTS:-}"; [ -n "${results}" ] || results='{}'
           jq -cn --arg phase candidate --arg shard_id "${SHARD_ID}" --arg command "${COMMAND}" --arg inventory_digest "$(jq -r .inventory_digest homeboy-test-shard-plan.json)" --arg plan_digest "$(jq -r .plan_digest homeboy-test-shard-plan.json)" --argjson budget "$(jq -c .budget homeboy-test-shard-plan.json)" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,shard_id:$shard_id,command:$command,inventory_digest:$inventory_digest,plan_digest:$plan_digest,budget:$budget,run_attempt:$run_attempt,results:$results}' > differential-phase/candidate/manifest.json
-          cp -R homeboy-ci-results differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
+          cp -R "${RUNNER_TEMP}/homeboy-ci-results" differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
       - if: always()
         uses: actions/upload-artifact@v7
         with:

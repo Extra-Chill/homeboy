@@ -29,7 +29,7 @@ FULL_SUITE_RETRY_COMMANDS=()
 HOMEBOY_OUTPUT_DIR=$(mktemp -d)
 echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "${GITHUB_ENV}"
 
-HOMEBOY_CI_RESULTS_DIR="${GITHUB_WORKSPACE:-$(pwd)}/homeboy-ci-results"
+HOMEBOY_CI_RESULTS_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/homeboy-ci-results"
 if [ -L "${HOMEBOY_CI_RESULTS_DIR}" ] || { [ -e "${HOMEBOY_CI_RESULTS_DIR}" ] && [ ! -d "${HOMEBOY_CI_RESULTS_DIR}" ]; }; then
   echo "::error::HOMEBOY_CI_RESULTS_DIR must be a real directory: ${HOMEBOY_CI_RESULTS_DIR}"
   exit 1

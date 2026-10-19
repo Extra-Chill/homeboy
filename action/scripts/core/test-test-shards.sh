@@ -193,9 +193,9 @@ inventory_digest="$(jq -r .inventory_digest "${tmp}/one.json")"
 shard_manifest="${tmp}/shard-1.json"
 jq --arg id shard-1 '.shards[] | select(.id == $id)' "${tmp}/one.json" > "${shard_manifest}"
 mkdir -p "${tmp}/replay-workspace"
-PATH="${tmp}/bin:${PATH}" GITHUB_ACTION_PATH="${ROOT}" GITHUB_WORKSPACE="${tmp}/replay-workspace" GITHUB_OUTPUT="${tmp}/replay-output" GITHUB_ENV="${tmp}/replay-env" RESOLVED_COMMANDS='review test' COMPONENT_NAME=fixture HOMEBOY_TEST_SHARD_MANIFEST="${shard_manifest}" FAKE_EXPECTED_SHARD_MANIFEST="${shard_manifest}" FAKE_HOMEBOY_ARGS="${tmp}/replay-args" \
+PATH="${tmp}/bin:${PATH}" GITHUB_ACTION_PATH="${ROOT}" GITHUB_WORKSPACE="${tmp}/replay-workspace" RUNNER_TEMP="${tmp}/replay-workspace-runner-temp" GITHUB_OUTPUT="${tmp}/replay-output" GITHUB_ENV="${tmp}/replay-env" RESOLVED_COMMANDS='review test' COMPONENT_NAME=fixture HOMEBOY_TEST_SHARD_MANIFEST="${shard_manifest}" FAKE_EXPECTED_SHARD_MANIFEST="${shard_manifest}" FAKE_HOMEBOY_ARGS="${tmp}/replay-args" \
   bash "${ROOT}/scripts/core/run-homeboy-commands.sh"
-replay_result="${tmp}/replay-workspace/homeboy-ci-results/review-test.json"
+replay_result="${tmp}/replay-workspace-runner-temp/homeboy-ci-results/review-test.json"
 replay_total="$(jq '.data.test_counts.total' "${replay_result}")"
 [ "${replay_total}" -gt 0 ] || { printf 'FAIL: non-empty shard manifest replay did not execute tests\n'; exit 1; }
 [ "${replay_total}" = "$(jq '.tests | length' "${shard_manifest}")" ] || { printf 'FAIL: replay total does not match assigned shard membership\n'; exit 1; }

@@ -669,7 +669,7 @@ runs:
       uses: actions/upload-artifact@v7
       with:
         name: ${{ steps.artifact-names.outputs.homeboy-ci-results }}
-        path: homeboy-ci-results/*.json
+        path: ${{ runner.temp }}/homeboy-ci-results/*.json
         if-no-files-found: ignore
 
     - name: Export Homeboy observations
@@ -762,8 +762,8 @@ runs:
       with:
         name: ${{ steps.artifact-names.outputs.homeboy-ci-results }}-failure-digest
         path: |
-          homeboy-ci-results/failure-digest.md
-          homeboy-ci-results/failure-digest-renderer.stderr
+          ${{ runner.temp }}/homeboy-ci-results/failure-digest.md
+          ${{ runner.temp }}/homeboy-ci-results/failure-digest-renderer.stderr
         if-no-files-found: ignore
 
     - name: Run release

@@ -27,7 +27,7 @@ chmod +x "${TMP_DIR}/bin/homeboy"
 set +e
 PATH="${TMP_DIR}/bin:${PATH}" \
 GITHUB_ACTION_PATH="${ROOT_DIR}" \
-GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+GITHUB_WORKSPACE="${TMP_DIR}/workspace" RUNNER_TEMP="${TMP_DIR}/workspace-runner-temp" \
 GITHUB_OUTPUT="${TMP_DIR}/github-output" \
 GITHUB_ENV="${TMP_DIR}/github-env" \
 RESOLVED_COMMANDS='review test' \
@@ -49,7 +49,7 @@ if ! grep -q 'FAILED (exit code 1)' "${TMP_DIR}/run.log"; then
   exit 1
 fi
 
-ci_result="${TMP_DIR}/workspace/homeboy-ci-results/review-test.json"
+ci_result="${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/review-test.json"
 if ! jq -e . "${ci_result}" >/dev/null 2>&1; then
   printf 'FAIL: valid review test result is retained at the durable CI result path\n'
   exit 1
@@ -58,8 +58,8 @@ fi
 printf 'PASS: failed review test records a current-run failure at its durable result path\n'
 
 for output_mode in missing malformed; do
-  mkdir -p "${TMP_DIR}/workspace/homeboy-ci-results"
-  printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review","success":true,"status":"succeeded","exit_code":0,"data":{"stale":true}}' > "${TMP_DIR}/workspace/homeboy-ci-results/review-test.json"
+  mkdir -p "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results"
+  printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review","success":true,"status":"succeeded","exit_code":0,"data":{"stale":true}}' > "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/review-test.json"
   cat > "${TMP_DIR}/bin/homeboy" <<'SH'
 #!/usr/bin/env bash
 output=""
@@ -77,14 +77,14 @@ exit 0
 SH
   chmod +x "${TMP_DIR}/bin/homeboy"
   set +e
-  PATH="${TMP_DIR}/bin:${PATH}" GITHUB_ACTION_PATH="${ROOT_DIR}" GITHUB_WORKSPACE="${TMP_DIR}/workspace" GITHUB_OUTPUT="${TMP_DIR}/${output_mode}-output" GITHUB_ENV="${TMP_DIR}/${output_mode}-env" RESOLVED_COMMANDS='review test' COMPONENT_NAME='homeboy-action' FAKE_OUTPUT_MODE="${output_mode}" bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/${output_mode}.log" 2>&1
+  PATH="${TMP_DIR}/bin:${PATH}" GITHUB_ACTION_PATH="${ROOT_DIR}" GITHUB_WORKSPACE="${TMP_DIR}/workspace" RUNNER_TEMP="${TMP_DIR}/workspace-runner-temp" GITHUB_OUTPUT="${TMP_DIR}/${output_mode}-output" GITHUB_ENV="${TMP_DIR}/${output_mode}-env" RESOLVED_COMMANDS='review test' COMPONENT_NAME='homeboy-action' FAKE_OUTPUT_MODE="${output_mode}" bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/${output_mode}.log" 2>&1
   exit_code=$?
   set -e
   if [ "${exit_code}" -ne 1 ] || ! grep -q '^results={"review test":"fail"}$' "${TMP_DIR}/${output_mode}-output" || ! grep -q 'did not write valid structured output' "${TMP_DIR}/${output_mode}.log"; then
     printf 'FAIL: zero-exit %s structured output fails closed\n' "${output_mode}"
     exit 1
   fi
-  if [ -e "${TMP_DIR}/workspace/homeboy-ci-results/review-test.json" ]; then
+  if [ -e "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/review-test.json" ]; then
     printf 'FAIL: %s output is advertised as a CI result\n' "${output_mode}"
     exit 1
   fi
@@ -111,7 +111,7 @@ exit 0
 SH
   chmod +x "${TMP_DIR}/bin/homeboy"
   set +e
-  PATH="${TMP_DIR}/bin:${PATH}" GITHUB_ACTION_PATH="${ROOT_DIR}" GITHUB_WORKSPACE="${TMP_DIR}/workspace" GITHUB_OUTPUT="${TMP_DIR}/${envelope_mode}-output" GITHUB_ENV="${TMP_DIR}/${envelope_mode}-env" RESOLVED_COMMANDS='review test' COMPONENT_NAME='homeboy-action' FAKE_ENVELOPE_MODE="${envelope_mode}" bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/${envelope_mode}.log" 2>&1
+  PATH="${TMP_DIR}/bin:${PATH}" GITHUB_ACTION_PATH="${ROOT_DIR}" GITHUB_WORKSPACE="${TMP_DIR}/workspace" RUNNER_TEMP="${TMP_DIR}/workspace-runner-temp" GITHUB_OUTPUT="${TMP_DIR}/${envelope_mode}-output" GITHUB_ENV="${TMP_DIR}/${envelope_mode}-env" RESOLVED_COMMANDS='review test' COMPONENT_NAME='homeboy-action' FAKE_ENVELOPE_MODE="${envelope_mode}" bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/${envelope_mode}.log" 2>&1
   exit_code=$?
   set -e
   if [ "${exit_code}" -ne 1 ] || ! grep -q '^results={"review test":"fail"}$' "${TMP_DIR}/${envelope_mode}-output"; then
@@ -143,7 +143,7 @@ chmod +x "${TMP_DIR}/bin/homeboy"
 set +e
 PATH="${TMP_DIR}/bin:${PATH}" \
 GITHUB_ACTION_PATH="${ROOT_DIR}" \
-GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+GITHUB_WORKSPACE="${TMP_DIR}/workspace" RUNNER_TEMP="${TMP_DIR}/workspace-runner-temp" \
 GITHUB_OUTPUT="${TMP_DIR}/root-command-output" \
 GITHUB_ENV="${TMP_DIR}/root-command-env" \
 RESOLVED_COMMANDS='review lint' \
@@ -179,7 +179,7 @@ chmod +x "${TMP_DIR}/bin/homeboy"
 
 PATH="${TMP_DIR}/bin:${PATH}" \
 GITHUB_ACTION_PATH="${ROOT_DIR}" \
-GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+GITHUB_WORKSPACE="${TMP_DIR}/workspace" RUNNER_TEMP="${TMP_DIR}/workspace-runner-temp" \
 GITHUB_OUTPUT="${TMP_DIR}/lint-output" \
 GITHUB_ENV="${TMP_DIR}/lint-env" \
 RESOLVED_COMMANDS='lint' \
@@ -191,11 +191,16 @@ if ! grep -q '^results={"lint":"pass"}$' "${TMP_DIR}/lint-output"; then
   cat "${TMP_DIR}/lint.log"
   exit 1
 fi
-if ! jq -e '.command == "review" and .operation == "lint" and .success == true and .exit_code == 0' "${TMP_DIR}/workspace/homeboy-ci-results/lint.json" >/dev/null; then
+if ! jq -e '.command == "review" and .operation == "lint" and .success == true and .exit_code == 0' "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/lint.json" >/dev/null; then
   printf 'FAIL: passing lint result is not retained at its durable path\n'
   exit 1
 fi
 printf 'PASS: passing legacy lint accepts and retains the review result envelope\n'
+if [ -e "${TMP_DIR}/workspace/homeboy-ci-results" ]; then
+  printf 'FAIL: CI results were written inside the checkout\n'
+  exit 1
+fi
+printf 'PASS: CI results stay outside the checkout\n'
 
 cat > "${TMP_DIR}/bin/homeboy" <<'SH'
 #!/usr/bin/env bash
@@ -205,13 +210,13 @@ while :; do sleep 1; done
 SH
 chmod +x "${TMP_DIR}/bin/homeboy"
 
-mkdir -p "${TMP_DIR}/workspace/homeboy-ci-results"
-printf '%s\n' '{"stale":true}' > "${TMP_DIR}/workspace/homeboy-ci-results/review-test.test-inventory.json"
-printf '%s\n' '{"stale":true}' > "${TMP_DIR}/workspace/homeboy-ci-results/review-test.test-outcomes.json"
+mkdir -p "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results"
+printf '%s\n' '{"stale":true}' > "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/review-test.test-inventory.json"
+printf '%s\n' '{"stale":true}' > "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/review-test.test-outcomes.json"
 set +e
 PATH="${TMP_DIR}/bin:${PATH}" \
 GITHUB_ACTION_PATH="${ROOT_DIR}" \
-GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+GITHUB_WORKSPACE="${TMP_DIR}/workspace" RUNNER_TEMP="${TMP_DIR}/workspace-runner-temp" \
 GITHUB_OUTPUT="${TMP_DIR}/timeout-output" \
 GITHUB_ENV="${TMP_DIR}/timeout-env" \
 RESOLVED_COMMANDS='review test' \
@@ -230,7 +235,7 @@ if ! grep -q 'TIMED OUT (exit code 124)' "${TMP_DIR}/timeout.log"; then
   printf 'FAIL: timed out review test does not report its timeout classification\n'
   exit 1
 fi
-if [ -e "${TMP_DIR}/workspace/homeboy-ci-results/review-test.test-inventory.json" ] || [ -e "${TMP_DIR}/workspace/homeboy-ci-results/review-test.test-outcomes.json" ]; then
+if [ -e "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/review-test.test-inventory.json" ] || [ -e "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/review-test.test-outcomes.json" ]; then
   printf 'FAIL: timed out Test retained stale paired sidecars\n'
   exit 1
 fi
@@ -255,32 +260,32 @@ printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"bench","success"
 SH
 chmod +x "${TMP_DIR}/bin/homeboy"
 
-mkdir -p "${TMP_DIR}/workspace/homeboy-ci-results"
-printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"bench","success":true,"status":"succeeded","exit_code":0,"data":{"stale":true}}' > "${TMP_DIR}/workspace/homeboy-ci-results/bench.json"
+mkdir -p "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results"
+printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"bench","success":true,"status":"succeeded","exit_code":0,"data":{"stale":true}}' > "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/bench.json"
 
 PATH="${TMP_DIR}/bin:${PATH}" \
 GITHUB_ACTION_PATH="${ROOT_DIR}" \
-GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+GITHUB_WORKSPACE="${TMP_DIR}/workspace" RUNNER_TEMP="${TMP_DIR}/workspace-runner-temp" \
 GITHUB_OUTPUT="${TMP_DIR}/bench-output" \
 GITHUB_ENV="${TMP_DIR}/bench-env" \
 RESOLVED_COMMANDS='bench' \
 COMPONENT_NAME='homeboy-action' \
 bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/bench.log" 2>&1
 
-if ! jq -e '.data.current == true' "${TMP_DIR}/workspace/homeboy-ci-results/bench.json" >/dev/null 2>&1; then
+if ! jq -e '.data.current == true' "${TMP_DIR}/workspace-runner-temp/homeboy-ci-results/bench.json" >/dev/null 2>&1; then
   printf 'FAIL: bench result does not replace stale output at its durable result path\n'
   exit 1
 fi
 printf 'PASS: bench requires current output at its durable result path\n'
 
-mkdir -p "${TMP_DIR}/symlink-workspace" "${TMP_DIR}/outside-results"
+mkdir -p "${TMP_DIR}/symlink-workspace" "${TMP_DIR}/symlink-workspace-runner-temp" "${TMP_DIR}/outside-results"
 printf 'outside sentinel\n' > "${TMP_DIR}/outside-results/sentinel"
-ln -s "${TMP_DIR}/outside-results" "${TMP_DIR}/symlink-workspace/homeboy-ci-results"
+ln -s "${TMP_DIR}/outside-results" "${TMP_DIR}/symlink-workspace-runner-temp/homeboy-ci-results"
 
 set +e
 PATH="${TMP_DIR}/bin:${PATH}" \
 GITHUB_ACTION_PATH="${ROOT_DIR}" \
-GITHUB_WORKSPACE="${TMP_DIR}/symlink-workspace" \
+GITHUB_WORKSPACE="${TMP_DIR}/symlink-workspace" RUNNER_TEMP="${TMP_DIR}/symlink-workspace-runner-temp" \
 GITHUB_OUTPUT="${TMP_DIR}/symlink-dir-output" \
 GITHUB_ENV="${TMP_DIR}/symlink-dir-env" \
 RESOLVED_COMMANDS='bench' \
@@ -295,21 +300,21 @@ if [ "${exit_code}" -ne 1 ] || ! grep -q 'must be a real directory' "${TMP_DIR}/
 fi
 printf 'PASS: symlinked CI results directory fails closed without touching its target\n'
 
-mkdir -p "${TMP_DIR}/target-symlink-workspace/homeboy-ci-results"
+mkdir -p "${TMP_DIR}/target-symlink-workspace-runner-temp/homeboy-ci-results"
 printf 'outside result sentinel\n' > "${TMP_DIR}/outside-results/bench.json"
-ln -s "${TMP_DIR}/outside-results/bench.json" "${TMP_DIR}/target-symlink-workspace/homeboy-ci-results/bench.json"
+ln -s "${TMP_DIR}/outside-results/bench.json" "${TMP_DIR}/target-symlink-workspace-runner-temp/homeboy-ci-results/bench.json"
 
 PATH="${TMP_DIR}/bin:${PATH}" \
 GITHUB_ACTION_PATH="${ROOT_DIR}" \
-GITHUB_WORKSPACE="${TMP_DIR}/target-symlink-workspace" \
+GITHUB_WORKSPACE="${TMP_DIR}/target-symlink-workspace" RUNNER_TEMP="${TMP_DIR}/target-symlink-workspace-runner-temp" \
 GITHUB_OUTPUT="${TMP_DIR}/symlink-target-output" \
 GITHUB_ENV="${TMP_DIR}/symlink-target-env" \
 RESOLVED_COMMANDS='bench' \
 COMPONENT_NAME='homeboy-action' \
 bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/symlink-target.log" 2>&1
 
-if [ -L "${TMP_DIR}/target-symlink-workspace/homeboy-ci-results/bench.json" ] \
-  || ! jq -e '.data.current == true' "${TMP_DIR}/target-symlink-workspace/homeboy-ci-results/bench.json" >/dev/null 2>&1 \
+if [ -L "${TMP_DIR}/target-symlink-workspace-runner-temp/homeboy-ci-results/bench.json" ] \
+  || ! jq -e '.data.current == true' "${TMP_DIR}/target-symlink-workspace-runner-temp/homeboy-ci-results/bench.json" >/dev/null 2>&1 \
   || ! grep -qx 'outside result sentinel' "${TMP_DIR}/outside-results/bench.json"; then
   printf 'FAIL: symlinked CI result target is replaced without writing outside the workspace\n'
   exit 1
