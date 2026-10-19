@@ -280,24 +280,13 @@ pub fn worktree_files_changed(root: &Path) -> Option<usize> {
 
 /// Count entries in `git status --porcelain` output.
 ///
-/// Homeboy's own run state lives under `.homeboy/` inside a cook worktree and
-/// is written by the controller, not the provider. Counting it would report
-/// edits on a cook where the provider has written nothing at all — precisely
-/// the signal this exists to make trustworthy.
+/// Homeboy keeps its own runner state outside the cook worktree, so every
+/// entry here is provider output.
 pub fn count_porcelain_entries(porcelain: &str) -> usize {
     porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .filter(|line| !is_homeboy_internal_entry(line))
         .count()
-}
-
-fn is_homeboy_internal_entry(line: &str) -> bool {
-    // Porcelain v1 status lines are `XY <path>`; a rename is `XY <old> -> <new>`
-    // and the destination is what matters.
-    let path = line.get(3..).unwrap_or("").trim();
-    let path = path.rsplit(" -> ").next().unwrap_or(path).trim_matches('"');
-    path == ".homeboy" || path.starts_with(".homeboy/")
 }
 
 /// Count commits made in `root` since `base_sha`.
@@ -318,14 +307,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn counts_provider_written_files_but_not_homeboy_run_state() {
-        // Controller-written `.homeboy/` state must never read as provider
-        // progress: a cook where the agent wrote nothing has to report zero.
+    fn counts_provider_written_files() {
         let porcelain = concat!(
             " M crates/homeboy-agents/src/lib.rs\n",
             "?? crates/homeboy-agents/src/new_module.rs\n",
-            "?? .homeboy/run/state.json\n",
-            " M .homeboy\n",
             "R  docs/old.md -> docs/new.md\n",
             "\n",
         );
@@ -525,11 +510,6 @@ mod tests {
         assert_eq!(worktree_files_changed(root), Some(0));
 
         std::fs::write(root.join("edited.rs"), "fn main() {}\n").expect("write provider edit");
-        assert_eq!(worktree_files_changed(root), Some(1));
-
-        // Controller-owned run state is not provider progress.
-        std::fs::create_dir_all(root.join(".homeboy/run")).expect("create run state directory");
-        std::fs::write(root.join(".homeboy/run/state.json"), "{}\n").expect("write run state");
         assert_eq!(worktree_files_changed(root), Some(1));
     }
 

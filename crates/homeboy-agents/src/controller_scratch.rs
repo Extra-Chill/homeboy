@@ -2165,15 +2165,7 @@ pub(crate) fn workspace_matches_patch(workspace: &Path, base: &str, patch: &[u8]
     let readonly_env = &[("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string())];
     let Ok(status) = git::run_git_with_env(
         workspace,
-        &[
-            "status",
-            "--porcelain=v1",
-            "--ignored",
-            "--",
-            ".",
-            ":(exclude).homeboy/runner-workspace.json",
-            ":(exclude).homeboy/lab-at-files/**",
-        ],
+        &["status", "--porcelain=v1", "--ignored", "--", "."],
         "git status",
         readonly_env,
     ) else {
@@ -2200,14 +2192,7 @@ pub(crate) fn workspace_matches_patch(workspace: &Path, base: &str, patch: &[u8]
     .is_err()
         || git::run_git_with_env(
             workspace,
-            &[
-                "add",
-                "--all",
-                "--",
-                ".",
-                ":(exclude).homeboy/runner-workspace.json",
-                ":(exclude).homeboy/lab-at-files/**",
-            ],
+            &["add", "--all", "--", "."],
             "git add scratch index",
             index_env,
         )
@@ -2226,8 +2211,6 @@ pub(crate) fn workspace_matches_patch(workspace: &Path, base: &str, patch: &[u8]
             "HEAD",
             "--",
             ".",
-            ":(exclude).homeboy/runner-workspace.json",
-            ":(exclude).homeboy/lab-at-files/**",
         ],
         "git diff scratch index",
         index_env,
@@ -4946,14 +4929,6 @@ mod tests {
         assert!(
             workspace_matches_patch(&worktree, &base, &patch),
             "the unstaged candidate must converge after its exact lock clears"
-        );
-
-        fs::create_dir_all(worktree.join(".homeboy/lab-at-files")).expect("runner metadata");
-        fs::write(worktree.join(".homeboy/runner-workspace.json"), "{}").expect("runner metadata");
-        fs::write(worktree.join(".homeboy/lab-at-files/plan.json"), "{}").expect("runner metadata");
-        assert!(
-            workspace_matches_patch(&worktree, &base, &patch),
-            "Homeboy runner metadata excluded from harvest must not block compaction"
         );
 
         fs::write(worktree.join("untracked.txt"), "not in the patch\n").expect("extra file");

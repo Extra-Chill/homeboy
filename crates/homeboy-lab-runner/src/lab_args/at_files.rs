@@ -214,8 +214,8 @@ fn remote_path_for_at_file(
 ) -> String {
     let filename = filename.and_then(|value| value.to_str()).unwrap_or("input");
     format!(
-        "{}/.homeboy/lab-at-files/sha256-{}-{}",
-        remote_cwd.trim_end_matches('/'),
+        "{}/sha256-{}-{}",
+        homeboy_lab_contract::lab::handoff::runner_workspace_lab_at_files_dir(remote_cwd),
         content_sha256,
         sanitize_remote_filename(filename)
     )

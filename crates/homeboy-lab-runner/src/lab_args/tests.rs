@@ -2749,7 +2749,7 @@ mod lab_args_rewrite_tests {
         assert_eq!(specs.len(), 1);
         assert!(specs[0]
             .remote_spec
-            .starts_with("@/runner/workspace/.homeboy/lab-at-files/"));
+            .starts_with("@/runner/workspace-homeboy-state/lab-at-files/"));
         assert!(specs[0].remote_spec.ends_with("-spec.json"));
         assert_eq!(
             remap_lab_at_file_args(&args, &specs),

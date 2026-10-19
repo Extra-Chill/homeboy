@@ -60,7 +60,7 @@ use harvest::{
     committed_harvest_failure, committed_harvest_preflight_outcome, harvest_committed_patch,
     harvest_uncommitted_patch,
 };
-pub(crate) use harvest::{git_output, HarvestError, RUNNER_METADATA_EXCLUDE_PATHSPECS};
+pub(crate) use harvest::{git_output, HarvestError};
 use outcome::event;
 pub use postprocess::run_postprocess_worker;
 use resources::{

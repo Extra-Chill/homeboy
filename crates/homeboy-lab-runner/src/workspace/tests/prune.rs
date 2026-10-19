@@ -13,7 +13,7 @@ use crate::workspace::sync::{
     ssh_process_liveness_command, ssh_prune_delete_command_with_terminal_authority,
     ssh_prune_delete_materialized_workspace_command, ssh_prune_delete_orphan_artifact_dir_command,
     sync_workspace, update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
-    ActiveResourceLifecycleLiveness, RunAuthority, WORKSPACE_METADATA_FILE,
+    workspace_metadata_file, ActiveResourceLifecycleLiveness, RunAuthority,
 };
 use crate::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -245,7 +245,7 @@ fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspace = runner_root.path().join("_lab_workspaces/active-lease");
         write_orphan_workspace(&workspace);
-        let metadata_path = workspace.join(WORKSPACE_METADATA_FILE);
+        let metadata_path = workspace_metadata_file(&workspace);
         let mut metadata: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
                 .expect("metadata json");
@@ -642,9 +642,8 @@ fn non_agent_task_polling_loss_retains_job_owned_workspace_until_terminal_reconc
             workspace.retain_for_reconciliation("review-job-11380", Some("generation-review"));
         }
 
-        let metadata =
-            fs::read_to_string(Path::new(&synced.remote_path).join(WORKSPACE_METADATA_FILE))
-                .expect("retained workspace metadata");
+        let metadata = fs::read_to_string(workspace_metadata_file(&synced.remote_path))
+            .expect("retained workspace metadata");
         let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
         assert_eq!(metadata["job_id"], "review-job-11380");
         assert_eq!(
@@ -704,7 +703,7 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
             sync_options(source.display().to_string()),
         )
         .expect("sync workspace");
-        let metadata_path = Path::new(&synced.remote_path).join(".homeboy/runner-workspace.json");
+        let metadata_path = workspace_metadata_file(&synced.remote_path);
         let mut metadata: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
                 .expect("metadata json");
@@ -869,9 +868,8 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
             );
             handle.set_terminal_outcome(WorkspaceTerminalOutcome::Failure);
         }
-        let metadata =
-            fs::read_to_string(Path::new(&synced.remote_path).join(WORKSPACE_METADATA_FILE))
-                .expect("terminal metadata");
+        let metadata = fs::read_to_string(workspace_metadata_file(&synced.remote_path))
+            .expect("terminal metadata");
         let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
         assert_eq!(metadata["terminal_evidence"]["final_outcome"], "failure");
         assert_eq!(
@@ -990,10 +988,12 @@ fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
             .path()
             .join("_lab_workspaces")
             .join("repo's odd (name) with spaces");
-        fs::create_dir_all(workspace.join(".homeboy")).expect("workspace metadata dir");
+        fs::create_dir_all(&workspace).expect("workspace metadata dir");
+        fs::create_dir_all(workspace_metadata_file(&workspace).parent().unwrap())
+            .expect("workspace metadata dir");
         fs::write(workspace.join("file.txt"), "orphan\n").expect("workspace file");
         fs::write(
-            workspace.join(".homeboy/runner-workspace.json"),
+            workspace_metadata_file(&workspace),
             serde_json::json!({
                 "schema": "homeboy/runner-workspace/v1",
                 "runner_id": "lab-local-prune-odd-preview",
@@ -1175,7 +1175,7 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
         write_orphan_workspace(&active);
         let unknown = workspaces_root.join("unknown-authority");
         write_orphan_workspace(&unknown);
-        let metadata_path = unknown.join(WORKSPACE_METADATA_FILE);
+        let metadata_path = workspace_metadata_file(&unknown);
         let mut metadata: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
                 .expect("metadata JSON");
@@ -1283,7 +1283,9 @@ fn age_entry(path: &Path) {
 
 /// A metadata-backed workspace shaped like `sync_workspace` writes it.
 fn write_family_workspace(path: &Path, local_path: &Path, run_id: Option<&str>) {
-    fs::create_dir_all(path.join(".homeboy")).expect("workspace metadata dir");
+    fs::create_dir_all(&path).expect("workspace metadata dir");
+    fs::create_dir_all(workspace_metadata_file(path).parent().unwrap())
+        .expect("workspace metadata dir");
     fs::write(path.join("file.txt"), "workspace\n").expect("workspace file");
     let mut metadata = serde_json::json!({
         "schema": "homeboy/runner-workspace/v1",
@@ -1309,7 +1311,7 @@ fn write_family_workspace(path: &Path, local_path: &Path, run_id: Option<&str>) 
             "status": "active"
         });
     }
-    fs::write(path.join(WORKSPACE_METADATA_FILE), metadata.to_string()).expect("metadata");
+    fs::write(workspace_metadata_file(path), metadata.to_string()).expect("metadata");
 }
 
 /// Live Lab: 1,515 top-level entries, yet a cursorless prune page (what the
@@ -1552,8 +1554,10 @@ fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
             if ORPHAN_INDICES.contains(&index) {
                 write_orphan_workspace(&workspace);
             } else if index % 11 == 0 {
-                fs::create_dir_all(workspace.join(".homeboy")).expect("malformed workspace");
-                fs::write(workspace.join(WORKSPACE_METADATA_FILE), "{malformed")
+                fs::create_dir_all(&workspace).expect("malformed workspace");
+                fs::create_dir_all(workspace_metadata_file(&workspace).parent().unwrap())
+                    .expect("malformed workspace");
+                fs::write(workspace_metadata_file(&workspace), "{malformed")
                     .expect("malformed metadata");
             } else {
                 fs::create_dir_all(workspace).expect("metadata-free workspace");
@@ -1741,7 +1745,7 @@ fn unavailable_job_authority_fails_closed_despite_inactive_process_evidence() {
         .expect("create runner");
         let runner = crate::load("lab-local-prune-advisory-size").expect("load runner");
         let mut metadata: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(workspace.join(WORKSPACE_METADATA_FILE)).expect("metadata"),
+            &fs::read_to_string(workspace_metadata_file(&workspace)).expect("metadata"),
         )
         .expect("metadata json");
 
@@ -1774,10 +1778,12 @@ fn ssh_prune_scan_command_handles_paths_that_need_shell_quoting() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().join("root's (quoted) workspaces");
     let workspace = root.join("repo's odd (name) with spaces");
-    fs::create_dir_all(workspace.join(".homeboy")).expect("workspace metadata dir");
+    fs::create_dir_all(&workspace).expect("workspace metadata dir");
+    fs::create_dir_all(workspace_metadata_file(&workspace).parent().unwrap())
+        .expect("workspace metadata dir");
     fs::write(workspace.join("file.txt"), "orphan\n").expect("workspace file");
     fs::write(
-        workspace.join(".homeboy/runner-workspace.json"),
+        workspace_metadata_file(&workspace),
         serde_json::json!({
             "schema": "homeboy/runner-workspace/v1",
             "runner_id": "lab-ssh-prune-odd-scan",
@@ -1868,7 +1874,7 @@ fn ssh_shaped_prune_delete_revalidates_lifecycle_and_deletes_atomically() {
 
     let active = root.path().join("_lab_workspaces/active");
     write_orphan_workspace(&active);
-    let metadata_path = active.join(WORKSPACE_METADATA_FILE);
+    let metadata_path = workspace_metadata_file(&active);
     let mut metadata: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
             .expect("metadata json");
@@ -1900,7 +1906,7 @@ fn ssh_materialized_workspace_delete_requires_exact_inactive_lifecycle() {
     let workspaces = root.path().join("_lab_workspaces");
     let eligible = workspaces.join("eligible");
     write_materialized_workspace(&eligible);
-    let metadata_path = eligible.join(WORKSPACE_METADATA_FILE);
+    let metadata_path = workspace_metadata_file(&eligible);
     let mut metadata: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
             .expect("metadata json");
@@ -1916,7 +1922,7 @@ fn ssh_materialized_workspace_delete_requires_exact_inactive_lifecycle() {
     let ambiguous = workspaces.join("ambiguous");
     write_materialized_workspace(&ambiguous);
     let expected_metadata = workspace_metadata(&ambiguous);
-    let metadata_path = ambiguous.join(WORKSPACE_METADATA_FILE);
+    let metadata_path = workspace_metadata_file(&ambiguous);
     let mut metadata: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
             .expect("metadata json");
@@ -1941,8 +1947,7 @@ fn ssh_materialized_workspace_delete_requires_exact_inactive_lifecycle() {
     let malformed = workspaces.join("malformed");
     write_materialized_workspace(&malformed);
     let expected_metadata = workspace_metadata(&malformed);
-    fs::write(malformed.join(WORKSPACE_METADATA_FILE), "{malformed")
-        .expect("write malformed metadata");
+    fs::write(workspace_metadata_file(&malformed), "{malformed").expect("write malformed metadata");
     let output = run_materialized_workspace_delete(&workspaces, &malformed, &expected_metadata);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
@@ -1973,7 +1978,7 @@ fn snapshot_git_materialized_workspace_uses_the_same_bounded_lifecycle_contract(
     let root = tempfile::tempdir().expect("workspace root");
     let workspace = root.path().join("_lab_workspaces/snapshot-git");
     write_materialized_workspace(&workspace);
-    let metadata_path = workspace.join(WORKSPACE_METADATA_FILE);
+    let metadata_path = workspace_metadata_file(&workspace);
     let mut metadata: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
             .expect("metadata json");
@@ -1991,7 +1996,7 @@ fn ssh_terminal_lifecycle_delete_revalidates_process_ownership() {
     let root = tempfile::tempdir().expect("workspace root");
     let workspace = root.path().join("_lab_workspaces/terminal");
     write_orphan_workspace(&workspace);
-    let metadata_path = workspace.join(WORKSPACE_METADATA_FILE);
+    let metadata_path = workspace_metadata_file(&workspace);
     fs::write(
         &metadata_path,
         active_lifecycle_metadata("terminal-run", "terminal-run").to_string(),
@@ -2029,7 +2034,7 @@ fn ssh_terminal_lifecycle_delete_requires_matching_owner_in_pretty_metadata() {
     let terminal = workspaces.join("terminal");
     write_orphan_workspace(&terminal);
     fs::write(
-        terminal.join(WORKSPACE_METADATA_FILE),
+        workspace_metadata_file(&terminal),
         serde_json::to_string_pretty(&active_lifecycle_metadata("terminal-run", "terminal-run"))
             .expect("pretty terminal metadata"),
     )
@@ -2052,7 +2057,7 @@ fn ssh_terminal_lifecycle_delete_requires_matching_owner_in_pretty_metadata() {
     let ambiguous = workspaces.join("ambiguous");
     write_orphan_workspace(&ambiguous);
     fs::write(
-        ambiguous.join(WORKSPACE_METADATA_FILE),
+        workspace_metadata_file(&ambiguous),
         active_lifecycle_metadata("terminal-run", "other-run").to_string(),
     )
     .expect("write ambiguous lifecycle metadata");
@@ -2089,10 +2094,12 @@ fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {
 }
 
 fn write_orphan_workspace(path: &Path) {
-    fs::create_dir_all(path.join(".homeboy")).expect("workspace metadata dir");
+    fs::create_dir_all(&path).expect("workspace metadata dir");
+    fs::create_dir_all(workspace_metadata_file(path).parent().unwrap())
+        .expect("workspace metadata dir");
     fs::write(path.join("file.txt"), "orphan\n").expect("workspace file");
     fs::write(
-        path.join(WORKSPACE_METADATA_FILE),
+        workspace_metadata_file(path),
         serde_json::json!({
             "schema": "homeboy/runner-workspace/v1",
             "local_path": path.join("missing-source").display().to_string(),
@@ -2103,10 +2110,12 @@ fn write_orphan_workspace(path: &Path) {
 }
 
 fn write_terminal_workspace(path: &Path, source: &Path, runner_root: &Path, run_id: &str) {
-    fs::create_dir_all(path.join(".homeboy")).expect("workspace metadata dir");
+    fs::create_dir_all(&path).expect("workspace metadata dir");
+    fs::create_dir_all(workspace_metadata_file(path).parent().unwrap())
+        .expect("workspace metadata dir");
     fs::write(path.join("file.txt"), "retained\n").expect("workspace file");
     fs::write(
-        path.join(WORKSPACE_METADATA_FILE),
+        workspace_metadata_file(path),
         serde_json::json!({
             "schema": "homeboy/runner-workspace/v1",
             "run_id": run_id,
@@ -2135,7 +2144,7 @@ fn write_terminal_workspace(path: &Path, source: &Path, runner_root: &Path, run_
 fn write_materialized_workspace(path: &Path) {
     write_orphan_workspace(path);
     fs::write(
-        path.join(WORKSPACE_METADATA_FILE),
+        workspace_metadata_file(path),
         serde_json::json!({
             "schema": "homeboy/runner-workspace/v1",
             "runner_id": "lab-ssh-prune-materialized",
@@ -2162,7 +2171,7 @@ fn encoded_workspace_metadata(path: &Path) -> String {
 }
 
 fn workspace_metadata(path: &Path) -> Vec<u8> {
-    fs::read(path.join(WORKSPACE_METADATA_FILE)).expect("read workspace metadata for compare")
+    fs::read(workspace_metadata_file(path)).expect("read workspace metadata for compare")
 }
 
 fn run_materialized_workspace_delete(

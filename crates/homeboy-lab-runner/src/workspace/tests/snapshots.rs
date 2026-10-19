@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::git;
 use crate::workspace::snapshot::{incremental_prepare_command_fits, snapshot_manifest_delta};
+use crate::workspace::sync::workspace_metadata_file;
 use crate::workspace::sync::{
     prepared_source_cache_command, prepared_source_view_command,
     reuse_compatible_snapshot_workspace, save_prepared_source_cache, sync_workspace,
@@ -52,9 +53,11 @@ fn workspace_snapshot_scan_skips_a_child_removed_during_atomic_promotion() {
         .expect("PATH lock");
     let root = tempfile::tempdir().expect("workspace root");
     let temporary = root.path().join("workspace.tmp-promoting");
-    fs::create_dir_all(temporary.join(".homeboy")).expect("temporary workspace");
+    fs::create_dir_all(&temporary).expect("temporary workspace");
+    fs::create_dir_all(workspace_metadata_file(&temporary).parent().unwrap())
+        .expect("temporary workspace state");
     fs::write(
-        temporary.join(".homeboy/runner-workspace.json"),
+        workspace_metadata_file(&temporary),
         r#"{"schema":"homeboy/runner-workspace/v1"}"#,
     )
     .expect("temporary metadata");
@@ -110,8 +113,10 @@ fn workspace_snapshot_scan_fails_when_its_root_disappears() {
         .expect("PATH lock");
     let root = tempfile::tempdir().expect("workspace root");
     let workspace = root.path().join("workspace");
-    fs::create_dir_all(workspace.join(".homeboy")).expect("workspace");
-    fs::write(workspace.join(".homeboy/runner-workspace.json"), "{}").expect("workspace metadata");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::create_dir_all(workspace_metadata_file(&workspace).parent().unwrap())
+        .expect("workspace state");
+    fs::write(workspace_metadata_file(&workspace), "{}").expect("workspace metadata");
     let shim_root = tempfile::tempdir().expect("base64 shim root");
     let shim = shim_root.path().join("base64");
     fs::write(
@@ -226,9 +231,9 @@ fn stale_truncated_metadata_does_not_block_current_workspace_sync() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         create_local_runner("lab-local-stale-metadata", runner_root.path());
-        let stale_metadata = runner_root
-            .path()
-            .join("_lab_workspaces/stale-unrelated/.homeboy/runner-workspace.json");
+        let stale_checkout = runner_root.path().join("_lab_workspaces/stale-unrelated");
+        fs::create_dir_all(&stale_checkout).expect("stale checkout");
+        let stale_metadata = workspace_metadata_file(&stale_checkout);
         fs::create_dir_all(stale_metadata.parent().expect("metadata parent"))
             .expect("stale workspace parent");
         fs::write(&stale_metadata, "{\n  \"runner_id\": \"").expect("truncated metadata");
@@ -258,7 +263,7 @@ fn stale_truncated_metadata_does_not_block_current_workspace_sync() {
         assert_eq!(output.skipped_invalid_metadata.len(), 1);
         let diagnostic = &output.skipped_invalid_metadata[0];
         assert_eq!(diagnostic.source, stale_metadata.display().to_string());
-        assert_eq!(diagnostic.field, ".homeboy/runner-workspace.json");
+        assert_eq!(diagnostic.field, "runner-workspace.json");
         assert!(diagnostic.error.contains("EOF while parsing a string"));
         assert!(diagnostic.error.len() <= 512 + "... [truncated]".len());
     });
@@ -279,9 +284,9 @@ fn ssh_snapshot_listing_preserves_entries_and_isolates_invalid_metadata() {
             ),
         )
         .expect("sync");
-        let invalid = runner_root
-            .path()
-            .join("_lab_workspaces/invalid/.homeboy/runner-workspace.json");
+        let invalid_checkout = runner_root.path().join("_lab_workspaces/invalid");
+        fs::create_dir_all(&invalid_checkout).expect("invalid checkout");
+        let invalid = workspace_metadata_file(&invalid_checkout);
         fs::create_dir_all(invalid.parent().expect("invalid parent")).expect("invalid workspace");
         fs::write(&invalid, "{\"workspace_lease\":").expect("invalid metadata");
 
@@ -428,8 +433,7 @@ fn clean_snapshot_reuse_ignores_legacy_metadata_without_a_lease() {
             sync_options(source.path().display().to_string(), None),
         )
         .expect("initial snapshot sync");
-        let metadata_path =
-            std::path::Path::new(&synced.remote_path).join(".homeboy/runner-workspace.json");
+        let metadata_path = workspace_metadata_file(&synced.remote_path);
         let mut metadata: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&metadata_path).expect("workspace metadata"))
                 .expect("workspace metadata JSON");
@@ -595,10 +599,8 @@ fn same_commit_prepared_source_cache_creates_private_job_views() {
         );
         assert!(second.materialization_plan.controller_git_bundle.is_none());
         let second_metadata: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(
-                std::path::Path::new(&second.remote_path).join(".homeboy/runner-workspace.json"),
-            )
-            .expect("second workspace metadata"),
+            &fs::read_to_string(workspace_metadata_file(&second.remote_path))
+                .expect("second workspace metadata"),
         )
         .expect("parse second workspace metadata");
         assert_eq!(
@@ -1058,8 +1060,7 @@ fn incremental_snapshot_falls_back_when_seed_manifest_is_corrupt() {
             ),
         )
         .expect("first snapshot");
-        let metadata_path =
-            std::path::Path::new(&first.remote_path).join(".homeboy/runner-workspace.json");
+        let metadata_path = workspace_metadata_file(&first.remote_path);
         let mut metadata: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
                 .expect("metadata JSON");

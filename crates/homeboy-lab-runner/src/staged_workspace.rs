@@ -713,7 +713,7 @@ fn verify_controller_workspace(
     let directory = retained
         .map(|authority| &authority.directory)
         .unwrap_or(&opened);
-    let metadata = read_workspace_metadata_nofollow(&directory)?;
+    let metadata = read_workspace_metadata_nofollow(&workspace.remote_cwd)?;
     let actual_path = metadata
         .get("remote_path")
         .and_then(serde_json::Value::as_str);
@@ -815,7 +815,7 @@ fn verify_controller_workspace(
 }
 
 #[cfg(unix)]
-fn read_workspace_metadata_nofollow(directory: &File) -> Result<serde_json::Value> {
+fn read_workspace_metadata_nofollow(remote_cwd: &str) -> Result<serde_json::Value> {
     use std::ffi::CString;
 
     fn open_at(directory: &File, name: &str, flags: i32) -> Result<File> {
@@ -838,8 +838,29 @@ fn read_workspace_metadata_nofollow(directory: &File) -> Result<serde_json::Valu
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    let homeboy = open_at(directory, ".homeboy", libc::O_RDONLY | libc::O_DIRECTORY)?;
-    let mut metadata = open_at(&homeboy, "runner-workspace.json", libc::O_RDONLY)?;
+    // Runner metadata lives in the Homeboy-owned state sibling, outside the
+    // workspace tree. Open it without following links at either component.
+    let state_dir = homeboy_lab_contract::lab::handoff::runner_workspace_state_dir(remote_cwd);
+    let (parent, name) = state_dir.rsplit_once('/').ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "staged_workspace_materialization",
+            "runner workspace path has no parent directory",
+            Some(remote_cwd.to_string()),
+            None,
+        )
+    })?;
+    let parent = File::open(if parent.is_empty() { "/" } else { parent }).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("open runner workspace parent".to_string()),
+        )
+    })?;
+    let state = open_at(&parent, name, libc::O_RDONLY | libc::O_DIRECTORY)?;
+    let mut metadata = open_at(
+        &state,
+        homeboy_lab_contract::lab::handoff::RUNNER_WORKSPACE_METADATA_FILE_NAME,
+        libc::O_RDONLY,
+    )?;
     let mut bytes = Vec::new();
     metadata.read_to_end(&mut bytes).map_err(|error| {
         Error::internal_io(

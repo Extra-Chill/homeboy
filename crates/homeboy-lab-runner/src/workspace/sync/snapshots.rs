@@ -22,7 +22,11 @@ use super::super::types::{
     RunnerWorkspaceSnapshotsOutput,
 };
 use super::super::util::{ssh_client_for_runner, validate_absolute_path};
-use super::{shell_arg, workspace_repo_from_path, WORKSPACE_METADATA_FILE};
+use super::{
+    shell_arg, workspace_metadata_path, workspace_metadata_relative_to_checkout,
+    workspace_repo_from_path,
+};
+use homeboy_lab_contract::lab::handoff::RUNNER_WORKSPACE_METADATA_FILE_NAME;
 
 /// Incremental reuse is a source lookup, not a full runner inventory. The
 /// directory prefix comes from the same writer that allocates snapshot paths;
@@ -123,7 +127,7 @@ pub(super) fn workspace_snapshot_for_path(
     remote_path: &str,
 ) -> Result<Option<RunnerWorkspaceSnapshotEntry>> {
     validate_absolute_path("remote_path", remote_path)?;
-    let metadata_path = Path::new(remote_path).join(WORKSPACE_METADATA_FILE);
+    let metadata_path = PathBuf::from(workspace_metadata_path(remote_path));
     let content = match runner.kind {
         RunnerKind::Local => match fs::read_to_string(&metadata_path) {
             Ok(content) => content,
@@ -333,7 +337,8 @@ fn workspace_snapshots_local(
         if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
             continue;
         }
-        let metadata_path = entry.path().join(WORKSPACE_METADATA_FILE);
+        let metadata_path =
+            PathBuf::from(workspace_metadata_path(&entry.path().display().to_string()));
         let Ok(content) = fs::read_to_string(&metadata_path) else {
             continue;
         };
@@ -436,7 +441,9 @@ fn workspace_metadata_for_lease_local(
         if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
             continue;
         }
-        let Ok(content) = fs::read_to_string(entry.path().join(WORKSPACE_METADATA_FILE)) else {
+        let Ok(content) =
+            fs::read_to_string(workspace_metadata_path(&entry.path().display().to_string()))
+        else {
             continue;
         };
         let Ok(metadata) = serde_json::from_str::<RunnerWorkspaceMetadata>(&content) else {
@@ -493,7 +500,7 @@ fn invalid_workspace_metadata(
     };
     RunnerWorkspaceSnapshotInvalidMetadata {
         source: source.to_string(),
-        field: WORKSPACE_METADATA_FILE,
+        field: RUNNER_WORKSPACE_METADATA_FILE_NAME,
         error,
     }
 }
@@ -507,9 +514,9 @@ fn workspace_snapshot_scan_command_for_prefix(root: &str, prefix: Option<&str>) 
     // disappeared child as an error even though the snapshot root remains
     // valid, so read each candidate defensively and verify the root afterwards.
     format!(
-        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/{pattern}*; do [ -d \"$dir\" ] || continue; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; encoded=$(base64 < \"$meta\" 2>/dev/null) || continue; encoded=$(printf '%s' \"$encoded\" | tr -d '\\n'); printf \"%s\\t%s\\n\" \"$dir\" \"$encoded\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
+        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/{pattern}*; do [ -d \"$dir\" ] || continue; meta=\"$dir$meta_rel\"; [ -f \"$meta\" ] || continue; encoded=$(base64 < \"$meta\" 2>/dev/null) || continue; encoded=$(printf '%s' \"$encoded\" | tr -d '\\n'); printf \"%s\\t%s\\n\" \"$dir\" \"$encoded\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
         root = shell::quote_arg(root),
-        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        meta = shell::quote_arg(&workspace_metadata_relative_to_checkout()),
         pattern = prefix.map(|prefix| shell::quote_arg(&format!("{prefix}-"))).unwrap_or_default(),
     )
 }
@@ -532,13 +539,15 @@ mod source_lookup_tests {
             ("unrelated-source-new".to_string(), "2026-03-01T00:00:00Z"),
         ] {
             let path = workspaces.join(name);
-            fs::create_dir_all(path.join(".homeboy")).unwrap();
+            let metadata_path = PathBuf::from(workspace_metadata_path(&path.display().to_string()));
+            fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+            fs::create_dir_all(&path).unwrap();
             let metadata = serde_json::json!({
                 "schema": "homeboy/runner-workspace/v1", "runner_id": "local",
                 "local_path": source, "remote_path": path, "sync_mode": "snapshot",
                 "snapshot_identity": "fixture", "synced_at": created,
             });
-            fs::write(path.join(WORKSPACE_METADATA_FILE), metadata.to_string()).unwrap();
+            fs::write(&metadata_path, metadata.to_string()).unwrap();
         }
         let runner = crate::RunnerSpec {
             workspace_root: Some(root.path().display().to_string()),
@@ -588,11 +597,15 @@ mod source_lookup_tests {
         use std::sync::Arc;
 
         let root = tempfile::tempdir().unwrap();
-        let metadata = root
-            .path()
-            .join("_lab_workspaces/source-seed")
-            .join(WORKSPACE_METADATA_FILE);
+        let metadata = PathBuf::from(workspace_metadata_path(
+            &root
+                .path()
+                .join("_lab_workspaces/source-seed")
+                .display()
+                .to_string(),
+        ));
         fs::create_dir_all(metadata.parent().unwrap()).unwrap();
+        fs::create_dir_all(root.path().join("_lab_workspaces/source-seed")).unwrap();
         // Keep a real encoder busy long enough to exercise cancellation while
         // the lookup owns its child, rather than only the pre-spawn checkpoint.
         fs::write(metadata, vec![b' '; 16 * 1024 * 1024]).unwrap();
@@ -621,9 +634,9 @@ fn workspace_snapshot_lease_command(root: &str, lease: &str) -> String {
     let lease = serde_json::to_string(lease).expect("serialize workspace lease");
     let needle = format!("\"workspace_lease\":{lease}");
     format!(
-        "root={root}; meta_rel={meta}; needle={needle}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -d \"$dir\" ] && [ ! -L \"$dir\" ] || continue; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; tr -d '[:space:]' < \"$meta\" | grep -Fq -- \"$needle\" || continue; encoded=$(base64 < \"$meta\" 2>/dev/null | tr -d '\\n') || continue; printf '%s\\t%s\\n' \"$dir\" \"$encoded\"; exit 0; done; fi",
+        "root={root}; meta_rel={meta}; needle={needle}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -d \"$dir\" ] && [ ! -L \"$dir\" ] || continue; meta=\"$dir$meta_rel\"; [ -f \"$meta\" ] || continue; tr -d '[:space:]' < \"$meta\" | grep -Fq -- \"$needle\" || continue; encoded=$(base64 < \"$meta\" 2>/dev/null | tr -d '\\n') || continue; printf '%s\\t%s\\n' \"$dir\" \"$encoded\"; exit 0; done; fi",
         root = shell::quote_arg(root),
-        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        meta = shell::quote_arg(&workspace_metadata_relative_to_checkout()),
         needle = shell::quote_arg(&needle),
     )
 }
