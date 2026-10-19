@@ -7120,6 +7120,7 @@ pub(crate) fn cook_failure_context_with_stores(
                     &recipe,
                 ),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
+                agent_incomplete_reason(lifecycle_store, record_run_id).as_deref(),
                 record.as_ref().and_then(lab_handoff_runtime_recovery),
                 record
                     .as_ref()
@@ -7614,6 +7615,30 @@ fn ambiguous_promotion_artifact_ids(
     .unwrap_or_default()
 }
 
+/// The `incomplete_reason` of the attempt's recorded review form when the agent
+/// declared the task incomplete. Unreadable evidence yields `None`, leaving the
+/// step to the remaining recovery facts.
+fn agent_incomplete_reason(
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    run_id: &str,
+) -> Option<String> {
+    let owned;
+    let store = match lifecycle_store {
+        Some(store) => store,
+        None => {
+            owned =
+                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok()?;
+            &owned
+        }
+    };
+    let outcome = selected_outcome_for_attempt_in_store(store, run_id).ok()?;
+    crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
+        .ok()
+        .flatten()?
+        .incomplete_reason()
+        .map(str::to_string)
+}
+
 struct CookRecoveryActions {
     legal_actions: Vec<super::AgentTaskCookRecoveryAction>,
     next_actions: Vec<super::AgentTaskCookRecoveryAction>,
@@ -7644,6 +7669,7 @@ fn cook_recovery_actions(
         exact_checkpoint_candidate_mismatch,
         ambiguous_artifact_ids,
         false,
+        None,
         lab_runtime_recovery,
         None,
     )
@@ -7658,6 +7684,7 @@ fn cook_recovery_actions_with_prefix(
     exact_checkpoint_candidate_mismatch: bool,
     ambiguous_artifact_ids: Vec<String>,
     continuation_rearm_required: bool,
+    agent_incomplete_reason: Option<&str>,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
     prefix: Option<String>,
 ) -> CookRecoveryActions {
@@ -7672,6 +7699,8 @@ fn cook_recovery_actions_with_prefix(
             exact_checkpoint_candidate_mismatch,
             ambiguous_artifact_ids: &ambiguous_artifact_ids,
             continuation_rearm_required,
+            run_id,
+            agent_incomplete_reason,
         });
     if !recovery_legal {
         let reason = match &step {
