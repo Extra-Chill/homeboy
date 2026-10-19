@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.21] - 2026-10-19
+
+### Fixed
+- write CI evidence under RUNNER_TEMP, not homeboy-ci-results/ in the checkout
+
 ## [2.20.20] - 2026-10-15
 
 ### Fixed
