@@ -221,7 +221,15 @@ impl LabStagingRecipe {
             read_only_polling: request.read_only_polling,
             require_controller_git_bundle: request.require_controller_git_bundle,
             reuse_compatible_snapshot: request.reuse_compatible_snapshot,
-            source_path: request.source_path.map(PathBuf::from),
+            // Durable staging replays this recipe from a controller daemon
+            // whose working directory is unrelated to the operator's checkout.
+            // Bind relative source paths to the initiating process's cwd now,
+            // while it is still the directory the operator invoked from
+            // (#16166).
+            source_path: request
+                .source_path
+                .map(homeboy_core::paths::absolute_local_path)
+                .transpose()?,
             expected_source_snapshot_identity: request
                 .expected_source_snapshot_identity
                 .map(str::to_string),
@@ -302,6 +310,26 @@ impl LabStagingRecipe {
                 "Lab staging requires a controller source path when controller materialization is selected",
                 Some(self.run_id.clone()),
                 None,
+            ));
+        }
+        // A relative source path would resolve against the staging daemon's
+        // working directory instead of the checkout the operator named, making
+        // every later Git evidence read run in the wrong directory (#16166).
+        if let Some(source_path) = self
+            .source_path
+            .as_deref()
+            .filter(|path| !path.is_absolute())
+        {
+            return Err(Error::validation_invalid_argument(
+                "lab_staging_recipe.source_path",
+                format!(
+                    "Lab staging requires an absolute controller source path, but this recipe recorded `{}`, which would resolve against the staging daemon's working directory instead of the operator's checkout",
+                    source_path.display()
+                ),
+                Some(self.run_id.clone()),
+                Some(vec![
+                    "Re-run the command; the controller resolves --path/--cwd to an absolute checkout before staging.".to_string(),
+                ]),
             ));
         }
         if self.output_file_requested && !self.local_output_run_id_emitted {
@@ -8505,6 +8533,27 @@ mod tests {
         no_source
             .validate_for_runner_staging()
             .expect("runner staging does not require the controller source path");
+
+        // Regression for #16166: a relative source path (`--path .` recorded
+        // verbatim) resolves against the staging daemon's working directory
+        // instead of the operator's checkout, so every later Git evidence read
+        // runs in the wrong place. Both validation forms must reject it with
+        // the recorded value named.
+        let mut relative_source = valid();
+        relative_source.source_path = Some(PathBuf::from("."));
+        let error = relative_source
+            .validate()
+            .expect_err("relative source path rejected");
+        assert_eq!(error.details["field"], "lab_staging_recipe.source_path");
+        assert!(error.message.contains("absolute controller source path"));
+        assert!(error.message.contains('.'));
+        assert_eq!(
+            relative_source
+                .validate_for_runner_staging()
+                .expect_err("relative source path rejected for runner staging")
+                .details["field"],
+            "lab_staging_recipe.source_path"
+        );
     }
 
     #[test]

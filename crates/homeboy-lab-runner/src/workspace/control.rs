@@ -148,11 +148,9 @@ impl WorkspaceControl {
             "read workspace Git evidence",
         )?;
         if !output.status.success() {
-            return Err(Error::internal_unexpected(format!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr)
-            )));
+            return Err(Error::internal_unexpected(
+                super::util::git_failure_evidence(path, args, &output),
+            ));
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }

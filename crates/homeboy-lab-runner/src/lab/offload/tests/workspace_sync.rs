@@ -393,6 +393,84 @@ fn lab_git_workspace_sync_keeps_git_for_public_sources() {
     assert_eq!(mode, RunnerWorkspaceSyncMode::Git);
 }
 
+/// Regression for #16166: the sync-mode remote read used to fail as
+/// `git config --get remote.origin.url failed: ` — internal.unexpected, empty
+/// stderr, no directory — and was recorded as invalid input. A checkout that
+/// really has no origin must instead name the directory it checked and carry a
+/// fix hint.
+#[test]
+fn changed_since_git_sync_mode_names_checkout_without_origin() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .status()
+        .expect("init git repo");
+
+    let args = vec![
+        "homeboy".to_string(),
+        "review".to_string(),
+        "test".to_string(),
+        "--changed-since".to_string(),
+        "origin/main".to_string(),
+    ];
+    let err = lab_workspace_sync_mode(
+        LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+        &args,
+        dir.path(),
+    )
+    .expect_err("checkout without origin must fail with named evidence");
+
+    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    assert!(
+        err.message
+            .contains(&dir.path().display().to_string()),
+        "error must name the directory it checked: {}",
+        err.message
+    );
+    assert!(err.message.contains("remote.origin.url"));
+    assert!(err.details["tried"]
+        .as_array()
+        .expect("tried hints")
+        .iter()
+        .any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("Set remote.origin.url"))));
+}
+
+/// Regression for #16166: when staging runs its Git evidence read somewhere
+/// that is not a Git work tree (the daemon's cwd, a scratch directory, a
+/// deleted checkout), that is a controller staging failure — classified as
+/// infrastructure (internal.io), not caller input — and it must name the
+/// directory it checked.
+#[test]
+fn changed_since_git_sync_mode_reports_non_git_directory_as_staging_failure() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let args = vec![
+        "homeboy".to_string(),
+        "review".to_string(),
+        "test".to_string(),
+        "--changed-since".to_string(),
+        "origin/main".to_string(),
+    ];
+    let err = lab_workspace_sync_mode(
+        LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+        &args,
+        dir.path(),
+    )
+    .expect_err("non-git directory must fail as a staging bug");
+
+    assert_eq!(err.code, ErrorCode::InternalIoError);
+    assert!(
+        err.message
+            .contains(&dir.path().display().to_string()),
+        "error must name the directory it checked: {}",
+        err.message
+    );
+    assert!(err.message.contains("not a Git work tree"));
+}
+
 #[test]
 fn in_flight_daemon_disconnect_error_surfaces_inspection_commands() {
     let source = Error::new(

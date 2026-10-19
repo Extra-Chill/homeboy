@@ -105,13 +105,40 @@ pub(crate) fn git_output(local_path: &Path, args: &[&str]) -> Result<String> {
         .output()
         .map_err(|err| Error::internal_io(err.to_string(), Some("run git".to_string())))?;
     if !output.status.success() {
-        return Err(Error::internal_unexpected(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
+        return Err(Error::internal_unexpected(git_failure_evidence(
+            local_path,
+            args,
+            &output,
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Render a failed Git evidence read with the directory it ran in, its exit
+/// status, and its stderr. `git config --get` exits 1 with *empty* stderr when
+/// a key is unset, so the previous `git … failed: ` message carried no usable
+/// evidence at all — not even the directory the command executed in (#16166).
+pub(crate) fn git_failure_evidence(
+    local_path: &Path,
+    args: &[&str],
+    output: &std::process::Output,
+) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    format!(
+        "git {} failed in `{}` (exit status {}): {}",
+        args.join(" "),
+        local_path.display(),
+        output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_string(), |code| code.to_string()),
+        if stderr.is_empty() {
+            "<no stderr>"
+        } else {
+            stderr
+        }
+    )
 }
 
 /// Confirm a materialized workspace has a Git representation Git itself can
