@@ -1008,11 +1008,11 @@ mod tests {
     fn hydration_failure_is_actionable_and_removes_only_the_temporary_checkout() {
         let repo = fixture_repo();
         std::fs::write(
-            repo.path().join("homeboy-deps.json"),
-            r#"{"provider":"failing-fixture","commands":{"install":{"argv":["sh","-c","exit 42"]}}}"#,
+            repo.path().join("homeboy.json"),
+            r#"{"id":"fixture-deps","deps":{"provider":"failing-fixture","commands":{"install":{"argv":["sh","-c","exit 42"]}}}}"#,
         )
         .expect("dependency provider");
-        git(repo.path(), &["add", "homeboy-deps.json"]);
+        git(repo.path(), &["add", "homeboy.json"]);
         commit(repo.path(), "add failing provider");
         let component = fixture_component(repo.path());
 
@@ -1033,7 +1033,7 @@ mod tests {
             "temporary checkout is removed on failure"
         );
         assert!(
-            repo.path().join("homeboy-deps.json").exists(),
+            repo.path().join("homeboy.json").exists(),
             "configured checkout is never cleaned"
         );
     }
@@ -1042,11 +1042,11 @@ mod tests {
     fn hydration_opt_out_does_not_run_the_materialized_provider() {
         let repo = fixture_repo();
         std::fs::write(
-            repo.path().join("homeboy-deps.json"),
-            r#"{"provider":"failing-fixture","commands":{"install":{"argv":["sh","-c","exit 42"]}}}"#,
+            repo.path().join("homeboy.json"),
+            r#"{"id":"fixture-deps","deps":{"provider":"failing-fixture","commands":{"install":{"argv":["sh","-c","exit 42"]}}}}"#,
         )
         .expect("dependency provider");
-        git(repo.path(), &["add", "homeboy-deps.json"]);
+        git(repo.path(), &["add", "homeboy.json"]);
         commit(repo.path(), "add failing provider");
         let component = fixture_component(repo.path());
         let checkout =

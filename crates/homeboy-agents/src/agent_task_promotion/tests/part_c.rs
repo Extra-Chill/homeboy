@@ -621,12 +621,15 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
         std::fs::create_dir_all(&worktree_path).expect("worktree dir");
         let deps_marker = worktree_path.join("deps-installed.txt");
         std::fs::write(
-            worktree_path.join("homeboy-deps.json"),
+            worktree_path.join("homeboy.json"),
             serde_json::json!({
-                "provider": "fixture-provider",
-                "commands": {
-                    "install": {
-                        "argv": ["sh", "-c", "printf installed > deps-installed.txt"]
+                "id": "fixture-deps",
+                "deps": {
+                    "provider": "fixture-provider",
+                    "commands": {
+                        "install": {
+                            "argv": ["sh", "-c", "printf installed > deps-installed.txt"]
+                        }
                     }
                 }
             })

@@ -91,6 +91,7 @@ homeboy component create --local-path /path/to/repo --changelog-target "CHANGELO
 | `version_targets` | Version detection patterns (`file`, `pattern`, optional `artifact_path`) |
 | `changelog_target` | Path to changelog file |
 | `scripts` | Optional component-owned `lint`, `test`, `build`, `bench`, and `trace` shell commands |
+| `deps` | Declarative dependency manifest (`provider`, `commands`, `outputs`, `packages`); see [deps](../../commands/deps.md) |
 | `extensions` | Extension configuration (e.g., `{"wordpress": {}}`) |
 | `capability_extensions` | Optional explicit extension ownership by capability label (e.g., `{"deps": "nodejs"}`) when more than one linked extension supports the same capability |
 | `deployment_provider` | Repository-owned provider policy: extension, provider ID, and opaque inline `policy` |

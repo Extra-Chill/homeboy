@@ -68,8 +68,8 @@ fn status_prefers_neutral_adapter_manifest_over_builtin_manifests() {
     let root_path = root.display().to_string();
 
     write_file(
-        &root.join("homeboy-deps.json"),
-        r#"{
+        &root.join("homeboy.json"),
+        r#"{"id":"fixture","deps":{
             "provider": "fixture-adapter",
             "dependency_identities": ["fixture/root"],
             "packages": [
@@ -84,7 +84,7 @@ fn status_prefers_neutral_adapter_manifest_over_builtin_manifests() {
             "commands": {
                 "install": { "argv": ["fixture-adapter", "install"] }
             }
-        }"#,
+        }}"#,
     );
     write_file(
         &root.join("composer.json"),
@@ -118,9 +118,9 @@ printf '%s\n' "$@" >> adapter-args.txt
     );
     make_executable(&adapter);
     write_file(
-        &root.join("homeboy-deps.json"),
+        &root.join("homeboy.json"),
         &format!(
-            r#"{{
+            r#"{{"id":"fixture","deps":{{
                 "provider": "fixture-adapter",
                 "packages": [{{
                     "name": "fixture/package",
@@ -132,7 +132,7 @@ printf '%s\n' "$@" >> adapter-args.txt
                     "install": {{ "argv": ["{}", "install"] }},
                     "update": {{ "argv": ["{}", "update", "{{package}}", "{{constraint}}"] }}
                 }}
-            }}"#,
+            }}}}"#,
             adapter.display(),
             adapter.display()
         ),
@@ -603,7 +603,7 @@ fn outdated_edge(
 }
 
 /// A downstream whose locked versions come through the existing dependency
-/// provider path: a neutral `homeboy-deps.json` manifest provider, the same
+/// provider path: a neutral `homeboy.json` `deps` manifest provider, the same
 /// product-agnostic provider surface the stack verbs already read.
 fn outdated_downstream(
     path: &std::path::Path,
@@ -621,8 +621,10 @@ fn outdated_downstream(
         .collect::<Vec<_>>()
         .join(",");
     write_file(
-        &path.join("homeboy-deps.json"),
-        &format!(r#"{{"provider":"fixture-outdated-adapter","packages":[{packages}]}}"#),
+        &path.join("homeboy.json"),
+        &format!(
+            r#"{{"id":"downstream","deps":{{"provider":"fixture-outdated-adapter","packages":[{packages}]}}}}"#
+        ),
     );
     stack_component("downstream", &path.display().to_string(), edges)
 }

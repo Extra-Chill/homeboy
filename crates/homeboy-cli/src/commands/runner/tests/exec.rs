@@ -163,8 +163,8 @@ fn workspace_ref_inspects_hydrates_and_executes_one_physical_snapshot() {
                 .expect("make sh shim executable");
         }
         fs::write(
-            project.path().join("homeboy-deps.json"),
-            r#"{"provider":"fixture","commands":{"install":{"argv":["false"]}},"outputs":[{"path":"node_modules","kind":"directory"}]}"#,
+            project.path().join("homeboy.json"),
+            r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["false"]}},"outputs":[{"path":"node_modules","kind":"directory"}]}}"#,
         )
         .expect("dependency manifest");
         fs::write(project.path().join("tracked.txt"), "tracked snapshot\n")
@@ -618,8 +618,8 @@ fn hydration_failure_is_durably_attributed_before_runner_handoff() {
         let runner_root = tempfile::tempdir().expect("runner root");
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(
-            workspace.path().join("homeboy-deps.json"),
-            r#"{"provider":"fixture","commands":{"install":{"argv":["false"]}},"outputs":[]}"#,
+            workspace.path().join("homeboy.json"),
+            r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["false"]}},"outputs":[]}}"#,
         )
         .expect("dependency manifest");
         runner::create(

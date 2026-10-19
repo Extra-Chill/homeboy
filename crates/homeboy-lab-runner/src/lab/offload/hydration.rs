@@ -1073,14 +1073,14 @@ mod tests {
                 .expect("create local runner");
 
             let project = tempfile::tempdir().expect("project tempdir");
-            let manifest = r#"{
+            let manifest = r#"{"id":"fixture-deps","deps":{
                 "provider": "declared-provider",
                 "commands": { "install": { "argv": ["fixture-tool", "install", "--no-interaction", "--no-progress"] } }
-            }"#;
-            std::fs::write(project.path().join("homeboy-deps.json"), manifest)
+            }}"#;
+            std::fs::write(project.path().join("homeboy.json"), manifest)
                 .expect("provider manifest");
             let remote = tempfile::tempdir().expect("remote workspace");
-            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
+            std::fs::write(remote.path().join("homeboy.json"), manifest)
                 .expect("remote provider manifest");
 
             let output = hydrate_lab_workspace_dependencies(
@@ -1124,11 +1124,10 @@ mod tests {
             crate::create(&path_guard.local_runner_spec("lab-local"), false)
                 .expect("create local runner");
             let project = tempfile::tempdir().expect("project");
-            let manifest = r#"{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}"#;
-            std::fs::write(project.path().join("homeboy-deps.json"), manifest).expect("manifest");
+            let manifest = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}}"#;
+            std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
             let remote = tempfile::tempdir().expect("remote");
-            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
-                .expect("remote manifest");
+            std::fs::write(remote.path().join("homeboy.json"), manifest).expect("remote manifest");
             std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
             std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
                 .expect("marker");
@@ -1288,8 +1287,8 @@ mod tests {
             )
             .expect("create local runner");
             let project = tempfile::tempdir().expect("project");
-            let manifest = r#"{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"}]}"#;
-            std::fs::write(project.path().join("homeboy-deps.json"), manifest).expect("manifest");
+            let manifest = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"}]}}"#;
+            std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
             let remote = tempfile::tempdir().expect("remote");
 
             let error = hydrate_lab_workspace_dependencies(
@@ -1314,11 +1313,10 @@ mod tests {
             crate::create(&path_guard.local_runner_spec("lab-outputless"), false)
                 .expect("create local runner");
             let project = tempfile::tempdir().expect("project");
-            let manifest = r#"{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}}}"#;
-            std::fs::write(project.path().join("homeboy-deps.json"), manifest).expect("manifest");
+            let manifest = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}}}}"#;
+            std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
             let remote = tempfile::tempdir().expect("remote");
-            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
-                .expect("remote manifest");
+            std::fs::write(remote.path().join("homeboy.json"), manifest).expect("remote manifest");
             std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
             std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
                 .expect("marker");
@@ -1345,11 +1343,10 @@ mod tests {
             crate::create(&path_guard.local_runner_spec("lab-local"), false)
                 .expect("create local runner");
             let project = tempfile::tempdir().expect("project");
-            let manifest = r#"{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}"#;
-            std::fs::write(project.path().join("homeboy-deps.json"), manifest).expect("manifest");
+            let manifest = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}}"#;
+            std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
             let remote = tempfile::tempdir().expect("remote");
-            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
-                .expect("remote manifest");
+            std::fs::write(remote.path().join("homeboy.json"), manifest).expect("remote manifest");
             std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
             std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
                 .expect("marker");
@@ -1374,11 +1371,10 @@ mod tests {
             crate::create(&path_guard.local_runner_spec("lab-local"), false)
                 .expect("create local runner");
             let project = tempfile::tempdir().expect("project");
-            let manifest = r#"{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}"#;
-            std::fs::write(project.path().join("homeboy-deps.json"), manifest).expect("manifest");
+            let manifest = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}}"#;
+            std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
             let remote = tempfile::tempdir().expect("remote");
-            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
-                .expect("remote manifest");
+            std::fs::write(remote.path().join("homeboy.json"), manifest).expect("remote manifest");
             std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
             std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
                 .expect("marker");
@@ -1512,14 +1508,14 @@ mod tests {
                 .expect("create local runner");
 
             let project = tempfile::tempdir().expect("project tempdir");
-            let manifest = r#"{
+            let manifest = r#"{"id":"fixture-deps","deps":{
                 "provider": "declared-provider",
                 "commands": { "install": { "argv": ["fixture-tool", "install"] } }
-            }"#;
-            std::fs::write(project.path().join("homeboy-deps.json"), manifest)
+            }}"#;
+            std::fs::write(project.path().join("homeboy.json"), manifest)
                 .expect("provider manifest");
             let remote = tempfile::tempdir().expect("remote workspace");
-            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
+            std::fs::write(remote.path().join("homeboy.json"), manifest)
                 .expect("remote provider manifest");
 
             let error = hydrate_lab_workspace_dependencies(
@@ -1549,14 +1545,14 @@ mod tests {
                 .expect("create local runner");
 
             let project = tempfile::tempdir().expect("project tempdir");
-            let manifest = r#"{
+            let manifest = r#"{"id":"fixture-deps","deps":{
                 "provider": "declared-provider",
                 "commands": { "install": { "argv": ["fixture-tool", "install"] } }
-            }"#;
-            std::fs::write(project.path().join("homeboy-deps.json"), manifest)
+            }}"#;
+            std::fs::write(project.path().join("homeboy.json"), manifest)
                 .expect("provider manifest");
             let remote = tempfile::tempdir().expect("remote workspace");
-            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
+            std::fs::write(remote.path().join("homeboy.json"), manifest)
                 .expect("remote provider manifest");
 
             let result = hydrate_for_lab_workspace_exec_internal(
