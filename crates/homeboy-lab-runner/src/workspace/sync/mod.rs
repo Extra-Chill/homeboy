@@ -30,9 +30,9 @@ use super::git::{
     GitMaterializationRequest,
 };
 use super::snapshot::{
-    effective_snapshot_excludes, ensure_no_runner_workspace_metadata_collision,
-    materialize_prepared_workspace_update, materialize_snapshot_git_controlled, snapshot_identity,
-    snapshot_manifest_delta, workspace_content_manifest_for_policy, SnapshotManifestDelta,
+    effective_snapshot_excludes, materialize_prepared_workspace_update,
+    materialize_snapshot_git_controlled, snapshot_identity, snapshot_manifest_delta,
+    workspace_content_manifest_for_policy, SnapshotManifestDelta,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 use super::snapshot::{
@@ -60,7 +60,10 @@ use homeboy_core::engine::shell;
 use homeboy_core::server::{
     execute_local_command_in_dir_with_timeout, is_transient_ssh_error, CommandOutput,
 };
-use homeboy_lab_contract::lab::handoff::RUNNER_ARTIFACT_ROOT_DIR_SUFFIX;
+use homeboy_lab_contract::lab::handoff::{
+    RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUNNER_WORKSPACE_METADATA_FILE_NAME,
+    RUNNER_WORKSPACE_STATE_DIR_SUFFIX,
+};
 use sha2::{Digest, Sha256};
 
 mod snapshots;
@@ -69,7 +72,31 @@ pub(crate) use snapshots::workspace_snapshot_scan_command;
 pub use snapshots::{list_workspaces, workspace_snapshots};
 use snapshots::{workspace_metadata_for_lease, workspace_snapshot_entry};
 
-pub(crate) const WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
+/// Runner workspace metadata lives in the Homeboy-owned state sibling
+/// (`<checkout>-homeboy-state/runner-workspace.json`), outside the workspace
+/// tree, so the checkout only ever holds the agent's own changes.
+pub(crate) fn workspace_metadata_path(remote_path: &str) -> String {
+    homeboy_lab_contract::lab::handoff::runner_workspace_metadata_path(remote_path)
+}
+
+/// Test helper: the metadata file for a checkout path.
+#[cfg(test)]
+pub(crate) fn workspace_metadata_file(remote_path: impl AsRef<Path>) -> PathBuf {
+    PathBuf::from(workspace_metadata_path(
+        &remote_path.as_ref().display().to_string(),
+    ))
+}
+
+/// Metadata location relative to the checkout path, for shell scripts that
+/// derive it from `$p` (`"$p$meta_rel"`).
+fn workspace_metadata_relative_to_checkout() -> String {
+    format!("{RUNNER_WORKSPACE_STATE_DIR_SUFFIX}/{RUNNER_WORKSPACE_METADATA_FILE_NAME}")
+}
+
+/// The Homeboy-owned state sibling for a runner workspace checkout.
+pub(crate) fn workspace_state_dir(remote_path: &str) -> String {
+    homeboy_lab_contract::lab::handoff::runner_workspace_state_dir(remote_path)
+}
 const MIN_RUNNER_WORKSPACE_FREE_BYTES: u64 = 1024 * 1024 * 1024;
 const MIN_RUNNER_WORKSPACE_FREE_RATIO: f64 = 0.01;
 const METADATA_SSH_RECOVERY_ATTEMPTS: usize = 2;
@@ -200,7 +227,6 @@ fn sync_workspace_in_roots_controlled(
 
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot | RunnerWorkspaceSyncMode::SnapshotGit => {
-            ensure_no_runner_workspace_metadata_collision(&local_path)?;
             let snapshot =
                 snapshot_identity_controlled(&local_path, &excludes, &includes, control)?;
             let remote_path = temp::unique_name(
@@ -918,7 +944,6 @@ fn materialize_git_fallback_filesystem_snapshot(
     _closure_error: &Error,
     control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
-    ensure_no_runner_workspace_metadata_collision(local_path)?;
     let snapshot = snapshot_identity_controlled(local_path, excludes, includes, control)?;
     let remote_path = temp::unique_name(
         &deterministic_remote_path(
@@ -2453,11 +2478,7 @@ fn workspace_metadata_run_id(
     runner: &super::super::Runner,
     remote_path: &str,
 ) -> Result<Option<String>> {
-    let metadata_path = format!(
-        "{}/{}",
-        remote_path.trim_end_matches('/'),
-        WORKSPACE_METADATA_FILE
-    );
+    let metadata_path = workspace_metadata_path(remote_path);
     let content = match runner.kind {
         RunnerKind::Local => fs::read_to_string(&metadata_path)
             .map_err(|error| Error::internal_io(error.to_string(), Some(metadata_path.clone())))?,
@@ -2613,11 +2634,7 @@ pub(crate) fn update_workspace_resource_lifecycle(
 ) -> Result<()> {
     resource_lifecycle.validate(0)?;
     let runner = load(runner_id)?;
-    let metadata_path = format!(
-        "{}/{}",
-        remote_path.trim_end_matches('/'),
-        WORKSPACE_METADATA_FILE
-    );
+    let metadata_path = workspace_metadata_path(remote_path);
     let content = match runner.kind {
         RunnerKind::Local => fs::read_to_string(&metadata_path).map_err(|error| {
             Error::internal_io(error.to_string(), Some(format!("read {metadata_path}")))
@@ -2655,11 +2672,7 @@ pub(crate) fn record_workspace_terminal_evidence(
     relinquished: bool,
 ) -> Result<()> {
     let runner = load(runner_id)?;
-    let metadata_path = format!(
-        "{}/{}",
-        remote_path.trim_end_matches('/'),
-        WORKSPACE_METADATA_FILE
-    );
+    let metadata_path = workspace_metadata_path(remote_path);
     let content = match runner.kind {
         RunnerKind::Local => fs::read_to_string(&metadata_path).map_err(|error| {
             Error::internal_io(error.to_string(), Some(format!("read {metadata_path}")))
@@ -2815,14 +2828,9 @@ fn write_workspace_metadata(
 ) -> Result<()> {
     let json = serde_json::to_string_pretty(&metadata)
         .map_err(|err| Error::internal_json(err.to_string(), None))?;
-    let metadata_path = format!(
-        "{}/{}",
-        metadata.remote_path.trim_end_matches('/'),
-        WORKSPACE_METADATA_FILE
-    );
+    let metadata_path = workspace_metadata_path(&metadata.remote_path);
     match runner.kind {
         RunnerKind::Local => {
-            exclude_homeboy_metadata_from_git_status(Path::new(&metadata.remote_path))?;
             let path = Path::new(&metadata_path);
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|err| {
@@ -2869,11 +2877,7 @@ fn write_workspace_metadata(
                     Some("write workspace metadata staging file".to_string()),
                 )
             })?;
-            let prepare_command = format!(
-                "remote_path={remote_path}; if [ -d \"$remote_path/.git\" ]; then mkdir -p \"$remote_path/.git/info\" && touch \"$remote_path/.git/info/exclude\" && grep -qxF '.homeboy/' \"$remote_path/.git/info/exclude\" || printf '\\n.homeboy/\\n' >> \"$remote_path/.git/info/exclude\"; fi; mkdir -p {parent}",
-                remote_path = shell::quote_arg(&metadata.remote_path),
-                parent = shell::quote_arg(&parent),
-            );
+            let prepare_command = format!("mkdir -p {parent}", parent = shell::quote_arg(&parent),);
             let publish_command = format!(
                 "mv -f {staged_path} {path}",
                 staged_path = shell::quote_arg(&staged_metadata_path),
@@ -3531,43 +3535,6 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn exclude_homeboy_metadata_from_git_status(workspace_path: &Path) -> Result<()> {
-    let git_dir = match git_output(workspace_path, &["rev-parse", "--absolute-git-dir"]) {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => return Ok(()),
-    };
-    if !git_dir.is_dir() {
-        return Ok(());
-    }
-
-    let exclude_path = git_dir.join("info/exclude");
-    if let Some(parent) = exclude_path.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("create workspace git exclude dir".to_string()),
-            )
-        })?;
-    }
-
-    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
-    if existing.lines().any(|line| line.trim() == ".homeboy/") {
-        return Ok(());
-    }
-
-    let mut next = existing;
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    next.push_str(".homeboy/\n");
-    fs::write(&exclude_path, next).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some("write workspace git exclude".to_string()),
-        )
-    })
-}
-
 fn prune_candidate_reason_after_ttl(
     runner: &super::super::Runner,
     metadata: &serde_json::Value,
@@ -3865,7 +3832,7 @@ fn revalidate_candidate_liveness(
     }
     let metadata = match runner.kind {
         RunnerKind::Local => {
-            let path = Path::new(&candidate.remote_path).join(WORKSPACE_METADATA_FILE);
+            let path = PathBuf::from(workspace_metadata_path(&candidate.remote_path));
             let contents = fs::read(&path).map_err(|err| {
                 Error::internal_io(err.to_string(), Some("read workspace metadata".to_string()))
             })?;
@@ -4273,9 +4240,9 @@ fn parse_prune_scan_output(stdout: &str) -> Result<PruneScanPage> {
 /// Decide one inventoried entry from its producer's ownership proof.
 ///
 /// Runner workspaces (every `sync_workspace` checkout, whatever its name
-/// family) are proven by `.homeboy/runner-workspace.json`; run artifact
-/// siblings are proven by their `<checkout>-homeboy-artifacts` name and follow
-/// the checkout they belong to. Anything else has no ownership proof and is
+/// family) are proven by `<checkout>-homeboy-state/runner-workspace.json`;
+/// state and run artifact siblings are proven by their `<checkout>-homeboy-state`
+/// / `<checkout>-homeboy-artifacts` names and follow the checkout they belong to. Anything else has no ownership proof and is
 /// reported as unknown rather than silently skipped or deleted.
 fn classify_prune_scan_row(runner: &super::super::Runner, row: PruneScanRow) -> PruneScanOutcome {
     let planned = |remote_path: String, source_path: String, age_seconds: u64, reason: String| {
@@ -4421,10 +4388,12 @@ fn settle_planned_entries(
     }
 }
 
-/// The checkout a run artifact sibling belongs to.
+/// The checkout a Homeboy-owned sibling (run artifacts or workspace state)
+/// belongs to.
 fn artifact_dir_checkout(remote_path: &str) -> Option<&str> {
     remote_path
         .strip_suffix(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX)
+        .or_else(|| remote_path.strip_suffix(RUNNER_WORKSPACE_STATE_DIR_SUFFIX))
         .filter(|checkout| !checkout.is_empty())
 }
 
@@ -4480,7 +4449,7 @@ pub(crate) fn prune_scan_command(
 ) -> String {
     format!(
         concat!(
-            "root={root}; after={after}; meta_rel={meta}; suffix={suffix}; min_age={min_age}; ",
+            "root={root}; after={after}; meta_name={meta}; suffix={suffix}; state_suffix={state_suffix}; min_age={min_age}; ",
             "now=$(date +%s); deadline=$((now + {scan_budget})); ",
             "if [ -d \"$root\" ]; then LC_ALL=C find \"$root\" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort | {{ ",
             "scanned=0; rows=0; complete=complete; last=; ",
@@ -4491,12 +4460,13 @@ pub(crate) fn prune_scan_command(
             "mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); ",
             "if [ \"$age\" -lt \"$min_age\" ]; then printf \"retained\\tyounger_than_min_age\\t%s\\n\" \"$dir\"; continue; fi; ",
             "if [ -L \"$dir\" ] || [ ! -d \"$dir\" ]; then printf \"unknown\\tnot_a_directory\\t%s\\n\" \"$dir\"; continue; fi; ",
-            "meta=\"$dir/$meta_rel\"; ",
+            "meta=\"$dir$state_suffix/$meta_name\"; ",
             "if [ -f \"$meta\" ]; then ",
             "if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then printf \"retained\\tpending_apply_back\\t%s\\n\" \"$dir\"; continue; fi; ",
             "kind=workspace; ",
             "else case \"$dir\" in ",
             "*\"$suffix\") checkout=${{dir%\"$suffix\"}}; if [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; then printf \"retained\\tartifact_dir_owned_by_checkout\\t%s\\n\" \"$dir\"; continue; fi; kind=artifact ;; ",
+            "*\"$state_suffix\") checkout=${{dir%\"$state_suffix\"}}; if [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; then printf \"retained\\tstate_dir_owned_by_checkout\\t%s\\n\" \"$dir\"; continue; fi; kind=artifact ;; ",
             "*) printf \"unknown\\tworkspace_metadata_missing\\t%s\\n\" \"$dir\"; continue ;; ",
             "esac; fi; ",
             "rows=$((rows + 1)); printf \"%s\\t%s\\t%s\" \"$kind\" \"$age\" \"$dir\"; ",
@@ -4506,7 +4476,8 @@ pub(crate) fn prune_scan_command(
         ),
         root = shell::quote_arg(root),
         after = shell::quote_arg(after.and_then(Path::to_str).unwrap_or("")),
-        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        meta = shell::quote_arg(RUNNER_WORKSPACE_METADATA_FILE_NAME),
+        state_suffix = shell::quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
         suffix = shell::quote_arg(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX),
         min_age = shell::quote_arg(&min_age.to_string()),
         row_budget = row_budget,
@@ -4600,7 +4571,7 @@ fn remove_prune_candidate(
             }
             if candidate.reason == STALE_MATERIALIZED_WORKSPACE_REASON {
                 let path = Path::new(&candidate.remote_path);
-                let metadata = fs::read(path.join(WORKSPACE_METADATA_FILE))
+                let metadata = fs::read(workspace_metadata_path(&candidate.remote_path))
                     .ok()
                     .and_then(|contents| serde_json::from_slice(&contents).ok());
                 if !metadata.is_some_and(|metadata| {
@@ -4629,7 +4600,7 @@ fn remove_ssh_prune_candidate(
     let command = if candidate.reason == ARTIFACT_DIR_CHECKOUT_MISSING_REASON {
         ssh_prune_delete_orphan_artifact_dir_command(root, &candidate.remote_path)
     } else if candidate.reason == STALE_MATERIALIZED_WORKSPACE_REASON {
-        let metadata_path = Path::new(&candidate.remote_path).join(WORKSPACE_METADATA_FILE);
+        let metadata_path = PathBuf::from(workspace_metadata_path(&candidate.remote_path));
         let metadata_command = format!(
             "meta={}; [ -f \"$meta\" ] && base64 < \"$meta\" | tr -d '\\n'",
             shell::quote_arg(&metadata_path.display().to_string())
@@ -4709,10 +4680,10 @@ pub(crate) fn ssh_prune_delete_command_with_terminal_authority(
     let owner = shell::quote_arg(terminal_owner_run_id.unwrap_or(""));
     let job = shell::quote_arg(terminal_job_id.unwrap_or(""));
     format!(
-        "root={root}; p={path}; meta_rel={meta}; owner={owner}; job={job}; case \"$p\" in \"$root\"/*) ;; *) printf unknown:workspace_path; exit 0 ;; esac; meta=\"$p/$meta_rel\"; [ -f \"$meta\" ] && grep -Eq '\"schema\"[[:space:]]*:[[:space:]]*\"homeboy/runner-workspace/v1\"' \"$meta\" || {{ printf unknown:metadata; exit 0; }}; if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"active\"' \"$meta\"; then compact=$(tr -d '[:space:]' < \"$meta\") || {{ printf unknown:metadata; exit 0; }}; {{ [ -n \"$owner\" ] && [ \"$(printf '%s' \"$compact\" | grep -Fo -- \"\\\"run_id\\\":\\\"$owner\\\"\" | wc -l | tr -d ' ')\" -ge 2 ]; }} || {{ [ -n \"$job\" ] && printf '%s' \"$compact\" | grep -Fq -- \"\\\"job_id\\\":\\\"$job\\\"\"; }} || {{ printf live:active_resource_lifecycle_lease; exit 0; }}; fi; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown:process_probe_unavailable; exit 0; }}; ps_output=$(ps -eo pid=,ppid=,args=) || {{ printf unknown:process_probe_failed; exit 0; }}; printf '%s\\n' \"$ps_output\" | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}'; state=$?; [ \"$state\" -eq 0 ] && {{ printf live:remote_process_ownership; exit 0; }}; [ \"$state\" -eq 1 ] || {{ printf unknown:process_probe_failed; exit 0; }}; cwd=$(lsof -w -Fn -a -d cwd +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$cwd\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$cwd\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; open=$(lsof -w -Fn +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$open\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$open\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; rm -rf -- \"$p\" && printf removed || printf unknown:delete_failed",
+        "root={root}; p={path}; meta_rel={meta}; owner={owner}; job={job}; case \"$p\" in \"$root\"/*) ;; *) printf unknown:workspace_path; exit 0 ;; esac; meta=\"$p$meta_rel\"; [ -f \"$meta\" ] && grep -Eq '\"schema\"[[:space:]]*:[[:space:]]*\"homeboy/runner-workspace/v1\"' \"$meta\" || {{ printf unknown:metadata; exit 0; }}; if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"active\"' \"$meta\"; then compact=$(tr -d '[:space:]' < \"$meta\") || {{ printf unknown:metadata; exit 0; }}; {{ [ -n \"$owner\" ] && [ \"$(printf '%s' \"$compact\" | grep -Fo -- \"\\\"run_id\\\":\\\"$owner\\\"\" | wc -l | tr -d ' ')\" -ge 2 ]; }} || {{ [ -n \"$job\" ] && printf '%s' \"$compact\" | grep -Fq -- \"\\\"job_id\\\":\\\"$job\\\"\"; }} || {{ printf live:active_resource_lifecycle_lease; exit 0; }}; fi; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown:process_probe_unavailable; exit 0; }}; ps_output=$(ps -eo pid=,ppid=,args=) || {{ printf unknown:process_probe_failed; exit 0; }}; printf '%s\\n' \"$ps_output\" | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}'; state=$?; [ \"$state\" -eq 0 ] && {{ printf live:remote_process_ownership; exit 0; }}; [ \"$state\" -eq 1 ] || {{ printf unknown:process_probe_failed; exit 0; }}; cwd=$(lsof -w -Fn -a -d cwd +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$cwd\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$cwd\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; open=$(lsof -w -Fn +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$open\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$open\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; rm -rf -- \"$p\" \"$p\"-homeboy-state && printf removed || printf unknown:delete_failed",
         root = shell::quote_arg(root),
         path = shell::quote_arg(remote_path),
-        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        meta = shell::quote_arg(&workspace_metadata_relative_to_checkout()),
     )
 }
 
@@ -4726,13 +4697,13 @@ pub(crate) fn ssh_prune_delete_materialized_workspace_command(
             "case \"$p\" in \"$root\"/*) ;; *) printf unknown:workspace_path; exit 0 ;; esac; ",
             "expected=$(mktemp \"${{TMPDIR:-/tmp}}/homeboy-prune-delete.XXXXXX\") || {{ printf unknown:metadata_transport; exit 0; }}; ",
             "trap 'rm -f \"$expected\"' EXIT HUP INT TERM; cat > \"$expected\" || {{ printf unknown:metadata_transport; exit 0; }}; ",
-            "meta=\"$p/$meta_rel\"; [ -f \"$meta\" ] || {{ printf unknown:metadata; exit 0; }}; ",
+            "meta=\"$p$meta_rel\"; [ -f \"$meta\" ] || {{ printf unknown:metadata; exit 0; }}; ",
             "cmp -s \"$meta\" \"$expected\" || {{ printf unknown:materialized_workspace_lifecycle_changed; exit 0; }}; ",
             "{probe_and_delete}"
         ),
         root = shell::quote_arg(root),
         path = shell::quote_arg(remote_path),
-        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        meta = shell::quote_arg(&workspace_metadata_relative_to_checkout()),
         probe_and_delete = SSH_PRUNE_PROBE_AND_DELETE,
     )
 }
@@ -4745,14 +4716,15 @@ pub(crate) fn ssh_prune_delete_orphan_artifact_dir_command(
 ) -> String {
     format!(
         concat!(
-            "root={root}; p={path}; suffix={suffix}; ",
-            "case \"$p\" in \"$root\"/*\"$suffix\") ;; *) printf unknown:workspace_path; exit 0 ;; esac; ",
-            "checkout=${{p%\"$suffix\"}}; {{ [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; }} && {{ printf unknown:artifact_dir_checkout_present; exit 0; }}; ",
+            "root={root}; p={path}; suffix={suffix}; state_suffix={state_suffix}; ",
+            "case \"$p\" in \"$root\"/*\"$suffix\") checkout=${{p%\"$suffix\"}} ;; \"$root\"/*\"$state_suffix\") checkout=${{p%\"$state_suffix\"}} ;; *) printf unknown:workspace_path; exit 0 ;; esac; ",
+            "{{ [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; }} && {{ printf unknown:artifact_dir_checkout_present; exit 0; }}; ",
             "{probe_and_delete}"
         ),
         root = shell::quote_arg(root),
         path = shell::quote_arg(remote_path),
         suffix = shell::quote_arg(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX),
+        state_suffix = shell::quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
         probe_and_delete = SSH_PRUNE_PROBE_AND_DELETE,
     )
 }
@@ -4768,7 +4740,7 @@ const SSH_PRUNE_PROBE_AND_DELETE: &str = concat!(
             "[ \"$state\" -eq 0 ] && [ -n \"$cwd\" ] && { printf live:remote_process_ownership; exit 0; }; { [ \"$state\" -eq 1 ] && [ -z \"$cwd\" ]; } || { printf unknown:process_probe_failed; exit 0; }; ",
             "open=$(lsof -w -Fn +D \"$p\" 2>/dev/null); state=$?; ",
             "[ \"$state\" -eq 0 ] && [ -n \"$open\" ] && { printf live:remote_process_ownership; exit 0; }; { [ \"$state\" -eq 1 ] && [ -z \"$open\" ]; } || { printf unknown:process_probe_failed; exit 0; }; ",
-            "rm -rf -- \"$p\" && printf removed || printf unknown:delete_failed"
+            "rm -rf -- \"$p\" \"$p\"-homeboy-state && printf removed || printf unknown:delete_failed"
 );
 
 fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str) -> Result<()> {
@@ -4781,9 +4753,10 @@ fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str
             let (_server, mut client) = ssh_client_for_runner(runner)?;
             client.env.extend(runner.env.clone());
             let command = format!(
-                "root={root}; path={path}; case \"$path\" in \"$root\"/*) [ \"$path\" != \"$root\" ] && rm -rf -- \"$path\" ;; *) echo refused >&2; exit 2 ;; esac",
+                "root={root}; path={path}; case \"$path\" in \"$root\"/*) [ \"$path\" != \"$root\" ] && rm -rf -- \"$path\" \"$path\"{state_suffix} ;; *) echo refused >&2; exit 2 ;; esac",
                 root = shell::quote_arg(root),
                 path = shell::quote_arg(remote_path),
+                state_suffix = shell::quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
             );
             let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
             if output.success {
@@ -4833,7 +4806,19 @@ fn remove_local_workspace_with_lifecycle(root: &Path, path: &Path) -> Result<()>
             None,
         )
     })?;
-    ResourceLifecycle::delete_path(&cleanup_path)
+    ResourceLifecycle::delete_path(&cleanup_path)?;
+    // The Homeboy-owned state sibling (runner metadata, Lab `@file` scratch)
+    // belongs to the checkout and goes with it.
+    let state_dir = PathBuf::from(workspace_state_dir(&path.display().to_string()));
+    if state_dir.exists() && !state_dir.is_symlink() {
+        fs::remove_dir_all(&state_dir).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!("remove {}", state_dir.display())),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 pub(crate) use crate::shell_quote::shell_arg;

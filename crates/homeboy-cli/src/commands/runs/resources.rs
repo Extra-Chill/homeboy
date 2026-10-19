@@ -1482,9 +1482,15 @@ mod tests {
             std::fs::create_dir_all(&resource_path).expect("runner workspace");
             std::fs::write(resource_path.join("generated.txt"), "generated")
                 .expect("workspace file");
-            std::fs::create_dir_all(resource_path.join(".homeboy")).expect("metadata directory");
+            let metadata_path = std::path::PathBuf::from(
+                homeboy_lab_contract::lab::handoff::runner_workspace_metadata_path(
+                    &resource_path.display().to_string(),
+                ),
+            );
+            std::fs::create_dir_all(metadata_path.parent().expect("state directory"))
+                .expect("metadata directory");
             std::fs::write(
-                resource_path.join(".homeboy/runner-workspace.json"),
+                &metadata_path,
                 serde_json::json!({
                     "schema": "homeboy/runner-workspace/v1",
                     "runner_id": "lab-local",
@@ -1526,6 +1532,10 @@ mod tests {
 
             assert_eq!(cleanup.applied_count, 1);
             assert!(!resource_path.exists());
+            assert!(
+                !metadata_path.exists(),
+                "runner workspace state is reaped with its checkout"
+            );
         });
     }
 

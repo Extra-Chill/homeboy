@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::workspace::sync::{reap_run_workspace, sync_workspace, WORKSPACE_METADATA_FILE};
+use crate::workspace::sync::{reap_run_workspace, sync_workspace, workspace_metadata_file};
 use crate::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::{MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome};
 
@@ -142,7 +142,7 @@ fn controller_tunnel_loss_during_live_workload_retains_workspace_for_reconciliat
             live_workload.exists(),
             "an unobserved daemon job must retain its live workspace"
         );
-        let metadata = fs::read_to_string(Path::new(&remote_path).join(WORKSPACE_METADATA_FILE))
+        let metadata = fs::read_to_string(workspace_metadata_file(&remote_path))
             .expect("reconciliation metadata");
         let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
         assert_eq!(
@@ -245,9 +245,8 @@ fn terminal_evidence_records_retained_outcome_owner_location_and_reclaim_command
                 }
             }
 
-            let metadata =
-                fs::read_to_string(Path::new(&remote_path).join(WORKSPACE_METADATA_FILE))
-                    .expect("terminal metadata");
+            let metadata = fs::read_to_string(workspace_metadata_file(&remote_path))
+                .expect("terminal metadata");
             let metadata: serde_json::Value =
                 serde_json::from_str(&metadata).expect("metadata json");
             let evidence = &metadata["terminal_evidence"];
@@ -290,7 +289,7 @@ fn preserve_on_failure_keeps_cancelled_workspace_for_ttl_reclamation() {
             Path::new(&remote_path).exists(),
             "cancellation must retain the workspace under preserve-on-failure"
         );
-        let metadata = fs::read_to_string(Path::new(&remote_path).join(WORKSPACE_METADATA_FILE))
+        let metadata = fs::read_to_string(workspace_metadata_file(&remote_path))
             .expect("cancelled terminal metadata");
         let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
         assert_eq!(metadata["terminal_evidence"]["final_outcome"], "cancelled");
@@ -315,7 +314,7 @@ fn preserve_on_failure_keeps_workspace_when_unwinding_from_panic() {
 
         assert!(result.is_err());
         assert!(Path::new(&remote_path).exists());
-        let metadata = fs::read_to_string(Path::new(&remote_path).join(WORKSPACE_METADATA_FILE))
+        let metadata = fs::read_to_string(workspace_metadata_file(&remote_path))
             .expect("panic terminal metadata");
         let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
         assert_eq!(metadata["terminal_evidence"]["final_outcome"], "panic");
@@ -344,7 +343,7 @@ fn delete_on_terminal_keeps_workspace_when_unwinding_from_panic() {
 
         assert!(result.is_err());
         assert!(Path::new(&remote_path).exists());
-        let metadata = fs::read_to_string(Path::new(&remote_path).join(WORKSPACE_METADATA_FILE))
+        let metadata = fs::read_to_string(workspace_metadata_file(&remote_path))
             .expect("panic terminal metadata");
         let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
         assert_eq!(metadata["terminal_evidence"]["final_outcome"], "panic");
@@ -494,7 +493,7 @@ fn concurrent_same_ref_jobs_keep_the_remaining_job_workspace_after_peer_reap() {
         assert!(Path::new(&first.remote_path).join("file.txt").is_file());
         assert!(Path::new(&second.remote_path).join("file.txt").is_file());
         let metadata: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(Path::new(&second.remote_path).join(WORKSPACE_METADATA_FILE))
+            &fs::read_to_string(workspace_metadata_file(&second.remote_path))
                 .expect("second metadata"),
         )
         .expect("metadata json");

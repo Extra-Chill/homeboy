@@ -15,11 +15,6 @@ const LAB_SOURCE_SNAPSHOT_SYNC_MODE: &str = "lab_offload";
 const SYNTHETIC_SNAPSHOT_BASELINE_REF: &str = "refs/heads/homeboy-snapshot-baseline";
 const SYNTHETIC_SNAPSHOT_AUTHOR: &str = "Homeboy Snapshot <snapshot@homeboy.invalid> 0 +0000";
 const CONTENT_MANIFEST_DIFFERENCE_LIMIT: usize = 8;
-const SYNTHETIC_BASELINE_PATHS: &[&str] = &[
-    ".",
-    ":(exclude).homeboy/runner-workspace.json",
-    ":(exclude).homeboy/lab-at-files/**",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedLabWorkspaceProvenance {
@@ -201,15 +196,7 @@ fn verify_materialized_snapshot_git_checkout(
     }
     if !git(
         workspace,
-        &[
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-            "--",
-            SYNTHETIC_BASELINE_PATHS[0],
-            SYNTHETIC_BASELINE_PATHS[1],
-            SYNTHETIC_BASELINE_PATHS[2],
-        ],
+        &["status", "--porcelain", "--untracked-files=all", "--", "."],
     )?
     .is_empty()
     {
@@ -285,8 +272,6 @@ fn git_status_ignoring_snapshot_excludes(
         "--untracked-files=all".to_string(),
         "--".to_string(),
         ".".to_string(),
-        SYNTHETIC_BASELINE_PATHS[1].to_string(),
-        SYNTHETIC_BASELINE_PATHS[2].to_string(),
     ];
     args.extend(snapshot_git_exclude_pathspecs(&provenance.sync_excludes));
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -353,15 +338,7 @@ fn verify_synthetic_snapshot_git_baseline(
     // `verify_exact_snapshot_git_checkout`.
     if !git(
         workspace,
-        &[
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-            "--",
-            SYNTHETIC_BASELINE_PATHS[0],
-            SYNTHETIC_BASELINE_PATHS[1],
-            SYNTHETIC_BASELINE_PATHS[2],
-        ],
+        &["status", "--porcelain", "--untracked-files=all", "--", "."],
     )?
     .is_empty()
     {
@@ -856,50 +833,12 @@ fn validate_content_manifest(
     Ok(())
 }
 
-/// Stage the synthetic snapshot baseline, keeping Homeboy-owned runner metadata
-/// (`.homeboy/runner-workspace.json`, `.homeboy/lab-at-files/**`) out of the
-/// committed tree.
-///
-/// When the repository itself gitignores `.homeboy`, the metadata is already
-/// excluded by gitignore — and `git add --all -- . :(exclude).homeboy/...`
-/// fails, because the explicit `.` pathspec makes Git treat the ignored
-/// `.homeboy` directory as an explicit add target and reject it ("The following
-/// paths are ignored by one of your .gitignore files: .homeboy"). That blocked
-/// committed-harvest baseline materialization on any repo that ignores
-/// `.homeboy` (#9399). In that case, stage with a bare `git add --all`, which
-/// respects `.gitignore` silently. Otherwise use the explicit exclude pathspecs
-/// so the metadata is kept out of a repo that does not ignore `.homeboy`.
+/// Stage the synthetic snapshot baseline. Runner metadata lives outside the
+/// workspace tree, so the baseline is exactly the workspace content and a bare
+/// `git add --all` (which respects repository ignore rules) is sufficient.
 fn stage_synthetic_baseline(workspace: &Path) -> std::result::Result<(), String> {
-    if homeboy_metadata_is_gitignored(workspace) {
-        git(workspace, &["add", "--all"])?;
-    } else {
-        git(
-            workspace,
-            &[
-                "add",
-                "--all",
-                "--",
-                SYNTHETIC_BASELINE_PATHS[0],
-                SYNTHETIC_BASELINE_PATHS[1],
-                SYNTHETIC_BASELINE_PATHS[2],
-            ],
-        )?;
-    }
+    git(workspace, &["add", "--all"])?;
     Ok(())
-}
-
-/// Whether the repository's own ignore rules already exclude the `.homeboy`
-/// runner-metadata directory, so `git add --all` will never stage it.
-fn homeboy_metadata_is_gitignored(workspace: &Path) -> bool {
-    // `git check-ignore` exits 0 when the path is ignored, 1 when it is not, and
-    // >1 on error. Treat only a clean "ignored" (0) as gitignored so a
-    // check-ignore failure falls back to the explicit-exclude path.
-    Command::new("git")
-        .args(["check-ignore", "-q", ".homeboy"])
-        .current_dir(workspace)
-        .status()
-        .map(|status| status.code() == Some(0))
-        .unwrap_or(false)
 }
 
 fn git(cwd: &Path, args: &[&str]) -> std::result::Result<String, String> {
@@ -1057,11 +996,6 @@ fn git_status_ignoring_snapshot_excludes_raw(
         "--".to_string(),
         ".".to_string(),
     ];
-    args.extend(
-        SYNTHETIC_BASELINE_PATHS[1..]
-            .iter()
-            .map(|path| path.to_string()),
-    );
     args.extend(snapshot_git_exclude_pathspecs(excludes));
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     git(workspace, &args)
@@ -1565,13 +1499,6 @@ mod tests {
             };
             std::fs::write(workspace.path().join("file.txt"), source_contents)
                 .expect("snapshot source");
-            std::fs::create_dir_all(workspace.path().join(".homeboy"))
-                .expect("runner metadata directory");
-            std::fs::write(
-                workspace.path().join(".homeboy/runner-workspace.json"),
-                "runner-owned metadata\n",
-            )
-            .expect("runner metadata");
             let mut snapshot = snapshot(workspace.path());
             snapshot.dirty = dirty;
             let mut lab = lab(workspace.path(), &snapshot);
@@ -1589,7 +1516,7 @@ mod tests {
             assert!(
                 !git(workspace.path(), &["ls-tree", "-r", "--name-only", "HEAD"])
                     .expect("list baseline tree")
-                    .contains(".homeboy/runner-workspace.json"),
+                    .contains(".homeboy"),
                 "runner metadata is never part of the synthetic baseline"
             );
             std::fs::write(
@@ -1597,18 +1524,7 @@ mod tests {
                 "provider edit\n",
             )
             .expect("provider edit");
-            git(
-                workspace.path(),
-                &[
-                    "add",
-                    "--all",
-                    "--",
-                    SYNTHETIC_BASELINE_PATHS[0],
-                    SYNTHETIC_BASELINE_PATHS[1],
-                    SYNTHETIC_BASELINE_PATHS[2],
-                ],
-            )
-            .expect("stage provider delta");
+            git(workspace.path(), &["add", "--all", "--", "."]).expect("stage provider delta");
             let patch = git(
                 workspace.path(),
                 &[
@@ -1618,9 +1534,7 @@ mod tests {
                     "--full-index",
                     &baseline,
                     "--",
-                    SYNTHETIC_BASELINE_PATHS[0],
-                    SYNTHETIC_BASELINE_PATHS[1],
-                    SYNTHETIC_BASELINE_PATHS[2],
+                    ".",
                 ],
             )
             .expect("provider delta");
@@ -1666,65 +1580,6 @@ mod tests {
                 "provider edit\n"
             );
         }
-    }
-
-    #[test]
-    fn verify_synthetic_baseline_ignores_reserved_runner_files() {
-        // The synthetic baseline excludes reserved runner bookkeeping from its
-        // committed tree, so those files remain present but untracked in the
-        // working tree. The baseline verifier must not reclassify them as dirt,
-        // otherwise the committed-change harvest fails with "synthetic snapshot
-        // Git workspace is not clean" even though the source content is pristine.
-        let workspace = tempfile::tempdir().expect("runner workspace");
-        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
-        std::fs::create_dir_all(workspace.path().join(".homeboy"))
-            .expect("runner metadata directory");
-        std::fs::write(
-            workspace.path().join(".homeboy/runner-workspace.json"),
-            "runner-owned metadata\n",
-        )
-        .expect("runner metadata");
-        std::fs::create_dir_all(workspace.path().join(".homeboy/lab-at-files"))
-            .expect("lab @file directory");
-        std::fs::write(
-            workspace.path().join(".homeboy/lab-at-files/handoff.json"),
-            "at-file payload\n",
-        )
-        .expect("lab @file payload");
-
-        let snapshot = snapshot(workspace.path());
-        let lab = lab(workspace.path(), &snapshot);
-        materialize_verified_lab_snapshot_git_baseline(
-            &workspace.path().display().to_string(),
-            workspace.path(),
-            snapshot.clone(),
-            lab.clone(),
-        )
-        .expect("synthetic baseline");
-
-        // Reserved files remain on disk but excluded from the baseline tree.
-        assert!(workspace
-            .path()
-            .join(".homeboy/runner-workspace.json")
-            .exists());
-        assert!(
-            !git(workspace.path(), &["ls-tree", "-r", "--name-only", "HEAD"])
-                .expect("baseline tree")
-                .contains(".homeboy/runner-workspace.json")
-        );
-
-        let provenance = verify_lab_workspace(
-            &workspace.path().display().to_string(),
-            workspace.path(),
-            snapshot,
-            lab,
-        )
-        .expect("verify provenance");
-
-        // The harvest provenance check must succeed despite the untracked
-        // reserved runner files.
-        verify_lab_workspace_git_root(workspace.path(), &provenance)
-            .expect("synthetic baseline verifies as clean with reserved runner files present");
     }
 
     #[derive(Clone)]
@@ -1790,7 +1645,6 @@ mod tests {
             metadata: serde_json::Value::Null,
         }
     }
-
     #[test]
     fn filesystem_snapshot_dispatches_providers_and_harvests_only_changed_candidates() {
         let _home = homeboy_core::test_support::HomeGuard::new();
@@ -2718,27 +2572,19 @@ mod tests {
 
     #[test]
     fn synthetic_baseline_succeeds_when_the_repository_gitignores_homeboy_metadata() {
-        // A repository that ignores `.homeboy` must remain Cook-able on Lab: the
-        // committed-harvest baseline previously died with "The following paths
-        // are ignored by one of your .gitignore files: .homeboy" because the
-        // explicit `.` add pathspec made Git treat the ignored metadata
-        // directory as an explicit add target (#9399).
+        // A repository that ignores `.homeboy` must remain Cook-able on Lab
+        // (#9399): staging respects repository ignore rules.
         let workspace = tempfile::tempdir().expect("runner workspace");
         std::fs::write(workspace.path().join(".gitignore"), ".homeboy/\n")
             .expect("repository ignores .homeboy");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("snapshot source");
-        std::fs::create_dir_all(workspace.path().join(".homeboy/lab-at-files"))
-            .expect("runner metadata directory");
+        std::fs::create_dir_all(workspace.path().join(".homeboy/cache"))
+            .expect("repository-ignored directory");
         std::fs::write(
-            workspace.path().join(".homeboy/runner-workspace.json"),
-            "runner-owned metadata\n",
+            workspace.path().join(".homeboy/cache/local.json"),
+            "repository-ignored content\n",
         )
-        .expect("runner metadata");
-        std::fs::write(
-            workspace.path().join(".homeboy/lab-at-files/handoff.json"),
-            "lab @file materialization\n",
-        )
-        .expect("lab at-file metadata");
+        .expect("repository-ignored file");
 
         let snapshot = snapshot(workspace.path());
         let lab = lab(workspace.path(), &snapshot);

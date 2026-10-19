@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 
-use crate::workspace::sync::{sync_workspace, update_workspace};
+use crate::workspace::sync::{sync_workspace, update_workspace, workspace_metadata_file};
 use crate::workspace::types::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceUpdateOptions,
 };
@@ -43,10 +43,9 @@ fn prepared_workspace_update_applies_delta_retains_assets_and_rotates_lease() {
             fs::read_to_string(remote.join("node_modules/cache")).unwrap(),
             "keep\n"
         );
-        let metadata: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(remote.join(".homeboy/runner-workspace.json")).unwrap(),
-        )
-        .unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(workspace_metadata_file(&remote)).unwrap())
+                .unwrap();
         assert_eq!(metadata["workspace_lease"], updated.lease);
         assert_eq!(metadata["workspace_generation"], 1);
         assert_eq!(
@@ -204,7 +203,7 @@ fn workspace_ref_rejects_expired_source_drift_and_metadata_redirection() {
             .expect_err("hydration source drift must fail closed");
         assert_eq!(drift.details["reason"], "workspace_ref_source_drift");
 
-        let metadata_path = Path::new(&synced.remote_path).join(".homeboy/runner-workspace.json");
+        let metadata_path = workspace_metadata_file(&synced.remote_path);
         let original = fs::read_to_string(&metadata_path).expect("metadata");
         let mut metadata: serde_json::Value =
             serde_json::from_str(&original).expect("metadata JSON");
@@ -253,7 +252,7 @@ fn ssh_prepared_workspace_update_resolves_fresh_lease_without_projecting_large_r
         let lease = synced.prepared_workspace_lease.expect("lease");
 
         let root = runner_root.path().join("_lab_workspaces");
-        let metadata_path = Path::new(&synced.remote_path).join(".homeboy/runner-workspace.json");
+        let metadata_path = workspace_metadata_file(&synced.remote_path);
         let metadata = fs::read_to_string(&metadata_path).expect("metadata");
         let metadata_value: serde_json::Value =
             serde_json::from_str(&metadata).expect("valid metadata");
@@ -263,8 +262,11 @@ fn ssh_prepared_workspace_update_resolves_fresh_lease_without_projecting_large_r
         )
         .expect("write compact metadata");
         for index in 0..24 {
-            let path = root.join(format!("stale-large-{index:02}/.homeboy"));
-            fs::create_dir_all(&path).expect("stale workspace");
+            let checkout = root.join(format!("stale-large-{index:02}"));
+            fs::create_dir_all(&checkout).expect("stale workspace");
+            let metadata_file = workspace_metadata_file(&checkout);
+            let path = metadata_file.parent().expect("state dir").to_path_buf();
+            fs::create_dir_all(&path).expect("stale workspace state");
             let oversized = metadata.replacen(
                 "\n}",
                 &format!(
@@ -457,9 +459,7 @@ fn locked_prepared_workspace_rejects_update_without_mutating_live_state() {
             fs::read_to_string(Path::new(&synced.remote_path).join("file.txt")).unwrap(),
             "before\n"
         );
-        assert!(Path::new(&synced.remote_path)
-            .join(".homeboy/runner-workspace.json")
-            .exists());
+        assert!(workspace_metadata_file(&synced.remote_path).exists());
     });
 }
 
@@ -485,16 +485,16 @@ fn prepared_workspace_metadata_hydrates_execution_source_snapshot() {
 
         // An unrelated retained workspace must not supply this path's provenance.
         // Its metadata deliberately claims the target path and sorts newest.
-        let metadata_path = Path::new(&updated.remote_path).join(".homeboy/runner-workspace.json");
+        let metadata_path = workspace_metadata_file(&updated.remote_path);
         let mut unrelated: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
                 .expect("parse metadata");
         unrelated["snapshot_identity"] = serde_json::json!("unrelated-snapshot");
         unrelated["original_prepared_snapshot_identity"] = serde_json::json!("unrelated-original");
         unrelated["synced_at"] = serde_json::json!("9999-01-01T00:00:00Z");
-        let unrelated_path = runner_root
-            .path()
-            .join("_lab_workspaces/unrelated/.homeboy/runner-workspace.json");
+        let unrelated_checkout = runner_root.path().join("_lab_workspaces/unrelated");
+        fs::create_dir_all(&unrelated_checkout).expect("unrelated checkout");
+        let unrelated_path = workspace_metadata_file(&unrelated_checkout);
         fs::create_dir_all(unrelated_path.parent().unwrap()).expect("unrelated directory");
         fs::write(&unrelated_path, unrelated.to_string()).expect("unrelated metadata");
 

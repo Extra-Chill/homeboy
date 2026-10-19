@@ -8,7 +8,7 @@ use crate::workspace::git::{
     git_bundle_install_command, git_snapshot, hydrate_controller_bundle_objects,
     materialize_git_command, ref_has_missing_objects, BundleTransfer,
 };
-use crate::workspace::sync::{list_workspaces, sync_workspace};
+use crate::workspace::sync::{sync_workspace, workspace_metadata_file};
 use crate::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::workspace::util::git_output;
 use homeboy_core::extension::registry::ExtensionLifecycleValidation;
@@ -153,7 +153,7 @@ fn changed_since_private_origin_without_controller_closure_falls_back_to_snapsho
             validation_dependency_ids: None,
             run_isolation_token: None,
         };
-        let sync_result = sync_workspace("lab-local-git-bundle", sync_options.clone());
+        let sync_result = sync_workspace("lab-local-git-bundle", sync_options);
 
         let (output, exit_code) = sync_result.expect("sync workspace");
 
@@ -204,15 +204,6 @@ fn changed_since_private_origin_without_controller_closure_falls_back_to_snapsho
             .is_err(),
             "the controller must not hydrate unrelated refs"
         );
-        fs::create_dir_all(source.path().join(".homeboy")).expect("reserved source dir");
-        fs::write(source.path().join(".homeboy/runner-workspace.json"), "{}")
-            .expect("reserved source metadata");
-        let (before, _) = list_workspaces("lab-local-git-bundle", 10).expect("list workspaces");
-        let error = sync_workspace("lab-local-git-bundle", sync_options)
-            .expect_err("fallback must reject reserved runner metadata");
-        assert!(error.message.contains("reserved runner path"));
-        let (after, _) = list_workspaces("lab-local-git-bundle", 10).expect("list workspaces");
-        assert_eq!(after.workspaces.len(), before.workspaces.len());
     });
 }
 
@@ -517,12 +508,10 @@ fn git_materialization_ignores_generated_homeboy_output_but_refuses_source_dirty
         let remote = Path::new(&output.remote_path);
         // Re-sync resets generated `.homeboy` *output* (experiments, scratch)
         // via `git clean -ffdqx`, so the experiment artifact written above is
-        // gone. The sync then legitimately re-writes its own workspace metadata
-        // marker under `.homeboy/runner-workspace.json` (used by orphaned-lab-
-        // workspace pruning, #6678/376bfde56), so `.homeboy` itself persists
-        // with only that metadata.
-        assert!(!remote.join(".homeboy/experiments").exists());
-        assert!(remote.join(".homeboy/runner-workspace.json").is_file());
+        // gone. Runner metadata lives in the sibling state directory, so no
+        // `.homeboy` path is left behind in the checkout.
+        assert!(!remote.join(".homeboy").exists());
+        assert!(workspace_metadata_file(&remote).is_file());
 
         fs::write(remote.join("dirty-source.txt"), "dirty\n").expect("write dirty source file");
         let err = sync().expect_err("real dirty runner workspace is refused");

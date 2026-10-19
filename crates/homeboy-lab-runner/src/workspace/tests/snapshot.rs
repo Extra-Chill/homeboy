@@ -1,16 +1,18 @@
 use super::git;
 
 use std::fs;
+
+use crate::workspace::sync::workspace_metadata_file;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use crate::workspace::snapshot::{
-    copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
-    excludes_with_links_to_excluded_targets, immutable_replay_snapshot, materialize_snapshot_piped,
-    materialize_snapshot_stage, register_after_snapshot_directory_discovery_hook,
-    snapshot_input_manifest, snapshot_install_command, snapshot_overlay_install_command,
-    snapshot_stable_manifest, synthetic_checkout_value, validate_snapshot_stability,
-    workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
+    copy_snapshot_to_directory, excludes_with_links_to_excluded_targets, immutable_replay_snapshot,
+    materialize_snapshot_piped, materialize_snapshot_stage,
+    register_after_snapshot_directory_discovery_hook, snapshot_input_manifest,
+    snapshot_install_command, snapshot_overlay_install_command, snapshot_stable_manifest,
+    synthetic_checkout_value, validate_snapshot_stability, workspace_content_hash,
+    workspace_content_hash_algorithm, workspace_content_hash_for_policy,
     workspace_content_manifest_and_hash_for_policy, workspace_content_manifest_for_policy,
     WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
@@ -319,28 +321,6 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
             &provenance,
         )
         .expect("committed-harvest Git root");
-
-        // Agent-task @plan staging is runner-owned execution state, not a
-        // source change. It can be staged by a runtime, so exercise the exact
-        // committed-harvest verifier with that state present.
-        let at_file =
-            Path::new(&synced.remote_path).join(".homeboy/lab-at-files/agent-task-plan.json");
-        fs::create_dir_all(at_file.parent().expect("@file parent")).expect("create @file parent");
-        fs::write(&at_file, "{}\n").expect("write staged agent-task plan");
-        std::process::Command::new("git")
-            .args([
-                "add",
-                "--force",
-                ".homeboy/lab-at-files/agent-task-plan.json",
-            ])
-            .current_dir(&synced.remote_path)
-            .status()
-            .expect("stage runner-owned plan");
-        super::super::provenance::verify_lab_workspace_git_root(
-            Path::new(&synced.remote_path),
-            &provenance,
-        )
-        .expect("runner-owned agent-task plan does not dirty the verified snapshot");
 
         fs::write(
             Path::new(&synced.remote_path).join("unexpected.txt"),
@@ -856,7 +836,9 @@ fn runner_snapshot_excludes_extend_default_snapshot_policy() {
 }
 
 #[test]
-fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
+fn runner_snapshot_transports_source_owned_homeboy_paths_as_ordinary_content() {
+    // Runner metadata lives outside the workspace tree, so a source that owns
+    // `.homeboy/runner-workspace.json` is ordinary content, not a collision.
     {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let roots = context.path_roots();
@@ -865,12 +847,12 @@ fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
         fs::create_dir_all(source.path().join(".homeboy")).expect("metadata directory");
         fs::write(
             source.path().join(".homeboy/runner-workspace.json"),
-            "user-owned collision\n",
+            "user-owned content\n",
         )
-        .expect("metadata collision");
+        .expect("source-owned file");
         rooted_local_runner(&roots, "lab-local-collision", runner_root.path());
 
-        let error = crate::workspace::sync::sync_workspace_in_roots(
+        let (output, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
             &roots,
             "lab-local-collision",
             RunnerWorkspaceSyncOptions {
@@ -885,31 +867,21 @@ fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
                 run_isolation_token: None,
             },
         )
-        .expect_err("reserved runner metadata must reject staging");
+        .expect("source-owned .homeboy content syncs");
 
-        assert!(error.message.contains("reserved runner path"));
-        assert!(error.message.contains("remove or rename"));
+        assert_eq!(exit_code, 0);
+        let remote = Path::new(&output.remote_path);
         assert_eq!(
-            fs::read_dir(runner_root.path())
-                .expect("runner root entries")
-                .count(),
-            0,
-            "collision must fail before creating a materialized workspace"
+            fs::read_to_string(remote.join(".homeboy/runner-workspace.json"))
+                .expect("source-owned file transported"),
+            "user-owned content\n"
         );
+        let metadata: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace_metadata_file(remote)).expect("runner metadata"),
+        )
+        .expect("parse runner metadata");
+        assert_eq!(metadata["schema"], "homeboy/runner-workspace/v1");
     }
-}
-
-#[test]
-fn runner_snapshot_rejects_source_lab_at_file_collision() {
-    let source = tempfile::tempdir().expect("source tempdir");
-    fs::create_dir_all(source.path().join(".homeboy/lab-at-files")).expect("Lab input collision");
-
-    let error = ensure_no_runner_workspace_metadata_collision(source.path())
-        .expect_err("reserved Lab input path must reject staging");
-
-    assert!(error.message.contains("reserved runner path"));
-    assert!(error.message.contains(".homeboy/lab-at-files"));
-    assert!(error.message.contains("remove or rename"));
 }
 
 #[test]
@@ -931,33 +903,6 @@ fn generic_snapshot_copy_allows_source_owned_runner_workspace_path() {
             .expect("copied metadata"),
         "source-owned generic snapshot content\n"
     );
-}
-
-#[test]
-fn workspace_content_hash_skips_runner_metadata_removed_after_discovery() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    fs::write(workspace.path().join("source.txt"), "source\n").expect("source file");
-    let metadata = workspace.path().join(".homeboy");
-    fs::create_dir_all(&metadata).expect("runner metadata directory");
-    fs::write(metadata.join("runner-workspace.json"), "{}\n").expect("runner metadata");
-    let expected = workspace_content_hash(workspace.path(), &[]).expect("baseline hash");
-
-    let metadata_to_remove = metadata.clone();
-    {
-        let _hook = register_after_snapshot_directory_discovery_hook(
-            metadata.canonicalize().expect("canonical metadata path"),
-            move || {
-                fs::remove_dir_all(&metadata_to_remove)
-                    .expect("remove runner metadata during traversal");
-            },
-        );
-        assert_eq!(
-            workspace_content_hash(workspace.path(), &[])
-                .expect("metadata cache miss is reconciled"),
-            expected,
-            "runner-owned metadata must not make an active snapshot claimant fail"
-        );
-    }
 }
 
 #[test]
@@ -1534,10 +1479,12 @@ fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overl
         let status = git_output(remote, &["status", "--porcelain=v1"]).unwrap();
         assert!(status.contains("file.txt"));
         assert!(status.contains("?? untracked.txt"));
-        assert!(fs::read_to_string(remote.join(".git/info/exclude"))
-            .unwrap()
-            .lines()
-            .any(|line| line == ".homeboy/"));
+        assert!(
+            !status.contains(".homeboy"),
+            "runner metadata must never appear in the workspace: {status}"
+        );
+        assert!(!remote.join(".homeboy").exists());
+        assert!(workspace_metadata_file(remote).is_file());
         assert_eq!(
             output.current_workspace.source_commit.as_deref(),
             Some(head.as_str())
@@ -1703,8 +1650,7 @@ fn snapshot_git_hydrates_partial_clone_on_controller_without_lab_remote_access()
             Some(head.as_str())
         );
         let metadata: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(remote.join(".homeboy/runner-workspace.json"))
-                .expect("read workspace metadata"),
+            &fs::read_to_string(workspace_metadata_file(&remote)).expect("read workspace metadata"),
         )
         .expect("parse workspace metadata");
         assert_eq!(metadata["actual_materialization_mode"], "snapshot-git");
@@ -2707,8 +2653,8 @@ fn snapshot_archive_fails_for_existing_unreadable_input() {
 #[test]
 fn snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_injection() {
     // This mirrors a Lab snapshot of a repository such as homeboy-extensions:
-    // the runner creates its metadata directory after extracting a source that
-    // has no `.homeboy` directory of its own.
+    // the runner records its metadata beside (never inside) the extracted
+    // source, which has no `.homeboy` directory of its own.
     let controller = tempfile::tempdir().expect("controller");
     let source = controller.path().join("homeboy-extensions@fixture");
     let dependency = controller.path().join("dependency");
@@ -2743,50 +2689,17 @@ fn snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_in
 
     let expected = workspace_content_hash(&source, &excludes).expect("controller hash");
     copy_snapshot_to_directory(&source, &destination, &excludes).expect("materialize snapshot");
-    fs::create_dir_all(destination.join(".homeboy")).expect("runner metadata directory");
-    fs::write(
-        destination.join(".homeboy/runner-workspace.json"),
-        r#"{"schema":"homeboy/runner-workspace/v1"}"#,
-    )
-    .expect("runner metadata");
+    let metadata = workspace_metadata_file(&destination);
+    fs::create_dir_all(metadata.parent().expect("state dir")).expect("runner state directory");
+    fs::write(&metadata, r#"{"schema":"homeboy/runner-workspace/v1"}"#).expect("runner metadata");
 
+    assert!(!destination.join(".homeboy").exists());
     assert!(destination.join("packages/runtime/runner.sh").is_file());
     assert!(!destination.join("generated-state").exists());
     assert_eq!(
         workspace_content_hash(&destination, &excludes).expect("materialized hash"),
         expected,
         "the controller hash must describe the bytes and structure that the runner verifies"
-    );
-}
-
-#[test]
-fn content_hash_ignores_reserved_runner_workspace_paths() {
-    let controller = tempfile::tempdir().expect("controller");
-    let source = controller.path().join("source");
-    fs::create_dir_all(source.join("packages")).expect("source package directory");
-    fs::write(source.join("packages/app.rs"), "fn main() {}\n").expect("source file");
-    let excludes: Vec<String> = Vec::new();
-
-    let expected = workspace_content_hash(&source, &excludes).expect("source hash");
-
-    // Inject every reserved runner-owned path, exactly as the runner would after
-    // transport, then re-hash. The identity must be unchanged.
-    fs::create_dir_all(source.join(".homeboy/lab-at-files")).expect("lab-at-files directory");
-    fs::write(
-        source.join(".homeboy/lab-at-files/at-input.txt"),
-        "runner-owned transport artifact\n",
-    )
-    .expect("lab-at-files entry");
-    fs::write(
-        source.join(".homeboy/runner-workspace.json"),
-        r#"{"schema":"homeboy/runner-workspace/v1"}"#,
-    )
-    .expect("runner metadata");
-
-    assert_eq!(
-        workspace_content_hash(&source, &excludes).expect("materialized hash"),
-        expected,
-        "content hash must ignore reserved runner-owned workspace paths"
     );
 }
 
@@ -3142,11 +3055,10 @@ fn snapshot_content_hash_binds_user_owned_homeboy_files_but_ignores_runner_state
 
     let expected = workspace_content_hash(&source, &excludes).expect("controller hash");
     copy_snapshot_to_directory(&source, &destination, &excludes).expect("materialize snapshot");
-    fs::write(
-        destination.join(".homeboy/runner-workspace.json"),
-        r#"{"schema":"homeboy/runner-workspace/v1"}"#,
-    )
-    .expect("runner metadata");
+    let metadata = workspace_metadata_file(&destination);
+    let state_dir = metadata.parent().expect("state dir").to_path_buf();
+    fs::create_dir_all(&state_dir).expect("runner state directory");
+    fs::write(&metadata, r#"{"schema":"homeboy/runner-workspace/v1"}"#).expect("runner metadata");
 
     assert_eq!(
         workspace_content_hash(&destination, &excludes).expect("materialized hash"),
@@ -3154,9 +3066,9 @@ fn snapshot_content_hash_binds_user_owned_homeboy_files_but_ignores_runner_state
         "runner metadata must not change the controller identity"
     );
 
-    fs::create_dir_all(destination.join(".homeboy/lab-at-files")).expect("Lab input directory");
+    fs::create_dir_all(state_dir.join("lab-at-files")).expect("Lab input directory");
     fs::write(
-        destination.join(".homeboy/lab-at-files/plan.json"),
+        state_dir.join("lab-at-files/plan.json"),
         "{\"task\":\"fixture\"}\n",
     )
     .expect("materialized Lab input");
@@ -3180,7 +3092,7 @@ fn snapshot_content_hash_binds_user_owned_homeboy_files_but_ignores_runner_state
     );
 
     fs::write(
-        destination.join(".homeboy/runner-workspace.json"),
+        &metadata,
         r#"{"schema":"homeboy/runner-workspace/v2","changed":true}"#,
     )
     .expect("changed runner metadata");
@@ -3194,11 +3106,8 @@ fn snapshot_content_hash_binds_user_owned_homeboy_files_but_ignores_runner_state
     {
         use std::os::unix::fs::PermissionsExt;
 
-        fs::set_permissions(
-            destination.join(".homeboy/runner-workspace.json"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .expect("changed runner metadata mode");
+        fs::set_permissions(&metadata, fs::Permissions::from_mode(0o600))
+            .expect("changed runner metadata mode");
         assert_eq!(
             workspace_content_hash(&destination, &excludes).expect("mode-insensitive hash"),
             expected,
@@ -3251,12 +3160,9 @@ fn snapshot_content_hash_matches_tar_when_homeboy_is_excluded() {
 
         let expected = workspace_content_hash(&source, &excludes).expect("controller hash");
         copy_snapshot_to_directory(&source, &destination, &excludes).expect("materialize snapshot");
-        fs::create_dir_all(destination.join(".homeboy")).expect("runner metadata directory");
-        fs::write(
-            destination.join(".homeboy/runner-workspace.json"),
-            "transport metadata\n",
-        )
-        .expect("runner metadata");
+        let metadata = workspace_metadata_file(&destination);
+        fs::create_dir_all(metadata.parent().expect("state dir")).expect("runner state directory");
+        fs::write(&metadata, "transport metadata\n").expect("runner metadata");
 
         assert_eq!(
             workspace_content_hash(&destination, &excludes).expect("materialized hash"),

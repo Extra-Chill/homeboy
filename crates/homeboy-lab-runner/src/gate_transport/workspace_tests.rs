@@ -28,8 +28,10 @@ fn resource_package(parent: &Path) -> std::path::PathBuf {
 
 fn metadata(remote_path: &str) -> serde_json::Value {
     serde_json::from_str(
-        &fs::read_to_string(Path::new(remote_path).join(".homeboy/runner-workspace.json"))
-            .expect("workspace metadata"),
+        &fs::read_to_string(
+            homeboy_lab_contract::lab::handoff::runner_workspace_metadata_path(&remote_path),
+        )
+        .expect("workspace metadata"),
     )
     .expect("metadata json")
 }
@@ -64,8 +66,10 @@ fn completed_gate_releases_its_run_owned_workspace() {
         assert!(
             !Path::new(&remote_path).exists(),
             "a completed gate left its workspace behind with lease {}",
-            fs::read_to_string(Path::new(&remote_path).join(".homeboy/runner-workspace.json"))
-                .unwrap_or_default()
+            fs::read_to_string(
+                homeboy_lab_contract::lab::handoff::runner_workspace_metadata_path(&remote_path)
+            )
+            .unwrap_or_default()
         );
     });
 }

@@ -20,35 +20,9 @@ use super::util::{
     run_shell_capture, run_shell_command, run_shell_command_before, shell_command_for_runner,
     ssh_args, ssh_client_for_runner,
 };
-
-const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
-const LAB_AT_FILES_DIRECTORY: &str = ".homeboy/lab-at-files";
-/// Runner-owned paths that Homeboy materializes *onto* a workspace after
-/// transport. They exist only on the runner side, never in the controller's
-/// source tree, so they must be excluded from every workspace content-identity
-/// computation — otherwise the runner and controller hash different trees and
-/// materialization verification fails spuriously.
-///
-/// This is the single source of truth: the content-hash traversals and the
-/// pre-sync collision check all derive from it, so a new reserved path cannot
-/// leak into one hash algorithm while being excluded from another (the drift
-/// that produced #9003 and left the v1 traversal missing `lab-at-files`).
-const RESERVED_RUNNER_WORKSPACE_PATHS: &[&str] =
-    &[RUNNER_WORKSPACE_METADATA_FILE, LAB_AT_FILES_DIRECTORY];
-
-/// Whether `relative` (a `/`-normalized workspace-relative path) is a
-/// runner-owned materialization artifact that must never contribute to a
-/// workspace content identity.
-fn is_reserved_runner_workspace_path(relative: &str) -> bool {
-    RESERVED_RUNNER_WORKSPACE_PATHS.contains(&relative)
-}
-
-/// The runner owns this container and may remove it with its metadata while a
-/// snapshot traversal still holds a directory entry for it. Its disappearance
-/// is therefore a cache miss, unlike a source path disappearing mid-read.
-fn is_runner_metadata_directory(logical: &Path) -> bool {
-    logical == Path::new(".homeboy")
-}
+use homeboy_lab_contract::lab::handoff::{
+    runner_workspace_metadata_path, runner_workspace_state_dir,
+};
 
 #[cfg(test)]
 mod test_snapshot_directory_discovery_hook {
@@ -320,12 +294,6 @@ impl ContentHashTraversal<'_> {
         self.control.checkpoint()?;
         let mut children = match fs::read_dir(path) {
             Ok(children) => children,
-            Err(err)
-                if is_runner_metadata_directory(logical)
-                    && err.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(());
-            }
             Err(err) => {
                 return Err(Error::internal_io(
                     err.to_string(),
@@ -349,7 +317,6 @@ impl ContentHashTraversal<'_> {
             let entry_path = entry.path();
             let relative_path = logical.join(entry.file_name());
             let relative = relative_path.to_string_lossy().replace('\\', "/");
-            let is_runner_metadata_directory = relative == ".homeboy";
             if relative == ".git"
                 || is_excluded(
                     self.root,
@@ -357,7 +324,6 @@ impl ContentHashTraversal<'_> {
                     self.excludes,
                     &[],
                 )
-                || is_reserved_runner_workspace_path(&relative)
             {
                 continue;
             }
@@ -365,12 +331,6 @@ impl ContentHashTraversal<'_> {
             test_snapshot_directory_discovery_hook::run(&entry_path);
             let link_metadata = match fs::symlink_metadata(&entry_path) {
                 Ok(metadata) => metadata,
-                Err(err)
-                    if is_runner_metadata_directory
-                        && err.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    continue;
-                }
                 Err(err) => {
                     return Err(Error::internal_io(
                         err.to_string(),
@@ -417,12 +377,6 @@ impl ContentHashTraversal<'_> {
             };
             let metadata = match fs::metadata(&resolved) {
                 Ok(metadata) => metadata,
-                Err(err)
-                    if is_runner_metadata_directory
-                        && err.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    continue;
-                }
                 Err(err) => {
                     return Err(Error::internal_io(
                         err.to_string(),
@@ -433,12 +387,6 @@ impl ContentHashTraversal<'_> {
             if metadata.is_dir() {
                 let canonical = match resolved.canonicalize() {
                     Ok(canonical) => canonical,
-                    Err(err)
-                        if is_runner_metadata_directory
-                            && err.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        continue;
-                    }
                     Err(err) => return Err(Error::internal_io(err.to_string(), None)),
                 };
                 if ancestors.contains(&canonical) {
@@ -449,21 +397,16 @@ impl ContentHashTraversal<'_> {
                         None,
                     ));
                 }
-                // The runner adds `.homeboy/runner-workspace.json` after transport.
-                // Recurse through the directory so user-owned children remain bound,
-                // but omit the transport-owned container entry and record itself.
-                if !is_runner_metadata_directory {
-                    self.hasher.update(relative.as_bytes());
-                    self.hasher.update(b"\0dir\0");
-                    record_workspace_content_manifest_entry(
-                        &mut self.manifest,
-                        relative.clone(),
-                        "directory",
-                        None,
-                        None,
-                        None,
-                    );
-                }
+                self.hasher.update(relative.as_bytes());
+                self.hasher.update(b"\0dir\0");
+                record_workspace_content_manifest_entry(
+                    &mut self.manifest,
+                    relative.clone(),
+                    "directory",
+                    None,
+                    None,
+                    None,
+                );
                 ancestors.push(canonical);
                 self.collect(&resolved, &relative_path, ancestors)?;
                 ancestors.pop();
@@ -1234,19 +1177,25 @@ pub(crate) fn materialize_prepared_workspace_update(
                 )
             })?;
     }
-    let removal_path = format!("{temporary}/.homeboy/update-removals");
-    let metadata_path = format!("{temporary}/{RUNNER_WORKSPACE_METADATA_FILE}");
+    // Update staging lives in the Homeboy-owned state sibling, never inside
+    // the workspace tree that is promoted into place.
+    let state_dir = runner_workspace_state_dir(remote_path);
+    let update_id = uuid::Uuid::new_v4();
+    let removal_path = format!("{state_dir}/update-removals-{update_id}");
+    let live_metadata_path = runner_workspace_metadata_path(remote_path);
+    let metadata_path = format!("{live_metadata_path}.update-{update_id}");
     let prepare = format!(
-        "rm -rf {temporary} {backup} && mkdir -p {temporary} && {seed} && mkdir -p {metadata_parent}",
+        "rm -rf {temporary} {backup} && mkdir -p {temporary} {state_dir} && {seed}",
         temporary = shell::quote_arg(&temporary),
         backup = shell::quote_arg(&backup),
+        state_dir = shell::quote_arg(&state_dir),
         seed = seed_snapshot_command(remote_path, &temporary),
-        metadata_parent = shell::quote_arg(&format!("{temporary}/.homeboy")),
     );
     let finalize = format!(
-        "tr -d '[:space:]' < {live_metadata} | grep -qF -- {lease} && mv {remote} {backup} && if mv {temporary} {remote}; then rm -rf {backup} || true; else if mv {backup} {remote}; then exit 1; else printf '%s\\n' 'prepared workspace promotion failed; original remains at {backup}' >&2; exit 2; fi; fi",
+        "tr -d '[:space:]' < {live_metadata} | grep -qF -- {lease} && mv {remote} {backup} && if mv {temporary} {remote}; then rm -rf {backup} || true; mv -f {staged_metadata} {live_metadata}; else if mv {backup} {remote}; then exit 1; else printf '%s\\n' 'prepared workspace promotion failed; original remains at {backup}' >&2; exit 2; fi; fi",
         lease = shell::quote_arg(&format!("\"workspace_lease\":\"{expected_lease}\"")),
-        live_metadata = shell::quote_arg(&format!("{remote_path}/{RUNNER_WORKSPACE_METADATA_FILE}")),
+        live_metadata = shell::quote_arg(&live_metadata_path),
+        staged_metadata = shell::quote_arg(&metadata_path),
         remote = shell::quote_arg(remote_path), temporary = shell::quote_arg(&temporary), backup = shell::quote_arg(&backup),
     );
     let remove = format!(
@@ -1555,10 +1504,9 @@ fn seed_snapshot_command(seed_path: &str, destination: &str) -> String {
     // across its storage boundary, retain correctness with a local copy while
     // transfer metrics continue to report controller-to-runner content only.
     format!(
-        "(cp -al {seed}/. {destination}/ 2>/dev/null || cp -a {seed}/. {destination}/) && rm -f {destination}/{metadata}",
+        "(cp -al {seed}/. {destination}/ 2>/dev/null || cp -a {seed}/. {destination}/)",
         seed = shell::quote_arg(seed_path),
         destination = shell::quote_arg(destination),
-        metadata = shell::quote_arg(RUNNER_WORKSPACE_METADATA_FILE),
     )
 }
 
@@ -1867,7 +1815,7 @@ fn synthetic_git_checkout_command(
         .unwrap_or_default();
 
     format!(
-        "git -C {remote_path} init && git -C {remote_path} config user.email homeboy-snapshot@localhost && git -C {remote_path} config user.name 'Homeboy Snapshot' && git -C {remote_path} add -A -- . ':(exclude).homeboy/runner-workspace.json' ':(exclude).homeboy/lab-at-files/**' && env GIT_AUTHOR_NAME='Homeboy Snapshot' GIT_AUTHOR_EMAIL=homeboy-snapshot@localhost GIT_COMMITTER_NAME='Homeboy Snapshot' GIT_COMMITTER_EMAIL=homeboy-snapshot@localhost GIT_AUTHOR_DATE='1970-01-01T00:00:00Z' GIT_COMMITTER_DATE='1970-01-01T00:00:00Z' git -C {remote_path} commit --allow-empty -m {message} --no-gpg-sign && git -C {remote_path} notes --ref=homeboy-snapshot add -m {note} HEAD{set_remote}",
+        "git -C {remote_path} init && git -C {remote_path} config user.email homeboy-snapshot@localhost && git -C {remote_path} config user.name 'Homeboy Snapshot' && git -C {remote_path} add -A -- . && env GIT_AUTHOR_NAME='Homeboy Snapshot' GIT_AUTHOR_EMAIL=homeboy-snapshot@localhost GIT_COMMITTER_NAME='Homeboy Snapshot' GIT_COMMITTER_EMAIL=homeboy-snapshot@localhost GIT_AUTHOR_DATE='1970-01-01T00:00:00Z' GIT_COMMITTER_DATE='1970-01-01T00:00:00Z' git -C {remote_path} commit --allow-empty -m {message} --no-gpg-sign && git -C {remote_path} notes --ref=homeboy-snapshot add -m {note} HEAD{set_remote}",
         message = shell::quote_arg(&format!("Homeboy snapshot {snapshot}")),
         note = shell::quote_arg(&format!("snapshot_identity={snapshot}\nsource_head={source_head}\nsource_dirty={source_dirty}")),
     )
@@ -2005,34 +1953,6 @@ fn reject_replay_symlinks(root: &Path, path: &Path, excludes: &[String]) -> Resu
         }
         if metadata.is_dir() {
             reject_replay_symlinks(root, &entry_path, excludes)?;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn ensure_no_runner_workspace_metadata_collision(local_path: &Path) -> Result<()> {
-    for reserved in RESERVED_RUNNER_WORKSPACE_PATHS.iter().copied() {
-        let reserved_path = local_path.join(reserved);
-        match fs::symlink_metadata(&reserved_path) {
-            Ok(_) => {
-                return Err(Error::validation_invalid_argument(
-                    "workspace",
-                    format!(
-                        "source workspace contains the reserved runner path `{reserved}`; remove or rename it before syncing"
-                    ),
-                    Some(reserved_path.display().to_string()),
-                    Some(vec![
-                        "Remove or rename the source path before syncing; Homeboy owns this path on materialized runner workspaces.".to_string(),
-                    ]),
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some("inspect reserved runner workspace path".to_string()),
-                ));
-            }
         }
     }
     Ok(())

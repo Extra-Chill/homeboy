@@ -480,10 +480,9 @@ mod tests {
     }
 
     #[test]
-    fn capture_patch_report_excludes_runner_metadata_and_staged_excludes() {
+    fn capture_patch_report_excludes_staged_excludes() {
         let _home = HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
-        fs::create_dir_all(workspace.path().join(".homeboy")).expect("runner metadata");
         fs::create_dir_all(workspace.path().join("docs")).expect("docs");
         fs::write(workspace.path().join("tracked.txt"), "before\n").expect("tracked");
         fs::write(workspace.path().join("docs/superpowers"), "before\n").expect("excluded");
@@ -495,11 +494,6 @@ mod tests {
         let baseline = capture_baseline(&workspace.path().display().to_string(), Some(&snapshot))
             .expect("baseline");
         fs::write(workspace.path().join("tracked.txt"), "after\n").expect("tracked change");
-        fs::write(
-            workspace.path().join(".homeboy/runner-workspace.json"),
-            "removed later\n",
-        )
-        .expect("runner metadata");
         fs::write(workspace.path().join("docs/superpowers"), "after\n").expect("excluded change");
 
         let report = capture_patch_report(

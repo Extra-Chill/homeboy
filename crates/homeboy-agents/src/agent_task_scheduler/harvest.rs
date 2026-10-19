@@ -4,16 +4,6 @@ use std::process::Command;
 
 use super::*;
 
-/// Git pathspecs excluding Homeboy-owned runner workspace metadata from captured
-/// candidate patches. The runner writes `.homeboy/runner-workspace.json` (and
-/// scratch under `.homeboy/`) after the snapshot baseline is established, so it
-/// is checkout drift rather than provider output — including it produces a patch
-/// that deletes/rewrites runner metadata and cannot be promoted cleanly. (#8534)
-pub(crate) const RUNNER_METADATA_EXCLUDE_PATHSPECS: &[&str] = &[
-    ":(exclude).homeboy/runner-workspace.json",
-    ":(exclude).homeboy/lab-at-files/**",
-];
-
 pub(super) fn harvest_committed_patch(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
@@ -47,10 +37,9 @@ pub(super) fn harvest_uncommitted_patch(
     let index_path = index.path().display().to_string();
     let index_env: &[(&str, &str)] = &[("GIT_INDEX_FILE", index_path.as_str())];
     git_output_with_env(root, &["read-tree", "HEAD"], index_env)?;
-    let mut add_args = vec!["add", "--all", "--", "."];
-    add_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    let add_args = ["add", "--all", "--", "."];
     git_output_with_env(root, &add_args, index_env)?;
-    let mut uncommitted_check_args = vec![
+    let uncommitted_check_args = [
         "diff",
         "--cached",
         "--binary",
@@ -60,7 +49,6 @@ pub(super) fn harvest_uncommitted_patch(
         "--",
         ".",
     ];
-    uncommitted_check_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
     if git_output_raw_with_env(root, &uncommitted_check_args, index_env)?
         .trim()
         .is_empty()
@@ -71,7 +59,7 @@ pub(super) fn harvest_uncommitted_patch(
     // candidate against the immutable task base. Otherwise this artifact would
     // omit the commits while still claiming `base` as its application base, and
     // committed harvest would skip it because a patch already exists.
-    let mut candidate_patch_args = vec![
+    let candidate_patch_args = [
         "diff",
         "--cached",
         "--binary",
@@ -81,10 +69,8 @@ pub(super) fn harvest_uncommitted_patch(
         "--",
         ".",
     ];
-    candidate_patch_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
     let patch = git_output_raw_with_env(root, &candidate_patch_args, index_env)?;
-    let mut uncommitted_changed_args = vec!["diff", "--cached", "--name-only", base, "--", "."];
-    uncommitted_changed_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    let uncommitted_changed_args = ["diff", "--cached", "--name-only", base, "--", "."];
     let changed_files = git_changed_files_with_env(root, &uncommitted_changed_args, index_env)?;
     let path = attempt_patch_path(running, "uncommitted")?;
     std::fs::write(&path, patch.as_bytes()).map_err(|error| HarvestError::ArtifactWrite {
@@ -330,7 +316,7 @@ fn harvest_committed_patch_with_metadata(
             head,
         });
     }
-    let mut committed_patch_args = vec![
+    let committed_patch_args = [
         "diff",
         "--binary",
         "--full-index",
@@ -340,7 +326,6 @@ fn harvest_committed_patch_with_metadata(
         "--",
         ".",
     ];
-    committed_patch_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
     let patch = git_output_raw(root, &committed_patch_args)?;
     if patch.trim().is_empty() {
         return Ok(());
@@ -362,8 +347,7 @@ fn harvest_committed_patch_with_metadata(
         Vec::new(),
     ));
     let commits = collect_metadata(root, &range)?;
-    let mut committed_changed_args = vec!["diff", "--name-only", base, "HEAD", "--", "."];
-    committed_changed_args.extend_from_slice(RUNNER_METADATA_EXCLUDE_PATHSPECS);
+    let committed_changed_args = ["diff", "--name-only", base, "HEAD", "--", "."];
     let changed_files = git_changed_files(root, &committed_changed_args)?;
     outcome
         .artifacts
@@ -541,11 +525,11 @@ pub(super) fn git_is_repository(cwd: &Path) -> Result<bool, HarvestError> {
 }
 
 /// Report workspace changes while excluding state injected by Homeboy's runner.
-pub(super) fn git_status_ignoring_runner_metadata(cwd: &Path) -> Result<String, HarvestError> {
+pub(super) fn git_status_porcelain(cwd: &Path) -> Result<String, HarvestError> {
     git_status_ignoring_snapshot_excludes(cwd, &[])
 }
 
-/// Same cleanliness surface as [`git_status_ignoring_runner_metadata`], plus
+/// Same cleanliness surface as [`git_status_porcelain`], plus
 /// declared snapshot excludes so omitted tracked context is not source dirt.
 pub(super) fn git_status_ignoring_snapshot_excludes(
     cwd: &Path,
@@ -559,11 +543,6 @@ pub(super) fn git_status_ignoring_snapshot_excludes(
         "--".to_string(),
         ".".to_string(),
     ];
-    args.extend(
-        RUNNER_METADATA_EXCLUDE_PATHSPECS
-            .iter()
-            .map(|pathspec| (*pathspec).to_string()),
-    );
     args.extend(extra);
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     git_output(cwd, &args)
@@ -1239,14 +1218,6 @@ mod committed_harvest_tests {
         git(&source, &["config", "user.email", "test@example.com"]);
         git(&source, &["config", "user.name", "Homeboy Test"]);
         std::fs::write(source.join("file.txt"), "base\n").expect("base file");
-        // The runner metadata exists at the baseline; the runner rewrites it after
-        // materialization, which is checkout drift, not provider output. (#8534)
-        std::fs::create_dir_all(source.join(".homeboy")).expect(".homeboy dir");
-        std::fs::write(
-            source.join(".homeboy/runner-workspace.json"),
-            "{\"stage\":\"baseline\"}\n",
-        )
-        .expect("runner metadata baseline");
         git(&source, &["add", "-A"]);
         git(&source, &["commit", "-m", "base"]);
         git(
@@ -1261,18 +1232,12 @@ mod committed_harvest_tests {
         );
         let base = git(&workspace, &["rev-parse", "HEAD"]);
 
-        // The provider commits one edit, then makes another uncommitted edit;
-        // the runner also rewrites its metadata (drift).
+        // The provider commits one edit, then makes another uncommitted edit.
         std::fs::write(workspace.join("file.txt"), "provider change\n").expect("provider edit");
         git(&workspace, &["add", "file.txt"]);
         git(&workspace, &["commit", "-m", "provider commit"]);
         std::fs::write(workspace.join("late.txt"), "late provider change\n")
             .expect("late provider edit");
-        std::fs::write(
-            workspace.join(".homeboy/runner-workspace.json"),
-            "{\"stage\":\"final\"}\n",
-        )
-        .expect("runner metadata drift");
         let index_lock =
             PathBuf::from(git(&workspace, &["rev-parse", "--absolute-git-dir"])).join("index.lock");
         std::fs::write(&index_lock, b"held by provider").expect("hold linked-worktree index lock");
@@ -1370,10 +1335,6 @@ mod committed_harvest_tests {
         assert!(
             patch.contains("late.txt") && patch.contains("+late provider change"),
             "the provider's uncommitted edit must be captured: {patch}"
-        );
-        assert!(
-            !patch.contains("runner-workspace.json"),
-            "Homeboy runner metadata drift must be excluded from the candidate patch: {patch}"
         );
         for key in [
             "run_id",

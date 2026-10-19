@@ -301,12 +301,7 @@ pub(crate) fn verify_unchanged_empty_checkout(
     {
         return false;
     }
-    let mut status_args = vec!["status", "--porcelain", "--untracked-files=all", "--", "."];
-    status_args.extend(
-        crate::agent_task_scheduler::RUNNER_METADATA_EXCLUDE_PATHSPECS
-            .iter()
-            .copied(),
-    );
+    let status_args = ["status", "--porcelain", "--untracked-files=all", "--", "."];
     // An unreadable status proves nothing; only a readable clean tree is
     // unchanged.
     homeboy_core::git::output_allow_empty(workspace_root, &status_args)

@@ -17,6 +17,37 @@ pub const ARTIFACT_MANIFEST_FILE: &str = "homeboy-artifact-manifest.json";
 pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = ARTIFACT_MANIFEST_SCHEMA;
 pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = ARTIFACT_MANIFEST_FILE;
 pub const RUNNER_ARTIFACT_ROOT_DIR_SUFFIX: &str = "-homeboy-artifacts";
+/// Sibling directory that holds Homeboy-owned runner workspace state
+/// (`runner-workspace.json`, Lab `@file` scratch). It lives beside the
+/// checkout under `_lab_workspaces`, never inside the workspace tree, so the
+/// agent's worktree only ever contains the agent's own changes.
+pub const RUNNER_WORKSPACE_STATE_DIR_SUFFIX: &str = "-homeboy-state";
+pub const RUNNER_WORKSPACE_METADATA_FILE_NAME: &str = "runner-workspace.json";
+pub const RUNNER_WORKSPACE_LAB_AT_FILES_DIR_NAME: &str = "lab-at-files";
+
+/// Homeboy-owned state directory for the runner workspace at `remote_path`.
+pub fn runner_workspace_state_dir(remote_path: &str) -> String {
+    format!(
+        "{}{RUNNER_WORKSPACE_STATE_DIR_SUFFIX}",
+        remote_path.trim_end_matches('/')
+    )
+}
+
+/// Runner workspace metadata path for the workspace at `remote_path`.
+pub fn runner_workspace_metadata_path(remote_path: &str) -> String {
+    format!(
+        "{}/{RUNNER_WORKSPACE_METADATA_FILE_NAME}",
+        runner_workspace_state_dir(remote_path)
+    )
+}
+
+/// Lab `@file` scratch directory for the workspace at `remote_path`.
+pub fn runner_workspace_lab_at_files_dir(remote_path: &str) -> String {
+    format!(
+        "{}/{RUNNER_WORKSPACE_LAB_AT_FILES_DIR_NAME}",
+        runner_workspace_state_dir(remote_path)
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabRunnerHandoffEnvelope {

@@ -318,8 +318,8 @@ fn execute_owned(
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
     )?;
     let receipt_file = format!(
-        "{}/.homeboy/gate-receipts/{}.json",
-        snapshot.remote_path,
+        "{}/gate-receipts/{}.json",
+        homeboy_lab_contract::lab::handoff::runner_workspace_state_dir(&snapshot.remote_path),
         uuid::Uuid::new_v4()
     );
     let mut command = vec![
