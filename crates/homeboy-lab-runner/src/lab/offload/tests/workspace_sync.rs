@@ -423,8 +423,7 @@ fn changed_since_git_sync_mode_names_checkout_without_origin() {
 
     assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
     assert!(
-        err.message
-            .contains(&dir.path().display().to_string()),
+        err.message.contains(&dir.path().display().to_string()),
         "error must name the directory it checked: {}",
         err.message
     );
@@ -463,8 +462,7 @@ fn changed_since_git_sync_mode_reports_non_git_directory_as_staging_failure() {
 
     assert_eq!(err.code, ErrorCode::InternalIoError);
     assert!(
-        err.message
-            .contains(&dir.path().display().to_string()),
+        err.message.contains(&dir.path().display().to_string()),
         "error must name the directory it checked: {}",
         err.message
     );

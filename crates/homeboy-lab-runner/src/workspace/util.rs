@@ -106,9 +106,7 @@ pub(crate) fn git_output(local_path: &Path, args: &[&str]) -> Result<String> {
         .map_err(|err| Error::internal_io(err.to_string(), Some("run git".to_string())))?;
     if !output.status.success() {
         return Err(Error::internal_unexpected(git_failure_evidence(
-            local_path,
-            args,
-            &output,
+            local_path, args, &output,
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())

@@ -83,10 +83,9 @@ pub(super) fn lab_workspace_sync_mode_with_source_policy(
 /// - a work tree without `remote.origin.url`: actionable caller input with a
 ///   fix hint.
 fn source_checkout_remote_origin_url(source_path: &Path) -> Result<String> {
-    if let Ok(remote_url) = super::super::workspace::git_output(
-        source_path,
-        &["config", "--get", "remote.origin.url"],
-    ) {
+    if let Ok(remote_url) =
+        super::super::workspace::git_output(source_path, &["config", "--get", "remote.origin.url"])
+    {
         return Ok(remote_url);
     }
 
@@ -113,7 +112,9 @@ fn source_checkout_remote_origin_url(source_path: &Path) -> Result<String> {
 
     Err(Error::validation_invalid_argument(
         "remote.origin.url",
-        format!("git-backed Lab offload requires remote.origin.url on the source checkout `{path}`"),
+        format!(
+            "git-backed Lab offload requires remote.origin.url on the source checkout `{path}`"
+        ),
         Some(path.clone()),
         Some(vec![
             format!("Set remote.origin.url on `{path}` before retrying Lab offload."),
