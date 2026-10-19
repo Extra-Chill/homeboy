@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.52.1] - 2026-10-19
+
+### Fixed
+- run terminal actions in a non-login shell
+- stage builds outside the component tree
+
 ## [3.52.0] - 2026-10-14
 
 ### Added
