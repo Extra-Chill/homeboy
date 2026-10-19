@@ -35,46 +35,48 @@ fn runner_wait_settings_and_environment_resolve_at_the_controller() {
         ..Default::default()
     };
     let _env = EnvVarGuard::unset(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
-    assert_eq!(
-        runner_exec_wait_timeout(&settings, None),
-        Duration::from_secs(2400)
-    );
+    let resolved = runner_exec_wait_timeout(&settings, None);
+    assert_eq!(resolved.timeout, Duration::from_secs(2400));
+    assert_eq!(resolved.source, RunnerExecWaitTimeoutSource::RunnerSetting);
 
     let _env = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "60");
-    assert_eq!(
-        runner_exec_wait_timeout(&settings, None),
-        Duration::from_secs(60)
-    );
+    let resolved = runner_exec_wait_timeout(&settings, None);
+    assert_eq!(resolved.timeout, Duration::from_secs(60));
+    assert_eq!(resolved.source, RunnerExecWaitTimeoutSource::EnvOverride);
 }
 
 #[test]
 fn agent_task_wait_honors_a_workload_budget_beyond_the_transport_default() {
     let budget_ms = 90 * 60 * 1_000;
+    let resolved = resolve_runner_exec_wait_timeout(None, None, Some(budget_ms));
     assert_eq!(
-        resolve_runner_exec_wait_timeout(None, None, Some(budget_ms)),
+        resolved.timeout,
         Duration::from_millis(budget_ms)
             + Duration::from_secs(AGENT_TASK_WAIT_STAGING_HARVEST_GRACE_SECS)
     );
+    assert_eq!(resolved.source, RunnerExecWaitTimeoutSource::WorkloadBudget);
 }
 
 #[test]
 fn explicit_wait_override_wins_over_the_workload_budget() {
     let budget_ms = Some(90 * 60 * 1_000);
     assert_eq!(
-        resolve_runner_exec_wait_timeout(None, Some(2400), budget_ms),
+        resolve_runner_exec_wait_timeout(None, Some(2400), budget_ms).timeout,
         Duration::from_secs(2400)
     );
     assert_eq!(
-        resolve_runner_exec_wait_timeout(Some(60), Some(2400), budget_ms),
+        resolve_runner_exec_wait_timeout(Some(60), Some(2400), budget_ms).timeout,
         Duration::from_secs(60)
     );
 }
 
 #[test]
 fn generic_exec_wait_keeps_the_twenty_minute_default() {
+    let resolved = resolve_runner_exec_wait_timeout(None, None, None);
+    assert_eq!(resolved.timeout, Duration::from_secs(20 * 60));
     assert_eq!(
-        resolve_runner_exec_wait_timeout(None, None, None),
-        Duration::from_secs(20 * 60)
+        resolved.source,
+        RunnerExecWaitTimeoutSource::TransportDefault
     );
 }
 

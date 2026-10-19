@@ -194,8 +194,8 @@ where
         .as_ref()
         .and_then(|workload| workload.agent_task.as_ref())
         .and_then(|agent_task| agent_task.wait_budget_ms);
-    let deadline =
-        Instant::now() + runner_exec_wait_timeout(&flow.runner.settings, workload_budget_ms);
+    let wait_timeout = runner_exec_wait_timeout(&flow.runner.settings, workload_budget_ms);
+    let deadline = Instant::now() + wait_timeout.timeout;
     let mut observed_terminal_daemon_job = job.status.is_terminal();
     let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {
@@ -260,9 +260,15 @@ where
                     format!("remote cancellation was requested but failed: {reason}")
                 }
             };
+            // Name the budget that expired and its value: a cancellation whose
+            // runner-side provenance says only "cancel requested via HTTP API"
+            // is indistinguishable from an operator cancel (#16168).
             output.stderr = format!(
-                "{} {job_id} on runner {} is still in flight after the controller wait timeout; {cancellation_message}. Remote command outcome is not known.\n",
-                flow.timeout_label, flow.runner.id
+                "{} {job_id} on runner {} is still in flight after the controller wait timeout ({}s, {}); {cancellation_message}. Remote command outcome is not known.\n",
+                flow.timeout_label,
+                flow.runner.id,
+                wait_timeout.timeout.as_secs(),
+                wait_timeout.source.label()
             );
             return Ok(RunnerExecCompletion::InFlight(output));
         }

@@ -370,7 +370,7 @@ pub(super) fn persist_lab_offload_handoff_run(
 pub(super) fn runner_exec_wait_timeout(
     settings: &homeboy_core::server::RunnerSettings,
     workload_budget_ms: Option<u64>,
-) -> Duration {
+) -> ResolvedRunnerExecWaitTimeout {
     resolve_runner_exec_wait_timeout(
         std::env::var(RUNNER_EXEC_WAIT_TIMEOUT_ENV)
             .ok()
@@ -380,19 +380,63 @@ pub(super) fn runner_exec_wait_timeout(
     )
 }
 
+/// The controller's resolved runner-job wait budget together with the source
+/// that produced it. The source is part of the contract: when this budget
+/// expires and the controller cancels the remote job, the operator-facing
+/// message must name which budget fired and its value, because the runner-side
+/// cancellation provenance only records "cancel requested via HTTP API"
+/// (#16168).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ResolvedRunnerExecWaitTimeout {
+    pub(super) timeout: Duration,
+    pub(super) source: RunnerExecWaitTimeoutSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RunnerExecWaitTimeoutSource {
+    EnvOverride,
+    RunnerSetting,
+    WorkloadBudget,
+    TransportDefault,
+}
+
+impl RunnerExecWaitTimeoutSource {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::EnvOverride => "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS override",
+            Self::RunnerSetting => "runner_exec_wait_timeout_secs setting",
+            Self::WorkloadBudget => "agent-task workload wait budget plus harvest grace",
+            Self::TransportDefault => "transport default",
+        }
+    }
+}
+
 pub(super) fn resolve_runner_exec_wait_timeout(
     env_secs: Option<u64>,
     setting_secs: Option<u64>,
     workload_budget_ms: Option<u64>,
-) -> Duration {
-    env_secs
-        .or(setting_secs)
-        .map(Duration::from_secs)
-        .or_else(|| {
-            workload_budget_ms.map(|budget_ms| {
-                Duration::from_millis(budget_ms)
-                    + Duration::from_secs(AGENT_TASK_WAIT_STAGING_HARVEST_GRACE_SECS)
-            })
-        })
-        .unwrap_or_else(|| Duration::from_secs(DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS))
+) -> ResolvedRunnerExecWaitTimeout {
+    if let Some(secs) = env_secs {
+        return ResolvedRunnerExecWaitTimeout {
+            timeout: Duration::from_secs(secs),
+            source: RunnerExecWaitTimeoutSource::EnvOverride,
+        };
+    }
+    if let Some(secs) = setting_secs {
+        return ResolvedRunnerExecWaitTimeout {
+            timeout: Duration::from_secs(secs),
+            source: RunnerExecWaitTimeoutSource::RunnerSetting,
+        };
+    }
+    if let Some(budget_ms) = workload_budget_ms {
+        return ResolvedRunnerExecWaitTimeout {
+            timeout: Duration::from_millis(budget_ms)
+                + Duration::from_secs(AGENT_TASK_WAIT_STAGING_HARVEST_GRACE_SECS),
+            source: RunnerExecWaitTimeoutSource::WorkloadBudget,
+        };
+    }
+    ResolvedRunnerExecWaitTimeout {
+        timeout: Duration::from_secs(DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS),
+        source: RunnerExecWaitTimeoutSource::TransportDefault,
+    }
 }
