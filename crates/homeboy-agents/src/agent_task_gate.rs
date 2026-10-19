@@ -4460,11 +4460,11 @@ fn gate_failure_evidence(
                 ))
     });
     let shell_rejection = gate_shell_rejection(exit_code, stderr);
-    let capability_preflight = homeboy_capability_preflight_failure(stdout, stderr);
+    let target_unresolved = homeboy_gate_target_unresolved(stdout, stderr);
     let classification = invalid_focused_selection
         .then_some(AgentTaskGateFailureClassification::ZeroTestsSelected)
         .or_else(|| {
-            (missing_script.is_some() || shell_rejection.is_some() || capability_preflight)
+            (missing_script.is_some() || shell_rejection.is_some() || target_unresolved)
                 .then_some(AgentTaskGateFailureClassification::GateDeclaration)
         })
         .unwrap_or(AgentTaskGateFailureClassification::CandidateCode);
@@ -4484,8 +4484,8 @@ fn gate_failure_evidence(
             (None, Some(line)) => {
                 format!("gate shell `sh -c` rejected the gate program itself: {line}")
             }
-            (None, None) if capability_preflight => format!(
-                "gate environment cannot run `{command}`: Homeboy capability preflight failed before checking the candidate"
+            (None, None) if target_unresolved => format!(
+                "gate environment cannot run `{command}`: Homeboy could not resolve the gate's target before checking the candidate"
             ),
             (None, None) => {
                 format!("deterministic gate failed with exit code {exit_code}: {command}")
@@ -4516,8 +4516,8 @@ fn gate_failure_evidence(
             (None, Some(line)) => format!(
                 "The declared gate is invalid, not candidate-code feedback. Gates run under POSIX `sh -c`, which rejected the gate program before it checked anything (`{line}`). Rewrite it for POSIX sh (for example drop `set -o pipefail` and other bash-only syntax) or invoke bash explicitly, e.g. `bash ./verify.sh`, before rerunning Cook."
             ),
-            (None, None) if capability_preflight => format!(
-                "The gate environment is broken, not candidate-code feedback. `{command}` failed Homeboy's capability preflight (for example an extension manifest could not be read in the gate environment) before it checked the candidate. Repair the component or extension on the executing runner, or declare a gate that runs there, then resume Cook. Do not change repository code to satisfy this gate."
+            (None, None) if target_unresolved => format!(
+                "The gate is invalid, not candidate-code feedback. `{command}` could not resolve its target in the gate environment before it checked the candidate (for example the component is registered only in operator config that isolated gate XDG hides, no extension provides the capability, or an extension manifest could not be read). Declare a gate that runs from the repository itself (such as its own test script), or give the component a portable homeboy.json with the needed extension, then rerun Cook. Do not change repository code to satisfy this gate."
             ),
             (None, None) => format!(
                 "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes, using the captured stdout/stderr tails as the primary failure evidence."
@@ -4537,17 +4537,40 @@ fn gate_failure_evidence(
     }
 }
 
-/// Detects a Homeboy gate (for example `homeboy review test <component>`)
-/// that failed its own capability preflight before checking the candidate.
+/// Detects a nested Homeboy gate (for example `homeboy review test
+/// <component>`) that failed before checking the candidate.
 ///
-/// Homeboy marks that error with the structured `review_capability_preflight`
-/// detail key. The failure is a property of the executing environment (such as
-/// an extension manifest the gate environment cannot read), so it is
-/// identical on any candidate and must never become gate-fix feedback asking
-/// the provider to change code (Extra-Chill/homeboy#15381).
-fn homeboy_capability_preflight_failure(stdout: &str, stderr: &str) -> bool {
-    const MARKER: &str = "\"review_capability_preflight\"";
-    stdout.contains(MARKER) || stderr.contains(MARKER)
+/// The gate's stdout is a Homeboy command result. Two structured signals mean
+/// the gate never reached the candidate: the `review_capability_preflight`
+/// detail (an extension manifest unreadable in the gate environment,
+/// Extra-Chill/homeboy#15381), or an error code for a target the gate
+/// environment cannot resolve (`component.not_found` when the component is
+/// registered only in the operator config that isolated gate XDG hides,
+/// `extension.unsupported` when no extension provides the capability;
+/// Extra-Chill/homeboy#16157). Either failure is identical on any candidate
+/// and on the baseline, so it is a broken gate, never an inherited failure or
+/// gate-fix feedback.
+fn homeboy_gate_target_unresolved(stdout: &str, stderr: &str) -> bool {
+    [stdout, stderr].into_iter().any(|stream| {
+        let Ok(result) = serde_json::from_str::<serde_json::Value>(stream.trim()) else {
+            return false;
+        };
+        if result.get("success") != Some(&serde_json::Value::Bool(false)) {
+            return false;
+        }
+        // Current results carry `diagnostics`; older ones carry `error`.
+        let Some(error) = result.get("diagnostics").or_else(|| result.get("error")) else {
+            return false;
+        };
+        error
+            .get("details")
+            .is_some_and(|details| details.get("review_capability_preflight").is_some())
+            || error
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .and_then(homeboy_error::ErrorCode::from_str)
+                .is_some_and(|code| code.is_unresolved_target())
+    })
 }
 
 /// Detects a gate program rejected by the POSIX sh interpreter itself.
@@ -5233,7 +5256,7 @@ mod tests {
     /// the candidate, so it must stop the Cook instead of asking the provider
     /// to change code (Extra-Chill/homeboy#15381).
     #[test]
-    fn homeboy_capability_preflight_failure_is_a_gate_declaration_failure() {
+    fn homeboy_gate_target_unresolved_is_a_gate_declaration_failure() {
         let stdout = r#"{
   "success": false,
   "error": {
@@ -5257,7 +5280,7 @@ mod tests {
             AgentTaskGateFailureClassification::GateDeclaration
         );
         assert!(
-            evidence.summary.contains("capability preflight"),
+            evidence.summary.contains("could not resolve"),
             "summary must name the environment failure: {}",
             evidence.summary
         );
@@ -5269,6 +5292,80 @@ mod tests {
             "feedback must not ask for a code change: {}",
             evidence.agent_feedback
         );
+    }
+
+    /// A nested Homeboy gate whose component or capability does not resolve in
+    /// the gate environment never checked the candidate. The exact stdout from
+    /// a Lab cook whose isolated gate XDG hid the operator component registry
+    /// (Extra-Chill/homeboy#16157) must classify as a broken gate, and an
+    /// identical baseline replay must not turn it into an inherited failure.
+    #[test]
+    fn homeboy_gate_with_unresolved_target_is_a_gate_declaration_failure() {
+        let component_not_found = r#"{
+  "schema": "homeboy/command-result/v3",
+  "command": "review",
+  "operation": "test",
+  "success": false,
+  "exit_code": 2,
+  "status": "failed",
+  "summary": "Component not found",
+  "diagnostics": {
+    "code": "component.not_found",
+    "message": "Component not found",
+    "details": { "id": "blocks-engine" },
+    "hints": [ { "message": "Run 'homeboy component list' to see available components" } ],
+    "failure_digest": { "summary": "Component not found" }
+  }
+}
+"#;
+        let extension_unsupported = r#"{
+  "schema": "homeboy/command-result/v3",
+  "success": false,
+  "exit_code": 2,
+  "diagnostics": {
+    "code": "extension.unsupported",
+    "message": "No extension provider configured for component 'blocks-engine'",
+    "details": { "component_id": "blocks-engine" }
+  }
+}"#;
+        for stdout in [component_not_found, extension_unsupported] {
+            let evidence =
+                gate_failure_evidence("homeboy review test blocks-engine", 2, stdout, "", None);
+            assert_eq!(
+                evidence.classification,
+                AgentTaskGateFailureClassification::GateDeclaration,
+                "{stdout}"
+            );
+            assert!(
+                evidence.summary.contains("could not resolve"),
+                "{}",
+                evidence.summary
+            );
+            assert!(
+                !evidence.agent_feedback.contains("Fix the code"),
+                "{}",
+                evidence.agent_feedback
+            );
+        }
+    }
+
+    /// A Homeboy result that resolved its target and then failed is ordinary
+    /// candidate feedback, as is a successful result.
+    #[test]
+    fn homeboy_gate_that_resolved_its_target_stays_candidate_code() {
+        for stdout in [
+            r#"{"success": false, "diagnostics": {"code": "validation.invalid_argument", "details": {}}}"#,
+            r#"{"success": true, "diagnostics": {"code": "component.not_found"}}"#,
+            "{\"success\": false}",
+            "component.not_found\n",
+        ] {
+            let evidence = gate_failure_evidence("homeboy review test demo", 1, stdout, "", None);
+            assert_eq!(
+                evidence.classification,
+                AgentTaskGateFailureClassification::CandidateCode,
+                "{stdout}"
+            );
+        }
     }
 
     /// Mentioning the words in ordinary output is not the structured marker.
