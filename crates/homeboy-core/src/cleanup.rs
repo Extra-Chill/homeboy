@@ -269,6 +269,51 @@ pub fn reconstructable_artifact_capacity_preview(root: &Path) -> serde_json::Val
     })
 }
 
+/// Estimate the bytes a plain `git worktree add` checkout of `repository`'s
+/// HEAD tree allocates on the controller filesystem.
+///
+/// A Lab-placed Cook's controller allocation is exactly this checkout — the
+/// provider attempt and deterministic gates run on the admitted runner, so no
+/// dependency hydration or build output lands in the controller worktree
+/// (#16149). Each tracked blob is rounded up to a filesystem block, plus a
+/// fixed allowance for the worktree's git administrative files (index,
+/// per-worktree refs and logs, checkout temp files).
+///
+/// Returns `None` when `repository` has no readable HEAD tree; callers keep
+/// their reserve-based admission for that case.
+pub fn estimated_checkout_allocation_bytes(repository: &Path) -> Option<u64> {
+    const BLOCK_BYTES: u64 = 4096;
+    const WORKTREE_METADATA_ALLOWANCE_BYTES: u64 = 64 * 1024 * 1024;
+    let output = std::process::Command::new("git")
+        .args(["ls-tree", "-r", "-l", "--full-tree", "HEAD"])
+        .current_dir(repository)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let mut total: u64 = 0;
+    for line in listing.lines() {
+        // `<mode> SP <type> SP <object> SP <size> TAB <path>`; size is `-`
+        // for non-blob entries such as submodule commits.
+        let metadata = line.split('\t').next().unwrap_or(line);
+        let Some(size) = metadata.split_whitespace().nth(3) else {
+            continue;
+        };
+        let Ok(bytes) = size.parse::<u64>() else {
+            continue;
+        };
+        total = total.saturating_add(
+            bytes
+                .div_ceil(BLOCK_BYTES)
+                .max(1)
+                .saturating_mul(BLOCK_BYTES),
+        );
+    }
+    Some(total.saturating_add(WORKTREE_METADATA_ALLOWANCE_BYTES))
+}
+
 /// Use the target filesystem for missing worktrees by probing the nearest
 /// existing ancestor. Both preview and execution admission use this resolver.
 fn capacity_probe_root(path: &Path) -> PathBuf {
@@ -3168,6 +3213,32 @@ fn git_root(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// #16149: a Lab-placed Cook's controller allocation is a plain checkout.
+    /// The estimator sizes it from the repository's HEAD tree and never claims
+    /// an estimate for a directory without one.
+    mod checkout_allocation_tests {
+        use super::super::estimated_checkout_allocation_bytes;
+
+        #[test]
+        fn sizes_a_committed_head_tree_and_declines_a_non_repository() {
+            let (_root, repository) =
+                crate::test_support::shared_committed_git_repo_fixture("fixture");
+            let estimate =
+                estimated_checkout_allocation_bytes(&repository).expect("committed HEAD tree");
+            // One small README rounds to one block plus the fixed metadata
+            // allowance; the estimate must stay orders of magnitude below the
+            // flat 20 GiB reconstructable-artifact reserve.
+            assert!(estimate >= 4096, "estimate covers the tracked blob");
+            assert!(
+                estimate < 1024 * 1024 * 1024,
+                "a megabytes-scale source tree must not be sized like the flat reserve: {estimate}"
+            );
+
+            let plain = tempfile::tempdir().expect("non-repository dir");
+            assert_eq!(estimated_checkout_allocation_bytes(plain.path()), None);
+        }
+    }
+
     /// #9481: a build holding the Cargo target lock must protect the target,
     /// whether or not Homeboy manages the checkout.
     ///

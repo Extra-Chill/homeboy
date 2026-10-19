@@ -1011,27 +1011,90 @@ fn apply_preview_worktree_capacity(
         && resolved["workspace"]["action"] == "planned_create";
     let provider_on_lab = resolved["placement"]["selected"].as_str() == Some("lab")
         || resolved["placement"]["requested"].as_str() == Some("lab");
-    // Provider placement does not move a planned controller checkout onto the
-    // runner's filesystem. Its allocation retains the controller's reserve.
     if capacity["state"] != "shortfall" || (provider_on_lab && !allocates_controller_worktree) {
         return;
+    }
+    let repository_path = repository_identity
+        .and_then(|identity| identity.get("repository_path"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut inspection_path = repository_path;
+    if provider_on_lab {
+        // A Lab-placed Cook's planned controller worktree is a plain source
+        // checkout: the provider attempt and deterministic gates run on the
+        // admitted runner, so no dependency hydration or build output lands
+        // here. Size admission to that checkout instead of the flat
+        // reconstructable-artifact reserve (#16149).
+        let source = cook_checkout_estimate_source(repository_identity, &resolved["workspace"]);
+        let estimate = source.as_deref().and_then(|path| {
+            homeboy::core::cleanup::estimated_checkout_allocation_bytes(Path::new(path))
+        });
+        inspection_path = inspection_path.or(source.clone());
+        if let Some(required_bytes) = estimate {
+            let available_bytes = capacity["available_bytes"].as_u64();
+            resolved["workspace"]["capacity"]["lab_checkout_allocation"] = serde_json::json!({
+                "estimated_bytes": required_bytes,
+                "source": source,
+            });
+            if available_bytes.is_some_and(|available| available >= required_bytes) {
+                return;
+            }
+            let available = available_bytes
+                .map(|available| available.to_string())
+                .unwrap_or_else(|| "an unmeasured number of".to_string());
+            let blocker = format!(
+                "local worktree filesystem cannot hold this Lab-placed Cook's plain source checkout: ~{required_bytes} bytes needed, {available} bytes available"
+            );
+            let next_action = worktree_artifact_inspection_action(inspection_path.as_deref());
+            let capacity = resolved["workspace"]["capacity"].clone();
+            resolved["placement"]["admission"] =
+                blocked_preview_admission(blocker, Some(next_action));
+            resolved["placement"]["admission"]["capacity"] = capacity;
+            return;
+        }
+        // Without a readable source tree the checkout cannot be sized;
+        // fall through to the reserve-based blocker below (fail closed).
     }
     let shortfall = capacity["shortfall_bytes"].as_u64().unwrap_or_default();
     let blocker =
         format!("local worktree filesystem is {shortfall} bytes below its configured reserve");
-    let repository_path = repository_identity
-        .and_then(|identity| identity.get("repository_path"))
-        .and_then(Value::as_str);
-    let next_action = repository_path
+    let next_action = worktree_artifact_inspection_action(inspection_path.as_deref());
+    resolved["placement"]["admission"] = blocked_preview_admission(blocker, Some(next_action));
+    resolved["placement"]["admission"]["capacity"] = capacity.clone();
+}
+
+/// The bounded inspection that reports the specific worktrees holding
+/// reconstructable dependency dirs (`node_modules`, `vendor`, `target`) — the
+/// entries that actually free controller space — scoped to the Cook's
+/// repository when one is known.
+fn worktree_artifact_inspection_action(repository: Option<&str>) -> String {
+    repository
         .map(|repository| {
             format!(
                 "homeboy cleanup artifacts --path '{}' --all-worktrees --sort size --limit 100",
                 repository.replace('\'', "'\\''")
             )
         })
-        .unwrap_or_else(|| "homeboy cleanup --include repo-artifacts".to_string());
-    resolved["placement"]["admission"] = blocked_preview_admission(blocker, Some(next_action));
-    resolved["placement"]["admission"]["capacity"] = capacity.clone();
+        .unwrap_or_else(|| "homeboy cleanup --include repo-artifacts".to_string())
+}
+
+/// The existing local repository whose HEAD tree sizes a planned controller
+/// checkout: the attested repository path, the resolved identity's workspace
+/// path, or the provisioning intent's repository when it names a path.
+fn cook_checkout_estimate_source(
+    repository_identity: Option<&Value>,
+    workspace: &Value,
+) -> Option<String> {
+    [
+        repository_identity.and_then(|identity| identity.get("repository_path")),
+        repository_identity.and_then(|identity| identity.get("workspace_path")),
+        workspace.pointer("/intent/repo"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .find(|path| Path::new(path).is_dir())
+    .map(str::to_string)
 }
 
 fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> Value {
@@ -11613,6 +11676,88 @@ mod tests {
         }
     }
 
+    /// #16149: a Lab-placed Cook only allocates a plain source checkout on
+    /// the controller — gates, dependency installs and builds run on the
+    /// admitted runner — so its admission is sized to that checkout, not the
+    /// flat reconstructable-artifact reserve.
+    #[test]
+    fn lab_cook_planned_checkout_is_sized_to_the_checkout_not_the_flat_reserve() {
+        let (_root, repository) =
+            homeboy::core::test_support::shared_committed_git_repo_fixture("fixture");
+        let identity = serde_json::json!({ "workspace_path": repository });
+        let mut resolved = serde_json::json!({
+            "workspace": { "action": "planned_create", "kind": "native" },
+            "placement": { "requested": "lab", "selected": "lab" },
+        });
+        // The flat reserve reports a 10 GiB shortfall, but 10 GiB of headroom
+        // easily holds a megabytes-scale checkout: the Lab Cook is admitted.
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let capacity = serde_json::json!({
+            "state": "shortfall",
+            "available_bytes": 10 * GIB,
+            "reserved_bytes": 20 * GIB,
+            "shortfall_bytes": 10 * GIB,
+        });
+        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), Some(&identity));
+        assert!(
+            resolved["placement"].get("admission").is_none(),
+            "a checkout-sized allocation must not be blocked by the flat reserve: {resolved}"
+        );
+        let allocation = &resolved["workspace"]["capacity"]["lab_checkout_allocation"];
+        assert!(
+            allocation["estimated_bytes"]
+                .as_u64()
+                .is_some_and(|bytes| bytes < GIB),
+            "disclosed checkout estimate: {allocation}"
+        );
+    }
+
+    /// A controller filesystem that cannot even hold the plain checkout still
+    /// blocks a Lab-placed Cook, and the next action inspects the worktrees
+    /// holding reconstructable dependency dirs instead of a category that
+    /// cannot free the space.
+    #[test]
+    fn lab_cook_blocks_when_the_checkout_itself_does_not_fit_and_reports_worktree_artifacts() {
+        let (_root, repository) =
+            homeboy::core::test_support::shared_committed_git_repo_fixture("fixture");
+        let identity = serde_json::json!({ "workspace_path": repository });
+        let mut resolved = serde_json::json!({
+            "workspace": { "action": "planned_create", "kind": "native" },
+            "placement": { "requested": "lab", "selected": "lab" },
+        });
+        let capacity = serde_json::json!({
+            "state": "shortfall",
+            "available_bytes": 1024,
+            "reserved_bytes": 20_u64 * 1024 * 1024 * 1024,
+            "shortfall_bytes": 20_u64 * 1024 * 1024 * 1024 - 1024,
+        });
+        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), Some(&identity));
+        let admission = &resolved["placement"]["admission"];
+        assert_eq!(admission["state"], "blocked", "{resolved}");
+        let blocker = admission["remaining_blocker"]
+            .as_str()
+            .expect("checkout-sized blocker");
+        assert!(
+            blocker.contains("plain source checkout"),
+            "blocker is sized to the checkout, not the reserve: {blocker}"
+        );
+        let next_action = admission["next_action"].as_str().expect("next action");
+        assert!(
+            next_action.contains("--all-worktrees")
+                && next_action.contains(repository.to_str().expect("repository path")),
+            "next action inspects repository worktree artifacts: {next_action}"
+        );
+        assert!(
+            admission["capacity"]["lab_checkout_allocation"]["estimated_bytes"]
+                .as_u64()
+                .is_some(),
+            "blocked admission discloses the checkout estimate: {admission}"
+        );
+    }
+
+    /// A Lab-placed Cook whose planned checkout cannot be sized (no readable
+    /// source tree) keeps the reserve-based admission: fail closed rather
+    /// than guessing.
     #[test]
     fn planned_controller_worktree_shortfall_blocks_lab_preview() {
         crate::test_support::with_isolated_home(|home| {
