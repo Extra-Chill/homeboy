@@ -55,9 +55,11 @@ function normalizeTerminalAction(action, options = {}) {
 	const cwd = resolveContainedCwd(action.cwd || options.cwd || '.', runtimeRoot);
 	const timeoutMs = normalizeTimeoutMs(action.timeout_ms ?? action.timeoutMs, options.timeoutMs);
 	const shell = action.shell || options.shell || 'bash';
+	// A non-login shell: login profiles rewrite PATH (macOS path_helper,
+	// ~/.profile) and would override the env the caller supplied below.
 	const shellArgs = Array.isArray(action.shell_args || action.shellArgs)
 		? action.shell_args || action.shellArgs
-		: ['-lc'];
+		: ['-c'];
 	const env = {
 		...process.env,
 		...(options.env || {}),
