@@ -4568,6 +4568,7 @@ fn gate_failure_evidence(
             .focused_problem()
             .map(|problem| (selection, problem))
     });
+    let missing_executable = gate_missing_executable(command, exit_code, stdout, stderr);
     let shell_rejection = gate_shell_rejection(exit_code, stderr);
     let target_unresolved = homeboy_gate_target_unresolved(stdout, stderr);
     let classification = match selection_problem {
@@ -4577,7 +4578,11 @@ fn gate_failure_evidence(
         Some((_, FocusedCargoSelectionProblem::Substring)) => {
             AgentTaskGateFailureClassification::GateDeclaration
         }
-        None if missing_script.is_some() || shell_rejection.is_some() || target_unresolved => {
+        None if missing_script.is_some()
+            || missing_executable.is_some()
+            || shell_rejection.is_some()
+            || target_unresolved =>
+        {
             AgentTaskGateFailureClassification::GateDeclaration
         }
         None => AgentTaskGateFailureClassification::CandidateCode,
@@ -4593,6 +4598,8 @@ fn gate_failure_evidence(
                 selection.selected_count, selection.selected_ids,
             ),
         }
+    } else if let Some(bin) = missing_executable.as_deref() {
+        format!("gate environment cannot run `{bin}`: executable not found")
     } else {
         match (missing_script, shell_rejection.as_deref()) {
             (Some(script), _) => {
@@ -4625,6 +4632,8 @@ fn gate_failure_evidence(
             .unwrap_or_else(|| {
                 "The Cargo test gate must use an exact or module-prefix filter and select at least one test before rerunning Cook.".to_string()
             })
+    } else if let Some(bin) = missing_executable.as_deref() {
+        format!("The declared gate is invalid, not candidate-code feedback. The gate environment cannot run `{bin}`: executable not found. Declare an installed tool or add the setup step before rerunning Cook. Do not change candidate code to satisfy this gate.")
     } else {
         match (missing_script, shell_rejection.as_deref()) {
             (Some(script), _) => format!(
@@ -4652,6 +4661,55 @@ fn gate_failure_evidence(
         agent_feedback,
         diagnostics: Vec::new(),
     }
+}
+
+/// Missing PATH executables are invalid gate declarations, not candidate
+/// failures. A missing path (`./bin/check`) stays candidate feedback: the
+/// candidate may be the change that creates it.
+fn gate_missing_executable(
+    command: &str,
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> Option<String> {
+    if exit_code == 127 {
+        for line in stderr.lines() {
+            for suffix in [": command not found", ": not found"] {
+                if let Some(prefix) = line.trim().strip_suffix(suffix) {
+                    let bin = prefix
+                        .rsplit(": ")
+                        .next()
+                        .unwrap_or_default()
+                        .trim_matches(['\'', '"']);
+                    if !bin.is_empty() && !bin.contains('/') {
+                        return Some(bin.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let pnpm_missing_command = exit_code == 254
+        && [stdout, stderr]
+            .iter()
+            .any(|stream| stream.contains("ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL"));
+    for stream in [stdout, stderr] {
+        if pnpm_missing_command {
+            if let Some(rest) = stream.split("Command \"").nth(1) {
+                if let Some((bin, _)) = rest.split_once("\" not found") {
+                    return Some(bin.to_string());
+                }
+            }
+        }
+        if stream.contains("could not determine executable to run") {
+            let mut words = command.split_whitespace();
+            let bin = words
+                .find(|word| *word == "npx")
+                .and_then(|_| words.find(|word| !word.starts_with('-')))
+                .unwrap_or(command);
+            return Some(bin.to_string());
+        }
+    }
+    None
 }
 
 /// Detects a nested Homeboy gate (for example `homeboy review test
@@ -4700,7 +4758,7 @@ fn homeboy_gate_target_unresolved(stdout: &str, stderr: &str) -> bool {
 ///
 /// Only interpreter-level diagnostics on exit status 2 qualify, the status
 /// POSIX shells reserve for syntax and option errors. A plain `not found` is
-/// deliberately excluded: a missing tool can be legitimate candidate feedback.
+/// handled separately by `gate_missing_executable`.
 fn gate_shell_rejection(exit_code: i32, stderr: &str) -> Option<String> {
     const MARKERS: [&str; 4] = [
         "Illegal option",
@@ -5494,12 +5552,95 @@ mod tests {
         );
     }
 
-    /// Ordinary failures stay candidate feedback: a missing tool, a shell
-    /// message on a non-syntax exit status, or a test's own "syntax error".
+    #[test]
+    fn missing_gate_executables_are_invalid_declarations() {
+        for (command, code, stdout, stderr, bin) in [
+            ("nginx -t", 127, "", "sh: 1: nginx: not found\n", "nginx"),
+            (
+                "tsc",
+                127,
+                "",
+                "sh: line 1: tsc: command not found\n",
+                "tsc",
+            ),
+            (
+                "pnpm exec tsc",
+                254,
+                "ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL Command \"tsc\" not found",
+                "",
+                "tsc",
+            ),
+            (
+                "pnpm exec tsc",
+                254,
+                "",
+                "ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL Command \"tsc\" not found",
+                "tsc",
+            ),
+            (
+                "pnpm exec tsc",
+                254,
+                "Command \"tsc\" not found",
+                "ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL",
+                "tsc",
+            ),
+            (
+                "npx tsc",
+                1,
+                "",
+                "npm error could not determine executable to run",
+                "tsc",
+            ),
+        ] {
+            let evidence = gate_failure_evidence(command, code, stdout, stderr, None);
+            assert_eq!(
+                evidence.classification,
+                AgentTaskGateFailureClassification::GateDeclaration
+            );
+            assert_eq!(
+                evidence.summary,
+                format!("gate environment cannot run `{bin}`: executable not found")
+            );
+            assert!(evidence
+                .agent_feedback
+                .contains("invalid, not candidate-code feedback"));
+            assert!(evidence
+                .agent_feedback
+                .contains("Declare an installed tool or add the setup step"));
+            let mut report = AgentTaskGateReport::skipped(
+                "gate-1",
+                vec![command.to_string()],
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                "fixture",
+            );
+            report.status = AgentTaskGateStatus::Failed;
+            report.failure_evidence = Some(evidence);
+            report.accept_inherited_failure();
+            assert_eq!(report.status, AgentTaskGateStatus::Failed, "{command}");
+        }
+    }
+
+    #[test]
+    fn missing_executable_cannot_be_accepted_as_inherited() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut report =
+            run_gate_command(temp.path(), 1, "homeboy_nonexistent_gate_16197").unwrap();
+        report.accept_inherited_failure();
+        assert_eq!(report.status, AgentTaskGateStatus::Failed);
+        assert_eq!(
+            report.failure_evidence.unwrap().classification,
+            AgentTaskGateFailureClassification::GateDeclaration
+        );
+    }
+
+    /// Ordinary failures stay candidate feedback: a shell message on a
+    /// non-syntax exit status, or a test's own "syntax error".
     #[test]
     fn ordinary_gate_failures_stay_candidate_code() {
         for (exit_code, stderr) in [
-            (127, "sh: 1: nginx: not found\n"),
+            (1, "test fixture: not found\n"),
+            (127, "sh: 1: ./bin/check: not found\n"),
             (1, "sh: 1: set: Illegal option -o pipefail\n"),
             (2, "VERIFY FAIL: README lacks target\n"),
             (2, "parser test: syntax error in fixture.conf\n"),
