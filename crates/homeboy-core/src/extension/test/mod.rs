@@ -1475,6 +1475,9 @@ pub fn compute_changed_test_scope_for_files(
         selected_count: selected_files.len(),
         selected_files,
         source_changes_without_tests,
+        widened_from: None,
+        widening_reason: None,
+        widening_files: Vec::new(),
     })
 }
 
