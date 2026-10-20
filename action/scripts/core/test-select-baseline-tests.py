@@ -98,4 +98,12 @@ phase = next(step for step in steps if step.get("id") == "phase")
 assert phase["env"]["HOMEBOY_TEST_SHARD_MANIFEST"] == "${{ steps.baseline-selection.outputs.selection-file }}"
 assert phase["with"]["scope"] == "full"
 assert next(step for step in steps if step.get("name") == "Enumerate base Test inventory without running tests")["env"]["HOMEBOY_TEST_INVENTORY_ONLY"] == "1"
+# Homeboy rejects inventory output outside the fixed workspace output
+# ("test inventory requested an output path outside the fixed workspace
+# output"), so every baseline selection file must live under the workspace.
+for step in steps:
+    for key in ("HOMEBOY_TEST_INVENTORY_FILE", "BASELINE_INVENTORY_FILE", "BASELINE_SELECTION_FILE"):
+        value = (step.get("env") or {}).get(key)
+        if value is not None:
+            assert value.startswith("${{ github.workspace }}/"), f"{key} must be under github.workspace: {value}"
 print("PASS: scoped baseline selects only candidate identities, binds base provenance, and preserves differential verdicts")
