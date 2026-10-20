@@ -228,6 +228,36 @@ pub(super) fn workspace_content_manifest_and_hash_controlled(
     policy: &str,
     control: &WorkspaceControl,
 ) -> Result<(WorkspaceContentManifest, String)> {
+    let walk = workspace_content_walk_controlled(path, excludes, policy, control)?;
+    Ok((walk.manifest, walk.content_identity))
+}
+
+/// Physical facts about one walked manifest entry, aligned by index with
+/// `WorkspaceContentWalk::manifest.entries`. They let the snapshot layer
+/// re-derive the content identity when an entry's recorded spelling changes.
+#[derive(Debug, Clone)]
+struct ContentWalkRecord {
+    /// The physical path the walk read (resolved through internal links).
+    source: PathBuf,
+    /// The executable flag that entered the content hash, if any.
+    hash_executable: Option<bool>,
+    /// The target text hashed for an unresolvable symlink.
+    symlink_target: Option<String>,
+}
+
+struct WorkspaceContentWalk {
+    manifest: WorkspaceContentManifest,
+    content_identity: String,
+    records: Vec<ContentWalkRecord>,
+    algorithm: String,
+}
+
+fn workspace_content_walk_controlled(
+    path: &Path,
+    excludes: &[String],
+    policy: &str,
+    control: &WorkspaceControl,
+) -> Result<WorkspaceContentWalk> {
     control.checkpoint()?;
     let (algorithm, executable_capability) =
         workspace_content_hash_contract(policy).ok_or_else(|| {
@@ -238,24 +268,29 @@ pub(super) fn workspace_content_manifest_and_hash_controlled(
                 None,
             )
         })?;
-    let mut hasher = Sha256::new();
-    hasher.update(algorithm.as_bytes());
-    hasher.update(b"\0");
+    let mut hasher = content_identity_hasher(&algorithm);
     let root = content_hash_root(path)?;
     let mut manifest = WorkspaceContentManifest {
         entry_count: 0,
         entries: Vec::new(),
     };
+    let mut records = Vec::new();
     ContentHashTraversal {
         root: &root,
         excludes,
         hasher: &mut hasher,
         executable_capability,
         manifest: Some(&mut manifest),
+        records: &mut records,
         control,
     }
     .collect(&root, Path::new(""), &mut vec![root.clone()])?;
-    Ok((manifest, format!("sha256:{:x}", hasher.finalize())))
+    Ok(WorkspaceContentWalk {
+        manifest,
+        content_identity: format!("sha256:{:x}", hasher.finalize()),
+        records,
+        algorithm,
+    })
 }
 
 /// A deterministic, content-free inventory of every path a snapshot materializes.
@@ -275,12 +310,49 @@ fn content_hash_root(path: &Path) -> Result<std::path::PathBuf> {
     })
 }
 
+// The content identity encoding. The walk and Git respelling both hash
+// through these encoders so the two can never disagree on the format.
+fn content_identity_hasher(algorithm: &str) -> Sha256 {
+    let mut hasher = Sha256::new();
+    hasher.update(algorithm.as_bytes());
+    hasher.update(b"\0");
+    hasher
+}
+
+fn hash_directory_entry(hasher: &mut Sha256, relative: &str) {
+    hasher.update(relative.as_bytes());
+    hasher.update(b"\0dir\0");
+}
+
+fn hash_symlink_entry(hasher: &mut Sha256, relative: &str, target: &str) {
+    hasher.update(relative.as_bytes());
+    hasher.update(b"\0symlink\0");
+    hasher.update((target.len() as u64).to_le_bytes());
+    hasher.update(target.as_bytes());
+}
+
+/// Hash a file entry's header; the caller streams its content afterwards.
+fn hash_file_entry_header(
+    hasher: &mut Sha256,
+    relative: &str,
+    executable: Option<bool>,
+    bytes: u64,
+) {
+    hasher.update(relative.as_bytes());
+    hasher.update(b"\0file\0");
+    if let Some(executable) = executable {
+        hasher.update([executable as u8]);
+    }
+    hasher.update(bytes.to_le_bytes());
+}
+
 struct ContentHashTraversal<'a> {
     root: &'a Path,
     excludes: &'a [String],
     hasher: &'a mut Sha256,
     executable_capability: ExecutableCapability,
     manifest: Option<&'a mut WorkspaceContentManifest>,
+    records: &'a mut Vec<ContentWalkRecord>,
     control: &'a WorkspaceControl,
 }
 
@@ -354,10 +426,7 @@ impl ContentHashTraversal<'_> {
                             )
                         })?;
                         let target = target.to_string_lossy().replace('\\', "/");
-                        self.hasher.update(relative.as_bytes());
-                        self.hasher.update(b"\0symlink\0");
-                        self.hasher.update((target.len() as u64).to_le_bytes());
-                        self.hasher.update(target.as_bytes());
+                        hash_symlink_entry(self.hasher, &relative, &target);
                         record_workspace_content_manifest_entry(
                             &mut self.manifest,
                             relative,
@@ -369,6 +438,11 @@ impl ContentHashTraversal<'_> {
                             Some(target.len() as u64),
                             None,
                         );
+                        self.records.push(ContentWalkRecord {
+                            source: entry_path.clone(),
+                            hash_executable: None,
+                            symlink_target: Some(target),
+                        });
                         continue;
                     }
                 }
@@ -397,8 +471,7 @@ impl ContentHashTraversal<'_> {
                         None,
                     ));
                 }
-                self.hasher.update(relative.as_bytes());
-                self.hasher.update(b"\0dir\0");
+                hash_directory_entry(self.hasher, &relative);
                 record_workspace_content_manifest_entry(
                     &mut self.manifest,
                     relative.clone(),
@@ -407,16 +480,17 @@ impl ContentHashTraversal<'_> {
                     None,
                     None,
                 );
+                self.records.push(ContentWalkRecord {
+                    source: resolved.clone(),
+                    hash_executable: None,
+                    symlink_target: None,
+                });
                 ancestors.push(canonical);
                 self.collect(&resolved, &relative_path, ancestors)?;
                 ancestors.pop();
             } else if metadata.is_file() {
-                self.hasher.update(relative.as_bytes());
-                self.hasher.update(b"\0file\0");
-                if let Some(executable) = self.executable_capability.value(&metadata) {
-                    self.hasher.update([executable as u8]);
-                }
-                self.hasher.update(metadata.len().to_le_bytes());
+                let hash_executable = self.executable_capability.value(&metadata);
+                hash_file_entry_header(self.hasher, &relative, hash_executable, metadata.len());
                 let mut file_hash = Sha256::new();
                 let bytes = read_file_chunks(&resolved, self.control, |chunk| {
                     self.hasher.update(chunk);
@@ -439,6 +513,11 @@ impl ContentHashTraversal<'_> {
                     Some(bytes),
                     self.executable_capability.owner_value(&metadata),
                 );
+                self.records.push(ContentWalkRecord {
+                    source: resolved.clone(),
+                    hash_executable,
+                    symlink_target: None,
+                });
             }
         }
         Ok(())
@@ -2060,16 +2139,36 @@ fn snapshot_stable_manifest_controlled(
     excludes: &[String],
     control: &WorkspaceControl,
 ) -> Result<SnapshotStableManifest> {
-    let (inventory, content_identity) = workspace_content_manifest_and_hash_controlled(
+    Ok(snapshot_stable_manifest_with_sources_controlled(path, excludes, control)?.0)
+}
+
+/// The stable manifest plus the physical source of each inventory entry.
+///
+/// When the snapshot source is a Git checkout, every entry is recorded under
+/// the spelling Git reports for it, so a case-insensitive controller
+/// filesystem cannot rename tracked paths in the inventory, the content
+/// identity, or the selection.
+fn snapshot_stable_manifest_with_sources_controlled(
+    path: &Path,
+    excludes: &[String],
+    control: &WorkspaceControl,
+) -> Result<(SnapshotStableManifest, Vec<PathBuf>)> {
+    let walk = workspace_content_walk_controlled(
         path,
         excludes,
         WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
         control,
     )?;
-    Ok(SnapshotStableManifest {
-        inventory,
-        content_identity,
-    })
+    let known = git_spelling::git_reported_paths(path, control)?;
+    let (inventory, content_identity, sources) =
+        git_spelling::apply_git_spelling(path, walk, known.as_deref(), control)?;
+    Ok((
+        SnapshotStableManifest {
+            inventory,
+            content_identity,
+        },
+        sources,
+    ))
 }
 
 pub(super) fn validate_snapshot_stability(
@@ -2287,15 +2386,17 @@ fn snapshot_input_manifest_controlled(
             source,
         });
     }
-    let stable_manifest = snapshot_stable_manifest_controlled(local_path, excludes, control)?;
+    let (stable_manifest, sources) =
+        snapshot_stable_manifest_with_sources_controlled(local_path, excludes, control)?;
     let mut selection = stable_manifest
         .inventory
         .entries
         .iter()
-        .map(|entry| {
+        .zip(sources)
+        .map(|(entry, source)| {
             control.checkpoint()?;
             Ok(SnapshotSelectionEntry {
-                source: local_path.join(&entry.path),
+                source,
                 relative: PathBuf::from(&entry.path),
                 kind: entry.kind.clone(),
             })
@@ -2774,5 +2875,10 @@ pub(super) fn snapshot_overlay_install_command(remote_path: &str) -> String {
     )
 }
 
+mod git_spelling;
+
 #[cfg(test)]
 mod construction_tests;
+
+#[cfg(test)]
+mod git_spelling_tests;
