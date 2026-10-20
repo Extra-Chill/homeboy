@@ -934,7 +934,7 @@ impl AgentTaskReviewDossier {
             _ => {}
         }
         for relationship in &self.source_relationships {
-            validate_issue_reference(&relationship.reference)?;
+            validate_issue_relationship(relationship)?;
         }
         if required(profile, AgentTaskReviewSectionId::Summary) && self.summary.is_empty() {
             return invalid("summary", "summary is required");
@@ -1506,6 +1506,105 @@ pub fn validate_issue_reference(value: &str) -> Result<()> {
         )
     }
 }
+/// `Closes` must name a GitHub issue so GitHub links and closes it on merge.
+/// `Relates to` additionally accepts a public HTTPS reference, such as a task
+/// tracked outside GitHub, rendered verbatim as a single-line link.
+pub fn validate_issue_relationship(relationship: &AgentTaskReviewIssueRelationship) -> Result<()> {
+    let reference = relationship.reference.as_str();
+    if relationship.kind == AgentTaskReviewIssueRelationshipKind::RelatesTo
+        && !issue_pattern().is_match(reference)
+    {
+        if reference
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return invalid(
+                "source_relationships.reference",
+                "relationship references must be a single token",
+            );
+        }
+        return validate_reviewer_url(
+            "source_relationships.reference",
+            reference,
+            "source_relationships",
+        );
+    }
+    validate_issue_reference(reference)
+}
+
+/// Map a task source ref onto the PR's source relationship.
+///
+/// A GitHub issue in the PR's destination repository (same host, owner and
+/// repository, compared case-insensitively) becomes `Closes #n`. Any other
+/// HTTPS task URL becomes `Relates to`: an issue or PR in another repository
+/// on the destination's host as `owner/repo#n`, a same-repository PR as `#n`,
+/// and anything else (another host, a non-GitHub tracker) as the URL itself.
+/// Non-HTTPS refs (prompts, Homeboy run refs) and references that would not
+/// pass dossier validation yield `None`.
+pub fn task_issue_relationship(
+    source_ref: &str,
+    destination: Option<&homeboy_core::git::release_download::GitHubRepo>,
+) -> Option<AgentTaskReviewIssueRelationship> {
+    let source_ref = source_ref.trim();
+    if !is_reviewer_url(source_ref) {
+        return None;
+    }
+    // `Url` normalizes the host to lowercase before the GitHub parser checks it.
+    let url = reqwest::Url::parse(source_ref).ok()?;
+    let github_item =
+        homeboy_core::git::release_download::parse_github_url(url.as_str()).and_then(|repo| {
+            let segments = url.path_segments()?.collect::<Vec<_>>();
+            match segments.as_slice() {
+                [_, _, kind @ ("issues" | "pull"), number, ..]
+                    if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) =>
+                {
+                    Some((repo, *kind == "issues", number.to_string()))
+                }
+                _ => None,
+            }
+        });
+    let same_host = |repo: &homeboy_core::git::release_download::GitHubRepo| {
+        destination.is_some_and(|dest| dest.host.eq_ignore_ascii_case(&repo.host))
+    };
+    let (kind, reference) = match github_item {
+        Some((repo, is_issue, number)) => {
+            let same_repo = destination.is_some_and(|dest| {
+                dest.host.eq_ignore_ascii_case(&repo.host)
+                    && dest.owner.eq_ignore_ascii_case(&repo.owner)
+                    && dest.repo.eq_ignore_ascii_case(&repo.repo)
+            });
+            if same_repo && is_issue {
+                (
+                    AgentTaskReviewIssueRelationshipKind::Closes,
+                    format!("#{number}"),
+                )
+            } else if same_repo {
+                (
+                    AgentTaskReviewIssueRelationshipKind::RelatesTo,
+                    format!("#{number}"),
+                )
+            } else if same_host(&repo) {
+                (
+                    AgentTaskReviewIssueRelationshipKind::RelatesTo,
+                    format!("{}/{}#{number}", repo.owner, repo.repo),
+                )
+            } else {
+                (
+                    AgentTaskReviewIssueRelationshipKind::RelatesTo,
+                    source_ref.to_string(),
+                )
+            }
+        }
+        None => (
+            AgentTaskReviewIssueRelationshipKind::RelatesTo,
+            source_ref.to_string(),
+        ),
+    };
+    let relationship = AgentTaskReviewIssueRelationship { kind, reference };
+    validate_issue_relationship(&relationship).ok()?;
+    Some(relationship)
+}
+
 fn is_reviewer_url(value: &str) -> bool {
     value.starts_with("https://") && !operator_only_reference(value)
 }
@@ -1586,6 +1685,139 @@ fn dossier_schema() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn destination(
+        host: &str,
+        owner: &str,
+        repo: &str,
+    ) -> homeboy_core::git::release_download::GitHubRepo {
+        homeboy_core::git::release_download::GitHubRepo {
+            host: host.into(),
+            owner: owner.into(),
+            repo: repo.into(),
+        }
+    }
+
+    fn relationship(
+        kind: AgentTaskReviewIssueRelationshipKind,
+        reference: &str,
+    ) -> Option<AgentTaskReviewIssueRelationship> {
+        Some(AgentTaskReviewIssueRelationship {
+            kind,
+            reference: reference.into(),
+        })
+    }
+
+    #[test]
+    fn task_issue_relationship_closes_same_repo_issue_case_insensitively() {
+        let dest = destination("github.com", "Extra-Chill", "homeboy");
+        assert_eq!(
+            task_issue_relationship(
+                "https://github.com/extra-chill/HOMEBOY/issues/16247",
+                Some(&dest)
+            ),
+            relationship(AgentTaskReviewIssueRelationshipKind::Closes, "#16247")
+        );
+    }
+
+    #[test]
+    fn task_issue_relationship_relates_cross_repo_issue() {
+        let dest = destination("github.com", "Extra-Chill", "homeboy");
+        assert_eq!(
+            task_issue_relationship("https://github.com/Extra-Chill/other/issues/7", Some(&dest)),
+            relationship(
+                AgentTaskReviewIssueRelationshipKind::RelatesTo,
+                "Extra-Chill/other#7"
+            )
+        );
+    }
+
+    #[test]
+    fn task_issue_relationship_never_closes_pull_requests_or_external_trackers() {
+        let dest = destination("github.com", "Extra-Chill", "homeboy");
+        assert_eq!(
+            task_issue_relationship("https://github.com/Extra-Chill/homeboy/pull/9", Some(&dest)),
+            relationship(AgentTaskReviewIssueRelationshipKind::RelatesTo, "#9")
+        );
+        assert_eq!(
+            task_issue_relationship("https://linear.app/team/issue/HB-1", Some(&dest)),
+            relationship(
+                AgentTaskReviewIssueRelationshipKind::RelatesTo,
+                "https://linear.app/team/issue/HB-1"
+            )
+        );
+        // Without a known destination nothing can be closed.
+        assert_eq!(
+            task_issue_relationship("https://github.com/Extra-Chill/homeboy/issues/3", None),
+            relationship(
+                AgentTaskReviewIssueRelationshipKind::RelatesTo,
+                "https://github.com/Extra-Chill/homeboy/issues/3"
+            )
+        );
+        assert_eq!(task_issue_relationship("prompt:do-it", Some(&dest)), None);
+        assert_eq!(
+            task_issue_relationship("homeboy://agent-task/run/x", Some(&dest)),
+            None
+        );
+    }
+
+    #[test]
+    fn task_issue_relationship_supports_github_enterprise_hosts() {
+        let dest = destination("github.example.com", "Team", "App");
+        assert_eq!(
+            task_issue_relationship("https://GitHub.example.com/team/app/issues/5", Some(&dest)),
+            relationship(AgentTaskReviewIssueRelationshipKind::Closes, "#5")
+        );
+        assert_eq!(
+            task_issue_relationship("https://github.example.com/team/lib/issues/6", Some(&dest)),
+            relationship(
+                AgentTaskReviewIssueRelationshipKind::RelatesTo,
+                "team/lib#6"
+            )
+        );
+        // Same owner/repo on a different host is a different repository.
+        assert_ne!(
+            task_issue_relationship("https://github.com/Team/App/issues/5", Some(&dest))
+                .map(|value| value.kind),
+            Some(AgentTaskReviewIssueRelationshipKind::Closes)
+        );
+    }
+
+    #[test]
+    fn task_issue_relationship_survives_validation_and_enrichment() {
+        let dest = destination("github.com", "Extra-Chill", "homeboy");
+        let mut value = dossier();
+        value.source_relationships = [
+            "https://github.com/Extra-Chill/homeboy/issues/16247",
+            "https://linear.app/team/issue/HB-1",
+        ]
+        .into_iter()
+        .filter_map(|url| task_issue_relationship(url, Some(&dest)))
+        .collect();
+        enrich_dossier(
+            &mut value,
+            &["https://github.com/Extra-Chill/homeboy/issues/16247".into()],
+            &[],
+            &[],
+            &[],
+            None,
+        );
+        value.validate(&default_profile()).unwrap();
+        let body = render_review_dossier(&value, &default_profile());
+        assert!(body.contains("Closes #16247"), "{body}");
+        assert!(
+            body.contains("Relates to https://linear.app/team/issue/HB-1"),
+            "{body}"
+        );
+        // Closes still rejects a non-GitHub reference.
+        assert!(
+            validate_issue_relationship(&AgentTaskReviewIssueRelationship {
+                kind: AgentTaskReviewIssueRelationshipKind::Closes,
+                reference: "https://linear.app/team/issue/HB-1".into(),
+            })
+            .is_err()
+        );
+    }
 
     /// The failure that discarded two fully-verified cooks on 2026-08-13: the
     /// agent answered a prose field with bullets, the parse hard-errored, and
