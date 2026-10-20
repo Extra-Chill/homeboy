@@ -96,7 +96,7 @@ fn detached_planless_handoff_persists_explicit_bench_label_before_handoff() {
         assert_eq!(handoff.run_id, "ssi-fixture-37-20260727-runtime-fixed");
         let record = agent_task_lifecycle::reconcile_status(&handoff.run_id)
             .expect("interrupted caller leaves a discoverable run");
-        assert!(!record.state.is_terminal());
+        assert!(!record.state().is_terminal());
         assert_eq!(record.plan_id, handoff.plan.plan_id);
         assert_eq!(
             agent_task_lifecycle::load_controller_plan(&handoff.run_id)
@@ -2387,7 +2387,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
         let replacement =
             agent_task_lifecycle::reconcile_status(&handoff.run_id).expect("failed retry");
         assert_eq!(
-            replacement.state,
+            replacement.state(),
             homeboy::agents::agent_tasks::lifecycle::AgentTaskRunState::Failed
         );
         assert_eq!(
@@ -4333,7 +4333,7 @@ fn execution_step_corrupt_published_inputs_preserve_staging_and_never_dispatch()
         );
         assert!(staging.is_dir(), "verification must precede cleanup");
         assert_eq!(
-            agent_task_lifecycle::exact_record(cook_id).unwrap().state,
+            agent_task_lifecycle::exact_record(cook_id).unwrap().state(),
             agent_task_lifecycle::AgentTaskRunState::Queued
         );
     });

@@ -133,7 +133,7 @@ impl WorkspaceTerminalAuthorityStore {
     }
 
     pub(crate) fn persist_terminal_from_record(&self, record: &AgentTaskRunRecord) -> Result<()> {
-        if !record.state.is_terminal() {
+        if !record.state().is_terminal() {
             return Ok(());
         }
         let Some(identity) = accepted_lab_runner_job_identity_from_record(record) else {

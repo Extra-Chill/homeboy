@@ -219,7 +219,7 @@ fn local_cook_hash_deadline_returns_named_failure_and_terminalizes_identity() {
         .read_record(cook_id)
         .expect("durable failed Cook parent");
     assert_eq!(
-        record.state,
+        record.state(),
         homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Failed,
         "record={} error={serialized}",
         serde_json::to_string(&record).unwrap_or_default()
@@ -367,7 +367,7 @@ fn failed_preseal_cook_replays_original_command_with_captured_stdin() {
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     let failed_record = store.read_record(cook_id).expect("failed Cook parent");
     assert_eq!(
-        failed_record.state,
+        failed_record.state(),
         homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Failed
     );
     let original_launcher = failed_record.metadata["detached_cook_handoff"]["launcher_id"]
@@ -430,7 +430,7 @@ fn failed_preseal_cook_replays_original_command_with_captured_stdin() {
         .read_record(cook_id)
         .expect("original failed Cook remains addressable");
     assert_eq!(
-        still_failed.state,
+        still_failed.state(),
         homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Failed
     );
     let replay_deadline = Instant::now() + Duration::from_secs(20);
@@ -438,7 +438,7 @@ fn failed_preseal_cook_replays_original_command_with_captured_stdin() {
         let record = store
             .read_record(&replay_run_id)
             .expect("replayed Cook parent");
-        if record.state.is_terminal() {
+        if record.state().is_terminal() {
             break record;
         }
         assert!(
@@ -448,7 +448,7 @@ fn failed_preseal_cook_replays_original_command_with_captured_stdin() {
         std::thread::sleep(Duration::from_millis(25));
     };
     assert_eq!(
-        completed.state,
+        completed.state(),
         homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Succeeded,
         "replay must finish the new durable Cook; record={completed:?}"
     );
@@ -529,7 +529,7 @@ fn generated_cook_id_is_emitted_before_bounded_admission_failure() {
         .read_record(cook_id)
         .expect("generated durable Cook parent");
     assert_eq!(
-        record.state,
+        record.state(),
         homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Failed,
         "record={} result={result}",
         serde_json::to_string(&record).unwrap_or_default()

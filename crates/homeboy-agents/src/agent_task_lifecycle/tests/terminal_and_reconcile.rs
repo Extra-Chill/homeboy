@@ -287,8 +287,8 @@ fn aggregate_transition_commits_record_aggregate_and_terminal_artifact_projectio
         .read_aggregate("aggregate-transition")
         .expect("persisted transitioned aggregate");
 
-    assert_eq!(completed.state, AgentTaskRunState::Succeeded);
-    assert_eq!(persisted.state, AgentTaskRunState::Succeeded);
+    assert_eq!(completed.state(), AgentTaskRunState::Succeeded);
+    assert_eq!(persisted.state(), AgentTaskRunState::Succeeded);
     assert_eq!(
         persisted.lifecycle.execution.state,
         homeboy_core::run_lifecycle_record::RunExecutionState::Succeeded
@@ -495,7 +495,7 @@ fn pinned_runtime_recovery_retains_the_existing_lab_proxy_identity() {
 
         assert!(pinned.is_file());
         assert_eq!(record.run_id, "runtime-a-lab-proxy");
-        assert_eq!(record.state, AgentTaskRunState::Queued);
+        assert_eq!(record.state(), AgentTaskRunState::Queued);
         assert_eq!(list_records().expect("one durable record").len(), 1);
         assert!(record.provider_handles.is_empty());
     });
@@ -680,7 +680,7 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
     let pending =
         cancel_exact_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
             .expect("controller-owned staging cancellation is routed in this root");
-    assert_eq!(pending.state, AgentTaskRunState::Running);
+    assert_eq!(pending.state(), AgentTaskRunState::Running);
     assert!(logs_in_store(&lifecycle_store, run_id)
         .expect("pending event stream")
         .events
@@ -691,8 +691,8 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
             .expect("controller terminal confirmation cancels its owned child");
     server.join().expect("controller endpoint finished");
 
-    assert_eq!(pending.state, AgentTaskRunState::Running);
-    assert_eq!(cancellation.state, AgentTaskRunState::Cancelled);
+    assert_eq!(pending.state(), AgentTaskRunState::Running);
+    assert_eq!(cancellation.state(), AgentTaskRunState::Cancelled);
     assert_eq!(
         pending.metadata["controller_job_cancellation"]["phase"],
         "requested"
@@ -754,7 +754,7 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
     )
     .expect("terminal attempt record")
     .record;
-    assert_eq!(record.state, AgentTaskRunState::Failed);
+    assert_eq!(record.state(), AgentTaskRunState::Failed);
     assert_eq!(
         record.metadata["pre_execution_failure"]["phase"],
         "lab_workspace_stage"
@@ -815,7 +815,7 @@ fn failed_lab_preacceptance_reconstructs_only_authenticated_zero_execution_recov
     .expect("failed record")
     .record;
     record.metadata["phase"] = json!("lab_handoff_preacceptance");
-    assert_eq!(record.state, AgentTaskRunState::Failed);
+    assert_eq!(record.state(), AgentTaskRunState::Failed);
     assert!(record.aggregate_path.is_some());
     assert!(!record.artifact_refs.is_empty());
     assert_eq!(record.lifecycle.provider_runtime.len(), 1);
@@ -976,7 +976,7 @@ fn controller_proxy_records_pre_execution_phase_progress() {
     )
     .expect("materialization phase persisted");
 
-    assert_eq!(materializing.state, AgentTaskRunState::Queued);
+    assert_eq!(materializing.state(), AgentTaskRunState::Queued);
     assert_eq!(materializing.metadata["phase"], "materializing");
     assert_eq!(materializing.metadata["provider_state"], "pending");
     assert_eq!(materializing.metadata["source_checkout"]["head"], "abc123");
@@ -1079,7 +1079,7 @@ fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_a
         &stub_lab_offload_submission,
     )
     .expect("long setup remains controller-owned");
-    assert_eq!(hydrating.state, AgentTaskRunState::Queued);
+    assert_eq!(hydrating.state(), AgentTaskRunState::Queued);
     assert_eq!(hydrating.metadata["phase"], "hydrating");
 
     let cancelled = cancel_run_in_store(
@@ -1167,7 +1167,7 @@ fn terminal_lab_artifact_attachment_skips_missing_controller_plan_and_preserves_
     )
     .expect("late attachment leaves terminal proxy intact");
 
-    assert_eq!(attached.state, AgentTaskRunState::Succeeded);
+    assert_eq!(attached.state(), AgentTaskRunState::Succeeded);
     assert_eq!(attached.runner_id(), Some("homeboy-lab"));
     assert_eq!(attached.runner_job_id(), Some("job-original"));
 }
@@ -1202,7 +1202,7 @@ fn queued_runner_child_reports_fifo_capacity_ownership_before_its_claim() {
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
         .expect("queued reconciliation");
 
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     assert_eq!(record.metadata["phase"], "waiting_for_capacity");
     assert_eq!(record.metadata["provider_state"], "queued");
     assert_eq!(
@@ -1297,7 +1297,7 @@ fn transport_only_reconciliation_stays_pending_until_foreground_projection_or_in
     transport_only.events.clear();
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &transport_only)
         .expect("transport-only terminal result");
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     assert_eq!(record.metadata["phase"], "awaiting_runner_synchronization");
     assert_eq!(
         record.metadata["runner_result_synchronization"]["state"],
@@ -1314,7 +1314,7 @@ fn transport_only_reconciliation_stays_pending_until_foreground_projection_or_in
         &transport_only
     )
     .expect("foreground transport result projects the explicit run"));
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     let projected = reconcile_status_in_store(
         &lifecycle_store,
         &record.run_id,
@@ -1323,7 +1323,7 @@ fn transport_only_reconciliation_stays_pending_until_foreground_projection_or_in
     )
     .expect("foreground terminal projection")
     .record;
-    assert_eq!(projected.state, AgentTaskRunState::Succeeded);
+    assert_eq!(projected.state(), AgentTaskRunState::Succeeded);
     assert_eq!(
         projected.metadata["runner_result_synchronization"]["state"],
         "projected"
@@ -1442,8 +1442,8 @@ fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once(
         )
         .expect("terminal durable run")
         .record;
-        assert_eq!(projected.state, expected_run);
-        assert_eq!(projected.tasks[0].state, expected_task);
+        assert_eq!(projected.state(), expected_run);
+        assert_eq!(projected.tasks[0].state(), expected_task);
         assert_eq!(projected.lifecycle.execution.state, expected_run.into());
         assert!(projected.lifecycle.execution.finished_at.is_some());
         assert_eq!(
@@ -1504,7 +1504,7 @@ fn scoped_reconcile_repairs_authoritative_terminal_runner_projection_idempotentl
         assert_eq!(report.reconciled, 0);
 
         let terminal = reconcile_status(run_id).expect("authoritative aggregate imported");
-        assert_eq!(terminal.state, AgentTaskRunState::PartialRecoverable);
+        assert_eq!(terminal.state(), AgentTaskRunState::PartialRecoverable);
         assert_eq!(terminal.runner_id(), Some("homeboy-lab"));
         assert_eq!(
             terminal.runner_job_id(),
@@ -1522,7 +1522,7 @@ fn scoped_reconcile_repairs_authoritative_terminal_runner_projection_idempotentl
         assert_eq!(
             reconcile_status(run_id)
                 .expect("terminal state retained")
-                .state,
+                .state(),
             AgentTaskRunState::PartialRecoverable
         );
     });
@@ -1565,7 +1565,7 @@ fn status_recovers_evicted_terminal_runner_job_from_durable_observation_once() {
         // the controller projection as a missing live job.
         let _provider = RunnerContinuationTestGuard::install(Box::new(ConnectedRunnerProvider));
         let recovered = reconcile_status(run_id).expect("recover terminal observation");
-        assert_eq!(recovered.state, AgentTaskRunState::Succeeded);
+        assert_eq!(recovered.state(), AgentTaskRunState::Succeeded);
         assert!(store::read_aggregate(run_id).is_ok());
 
         let recovered_aggregate = store::read_aggregate(run_id).expect("recovered aggregate");
@@ -1578,7 +1578,7 @@ fn status_recovers_evicted_terminal_runner_job_from_durable_observation_once() {
                 .expect("terminal projection is exactly once")
         );
         let repeated = reconcile_status(run_id).expect("idempotent recovery");
-        assert_eq!(repeated.state, AgentTaskRunState::Succeeded);
+        assert_eq!(repeated.state(), AgentTaskRunState::Succeeded);
         assert_eq!(
             store::read_aggregate(run_id).expect("recovered aggregate remains stable"),
             recovered_aggregate
@@ -1659,8 +1659,8 @@ fn verified_pre_provider_runner_cancellation_terminalizes_and_replays_idempotent
         .expect("verified pre-provider cancellation projects");
     let first = record.clone();
 
-    assert_eq!(record.state, AgentTaskRunState::Cancelled);
-    assert_eq!(record.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(record.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(record.tasks[0].state(), AgentTaskState::Cancelled);
     assert_eq!(record.metadata["runner_job_status"], "cancelled");
     assert_eq!(
         record.metadata["runner_result_synchronization"]["state"],
@@ -1693,7 +1693,7 @@ fn verified_pre_provider_runner_cancellation_terminalizes_and_replays_idempotent
         )
         .expect("terminal status")
         .record
-        .state,
+        .state(),
         AgentTaskRunState::Cancelled
     );
 }
@@ -1720,7 +1720,7 @@ fn stale_snapshot_pre_provider_cancellation_cannot_overwrite_a_concurrent_termin
         },
     )
     .expect("accepted detached handoff");
-    assert_eq!(stale.state, AgentTaskRunState::Running);
+    assert_eq!(stale.state(), AgentTaskRunState::Running);
 
     // Another writer terminalizes the run after the reconciler's read.
     lifecycle_store
@@ -1742,7 +1742,7 @@ fn stale_snapshot_pre_provider_cancellation_cannot_overwrite_a_concurrent_termin
 
     let stored = lifecycle_store.read_record(run_id).expect("settled record");
     assert_eq!(
-        stored.state,
+        stored.state(),
         AgentTaskRunState::Failed,
         "lost update: a stale runner snapshot replaced the concurrent terminal state"
     );
@@ -1825,7 +1825,7 @@ fn cancellation_after_runner_start_stays_pending_without_an_inner_aggregate() {
 
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
         .expect("ambiguous terminal transport stays pending");
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     assert_eq!(
         record.metadata["runner_result_synchronization"]["state"],
         "pending"
@@ -1854,7 +1854,7 @@ fn truncated_cancellation_history_stays_pending_without_an_inner_aggregate() {
 
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
         .expect("truncated terminal transport stays pending");
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     assert_eq!(
         record.metadata["runner_result_synchronization"]["state"],
         "pending"
@@ -1897,8 +1897,8 @@ fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once
             .read_aggregate(run_id)
             .expect("failed aggregate is durable");
 
-        assert_eq!(record.state, AgentTaskRunState::Failed);
-        assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
+        assert_eq!(record.state(), AgentTaskRunState::Failed);
+        assert_eq!(record.tasks[0].state(), AgentTaskState::Failed);
         assert_eq!(record.metadata["phase"], "lab_runner_job_pre_provider");
         assert_eq!(
             record.metadata["pre_execution_failure"]["error_code"],
@@ -1968,7 +1968,7 @@ fn typed_runner_failure_preserves_existing_provider_progress() {
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
         .expect("late transport failure preserves provider work");
 
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     assert_eq!(
         record.provider_handles[0].provider_run_id,
         "provider-already-started"
@@ -1983,7 +1983,7 @@ fn typed_runner_failure_preserves_existing_provider_progress() {
 
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
         .expect("repeated transport failure is a no-op");
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     assert_eq!(
         record.provider_handles[0].provider_run_id,
         "provider-already-started"
@@ -2025,7 +2025,7 @@ fn restart_recovers_persisted_typed_runner_failure_before_live_reconciliation() 
             false,
         )
         .expect("restart consumes durable terminal event");
-        assert_eq!(outcome.record.state, AgentTaskRunState::Failed);
+        assert_eq!(outcome.record.state(), AgentTaskRunState::Failed);
         assert!(!outcome.runner_probe.performed);
         assert_eq!(
             outcome.record.metadata["terminal_transport_recovery"],
@@ -2047,7 +2047,7 @@ fn restart_recovers_persisted_typed_runner_failure_before_live_reconciliation() 
             assert_eq!(report.failed, 0);
         }
         let repeated = reconcile_status(run_id).expect("terminal status remains stable");
-        assert_eq!(repeated.state, AgentTaskRunState::Failed);
+        assert_eq!(repeated.state(), AgentTaskRunState::Failed);
         assert_eq!(repeated.metadata["phase"], "lab_runner_job_pre_provider");
     });
 }
@@ -2087,7 +2087,7 @@ fn stale_reconcile_keeps_an_accepted_runner_job_active_after_controller_owner_ex
         assert_eq!(report.reconciled, 0);
 
         let active = store::read_record(run_id).expect("active runner projection retained");
-        assert_eq!(active.state, AgentTaskRunState::Running);
+        assert_eq!(active.state(), AgentTaskRunState::Running);
         assert_eq!(active.runner_id(), Some("homeboy-lab"));
         assert_eq!(
             active.runner_job_id(),
@@ -2141,8 +2141,8 @@ fn cancellation_race_projects_runner_success_instead_of_cancelling_controller_pr
 
     let terminal = cancel_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
         .expect("daemon terminal result wins cancellation race");
-    assert_eq!(terminal.state, AgentTaskRunState::Succeeded);
-    assert_eq!(terminal.tasks[0].state, AgentTaskState::Succeeded);
+    assert_eq!(terminal.state(), AgentTaskRunState::Succeeded);
+    assert_eq!(terminal.tasks[0].state(), AgentTaskState::Succeeded);
     assert!(terminal.metadata.get("cancel_reason").is_none());
     assert!(lifecycle_store.read_aggregate(run_id).is_ok());
 }
@@ -2184,7 +2184,7 @@ fn accepted_runner_cancellation_fails_closed_when_daemon_cannot_be_reached() {
         lifecycle_store
             .read_record(run_id)
             .expect("durable record")
-            .state,
+            .state(),
         AgentTaskRunState::Running
     );
 }
@@ -2251,7 +2251,7 @@ fn accepted_runner_cancellation_does_not_signal_a_controller_local_pid() {
     let _ = local_controller.wait();
 
     assert!(controller_was_not_signalled);
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
     assert_eq!(
         cancelled.metadata["live_cancellation"]["cancellation"],
         "runner_job_cancel"
@@ -2550,7 +2550,7 @@ fn controller_proxy_becomes_terminal_when_handoff_fails_before_child_creation() 
     )
     .expect("terminal status")
     .record;
-    assert_eq!(record.state, AgentTaskRunState::Failed);
+    assert_eq!(record.state(), AgentTaskRunState::Failed);
     assert_eq!(record.metadata["runner_id"], "homeboy-lab");
     assert_eq!(
         record.metadata["pre_execution_failure"]["phase"],
@@ -2621,7 +2621,7 @@ fn detached_lab_handoff_upgrades_existing_observation_record() {
         .get_run("agent-task-detached")
         .expect("read observation")
         .expect("observation exists");
-    assert_eq!(loaded.state, AgentTaskRunState::Running);
+    assert_eq!(loaded.state(), AgentTaskRunState::Running);
     assert_eq!(observation.metadata_json["lab"]["remote_job_id"], "job-123");
     assert!(observation.metadata_json.get("agent_task_run").is_some());
 }
@@ -2932,7 +2932,7 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
         }
 
         let record = reconcile_status("detached-run").expect("status");
-        assert_eq!(record.state, AgentTaskRunState::PartialRecoverable);
+        assert_eq!(record.state(), AgentTaskRunState::PartialRecoverable);
         assert_eq!(record.metadata["runner_id"], "local");
         assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
         assert_eq!(
@@ -3083,7 +3083,10 @@ fn acceptance_is_created_after_green_promotion_and_persists_verifier_provenance(
         }),
     )
     .expect("pending promotion recorded");
-    assert_eq!(before_gates.state, AgentTaskRunState::CandidateRecoverable);
+    assert_eq!(
+        before_gates.state(),
+        AgentTaskRunState::CandidateRecoverable
+    );
     assert!(before_gates.acceptance.is_none());
 
     let pending = record_promotion_in_store(
@@ -3500,9 +3503,9 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
             .expect("aggregate source");
 
         assert_eq!(record.run_id, "conductor-full-loop-proof-retry2-20260611");
-        assert_eq!(loaded.state, AgentTaskRunState::Failed);
+        assert_eq!(loaded.state(), AgentTaskRunState::Failed);
         assert_eq!(loaded.tasks[0].task_id, "cook-conductor");
-        assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
+        assert_eq!(loaded.tasks[0].state(), AgentTaskState::Failed);
         assert_eq!(loaded.tasks[0].backend, "fixture.agent-task-executor");
         assert_eq!(loaded.provider_handles.len(), 1);
         assert_eq!(loaded.provider_handles[0].provider_run_id, "provider-run-1");
@@ -3619,8 +3622,8 @@ fn terminal_aggregate_projection_owns_provider_models_and_status_leaves_them() {
         .expect("terminal aggregate projection");
 
     let committed = lifecycle_store.read_record(run_id).expect("committed");
-    assert_eq!(terminal.state, AgentTaskRunState::Succeeded);
-    assert_eq!(committed.state, AgentTaskRunState::Succeeded);
+    assert_eq!(terminal.state(), AgentTaskRunState::Succeeded);
+    assert_eq!(committed.state(), AgentTaskRunState::Succeeded);
     assert_eq!(
         committed.metadata["cook_delivery"]["artifacts"]["promotion"]["status"],
         "applied"
@@ -3660,10 +3663,10 @@ fn cancel_keeps_run_state_and_execution_state_paired() {
 
         let cancelled = cancel("run-cancel-pairing").expect("cancelled");
 
-        assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+        assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
         assert_eq!(
             cancelled.lifecycle.execution.state,
-            RunExecutionState::from(cancelled.state),
+            RunExecutionState::from(cancelled.state()),
         );
         assert_eq!(
             cancelled.lifecycle.execution.state,
@@ -3680,8 +3683,8 @@ fn cancel_marks_queued_run_and_tasks_cancelled() {
 
         let record = cancel("run-cancel").expect("cancelled");
 
-        assert_eq!(record.state, AgentTaskRunState::Cancelled);
-        assert_eq!(record.tasks[0].state, AgentTaskState::Cancelled);
+        assert_eq!(record.state(), AgentTaskRunState::Cancelled);
+        assert_eq!(record.tasks[0].state(), AgentTaskState::Cancelled);
         assert!(record.metadata["cancel_requested_at"].is_string());
     });
 }
@@ -3750,12 +3753,12 @@ fn running_run(store: &AgentTaskLifecycleStore, run_id: &str) -> AgentTaskRunRec
         .expect("submit exact run");
     let mut record = store.read_record(run_id).expect("queued record");
     set_run_state(&mut record, AgentTaskRunState::Running);
-    record.tasks[0].state = AgentTaskState::Running;
+    record.tasks[0].set_state_for_test(AgentTaskState::Running);
     store
         .advance_record(&mut record, AgentTaskAdvance::Start)
         .expect("start the run");
     let record = store.read_record(run_id).expect("running record");
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     record
 }
 
@@ -3769,8 +3772,11 @@ fn commit_runner_cancellation(
     let mut prepared = store.read_record(run_id).expect("live record");
     set_run_state(&mut prepared, AgentTaskRunState::Cancelled);
     for task in &mut prepared.tasks {
-        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-            task.state = AgentTaskState::Cancelled;
+        if matches!(
+            task.state(),
+            AgentTaskState::Queued | AgentTaskState::Running
+        ) {
+            task.set_state_for_test(AgentTaskState::Cancelled);
         }
     }
     prepared.metadata["cancellation_provenance"] = provenance.clone();
@@ -3828,26 +3834,26 @@ fn operator_cancellation_preserves_existing_runner_event_provenance() {
         .expect("runner cancellation event");
     assert_eq!(original.data["provenance"], provenance);
     assert_eq!(
-        lifecycle_store.read_record(run_id).expect("record").state,
+        lifecycle_store.read_record(run_id).expect("record").state(),
         AgentTaskRunState::Cancelled
     );
 
     let cancelled = cancel_run_in_store(&lifecycle_store, run_id, Some("operator requested stop"))
         .expect("operator cancellation converges");
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
-    assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
     assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
     assert_eq!(
         lifecycle_store
             .read_record(run_id)
             .expect("committed")
-            .state,
+            .state(),
         AgentTaskRunState::Cancelled
     );
 
     let repeated = cancel_run_in_store(&lifecycle_store, run_id, Some("operator requested stop"))
         .expect("repeated cancellation");
-    assert_eq!(repeated.state, AgentTaskRunState::Cancelled);
+    assert_eq!(repeated.state(), AgentTaskRunState::Cancelled);
     assert_eq!(
         run_cancelled_receipts(&lifecycle_store, run_id),
         vec![original]
@@ -3870,7 +3876,7 @@ fn runner_cancellation_is_stored_and_every_read_agrees_without_writing() {
     stale.metadata["runner_job_id"] = json!("pruned-job");
     store.commit_record(&mut stale).unwrap();
     assert_eq!(
-        store.read_record(run_id).unwrap().state,
+        store.read_record(run_id).unwrap().state(),
         AgentTaskRunState::Running
     );
 
@@ -3906,15 +3912,15 @@ fn runner_cancellation_is_stored_and_every_read_agrees_without_writing() {
 
     for _ in 0..2 {
         let cancelled = store.read_record(run_id).unwrap();
-        assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
-        assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+        assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
+        assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
         assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
         assert_eq!(
             cancelled.lifecycle.execution.state,
             RunExecutionState::from(AgentTaskRunState::Cancelled)
         );
         assert_eq!(
-            store.read_record_bounded(run_id).unwrap().state,
+            store.read_record_bounded(run_id).unwrap().state(),
             AgentTaskRunState::Cancelled
         );
     }
@@ -3923,7 +3929,7 @@ fn runner_cancellation_is_stored_and_every_read_agrees_without_writing() {
         listed
             .iter()
             .find(|listed| listed.run_id == run_id)
-            .map(|listed| listed.state),
+            .map(|listed| listed.state()),
         Some(AgentTaskRunState::Cancelled),
         "registry listings read the same stored snapshot"
     );
@@ -3958,7 +3964,7 @@ fn status_state(store: &AgentTaskLifecycleStore, run_id: &str) -> AgentTaskRunSt
     reconcile_status_in_store(store, run_id, AgentTaskStatusOptions::default(), true)
         .expect("status")
         .record
-        .state
+        .state()
 }
 
 /// #15718 gate: a cancelled run followed by 150 runner events and a stale
@@ -3973,7 +3979,7 @@ fn cancellation_survives_150_runner_events_and_a_stale_running_write() {
 
     let cancelled = cancel_run_in_store(&store, run_id, Some("operator requested stop"))
         .expect("cancel through the real cancellation path");
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
 
     append_runner_progress_events(&store, run_id, 150);
     let settled = store.read_record(run_id).unwrap();
@@ -3984,8 +3990,8 @@ fn cancellation_survives_150_runner_events_and_a_stale_running_write() {
 
     let read = store.read_record(run_id).unwrap();
     assert_eq!(read, settled, "the refused commit wrote nothing");
-    assert_eq!(read.state, AgentTaskRunState::Cancelled);
-    assert_eq!(read.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(read.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(read.tasks[0].state(), AgentTaskState::Cancelled);
     assert_eq!(status_state(&store, run_id), AgentTaskRunState::Cancelled);
 }
 
@@ -4034,8 +4040,8 @@ fn runner_cancellation_receipt_survives_payload_pruning_and_a_stale_write() {
 
     assert_eq!(status_state(&store, run_id), AgentTaskRunState::Cancelled);
     let read = store.read_record(run_id).unwrap();
-    assert_eq!(read.state, AgentTaskRunState::Cancelled);
-    assert_eq!(read.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(read.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(read.tasks[0].state(), AgentTaskState::Cancelled);
     assert_eq!(read.metadata["cancellation_provenance"], provenance);
     assert_eq!(
         read.metadata["cancellation_provenance"],
@@ -4061,8 +4067,8 @@ fn cancel_run_reclaims_stale_running_record() {
     let mut record = lifecycle_store
         .read_record("run-cancel-stale")
         .expect("record");
-    record.state = AgentTaskRunState::Running;
-    record.tasks[0].state = AgentTaskState::Running;
+    record.set_state_for_test(AgentTaskRunState::Running);
+    record.tasks[0].set_state_for_test(AgentTaskState::Running);
     record.metadata["runner_pid"] = json!(u32::MAX);
     // Reserving provider execution records the libtest process as its owner.
     // Leaving that live PID in this stale-owner fixture makes cancellation
@@ -4076,8 +4082,8 @@ fn cancel_run_reclaims_stale_running_record() {
     let cancelled = cancel_run_in_store(&lifecycle_store, "run-cancel-stale", None)
         .expect("stale run cancelled");
 
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
-    assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
     assert_eq!(cancelled.metadata["cancelled_stale_running"], json!(true));
     assert_eq!(
         cancelled.metadata["provider_executions"][0]["state"],
@@ -4117,8 +4123,8 @@ fn replaying_cancel_repairs_stale_provider_execution() {
     let mut record = lifecycle_store
         .read_record("run-cancel-replay")
         .expect("record");
-    record.state = AgentTaskRunState::Cancelled;
-    record.tasks[0].state = AgentTaskState::Cancelled;
+    record.set_state_for_test(AgentTaskRunState::Cancelled);
+    record.tasks[0].set_state_for_test(AgentTaskState::Cancelled);
     lifecycle_store
         .write_record(&record)
         .expect("legacy cancelled record");
@@ -4126,7 +4132,7 @@ fn replaying_cancel_repairs_stale_provider_execution() {
     let repaired = cancel_run_in_store(&lifecycle_store, "run-cancel-replay", None)
         .expect("replayed cancellation");
 
-    assert_eq!(repaired.state, AgentTaskRunState::Cancelled);
+    assert_eq!(repaired.state(), AgentTaskRunState::Cancelled);
     assert_eq!(
         repaired.metadata["provider_executions"][0]["state"],
         "cancelled"
@@ -4176,8 +4182,8 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
         .expect("record stale released resource");
 
         let mut record = store::read_record(run_id).expect("record");
-        record.state = AgentTaskRunState::Cancelled;
-        record.tasks[0].state = AgentTaskState::Cancelled;
+        record.set_state_for_test(AgentTaskRunState::Cancelled);
+        record.tasks[0].set_state_for_test(AgentTaskState::Cancelled);
         store::write_record(&record).expect("legacy cancelled record");
 
         // A terminal cleanup pass made this dead allocation look orphaned before
@@ -4328,8 +4334,8 @@ fn status_keeps_live_local_provider_owner_running_idempotently() {
 
         let first = reconcile_status("owner-live").expect("first status");
         let second = reconcile_status("owner-live").expect("second status");
-        assert_eq!(first.state, AgentTaskRunState::Running);
-        assert_eq!(second.state, AgentTaskRunState::Running);
+        assert_eq!(first.state(), AgentTaskRunState::Running);
+        assert_eq!(second.state(), AgentTaskRunState::Running);
         assert_eq!(
             second.metadata["provider_executions"][0]["owner_state"],
             json!("live")
@@ -4364,7 +4370,7 @@ fn status_does_not_terminalize_a_live_owner_after_provider_success() {
 
         let record =
             reconcile_status("owner-live-late-import").expect("status before aggregate import");
-        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(record.state(), AgentTaskRunState::Running);
         assert_eq!(
             record.metadata["provider_executions"][0]["owner_state"],
             json!("live")
@@ -4405,7 +4411,7 @@ fn legacy_provider_reservation_without_owner_proof_remains_joinable() {
         .expect("legacy reservation fixture");
 
         let record = reconcile_status("owner-legacy").expect("legacy status");
-        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(record.state(), AgentTaskRunState::Running);
         assert_eq!(
             record.metadata["provider_executions"][0]["owner_state"],
             json!("unverifiable")
@@ -4440,7 +4446,7 @@ fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it()
         .expect("reused PID fixture");
 
         let record = reconcile_status("owner-pid-reused").expect("reconcile PID reuse");
-        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert_eq!(record.state(), AgentTaskRunState::Cancelled);
         assert_eq!(
             record.metadata["provider_executions"][0]["owner_state"],
             json!("identity_mismatch")
@@ -4481,8 +4487,8 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
 
         let terminal = reconcile_status("owner-dead").expect("reconciled status");
         let replay = reconcile_status("owner-dead").expect("idempotent status");
-        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
-        assert_eq!(replay.state, AgentTaskRunState::Cancelled);
+        assert_eq!(terminal.state(), AgentTaskRunState::Cancelled);
+        assert_eq!(replay.state(), AgentTaskRunState::Cancelled);
         assert_eq!(
             replay.metadata["provider_executions"][0]["state"],
             json!("cancelled")
@@ -4540,7 +4546,7 @@ fn interrupted_local_owner_leaves_remotely_owned_attempts_running() {
             .expect("remote owner fixture");
             let before = store.read_record(run_id).expect("record");
             let after = record_interrupted_local_owner_in_store(&store, run_id).expect("observed");
-            assert_eq!(after.state, AgentTaskRunState::Running, "{key}");
+            assert_eq!(after.state(), AgentTaskRunState::Running, "{key}");
             assert_eq!(after.revision, before.revision, "{key}");
         }
     });
@@ -4587,7 +4593,7 @@ fn dead_owner_does_not_call_late_provider_success_a_candidate_without_artifact()
 
         let recovered = reconcile_status("owner-late-success").expect("recovered status");
         assert_ne!(
-            recovered.state,
+            recovered.state(),
             AgentTaskRunState::CandidateRecoverable,
             "provider completion without a harvested artifact is not a recoverable candidate"
         );
@@ -4646,11 +4652,11 @@ fn terminal_provider_failure_without_owner_persists_interrupted_owner_aggregate(
 
         let terminal = reconcile_status("provider-failed-no-owner").expect("reconciled status");
         let replay = reconcile_status("provider-failed-no-owner").expect("idempotent status");
-        assert_eq!(terminal.state, AgentTaskRunState::Failed);
-        assert_eq!(replay.state, AgentTaskRunState::Failed);
+        assert_eq!(terminal.state(), AgentTaskRunState::Failed);
+        assert_eq!(replay.state(), AgentTaskRunState::Failed);
         assert!(replay.provider_handles.is_empty());
         assert!(replay.aggregate_path.is_some());
-        assert_eq!(replay.tasks[0].state, AgentTaskState::Failed);
+        assert_eq!(replay.tasks[0].state(), AgentTaskState::Failed);
         assert_eq!(
             replay.metadata["local_provider_ownership"]["state"],
             json!("provider_failed")
@@ -4706,9 +4712,9 @@ fn terminal_provider_cancellation_without_owner_converges_and_is_idempotent() {
         let terminal = reconcile_status("provider-cancelled-no-owner").expect("reconciled status");
         let replay = reconcile_status("provider-cancelled-no-owner").expect("idempotent status");
 
-        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
-        assert_eq!(replay.state, AgentTaskRunState::Cancelled);
-        assert_eq!(replay.tasks[0].state, AgentTaskState::Cancelled);
+        assert_eq!(terminal.state(), AgentTaskRunState::Cancelled);
+        assert_eq!(replay.state(), AgentTaskRunState::Cancelled);
+        assert_eq!(replay.tasks[0].state(), AgentTaskState::Cancelled);
         assert_eq!(
             replay.metadata["provider_executions"][0]["state"],
             json!("cancelled")
@@ -4761,7 +4767,7 @@ fn interrupted_foreground_owner_converges_terminal_provider_failure() {
         owner.wait().expect("reap foreground owner");
 
         let terminal = reconcile_status("provider-failed-owner-dead").expect("reconciled status");
-        assert_eq!(terminal.state, AgentTaskRunState::Failed);
+        assert_eq!(terminal.state(), AgentTaskRunState::Failed);
         assert_eq!(
             terminal.metadata["provider_executions"][0]["owner_state"],
             json!("dead")
@@ -4803,8 +4809,8 @@ fn cancellation_race_defers_to_a_durable_provider_success() {
             .expect("cancellation defers to terminal provider");
         let replay = cancel_run("cancel-race", Some("operator cancel"))
             .expect("idempotent cancellation deferral");
-        assert_eq!(deferred.state, AgentTaskRunState::Running);
-        assert_eq!(replay.state, AgentTaskRunState::Running);
+        assert_eq!(deferred.state(), AgentTaskRunState::Running);
+        assert_eq!(replay.state(), AgentTaskRunState::Running);
         assert_eq!(
             replay.metadata["provider_executions"][0]["state"],
             json!("succeeded")
@@ -4854,7 +4860,7 @@ fn provider_terminalization_observes_cancellation_that_won_the_race() {
         )
         .expect("provider timeout observes the durable cancellation");
 
-        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+        assert_eq!(terminal.state(), AgentTaskRunState::Cancelled);
         assert_eq!(
             terminal.metadata["provider_executions"][0]["state"],
             json!("cancelled")
@@ -5021,7 +5027,7 @@ fn cancellation_wins_the_retry_pre_execution_failure_race() {
         )
         .expect("terminal arbitration preserves cancellation");
 
-        assert_eq!(failure.state, AgentTaskRunState::Cancelled);
+        assert_eq!(failure.state(), AgentTaskRunState::Cancelled);
         assert!(failure.metadata.get("pre_execution_failure").is_none());
     });
 }
@@ -5049,7 +5055,7 @@ fn controller_failure_cannot_terminalize_a_successful_aggregate() {
         )
         .expect("retain aggregate evidence");
 
-        assert_eq!(terminal.state, AgentTaskRunState::Failed);
+        assert_eq!(terminal.state(), AgentTaskRunState::Failed);
         assert!(terminal.aggregate_path.is_some());
         assert_eq!(
             terminal.metadata["cook_controller_failure"]["code"],
@@ -5076,7 +5082,7 @@ fn snapshot_fence_transition_preserves_cancelled_terminal_winner() {
         let record = store
             .record_workspace_snapshot_fence_invalidation(run_id, &plan, &error)
             .expect("preserve cancellation");
-        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert_eq!(record.state(), AgentTaskRunState::Cancelled);
         assert!(record.metadata.get("pre_execution_failure").is_none());
     });
 }
@@ -5098,7 +5104,7 @@ fn snapshot_fence_transition_preserves_unrelated_zero_execution_failure() {
         let record = store
             .record_workspace_snapshot_fence_invalidation(run_id, &plan, &fence)
             .expect("preserve unrelated failure");
-        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(record.state(), AgentTaskRunState::Failed);
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
             "unrelated_phase"
@@ -5163,7 +5169,7 @@ fn dead_retry_launcher_persists_terminal_failure_under_strict_config_locking() {
             )
             .expect("strict lock must not re-enter during terminal persistence");
 
-            assert_eq!(failed.state, AgentTaskRunState::Failed);
+            assert_eq!(failed.state(), AgentTaskRunState::Failed);
             assert_eq!(failed.metadata["pre_execution_failure"]["retryable"], true);
             assert_eq!(
                 store.read_aggregate(run_id).expect("aggregate").status,
@@ -5228,7 +5234,7 @@ fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
     )
     .expect("candidate record")
     .record;
-    assert_eq!(before.state, AgentTaskRunState::Succeeded);
+    assert_eq!(before.state(), AgentTaskRunState::Succeeded);
     assert!(before.has_recorded_provider_progress());
 
     // The exact failure from the field: post-provider detached handoff
@@ -5251,7 +5257,7 @@ fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
     // Candidate preserved: state stays Succeeded, never regressed to Failed,
     // and the pre-execution failure shape (zero-artifact, consumed:0) is NOT
     // stamped over it.
-    assert_eq!(preserved.state, AgentTaskRunState::Succeeded);
+    assert_eq!(preserved.state(), AgentTaskRunState::Succeeded);
     assert!(preserved.metadata.get("pre_execution_failure").is_none());
     let marker = &preserved.metadata["transport_follow_up_failure"];
     assert_eq!(marker["reason"], "post_provider_transport_failure");
@@ -5270,7 +5276,7 @@ fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
     )
     .expect("reloaded candidate")
     .record;
-    assert_eq!(reloaded.state, AgentTaskRunState::Succeeded);
+    assert_eq!(reloaded.state(), AgentTaskRunState::Succeeded);
     assert_eq!(
         reloaded.metadata["transport_follow_up_failure"]["reason"],
         "post_provider_transport_failure"
@@ -5303,7 +5309,7 @@ fn terminal_write_persists_the_aggregate_provider_model() {
     let persisted = lifecycle_store
         .read_record(run_id)
         .expect("persisted record");
-    assert!(persisted.state.is_terminal(), "terminal state committed");
+    assert!(persisted.state().is_terminal(), "terminal state committed");
     assert_eq!(
         persisted.tasks[0].model.as_deref(),
         Some("openai/gpt-5.6-terra")
@@ -5337,7 +5343,7 @@ fn status_leaves_terminal_record_untouched_when_aggregate_has_no_model() {
     let run_id = "terminal-no-model-9411";
     let record = record_completed_run_in_store(&lifecycle_store, &plan, &aggregate, Some(run_id))
         .expect("terminal record");
-    assert!(record.state.is_terminal());
+    assert!(record.state().is_terminal());
 
     let before = lifecycle_store.read_record(run_id).expect("record before");
     let reconciled = reconcile_status_in_store(
@@ -5350,7 +5356,7 @@ fn status_leaves_terminal_record_untouched_when_aggregate_has_no_model() {
     .record;
 
     // No model to reproject: task model stays absent and the run stays terminal.
-    assert!(reconciled.state.is_terminal());
+    assert!(reconciled.state().is_terminal());
     assert!(reconciled.tasks[0]
         .model
         .as_deref()
@@ -5421,7 +5427,7 @@ fn accepted_runner_cancel_stays_nonterminal_until_runner_confirms_cancellation()
     let pending =
         cancel_exact_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
             .expect("asynchronous runner cancellation request");
-    assert_eq!(pending.state, AgentTaskRunState::Running);
+    assert_eq!(pending.state(), AgentTaskRunState::Running);
     assert_eq!(
         pending.metadata["runner_cancellation_pending"]["state"],
         "requested"
@@ -5439,7 +5445,7 @@ fn accepted_runner_cancel_stays_nonterminal_until_runner_confirms_cancellation()
     let cancelled =
         cancel_exact_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
             .expect("retry until runner confirms cancellation");
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
     assert!(cancelled
         .metadata
         .get("runner_cancellation_pending")

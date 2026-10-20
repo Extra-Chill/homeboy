@@ -74,7 +74,7 @@ fn state_retains_pin(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
     min_age: Duration,
 ) -> Option<ControllerPinProtectionReason> {
-    if !record.state.is_terminal() {
+    if !record.state().is_terminal() {
         return Some(ControllerPinProtectionReason::ProtectedInFlight);
     }
     if !mutating_lifecycle_action_remains_open(record) {

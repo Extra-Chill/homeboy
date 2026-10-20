@@ -41,7 +41,7 @@ pub(crate) fn project_terminal_runner_record_in_store(
     record: &mut AgentTaskRunRecord,
     source: &homeboy_core::observation::RunRecord,
 ) -> Result<bool> {
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         return Ok(false);
     }
     let Some(value) = source.metadata_json.get("agent_task_run") else {
@@ -53,7 +53,7 @@ pub(crate) fn project_terminal_runner_record_in_store(
             Some("parse terminal runner record".to_string()),
         )
     })?;
-    if !remote.state.is_terminal() || source.finished_at.is_none() {
+    if !remote.state().is_terminal() || source.finished_at.is_none() {
         return Ok(false);
     }
     let (Some(runner_id), Some(job_id)) = (record.runner_id(), record.runner_job_id()) else {
@@ -98,7 +98,7 @@ pub(crate) fn project_terminal_runner_record_in_store(
     })?;
     let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
     if aggregate.plan_id != record.plan_id
-        || super::conversion::run_state_for_aggregate(&aggregate) != remote.state
+        || super::conversion::run_state_for_aggregate(&aggregate) != remote.state()
         || aggregate.outcomes.iter().any(|outcome| {
             !plan
                 .tasks
@@ -118,7 +118,7 @@ pub(crate) fn project_terminal_runner_record_in_store(
     record_verified_lab_placement_outcome(record)?;
     record.ensure_metadata_object().insert(
         "terminal_transport_recovery".to_string(),
-        json!({"source": "durable_runner_run_record", "run_id": source.id, "runner_job_id": job_id, "state": remote.state,
+        json!({"source": "durable_runner_run_record", "run_id": source.id, "runner_job_id": job_id, "state": remote.state(),
             "source_finished_at": source.finished_at, "execution_context": remote.metadata["runner_execution_context"]}),
     );
     apply_aggregate_transition_in_store(
@@ -165,16 +165,11 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
     // through here, so binding cannot diverge across callers. Both steps no-op
     // once the run is already bound / no longer queued.
     bind_pending_lab_handoff_snapshot_in_store(lifecycle_store, record, snapshot)?;
-    let started = record.state == AgentTaskRunState::Queued;
+    let started = record.state() == AgentTaskRunState::Queued;
     if started {
-        set_run_state(record, AgentTaskRunState::Running);
-        for task in &mut record.tasks {
-            if task.state == AgentTaskState::Queued {
-                task.state = AgentTaskState::Running;
-            }
-        }
+        start_run(record);
     }
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         // A transport-only terminal result can arrive before the daemon has
         // published the inner agent-task aggregate. Adopt that later evidence
         // when it proves the same controller run rather than losing its patch.
@@ -412,7 +407,7 @@ pub fn project_terminal_runner_result_in_store(
         )?;
         return Ok(true);
     }
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         return Ok(false);
     }
     project_terminal_runner_job_snapshot(&mut record, snapshot);
@@ -520,12 +515,7 @@ fn project_terminal_runner_job_snapshot(
             return
         }
     };
-    set_run_state(record, run_state);
-    for task in &mut record.tasks {
-        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-            task.state = task_state;
-        }
-    }
+    settle_run(record, run_state, task_state);
     record_runner_job_terminal_metadata(record, snapshot.job.status, &snapshot.events);
     let metadata = record.ensure_metadata_object();
     if snapshot.job.status == homeboy_core::api_jobs::JobStatus::Cancelled {
@@ -713,7 +703,7 @@ fn project_terminal_runner_pre_provider_failure_in_store(
     record: &mut AgentTaskRunRecord,
     events: &[homeboy_core::api_jobs::JobEvent],
 ) -> Result<bool> {
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         return Ok(false);
     }
     let Some(event) = events.iter().rev().find(|event| {
@@ -784,7 +774,7 @@ fn project_terminal_runner_pre_provider_failure_in_store(
         &error,
     )?;
     let sequence = event.sequence;
-    if !failed.state.is_terminal() {
+    if !failed.state().is_terminal() {
         annotate_runner_pre_provider_failure(&mut failed, events, sequence);
         lifecycle_store.commit_record(&mut failed)?;
         *record = failed;
@@ -795,7 +785,7 @@ fn project_terminal_runner_pre_provider_failure_in_store(
     // carries this pre-provider failure, so a write that landed in between is
     // neither lost nor overwritten by a stale copy (#15718).
     let projected = lifecycle_store.transition_when(&failed.run_id, |current| {
-        let still_this_failure = current.state == failed.state
+        let still_this_failure = current.state() == failed.state()
             && current
                 .metadata
                 .pointer("/pre_execution_failure/phase")
@@ -824,7 +814,7 @@ fn annotate_runner_pre_provider_failure(
     event_sequence: u64,
 ) {
     record_runner_job_terminal_metadata(record, homeboy_core::api_jobs::JobStatus::Failed, events);
-    let terminalized = record.state.is_terminal();
+    let terminalized = record.state().is_terminal();
     let run_id = record.run_id.clone();
     let metadata = record.ensure_metadata_object();
     metadata.insert(

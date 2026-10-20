@@ -392,7 +392,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                     attempts: vec![AgentTaskCookAttemptReport {
                         attempt: 1,
                         run_id: record.run_id.clone(),
-                        run_state: format!("{:?}", record.state),
+                        run_state: format!("{:?}", record.state()),
                         aggregate_path: record.aggregate_path.clone(),
                         promotion: persisted_promotion,
                         feedback: None,
@@ -426,7 +426,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 attempts: vec![AgentTaskCookAttemptReport {
                     attempt: adopted_attempt,
                     run_id: record.run_id.clone(),
-                    run_state: format!("{:?}", record.state),
+                    run_state: format!("{:?}", record.state()),
                     aggregate_path: record.aggregate_path.clone(),
                     promotion: persisted_promotion,
                     feedback: None,
@@ -454,7 +454,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 attempts: vec![AgentTaskCookAttemptReport {
                     attempt: 1,
                     run_id: record.run_id.clone(),
-                    run_state: format!("{:?}", record.state),
+                    run_state: format!("{:?}", record.state()),
                     aggregate_path: record.aggregate_path.clone(),
                     promotion: Some(promotion),
                     feedback: None,
@@ -496,7 +496,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             attempts: vec![AgentTaskCookAttemptReport {
                 attempt: adopted_attempt,
                 run_id: record.run_id.clone(),
-                run_state: format!("{:?}", record.state),
+                run_state: format!("{:?}", record.state()),
                 aggregate_path: record.aggregate_path.clone(),
                 promotion: Some(promotion),
                 feedback: Some(feedback),
@@ -745,7 +745,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     let attempt = AgentTaskCookAttemptReport {
         attempt: adopted_attempt,
         run_id: record.run_id.clone(),
-        run_state: format!("{:?}", record.state),
+        run_state: format!("{:?}", record.state()),
         aggregate_path: record.aggregate_path.clone(),
         promotion: Some(promotion.clone()),
         feedback: Some(feedback.clone()),

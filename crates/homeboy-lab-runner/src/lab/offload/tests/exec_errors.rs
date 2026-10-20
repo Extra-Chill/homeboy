@@ -113,7 +113,7 @@ fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
         let record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)
             .expect("controller record");
         assert_eq!(
-            record.state,
+            record.state(),
             homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Running
         );
         assert_eq!(record.runner_job_id(), Some("job-8525"));

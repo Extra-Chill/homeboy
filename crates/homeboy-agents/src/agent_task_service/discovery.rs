@@ -428,7 +428,7 @@ pub fn discover_runs_page(
         .filter(|page_record| {
             filter != AgentTaskDiscoveryFilter::Active
                 || matches!(
-                    page_record.record.state,
+                    page_record.record.state(),
                     agent_task_lifecycle::AgentTaskRunState::Queued
                         | agent_task_lifecycle::AgentTaskRunState::Running
                 )
@@ -604,7 +604,7 @@ fn discovery_report(
     if is_active {
         records.retain(|record| {
             matches!(
-                record.state,
+                record.state(),
                 agent_task_lifecycle::AgentTaskRunState::Queued
                     | agent_task_lifecycle::AgentTaskRunState::Running
             )
@@ -678,7 +678,7 @@ fn matches_discovery_options(
     if options
         .state
         .as_deref()
-        .is_some_and(|state| !format!("{:?}", record.state).eq_ignore_ascii_case(state))
+        .is_some_and(|state| !format!("{:?}", record.state()).eq_ignore_ascii_case(state))
         || submitted_after.is_some_and(|after| {
             chrono::DateTime::parse_from_rfc3339(&record.submitted_at)
                 .map(|submitted| submitted.with_timezone(&chrono::Utc) <= *after)
@@ -878,14 +878,14 @@ pub(crate) fn controller_upgrade_admission_for_records(
     // block every controller replacement permanently (#14571).
     let terminal_run_ids = records
         .iter()
-        .filter(|record| record.state.is_terminal())
+        .filter(|record| record.state().is_terminal())
         .map(|record| record.run_id.as_str())
         .collect::<BTreeSet<_>>();
     let mut blockers = records
         .iter()
         // Durable terminal state is authoritative even when stale ownership
         // metadata remains from the process that produced it.
-        .filter(|record| !record.state.is_terminal())
+        .filter(|record| !record.state().is_terminal())
         .filter(|record| !owns_terminal_cook_parent(record, &terminal_run_ids))
         // A Cook that has not materialized any task and is blocked only by a
         // stale runner needs this controller replacement to converge runtime.
@@ -1119,7 +1119,7 @@ fn classify_liveness(
     if record.has_fresh_controller_pre_provider_heartbeat() {
         return AgentTaskLiveness::Active;
     }
-    if record.state != agent_task_lifecycle::AgentTaskRunState::Running {
+    if record.state() != agent_task_lifecycle::AgentTaskRunState::Running {
         if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
             return AgentTaskLiveness::Unreconciled;
         }
@@ -1190,7 +1190,7 @@ fn classify_liveness(
 }
 
 fn durable_queued_retry_is_live(record: &AgentTaskRunRecord) -> bool {
-    record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+    record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
         && record.metadata["retry_of"]
             .as_str()
             .is_some_and(|run_id| !run_id.is_empty())
@@ -1346,7 +1346,7 @@ fn discovery_run(
         run_id: run_id.clone(),
         branch: metadata_string(&record.metadata, "branch")
             .or_else(|| metadata_string(&record.metadata, "worktree_branch")),
-        state: record.state,
+        state: record.state(),
         repo: identity.repo,
         component,
         workspace: identity.workspace,
@@ -1422,7 +1422,7 @@ fn stale_reason_for_record(record: &AgentTaskRunRecord) -> String {
 fn discovery_counts(tasks: &[agent_task_lifecycle::AgentTaskRunTask]) -> AgentTaskDiscoveryCounts {
     let mut counts = AgentTaskDiscoveryCounts::default();
     for task in tasks {
-        match task.state {
+        match task.state() {
             AgentTaskState::Queued | AgentTaskState::Blocked | AgentTaskState::Skipped => {
                 counts.queued += 1;
             }

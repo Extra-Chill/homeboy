@@ -23,7 +23,7 @@ pub(crate) fn apply_aggregate_transition_in_store(
         .aggregate_path(&record.run_id)
         .display()
         .to_string();
-    let decided_from = record.state;
+    let decided_from = record.state();
     apply_aggregate_to_record(record, plan, aggregate, aggregate_path);
     // Compare-and-swap at the revision this record was read at: a stale
     // projection can no longer replace a terminal decision it never saw (#15718).

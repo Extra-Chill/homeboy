@@ -116,7 +116,7 @@ fn accepted_detached_handoff(run_id: &str) -> AgentTaskRunRecord {
 
 fn retained_terminal_run(record: &AgentTaskRunRecord) -> homeboy_core::observation::RunRecord {
     let mut remote = record.clone();
-    remote.state = AgentTaskRunState::Failed;
+    remote.set_state_for_test(AgentTaskRunState::Failed);
     remote.lab_handoff = None;
     remote
         .ensure_metadata_object()
@@ -194,7 +194,7 @@ fn durable_terminal_run_restores_failed_outcome_without_transport_job_or_plan_re
             .unwrap()
         );
         let reloaded = store.read_record(&record.run_id).unwrap();
-        assert_eq!(reloaded.state, AgentTaskRunState::Failed);
+        assert_eq!(reloaded.state(), AgentTaskRunState::Failed);
         assert_eq!(
             reloaded.runner_job_id(),
             Some("00000000-0000-0000-0000-000000000123")
@@ -254,7 +254,7 @@ fn durable_terminal_run_rejects_unbound_or_tampered_evidence_without_mutating_st
                 "{field}"
             );
             assert_eq!(
-                store.read_record(&record.run_id).unwrap().state,
+                store.read_record(&record.run_id).unwrap().state(),
                 AgentTaskRunState::Running
             );
         }
@@ -301,7 +301,7 @@ fn durable_terminal_run_accepts_direct_dispatch_attempt_of_the_same_run() {
             );
         }
         assert_eq!(
-            store.read_record(&record.run_id).unwrap().state,
+            store.read_record(&record.run_id).unwrap().state(),
             AgentTaskRunState::Running
         );
 
@@ -317,7 +317,7 @@ fn durable_terminal_run_accepts_direct_dispatch_attempt_of_the_same_run() {
             .unwrap()
         );
         assert_eq!(
-            store.read_record(&run_id).unwrap().state,
+            store.read_record(&run_id).unwrap().state(),
             AgentTaskRunState::Failed
         );
     });
@@ -343,7 +343,7 @@ fn durable_terminal_run_preserves_parent_mission_and_explicit_handoff_identity()
             .unwrap()
         );
         let persisted = store.read_record(&record.run_id).unwrap();
-        assert_eq!(persisted.state, AgentTaskRunState::Failed);
+        assert_eq!(persisted.state(), AgentTaskRunState::Failed);
         assert_eq!(
             persisted.metadata["terminal_transport_recovery"]["execution_context"]["context"]
                 ["accepted_handoff_id"],
@@ -442,7 +442,7 @@ fn accepted_runner_identity_binds_before_snapshot_validation_and_survives_caller
         recovered.runner_job_id(),
         Some(identity.runner_job_id.as_str())
     );
-    assert_eq!(recovered.state, AgentTaskRunState::Running);
+    assert_eq!(recovered.state(), AgentTaskRunState::Running);
 }
 
 #[test]
@@ -492,7 +492,7 @@ fn accepted_runner_binding_fails_if_terminalization_wins_before_identity_persist
     let persisted = lifecycle_store
         .read_record(run_id)
         .expect("terminal record remains readable");
-    assert_eq!(persisted.state, AgentTaskRunState::Cancelled);
+    assert_eq!(persisted.state(), AgentTaskRunState::Cancelled);
     assert!(accepted_lab_runner_job_identity_from_record(&persisted).is_none());
     assert!(persisted.runner_job_id().is_none());
 }
@@ -534,7 +534,7 @@ fn submit_plan_persists_queued_status() {
         let loaded = reconcile_status(&record.run_id).expect("status loaded");
 
         assert_eq!(record.run_id, "run_a");
-        assert_eq!(loaded.state, AgentTaskRunState::Queued);
+        assert_eq!(loaded.state(), AgentTaskRunState::Queued);
         assert_eq!(
             loaded.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
                 ["requested"],
@@ -791,7 +791,7 @@ fn active_pinned_run_does_not_block_controller_promotion() {
             .expect("active durable run must not block promotion");
         let after = submit_plan(&test_plan(), Some("post-promotion-runtime"))
             .expect("post-switch submission");
-        assert_eq!(after.state, AgentTaskRunState::Queued);
+        assert_eq!(after.state(), AgentTaskRunState::Queued);
     });
 }
 
@@ -1021,7 +1021,7 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
     )
     .expect("controller proxy recorded before handoff");
 
-    assert_eq!(planned.state, AgentTaskRunState::Queued);
+    assert_eq!(planned.state(), AgentTaskRunState::Queued);
     assert!(planned.metadata.get("runner_job_id").is_none());
     assert_eq!(planned.metadata["lifecycle_store_owner"], "controller");
     assert!(planned.lab_handoff.is_none());
@@ -1057,7 +1057,7 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
         },
     )
     .expect("accepted child binds proxy");
-    assert_eq!(running.state, AgentTaskRunState::Running);
+    assert_eq!(running.state(), AgentTaskRunState::Running);
     assert_eq!(running.metadata["runner_job_id"], "job-123");
     assert_eq!(running.metadata["lifecycle_store_owner"], "controller");
     assert!(running.metadata.get("handoff_acceptance").is_none());
@@ -1136,7 +1136,7 @@ fn reserved_lab_admission_is_named_on_the_durable_run_before_acceptance() {
         "homeboy agent-task cancel agent-task-admission-identity"
     );
     // Naming a reservation is evidence, never acceptance.
-    assert_eq!(reserved.state, AgentTaskRunState::Queued);
+    assert_eq!(reserved.state(), AgentTaskRunState::Queued);
     assert!(reserved.metadata.get("runner_job_id").is_none());
 
     // A terminal run is never reopened by a late reservation write.
@@ -1269,7 +1269,7 @@ fn runner_snapshot_binds_pending_lab_handoff_before_validation() {
         )
         .expect("accepted runner snapshot binds the pending handoff");
 
-        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(record.state(), AgentTaskRunState::Running);
         assert_eq!(
             record.runner_job_id(),
             Some("00000000-0000-0000-0000-000000000123")
@@ -1360,7 +1360,7 @@ fn preacceptance_snapshot_binds_replacement_job_from_planned_execution_record() 
     reconcile_transport_proxy_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
         .expect("replacement runner snapshot binds the planned execution record");
 
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     assert_eq!(record.runner_job_id(), Some(replacement_job_id.as_str()));
     assert_eq!(
         record.lab_handoff.as_ref().map(|handoff| handoff.state),
@@ -1535,7 +1535,7 @@ fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
     )
     .expect("pre-acceptance attempt record");
 
-    assert_eq!(queued.state, AgentTaskRunState::Queued);
+    assert_eq!(queued.state(), AgentTaskRunState::Queued);
     assert_eq!(queued.metadata["phase"], "materializing");
     assert!(queued.metadata.get("runner_job_id").is_none());
 
@@ -1552,7 +1552,7 @@ fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
     .expect("daemon acceptance advances the same attempt");
 
     assert_eq!(accepted.run_id, attempt_run_id);
-    assert_eq!(accepted.state, AgentTaskRunState::Running);
+    assert_eq!(accepted.state(), AgentTaskRunState::Running);
     assert_eq!(accepted.metadata["runner_job_id"], "job-7970");
     assert_eq!(accepted.metadata["phase"], "awaiting_runner_result");
     assert_eq!(
@@ -1593,7 +1593,7 @@ fn accepted_handoff_adopts_a_job_found_on_another_known_generation() {
 
         let reconciled = reconcile_status(run_id).expect("adopted generation snapshot");
 
-        assert_eq!(reconciled.state, AgentTaskRunState::Running);
+        assert_eq!(reconciled.state(), AgentTaskRunState::Running);
         assert_eq!(reconciled.metadata["runner_job_status"], "running");
         assert_eq!(reconciled.metadata["provider_executions_consumed"], 0);
         assert!(reconciled.provider_handles.is_empty());
@@ -1612,7 +1612,7 @@ fn accepted_handoff_fails_after_confirmed_absence_across_generations() {
 
         let terminal = reconcile_status(run_id).expect("terminal lost accepted job");
 
-        assert_eq!(terminal.state, AgentTaskRunState::Failed);
+        assert_eq!(terminal.state(), AgentTaskRunState::Failed);
         assert_eq!(terminal.metadata["phase"], "accepted_lab_runner_job_lost");
         assert_eq!(
             terminal.metadata["lost_accepted_runner_job"]["checked_generations"],
@@ -1640,7 +1640,7 @@ fn accepted_handoff_does_not_terminalize_unconfirmed_generation_absence() {
 
         let retained = reconcile_status(run_id).expect("retain unconfirmed handoff");
 
-        assert_eq!(retained.state, AgentTaskRunState::Running);
+        assert_eq!(retained.state(), AgentTaskRunState::Running);
         assert!(retained.metadata.get("lost_accepted_runner_job").is_none());
         assert_eq!(retained.metadata["provider_executions_consumed"], 0);
         assert!(retained.provider_handles.is_empty());
@@ -1693,7 +1693,7 @@ fn reserved_lab_admission_recovers_runner_job_after_client_loss() {
 
         let recovered = reconcile_status(run_id).expect("recover admitted runner job");
 
-        assert_eq!(recovered.state, AgentTaskRunState::Running);
+        assert_eq!(recovered.state(), AgentTaskRunState::Running);
         assert_eq!(recovered.runner_id(), Some("homeboy-lab"));
         assert_eq!(recovered.runner_job_id(), Some("accepted-runner-job-1"));
         assert_eq!(
@@ -1903,7 +1903,7 @@ fn foreground_terminal_projection_binds_a_pending_handoff_before_validation() {
     .expect("bound terminal projection")
     .record;
     assert_eq!(bound.runner_job_id(), Some(accepted_job_id.as_str()));
-    assert_eq!(bound.state, AgentTaskRunState::Succeeded);
+    assert_eq!(bound.state(), AgentTaskRunState::Succeeded);
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -1945,7 +1945,7 @@ fn terminal_aggregate_binds_runner_job_before_snapshot_validation() {
     )
     .expect("aggregate terminalizes the run")
     .record;
-    assert_eq!(terminal.state, AgentTaskRunState::Succeeded);
+    assert_eq!(terminal.state(), AgentTaskRunState::Succeeded);
     assert!(terminal.runner_job_id().is_none());
 
     let mut snapshot = terminal_child_snapshot(&aggregate);
@@ -1967,7 +1967,7 @@ fn terminal_aggregate_binds_runner_job_before_snapshot_validation() {
     )
     .expect("bound terminal run")
     .record;
-    assert_eq!(bound.state, AgentTaskRunState::Succeeded);
+    assert_eq!(bound.state(), AgentTaskRunState::Succeeded);
     assert_eq!(bound.runner_id(), Some("homeboy-lab"));
     assert_eq!(bound.runner_job_id(), Some(accepted_job_id.as_str()));
 }
@@ -2089,7 +2089,7 @@ fn missing_lab_attempt_plan_is_recovered_before_handoff_or_terminalized() {
     )
     .expect("terminal recovery record")
     .record;
-    assert_eq!(terminal.state, AgentTaskRunState::Failed);
+    assert_eq!(terminal.state(), AgentTaskRunState::Failed);
     assert_eq!(
         terminal.metadata["pre_execution_failure"]["phase"],
         "lab_attempt_plan_recovery"
@@ -2250,7 +2250,7 @@ fn runner_terminal_reconciliation_is_idempotent_and_preserves_execution_owner() 
             remote_command: &command,
         })
         .expect("same child handoff is idempotent");
-        assert_eq!(retry.state, AgentTaskRunState::Succeeded);
+        assert_eq!(retry.state(), AgentTaskRunState::Succeeded);
         assert_eq!(
             retry.metadata["runner_execution_record"]["status"],
             "succeeded"
@@ -2296,7 +2296,7 @@ fn reachable_running_child_clears_disconnected_liveness_and_refreshes_heartbeat(
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
         .expect("reachable reconciliation");
 
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     assert_eq!(record.metadata["runner_liveness"], "reachable");
     assert!(record.metadata.get("stale_running").is_none());
     assert!(record.metadata.get("stale_running_reason").is_none());
@@ -2404,7 +2404,7 @@ fn terminal_runner_reconciliation_never_resurrects_a_controller_record() {
         )
         .expect("terminal state remains committed")
         .record
-        .state,
+        .state(),
         AgentTaskRunState::Succeeded
     );
 
@@ -2443,7 +2443,7 @@ fn disconnected_runner_marks_nonterminal_proxy_stale_without_advancing_heartbeat
 
     record.annotate_runner_disconnected();
 
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     assert_eq!(record.lifecycle.heartbeat, heartbeat);
     assert_eq!(record.metadata["runner_liveness"], "disconnected");
     assert_eq!(record.metadata["stale_running"], true);
@@ -2456,38 +2456,25 @@ fn disconnected_runner_marks_nonterminal_proxy_stale_without_advancing_heartbeat
 #[test]
 fn detached_runner_failure_transitions_parent_and_task_terminal() {
     let plan = test_plan();
-    let mut record = AgentTaskRunRecord {
-        schema: schemas::RUN.to_string(),
-        run_id: "detached-run".to_string(),
-        plan_id: plan.plan_id.clone(),
-        state: AgentTaskRunState::Running,
-        revision: 0,
-        submitted_at: now_timestamp(),
-        updated_at: None,
-        plan_path: "plan.json".to_string(),
-        aggregate_path: None,
-        totals: None,
-        tasks: plan.tasks.iter().map(queued_task).collect(),
-        artifact_refs: Vec::new(),
-        provider_handles: Vec::new(),
-        latest_executor_evidence: None,
-        lifecycle: lifecycle_for_submitted_plan(&plan),
-        lab_handoff: None,
-        candidate_adoption: None,
-        adoption_run_id: None,
-        acceptance: None,
-        workspace_identity: None,
-        workspace_lifecycle_revision: 0,
-        workspace_owner_lease: None,
-        workspace_claim: None,
-        metadata: json!({ "runner_id": "homeboy-lab", "runner_job_id": "job-123" }),
+    let mut record = {
+        let mut record = AgentTaskRunRecord::new_queued(
+            "detached-run".to_string(),
+            plan.plan_id.clone(),
+            "plan.json".to_string(),
+            now_timestamp(),
+        );
+        record.tasks = plan.tasks.iter().map(queued_task).collect();
+        record.lifecycle = lifecycle_for_submitted_plan(&plan);
+        record.metadata = json!({ "runner_id": "homeboy-lab", "runner_job_id": "job-123" });
+        record.set_state_for_test(AgentTaskRunState::Running);
+        record
     };
-    record.tasks[0].state = AgentTaskState::Running;
+    record.tasks[0].set_state_for_test(AgentTaskState::Running);
 
     apply_runner_job_terminal_state(&mut record, homeboy_core::api_jobs::JobStatus::Failed, &[]);
 
-    assert_eq!(record.state, AgentTaskRunState::Failed);
-    assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
+    assert_eq!(record.state(), AgentTaskRunState::Failed);
+    assert_eq!(record.tasks[0].state(), AgentTaskState::Failed);
     assert_eq!(record.lifecycle.execution.state, RunExecutionState::Failed);
     assert_eq!(record.metadata["runner_job_status"], "failed");
     assert_eq!(record.metadata["retryable"], true);
@@ -2843,7 +2830,7 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
         let (raw_aggregate, _) = aggregate_source("local-run").expect("aggregate source");
 
         assert_eq!(record.run_id, "local-run");
-        assert_eq!(loaded.state, AgentTaskRunState::Failed);
+        assert_eq!(loaded.state(), AgentTaskRunState::Failed);
         assert_eq!(loaded.tasks[0].task_id, "task-a");
         assert_ne!(loaded.tasks[0].task_id, "agent-task-predispatch");
         assert_eq!(
@@ -3122,7 +3109,7 @@ fn failed_provider_run_exposes_workflow_evidence_refs() {
     let durable_artifacts =
         artifacts_in_store(&lifecycle_store, &record.run_id).expect("artifacts");
 
-    assert_eq!(durable_status.state, AgentTaskRunState::Failed);
+    assert_eq!(durable_status.state(), AgentTaskRunState::Failed);
     assert_eq!(durable_status.artifact_refs.len(), 1);
     assert_eq!(durable_status.artifact_refs[0].kind, "provider-transcript");
     assert_eq!(durable_artifacts.evidence_refs.len(), 4);
@@ -3153,7 +3140,7 @@ fn status_marks_running_run_without_owner_as_stale() {
     let mut record = lifecycle_store
         .read_record("run-stale-missing-owner")
         .expect("record");
-    record.state = AgentTaskRunState::Running;
+    record.set_state_for_test(AgentTaskRunState::Running);
     lifecycle_store
         .write_record(&record)
         .expect("stored running record");
@@ -3167,7 +3154,7 @@ fn status_marks_running_run_without_owner_as_stale() {
     .expect("status loaded")
     .record;
 
-    assert_eq!(loaded.state, AgentTaskRunState::Running);
+    assert_eq!(loaded.state(), AgentTaskRunState::Running);
     assert_eq!(loaded.metadata["stale_running"], json!(true));
     assert_eq!(
         loaded.metadata["stale_running_reason"],
@@ -3223,7 +3210,7 @@ fn status_keeps_fresh_planned_runner_submission_live() {
 
         let loaded = reconcile_status(run_id).expect("status loaded");
 
-        assert_eq!(loaded.state, AgentTaskRunState::Running);
+        assert_eq!(loaded.state(), AgentTaskRunState::Running);
         assert_eq!(
             loaded.metadata["runner_execution_record"]["status"],
             "planned"
@@ -3360,14 +3347,14 @@ fn cancel_run_marks_queued_record_cancelled() {
     .expect("status loaded")
     .record;
 
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
-    assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
     assert_eq!(cancelled.metadata["cancel_reason"], json!("loser cell"));
     assert_eq!(
         cancelled.metadata["live_cancellation"]["cancellation"],
         "runner_job_cancel"
     );
-    assert_eq!(loaded.state, AgentTaskRunState::Cancelled);
+    assert_eq!(loaded.state(), AgentTaskRunState::Cancelled);
 }
 
 #[test]

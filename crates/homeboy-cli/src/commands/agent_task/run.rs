@@ -4705,7 +4705,7 @@ where
         args.acknowledge_model_override,
     );
     if !route_override.is_empty() {
-        if !args.rearm || !record.state.is_terminal() {
+        if !args.rearm || !record.state().is_terminal() {
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "provider-route",
                 "Cook provider-route overrides require a terminal attempt to rearm",
@@ -4736,7 +4736,7 @@ where
                 .any(homeboy::agents::agent_task_service::cook_request_is_review_form_only)
         });
     if (args.timeout_ms.is_some() || args.review_form_timeout_ms.is_some())
-        && !record.state.is_terminal()
+        && !record.state().is_terminal()
     {
         return Err(homeboy::core::Error::validation_invalid_argument(
             if args.review_form_timeout_ms.is_some() {
@@ -4781,7 +4781,7 @@ where
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
-    if record.state.is_terminal()
+    if record.state().is_terminal()
         && agent_task_service_direct::retryable_pre_execution_failure(&record)
     {
         if !args.rearm {
@@ -4807,12 +4807,12 @@ where
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
-    if !record.state.is_terminal() {
+    if !record.state().is_terminal() {
         return Ok((cook_continuation_status(&recipe.cook_id, &record), 0));
     }
 
     if matches!(
-        record.state,
+        record.state(),
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
@@ -4851,7 +4851,7 @@ where
                 cook_terminal_continuation_status(
                     &recipe.cook_id,
                     &run_id,
-                    &format!("{:?}", record.state),
+                    &format!("{:?}", record.state()),
                     agent_task_service::continuation_state_in_store(
                         &recipe_store,
                         &recipe.cook_id,
@@ -4865,7 +4865,7 @@ where
         let historical_terminal =
             agent_task_service_direct::historical_terminal_continuation_is_eligible(
                 &recipe,
-                record.state,
+                record.state(),
             );
         let dispatcher = reconstruct_dispatcher;
         let executor = executor.clone();
@@ -5057,7 +5057,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                         .and_then(|promotion| promotion.pointer("/provenance/candidate"))
                         .cloned()
                         .unwrap_or(Value::Null);
-                phases.push(serde_json::json!({ "phase": "lifecycle", "status": "passed", "reason": "ok", "state": format!("{:?}", record.state) }));
+                phases.push(serde_json::json!({ "phase": "lifecycle", "status": "passed", "reason": "ok", "state": format!("{:?}", record.state()) }));
                 observation
             }
             Err(error) => {
@@ -5103,7 +5103,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             .filter(|finalization| !finalization.is_null())
             .filter(|_| {
                 matches!(
-                    record.state,
+                    record.state(),
                     agent_task_lifecycle::AgentTaskRunState::Succeeded
                         | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
                         | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
@@ -5204,7 +5204,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         let reconstruction =
             if agent_task_service_direct::historical_terminal_continuation_is_eligible(
                 &recipe,
-                record.state,
+                record.state(),
             ) {
                 agent_task_service::reconstruct_adoption_options_with_dispatcher(
                     &recipe, dispatcher,
@@ -5237,7 +5237,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             finalization,
         ));
     }
-    if !record.state.is_terminal() {
+    if !record.state().is_terminal() {
         let error = homeboy::core::Error::validation_invalid_argument(
             "cook_or_attempt_id",
             "selected Cook attempt is not terminal and cannot be admitted to dispatch",
@@ -5258,7 +5258,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         ));
     }
     if matches!(
-        record.state,
+        record.state(),
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
@@ -5374,7 +5374,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
     let historical_terminal =
         agent_task_service_direct::historical_terminal_continuation_is_eligible(
             &recipe,
-            record.state,
+            record.state(),
         );
     let mut options = match if terminal_review || historical_terminal {
         agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)
@@ -5760,7 +5760,7 @@ fn cook_continuation_status(
             }),
         )
     } else if waiting_for_capacity
-        || record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+        || record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
     {
         let command = runner_id
             .map(|runner_id| format!("homeboy runner status {runner_id}"))
@@ -5793,7 +5793,7 @@ fn cook_continuation_status(
         "latest_run_id": run_id,
         "status": status,
         "provider": {
-            "state": format!("{:?}", record.state),
+            "state": format!("{:?}", record.state()),
             "run_id": run_id,
             "runner_id": runner_id,
             "runner_job_status": record.metadata.get("runner_job_status"),

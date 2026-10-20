@@ -1088,7 +1088,7 @@ mod tests {
 
             let record = store.read_record(cook_id).expect("read Cook parent");
             assert_eq!(
-                record.state,
+                record.state(),
                 homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Failed
             );
             assert_eq!(

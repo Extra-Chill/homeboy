@@ -155,19 +155,19 @@ impl AgentTaskAdvance {
             |record: &AgentTaskRunRecord| record.lab_handoff.as_ref().map(|h| h.state);
         match self {
             Self::Submit => None,
-            Self::Start => (stored.state.is_terminal()
-                || prepared.state != AgentTaskRunState::Running)
+            Self::Start => (stored.state().is_terminal()
+                || prepared.state() != AgentTaskRunState::Running)
                 .then_some("start must move a live run to running"),
-            Self::Requeue => (stored.state.is_terminal()
-                || prepared.state != AgentTaskRunState::Queued)
+            Self::Requeue => (stored.state().is_terminal()
+                || prepared.state() != AgentTaskRunState::Queued)
                 .then_some("requeue must return a live run to the queue"),
-            Self::PendLabHandoff => (stored.state.is_terminal()
-                || prepared.state != stored.state
+            Self::PendLabHandoff => (stored.state().is_terminal()
+                || prepared.state() != stored.state()
                 || accepted(stored).is_some()
                 || handoff_state(prepared) != Some(AgentTaskLabHandoffState::Pending))
             .then_some("a pending Lab handoff requires a live, unaccepted run"),
             Self::BindLabHandoff => match (accepted(stored), accepted(prepared)) {
-                _ if prepared.state != AgentTaskRunState::Running => {
+                _ if prepared.state() != AgentTaskRunState::Running => {
                     Some("binding a Lab handoff must leave the run running")
                 }
                 (_, None) => Some("binding a Lab handoff must accept a runner job"),
@@ -178,20 +178,20 @@ impl AgentTaskAdvance {
                 }
                 // Late acceptance may supersede only the synthetic expiry
                 // cancellation of an unaccepted handoff.
-                _ if stored.state.is_terminal()
+                _ if stored.state().is_terminal()
                     && handoff_state(stored) != Some(AgentTaskLabHandoffState::Expired) =>
                 {
                     Some("a terminal run cannot bind a Lab handoff")
                 }
                 _ => None,
             },
-            Self::ReleaseLabHandoff => (stored.state.is_terminal()
-                || prepared.state != stored.state
+            Self::ReleaseLabHandoff => (stored.state().is_terminal()
+                || prepared.state() != stored.state()
                 || accepted(stored).is_some()
                 || prepared.lab_handoff.is_some())
             .then_some("only a live, unaccepted Lab handoff can be released"),
-            Self::ExpireLabHandoff => (stored.state != AgentTaskRunState::Cancelled
-                || prepared.state != stored.state
+            Self::ExpireLabHandoff => (stored.state() != AgentTaskRunState::Cancelled
+                || prepared.state() != stored.state()
                 || handoff_state(prepared) != Some(AgentTaskLabHandoffState::Expired))
             .then_some("only a cancelled run's Lab handoff can expire"),
         }
@@ -218,7 +218,7 @@ fn ownership_change(
             .as_ref()
             .map(|lease| (lease.workspace.clone(), lease.owner_id.clone()))
     };
-    if prepared.state != stored.state {
+    if prepared.state() != stored.state() {
         Some("the run state")
     } else if prepared.lab_handoff != stored.lab_handoff {
         Some("the Lab handoff")
@@ -258,7 +258,7 @@ impl AgentTaskTransition {
             Self::ProjectAggregate { prepared, .. }
             | Self::CommitRecord { prepared }
             | Self::Annotate { prepared }
-            | Self::Advance { prepared, .. } => prepared.state,
+            | Self::Advance { prepared, .. } => prepared.state(),
         }
     }
 
@@ -310,7 +310,7 @@ impl AgentTaskTransition {
                 if let Some(field) = ownership_change(&stored, &prepared) {
                     return Err(illegal_transition(
                         &stored,
-                        prepared.state,
+                        prepared.state(),
                         "annotate",
                         &format!("an annotation cannot change {field}; commit a typed transition"),
                     ));
@@ -322,9 +322,9 @@ impl AgentTaskTransition {
                 if let Some(problem) = kind.violation(&stored, &prepared) {
                     return Err(illegal_transition(
                         &stored,
-                        prepared.state,
+                        prepared.state(),
                         kind.name(),
-                        &format!("{problem} (stored state {:?})", stored.state),
+                        &format!("{problem} (stored state {:?})", stored.state()),
                     ));
                 }
                 Ok((*prepared, stored_aggregate, false))
@@ -363,10 +363,10 @@ fn validate_prepared_terminal_record(
             None,
         ));
     }
-    if !prepared.state.is_terminal() {
+    if !prepared.state().is_terminal() {
         return Err(illegal_transition(
             stored,
-            prepared.state,
+            prepared.state(),
             name,
             &format!("{what} must commit a terminal run state"),
         ));
@@ -387,7 +387,7 @@ pub(crate) fn illegal_transition(
     transition: &str,
     problem: &str,
 ) -> Error {
-    illegal_state_transition(&stored.run_id, stored.state, to, transition, problem)
+    illegal_state_transition(&stored.run_id, stored.state(), to, transition, problem)
 }
 
 pub(crate) fn illegal_state_transition(
@@ -508,3 +508,118 @@ impl From<AgentTaskTransitionError> for Error {
 /// against each fresh read. Each attempt holds the config lock, so a conflict
 /// means a writer outside it (another store) committed.
 pub(crate) const TRANSITION_RETRY_ATTEMPTS: usize = 3;
+
+// ---------------------------------------------------------------------------
+// State writes (#15718 step 4b).
+//
+// `AgentTaskRunRecord::state` and `AgentTaskRunTask::state` are private
+// fields. Their only writer, `write_state`, demands a `StateWriteAuthority`,
+// and only this module can mint one. Every run- and task-state change in
+// production code is therefore one of the typed writers below, applied to a
+// record that is then committed through the lifecycle store's fenced write
+// path (`transition`, `transition_when`, `mutate_record`), which validates the
+// edge against the stored state. A new direct assignment anywhere else does
+// not compile.
+// ---------------------------------------------------------------------------
+
+/// Proof that a state write was issued by the transition module. The private
+/// field keeps it unconstructible anywhere else.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StateWriteAuthority(());
+
+const AUTHORITY: StateWriteAuthority = StateWriteAuthority(());
+
+/// Single authoritative setter for a run's state. It writes both the
+/// top-level run state and the derived `lifecycle.execution.state`
+/// projection together, so the two cannot silently diverge.
+pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: AgentTaskRunState) {
+    record.write_state(state, AUTHORITY);
+    let timestamp = record.updated_at.clone().unwrap_or_else(now_timestamp);
+    record.lifecycle.execution.state = RunExecutionState::from(state);
+    record.lifecycle.execution.updated_at = Some(timestamp.clone());
+    if state == AgentTaskRunState::Running && record.lifecycle.execution.started_at.is_none() {
+        record.lifecycle.execution.started_at = Some(timestamp.clone());
+    }
+    // A terminal run has finished executing, so stamp `finished_at` for the
+    // canonical terminal set (`is_terminal`), matching the legacy-record
+    // migration path in `health.rs`.
+    if state.is_terminal() {
+        record.lifecycle.execution.finished_at = Some(timestamp.clone());
+    }
+    record.lifecycle.updated_at = Some(timestamp);
+    // Assert the invariant the record-health check enforces
+    // (`ConflictingProjections`) so a future edit that breaks the pairing
+    // fails fast in dev/tests rather than emitting divergent records.
+    debug_assert!(
+        record.run_state_projections_agree(),
+        "set_run_state must leave run-state projections in agreement"
+    );
+}
+
+/// Start the run: `Running`, and every task still `Queued` starts with it.
+pub(crate) fn start_run(record: &mut AgentTaskRunRecord) {
+    set_run_state(record, AgentTaskRunState::Running);
+    for task in &mut record.tasks {
+        if task.state() == AgentTaskState::Queued {
+            task.write_state(AgentTaskState::Running, AUTHORITY);
+        }
+    }
+}
+
+/// Settle the run in `run_state`, moving every task that had not finished
+/// (`Queued` or `Running`) to `task_state`. Tasks that already finished keep
+/// their own outcome.
+pub(crate) fn settle_run(
+    record: &mut AgentTaskRunRecord,
+    run_state: AgentTaskRunState,
+    task_state: AgentTaskState,
+) {
+    set_run_state(record, run_state);
+    for task in &mut record.tasks {
+        if matches!(
+            task.state(),
+            AgentTaskState::Queued | AgentTaskState::Running
+        ) {
+            task.write_state(task_state, AUTHORITY);
+        }
+    }
+}
+
+/// Return a zero-execution run to the queue and drop its exact-step owner.
+pub(crate) fn reset_for_requeue(record: &mut AgentTaskRunRecord) {
+    set_run_state(record, AgentTaskRunState::Queued);
+    record.lifecycle.execution.started_at = None;
+    record.lifecycle.execution.finished_at = None;
+    for task in &mut record.tasks {
+        task.write_state(AgentTaskState::Queued, AUTHORITY);
+    }
+    let metadata = record.ensure_metadata_object();
+    for key in [
+        "execution_step_owner",
+        "runner_pid",
+        "runner_process_start_identity",
+        "runner_started_at",
+    ] {
+        metadata.remove(key);
+    }
+}
+
+/// Project a task's state from durable aggregate evidence (its latest event or
+/// its outcome) while the run's task list is rebuilt from that aggregate.
+pub(crate) fn project_task_state(task: &mut AgentTaskRunTask, state: AgentTaskState) {
+    task.write_state(state, AUTHORITY);
+}
+
+/// A read-time copy of `record` presented in `state`, for observation
+/// surfaces whose derived state differs from the stored one (for example a
+/// provider-succeeded Cook that never finished end to end). Only the
+/// top-level state is replaced, exactly as observed; the copy is a view and
+/// is never handed back to the store.
+pub(crate) fn observed_with_run_state(
+    record: &AgentTaskRunRecord,
+    state: AgentTaskRunState,
+) -> AgentTaskRunRecord {
+    let mut observed = record.clone();
+    observed.write_state(state, AUTHORITY);
+    observed
+}

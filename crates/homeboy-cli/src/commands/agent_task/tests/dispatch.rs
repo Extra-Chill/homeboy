@@ -2559,7 +2559,7 @@ fn persist_discovery_record(run_id: &str, branch: &str, state: AgentTaskRunState
     agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
         record.submitted_at = "2026-09-10T00:00:00Z".to_string();
         record.updated_at = Some("2026-09-10T00:00:00Z".to_string());
-        record.state = state;
+        record.set_state_for_test(state);
     })
     .expect("set discovery fixture keyset and state");
 }

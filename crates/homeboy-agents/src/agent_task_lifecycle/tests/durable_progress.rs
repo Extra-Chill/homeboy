@@ -23,7 +23,7 @@ fn persist_record_without_writer(store: &AgentTaskLifecycleStore, record: &Agent
             component_id: Some(record.plan_id.clone()),
             started_at: record.submitted_at.clone(),
             finished_at: record.lifecycle.execution.finished_at.clone(),
-            status: if record.state.is_terminal() {
+            status: if record.state().is_terminal() {
                 "pass".to_string()
             } else {
                 "running".to_string()

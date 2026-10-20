@@ -1548,7 +1548,7 @@ mod tests {
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("interrupted parent remains addressable");
             assert_eq!(
-                parent.state,
+                parent.state(),
                 agent_task_lifecycle::AgentTaskRunState::Failed
             );
             assert_eq!(
@@ -1570,7 +1570,7 @@ mod tests {
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("first parent remains discoverable");
             assert_eq!(
-                parent.state,
+                parent.state(),
                 agent_task_lifecycle::AgentTaskRunState::Queued
             );
             assert_eq!(parent.metadata["detached_cook_handoff"]["state"], "pending");
@@ -1586,7 +1586,7 @@ mod tests {
             assert_eq!(
                 agent_task_lifecycle::exact_record(cook_id)
                     .expect("owner cleanup terminalizes parent")
-                    .state,
+                    .state(),
                 agent_task_lifecycle::AgentTaskRunState::Failed
             );
         });
@@ -1691,7 +1691,7 @@ mod tests {
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("read redirected handoff parent");
             assert_eq!(
-                parent.state,
+                parent.state(),
                 agent_task_lifecycle::AgentTaskRunState::Succeeded
             );
             assert_eq!(
@@ -1738,7 +1738,7 @@ mod tests {
             let cancelled =
                 agent_task_lifecycle::cancel_run(cook_id, None).expect("cancel pending handoff");
             assert_eq!(
-                cancelled.state,
+                cancelled.state(),
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
             );
             assert!(
@@ -1784,7 +1784,7 @@ mod tests {
             let cancelled = agent_task_lifecycle::cancel_run(cook_id, None)
                 .expect("cancel pending supervised handoff");
             assert_eq!(
-                cancelled.state,
+                cancelled.state(),
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
             );
             assert_eq!(
@@ -1922,7 +1922,7 @@ mod tests {
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("read redirected handoff parent");
             assert_eq!(
-                parent.state,
+                parent.state(),
                 agent_task_lifecycle::AgentTaskRunState::Succeeded
             );
             assert_eq!(
@@ -2006,7 +2006,7 @@ mod tests {
             let cancelled = agent_task_lifecycle::cancel_run(cook_id, None)
                 .expect("cancellation wins the handoff arbitration");
             assert_eq!(
-                cancelled.state,
+                cancelled.state(),
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
             );
 
@@ -2023,7 +2023,7 @@ mod tests {
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("read cancellation-winning handoff parent");
             assert_eq!(
-                parent.state,
+                parent.state(),
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
             );
             assert_eq!(
@@ -2066,13 +2066,13 @@ mod tests {
                 .expect("Cook alias resolves to its materialized attempt");
             assert_eq!(cancelled.run_id, attempt_id);
             assert_eq!(
-                cancelled.state,
+                cancelled.state(),
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
             );
             assert_eq!(
                 agent_task_lifecycle::exact_record(attempt_id)
                     .expect("read materialized cancelled attempt")
-                    .state,
+                    .state(),
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
             );
         });

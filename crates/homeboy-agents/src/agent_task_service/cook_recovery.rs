@@ -544,7 +544,7 @@ fn resolve_cook_key(id: &str) -> Result<String> {
 /// model decides first; otherwise the attempt's own lifecycle evidence.
 pub(crate) fn cook_recovery_status(record: &agent_task_lifecycle::AgentTaskRunRecord) -> String {
     use agent_task_lifecycle::AgentTaskRunState as State;
-    match record.state {
+    match record.state() {
         State::Queued => return "queued".to_string(),
         State::Running => return "running".to_string(),
         _ => {}
@@ -568,7 +568,7 @@ pub(crate) fn cook_recovery_status(record: &agent_task_lifecycle::AgentTaskRunRe
     {
         return status.to_string();
     }
-    match record.state {
+    match record.state() {
         State::Queued => "queued",
         State::Running => "running",
         State::Succeeded => "succeeded",

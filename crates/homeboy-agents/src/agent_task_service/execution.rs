@@ -1346,7 +1346,7 @@ fn terminal_run_result_for_record(
     recover_missing_aggregate: bool,
 ) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     if !matches!(
-        record.state,
+        record.state(),
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
@@ -1369,7 +1369,7 @@ fn terminal_run_result_for_record(
             "run_id",
             format!(
                 "agent-task run '{}' is terminal with state {:?} but has no durable aggregate evidence",
-                record.run_id, record.state
+                record.run_id, record.state()
             ),
             Some(record.run_id.clone()),
             Some(vec![format!(
@@ -1382,7 +1382,7 @@ fn terminal_run_result_for_record(
         Err(error) => return Err(error),
     };
     Ok(Some(AgentTaskRunResult {
-        exit_code: terminal_record_exit_code(&record.state, &aggregate),
+        exit_code: terminal_record_exit_code(&record.state(), &aggregate),
         value: crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
     }))
 }
@@ -1603,7 +1603,8 @@ where
         &mut source_plan,
     )?;
     preflight(&source_plan)?;
-    if source.state.is_terminal() && agent_task_lifecycle::is_unmaterialized_cook_admission(&source)
+    if source.state().is_terminal()
+        && agent_task_lifecycle::is_unmaterialized_cook_admission(&source)
     {
         if let Some(route_override) = route_override.filter(|override_| !override_.is_empty()) {
             validate_admission_route_override(&source, route_override)?;
@@ -1708,7 +1709,7 @@ where
         ))
     })?;
     if let Some(record) = recovered_replacement {
-        let run = run && !record.state.is_terminal();
+        let run = run && !record.state().is_terminal();
         return Ok(AgentTaskRetryServiceResult {
             record,
             run,
@@ -1828,7 +1829,7 @@ where
                 false,
             )?
             .record;
-            if record.state.is_terminal() {
+            if record.state().is_terminal() {
                 return Ok(AgentTaskRetryServiceResult {
                     record,
                     run: false,
@@ -2552,7 +2553,7 @@ fn retryable_cook_attempt(
                 .is_some_and(|feedback| !feedback.is_empty())
     });
     let failed_provider_without_candidate = matches!(
-        source.state,
+        source.state(),
         agent_task_lifecycle::AgentTaskRunState::Failed
             | agent_task_lifecycle::AgentTaskRunState::Cancelled
     ) && !retryable_pre_execution_failure
@@ -2618,7 +2619,7 @@ fn retryable_cook_attempt(
             && record.metadata["cook_attempt"] == recipe_attempt.attempt;
         if materialized_attempt_seen
             && !owned_replacement
-            && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+            && record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
         {
             for _ in 0..100 {
                 std::thread::sleep(Duration::from_millis(10));
@@ -2656,8 +2657,8 @@ fn retryable_cook_attempt(
                 None,
             ));
         }
-        if record.state.is_terminal() {
-            if record.state == agent_task_lifecycle::AgentTaskRunState::Succeeded {
+        if record.state().is_terminal() {
+            if record.state() == agent_task_lifecycle::AgentTaskRunState::Succeeded {
                 return Ok(Some(CookRetryAttempt {
                     cook_id: cook_id.to_string(),
                     attempt: recipe_attempt.attempt,
@@ -2673,7 +2674,7 @@ fn retryable_cook_attempt(
             // retry budget permits it.
             continue;
         }
-        if record.state != agent_task_lifecycle::AgentTaskRunState::Queued {
+        if record.state() != agent_task_lifecycle::AgentTaskRunState::Queued {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
                 "pending Cook retry run is already active and must be resumed through its lifecycle",
@@ -3679,7 +3680,7 @@ mod tests {
                 .expect("persist source attempt");
             store
                 .mutate_record(run_id, |record| {
-                    record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
                     record.metadata["cook_id"] = json!(cook_id);
                     record.metadata["cook_attempt"] = json!(1);
                     record.metadata["provider_executions_consumed"] = json!(0);
@@ -3875,7 +3876,7 @@ mod tests {
 
             let record = store.read_record(run_id).expect("rooted terminal record");
             assert_eq!(
-                record.state,
+                record.state(),
                 agent_task_lifecycle::AgentTaskRunState::Succeeded
             );
             assert_eq!(

@@ -456,7 +456,7 @@ impl CookRecipeStore {
     pub fn enqueue_feedback_remediation(&self, cook_id: &str, run_id: &str) -> Result<bool> {
         let lifecycle_store = self.lifecycle_store();
         let record = lifecycle_store.read_record(run_id)?;
-        if !record.state.is_terminal() {
+        if !record.state().is_terminal() {
             return Ok(false);
         }
         let rearm_failed = matches!(
@@ -1913,7 +1913,7 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
     {
         return Ok(record);
     }
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         if let Ok(aggregate) = lifecycle_store.read_aggregate(run_id) {
             if !agent_task_lifecycle::terminal_artifact_projection_is_verified_in_store(
                 lifecycle_store,
@@ -2932,13 +2932,13 @@ pub fn pre_execution_runtime_recovery(
     if !has_unambiguous_zero_execution(record) {
         return None;
     }
-    if record.state.is_terminal()
+    if record.state().is_terminal()
         && super::cook_pre_execution::retryable_pre_execution_failure(record)
     {
         return Some(PreExecutionRuntimeRecovery::RetryablePreExecutionFailure);
     }
     let admission = &record.metadata["cook_runtime_admission"];
-    if record.state == AgentTaskRunState::Queued
+    if record.state() == AgentTaskRunState::Queued
         && admission["schema"] == "homeboy/cook-runtime-admission/v1"
         && admission["state"] == "queued"
         && record.metadata["execution_scheduling"]["epoch"]
@@ -2955,7 +2955,7 @@ pub fn pre_execution_runtime_recovery(
     let current =
         &record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY];
     if matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Queued | AgentTaskRunState::Running
     ) && recovery["schema"] == "homeboy/controller-runtime-pre-execution-recovery/v1"
         && recovery["provider_executions_consumed"].as_u64() == Some(0)
@@ -3123,7 +3123,7 @@ fn continuation_source_run_id(
     let Ok(latest) = lifecycle_store.read_record(&latest_run_id) else {
         return latest_run_id;
     };
-    let stranded_pre_provider_failure = latest.state == AgentTaskRunState::Failed
+    let stranded_pre_provider_failure = latest.state() == AgentTaskRunState::Failed
         && latest.metadata.get("pre_execution_failure").is_some()
         && has_unambiguous_zero_execution(&latest)
         && !super::cook_pre_execution::retryable_pre_execution_failure(&latest);
@@ -3140,7 +3140,7 @@ fn continuation_source_run_id(
                 .read_record(&attempt.run_id)
                 .is_ok_and(|record| {
                     matches!(
-                        record.state,
+                        record.state(),
                         AgentTaskRunState::CandidateRecoverable
                             | AgentTaskRunState::PartialRecoverable
                             | AgentTaskRunState::Succeeded
@@ -3414,7 +3414,7 @@ pub(crate) fn complete_absorbed_review_form_follow_ups(
         };
         let follow_up = super::recorded_promotion_report(&record.metadata)
             .and_then(|promotion| promotion.pointer("/provenance/cook_follow_up"));
-        if !record.state.is_terminal()
+        if !record.state().is_terminal()
             || follow_up
                 .and_then(|follow_up| follow_up.get("kind"))
                 .and_then(Value::as_str)
@@ -4580,7 +4580,9 @@ mod tests {
         let (_, plan) = persist_recipe_run(&store, &lifecycle_store);
         lifecycle_store
             .mutate_record("run", |record| {
-                record.state = agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
+                record.set_state_for_test(
+                    agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
+                );
                 true
             })
             .unwrap();
@@ -4598,7 +4600,7 @@ mod tests {
         let fail = |retryable: bool| {
             lifecycle_store
                 .mutate_record("retry", |record| {
-                    record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
                     let metadata = record.ensure_metadata_object();
                     metadata.insert("provider_executions_consumed".into(), serde_json::json!(0));
                     metadata.insert("provider_run_ids".into(), serde_json::json!([]));
@@ -5463,7 +5465,7 @@ mod tests {
         persist_recipe_run(&store, &lifecycle_store);
         lifecycle_store
             .mutate_record("run", |record| {
-                record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
                 true
             })
             .unwrap();
@@ -5788,7 +5790,7 @@ mod tests {
         store.enqueue_terminal_continuation("cook", "run").unwrap();
         lifecycle_store
             .mutate_record("run", |record| {
-                record.state = agent_task_lifecycle::AgentTaskRunState::Succeeded;
+                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Succeeded);
                 record
                     .metadata
                     .as_object_mut()
@@ -5818,7 +5820,7 @@ mod tests {
                 Ok(serde_json::json!({}))
             })
             .unwrap();
-        record.state = agent_task_lifecycle::AgentTaskRunState::Succeeded;
+        record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Succeeded);
         crate::agent_task_service::set_cook_delivery_artifact_for_test(
             &mut record.metadata,
             "/promotion",

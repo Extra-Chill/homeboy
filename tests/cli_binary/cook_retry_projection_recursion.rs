@@ -70,7 +70,7 @@ fn missing_transport_child_projection_resolves_without_recursion_or_provider_dis
             .expect("persist lifecycle attempt");
         store
             .mutate_record(run_id, |record| {
-                record.state = AgentTaskRunState::Failed;
+                record.set_state_for_test(AgentTaskRunState::Failed);
                 record.metadata["cook_id"] = serde_json::json!(cook_id);
                 record.metadata["cook_attempt"] = serde_json::json!(1);
                 record.metadata["provider_executions_consumed"] = serde_json::json!(1);

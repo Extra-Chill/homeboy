@@ -284,7 +284,7 @@ impl AgentTaskLifecycleStore {
     ) -> Result<Option<AgentTaskRunRecord>> {
         self.with_config_lock(|| {
             let mut record = self.read_record(run_id)?;
-            if record.state != super::AgentTaskRunState::Queued
+            if record.state() != super::AgentTaskRunState::Queued
                 || record.metadata.get("queue_quarantine").is_some()
                 || !authorize(&record)
             {
@@ -295,13 +295,8 @@ impl AgentTaskLifecycleStore {
             write_private_json(&self.controller_plan_path(run_id), plan)?;
 
             record.updated_at = Some(super::now_timestamp());
-            super::set_run_state(&mut record, super::AgentTaskRunState::Running);
+            super::start_run(&mut record);
             super::update_lifecycle_heartbeat(&mut record);
-            for task in &mut record.tasks {
-                if task.state == crate::agent_tasks::AgentTaskState::Queued {
-                    task.state = crate::agent_tasks::AgentTaskState::Running;
-                }
-            }
             record.record_runner_metadata(false);
             if record.metadata["execution_scheduling"].is_object() {
                 let intent_id =
@@ -990,7 +985,7 @@ impl AgentTaskLifecycleStore {
         Ok(records_with_health(active)?
             .0
             .into_iter()
-            .filter(|record| !record.state.is_terminal())
+            .filter(|record| !record.state().is_terminal())
             .collect())
     }
 
@@ -1246,7 +1241,7 @@ impl AgentTaskLifecycleStore {
                 true,
                 RecordWriteGuard {
                     expected_revision: record.revision,
-                    from: stored.map_or(record.state, |stored| stored.state),
+                    from: stored.map_or(record.state(), |stored| stored.state()),
                     transition: Some("import"),
                 },
             )?;
@@ -1374,7 +1369,7 @@ impl AgentTaskLifecycleStore {
                     None,
                 ));
             }
-            if record.state != AgentTaskRunState::Queued
+            if record.state() != AgentTaskRunState::Queued
                 || recovery != Some(PreExecutionRuntimeRecovery::QueuedRuntimeAdmission)
             {
                 return Err(Error::validation_invalid_argument(
@@ -1428,7 +1423,7 @@ impl AgentTaskLifecycleStore {
     ) -> Result<AgentTaskRunRecord> {
         self.with_config_lock(|| {
             let existing = self.read_record(&record.run_id)?;
-            if !existing.state.is_terminal()
+            if !existing.state().is_terminal()
                 || !crate::agent_task_service::has_unambiguous_zero_execution(&existing)
                 || !crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
                     &existing,
@@ -1445,7 +1440,7 @@ impl AgentTaskLifecycleStore {
                     None,
                 ));
             }
-            if record.state != AgentTaskRunState::Queued
+            if record.state() != AgentTaskRunState::Queued
                 || record.run_id != existing.run_id
                 || record.plan_id != existing.plan_id
             {
@@ -1488,7 +1483,7 @@ impl AgentTaskLifecycleStore {
                 true,
                 RecordWriteGuard {
                     expected_revision: rebound.revision,
-                    from: existing.state,
+                    from: existing.state(),
                     transition: Some("rearm"),
                 },
             )?;
@@ -1763,7 +1758,7 @@ impl AgentTaskLifecycleStore {
                         attempts += 1;
                         let rebase = match conflict.actual_state {
                             Some(state) if state.is_terminal() => {
-                                state == decided_from || state == prepared.state
+                                state == decided_from || state == prepared.state()
                             }
                             _ => true,
                         };
@@ -1808,9 +1803,9 @@ impl AgentTaskLifecycleStore {
             transition: name,
         };
         if stored.revision != expected_revision {
-            return Ok(Err(conflict(stored.revision, Some(stored.state))));
+            return Ok(Err(conflict(stored.revision, Some(stored.state()))));
         }
-        let from = stored.state;
+        let from = stored.state();
         let stored_aggregate = read_mirrored_aggregate_in_store(self, run_id)?;
         let (next, aggregate, write_cache) = transition.apply(stored, stored_aggregate)?;
         let guard = RecordWriteGuard {
@@ -2153,7 +2148,7 @@ impl RecordWriteGuard {
     pub(super) fn annotation(record: &AgentTaskRunRecord) -> Self {
         Self {
             expected_revision: record.revision,
-            from: record.state,
+            from: record.state(),
             transition: None,
         }
     }
@@ -2290,15 +2285,16 @@ pub(super) fn write_record_guarded(
     // commit an edge it does not name (#15718). Only a test fixture writes
     // unfenced, and it seeds a state rather than taking an edge.
     if let (Some(guard), Some(from)) = (guard, stored_state) {
-        if !from.can_transition_to(record.state) {
+        if !from.can_transition_to(record.state()) {
             return Err(super::terminal_transition::illegal_state_transition(
                 &record.run_id,
                 from,
-                record.state,
+                record.state(),
                 guard.transition.unwrap_or("annotate"),
                 &format!(
                     "agent-task run `{}` cannot move from {from:?} to {:?}; nothing was written",
-                    record.run_id, record.state
+                    record.run_id,
+                    record.state()
                 ),
             ));
         }
@@ -2408,7 +2404,7 @@ pub(super) fn write_record_guarded(
         (RunStatus::Running.as_str().to_string(), None)
     } else {
         (
-            run_status(record.state).to_string(),
+            run_status(record.state()).to_string(),
             terminal_finished_at(&record),
         )
     };
@@ -2613,7 +2609,7 @@ fn agent_task_resource_projection(
             .updated_at
             .clone()
             .unwrap_or_else(|| record.submitted_at.clone()),
-        state: serde_json::to_value(record.state)
+        state: serde_json::to_value(record.state())
             .map_err(|error| Error::internal_json(error.to_string(), None))?
             .as_str()
             .unwrap_or("unknown")
@@ -3413,7 +3409,7 @@ fn run_status(state: AgentTaskRunState) -> &'static str {
 }
 
 fn terminal_finished_at(record: &AgentTaskRunRecord) -> Option<String> {
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         record
             .updated_at
             .clone()

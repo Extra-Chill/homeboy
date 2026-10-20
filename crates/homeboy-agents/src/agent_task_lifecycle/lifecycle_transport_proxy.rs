@@ -148,7 +148,7 @@ pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
             )
         })?;
     homeboy_core::controller_runtime::validate(runtime)?;
-    if !record.state.is_terminal() || !is_authenticated_transport_recovery_record(&record) {
+    if !record.state().is_terminal() || !is_authenticated_transport_recovery_record(&record) {
         return Ok(false);
     }
     let (Some(runner_id), Some(runner_job_id)) = (
@@ -360,7 +360,7 @@ pub(crate) fn bind_pending_lab_handoff_snapshot_in_store(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         // The runner can finish and mirror its aggregate before the controller
         // projects the daemon snapshot. Preserve that terminal outcome while
         // attaching the authoritative job identity needed for validation.

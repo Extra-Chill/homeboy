@@ -66,10 +66,10 @@ fn assert_refused(
     let error = match committed {
         Ok(record) => panic!(
             "an illegal {:?} -> {:?} commit was reported committed as {:?} (stored {:?}, row `{}`)",
-            before.state,
-            record.as_ref().map(|record| record.state),
+            before.state(),
+            record.as_ref().map(|record| record.state()),
             record.as_ref().map(|record| record.revision),
-            read.state,
+            read.state(),
             row.status,
         ),
         Err(error) => error,
@@ -79,8 +79,12 @@ fn assert_refused(
         json!(AGENT_TASK_ILLEGAL_TRANSITION),
         "{error:?}"
     );
-    assert_eq!(error.details["from_state"], json!(before.state));
-    assert_eq!(read.state, before.state, "a refused commit writes nothing");
+    assert_eq!(error.details["from_state"], json!(before.state()));
+    assert_eq!(
+        read.state(),
+        before.state(),
+        "a refused commit writes nothing"
+    );
     assert_eq!(
         read.revision, before.revision,
         "a refused commit writes nothing"
@@ -95,7 +99,7 @@ fn a_mutation_cannot_resume_a_finished_run_in_place() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = finished(&context, AgentTaskTerminalOutcome::Succeeded);
     let before = store.read_record(RUN_ID).unwrap();
-    assert_eq!(before.state, AgentTaskRunState::Succeeded);
+    assert_eq!(before.state(), AgentTaskRunState::Succeeded);
 
     let committed = store.mutate_record(RUN_ID, |record| {
         set_run_state(record, AgentTaskRunState::Running);
@@ -113,7 +117,7 @@ fn a_cancelled_run_cannot_be_reprojected_as_a_success() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = finished(&context, AgentTaskTerminalOutcome::Cancelled);
     let before = store.read_record(RUN_ID).unwrap();
-    assert_eq!(before.state, AgentTaskRunState::Cancelled);
+    assert_eq!(before.state(), AgentTaskRunState::Cancelled);
 
     let committed = store.mutate_record(RUN_ID, |record| {
         if let Some(metadata) = record.metadata.as_object_mut() {
@@ -166,5 +170,5 @@ fn a_finished_run_is_still_reprojected_from_later_evidence() {
         })
         .expect("a failure may be re-projected from later evidence")
         .expect("written");
-    assert_eq!(reprojected.state, AgentTaskRunState::Succeeded);
+    assert_eq!(reprojected.state(), AgentTaskRunState::Succeeded);
 }

@@ -86,7 +86,7 @@ fn execute_and_assert_one_initial_attempt(subject: &str) {
     let child = format!("{subject}-attempt-1");
     assert_eq!(store.read_cook_index(subject).unwrap().latest_run_id, child);
     assert_eq!(
-        store.read_record(&child).unwrap().state,
+        store.read_record(&child).unwrap().state(),
         AgentTaskRunState::Succeeded
     );
     assert!(!store
@@ -264,7 +264,7 @@ fn execution_step_concurrent_rearm_placement_and_cancel_fence_all_old_children()
                 execute_counted(&current.intent_id, &calls, &transport).unwrap();
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
                 assert_eq!(
-                    store.read_record(subject).unwrap().state,
+                    store.read_record(subject).unwrap().state(),
                     AgentTaskRunState::Cancelled
                 );
                 assert!(store.read_cook_index(subject).is_err());
@@ -439,7 +439,7 @@ fn execution_step_interrupted_spawn_gates_old_child_then_recovery_executes_once(
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
-            store.read_record("gate-retry").unwrap().state,
+            store.read_record("gate-retry").unwrap().state(),
             AgentTaskRunState::Succeeded
         );
     });
@@ -549,7 +549,7 @@ fn execution_step_runner_ineligible_then_eligible_across_daemon_restart_executes
         );
         assert_eq!(store.read_cook_index(subject).unwrap().latest_run_id, child);
         assert_eq!(
-            store.read_record(&child).unwrap().state,
+            store.read_record(&child).unwrap().state(),
             AgentTaskRunState::Succeeded
         );
         assert_eq!(

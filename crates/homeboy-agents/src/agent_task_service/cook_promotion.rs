@@ -2506,7 +2506,7 @@ pub(crate) fn attempt_needs_execution_with_store(
 
 fn run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
     !matches!(
-        record.state,
+        record.state(),
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
@@ -2522,7 +2522,7 @@ pub(crate) fn retryable_provider_discovery_failure_with_store(
 ) -> bool {
     lifecycle_store
         .read_record(run_id)
-        .is_ok_and(|record| record.state == agent_task_lifecycle::AgentTaskRunState::Failed)
+        .is_ok_and(|record| record.state() == agent_task_lifecycle::AgentTaskRunState::Failed)
         && lifecycle_store
             .read_aggregate(run_id)
             .is_ok_and(|aggregate| {
@@ -3626,7 +3626,7 @@ pub fn persist_manual_finalization_intent(
     report: &AgentTaskPrFinalizationReport,
 ) -> Result<crate::agent_task_lifecycle::AgentTaskRunRecord> {
     let mut report = report.clone();
-    if crate::agent_task_lifecycle::status(run_id)?.state
+    if crate::agent_task_lifecycle::status(run_id)?.state()
         == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
     {
         report.manual_candidate_binding = Some(manual_candidate_binding(run_id, &report)?);
@@ -3691,7 +3691,7 @@ pub fn prepare_manual_finalization_identity(requested_id: &str) -> Result<String
                     None,
                 )
             })?;
-        if crate::agent_task_lifecycle::status(&run_id)?.state
+        if crate::agent_task_lifecycle::status(&run_id)?.state()
             == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
         {
             let candidate = crate::agent_task_lifecycle::select_cook_candidate(requested_id)?;
@@ -3738,7 +3738,7 @@ fn require_manual_finalization_run(run_id: &str) -> Result<String> {
     if persisted_manual_finalization_identity(&record.metadata) == Some(&Value::Bool(true)) {
         return Ok(run_id.to_string());
     }
-    if record.state == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable {
+    if record.state() == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable {
         if record.acceptance.is_some() || record.metadata.get("acceptance_requirement").is_some() {
             return Err(Error::validation_invalid_argument(
                 "acceptance",
@@ -3788,7 +3788,7 @@ fn manual_candidate_binding(
     report: &AgentTaskPrFinalizationReport,
 ) -> Result<crate::agent_task_finalization::AgentTaskManualCandidateBinding> {
     let record = crate::agent_task_lifecycle::status(run_id)?;
-    if record.state != crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+    if record.state() != crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
         || record.acceptance.is_some()
         || record.metadata.get("acceptance_requirement").is_some()
     {
@@ -4814,7 +4814,7 @@ fn manual_finalization_intent_for_run(
             None,
         ));
     }
-    let candidate_recoverable = crate::agent_task_lifecycle::status(run_id)?.state
+    let candidate_recoverable = crate::agent_task_lifecycle::status(run_id)?.state()
         == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
     if candidate_recoverable && report.manual_candidate_binding.is_none() {
         return Err(Error::validation_invalid_argument(
@@ -6823,7 +6823,7 @@ pub(crate) fn cook_failure_context_with_stores(
         .sum();
     let lifecycle_state = record
         .as_ref()
-        .map(|record| format!("{:?}", record.state))
+        .map(|record| format!("{:?}", record.state()))
         .unwrap_or_else(|| "recipe_persisted_without_lifecycle_record".to_string());
     let recovery_legal = record.is_some();
     let promotion_claim = lifecycle_store

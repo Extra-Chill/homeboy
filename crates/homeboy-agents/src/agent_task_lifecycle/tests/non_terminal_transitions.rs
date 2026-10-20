@@ -113,7 +113,7 @@ fn stale_proxy_recovery_cannot_unbind_a_concurrent_lab_handoff_acceptance() {
     })
     .expect("drop the stub runtime pin");
     let planned = store.read_record(RUN_ID).expect("planned proxy");
-    assert_eq!(planned.state, AgentTaskRunState::Queued);
+    assert_eq!(planned.state(), AgentTaskRunState::Queued);
     assert!(planned.runner_job_id().is_none());
 
     let _provider = RunnerContinuationTestGuard::install(Box::new(AcceptsDuringAuthorityProbe {
@@ -124,7 +124,7 @@ fn stale_proxy_recovery_cannot_unbind_a_concurrent_lab_handoff_acceptance() {
 
     let stored = store.read_record(RUN_ID).expect("stored record");
     assert_eq!(
-        stored.state,
+        stored.state(),
         AgentTaskRunState::Running,
         "lost update: a stale recovery snapshot reverted the accepted handoff's running state"
     );
@@ -254,7 +254,7 @@ fn annotations_cannot_change_state_or_ownership() {
     );
 
     let stored = store.read_record(RUN_ID).expect("stored");
-    assert_eq!(stored.state, AgentTaskRunState::Queued);
+    assert_eq!(stored.state(), AgentTaskRunState::Queued);
     assert_eq!(
         stored.lab_handoff.as_ref().map(|handoff| handoff.state),
         Some(AgentTaskLabHandoffState::Pending)
@@ -297,7 +297,7 @@ fn a_late_lab_acceptance_after_expiry_keeps_the_receipt_and_every_view_agreeing(
             .expect("expire the handoff")
     );
     let expired = store.read_record(RUN_ID).expect("expired");
-    assert_eq!(expired.state, AgentTaskRunState::Cancelled);
+    assert_eq!(expired.state(), AgentTaskRunState::Cancelled);
     let provenance = expired.metadata["cancellation_provenance"].clone();
     assert!(provenance.is_object(), "{:?}", expired.metadata);
     let run = homeboy_control_plane_contract::RunId::new(RUN_ID).unwrap();
@@ -335,17 +335,17 @@ fn a_late_lab_acceptance_after_expiry_keeps_the_receipt_and_every_view_agreeing(
         .expect("stored row");
     assert_eq!(
         row.metadata_json["agent_task_run"]["state"],
-        serde_json::json!(bound.state),
+        serde_json::json!(bound.state()),
         "the lifecycle read and the active-run SQL agree"
     );
     assert_eq!(
         row.status == "running",
-        !bound.state.is_terminal(),
+        !bound.state().is_terminal(),
         "the lifecycle read and `runs.status` agree"
     );
     assert_eq!(
         bound.metadata.get("cancellation_provenance").is_some(),
-        bound.state == AgentTaskRunState::Cancelled,
+        bound.state() == AgentTaskRunState::Cancelled,
         "only a cancelled record carries cancellation provenance"
     );
     assert_eq!(
@@ -361,7 +361,7 @@ fn a_late_lab_acceptance_after_expiry_keeps_the_receipt_and_every_view_agreeing(
         Some("operator requested stop"),
     )
     .expect("operator cancellation converges");
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
     assert_eq!(
         cancelled.metadata["cancellation_provenance"], provenance,
         "the operator cancellation reuses the receipt's first cause"

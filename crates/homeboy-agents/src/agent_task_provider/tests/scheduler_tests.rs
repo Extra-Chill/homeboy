@@ -735,7 +735,7 @@ fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
         .expect("record aggregate");
 
     assert_eq!(
-        record.state,
+        record.state(),
         crate::agent_task_lifecycle::AgentTaskRunState::Failed
     );
     assert_eq!(

@@ -69,12 +69,12 @@ fn reconcile_apply_owns_the_transitions_status_no_longer_performs() {
         // Persisted terminal runner observation -> terminal aggregate projection.
         let runner = "purity-pending-runner-snapshot";
         assert_eq!(
-            store.read_record(runner).unwrap().state,
+            store.read_record(runner).unwrap().state(),
             AgentTaskRunState::Running
         );
         crate::agent_task_service::reconcile_run(runner, false).expect("reconcile runner run");
         let projected = store.read_record(runner).unwrap();
-        assert_eq!(projected.state, AgentTaskRunState::Succeeded);
+        assert_eq!(projected.state(), AgentTaskRunState::Succeeded);
         assert_eq!(
             projected.metadata["terminal_transport_recovery"],
             "persisted_runner_job_events"
@@ -106,7 +106,7 @@ fn reconcile_apply_owns_the_transitions_status_no_longer_performs() {
         let report = crate::agent_task_service::reconcile_run(orphan, false).expect("reconcile");
         assert_eq!(report.reconciled, 1, "{report:?}");
         assert_eq!(
-            store.read_record(orphan).unwrap().state,
+            store.read_record(orphan).unwrap().state(),
             AgentTaskRunState::Cancelled
         );
     });

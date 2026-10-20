@@ -136,7 +136,8 @@ impl CookStartupAdmission {
         };
         if let Some(workspace) = caller_workspace {
             record = match store.mutate_record(&cook_id, |current| {
-                if current.state.is_terminal() || !current.metadata["caller_workspace"].is_null() {
+                if current.state().is_terminal() || !current.metadata["caller_workspace"].is_null()
+                {
                     return false;
                 }
                 current.metadata["caller_workspace"] = workspace.clone();
@@ -145,7 +146,7 @@ impl CookStartupAdmission {
                 Some(updated) => updated,
                 None => store.read_record_bounded(&cook_id)?,
             };
-            if !record.state.is_terminal() && record.metadata["caller_workspace"] != workspace {
+            if !record.state().is_terminal() && record.metadata["caller_workspace"] != workspace {
                 return Err(homeboy::core::Error::validation_invalid_argument(
                     "caller_workspace",
                     "Cook admission checkout differs from its original caller ownership",
@@ -173,7 +174,7 @@ impl CookStartupAdmission {
         let handoff = &record.metadata["detached_cook_handoff"];
         let progress_is_current =
             record.metadata["cook_progress"]["phase"] == "controller_runtime_seal";
-        if !record.state.is_terminal()
+        if !record.state().is_terminal()
             && handoff["state"] == "pending"
             && handoff["admission_state"] == "pre_supervisor"
             && handoff["launcher_id"] == launcher_id
@@ -226,7 +227,7 @@ impl CookStartupAdmission {
         // The pinning process may fail only the startup claim it owns. A replay
         // or a transferred local launcher has a different token and must retain
         // its own handoff custody.
-        if record.state.is_terminal()
+        if record.state().is_terminal()
             || handoff["state"] != "pending"
             || handoff["admission_state"] != "pre_supervisor"
             || handoff["launcher_id"] != self.launcher_id
@@ -2506,7 +2507,7 @@ fn agent_task_lifecycle_delegation_run_id(cli: &Cli) -> Option<String> {
             // (#15732: a 0.417.6 pin hid the #15668 Cook continuation guard).
             crate::commands::agent_task::AgentTaskCommand::Resume(args)
                 if crate::agents::agent_tasks::lifecycle::status(&args.run_id)
-                    .is_ok_and(|record| record.state.is_terminal()) =>
+                    .is_ok_and(|record| record.state().is_terminal()) =>
             {
                 None
             }
@@ -3667,7 +3668,8 @@ fn controller_owned_unmaterialized_resume(cli: &Cli) -> bool {
         return false;
     };
     crate::agents::agent_tasks::lifecycle::exact_record(&args.run_id).is_ok_and(|record| {
-        !record.state.is_terminal() && record.metadata["unmaterialized_cook_admission"].is_object()
+        !record.state().is_terminal()
+            && record.metadata["unmaterialized_cook_admission"].is_object()
     })
 }
 
@@ -6678,7 +6680,7 @@ mod tests {
             };
             let set_state = |state: AgentTaskRunState| {
                 crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
-                    record.state = state;
+                    record.set_state_for_test(state);
                 })
                 .expect("rewrite record state");
             };
@@ -6876,7 +6878,9 @@ mod tests {
             std::fs::set_permissions(&pinned_runtime_a, std::fs::Permissions::from_mode(0o700))
                 .expect("make runtime-A pin executable");
             crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
-                record.state = crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded;
+                record.set_state_for_test(
+                    crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded,
+                );
                 record.metadata["controller_runtime"] = serde_json::json!({
                     "originating": {
                         "build_identity": identity,
@@ -6905,7 +6909,7 @@ mod tests {
                 AgentTaskRunState::PartialRecoverable,
             ] {
                 crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
-                    record.state = state;
+                    record.set_state_for_test(state);
                 })
                 .expect("persist attempt state");
                 // Both the Cook ID and exact attempt ID must resolve on the
@@ -6999,7 +7003,9 @@ mod tests {
             crate::agents::agent_tasks::lifecycle::submit_plan(&plan, Some(run_id))
                 .expect("persist legacy lifecycle run");
             crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
-                record.state = crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded;
+                record.set_state_for_test(
+                    crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded,
+                );
                 record.metadata["controller_runtime"] = serde_json::json!({
                     "originating": { "build_identity": "homeboy legacy-runtime" }
                 });

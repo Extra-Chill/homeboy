@@ -535,8 +535,8 @@ fn observed_agent_task_terminal_job_status(
         homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
     {
         if let Ok(record) = store.read_record(run_id) {
-            if record.state.is_terminal() {
-                return exact_attempt_terminal_job_status(record.state);
+            if record.state().is_terminal() {
+                return exact_attempt_terminal_job_status(record.state());
             }
         }
     }
@@ -729,7 +729,7 @@ mod tests {
             .expect("terminal observer releases promotion ownership");
             drop(lease);
             assert_eq!(
-                store.read_record(retry_id).unwrap().state,
+                store.read_record(retry_id).unwrap().state(),
                 AgentTaskRunState::Queued
             );
         });

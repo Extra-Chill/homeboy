@@ -1434,7 +1434,7 @@ fn ensure_deferred_source_active(
     store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<()> {
-    if store.read_record(run_id)?.state.is_terminal() {
+    if store.read_record(run_id)?.state().is_terminal() {
         let mut error =
             Error::internal_unexpected("source materialization stopped before runner handoff");
         error.details["workspace_sync"] = json!({"cancelled": true});
@@ -4684,12 +4684,12 @@ fn ensure_linked_attempt_not_terminal(run_id: &str) -> Result<()> {
         // authority; a missing run record is handled by their validation.
         return Ok(());
     };
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         return Err(Error::validation_invalid_argument(
             "run_id",
             format!(
                 "Lab staging dispatch cannot start for agent-task run `{}` that already terminalized as {:?}",
-                run_id, record.state
+                run_id, record.state()
             ),
             Some(run_id.to_string()),
             Some(vec![
@@ -5105,7 +5105,9 @@ mod tests {
             let mut record = store.read_record(run_id).expect("materializing record");
             assert_eq!(record.metadata["phase"], "source_materialization");
             assert!(record.runner_job_id().is_none());
-            record.state = homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled;
+            record.set_state_for_test(
+                homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled,
+            );
             store.write_record(&record).expect("durable cancellation");
             let error = worker
                 .join()
@@ -5119,7 +5121,7 @@ mod tests {
             );
             assert!(ensure_deferred_source_active(&store, run_id).is_err());
             assert_eq!(
-                store.read_record(run_id).expect("terminal record").state,
+                store.read_record(run_id).expect("terminal record").state(),
                 homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled
             );
             let timeout_run = "source-deadline";
@@ -5148,7 +5150,7 @@ mod tests {
                 store
                     .read_record(timeout_run)
                     .expect("failed source record")
-                    .state,
+                    .state(),
                 homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Failed
             );
         });
@@ -5185,7 +5187,7 @@ mod tests {
 
                     let record = homeboy_agents::agent_task_lifecycle::exact_record(run_id)
                         .expect("planned Lab proxy");
-                    assert!(!record.state.is_terminal(), "{record:#?}");
+                    assert!(!record.state().is_terminal(), "{record:#?}");
                     assert_eq!(
                         record.metadata["runner_execution_record"]["status"],
                         "planned"
@@ -5473,7 +5475,8 @@ mod tests {
             homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
                 .expect("lifecycle store");
         let mut record = lifecycle.read_record(run_id).expect("attempt record");
-        record.state = homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled;
+        record
+            .set_state_for_test(homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled);
         lifecycle
             .write_record(&record)
             .expect("terminalize attempt");
@@ -6302,7 +6305,7 @@ mod tests {
                 assert_eq!(
                     homeboy_agents::agent_task_lifecycle::exact_record(run_id)
                         .unwrap()
-                        .state,
+                        .state(),
                     homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Succeeded
                 );
             });
@@ -8638,7 +8641,7 @@ mod tests {
             let record =
                 homeboy_agents::agent_task_lifecycle::reconcile_status(run_id).expect("parent");
             assert!(matches!(
-                record.state,
+                record.state(),
                 homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Failed
             ));
             assert_eq!(

@@ -2679,7 +2679,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
         let runtimes = &record.lifecycle.provider_runtime;
 
         assert_eq!(
-            record.state,
+            record.state(),
             crate::agent_task_lifecycle::AgentTaskRunState::Succeeded
         );
         assert_eq!(runtimes.len(), 2);
