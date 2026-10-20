@@ -306,15 +306,11 @@ fn ssh_snapshot_listing_preserves_entries_and_isolates_invalid_metadata() {
         assert_eq!(output.snapshots.len(), 1);
         assert_eq!(output.snapshots[0].remote_path, synced.remote_path);
         assert_eq!(output.skipped_invalid_metadata.len(), 1);
+        // The SSH scan names the checkout whose state metadata is invalid;
+        // the metadata itself lives in the sibling `-homeboy-state` directory.
         assert_eq!(
             output.skipped_invalid_metadata[0].source,
-            invalid
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .display()
-                .to_string()
+            invalid_checkout.display().to_string()
         );
     });
 }

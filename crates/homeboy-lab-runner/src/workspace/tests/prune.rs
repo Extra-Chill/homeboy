@@ -1243,7 +1243,10 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
         // `limit` bounds candidates, so withheld workspaces never end a pass:
         // one pass per removable workspace plus the pass that reaches the end.
         assert_eq!(resumed.pass_count, REMOVABLE_COUNT + 1);
-        assert_eq!(resumed.inspected_count, WORKSPACE_COUNT);
+        // Each retained workspace also carries its `-homeboy-state` sibling,
+        // inventoried as owned by its checkout; removed workspaces take their
+        // sibling with them before the scan reaches it.
+        assert_eq!(resumed.inspected_count, WORKSPACE_COUNT + 2);
         assert_eq!(resumed.applied_count, REMOVABLE_COUNT);
         assert_eq!(resumed.skipped_count, 2);
         assert_eq!(resumed.terminal_reason, "scan_complete");
@@ -1264,7 +1267,7 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
             fs::read_dir(workspaces_root)
                 .expect("remaining workspaces")
                 .count(),
-            2
+            4
         );
         child.kill().expect("stop active workspace holder");
         child.wait().expect("reap active workspace holder");
@@ -1459,7 +1462,11 @@ fn prune_page_inventories_every_lab_workspace_family_behind_a_retained_prefix() 
         vec![
             ("artifact_dir_owned_by_checkout", 1),
             ("source_path_present", 31),
-            ("younger_than_min_age", 1),
+            // Every metadata-backed workspace's `-homeboy-state` sibling
+            // (30 retained prefix + 3 stale + declared + kept) follows its
+            // checkout; the young orphan's sibling is gated by age.
+            ("state_dir_owned_by_checkout", 35),
+            ("younger_than_min_age", 2),
         ]
     );
     // Every inspected entry is accounted for exactly once.
@@ -1487,6 +1494,13 @@ fn prune_page_inventories_every_lab_workspace_family_behind_a_retained_prefix() 
     assert_eq!(applied.removed.len(), 4, "{}", prune_diagnosis(&applied));
     for removed in [&agent, &baseline, &fix_issue, &orphan_artifacts] {
         assert!(!removed.exists(), "{}", removed.display());
+    }
+    for removed in [&agent, &baseline, &fix_issue] {
+        assert!(
+            !workspace_metadata_file(removed).parent().unwrap().exists(),
+            "state sibling of {} goes with its checkout",
+            removed.display()
+        );
     }
     for kept in [&declared, &kept, &kept_artifacts, &manual, &stray, &young] {
         assert!(kept.exists(), "{}", kept.display());
@@ -1549,11 +1563,16 @@ fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspaces_root = runner_root.path().join("_lab_workspaces");
         fs::create_dir_all(&workspaces_root).expect("workspaces root");
+        // Orphans and malformed workspaces carry a `-homeboy-state` sibling
+        // holding their metadata; each is its own top-level entry.
+        let mut state_dir_count = 0;
         for index in 0..WORKSPACE_COUNT {
             let workspace = workspaces_root.join(format!("workspace-{index:05}"));
             if ORPHAN_INDICES.contains(&index) {
                 write_orphan_workspace(&workspace);
+                state_dir_count += 1;
             } else if index % 11 == 0 {
+                state_dir_count += 1;
                 fs::create_dir_all(&workspace).expect("malformed workspace");
                 fs::create_dir_all(workspace_metadata_file(&workspace).parent().unwrap())
                     .expect("malformed workspace");
@@ -1589,7 +1608,10 @@ fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
         .expect("bounded mixed-entry drain");
         assert!(output.scan_complete, "{}", prune_diagnosis(&output));
         assert!(output.continuation_cursor.is_none());
-        assert_eq!(output.scanned_workspace_count, WORKSPACE_COUNT);
+        assert_eq!(
+            output.scanned_workspace_count,
+            WORKSPACE_COUNT + state_dir_count
+        );
         assert_eq!(output.removed.len(), ORPHAN_INDICES.len());
         assert_eq!(
             output.skipped_unknown_count,
@@ -1604,7 +1626,7 @@ fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
             fs::read_dir(&workspaces_root)
                 .expect("remaining workspaces")
                 .count(),
-            WORKSPACE_COUNT - ORPHAN_INDICES.len()
+            WORKSPACE_COUNT + state_dir_count - 2 * ORPHAN_INDICES.len()
         );
     });
 }
@@ -1652,8 +1674,18 @@ fn ssh_prune_scan_command_bounds_measured_rows_not_inspected_entries() {
         5,
         "{stdout}"
     );
+    // The four `-homeboy-state` siblings interleaved with the measured
+    // workspaces are inspected but retained, not measured.
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("retained\tstate_dir_owned_by_checkout\t"))
+            .count(),
+        4,
+        "{stdout}"
+    );
     assert!(
-        stdout.contains("__homeboy_prune_scan__\t25\tpartial"),
+        stdout.contains("__homeboy_prune_scan__\t29\tpartial"),
         "{stdout}"
     );
 
@@ -1675,7 +1707,7 @@ fn ssh_prune_scan_command_bounds_measured_rows_not_inspected_entries() {
     assert!(resumed_stdout.contains("workspace-00005\t"));
     assert!(resumed_stdout.contains("workspace-00009\t"));
     assert!(
-        resumed_stdout.contains("__homeboy_prune_scan__\t5\tpartial"),
+        resumed_stdout.contains("__homeboy_prune_scan__\t10\tpartial"),
         "{resumed_stdout}"
     );
 }
@@ -1820,9 +1852,13 @@ fn ssh_prune_scan_command_handles_paths_that_need_shell_quoting() {
         "{stdout}"
     );
     assert!(stdout.contains('\t'), "{stdout}");
-    assert!(stdout.lines().count() == 2, "{stdout}");
     assert!(
-        stdout.contains("__homeboy_prune_scan__\t1\tcomplete"),
+        stdout.contains("retained\tstate_dir_owned_by_checkout\t"),
+        "{stdout}"
+    );
+    assert!(stdout.lines().count() == 3, "{stdout}");
+    assert!(
+        stdout.contains("__homeboy_prune_scan__\t2\tcomplete"),
         "{stdout}"
     );
 }

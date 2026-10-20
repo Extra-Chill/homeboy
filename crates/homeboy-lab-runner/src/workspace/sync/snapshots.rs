@@ -26,7 +26,18 @@ use super::{
     shell_arg, workspace_metadata_path, workspace_metadata_relative_to_checkout,
     workspace_repo_from_path,
 };
-use homeboy_lab_contract::lab::handoff::RUNNER_WORKSPACE_METADATA_FILE_NAME;
+use homeboy_lab_contract::lab::handoff::{
+    RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUNNER_WORKSPACE_METADATA_FILE_NAME,
+    RUNNER_WORKSPACE_STATE_DIR_SUFFIX,
+};
+
+/// Homeboy-owned siblings (`<checkout>-homeboy-state`,
+/// `<checkout>-homeboy-artifacts`) share the Lab workspaces root with the
+/// checkouts they belong to, but are never workspaces themselves.
+fn is_homeboy_owned_sibling(path: &str) -> bool {
+    path.ends_with(RUNNER_WORKSPACE_STATE_DIR_SUFFIX)
+        || path.ends_with(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX)
+}
 
 /// Incremental reuse is a source lookup, not a full runner inventory. The
 /// directory prefix comes from the same writer that allocates snapshot paths;
@@ -252,6 +263,9 @@ fn list_local_lab_workspaces(root: &Path, limit: usize) -> Result<Vec<String>> {
             // only reusable if it is not a git checkout at all, or is one whose
             // HEAD resolves.
             let path = entry.path();
+            if is_homeboy_owned_sibling(&path.to_string_lossy()) {
+                return None;
+            }
             if !local_workspace_is_reusable(&path) {
                 return None;
             }
@@ -305,7 +319,7 @@ fn list_ssh_lab_workspaces(
         .stdout
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && !is_homeboy_owned_sibling(line))
         .map(str::to_string)
         .collect::<Vec<_>>();
     Ok(paths.into_iter().take(limit).collect())

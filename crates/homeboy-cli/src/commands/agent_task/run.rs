@@ -10287,18 +10287,17 @@ Use / as a separator and retain https://example.test/response plus `// NOTE: imp
 
     #[test]
     fn accepts_only_exact_admitted_projected_evidence_paths() {
-        let admitted = std::collections::BTreeSet::from([
-            "/state/provider-evidence/files/abc/input".to_string(),
-        ]);
-        validate_provider_evidence_prompt(
-            Some("Read /state/provider-evidence/files/abc/input"),
-            &admitted,
-        )
-        .expect("exact admitted projection is allowed");
+        // Projections live in Homeboy-owned state outside the workspace, under
+        // a recognized host root, so near-miss spellings are classified as
+        // host paths and must match an admitted projection exactly.
+        let projected = "/home/homeboy/.local/share/homeboy/provider-evidence/files/abc/input";
+        let admitted = std::collections::BTreeSet::from([projected.to_string()]);
+        validate_provider_evidence_prompt(Some(&format!("Read {projected}")), &admitted)
+            .expect("exact admitted projection is allowed");
 
         for path in [
             "/tmp/provider-evidence/files/abc/secret",
-            "/state/provider-evidence/files/abc/input.backup",
+            "/home/homeboy/.local/share/homeboy/provider-evidence/files/abc/input.backup",
         ] {
             let error = validate_provider_evidence_prompt(Some(&format!("Read {path}")), &admitted)
                 .expect_err("unadmitted projected-looking path is rejected");
