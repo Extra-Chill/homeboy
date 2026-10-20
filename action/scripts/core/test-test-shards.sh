@@ -398,7 +398,7 @@ fi
 # Three NEXTEST_PROFILE declarations, not two: the archive is BUILT with the
 # same profile the shards RUN with. A profile mismatch between build and replay
 # would silently change which binaries nextest produces versus expects.
-if [ "$(grep -c "HOMEBOY_RUST_NEXTEST_FALLBACK: '0'" "${WORKFLOW}")" -ne 2 ] || [ "$(grep -c 'NEXTEST_PROFILE: ci' "${WORKFLOW}")" -ne 3 ]; then
+if [ "$(grep -c "HOMEBOY_RUST_NEXTEST_FALLBACK: '0'" "${WORKFLOW}")" -ne 4 ] || [ "$(grep -c 'NEXTEST_PROFILE: ci' "${WORKFLOW}")" -ne 3 ]; then
   printf 'FAIL: Rust shard jobs do not require nextest with the CI profile\n'; exit 1
 fi
 

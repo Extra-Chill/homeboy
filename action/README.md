@@ -41,6 +41,15 @@ command, component, action revision, CLI revision, and phase identity. Missing
 or mismatched evidence fails closed. This DAG behavior is specific to the
 reusable workflow; direct composite-action callers keep the combined behavior.
 
+For unsharded changed-scope Rust Test failures with valid per-test sidecars,
+the baseline enumerates the base inventory without executing it, then replays
+only the candidate's selected identities that exist at base via a base-bound
+`HOMEBOY_TEST_SHARD_MANIFEST`. Normal runner-owned outcome/inventory sidecars
+still drive reconciliation; candidate-only test failures remain introduced.
+Full-scope candidates, unsupported runners, and missing selection evidence
+retain the full baseline. An empty base intersection fails closed rather than
+silently running the whole suite. Compilation/enumeration costs still apply.
+
 Before that reconciliation blames the PR for a test failure that appears only
 on the candidate, `retry-introduced-test-failures: 'true'` (the default) gives
 it a chance to prove that failure flaky: it checks out the candidate SHA a

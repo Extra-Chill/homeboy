@@ -582,6 +582,8 @@ jobs:
           ACTION_REVISION="$(git -C .homeboy-action rev-parse HEAD)"
           export ACTION_REVISION
           bash .homeboy-action/scripts/core/write-differential-phase-manifest.sh
+          jq --arg scope '${{ steps.phase.outputs.scope-effective }}' '. + {scope:$scope}' differential-phase/candidate/manifest.json > differential-phase/candidate/manifest.tmp
+          mv differential-phase/candidate/manifest.tmp differential-phase/candidate/manifest.json
           cp -R "${RUNNER_TEMP}/homeboy-ci-results" differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
           cp -R homeboy-observations differential-phase/candidate/homeboy-observations 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-observations
 
@@ -647,11 +649,55 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
         run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Plan baseline Test selection
+        id: baseline-selection-policy
+        if: steps.baseline-policy.outputs.run == 'true'
+        env:
+          CANDIDATE_MANIFEST: candidate-phase/candidate/manifest.json
+          COMMAND: ${{ matrix.command }}
+        run: python3 .homeboy-action/scripts/core/select-baseline-tests.py plan
+      - name: Enumerate base Test inventory without running tests
+        if: steps.baseline-selection-policy.outputs.runner != ''
+        env:
+          HOMEBOY_TEST_INVENTORY_ONLY: '1'
+          HOMEBOY_TEST_INVENTORY_FILE: ${{ runner.temp }}/homeboy-baseline-inventory.json
+          HOMEBOY_RUST_TEST_RUNNER: ${{ steps.baseline-selection-policy.outputs.runner }}
+          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+        uses: ./.homeboy-action
+        with:
+          config-dir: ${{ inputs.config-dir }}
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
+          commands: ${{ matrix.command }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          scope: 'full'
+          auto-setup: ${{ inputs.auto-setup }}
+          rust-toolchain: ${{ inputs.rust-toolchain }}
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
+          pr-comment: 'false'
+      - name: Materialize base-bound candidate Test selection
+        id: baseline-selection
+        if: steps.baseline-selection-policy.outputs.runner != ''
+        env:
+          CANDIDATE_MANIFEST: candidate-phase/candidate/manifest.json
+          COMMAND: ${{ matrix.command }}
+          BASELINE_INVENTORY_FILE: ${{ runner.temp }}/homeboy-baseline-inventory.json
+          BASELINE_SELECTION_FILE: ${{ runner.temp }}/homeboy-baseline-selection.json
+        run: python3 .homeboy-action/scripts/core/select-baseline-tests.py materialize
       - name: Run baseline ${{ matrix.title }}
         id: phase
         if: steps.baseline-policy.outputs.run == 'true'
         continue-on-error: true
         env:
+          HOMEBOY_TEST_SHARD_MANIFEST: ${{ steps.baseline-selection.outputs.selection-file }}
+          HOMEBOY_RUST_TEST_RUNNER: ${{ steps.baseline-selection-policy.outputs.runner }}
+          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
           HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}
         uses: ./.homeboy-action
         with:
@@ -666,9 +712,8 @@ jobs:
           commands: ${{ matrix.command }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
-          # The base checkout cannot derive the candidate's changed scope by
-          # comparing the base SHA to itself. Run a real baseline so its
-          # evidence can be compared with the candidate's selected inventory.
+          # Scoped Rust tests replay the candidate identities through a
+          # base-bound manifest; do not derive changed scope from base itself.
           scope: full
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}

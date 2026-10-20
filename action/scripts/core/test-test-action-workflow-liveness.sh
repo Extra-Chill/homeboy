@@ -9,13 +9,13 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 if ! grep -q 'name: Candidate \${{ matrix.title }}' "${ROOT_DIR}/.github/workflows/ci.yml" \
   || ! grep -q 'commands: \${{ matrix.command }}' "${ROOT_DIR}/.github/workflows/ci.yml" \
   || ! grep -q '^      execution-timeout-seconds:' "${ROOT_DIR}/.github/workflows/ci.yml" \
-  || [ "$(grep -c '^          execution-timeout-seconds: \${{ inputs.execution-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml")" -ne 4 ] \
+  || [ "$(grep -c '^          execution-timeout-seconds: \${{ inputs.execution-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml")" -ne 5 ] \
   || ! grep -q '^      test-timeout-seconds:' "${ROOT_DIR}/.github/workflows/ci.yml" \
-  || [ "$(grep -c '^          test-timeout-seconds: \${{ inputs.test-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml")" -ne 4 ] \
+  || [ "$(grep -c '^          test-timeout-seconds: \${{ inputs.test-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml")" -ne 5 ] \
   || [ "$(grep -c "HOMEBOY_TEST_TIMEOUT_SECONDS: \${{ inputs.test-timeout-seconds || env.HOMEBOY_TEST_TIMEOUT_SECONDS || '1500' }}" "${ROOT_DIR}/action.yml")" -ne 5 ] \
   || ! grep -q "if: steps.resolve-commands.outputs.has-test == 'true'" "${ROOT_DIR}/action.yml" \
   || ! grep -q '^      cleanup-timeout-seconds:' "${ROOT_DIR}/.github/workflows/ci.yml" \
-  || [ "$(grep -c '^          cleanup-timeout-seconds: \${{ inputs.cleanup-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml")" -ne 4 ] \
+  || [ "$(grep -c '^          cleanup-timeout-seconds: \${{ inputs.cleanup-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml")" -ne 5 ] \
   || ! grep -A2 'name: Fail candidate phase when terminal evidence is not pass' "${ROOT_DIR}/.github/workflows/ci.yml" | grep -q "if: always() && inputs.differential-gating != 'true' && steps.phase.outcome == 'failure'" \
   || ! grep -A8 'name: Validate candidate Test shard terminal provenance' "${ROOT_DIR}/.github/workflows/ci.yml" | grep -q 'if: always()' \
   || grep -A8 'name: Validate candidate Test shard terminal provenance' "${ROOT_DIR}/.github/workflows/ci.yml" | grep -q 'differential-gating'; then
