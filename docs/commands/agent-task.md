@@ -570,7 +570,6 @@ relative verification-file paths are anchored at the operator's working director
 Cook resolves the installed profile's backend, selector, model and provider-config
 defaults, with explicit flags taking precedence. Batch only forwards the profile
 name; each child resolves it. `--max-attempts` defaults to 3 for both commands.
-Use `--selector` for provider selection (no command-specific alias).
 
 ```bash
 homeboy --placement lab agent-task fanout cook-batch \
@@ -811,8 +810,8 @@ safe remediation without exposing the opaque destination. Detached route-less
 submissions emit the same diagnosis before durable handoff, and `agent-task
 status <cook-id>` preserves it with the latest notification delivery outcome.
 
-`--backend` selects the generic executor backend, `--selector` selects a
-specific provider id for that backend, and
+`--backend` selects the generic executor backend, `--dispatch-provider-id` (also
+accepted as `--selector`) selects a specific provider id for that backend, and
 `--model` is only a provider-owned model override. Provider ids come from
 `homeboy agent-task providers`; they are not model names or provider families.
 The same `--model` value records adopted-candidate and manual-finalization AI
