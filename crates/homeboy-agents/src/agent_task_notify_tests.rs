@@ -488,14 +488,13 @@ fn install_transport(id: &str, command: Vec<&str>) {
     homeboy_core::extension::catalog::save_manifest(&manifest).expect("install transport");
 }
 
+/// Update only the notification transport of the isolated config. Saving a
+/// whole `HomeboyConfig::default()` here once replaced an operator's real
+/// config when an inherited `HOMEBOY_CONFIG_ROOT` escaped isolation (#16106).
 fn set_default_transport(id: &str) {
-    homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
-        notifications: homeboy_core::defaults::NotificationConfig {
-            default_transport: Some(id.to_string()),
-        },
-        ..Default::default()
-    })
-    .expect("configure transport");
+    let mut config = homeboy_core::defaults::load_config();
+    config.notifications.default_transport = Some(id.to_string());
+    homeboy_core::defaults::save_config(&config).expect("configure transport");
 }
 
 fn latest_delivery(cook_id: &str) -> Value {

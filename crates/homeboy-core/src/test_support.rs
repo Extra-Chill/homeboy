@@ -622,6 +622,7 @@ impl HermeticTestContext {
             // These explicit overrides take precedence over HOME/XDG. Always
             // replace inherited operator roots so daemon discovery and runner
             // source leases remain inside this test namespace.
+            .env_remove(crate::paths::HOMEBOY_CONFIG_ROOT_ENV)
             .env(crate::paths::HOMEBOY_DATA_DIR_ENV, self.data_dir())
             .env(crate::paths::DAEMON_STATE_DIR_ENV, self.daemon_dir())
             .env(TEST_DAEMON_NAMESPACE_ENV, self.daemon_dir())
@@ -965,11 +966,11 @@ pub struct HomeGuard {
     prior_xdg_data_home: Option<String>,
     prior_xdg_state_home: Option<String>,
     prior_xdg_runtime_dir: Option<String>,
-    prior_data_dir: Option<String>,
+    /// Every [`crate::paths::HOMEBOY_ROOT_ENV_VARS`] value seen at setup.
+    prior_root_env: Vec<(&'static str, Option<String>)>,
     prior_daemon_state_dir: Option<String>,
     prior_daemon_namespace: Option<String>,
     prior_keep_daemon_in_process_group: Option<String>,
-    prior_artifact_root: Option<String>,
     prior_runtime_tmpdir: Option<String>,
     prior_invocation_runtime: Option<String>,
     prior_no_update_check: Option<String>,
@@ -1031,12 +1032,15 @@ impl HomeGuard {
         let prior_xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
         let prior_xdg_state_home = std::env::var("XDG_STATE_HOME").ok();
         let prior_xdg_runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok();
-        let prior_data_dir = std::env::var(crate::paths::HOMEBOY_DATA_DIR_ENV).ok();
+        let prior_root_env: Vec<(&'static str, Option<String>)> =
+            crate::paths::HOMEBOY_ROOT_ENV_VARS
+                .iter()
+                .map(|name| (*name, std::env::var(name).ok()))
+                .collect();
         let prior_daemon_state_dir = std::env::var(crate::paths::DAEMON_STATE_DIR_ENV).ok();
         let prior_daemon_namespace = std::env::var(TEST_DAEMON_NAMESPACE_ENV).ok();
         let prior_keep_daemon_in_process_group =
             std::env::var(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV).ok();
-        let prior_artifact_root = std::env::var("HOMEBOY_ARTIFACT_ROOT").ok();
         let prior_runtime_tmpdir = std::env::var("HOMEBOY_RUNTIME_TMPDIR").ok();
         let prior_invocation_runtime =
             std::env::var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
@@ -1075,11 +1079,15 @@ impl HomeGuard {
             context.home().join(".local").join("state"),
         );
         std::env::set_var("XDG_RUNTIME_DIR", context.runtime_dir());
-        std::env::remove_var(crate::paths::HOMEBOY_DATA_DIR_ENV);
+        // Explicit root overrides outrank HOME, so an inherited
+        // `HOMEBOY_CONFIG_ROOT` / `HOMEBOY_DATA_DIR` / `HOMEBOY_ARTIFACT_ROOT`
+        // would aim the isolated test at the operator's real roots (#16106).
+        for name in crate::paths::HOMEBOY_ROOT_ENV_VARS {
+            std::env::remove_var(name);
+        }
         std::env::set_var(crate::paths::DAEMON_STATE_DIR_ENV, context.daemon_dir());
         std::env::set_var(TEST_DAEMON_NAMESPACE_ENV, context.daemon_dir());
         std::env::set_var(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV, "1");
-        std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
         crate::set_artifact_root_override(None);
@@ -1120,11 +1128,10 @@ impl HomeGuard {
             prior_xdg_data_home,
             prior_xdg_state_home,
             prior_xdg_runtime_dir,
-            prior_data_dir,
+            prior_root_env,
             prior_daemon_state_dir,
             prior_daemon_namespace,
             prior_keep_daemon_in_process_group,
-            prior_artifact_root,
             prior_runtime_tmpdir,
             prior_invocation_runtime,
             prior_no_update_check,
@@ -1527,9 +1534,11 @@ impl Drop for HomeGuard {
             Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
             None => std::env::remove_var("XDG_RUNTIME_DIR"),
         }
-        match &self.prior_data_dir {
-            Some(value) => std::env::set_var(crate::paths::HOMEBOY_DATA_DIR_ENV, value),
-            None => std::env::remove_var(crate::paths::HOMEBOY_DATA_DIR_ENV),
+        for (name, prior) in &self.prior_root_env {
+            match prior {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
         match &self.prior_daemon_state_dir {
             Some(value) => std::env::set_var(crate::paths::DAEMON_STATE_DIR_ENV, value),
@@ -1542,10 +1551,6 @@ impl Drop for HomeGuard {
         match &self.prior_keep_daemon_in_process_group {
             Some(value) => std::env::set_var(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV, value),
             None => std::env::remove_var(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV),
-        }
-        match &self.prior_artifact_root {
-            Some(value) => std::env::set_var("HOMEBOY_ARTIFACT_ROOT", value),
-            None => std::env::remove_var("HOMEBOY_ARTIFACT_ROOT"),
         }
         match &self.prior_runtime_tmpdir {
             Some(value) => std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", value),
@@ -1790,7 +1795,12 @@ pub fn controller_runtime_test_executable() -> PathBuf {
 }
 
 pub fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
-    let home = HomeGuard::new();
+    with_isolated_home_guard(HomeGuard::new(), body)
+}
+
+/// Body of [`with_isolated_home`] against an already-constructed guard, so a
+/// test can stage ambient environment under the same lock first.
+fn with_isolated_home_guard<R>(home: HomeGuard, body: impl FnOnce(&TempDir) -> R) -> R {
     // Tests own fixture records rather than the runner job that invoked them.
     let _runner_id = EnvVarGuard::unset(crate::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV);
     let _runner_job = EnvVarGuard::unset(crate::runner_job_execution_context::RUNNER_JOB_ID_ENV);
@@ -2246,6 +2256,68 @@ mod tests {
                 validation.store(true, Ordering::SeqCst);
             }
         }
+    }
+
+    #[test]
+    fn with_isolated_home_ignores_inherited_isolated_config_root() {
+        let operator = tempfile::tempdir().expect("operator roots");
+        let config_root = operator.path().join("config");
+        let data_root = operator.path().join("data");
+        let artifact_root = operator.path().join("artifacts");
+        std::fs::create_dir_all(&config_root).expect("seed config root");
+        let seeded_path = config_root.join("homeboy.json");
+        let seeded = br#"{"settings":{"pi_agent_dir":"/operator/pi"},"github_hosts":{"x":{}}}"#;
+        std::fs::write(&seeded_path, seeded).expect("seed operator config");
+
+        let lock = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let ambient = EnvRestore::capture(crate::paths::HOMEBOY_ROOT_ENV_VARS);
+        std::env::set_var(crate::paths::HOMEBOY_CONFIG_ROOT_ENV, &config_root);
+        std::env::set_var(crate::paths::HOMEBOY_DATA_DIR_ENV, &data_root);
+        std::env::set_var(crate::paths::HOMEBOY_ARTIFACT_ROOT_ENV, &artifact_root);
+
+        let home = HomeGuard::new_with_guard(TestBinary::CurrentTest, Some(lock));
+        with_isolated_home_guard(home, |isolated| {
+            for name in crate::paths::HOMEBOY_ROOT_ENV_VARS {
+                assert!(std::env::var_os(name).is_none(), "{name} must be cleared");
+            }
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig::default())
+                .expect("save isolated config");
+            let written = crate::paths::homeboy_json().expect("config path");
+            assert!(
+                written.starts_with(isolated.path()),
+                "{} must be inside the isolated home {}",
+                written.display(),
+                isolated.path().display()
+            );
+            assert!(written.is_file());
+            assert!(crate::paths::homeboy_data()
+                .expect("data root")
+                .starts_with(isolated.path()));
+        });
+
+        assert_eq!(
+            std::env::var_os(crate::paths::HOMEBOY_CONFIG_ROOT_ENV),
+            Some(config_root.clone().into_os_string()),
+            "the inherited config root is restored"
+        );
+        {
+            let _lock = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+            drop(ambient);
+        }
+        assert_eq!(
+            std::fs::read(&seeded_path).expect("seeded config"),
+            seeded.to_vec(),
+            "the operator config must stay byte-identical"
+        );
+        assert_eq!(
+            std::fs::read_dir(&config_root)
+                .expect("config root")
+                .count(),
+            1,
+            "nothing else is written to the operator config root"
+        );
+        assert!(!data_root.exists());
+        assert!(!artifact_root.exists());
     }
 
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
