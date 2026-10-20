@@ -5,6 +5,38 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 pub const HOMEBOY_DATA_DIR_ENV: &str = "HOMEBOY_DATA_DIR";
+/// Explicit artifact-root override env var name.
+pub const HOMEBOY_ARTIFACT_ROOT_ENV: &str = "HOMEBOY_ARTIFACT_ROOT";
+
+/// Every environment variable that names a Homeboy config, data or artifact
+/// root outright, outranking `HOME`.
+///
+/// Anything that isolates `HOME` (test `HomeGuard`s, Cook gate environments)
+/// must relocate or strip each of these too; otherwise an inherited value
+/// points the isolated process straight back at the operator's real roots
+/// (#16106). Keep this the single list both places consume.
+pub const HOMEBOY_ROOT_ENV_VARS: &[&str] = &[
+    HOMEBOY_CONFIG_ROOT_ENV,
+    HOMEBOY_DATA_DIR_ENV,
+    HOMEBOY_ARTIFACT_ROOT_ENV,
+];
+
+/// Where the root named by `name` (one of [`HOMEBOY_ROOT_ENV_VARS`]) resolves
+/// by default beneath an isolated `home`, used to relocate it there.
+pub fn homeboy_root_env_default_under_home(name: &str, home: &Path) -> Option<PathBuf> {
+    let identity = &homeboy_product_identity::PRODUCT_IDENTITY;
+    let data = || {
+        home.join(".local")
+            .join("share")
+            .join(identity.data_dirname)
+    };
+    match name {
+        HOMEBOY_CONFIG_ROOT_ENV => Some(home.join(".config").join(identity.config_dirname)),
+        HOMEBOY_DATA_DIR_ENV => Some(data()),
+        HOMEBOY_ARTIFACT_ROOT_ENV => Some(data().join("artifacts")),
+        _ => None,
+    }
+}
 pub const CARGO_TARGETS_STORE: &str = "cargo-targets";
 pub const CONTROLLER_RUNTIMES_STORE: &str = "controller-runtimes";
 pub const CONTROLLER_SCRATCH_STORE: &str = "controller-scratch";

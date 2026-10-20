@@ -3949,6 +3949,21 @@ fn selected_gate_environment(
         })?;
         materialize_extension_inputs(&mut report, &home, &policy.extension_inputs)?;
         isolated_home = Some(home.clone());
+        // Explicit Homeboy root overrides outrank HOME. An inherited (or
+        // step-injected) controller `HOMEBOY_CONFIG_ROOT` / `HOMEBOY_DATA_DIR`
+        // would let a gate running Homeboy's own tests rewrite the operator's
+        // real config (#16106), so pin every one inside the gate home.
+        for name in homeboy_core::paths::HOMEBOY_ROOT_ENV_VARS {
+            let path = homeboy_core::paths::homeboy_root_env_default_under_home(name, &home)
+                .expect("every Homeboy root env var has an in-home default");
+            fs::create_dir_all(&path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("create {}", path.display())),
+                )
+            })?;
+            set_isolated_environment_variable(&mut report, &mut values, name, path);
+        }
         set_isolated_environment_variable(&mut report, &mut values, "HOME", home);
     } else if !policy.extension_inputs.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -10185,6 +10200,78 @@ exit 2
                 Some(&expected),
                 "{name} must resolve to the invocation temp dir"
             );
+        }
+    }
+
+    #[test]
+    fn gate_environment_relocates_isolated_config_root_and_data_roots_into_gate_home() {
+        let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
+        let operator = tempfile::tempdir().expect("operator roots");
+        let operator_root = |name: &str| operator.path().join(name).display().to_string();
+        // The controller's ambient process environment, plus the roots a Cook
+        // step injects into the gate's declared variables.
+        let ambient: BTreeMap<String, String> = [
+            ("PATH", "/usr/bin".to_string()),
+            ("HOME", operator_root("home")),
+            ("HOMEBOY_CONFIG_ROOT", operator_root("config")),
+            ("HOMEBOY_DATA_DIR", operator_root("data")),
+            ("HOMEBOY_ARTIFACT_ROOT", operator_root("artifacts")),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+        for mode in [
+            AgentTaskGateEnvironmentMode::Inherit,
+            AgentTaskGateEnvironmentMode::Replace,
+        ] {
+            let mut policy = AgentTaskGateEnvironmentPolicy {
+                mode,
+                ..AgentTaskGateEnvironmentPolicy::default()
+            };
+            assert!(policy.isolate_home);
+            for name in ["HOMEBOY_CONFIG_ROOT", "HOMEBOY_DATA_DIR"] {
+                policy
+                    .variables
+                    .insert(name.to_string(), ambient[name].clone());
+            }
+            let selected = selected_gate_environment(&policy, Some(runtime_tmpdir.path()))
+                .expect("gate environment");
+            let gate_home = selected.isolated_home.clone().expect("isolated gate home");
+
+            // Effective child environment: ambient, then the gate overlay.
+            let setup = selected.hydration_environment();
+            let mut effective = if setup.clear {
+                BTreeMap::new()
+            } else {
+                ambient.clone()
+            };
+            for name in &setup.remove {
+                effective.remove(name);
+            }
+            effective.extend(setup.set.clone());
+
+            assert_eq!(
+                effective.get("HOME").map(PathBuf::from),
+                Some(gate_home.clone())
+            );
+            for name in homeboy_core::paths::HOMEBOY_ROOT_ENV_VARS {
+                let value = effective
+                    .get(*name)
+                    .unwrap_or_else(|| panic!("{name} must be pinned for {mode:?}"));
+                assert!(
+                    PathBuf::from(value).starts_with(&gate_home),
+                    "{name}={value} must stay inside the gate home {}",
+                    gate_home.display()
+                );
+            }
+            for (name, value) in &effective {
+                if name.starts_with("HOMEBOY_") {
+                    assert!(
+                        !value.starts_with(operator.path().to_string_lossy().as_ref()),
+                        "{name}={value} reaches the controller's roots"
+                    );
+                }
+            }
         }
     }
 

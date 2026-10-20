@@ -2754,8 +2754,8 @@ mod lab_gate_binding_tests {
 
     fn with_git_candidate(test: impl FnOnce(&Path, &homeboy_core::observation::ObservationStore)) {
         homeboy_core::test_support::with_isolated_home(|home| {
-            // Root all four owners explicitly; broader CONFIG_ROOT isolation is
-            // independent work and must not leak into these new fixtures.
+            // Root all four owners explicitly. `with_isolated_home` already
+            // clears inherited roots; these fixtures pin them deliberately.
             let _config = homeboy_core::test_support::EnvVarGuard::set(
                 "HOMEBOY_CONFIG_ROOT",
                 home.path().join(".config/homeboy"),
