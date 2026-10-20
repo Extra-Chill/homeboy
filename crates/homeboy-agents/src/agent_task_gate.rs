@@ -3981,17 +3981,30 @@ fn selected_gate_environment(
     })
 }
 
+/// Homeboy-managed browser cache under the runner HOME. Checked before the
+/// Playwright default so a runner provisioned by Homeboy keeps its pinned set.
+const HOMEBOY_PLAYWRIGHT_CACHE_SUBPATH: &str = ".cache/homeboy/playwright-browsers";
+
+/// Locate the runner's installed Playwright browser cache, in order: the
+/// runner's configured `PLAYWRIGHT_BROWSERS_PATH`, the Homeboy-managed cache,
+/// then the Playwright default cache. Returns the resolved directory and a
+/// replayable preserve source (`PLAYWRIGHT_BROWSERS_PATH` or `HOME/<subpath>`).
+/// Absent caches resolve to `None`; that is not an error.
 pub(super) fn playwright_cache_path(
     declared: Option<&Path>,
     host_home: Option<&Path>,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, String)> {
+    const NAME: &str = "PLAYWRIGHT_BROWSERS_PATH";
     if let Some(path) = declared.map(Path::to_path_buf) {
         if path.is_dir() {
-            return Some(path);
+            return Some((path, NAME.to_string()));
         }
     }
-    let cache = host_home?.join(PLAYWRIGHT_CACHE_SUBPATH);
-    cache.is_dir().then_some(cache)
+    let home = host_home?;
+    [HOMEBOY_PLAYWRIGHT_CACHE_SUBPATH, PLAYWRIGHT_CACHE_SUBPATH]
+        .into_iter()
+        .map(|subpath| (home.join(subpath), format!("HOME/{subpath}")))
+        .find(|(cache, _)| cache.is_dir())
 }
 
 fn preserve_playwright_cache(
@@ -4018,16 +4031,12 @@ pub(super) fn preserve_playwright_cache_mapping(
     report: &mut AgentTaskGateEnvironment,
 ) {
     const NAME: &str = "PLAYWRIGHT_BROWSERS_PATH";
-    if let Some(cache) = playwright_cache_path(declared, host_home) {
+    if let Some((cache, source)) = playwright_cache_path(declared, host_home) {
         values.insert(NAME.to_string(), cache.display().to_string());
-        report.preserved.insert(
-            NAME.to_string(),
-            if host_home.is_some_and(|home| cache.starts_with(home)) {
-                format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}")
-            } else {
-                cache.display().to_string()
-            },
-        );
+        // Record a replayable source (an environment name, optionally with a
+        // HOME-relative suffix), never an absolute path: replay resolves
+        // `preserve` entries through `preserved_environment_value`.
+        report.preserved.insert(NAME.to_string(), source);
     }
 }
 
@@ -8585,7 +8594,13 @@ mod tests {
             r#"{"id":"ambient-fixture","name":"Ambient","version":"1.0.0"}"#,
         )
         .expect("ambient manifest");
-        let _env = EnvVarGuard::set(&[("HOME", ambient.path())]);
+        // Stub the runner browser cache so preservation and replay do not
+        // depend on whatever cache the host (or an enclosing Lab gate) has.
+        let browser_cache = tempfile::tempdir().expect("stub browser cache");
+        let _env = EnvVarGuard::set(&[
+            ("HOME", ambient.path()),
+            ("PLAYWRIGHT_BROWSERS_PATH", browser_cache.path()),
+        ]);
         let policy = AgentTaskGateEnvironmentPolicy {
             extension_inputs: vec![AgentTaskGateExtensionInput {
                 id: "selected-fixture".to_string(),
@@ -8653,6 +8668,10 @@ mod tests {
             candidate.environment.extension_inputs,
             baseline.environment.extension_inputs
         );
+        assert_eq!(
+            candidate.environment.preserved["PLAYWRIGHT_BROWSERS_PATH"],
+            "PLAYWRIGHT_BROWSERS_PATH"
+        );
     }
 
     #[cfg(unix)]
@@ -8718,6 +8737,14 @@ mod tests {
         let _guard = env_mutex();
         let worktree = tempfile::tempdir().expect("worktree");
         let source = tempfile::tempdir().expect("extension source");
+        // Stub the runner HOME and browser cache so preservation and replay
+        // are hermetic inside Lab gates and on developer machines alike.
+        let host_home = tempfile::tempdir().expect("host home");
+        let browser_cache = tempfile::tempdir().expect("stub browser cache");
+        let _env = EnvVarGuard::set(&[
+            ("HOME", host_home.path()),
+            ("PLAYWRIGHT_BROWSERS_PATH", browser_cache.path()),
+        ]);
         fs::write(
             source.path().join("selected-fixture.json"),
             "candidate content",
@@ -9126,7 +9153,7 @@ mod tests {
                 Some(declared_cache.as_path()),
                 Some(other_home.path()),
                 Some(declared_cache.display().to_string()),
-                Some(declared_cache.display().to_string()),
+                Some("PLAYWRIGHT_BROWSERS_PATH".to_string()),
             ),
         ] {
             values.clear();
