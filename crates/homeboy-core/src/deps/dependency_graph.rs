@@ -325,13 +325,13 @@ fn stack_edges_from_components(
     Ok(edges)
 }
 
-fn edge_key(edge: &DependencyStackEdge) -> String {
+pub(super) fn edge_key(edge: &DependencyStackEdge) -> String {
     format!("{}>{}:{}", edge.upstream, edge.downstream, edge.package)
 }
 
 /// Wall-clock budget for one remote release resolution, matching
 /// `homeboy release resolve`.
-const STACK_OUTDATED_RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const STACK_OUTDATED_RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -617,7 +617,7 @@ fn outdated_edge_status(
 
 /// Compare the way the package ecosystem does: a lock may record `v0.18.0`
 /// for a `0.18.0` release, and those are the same version.
-fn parse_dependency_version(version: &str) -> Option<semver::Version> {
+pub(super) fn parse_dependency_version(version: &str) -> Option<semver::Version> {
     let version = version.trim().strip_prefix('v').unwrap_or(version.trim());
     semver::Version::parse(version).ok()
 }
@@ -708,12 +708,12 @@ fn edge_status(component: &Component, edge: &DependencyStackEdge) -> DependencyS
 }
 
 impl DependencyStackPlanStep {
-    fn uses_default_update_command(&self) -> bool {
+    pub(super) fn uses_default_update_command(&self) -> bool {
         self.update_command == update_command_for(&self.package, &self.downstream_path)
     }
 }
 
-fn update_command(edge: &DependencyStackEdge, downstream_path: &str) -> String {
+pub(super) fn update_command(edge: &DependencyStackEdge, downstream_path: &str) -> String {
     edge.update
         .clone()
         .unwrap_or_else(|| update_command_for(&edge.package, downstream_path))
@@ -744,7 +744,7 @@ fn update_command_for_options(
     command
 }
 
-fn rebuild_command(step: &DependencyStackPlanStep) -> String {
+pub(super) fn rebuild_command(step: &DependencyStackPlanStep) -> String {
     format!(
         "homeboy build {} --path {}",
         shell_word(&step.downstream),
@@ -752,7 +752,7 @@ fn rebuild_command(step: &DependencyStackPlanStep) -> String {
     )
 }
 
-fn run_default_update_step(
+pub(super) fn run_default_update_step(
     step: &DependencyStackPlanStep,
     constraint: Option<&str>,
     dry_run: bool,
@@ -798,7 +798,7 @@ fn run_default_update_step(
     })
 }
 
-fn run_stack_command(
+pub(super) fn run_stack_command(
     phase: &str,
     command: &str,
     cwd: &str,

@@ -345,6 +345,29 @@ enum DepsStackCommand {
         /// Component ID. When omitted, auto-detected from CWD.
         component: Option<String>,
     },
+    /// Roll declared edges forward to each source's newest release
+    ///
+    /// Runs the outdated evaluation, then applies each behind edge through
+    /// its existing update path. Does not commit, push, or open PRs. Exit
+    /// status gates on the result: 0 when nothing is behind or everything
+    /// behind updated cleanly, 1 when at least one edge failed to update,
+    /// 2 when at least one edge was unresolvable and none failed.
+    Refresh {
+        /// Component ID. When omitted, auto-detected from CWD.
+        component: Option<String>,
+
+        /// Downstream checkout path to operate on directly.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+
+        /// Print the refresh plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip provider-owned install/lockfile refresh after each manifest update.
+        #[arg(long)]
+        no_install: bool,
+    },
 }
 
 impl DepsArgs {
@@ -414,6 +437,21 @@ impl DepsArgs {
                     let (output, exit_code) =
                         homeboy::core::deps::stack_outdated_value_with_exit_code(
                             component.as_deref(),
+                        )?;
+                    Ok((output, exit_code))
+                }
+                DepsStackCommand::Refresh {
+                    component,
+                    path,
+                    dry_run,
+                    no_install,
+                } => {
+                    let (output, exit_code) =
+                        homeboy::core::deps::stack_refresh_value_with_exit_code(
+                            component.as_deref(),
+                            path.as_deref(),
+                            dry_run,
+                            !no_install,
                         )?;
                     Ok((output, exit_code))
                 }
