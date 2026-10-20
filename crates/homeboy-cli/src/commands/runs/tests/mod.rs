@@ -415,7 +415,7 @@ fn run_list_rediscovers_lab_agent_task_lineage_from_canonical_metadata() {
                     "runner_job_id": "job-11958",
                     "remote_command": ["homeboy", "agent-task", "cook", "--goal", "ux-review"]
                 },
-                "provider_handles": [{ "provider": "opencode", "session_id": "session-11958" }]
+                "provider_handles": [{ "provider": "pi", "session_id": "session-11958" }]
             },
             "agent_task_aggregate": { "plan_id": "wp-build-ux-review" }
         });

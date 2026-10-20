@@ -579,7 +579,7 @@ mod tests {
         // and count only processes that can still consume host resources.
         let ps = concat!(
             "100 1 Z 0 02:54 <defunct>\n",
-            "200 100 S 524288 02:53 opencode run --format json\n",
+            "200 100 S 524288 02:53 pi run --format json\n",
             "300 200 R 262144 00:12 cargo test -q -p homeboy-agents\n",
         );
         let rows = parse_process_activity_rows(ps);
@@ -588,7 +588,7 @@ mod tests {
 
         let activity = sample.activity.expect("live descendant is observable");
         assert_eq!(activity.pid, 200);
-        assert_eq!(activity.command, "opencode run --format json");
+        assert_eq!(activity.command, "pi run --format json");
         assert_eq!(activity.descendant_count, 2);
         assert_eq!(sample.descendant_count, 2);
         assert_eq!(sample.tree_rss_kib, Some(786_432));
@@ -598,13 +598,13 @@ mod tests {
     fn a_bare_seconds_etime_is_not_mistaken_for_a_memory_column() {
         // `etime` degenerates to a bare integer under a minute, which is the
         // one shape the two projections could be confused over.
-        let ps = "4242 100 05 opencode run\n";
+        let ps = "4242 100 05 pi run\n";
 
         let rows = parse_process_activity_rows(ps);
 
         assert_eq!(rows[0].rss_kib, None);
         assert_eq!(rows[0].elapsed_seconds, 5);
-        assert_eq!(rows[0].command, "opencode run");
+        assert_eq!(rows[0].command, "pi run");
     }
 
     #[test]
@@ -612,7 +612,7 @@ mod tests {
         // The supervision question is what the whole tree is holding on this
         // host, so a provider plus the compilers it launched is one number.
         let ps = concat!(
-            "100 1 262144 06:20 opencode run --format json\n",
+            "100 1 262144 06:20 pi run --format json\n",
             "200 100 524288 06:12 cargo test -q\n",
             "300 200 1048576 00:03 rustc --crate-name homeboy_agents\n",
         );
@@ -624,10 +624,10 @@ mod tests {
         assert_eq!(sample.descendant_count, 3);
         let activity = sample.activity.expect("provider is observable");
         // Selection is longest-running non-homeboy descendant (#11598 removed
-        // the depth preference that reported the controller). `opencode run`
+        // the depth preference that reported the controller). `pi run`
         // has been alive longest, so it is what is reported — and it carries
         // only its own footprint, which is why the tree sum above exists.
-        assert_eq!(activity.command, "opencode run --format json");
+        assert_eq!(activity.command, "pi run --format json");
         assert_eq!(activity.rss_kib, Some(262_144));
     }
 
@@ -638,9 +638,9 @@ mod tests {
         // must be used as the root instead.
         let rows = parse_process_activity_rows(concat!(
             "1 0 S 1024 10:00 homeboy agent-task fanout cook\n",
-            "101 1 S 2048 05:00 opencode run child-a\n",
+            "101 1 S 2048 05:00 pi run child-a\n",
             "102 101 S 4096 04:00 cargo test child-a\n",
-            "201 1 S 8192 05:00 opencode run child-b\n",
+            "201 1 S 8192 05:00 pi run child-b\n",
             "202 201 S 16384 04:00 cargo test child-b\n",
         ));
 
@@ -663,7 +663,7 @@ mod tests {
     fn an_unmeasured_tree_reports_no_memory_rather_than_zero() {
         // A budget that fired on a fabricated zero would be worse than no
         // budget at all, so the absence has to survive selection.
-        let ps = "100 1 06:20 opencode run\n";
+        let ps = "100 1 06:20 pi run\n";
         let rows = parse_process_activity_rows(ps);
 
         assert_eq!(select_provider_activity(&rows, 1, &[]).tree_rss_kib, None);
@@ -684,9 +684,9 @@ mod tests {
     fn selects_the_longest_running_spawned_work_over_the_provider_and_its_newest_child() {
         // The exact shape from #11482: a provider that has been up as long as
         // the compile it launched, plus a freshly started compiler child. The
-        // actionable answer is `cargo test`, not `opencode` and not `rustc`.
+        // actionable answer is `cargo test`, not `pi` and not `rustc`.
         let ps = concat!(
-            "100 1 06:20 opencode run --format json # Task: make Cook honor model rotation\n",
+            "100 1 06:20 pi run --format json # Task: make Cook honor model rotation\n",
             "200 100 06:12 timeout 1200 cargo test -q -j3 -p homeboy-agents\n",
             "300 200 06:12 cargo test -q -j3 -p homeboy-agents\n",
             "400 300 00:03 rustc --crate-name homeboy_agents\n",
@@ -708,7 +708,7 @@ mod tests {
     fn reports_the_provider_itself_when_it_has_spawned_nothing() {
         // A provider that is thinking rather than shelling out still has to be
         // visible — "no descendants" must not read as "no activity".
-        let ps = "100 1 02:00 opencode run --format json\n";
+        let ps = "100 1 02:00 pi run --format json\n";
         let rows = parse_process_activity_rows(ps);
 
         let activity = select_provider_activity(&rows, 1, &[])
@@ -717,13 +717,13 @@ mod tests {
 
         assert_eq!(activity.pid, 100);
         assert_eq!(activity.depth, 1);
-        assert_eq!(activity.command, "opencode run --format json");
+        assert_eq!(activity.command, "pi run --format json");
     }
 
     #[test]
     fn never_reports_the_observing_process_as_the_activity() {
         let ps = concat!(
-            "100 1 06:20 opencode run\n",
+            "100 1 06:20 pi run\n",
             "999 1 00:00 ps -axo pid=,ppid=,etime=,args=\n",
         );
         let rows = parse_process_activity_rows(ps);
@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn returns_nothing_when_the_tree_has_no_descendants() {
-        let rows = parse_process_activity_rows("100 1 06:20 opencode run\n");
+        let rows = parse_process_activity_rows("100 1 06:20 pi run\n");
 
         let sample = select_provider_activity(&rows, 4242, &[]);
 
@@ -765,7 +765,7 @@ mod tests {
         let ps = concat!(
             "100 1 20:16 /usr/local/bin/homeboy agent-task cook --placement local --wait\n",
             "200 100 20:14 /usr/local/bin/homeboy agent-task cook --placement local --wait\n",
-            "300 200 20:10 opencode run --format json # Task: fix homeboy cook attribution\n",
+            "300 200 20:10 pi run --format json # Task: fix homeboy cook attribution\n",
         );
         let rows = parse_process_activity_rows(ps);
 
@@ -773,7 +773,7 @@ mod tests {
 
         let activity = sample.activity.expect("the provider is observable");
         assert_eq!(activity.pid, 300);
-        assert!(activity.command.starts_with("opencode run"));
+        assert!(activity.command.starts_with("pi run"));
         assert_eq!(sample.unavailable, None);
     }
 
@@ -806,7 +806,7 @@ mod tests {
         // tree. Tool calls the agent makes into Homeboy are Homeboy's work, not
         // the provider's.
         let ps = concat!(
-            "100 1 06:20 opencode run --format json\n",
+            "100 1 06:20 pi run --format json\n",
             "200 100 00:13 homeboy contract constants all\n",
         );
         let rows = parse_process_activity_rows(ps);
@@ -816,7 +816,7 @@ mod tests {
             .expect("the provider is observable");
 
         assert_eq!(activity.pid, 100);
-        assert!(activity.command.starts_with("opencode run"));
+        assert!(activity.command.starts_with("pi run"));
     }
 
     #[test]
@@ -825,7 +825,7 @@ mod tests {
         // descendant. The exclusion is stated on identity, so it holds anyway.
         let ps = concat!(
             "100 200 30:00 /usr/local/bin/homeboy agent-task cook --wait\n",
-            "200 100 29:00 opencode run --format json\n",
+            "200 100 29:00 pi run --format json\n",
         );
         let rows = parse_process_activity_rows(ps);
 
@@ -846,7 +846,7 @@ mod tests {
         assert!(is_homeboy_process("timeout 600 homeboy agent-task status"));
         assert!(is_homeboy_process("homeboy-lab-runner exec"));
         assert!(!is_homeboy_process(
-            "opencode run --format json # Task: fix homeboy agent-task cook"
+            "pi run --format json # Task: fix homeboy agent-task cook"
         ));
         assert!(!is_homeboy_process(
             "timeout 1200 cargo test -p homeboy-agents"

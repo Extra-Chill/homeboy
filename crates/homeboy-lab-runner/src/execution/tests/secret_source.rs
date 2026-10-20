@@ -231,7 +231,7 @@ fn runner_secret_env_plan_source_failure_stays_fail_closed_without_runner_ref() 
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut plan = SecretEnvPlan::from_secret_env_names(["ACCESS_TOKEN".to_string()]);
         plan.provider_credentials.insert(
-            "opencode.agent-task-executor".to_string(),
+            "pi.agent-task-executor".to_string(),
             homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping {
                 secret_env: vec!["ACCESS_TOKEN".to_string()],
                 sources: [(

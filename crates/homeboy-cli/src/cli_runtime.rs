@@ -3997,7 +3997,7 @@ const ARGUMENT_MIGRATIONS: &[ArgumentMigration] = &[ArgumentMigration {
     command_path: &["agent-task", "cook"],
     historical_flags: &["--provider", "--provider-id", "--dispatch-selector"],
     diagnostic: "executor selection now uses `--backend <backend>` and optional `--selector <provider-id>`.\n\
-Example: `homeboy agent-task cook --backend opencode --selector opencode.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'homeboy review test homeboy' --no-finalize`\n\
+Example: `homeboy agent-task cook --backend pi --selector pi.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'homeboy review test homeboy' --no-finalize`\n\
 List available executor providers: `homeboy agent-task providers`\n\
 `--provider-argv` is promotion-only: it configures the deprecated promotion apply-provider invocation and cannot select an executor.",
 }];
@@ -6503,7 +6503,7 @@ mod tests {
                 "agent-task".to_string(),
                 "providers".to_string(),
                 "--backend".to_string(),
-                "opencode".to_string(),
+                "pi".to_string(),
                 "--validate-readiness".to_string(),
             ],
             vec![
@@ -6513,7 +6513,7 @@ mod tests {
                 "--runner".to_string(),
                 "homeboy-lab".to_string(),
                 "--backend".to_string(),
-                "opencode".to_string(),
+                "pi".to_string(),
                 "--validate-readiness".to_string(),
             ],
         ] {
@@ -6522,7 +6522,7 @@ mod tests {
                 "agent-task",
                 "providers",
                 "--backend",
-                "opencode",
+                "pi",
                 "--validate-readiness",
             ]);
 
@@ -6542,7 +6542,7 @@ mod tests {
             "--runner".to_string(),
             "homeboy-lab".to_string(),
             "--backend".to_string(),
-            "opencode".to_string(),
+            "pi".to_string(),
             "--validate-readiness".to_string(),
         ];
         let mut cli = Cli::parse_from([
@@ -6550,7 +6550,7 @@ mod tests {
             "agent-task",
             "providers",
             "--backend",
-            "opencode",
+            "pi",
             "--validate-readiness",
         ]);
         normalize_agent_task_runner_option(&mut cli, &argv);

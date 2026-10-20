@@ -694,6 +694,29 @@ processes start. Compact `agent-task status` includes `execution_location` as
 | `contract` | Export Homeboy's machine-readable agent-task core contract metadata. |
 | `auth` | Configure and inspect provider authentication secrets. |
 
+#### Coding backend: Pi
+
+Pi is Cook's coding backend. When no `--backend` is passed and no component,
+extension, or Homeboy config policy names `agent_task.default_backend`, Cook
+selects the built-in `pi` backend if the provider catalog declares it; the
+backend selection reports `source: builtin`. Pi routes bill through the Roadie
+credential pool with a per-runner client key, so the reference rotation uses
+pool-backed `roadie/<rotation>` models:
+
+```bash
+homeboy config set /agent_task/default_backend pi
+homeboy config set /agent_task/rotation \
+  '{"entries":[{"backend":"pi","model":"roadie/anthropic-claude-sonnet-5-5"}]}' --json
+homeboy agent-task providers --validate-readiness
+```
+
+Cook ships no second coding runtime (#15932). A `--backend`,
+`agent_task.default_backend`, or `agent_task.rotation` entry that names a
+backend no installed provider declares fails provider resolution instead of
+routing; the error names the missing backend and tells the operator to replace
+it with `pi`. `agent-task providers --set-default` puts `pi` first when it is
+ready.
+
 `agent-task contract --format=json` includes `agent_runtime_handshake`, the
 Homeboy-owned extension-facing protocol registry for runtime capability
 manifests, readiness checks, resolved execution contracts, materialization plans,
@@ -865,7 +888,7 @@ with `stale: true` rather than presenting it as current.
 
 Each route's readiness invocation runs with `mode: "capacity"`. Runtimes that
 support this mode answer from provider usage lookups only, so the command
-spends no inference. The OpenCode runtime supports it. For runtimes that don't,
+spends no inference. For runtimes that don't support it,
 the command reports only what the capacity result contains.
 
 - Route probes are bounded. A route that fails is

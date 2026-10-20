@@ -1979,9 +1979,9 @@ fn durable_finalization_discloses_terminal_successful_model_after_same_backend_r
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
         lifecycle: Some(rotated_lifecycle(
-            "opencode",
+            "pi",
             "openai/gpt-5.6-sol",
-            "opencode",
+            "pi",
             "openai/gpt-5.6-terra",
         )),
         gate_proof: Some(successful_gate_proof()),
@@ -2004,7 +2004,7 @@ fn durable_finalization_discloses_terminal_successful_model_after_cross_backend_
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
         lifecycle: Some(rotated_lifecycle(
-            "opencode",
+            "pi",
             "openai/gpt-5.6-sol",
             "claude-code",
             "anthropic/claude-sonnet-4",
@@ -2209,7 +2209,7 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
         .provider_runtime
         .push(ProviderRuntimeLifecycle {
             task_id: "task".to_string(),
-            backend: "opencode".to_string(),
+            backend: "pi".to_string(),
             state: ProviderRuntimeState::Succeeded,
             stream_uri: None,
             external_runtime_ids: Vec::new(),
@@ -2570,11 +2570,7 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let plan = AgentTaskPlan::new(
             "obsolete-generic-plan",
-            vec![durable_task(
-                "task",
-                "opencode",
-                Some("openai/gpt-5.6-terra"),
-            )],
+            vec![durable_task("task", "pi", Some("openai/gpt-5.6-terra"))],
         );
         let aggregate = AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
@@ -2638,8 +2634,8 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
             "mixed-executor-plan",
             vec![
                 durable_task("native", "native-executor", Some("native-model")),
-                durable_task("generic", "opencode", Some("openai/gpt-5.6-terra")),
-                durable_task("skipped", "opencode", None),
+                durable_task("generic", "pi", Some("openai/gpt-5.6-terra")),
+                durable_task("skipped", "pi", None),
             ],
         );
         let aggregate = AgentTaskAggregate {
@@ -2684,7 +2680,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
         );
         assert_eq!(runtimes.len(), 2);
         assert_eq!(runtimes[0].external_runtime_ids[0].value, "native-run-123");
-        assert_eq!(runtimes[1].backend, "opencode");
+        assert_eq!(runtimes[1].backend, "pi");
         assert_eq!(
             runtimes[1].metadata["evidence_source"],
             "canonical_executor_outcome"
@@ -3612,13 +3608,13 @@ fn generic_executor_lifecycle(state: ProviderRuntimeState, model: &str) -> RunLi
         },
         provider_runtime: vec![ProviderRuntimeLifecycle {
             task_id: "task".to_string(),
-            backend: "opencode".to_string(),
+            backend: "pi".to_string(),
             state,
             stream_uri: None,
             external_runtime_ids: Vec::new(),
             metadata: json!({
                 "evidence_source": "canonical_executor_outcome",
-                "executor": { "backend": "opencode", "model": model },
+                "executor": { "backend": "pi", "model": model },
                 "model": model,
             }),
         }],
@@ -3783,7 +3779,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
             source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/3678".to_string()],
             artifact_refs: vec!["artifact://aggregate.json".to_string()],
             attempt_summary: "attempt 1 passed deterministic gates".to_string(),
-            ai_tool: "OpenCode (GPT-5.5)".to_string(),
+            ai_tool: "Pi (GPT-5.5)".to_string(),
             ai_model: Some("GPT-5.5".to_string()),
             source_relationship: AgentTaskPrSourceRelationship::default(),
             verification: AgentTaskPrVerification::default(),
@@ -3809,7 +3805,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
             public_contract_evidence: None,
             ai_assistance: crate::agent_task_review_dossier::AgentTaskReviewAiAssistance {
                 used: true,
-                tool: "Homeboy (OpenCode (GPT-5.5))".to_string(),
+                tool: "Homeboy (Pi (GPT-5.5))".to_string(),
                 model: "GPT-5.5".to_string(),
                 used_for: "Traced the finalization contract change, implemented it, and confirmed with the recorded gate."
                     .to_string(),

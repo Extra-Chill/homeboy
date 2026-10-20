@@ -223,7 +223,7 @@ mod tests {
                 budgets,
                 ..AgentSupervisionPolicy::default()
             },
-            Some("opencode".to_string()),
+            Some("pi".to_string()),
         )
     }
 
@@ -448,7 +448,7 @@ mod tests {
     fn a_backend_specific_budget_supervises_only_that_backend() {
         let mut backends = BTreeMap::new();
         backends.insert(
-            "opencode".to_string(),
+            "pi".to_string(),
             vec![AgentSupervisionBudget::new(
                 AgentSupervisionMetric::ChildProcesses,
                 8,
@@ -460,7 +460,7 @@ mod tests {
             ..AgentSupervisionPolicy::default()
         };
 
-        let mut supervised = CookSupervisor::new(policy.clone(), Some("opencode".to_string()));
+        let mut supervised = CookSupervisor::new(policy.clone(), Some("pi".to_string()));
         assert!(supervised.observe(&activity(15, 100, 41)).stop_now);
 
         let mut unsupervised = CookSupervisor::new(policy, Some("claude".to_string()));

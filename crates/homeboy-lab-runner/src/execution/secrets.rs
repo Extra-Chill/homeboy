@@ -131,7 +131,7 @@ pub(crate) fn provision_provider_file_secret_sources_for_runner(
     candidate_names.sort();
     candidate_names.dedup();
     // A forwarded env value does not make the declared file redundant: a
-    // runtime such as OpenCode reads its credential store, not the env. The
+    // runtime may read its credential store, not the env. The
     // delivery is a projection of declared fields, so syncing it every run is
     // safe and keeps the runner's copy current (#15783).
     let _ = request_env;
@@ -158,7 +158,7 @@ pub(crate) fn provision_provider_file_secret_sources_for_runner(
                 ),
                 Some(runner.id.clone()),
                 Some(vec![
-                    "Refresh the provider login on the controller (for OpenCode: `opencode auth login`), then rerun.".to_string(),
+                    "Refresh the provider credentials on the controller (for Pi routes, the Roadie credential pool client key), then rerun.".to_string(),
                 ]),
             ));
         }

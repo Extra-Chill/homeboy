@@ -2323,9 +2323,9 @@ fn terminal_transport_recovery_replaces_lossy_aggregate_from_persisted_authorita
                     "sha256": "b5a1e03af63b59f17b365cb00891ac488559edb928bf93879052ecfd8bf2e7dc"
                 }, {
                     "schema": "homeboy/agent-task-artifact/v1",
-                    "id": "opencode-runtime-stdout",
+                    "id": "pi-runtime-stdout",
                     "kind": "runtime_log",
-                    "name": "opencode-runtime-stdout",
+                    "name": "pi-runtime-stdout",
                     "size_bytes": 856519,
                     "sha256": "52ba42791eed934b05ca8d1ead6e2520b31b1ec9a2477564d2cc7c41b34f759f"
                 }],
@@ -2339,7 +2339,7 @@ fn terminal_transport_recovery_replaces_lossy_aggregate_from_persisted_authorita
                     "kind": "json",
                     "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/result.json"
                 }, {
-                    "kind": "opencode-runtime-log",
+                    "kind": "pi-runtime-log",
                     "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/runtime.log"
                 }, {
                     "kind": "executor-input",
@@ -3542,7 +3542,7 @@ fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provide
         std::fs::create_dir_all(workspace.path().join("target/debug")).expect("target");
         std::fs::write(workspace.path().join("target/debug/app"), "artifact").expect("artifact");
         plan.tasks[0].workspace.root = Some(workspace.path().display().to_string());
-        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.backend = "pi".to_string();
         plan.tasks[0].executor.model = None;
         let mut aggregate = succeeded_aggregate(&plan);
         aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
@@ -3557,7 +3557,7 @@ fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provide
 
         assert!(record.provider_handles.is_empty());
         assert_eq!(record.metadata["provider_run_ids"], json!([]));
-        assert_eq!(runtime.backend, "opencode");
+        assert_eq!(runtime.backend, "pi");
         assert_eq!(runtime.state, ProviderRuntimeState::Succeeded);
         assert_eq!(
             record.tasks[0].model.as_deref(),
@@ -3593,7 +3593,7 @@ fn terminal_aggregate_projection_owns_provider_models_and_status_leaves_them() {
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let mut plan = test_plan();
-    plan.tasks[0].executor.backend = "opencode".to_string();
+    plan.tasks[0].executor.backend = "pi".to_string();
     plan.tasks[0].executor.model = None;
     let mut aggregate = succeeded_aggregate(&plan);
     aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
@@ -5296,7 +5296,7 @@ fn terminal_write_persists_the_aggregate_provider_model() {
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let mut plan = test_plan();
-    plan.tasks[0].executor.backend = "opencode".to_string();
+    plan.tasks[0].executor.backend = "pi".to_string();
     plan.tasks[0].executor.model = None;
     let mut aggregate = succeeded_aggregate(&plan);
     // Authoritative: the aggregate outcome recorded the selected model.
@@ -5335,7 +5335,7 @@ fn status_leaves_terminal_record_untouched_when_aggregate_has_no_model() {
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let mut plan = test_plan();
-    plan.tasks[0].executor.backend = "opencode".to_string();
+    plan.tasks[0].executor.backend = "pi".to_string();
     plan.tasks[0].executor.model = None;
     // Aggregate records no model — nothing authoritative to reproject.
     let aggregate = succeeded_aggregate(&plan);

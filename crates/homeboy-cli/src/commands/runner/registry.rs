@@ -992,7 +992,7 @@ mod tests {
             let mut configured = configured_runner("lab");
             configured
                 .env
-                .insert("OPENCODE_API_KEY".to_string(), "secret-token".to_string());
+                .insert("PI_API_KEY".to_string(), "secret-token".to_string());
             configured
                 .env
                 .insert("PUBLIC_SETTING".to_string(), "kept".to_string());
@@ -1000,7 +1000,7 @@ mod tests {
             let value = serde_json::to_value(output).expect("full list serializes");
 
             assert_eq!(
-                value["entities"][0]["env"]["OPENCODE_API_KEY"],
+                value["entities"][0]["env"]["PI_API_KEY"],
                 REDACTED_ENV_VALUE
             );
             assert_eq!(value["entities"][0]["env"]["PUBLIC_SETTING"], "kept");

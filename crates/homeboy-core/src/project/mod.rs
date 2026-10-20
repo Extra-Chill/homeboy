@@ -115,7 +115,7 @@ pub struct Project {
     pub components: Vec<ProjectComponentAttachment>,
     /// Per-component field overrides applied when a component runs in this project.
     ///
-    /// Example: `{"sample-plugin": {"extract_command": "...", "remote_owner": "opencode:opencode"}}`
+    /// Example: `{"sample-plugin": {"extract_command": "...", "remote_owner": "www-data:www-data"}}`
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub component_overrides: HashMap<String, ProjectComponentOverrides>,
 

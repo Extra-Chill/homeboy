@@ -21,7 +21,7 @@ const NOTE_MAX_CHARS: usize = 200;
 /// dispatch, prefixed once with the model that actually ran. For example:
 ///
 /// ```text
-/// Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the provider-owned OpenCode credentials, then retry.)
+/// Ran on roadie/openai-gpt-6-luna; roadie/anthropic-claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie pool client key, then retry.)
 /// xai/grok-4.7 skipped: usage_capped (Wait for the provider usage cap to reset.)
 /// ```
 pub(crate) fn provider_route_notes(
@@ -144,20 +144,20 @@ mod tests {
     fn plan_with_skips() -> AgentTaskPlan {
         let request: AgentTaskRequest = serde_json::from_value(json!({
             "task_id": "task-1",
-            "executor": { "backend": "opencode" },
+            "executor": { "backend": "pi" },
             "instructions": "do the thing",
             "metadata": {
                 "provider_readiness_routing": {
                     "skipped": [{
-                        "backend": "opencode",
+                        "backend": "pi",
                         "selector": null,
                         "model": "anthropic/claude-sonnet-5-5",
                         "state": "credentials_unusable",
-                        "reason": "OPENCODE_API_KEY is missing",
+                        "reason": "PI_API_KEY is missing",
                         "reset_at": null,
                         "classification": "credentials",
                         "retryable": true,
-                        "remediation": "Refresh the provider-owned OpenCode credentials, then retry.",
+                        "remediation": "Refresh the Roadie credential pool key, then retry.",
                         "cache_identity": null,
                         "provider_identity": null,
                     }],
@@ -173,7 +173,7 @@ mod tests {
         let mut record = base_record();
         record.latest_executor_evidence = Some(AgentTaskLatestExecutorEvidence {
             task_id: "task-1".to_string(),
-            backend: "opencode".to_string(),
+            backend: "pi".to_string(),
             selector: None,
             model: Some("openai/gpt-6-luna".to_string()),
             input_ref: AgentTaskEvidenceRef {
@@ -200,7 +200,7 @@ mod tests {
         let notes = provider_route_notes(&record, Some(&plan_with_skips()));
         assert_eq!(
             notes,
-            vec!["Ran on openai/gpt-6-luna; opencode/anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the provider-owned OpenCode credentials, then retry.)"
+            vec!["Ran on openai/gpt-6-luna; pi/anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie credential pool key, then retry.)"
                 .to_string()]
         );
     }
@@ -217,6 +217,6 @@ mod tests {
         plan.tasks.push(duplicated);
         let notes = provider_route_notes(&record, Some(&plan));
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].starts_with("opencode/anthropic/claude-sonnet-5-5 skipped:"));
+        assert!(notes[0].starts_with("pi/anthropic/claude-sonnet-5-5 skipped:"));
     }
 }

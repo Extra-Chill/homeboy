@@ -25,7 +25,7 @@ Probes are declared on detailed `trace_workloads` entries:
         "path": "${package.root}/trace/create-site.trace.mjs",
         "trace_probes": [
           { "type": "log.tail", "path": "${components.app.path}/app.log", "grep": "invalid_grant" },
-          { "type": "process.snapshot", "pattern": "opencode.*serve", "interval_ms": 250 },
+          { "type": "process.snapshot", "pattern": "pi.*--mode", "interval_ms": 250 },
           { "type": "file.watch", "path": "${components.app.path}/auth.json" },
           { "type": "port.snapshot", "port": 3000 },
           { "type": "http.poll", "url": "http://127.0.0.1:3000/health", "assert-status": 200 },

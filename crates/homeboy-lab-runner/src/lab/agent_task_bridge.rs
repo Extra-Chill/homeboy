@@ -1361,7 +1361,7 @@ mod tests {
                     group_key: None,
                     parent_plan_id: None,
                     executor: homeboy_agents::agent_task::AgentTaskExecutor {
-                        backend: "opencode".to_string(),
+                        backend: "pi".to_string(),
                         selector: None,
                         runtime_selection: None,
                         required_capabilities: Vec::new(),
@@ -1393,7 +1393,7 @@ mod tests {
                 plan_ref: Some(format!("@{}", plan_path.display())),
                 resolved_provider_policy: Some(
                     homeboy_agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
-                        backend: "opencode".to_string(),
+                        backend: "pi".to_string(),
                         selector: None,
                         model: Some("openai/gpt-5.6-terra".to_string()),
                         rotation: None,
@@ -1439,7 +1439,7 @@ mod tests {
                                 metadata: serde_json::json!({
                                     "provider_handle": {
                                         "task_id": "cook",
-                                        "backend": "opencode",
+                                        "backend": "pi",
                                         "run_id": "provider-run-8263",
                                         "metadata": {"provider_owned": true}
                                     }

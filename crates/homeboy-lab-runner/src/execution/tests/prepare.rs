@@ -191,7 +191,7 @@ fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
         ];
         let mut secret_env_plan = SecretEnvPlan::from_secret_env_names(names.clone());
         secret_env_plan.provider_credentials.insert(
-            "opencode.agent-task-executor".to_string(),
+            "pi.agent-task-executor".to_string(),
             homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping {
                 secret_env: names.clone(),
                 sources: [
@@ -275,7 +275,7 @@ fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
         assert!(serialized.contains("tokens.expires_at"));
         let mapping = secret_env_plan
             .provider_credentials
-            .get("opencode.agent-task-executor")
+            .get("pi.agent-task-executor")
             .expect("selected provider credential mapping");
         assert_eq!(
             mapping.sources["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"]

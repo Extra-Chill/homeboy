@@ -8,6 +8,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::agent_task_builtin_backend::BUILTIN_DEFAULT_BACKEND;
 use crate::agent_task_dispatch_plan::{
     build_dispatch_plan, build_dispatch_plan_with_provider_requirements,
     preflight_dispatch_provider_secrets,
@@ -51,6 +52,9 @@ pub enum BackendSelectionSource {
     Policy,
     /// Resolved from the Homeboy config `agent_task.default_backend`.
     Config,
+    /// No policy names a backend, so Cook selected its built-in coding backend
+    /// (Pi) because the provider catalog declares it (#15932).
+    Builtin,
 }
 
 /// The effective backend plus where it came from and whether it overrides the
@@ -860,6 +864,10 @@ fn missing_default_backend_error(available_backends: &[String]) -> Error {
         )
     };
 
+    tried.push(format!(
+        "Install the built-in `{BUILTIN_DEFAULT_BACKEND}` coding backend: Cook selects it automatically when no policy names a backend."
+    ));
+
     let mut error = Error::validation_invalid_argument("backend", problem, None, Some(tried));
     // Consumers distinguish an omitted route selection from an executor outage
     // without coupling to the rendered validation message.
@@ -904,26 +912,40 @@ fn resolve_dispatch_request_with_sources(
         None => match command.backend.clone() {
             Some(backend) => (backend, BackendSelectionSource::Cli),
             None => {
-                let resolved =
-                    default_backend(command.component.as_deref().or(command.repo.as_deref()))?
-                        .ok_or_else(|| {
-                            // The provider catalog already knows every dispatchable
-                            // backend at this point, so discover it rather than making
-                            // the operator run `agent-task providers` and parse JSON to
-                            // answer a question this command can answer (#11478).
-                            // Discovery only happens on the failure path.
-                            missing_default_backend_error(&available_backends())
-                        })?;
-                // The policy resolver prefers component/extension defaults over the
-                // Homeboy config default; if the resolved value matches the config
-                // default we attribute it to config, otherwise to higher-priority
-                // component/extension policy.
-                let source = if config_default.as_deref() == Some(resolved.as_str()) {
-                    BackendSelectionSource::Config
-                } else {
-                    BackendSelectionSource::Policy
-                };
-                (resolved, source)
+                match default_backend(command.component.as_deref().or(command.repo.as_deref()))? {
+                    Some(resolved) => {
+                        // The policy resolver prefers component/extension defaults over the
+                        // Homeboy config default; if the resolved value matches the config
+                        // default we attribute it to config, otherwise to higher-priority
+                        // component/extension policy.
+                        let source = if config_default.as_deref() == Some(resolved.as_str()) {
+                            BackendSelectionSource::Config
+                        } else {
+                            BackendSelectionSource::Policy
+                        };
+                        (resolved, source)
+                    }
+                    None => {
+                        // The provider catalog already knows every dispatchable
+                        // backend at this point, so discover it rather than making
+                        // the operator run `agent-task providers` and parse JSON to
+                        // answer a question this command can answer (#11478).
+                        // Discovery only happens when no policy names a backend.
+                        let available = available_backends();
+                        if available
+                            .iter()
+                            .any(|backend| backend == BUILTIN_DEFAULT_BACKEND)
+                        {
+                            // Pi is the built-in coding backend (#15932).
+                            (
+                                BUILTIN_DEFAULT_BACKEND.to_string(),
+                                BackendSelectionSource::Builtin,
+                            )
+                        } else {
+                            return Err(missing_default_backend_error(&available));
+                        }
+                    }
+                }
             }
         },
     };
@@ -1646,7 +1668,7 @@ mod tests {
         let error = missing_default_backend_error(&[
             "claude-code".to_string(),
             "codex".to_string(),
-            "opencode".to_string(),
+            "pi".to_string(),
         ]);
 
         assert!(
@@ -1659,7 +1681,7 @@ mod tests {
         assert!(
             error
                 .message
-                .contains("available backends: claude-code, codex, opencode"),
+                .contains("available backends: claude-code, codex, pi"),
             "the failing command must name the values it will accept: {}",
             error.message
         );
@@ -1715,27 +1737,43 @@ mod tests {
     }
 
     #[test]
+    fn builtin_pi_backend_is_selected_when_no_policy_names_one() {
+        let request = resolve_dispatch_request_with_sources(
+            command_with_backend(None),
+            |_| Ok(None),
+            || None,
+            || vec!["codex".to_string(), "pi".to_string()],
+        )
+        .expect("pi is declared");
+
+        assert_eq!(request.backend, "pi");
+        let selection = request.backend_selection.expect("selection");
+        assert_eq!(selection.source, BackendSelectionSource::Builtin);
+        assert!(!selection.overrides_default);
+    }
+
+    #[test]
     fn explicit_backend_is_attributed_to_cli_source() {
         let request = resolve_dispatch_request_with_default_and_config(
             command_with_backend(Some("claude-code")),
-            |_| Ok(Some("opencode".to_string())),
-            || Some("opencode".to_string()),
+            |_| Ok(Some("pi".to_string())),
+            || Some("pi".to_string()),
         )
         .expect("request");
 
         let selection = request.backend_selection.expect("selection");
         assert_eq!(selection.backend, "claude-code");
         assert_eq!(selection.source, BackendSelectionSource::Cli);
-        assert_eq!(selection.default_backend.as_deref(), Some("opencode"));
+        assert_eq!(selection.default_backend.as_deref(), Some("pi"));
         assert!(selection.overrides_default);
     }
 
     #[test]
     fn explicit_backend_matching_default_does_not_warn() {
         let request = resolve_dispatch_request_with_default_and_config(
-            command_with_backend(Some("opencode")),
-            |_| Ok(Some("opencode".to_string())),
-            || Some("opencode".to_string()),
+            command_with_backend(Some("pi")),
+            |_| Ok(Some("pi".to_string())),
+            || Some("pi".to_string()),
         )
         .expect("request");
 
@@ -1748,13 +1786,13 @@ mod tests {
     fn config_default_backend_is_attributed_to_config_source() {
         let request = resolve_dispatch_request_with_default_and_config(
             command_with_backend(None),
-            |_| Ok(Some("opencode".to_string())),
-            || Some("opencode".to_string()),
+            |_| Ok(Some("pi".to_string())),
+            || Some("pi".to_string()),
         )
         .expect("request");
 
         let selection = request.backend_selection.expect("selection");
-        assert_eq!(selection.backend, "opencode");
+        assert_eq!(selection.backend, "pi");
         assert_eq!(selection.source, BackendSelectionSource::Config);
         assert!(!selection.overrides_default);
     }
@@ -1769,7 +1807,7 @@ mod tests {
             command,
             |component| {
                 assert_eq!(component, Some("php-transformer"));
-                Ok(Some("opencode".to_string()))
+                Ok(Some("pi".to_string()))
             },
             || None,
         )
@@ -1777,15 +1815,15 @@ mod tests {
 
         assert_eq!(request.repo.as_deref(), Some("blocks-engine"));
         assert_eq!(request.component.as_deref(), Some("php-transformer"));
-        assert_eq!(request.backend, "opencode");
+        assert_eq!(request.backend, "pi");
     }
 
     #[test]
     fn configured_default_projects_the_same_initial_cook_route() {
         let request = resolve_dispatch_request_with_default_and_config(
             command_with_backend(None),
-            |_| Ok(Some("opencode".to_string())),
-            || Some("opencode".to_string()),
+            |_| Ok(Some("pi".to_string())),
+            || Some("pi".to_string()),
         )
         .expect("configured default request");
         let route =
@@ -1795,7 +1833,7 @@ mod tests {
                 None,
             ));
 
-        assert_eq!(route.backend, "opencode");
+        assert_eq!(route.backend, "pi");
         assert!(route.selector.is_none());
         assert!(route.model.is_none());
         assert!(route.rotation_selected_initial);
@@ -1837,7 +1875,7 @@ mod tests {
         let request = resolve_dispatch_request_with_default_and_config(
             command_with_backend(None),
             |_| Ok(Some("component-backend".to_string())),
-            || Some("opencode".to_string()),
+            || Some("pi".to_string()),
         )
         .expect("request");
 
@@ -1874,8 +1912,8 @@ mod tests {
         };
         let request = resolve_dispatch_request_with_default_and_config(
             command_with_backend(Some("codex")),
-            |_| Ok(Some("opencode".to_string())),
-            || Some("opencode".to_string()),
+            |_| Ok(Some("pi".to_string())),
+            || Some("pi".to_string()),
         )
         .expect("explicit Codex request");
         let policy = controller_resolved_execution_policy_with_sources(
@@ -1884,7 +1922,7 @@ mod tests {
             Some(AgentTaskProviderRotationPolicy {
                 entries: vec![
                     crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                        backend: Some("opencode".to_string()),
+                        backend: Some("pi".to_string()),
                         ..Default::default()
                     },
                 ],
@@ -1909,8 +1947,8 @@ mod tests {
                 model: Some("openai/gpt-5.6-sol".to_string()),
                 ..AgentTaskDispatchCommand::default()
             },
-            |_| Ok(Some("opencode".to_string())),
-            || Some("opencode".to_string()),
+            |_| Ok(Some("pi".to_string())),
+            || Some("pi".to_string()),
         )
         .expect("request");
         let policy = controller_resolved_execution_policy_with_sources(

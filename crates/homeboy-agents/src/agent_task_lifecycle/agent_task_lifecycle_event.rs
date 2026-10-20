@@ -351,7 +351,7 @@ mod tests {
                         "evidence_refs": [{ "kind": "transcript", "uri": "homeboy://lab/transcript", "label": "Provider transcript" }],
                         "diagnostics": [],
                         "outputs": null,
-                        "metadata": { "provider_run_id": "provider-run-1", "provider": "opencode" }
+                        "metadata": { "provider_run_id": "provider-run-1", "provider": "pi" }
                     }]
                 }
             }

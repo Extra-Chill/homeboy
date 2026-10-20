@@ -158,7 +158,7 @@ fn refresh_patch_deletes_a_homeboy_synthesized_path_for_ssh_runners() {
         let ctl_home = controller.path().join("ctl-home");
         let workspace = controller.path().join("w");
         let synthesized_path = format!(
-            "{home}/.local/bin:{home}/.opencode/bin:{ws}/_homeboy_binaries/homeboy-a:{ws}/_homeboy_binaries/homeboy-b:/usr/bin",
+            "{home}/.local/bin:{home}/.pi/bin:{ws}/_homeboy_binaries/homeboy-a:{ws}/_homeboy_binaries/homeboy-b:/usr/bin",
             home = ctl_home.display(),
             ws = workspace.display(),
         );

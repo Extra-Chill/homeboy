@@ -6636,7 +6636,7 @@ mod tests {
             CollectedDiagnostic {
                 task_id: "cook".to_string(),
                 class: "provider.process_exit".to_string(),
-                message: "OpenCode CLI exited with status 0".to_string(),
+                message: "Pi CLI exited with status 0".to_string(),
                 source: "diagnostics".to_string(),
                 data: Value::Null,
             },

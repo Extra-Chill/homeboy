@@ -3221,7 +3221,7 @@ mod tests {
             "agent-task".to_string(),
             "cook".to_string(),
             "--backend".to_string(),
-            "opencode".to_string(),
+            "pi".to_string(),
             "--secret-env".to_string(),
             "HOMEBOY_LAB_EARLY_MISSING_SECRET".to_string(),
         ];
@@ -3645,7 +3645,7 @@ mod tests {
                 "--run-id".to_string(),
                 "cook-8009".to_string(),
                 "--backend".to_string(),
-                "opencode".to_string(),
+                "pi".to_string(),
                 "--to-worktree".to_string(),
                 "homeboy@fix-8009-staging-lifecycle-identity".to_string(),
                 "--verify".to_string(),

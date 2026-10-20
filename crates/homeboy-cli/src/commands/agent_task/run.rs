@@ -2020,7 +2020,7 @@ mod preview_tests {
     fn lab_preview_readiness_projection_defers_binding_to_the_runner() {
         let request: AgentTaskRequest = serde_json::from_value(serde_json::json!({
             "task_id": "cook",
-            "executor": { "backend": "opencode", "model": "anthropic/claude-sonnet-5" },
+            "executor": { "backend": "pi", "model": "anthropic/claude-sonnet-5" },
             "instructions": "run",
         }))
         .expect("request fixture");
@@ -8183,7 +8183,7 @@ fn run_preflight_cook_execution(
                 ),
             // Model identity comes only from explicit/config/rotation selection
             // (`--model`, provider profile). Disclosure text like
-            // `OpenCode (GPT-5.5)` is presentation, not execution provenance, and
+            // `Pi (GPT-5.5)` is presentation, not execution provenance, and
             // must not be reverse-parsed into a model — an omitted model stays
             // omitted so finalization records only real model identity (#9789).
                 ai_model: selected_model,
@@ -8497,7 +8497,7 @@ mod rotation_disclosure_tests {
             "agent-task",
             "cook",
             "--backend",
-            "opencode",
+            "pi",
             "--model",
             "openai/gpt-5.6-terra",
             "--acknowledge-model-override",
@@ -8540,7 +8540,7 @@ mod rotation_disclosure_tests {
             "agent-task",
             "cook",
             "--backend",
-            "opencode",
+            "pi",
             "--max-attempts",
             "2",
             "--no-finalize",

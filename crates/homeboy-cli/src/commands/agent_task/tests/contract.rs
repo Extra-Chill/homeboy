@@ -106,12 +106,12 @@ fn providers_output_labels_runner_scope_without_exposing_secret_values() {
         std::env::set_var(execution_runner, "homeboy-lab");
 
         let result = review::providers(ProvidersArgs {
-            backend: Some("opencode".to_string()),
-            selector: Some("opencode.agent-task-executor".to_string()),
+            backend: Some("pi".to_string()),
+            selector: Some("pi.agent-task-executor".to_string()),
             model: Some("openai/gpt-5.6-luna".to_string()),
             runtime: None,
             status: None,
-            secret_env: vec!["OPENCODE_TOKEN".to_string()],
+            secret_env: vec!["PI_TOKEN".to_string()],
             validate_readiness: false,
             refresh: false,
             catalog: false,

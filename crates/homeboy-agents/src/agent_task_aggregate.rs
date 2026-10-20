@@ -1126,7 +1126,7 @@ mod tests {
                 "total_tokens_status": "complete",
                 "cost_usd": 0.01,
                 "cost_usd_status": "complete",
-                "source": "opencode-jsonl"
+                "source": "pi-jsonl"
             }
         });
         let report = aggregate_agent_task_outcomes(&[
@@ -1158,7 +1158,7 @@ mod tests {
                 "output_tokens_status": "complete",
                 "cost_usd": cost,
                 "cost_usd_status": "complete",
-                "source": "opencode-jsonl"
+                "source": "pi-jsonl"
             })
         };
         let mut retry = outcome("retry", AgentTaskOutcomeStatus::Failed, Vec::new());

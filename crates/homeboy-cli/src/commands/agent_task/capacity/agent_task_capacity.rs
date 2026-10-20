@@ -365,10 +365,10 @@ fn capacity_summary_renders_one_block_per_pool_and_line_per_account() {
         "generated_at": "2026-09-24T20:00:00+00:00",
         "routes": [
             {
-                "backend": "opencode",
+                "backend": "pi",
                 "selector": null,
                 "models": ["anthropic/claude-sonnet-5", "anthropic/claude-opus-5"],
-                "scope": "opencode:anthropic",
+                "scope": "pi:anthropic",
                 "capacity": {
                     "state": "known", "remaining": 70, "limit": 100, "unit": "percent",
                     "accounts": [
@@ -378,10 +378,10 @@ fn capacity_summary_renders_one_block_per_pool_and_line_per_account() {
                 },
             },
             {
-                "backend": "opencode",
+                "backend": "pi",
                 "selector": null,
                 "models": ["openai/gpt-5.6"],
-                "scope": "opencode:openai",
+                "scope": "pi:openai",
                 "capacity": {
                     "state": "exhausted",
                     "reset_at": "2026-09-27T15:26:09Z",
@@ -390,19 +390,19 @@ fn capacity_summary_renders_one_block_per_pool_and_line_per_account() {
                 },
             },
             {
-                "backend": "opencode",
+                "backend": "pi",
                 "selector": null,
                 "models": ["zai-coding-plan/glm-5.3"],
-                "scope": "opencode:zai-coding-plan",
+                "scope": "pi:zai-coding-plan",
                 "capacity": {
                     "state": "known", "remaining": 37, "limit": 100, "unit": "percent",
                     "reset_at": "2026-09-29T02:00:00Z",
                 },
             },
             {
-                "backend": "opencode",
+                "backend": "pi",
                 "selector": null,
-                "models": ["opencode-go/glm-5.3-flash"],
+                "models": ["pi-go/glm-5.3-flash"],
                 "scope": null,
                 "capacity": { "state": "unknown", "reason": "not published" },
             },
@@ -421,7 +421,7 @@ fn capacity_summary_renders_one_block_per_pool_and_line_per_account() {
             "  claude@extrachill.com  available  70%",
             "openai: exhausted until 2026-09-27T15:26:09Z",
             "zai-coding-plan: 37% remaining, resets 2026-09-29T02:00:00Z",
-            "opencode-go/glm-5.3-flash: capacity not published",
+            "pi-go/glm-5.3-flash: capacity not published",
         ]
         .join("\n")
     );

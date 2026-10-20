@@ -238,8 +238,8 @@ pub enum AgentTaskCommand {
     /// (`mode: "capacity"`), groups routes that report the same account-pool
     /// `scope`, and returns `homeboy/agent-task-capacity/v1` with one entry per
     /// pool and `next_reset` naming the soonest exhausted-account reset.
-    /// Capacity support is a runtime opt-in (OpenCode implements it via
-    /// homeboy-extensions); a route whose runtime publishes no capacity is
+    /// Capacity support is a runtime opt-in declared by the runtime
+    /// extension; a route whose runtime publishes no capacity is
     /// reported as unknown with its diagnostic, never probed with inference.
     Capacity(AgentTaskCapacityArgs),
     /// Manage markdown prompts in Homeboy-owned storage.

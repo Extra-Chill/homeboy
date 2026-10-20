@@ -935,7 +935,7 @@ mod tests {
             "agent-task",
             "cook",
             "--backend",
-            "opencode",
+            "pi",
             "--model",
             "openai/gpt-5.6-terra",
             "--acknowledge-model-override",

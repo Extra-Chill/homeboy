@@ -264,7 +264,7 @@ lifecycle, queue or orchestration service was added.
 
 ## Historical entry-point-only evidence
 
-AI assistance: OpenAI GPT-6.1 Sol via OpenCode. No delegation, commit, push, PR,
+AI assistance: OpenAI GPT-6.1 Sol via a coding-agent CLI. No delegation, commit, push, PR,
 release, upgrade, or runner runtime-pin changes were performed.
 
 ## Cause and owner reuse

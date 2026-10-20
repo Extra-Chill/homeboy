@@ -567,7 +567,7 @@ fn is_git_checkout(path: &std::path::Path) -> bool {
 /// Resolves exactly like execution does (`validate_secret_env_with_fallbacks`
 /// with the selected providers' declared `secret_env_sources`), so a route
 /// whose credentials come from a declared `json-file` source — e.g. the
-/// OpenCode `openai-oauth` auth-store handoff — is admitted here instead of
+/// `openai-oauth` auth-store handoff — is admitted here instead of
 /// being refused for env names it never needs in the process env (#15331).
 pub fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> Result<()> {
     preflight_dispatch_provider_secrets_with_sources(plan, &provider_secret_sources_for_plan(plan))
@@ -1210,7 +1210,7 @@ mod tests {
                 timeout_ms: Some(2_700_000),
                 resolved_provider_policy: Some(
                     crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
-                        backend: "opencode".to_string(),
+                        backend: "pi".to_string(),
                         selector: None,
                         model: None,
                         rotation: Some(
@@ -1499,7 +1499,7 @@ mod tests {
             defaults::save_config(&config).expect("save config");
             let mut request = dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Cook with the selected global model.".to_string()),
-                backend: Some("opencode".to_string()),
+                backend: Some("pi".to_string()),
                 ..DispatchRequestOverrides::default()
             });
 
@@ -1541,7 +1541,7 @@ mod tests {
             defaults::save_config(&config).expect("save config");
             let submitted_policy =
                 crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
-                    backend: "opencode".to_string(),
+                    backend: "pi".to_string(),
                     selector: None,
                     model: Some("submitted-model".to_string()),
                     rotation: None,
@@ -1623,8 +1623,8 @@ mod tests {
         let request = dispatch_request(DispatchRequestOverrides {
             prompt: Some("Cook the issue cleanly.".to_string()),
             cwd: Some(workspace.path().display().to_string()),
-            backend: Some("opencode".to_string()),
-            selector: Some("opencode.agent-task-executor".to_string()),
+            backend: Some("pi".to_string()),
+            selector: Some("pi.agent-task-executor".to_string()),
             model: Some("gpt-5.5".to_string()),
             core: DispatchCoreInputs {
                 provider_config: Some(r#"{"provider":"openai"}"#.to_string()),
@@ -1641,15 +1641,12 @@ mod tests {
             .runtime_selection
             .as_ref()
             .expect("runtime selection");
-        assert_eq!(executor.backend, "opencode");
-        assert_eq!(
-            executor.selector.as_deref(),
-            Some("opencode.agent-task-executor")
-        );
-        assert_eq!(selection.executor_backend.as_deref(), Some("opencode"));
+        assert_eq!(executor.backend, "pi");
+        assert_eq!(executor.selector.as_deref(), Some("pi.agent-task-executor"));
+        assert_eq!(selection.executor_backend.as_deref(), Some("pi"));
         assert_eq!(
             selection.executor_provider_id.as_deref(),
-            Some("opencode.agent-task-executor")
+            Some("pi.agent-task-executor")
         );
         assert_eq!(selection.ai_provider_id.as_deref(), Some("openai"));
         assert_eq!(selection.model.as_deref(), Some("gpt-5.5"));
@@ -1657,7 +1654,7 @@ mod tests {
         let serialized = serde_json::to_value(&plan).expect("serialize plan");
         assert_eq!(
             serialized["tasks"][0]["executor"]["runtime_selection"]["executor_provider_id"],
-            "opencode.agent-task-executor"
+            "pi.agent-task-executor"
         );
         assert_eq!(
             serialized["tasks"][0]["executor"]["runtime_selection"]["ai_provider_id"],
@@ -1964,7 +1961,7 @@ mod tests {
     }
 
     /// A provider route whose credentials come from a declared `json-file`
-    /// source (OpenCode `openai-oauth` auth-store handoff) must pass the
+    /// source (an `openai-oauth` auth-store handoff) must pass the
     /// dispatch preflight even though the env names are absent from the
     /// process env and Homeboy's secret config (#15331).
     #[test]

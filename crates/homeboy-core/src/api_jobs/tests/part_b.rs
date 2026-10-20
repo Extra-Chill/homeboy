@@ -1670,7 +1670,7 @@ fn provider_credential_secret_env_plan() -> crate::secret_env_plan::SecretEnvPla
     let mut plan = SecretEnvPlan::default();
     plan.extend_secret_env_names([ACCESS_TOKEN.to_string(), REFRESH_TOKEN.to_string()]);
     plan.provider_credentials.insert(
-        "test.opencode-provider".to_string(),
+        "test.pi-provider".to_string(),
         SecretEnvProviderCredentialMapping {
             secret_env: vec![ACCESS_TOKEN.to_string(), REFRESH_TOKEN.to_string()],
             sources: std::collections::BTreeMap::from([(

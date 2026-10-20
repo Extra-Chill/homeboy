@@ -617,9 +617,13 @@ pub(super) fn provider_not_found_message(
     backend: &str,
     diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
 ) -> String {
-    let base = format!(
+    let mut base = format!(
         "no extension agent-task provider found for backend '{backend}' (no installed provider can serve this backend)"
     );
+    if backend.trim() != crate::agent_task_builtin_backend::BUILTIN_DEFAULT_BACKEND {
+        base.push_str("; ");
+        base.push_str(&crate::agent_task_builtin_backend::builtin_backend_remediation(backend));
+    }
     if diagnostics.is_empty() {
         return base;
     }
@@ -817,20 +821,20 @@ mod tests {
         // Deserialize from JSON so schema-string and other required defaults are
         // populated the same way discovery populates them.
         serde_json::from_value(serde_json::json!({
-            "id": "test.opencode",
-            "backend": "opencode",
+            "id": "test.pi",
+            "backend": "pi",
             "cli": {
-                "default_ai_disclosure": "OpenCode (GPT-5.5)",
+                "default_ai_disclosure": "Pi (GPT-5.5)",
                 "profiles": [
                     {
                         "name": "terra",
                         "model": "openai/gpt-5.6-terra",
-                        "ai_disclosure": "OpenCode (GPT-5.6 Terra)"
+                        "ai_disclosure": "Pi (GPT-5.6 Terra)"
                     },
                     {
                         "name": "sol",
                         "model": "openai/gpt-5.6-sol",
-                        "ai_disclosure": "OpenCode (GPT-5.6 Sol)"
+                        "ai_disclosure": "Pi (GPT-5.6 Sol)"
                     }
                 ]
             }
@@ -857,10 +861,10 @@ mod tests {
     fn backends_are_sorted_deduped_and_skip_blanks() {
         let catalog = AgentTaskProviderCatalog {
             providers: vec![
-                provider_with_backend("b.opencode", "opencode"),
+                provider_with_backend("b.codex", "codex"),
                 provider_with_backend("a.pi", "pi"),
                 // Two providers for one backend must not double-list it.
-                provider_with_backend("c.opencode", "opencode"),
+                provider_with_backend("c.codex", "codex"),
                 provider_with_backend("d.claude", "claude-code"),
                 provider_with_backend("e.blank", "   "),
             ],
@@ -871,7 +875,7 @@ mod tests {
             catalog.backends(),
             vec![
                 "claude-code".to_string(),
-                "opencode".to_string(),
+                "codex".to_string(),
                 "pi".to_string()
             ]
         );
@@ -887,16 +891,16 @@ mod tests {
         let catalog = disclosure_catalog();
         assert_eq!(
             catalog
-                .ai_disclosure_for("opencode", None, Some("openai/gpt-5.6-terra"))
+                .ai_disclosure_for("pi", None, Some("openai/gpt-5.6-terra"))
                 .as_deref(),
-            Some("OpenCode (GPT-5.6 Terra)"),
+            Some("Pi (GPT-5.6 Terra)"),
             "a model override must derive its matching profile disclosure"
         );
         assert_eq!(
             catalog
-                .ai_disclosure_for("opencode", None, Some("openai/gpt-5.6-sol"))
+                .ai_disclosure_for("pi", None, Some("openai/gpt-5.6-sol"))
                 .as_deref(),
-            Some("OpenCode (GPT-5.6 Sol)")
+            Some("Pi (GPT-5.6 Sol)")
         );
     }
 
@@ -905,14 +909,14 @@ mod tests {
         let catalog = disclosure_catalog();
         // No model and an unknown model both fall back to the provider default.
         assert_eq!(
-            catalog.ai_disclosure_for("opencode", None, None).as_deref(),
-            Some("OpenCode (GPT-5.5)")
+            catalog.ai_disclosure_for("pi", None, None).as_deref(),
+            Some("Pi (GPT-5.5)")
         );
         assert_eq!(
             catalog
-                .ai_disclosure_for("opencode", None, Some("openai/unknown-model"))
+                .ai_disclosure_for("pi", None, Some("openai/unknown-model"))
                 .as_deref(),
-            Some("OpenCode (GPT-5.5)")
+            Some("Pi (GPT-5.5)")
         );
     }
 
@@ -933,7 +937,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
                 "task_id": "task",
-                "executor": { "backend": "opencode" },
+                "executor": { "backend": "pi" },
                 "instructions": "Cook",
                 "workspace": { "mode": "existing" },
                 "metadata": {
@@ -965,7 +969,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
                 "task_id": "task",
-                "executor": { "backend": "opencode" },
+                "executor": { "backend": "pi" },
                 "instructions": "Cook",
                 "workspace": { "mode": "existing" }
             }))

@@ -1742,7 +1742,7 @@ mod tests {
     #[test]
     fn runner_provider_readiness_accepts_selected_runner_and_preserves_metadata() {
         validate_runner_provider_scope(
-            r#"{"schema":"homeboy/command-result/v3","data":{"observed_scope":{"location":"runner","runner_id":"homeboy-lab","homeboy_identity":{"git_commit":"runner-sha"}},"readiness_validation":{"effective_model":"openai/gpt-5.6-luna"},"secret_env":[{"name":"OPENCODE_TOKEN","configured":false}]}}"#,
+            r#"{"schema":"homeboy/command-result/v3","data":{"observed_scope":{"location":"runner","runner_id":"homeboy-lab","homeboy_identity":{"git_commit":"runner-sha"}},"readiness_validation":{"effective_model":"openai/gpt-5.6-luna"},"secret_env":[{"name":"PI_TOKEN","configured":false}]}}"#,
             Some("homeboy-lab"),
         )
         .expect("runner readiness scope");

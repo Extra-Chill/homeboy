@@ -823,7 +823,6 @@ impl AgentTaskScheduleSupport {
 
     fn executed_model_from_result(result: &Value) -> Option<String> {
         [
-            "/opencode_session/model",
             "/metadata/model_identity/actual",
             "/model_identity/actual",
             "/metadata/model",
@@ -1995,7 +1994,7 @@ mod execution_budget_evidence_tests {
 
 /// Names of the required outputs an executor reported missing, read from the
 /// executor's summary: `… completed without required structured output(s): a, b.`
-/// (the OpenCode executor, code `agent_task.opencode_required_outputs_missing`).
+/// (executor code `agent_task.required_outputs_missing`).
 fn missing_required_output_names(outcome: &AgentTaskOutcome) -> Option<Vec<String>> {
     const MARKER: &str = "completed without required structured output(s):";
     let text = outcome.summary.as_deref()?;

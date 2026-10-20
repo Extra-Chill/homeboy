@@ -303,7 +303,7 @@ fn logs_read_does_not_append_historical_metadata_progress() {
             "key": "task-a:1",
             "task_id": "task-a",
             "attempt": 1,
-            "backend": "opencode",
+            "backend": "pi",
             "state": "running",
             "started_at": "2026-07-24T00:00:00Z"
         }]);
@@ -860,7 +860,7 @@ fn seed_historical_fixture(store: &AgentTaskLifecycleStore, run_id: &str) -> Age
         "key": "task-a:1",
         "task_id": "task-a",
         "attempt": 1,
-        "backend": "opencode",
+        "backend": "pi",
         "state": "running",
         "started_at": "2026-07-24T00:00:00Z"
     }]);

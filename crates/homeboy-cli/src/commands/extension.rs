@@ -2530,32 +2530,29 @@ mod tests {
     fn extension_runtime_diagnostics_reports_durable_root_and_generation() {
         with_isolated_home(|home| {
             let config = home.path().join(".config/homeboy");
-            let source = config.join("extension-sources/opencode/agent-runtimes/opencode");
+            let source = config.join("extension-sources/pi/agent-runtimes/pi");
             fs::create_dir_all(&source).expect("durable extension source");
+            fs::write(source.join("pi.json"), r#"{"name":"Pi","version":"2.0.0"}"#)
+                .expect("extension manifest");
             fs::write(
-                source.join("opencode.json"),
-                r#"{"name":"OpenCode","version":"2.0.0"}"#,
-            )
-            .expect("extension manifest");
-            fs::write(
-                config.join("extension-sources/opencode/homeboy-extension-root.json"),
+                config.join("extension-sources/pi/homeboy-extension-root.json"),
                 r#"{"shared_assets":["agent-runtimes"]}"#,
             )
             .expect("root manifest");
             fs::create_dir_all(config.join("extensions")).expect("extensions directory");
-            symlink(&source, config.join("extensions/opencode")).expect("extension link");
+            symlink(&source, config.join("extensions/pi")).expect("extension link");
             fs::create_dir_all(config.join("runtime-generations/generation-2/agent-runtimes"))
                 .expect("runtime generation");
             symlink("generation-2", config.join("runtime-generations/current"))
                 .expect("current generation link");
 
-            let diagnostics = extension_runtime_diagnostics("opencode", None);
+            let diagnostics = extension_runtime_diagnostics("pi", None);
 
             assert_eq!(
                 diagnostics.root_manifest_path.as_deref(),
                 Some(
                     config
-                        .join("extension-sources/opencode/homeboy-extension-root.json")
+                        .join("extension-sources/pi/homeboy-extension-root.json")
                         .to_str()
                         .expect("UTF-8 root manifest path")
                 )

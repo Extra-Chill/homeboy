@@ -4,11 +4,11 @@
 //! actionable cause — an account-level 403 with a human-readable message and
 //! an explicit non-retryable flag — is emitted as a structured error event on
 //! the provider's runtime stdout stream. Diagnose used to collapse that to
-//! "OpenCode CLI exited with status 1" and leave `stdout_excerpt: null` while
+//! "provider CLI exited with status 1" and leave `stdout_excerpt: null` while
 //! the actual error sat in a log file the same response already listed.
 //!
 //! This module is the provider adapter boundary for that evidence:
-//! - Vendor stream shapes (currently the OpenCode JSONL error event) are
+//! - Runtime stream shapes (currently the JSONL terminal error event) are
 //!   parsed HERE and nowhere else.
 //! - Everything downstream — diagnose projection, status summaries, the
 //!   runtime evidence index — consumes only the normalized
@@ -61,22 +61,16 @@ pub const PROVIDER_ERROR: &str = "provider_error";
 
 /// Normalize a provider runtime stream into the normalized structured error.
 ///
-/// `backend` selects the registered adapter:
-/// - `Some(backend)` uses only that backend's parser (execution time, where
-///   the executor backend is known), and returns `None` for unregistered
-///   backends so an unrelated provider's output is never misread.
-/// - `None` tries every registered adapter (read time, where only the stream
-///   text is available). Every adapter is structurally strict — it requires a
-///   terminal error event carrying a non-empty message — so cross-vendor
-///   false positives are not realistic.
+/// `backend` names the executor backend when it is known (execution time) and
+/// is `None` at read time, where only the stream text is available. The JSONL
+/// terminal error event adapter is backend-neutral and structurally strict —
+/// it requires a terminal error event carrying a non-empty message — so
+/// cross-runtime false positives are not realistic, and every backend uses it.
 ///
 /// The returned value is redacted; it is safe to persist and project.
 pub fn normalize_runtime_stream_error(backend: Option<&str>, text: &str) -> Option<Value> {
-    let normalized = match backend {
-        Some("opencode") => normalize_opencode_stream_error(text),
-        Some(_) => None,
-        None => normalize_opencode_stream_error(text),
-    }?;
+    let _ = backend;
+    let normalized = normalize_jsonl_stream_error(text)?;
     Some(RedactionPolicy::default().redact_json(&normalized))
 }
 
@@ -213,14 +207,14 @@ fn normalized_error(
     })
 }
 
-/// Parse the OpenCode runtime stream for its terminal error event.
+/// Parse a JSONL runtime stream for its terminal error event.
 ///
-/// OpenCode emits JSONL events on runtime stdout; a fatal provider/API error
-/// is `{"type":"error","error":{"name":"APIError","data":{"message":...,
+/// A runtime that emits JSONL events on stdout reports a fatal provider/API
+/// error as `{"type":"error","error":{"name":"APIError","data":{"message":...,
 /// "statusCode":403,"isRetryable":false}}}` (observed live in #13703). The
 /// whole stream may also be a single JSON object. The LAST error event wins:
 /// it is the terminal cause.
-fn normalize_opencode_stream_error(text: &str) -> Option<Value> {
+fn normalize_jsonl_stream_error(text: &str) -> Option<Value> {
     let mut last_error = None;
     for line in text.lines().rev() {
         let line = line.trim();
@@ -230,20 +224,20 @@ fn normalize_opencode_stream_error(text: &str) -> Option<Value> {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if let Some(error) = structured_error_from_opencode_event(&event) {
+        if let Some(error) = structured_error_from_jsonl_event(&event) {
             last_error = Some(error);
             break;
         }
     }
     if last_error.is_none() {
         if let Ok(event) = serde_json::from_str::<Value>(text) {
-            last_error = structured_error_from_opencode_event(&event);
+            last_error = structured_error_from_jsonl_event(&event);
         }
     }
     last_error
 }
 
-fn structured_error_from_opencode_event(event: &Value) -> Option<Value> {
+fn structured_error_from_jsonl_event(event: &Value) -> Option<Value> {
     if event.get("type").and_then(Value::as_str) != Some("error") {
         return None;
     }
@@ -274,17 +268,15 @@ fn structured_error_from_opencode_event(event: &Value) -> Option<Value> {
 
 /// Normalize a provider error already captured in a provider result. This is
 /// the same adapter path used for runtime streams, so generic outcome code
-/// never inspects OpenCode's vendor payload.
+/// never inspects a vendor payload.
 pub fn normalize_provider_error(backend: &str, value: &Value) -> Option<Value> {
-    let normalized = match backend {
-        "opencode" => normalize_opencode_error_value(value),
-        _ => None,
-    }?;
+    let _ = backend;
+    let normalized = normalize_error_value(value)?;
     Some(RedactionPolicy::default().redact_json(&normalized))
 }
 
-fn normalize_opencode_error_value(value: &Value) -> Option<Value> {
-    if let Some(error) = structured_error_from_opencode_event(value) {
+fn normalize_error_value(value: &Value) -> Option<Value> {
+    if let Some(error) = structured_error_from_jsonl_event(value) {
         return Some(error);
     }
     match value {
@@ -312,9 +304,9 @@ fn normalize_opencode_error_value(value: &Value) -> Option<Value> {
                     object.get("name").and_then(Value::as_str),
                 ));
             }
-            object.values().find_map(normalize_opencode_error_value)
+            object.values().find_map(normalize_error_value)
         }
-        Value::Array(values) => values.iter().find_map(normalize_opencode_error_value),
+        Value::Array(values) => values.iter().find_map(normalize_error_value),
         _ => None,
     }
 }
@@ -399,9 +391,9 @@ mod tests {
     );
 
     #[test]
-    fn normalizes_the_live_opencode_account_rejection() {
+    fn normalizes_the_live_account_rejection() {
         let normalized =
-            normalize_runtime_stream_error(Some("opencode"), LIVE_STREAM).expect("normalized");
+            normalize_runtime_stream_error(Some("pi"), LIVE_STREAM).expect("normalized");
 
         assert_eq!(normalized["schema"], PROVIDER_STRUCTURED_ERROR_SCHEMA);
         assert_eq!(
@@ -418,14 +410,16 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_without_a_backend_hint_by_trying_registered_adapters() {
+    fn normalizes_without_a_backend_hint() {
         let normalized = normalize_runtime_stream_error(None, LIVE_STREAM).expect("normalized");
         assert_eq!(normalized["status_code"], 403);
     }
 
     #[test]
-    fn an_unregistered_backend_is_never_parsed() {
-        assert!(normalize_runtime_stream_error(Some("claude-cli"), LIVE_STREAM).is_none());
+    fn the_jsonl_adapter_is_backend_neutral() {
+        let normalized =
+            normalize_runtime_stream_error(Some("claude-cli"), LIVE_STREAM).expect("normalized");
+        assert_eq!(normalized["status_code"], 403);
     }
 
     #[test]
@@ -436,15 +430,14 @@ mod tests {
             r#"{"type":"error","error":{"data":{"message":"final failure","statusCode":403,"isRetryable":false}}}"#,
             "\n",
         );
-        let normalized =
-            normalize_runtime_stream_error(Some("opencode"), stream).expect("normalized");
+        let normalized = normalize_runtime_stream_error(Some("pi"), stream).expect("normalized");
         assert_eq!(normalized["message"], "final failure");
     }
 
     #[test]
     fn a_retryable_error_classifies_as_rate_limited() {
         let normalized = normalize_runtime_stream_error(
-            Some("opencode"),
+            Some("pi"),
             r#"{"type":"error","error":{"data":{"message":"too many requests","statusCode":429,"isRetryable":true}}}"#,
         )
         .expect("normalized");
@@ -454,7 +447,7 @@ mod tests {
     #[test]
     fn a_forbidden_resource_without_billing_vocabulary_is_a_generic_provider_error() {
         let normalized = normalize_runtime_stream_error(
-            Some("opencode"),
+            Some("pi"),
             r#"{"type":"error","error":{"data":{"message":"repository not accessible","statusCode":403,"isRetryable":false}}}"#,
         )
         .expect("normalized");
@@ -478,16 +471,14 @@ mod tests {
     #[test]
     fn non_error_streams_do_not_normalize() {
         assert!(normalize_runtime_stream_error(
-            Some("opencode"),
+            Some("pi"),
             r#"{"type":"step_start","part":{"id":"p1"}}"#
         )
         .is_none());
-        assert!(
-            normalize_runtime_stream_error(Some("opencode"), "unstructured output\n").is_none()
-        );
+        assert!(normalize_runtime_stream_error(Some("pi"), "unstructured output\n").is_none());
         // An error event without a message is not actionable evidence.
         assert!(normalize_runtime_stream_error(
-            Some("opencode"),
+            Some("pi"),
             r#"{"type":"error","error":{"data":{"statusCode":500}}}"#
         )
         .is_none());
@@ -496,7 +487,7 @@ mod tests {
     #[test]
     fn normalized_output_is_redacted() {
         let normalized = normalize_runtime_stream_error(
-            Some("opencode"),
+            Some("pi"),
             r#"{"type":"error","error":{"data":{"message":"rejected for api_key=sk-live-secret-value","statusCode":401,"isRetryable":false}}}"#,
         )
         .expect("normalized");
@@ -508,7 +499,7 @@ mod tests {
     #[test]
     fn the_recognizer_accepts_only_the_normalized_schema_with_a_message() {
         let normalized =
-            normalize_runtime_stream_error(Some("opencode"), LIVE_STREAM).expect("normalized");
+            normalize_runtime_stream_error(Some("pi"), LIVE_STREAM).expect("normalized");
         assert!(normalized_structured_error(&normalized).is_some());
         assert!(normalized_structured_error(&json!({
             "schema": PROVIDER_STRUCTURED_ERROR_SCHEMA,

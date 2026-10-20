@@ -312,9 +312,9 @@ mod revision_probe_tests {
     fn manifest() -> AgentRuntimeManifest {
         serde_json::from_value(serde_json::json!({
             "schema": homeboy_core::agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
-            "id": "opencode",
-            "extension_id": "homeboy-opencode",
-            "runtime_path": "/runtimes/opencode",
+            "id": "pi",
+            "extension_id": "homeboy-pi",
+            "runtime_path": "/runtimes/pi",
         }))
         .expect("valid runtime manifest fixture")
     }
@@ -336,9 +336,9 @@ mod revision_probe_tests {
             diagnostic.class,
             AGENT_RUNTIME_REVISION_PROBE_TIMEOUT_DIAGNOSTIC
         );
-        assert_eq!(diagnostic.runtime_id.as_deref(), Some("opencode"));
-        assert_eq!(diagnostic.extension_id.as_deref(), Some("homeboy-opencode"));
-        assert_eq!(diagnostic.path.as_deref(), Some("/runtimes/opencode"));
+        assert_eq!(diagnostic.runtime_id.as_deref(), Some("pi"));
+        assert_eq!(diagnostic.extension_id.as_deref(), Some("homeboy-pi"));
+        assert_eq!(diagnostic.path.as_deref(), Some("/runtimes/pi"));
         assert!(diagnostic.message.contains("unknown, not absent"));
     }
 
@@ -353,9 +353,9 @@ mod revision_probe_tests {
     fn invalid_readiness_timeout_is_a_scoped_discovery_diagnostic() {
         let mut runtime = manifest();
         runtime.agent_task_executors = vec![serde_json::json!({
-            "id": "opencode.agent-task-executor",
-            "backend": "opencode",
-            "readiness_invocation": { "argv": ["opencode-provider"], "timeout_ms": 120001 }
+            "id": "pi.agent-task-executor",
+            "backend": "pi",
+            "readiness_invocation": { "argv": ["pi-provider"], "timeout_ms": 120001 }
         })];
         let mut diagnostics = Vec::new();
 
@@ -370,6 +370,6 @@ mod revision_probe_tests {
         assert!(diagnostics[0]
             .message
             .contains("readiness_invocation.timeout_ms"));
-        assert_eq!(diagnostics[0].runtime_id.as_deref(), Some("opencode"));
+        assert_eq!(diagnostics[0].runtime_id.as_deref(), Some("pi"));
     }
 }
