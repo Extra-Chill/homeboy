@@ -4300,7 +4300,7 @@ fn select_recoverable_patch_artifact(
             .into_iter()
             .next()
             .expect("one canonical patch")),
-        0 => Err(Error::new(
+        0 => Err(canonical_budget_rejection_error(&canonical.unavailable).unwrap_or_else(|| Error::new(
             homeboy_core::ErrorCode::ValidationInvalidArgument,
             "recoverable-candidate promotion found no readable actionable patch; reconcile or hydrate the run artifacts before retrying",
             json!({
@@ -4308,7 +4308,7 @@ fn select_recoverable_patch_artifact(
                 "next_action": "homeboy agent-task review <run-id> --to-worktree <managed-worktree>",
                 "unavailable_artifacts": canonical.unavailable,
             }),
-        )),
+        ))),
         _ => Err(Error::new(
             homeboy_core::ErrorCode::ValidationInvalidArgument,
             "recoverable-candidate promotion found distinct actionable patches; select one with --artifact-id",
@@ -4325,12 +4325,47 @@ fn select_recoverable_patch_artifact(
     }
 }
 
+const CANONICAL_PATCH_BYTE_BUDGET_EXCEEDED: &str = "canonical_patch_byte_budget_exceeded";
+
+/// Name the size rejection explicitly when the comparison budget is the only
+/// reason no candidate survived, so operators select the artifact by ID
+/// instead of reconciling or hydrating artifacts that are already present.
+pub(crate) fn canonical_budget_rejection_error(unavailable: &[Value]) -> Option<Error> {
+    let rejected = unavailable.iter().find(|entry| {
+        entry.get("reason").and_then(Value::as_str) == Some(CANONICAL_PATCH_BYTE_BUDGET_EXCEEDED)
+    })?;
+    let id = rejected
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("<artifact-id>");
+    let size = rejected
+        .get("size_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    Some(Error::new(
+        homeboy_core::ErrorCode::ValidationInvalidArgument,
+        format!(
+            "recoverable-candidate promotion rejected patch artifact `{id}`: {CANONICAL_PATCH_BYTE_BUDGET_EXCEEDED} ({size} bytes exceeds the {CANONICAL_PATCH_BYTES_TOTAL_LIMIT}-byte candidate comparison limit); select it explicitly with --artifact-id {id}"
+        ),
+        json!({
+            "field": "artifact_id",
+            "reason": CANONICAL_PATCH_BYTE_BUDGET_EXCEEDED,
+            "artifact_id": id,
+            "size_bytes": size,
+            "limit_bytes": CANONICAL_PATCH_BYTES_TOTAL_LIMIT,
+            "next_action": format!("pass --artifact-id {id} to select the patch explicitly"),
+            "unavailable_artifacts": unavailable,
+        }),
+    ))
+}
+
 #[derive(Debug, Clone)]
 pub struct CanonicalRecoverablePatchArtifacts {
     pub artifacts: Vec<AgentTaskArtifact>,
     /// Normalized patch bodies keyed by canonical artifact ID. Callers use this
     /// only for bounded, deterministic projections; full patches remain at their
-    /// durable artifact addresses.
+    /// durable artifact addresses. Candidates compared by stored SHA-256 and
+    /// size because they exceed the comparison byte budget have no entry.
     pub patch_contents: BTreeMap<String, String>,
     pub unavailable: Vec<Value>,
     pub omitted_candidate_count: usize,
@@ -4381,7 +4416,10 @@ fn canonical_recoverable_patch_artifacts_internal(
         .saturating_sub(CANONICAL_PATCH_CANDIDATE_LIMIT);
     candidates.truncate(CANONICAL_PATCH_CANDIDATE_LIMIT);
 
-    let mut canonical = Vec::<(String, AgentTaskArtifact, String)>::new();
+    // A sole candidate (including one chosen explicitly by artifact ID) needs
+    // no comparison, so the comparison byte budget does not apply to it.
+    let sole_candidate = candidates.len() == 1;
+    let mut canonical = Vec::<CanonicalCandidate>::new();
     let mut unavailable = Vec::new();
     let mut read_patch_bytes = 0_u64;
     let mut omitted_patch_bytes = 0_u64;
@@ -4411,13 +4449,70 @@ fn canonical_recoverable_patch_artifacts_internal(
                 continue;
             }
         };
-        if read_patch_bytes.saturating_add(patch_bytes) > CANONICAL_PATCH_BYTES_TOTAL_LIMIT {
+        if !sole_candidate
+            && read_patch_bytes.saturating_add(patch_bytes) > CANONICAL_PATCH_BYTES_TOTAL_LIMIT
+        {
+            // Compare by reference: the stored SHA-256 and size identify the
+            // patch without loading its bytes into memory. The digest is
+            // verified by streaming the artifact file.
+            let Some(stored_sha256) = artifact
+                .sha256
+                .clone()
+                .filter(|sha256| valid_sha256(sha256))
+            else {
+                omitted_patch_bytes = omitted_patch_bytes.saturating_add(patch_bytes);
+                unavailable.push(json!({
+                    "id": artifact.id,
+                    "reason": CANONICAL_PATCH_BYTE_BUDGET_EXCEEDED,
+                    "size_bytes": patch_bytes,
+                    "limit_bytes": CANONICAL_PATCH_BYTES_TOTAL_LIMIT,
+                }));
+                continue;
+            };
+            if let Some(expected_size) = artifact.size_bytes {
+                if expected_size != patch_bytes {
+                    unavailable.push(json!({
+                        "id": artifact.id,
+                        "path": path,
+                        "reason": format!(
+                            "patch artifact size mismatch: expected {expected_size} bytes, read {patch_bytes} bytes"
+                        ),
+                    }));
+                    continue;
+                }
+            }
+            match content_hash::sha256_file(&path) {
+                Ok(actual) if actual == stored_sha256 => {}
+                Ok(actual) => {
+                    unavailable.push(json!({
+                        "id": artifact.id,
+                        "path": path,
+                        "reason": format!(
+                            "patch artifact sha256 mismatch: expected {stored_sha256}, read {actual}"
+                        ),
+                    }));
+                    continue;
+                }
+                Err(error) => {
+                    unavailable
+                        .push(json!({ "id": artifact.id, "path": path, "reason": error.message }));
+                    continue;
+                }
+            }
             omitted_patch_bytes = omitted_patch_bytes.saturating_add(patch_bytes);
-            unavailable.push(json!({
-                "id": artifact.id,
-                "reason": "canonical_patch_byte_budget_exceeded",
-                "size_bytes": patch_bytes,
-            }));
+            let stored_identity =
+                canonical_patch_stored_identity(&artifact, &stored_sha256, patch_bytes);
+            if !canonical
+                .iter()
+                .any(|existing| existing.stored_identity == stored_identity)
+            {
+                canonical.push(CanonicalCandidate {
+                    normalized_identity: None,
+                    stored_identity,
+                    artifact,
+                    content: None,
+                });
+            }
             continue;
         }
         let patch = match std::fs::read_to_string(&path) {
@@ -4441,29 +4536,61 @@ fn canonical_recoverable_patch_artifacts_internal(
                 continue;
             }
         };
+        let stored_identity = canonical_patch_stored_identity(
+            &artifact,
+            &content_hash::sha256_hex(patch.as_bytes()),
+            patch_bytes,
+        );
+        drop(patch);
         let digest = content_hash::sha256_hex(normalized.content.as_bytes());
         let identity = canonical_patch_identity_with_digest(&artifact, &digest);
-        if !canonical
-            .iter()
-            .any(|(existing, _, _)| existing == &identity)
-        {
-            canonical.push((identity, artifact, normalized.content));
+        if !canonical.iter().any(|existing| {
+            existing.normalized_identity.as_deref() == Some(identity.as_str())
+                || existing.stored_identity == stored_identity
+        }) {
+            canonical.push(CanonicalCandidate {
+                normalized_identity: Some(identity),
+                stored_identity,
+                artifact,
+                content: Some(normalized.content),
+            });
         }
     }
 
     Ok(CanonicalRecoverablePatchArtifacts {
         artifacts: canonical
             .iter()
-            .map(|(_, artifact, _)| artifact.clone())
+            .map(|candidate| candidate.artifact.clone())
             .collect(),
         patch_contents: canonical
             .into_iter()
-            .map(|(_, artifact, patch)| (artifact.id, patch))
+            .filter_map(|candidate| {
+                candidate
+                    .content
+                    .map(|content| (candidate.artifact.id, content))
+            })
             .collect(),
         unavailable,
         omitted_candidate_count,
         omitted_patch_bytes,
     })
+}
+
+struct CanonicalCandidate {
+    /// Digest of the normalized patch body, when the bytes were read.
+    normalized_identity: Option<String>,
+    /// Stored SHA-256 and size of the raw artifact bytes.
+    stored_identity: String,
+    artifact: AgentTaskArtifact,
+    content: Option<String>,
+}
+
+fn canonical_patch_stored_identity(
+    artifact: &AgentTaskArtifact,
+    sha256: &str,
+    size: u64,
+) -> String {
+    format!("{sha256}|{size}|{}", canonical_patch_provenance(artifact))
 }
 
 fn canonical_patch_identity(artifact: &AgentTaskArtifact) -> String {
