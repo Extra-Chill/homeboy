@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.430.1] - 2026-10-20
+
+### Changed
+- pass the merged-worktree probe in checkout-sizing tests
+
+### Fixed
+- cleanup nominates merged clean worktrees that plain remove accepts
+- stop advertising recover for an agent-declared incomplete candidate
+
 ## [0.430.0] - 2026-10-19
 
 ### Added
