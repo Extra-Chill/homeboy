@@ -34,6 +34,7 @@ pub(crate) mod agent_task_prompt_template;
 pub mod agent_task_prompts;
 pub mod agent_task_provider;
 pub(crate) mod agent_task_review_dossier;
+pub mod agent_task_retired_backends;
 pub mod agent_task_route_notes;
 pub(crate) mod agent_task_runtime_dependency_graph;
 pub(crate) mod agent_task_schedule;

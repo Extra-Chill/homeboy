@@ -21,7 +21,7 @@ const NOTE_MAX_CHARS: usize = 200;
 /// dispatch, prefixed once with the model that actually ran. For example:
 ///
 /// ```text
-/// Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the provider-owned OpenCode credentials, then retry.)
+/// Ran on roadie/openai-gpt-6-luna; roadie/anthropic-claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie pool client key, then retry.)
 /// xai/grok-4.7 skipped: usage_capped (Wait for the provider usage cap to reset.)
 /// ```
 pub(crate) fn provider_route_notes(

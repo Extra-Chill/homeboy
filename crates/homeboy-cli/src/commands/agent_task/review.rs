@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use homeboy::agents::agent_task_model::normalize_concrete_model_identifier;
+use homeboy::agents::agent_task_retired_backends as retired_backends;
 use homeboy::agents::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
 use homeboy::agents::agent_tasks::finalization::{
@@ -1986,10 +1987,21 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
 /// (#13634). This closes that gap by deriving a working configuration from
 /// what actually authenticates here, rather than only documenting the shape.
 fn write_default_backend_from_readiness(catalog: &AgentTaskProviderCatalog) -> CmdResult<Value> {
-    let ready_backends = dispatchable_backend_choices(catalog, true)
+    // A retired backend (#15932) is never written as a route, even when an
+    // installed extension still declares it. The built-in Pi backend leads
+    // the derived chain when it is ready.
+    let mut ready_backends = dispatchable_backend_choices(catalog, true)
         .into_iter()
         .map(|choice| choice.backend)
+        .filter(|backend| !retired_backends::is_retired_backend(backend))
         .collect::<Vec<_>>();
+    if let Some(index) = ready_backends
+        .iter()
+        .position(|backend| backend == retired_backends::BUILTIN_DEFAULT_BACKEND)
+    {
+        let builtin = ready_backends.remove(index);
+        ready_backends.insert(0, builtin);
+    }
 
     let Some((default_backend, rotation_backends)) = ready_backends.split_first() else {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -4155,6 +4167,39 @@ mod tests {
                 persisted.agent_task.rotation,
                 Some(serde_json::json!({ "entries": [ { "backend": "zeta" } ] }))
             );
+        });
+    }
+
+    /// #15932: Pi leads the derived chain and a retired backend is never
+    /// written, even when an installed extension still declares it as ready.
+    #[test]
+    fn providers_set_default_leads_with_pi_and_skips_retired_backends() {
+        crate::test_support::with_isolated_home(|_| {
+            let ready = |id: &str, backend: &str| {
+                let mut provider = provider(id, backend);
+                provider.readiness_invocation = Some(
+                    serde_json::from_value(serde_json::json!({
+                        "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                    }))
+                    .expect("readiness invocation"),
+                );
+                provider
+            };
+            let catalog = provider_catalog(vec![
+                ready("alpha.provider", "alpha"),
+                ready("opencode.agent-task-executor", "opencode"),
+                ready("pi.agent-task-executor", "pi"),
+            ]);
+            let output = write_default_backend_from_readiness(&catalog)
+                .expect("pi is live-ready")
+                .0;
+
+            assert_eq!(output["default_backend"], "pi");
+            assert_eq!(
+                output["rotation"],
+                serde_json::json!({ "entries": [ { "backend": "alpha" } ] })
+            );
+            assert_eq!(output["ready_backends"], serde_json::json!(["pi", "alpha"]));
         });
     }
 

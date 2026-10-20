@@ -36,7 +36,7 @@ details stay with the component that knows how to run that backend.
 | Backend category | Adapter owner | Core-facing backend string |
 |------------------|---------------|----------------------------|
 | Runtime sandbox provider | Provider extension integration | provider-defined string |
-| CLI/session provider | Local CLI/session integration | `cli`, `opencode`, or provider-defined string |
+| CLI/session provider | Local CLI/session integration | `cli`, `pi`, or provider-defined string |
 | Remote runner job | Runner/job integration | `runner` or provider-defined string |
 
 The string values are selectors, not an enum in core. This keeps core open to

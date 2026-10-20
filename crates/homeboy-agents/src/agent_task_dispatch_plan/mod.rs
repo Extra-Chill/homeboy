@@ -15,6 +15,7 @@ use crate::agent_task::{
 };
 use crate::agent_task_provider::provider_requires_cwd_git_checkout;
 use crate::agent_task_provider::provider_secret_sources_for_plan;
+use crate::agent_task_retired_backends::{reject_retired_backend, reject_retired_rotation_backends};
 use crate::agent_task_runtime_dependency_graph;
 use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
@@ -183,6 +184,9 @@ pub fn build_dispatch_plan_with_provider_requirements(
         .as_ref()
         .map(|route| route.backend.clone())
         .unwrap_or_else(|| request.backend.clone());
+    // The first rotation entry can select the initial backend, so validate the
+    // route Cook will actually start on, not only the requested backend.
+    reject_retired_backend("backend", &policy_backend)?;
     let policy_selector = initial_route
         .as_ref()
         .and_then(|route| route.selector.clone())
@@ -410,6 +414,11 @@ pub fn build_dispatch_plan_with_provider_requirements(
                     .and_then(|rotation| serde_json::from_value(rotation).ok()),
             }
         };
+    // A retired backend in the configured chain fails validation instead of
+    // routing a later attempt to a dead runtime (#15932).
+    if let Some(rotation) = rotation.as_ref() {
+        reject_retired_rotation_backends("agent_task.rotation", rotation)?;
+    }
     // The budget must be resolved AFTER the rotation policy, not before it.
     // Building it from CLI flags alone left the configured chain loaded,
     // carried, and unreachable: the scheduler gates rotation on
@@ -1040,6 +1049,33 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_plan_rejects_a_global_rotation_naming_a_retired_backend() {
+        with_isolated_home(|_| {
+            let mut config = defaults::load_config();
+            config.agent_task.rotation = Some(serde_json::json!({
+                "entries": [
+                    { "backend": "pi", "model": "roadie/anthropic-claude-sonnet-5-5" },
+                    { "backend": "opencode", "model": "anthropic/claude-sonnet-5-5" }
+                ]
+            }));
+            defaults::save_config(&config).expect("save config");
+
+            let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Cook with a stale rotation.".to_string()),
+                repo: Some("sample-plugin".to_string()),
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect_err("a retired rotation route must not dispatch");
+
+            assert_eq!(
+                error.details["field"].as_str(),
+                Some("agent_task.rotation.entries[1].backend")
+            );
+            assert_eq!(error.details["retired_backend"], "opencode");
+        });
+    }
+
+    #[test]
     fn dispatch_plan_leaves_rotation_unset_without_global_policy() {
         with_isolated_home(|_| {
             let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
@@ -1210,7 +1246,7 @@ mod tests {
                 timeout_ms: Some(2_700_000),
                 resolved_provider_policy: Some(
                     crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
-                        backend: "opencode".to_string(),
+                        backend: "pi".to_string(),
                         selector: None,
                         model: None,
                         rotation: Some(
@@ -1499,7 +1535,7 @@ mod tests {
             defaults::save_config(&config).expect("save config");
             let mut request = dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Cook with the selected global model.".to_string()),
-                backend: Some("opencode".to_string()),
+                backend: Some("pi".to_string()),
                 ..DispatchRequestOverrides::default()
             });
 
@@ -1541,7 +1577,7 @@ mod tests {
             defaults::save_config(&config).expect("save config");
             let submitted_policy =
                 crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
-                    backend: "opencode".to_string(),
+                    backend: "pi".to_string(),
                     selector: None,
                     model: Some("submitted-model".to_string()),
                     rotation: None,
@@ -1623,8 +1659,8 @@ mod tests {
         let request = dispatch_request(DispatchRequestOverrides {
             prompt: Some("Cook the issue cleanly.".to_string()),
             cwd: Some(workspace.path().display().to_string()),
-            backend: Some("opencode".to_string()),
-            selector: Some("opencode.agent-task-executor".to_string()),
+            backend: Some("pi".to_string()),
+            selector: Some("pi.agent-task-executor".to_string()),
             model: Some("gpt-5.5".to_string()),
             core: DispatchCoreInputs {
                 provider_config: Some(r#"{"provider":"openai"}"#.to_string()),
@@ -1641,15 +1677,15 @@ mod tests {
             .runtime_selection
             .as_ref()
             .expect("runtime selection");
-        assert_eq!(executor.backend, "opencode");
+        assert_eq!(executor.backend, "pi");
         assert_eq!(
             executor.selector.as_deref(),
-            Some("opencode.agent-task-executor")
+            Some("pi.agent-task-executor")
         );
-        assert_eq!(selection.executor_backend.as_deref(), Some("opencode"));
+        assert_eq!(selection.executor_backend.as_deref(), Some("pi"));
         assert_eq!(
             selection.executor_provider_id.as_deref(),
-            Some("opencode.agent-task-executor")
+            Some("pi.agent-task-executor")
         );
         assert_eq!(selection.ai_provider_id.as_deref(), Some("openai"));
         assert_eq!(selection.model.as_deref(), Some("gpt-5.5"));
@@ -1657,7 +1693,7 @@ mod tests {
         let serialized = serde_json::to_value(&plan).expect("serialize plan");
         assert_eq!(
             serialized["tasks"][0]["executor"]["runtime_selection"]["executor_provider_id"],
-            "opencode.agent-task-executor"
+            "pi.agent-task-executor"
         );
         assert_eq!(
             serialized["tasks"][0]["executor"]["runtime_selection"]["ai_provider_id"],

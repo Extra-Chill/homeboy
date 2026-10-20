@@ -676,6 +676,28 @@ processes start. Compact `agent-task status` includes `execution_location` as
 | `contract` | Export Homeboy's machine-readable agent-task core contract metadata. |
 | `auth` | Configure and inspect provider authentication secrets. |
 
+#### Coding backend: Pi
+
+Pi is Cook's coding backend. When no `--backend` is passed and no component,
+extension, or Homeboy config policy names `agent_task.default_backend`, Cook
+selects the built-in `pi` backend if the provider catalog declares it; the
+backend selection reports `source: builtin`. Pi routes bill through the Roadie
+credential pool with a per-runner client key, so the reference rotation uses
+pool-backed `roadie/<rotation>` models:
+
+```bash
+homeboy config set /agent_task/default_backend pi
+homeboy config set /agent_task/rotation \
+  '{"entries":[{"backend":"pi","model":"roadie/anthropic-claude-sonnet-5-5"}]}' --json
+homeboy agent-task providers --validate-readiness
+```
+
+The `opencode` backend is retired (#15932). A `--backend opencode`, an
+`agent_task.default_backend` of `opencode`, or an `agent_task.rotation` entry
+naming `opencode` fails validation with `retired_backend` in the error details
+instead of routing to it. `agent-task providers --set-default` never writes a
+retired backend and puts `pi` first when it is ready.
+
 `agent-task contract --format=json` includes `agent_runtime_handshake`, the
 Homeboy-owned extension-facing protocol registry for runtime capability
 manifests, readiness checks, resolved execution contracts, materialization plans,
@@ -847,7 +869,7 @@ with `stale: true` rather than presenting it as current.
 
 Each route's readiness invocation runs with `mode: "capacity"`. Runtimes that
 support this mode answer from provider usage lookups only, so the command
-spends no inference. The OpenCode runtime supports it. For runtimes that don't,
+spends no inference. For runtimes that don't support it,
 the command reports only what the capacity result contains.
 
 - Route probes are bounded. A route that fails is
