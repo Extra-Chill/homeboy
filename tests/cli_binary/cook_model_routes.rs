@@ -289,6 +289,42 @@ if (args[0] === '--version') {{
 
     let source = home.join("source");
     initialize_git_repository(&source);
+    // Cook's base preflight resolves `--base main` with `git ls-remote origin`,
+    // so the fixture needs a real (local, bare) origin carrying `main`.
+    let origin = home.join("origin.git");
+    for (dir, args) in [
+        (
+            home.to_path_buf(),
+            vec![
+                "init",
+                "--quiet",
+                "--bare",
+                origin.to_str().expect("origin path"),
+            ],
+        ),
+        (
+            source.clone(),
+            vec![
+                "remote",
+                "add",
+                "origin",
+                origin.to_str().expect("origin path"),
+            ],
+        ),
+        (source.clone(), vec!["push", "--quiet", "origin", "main"]),
+        (source.clone(), vec!["fetch", "--quiet", "origin"]),
+    ] {
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(&dir)
+            .output()
+            .expect("configure fixture origin");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let workspace = home.join("workspace");
     let linked = Command::new("git")
         .args([
