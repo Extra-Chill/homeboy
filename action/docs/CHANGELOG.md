@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.21.4] - 2026-10-20
+
+### Fixed
+- use Homeboy's fixed inventory file name on the baseline
+
 ## [2.21.3] - 2026-10-20
 
 ### Fixed
