@@ -33,45 +33,14 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
-  lint:
-    name: homeboy / Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - uses: actions/checkout@v6
-        with:
-          repository: Extra-Chill/homeboy-action
-          ref: 8194050639aeb51728460051884f183aa74eade5
-          path: .homeboy-action
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        continue-on-error: true
-        with:
-          client-id: ${{ secrets.HOMEBOY_APP_ID }}
-          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
-      - uses: ./.homeboy-action
-        with:
-          source: .
-          component: homeboy
-          commands: review lint
-          expected-commands: review lint,review test
-          differential-gating: true
-          execution-timeout-seconds: '1800'
-          test-timeout-seconds: '1500'
-          setup-timeout-seconds: '2400'
-          app-token: ${{ steps.app-token.outputs.token || github.token }}
-          comment-section-key: lint
-          comment-section-title: Lint
-
   homeboy:
     name: homeboy
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@e598b0f6c53407b2680517ff36802daabdc30947
     with:
-      commands: review test
-      args: --skip-lint
+      # Lint and Test share the prepared candidate binary and retain separate
+      # checks/comment sections via the workflow's per-command defaults.
+      # Keep --skip-lint test-local; shared args would pass it to review lint.
+      commands: review lint,review test --skip-lint
       expected-commands: review lint,review test
       component: homeboy
       # Released cache ownership repair, including native colored-retry coverage.
@@ -80,11 +49,9 @@ jobs:
       source: .
       scope: auto
       differential-gating: 'true'
-      baseline-commands: review test
+      baseline-commands: review lint,review test --skip-lint
       test-shards: '1'
       execution-timeout-seconds: '2100'
       test-timeout-seconds: '1800'
       setup-timeout-seconds: '2400'
-      comment-section-key: test
-      comment-section-title: Test
     secrets: inherit
