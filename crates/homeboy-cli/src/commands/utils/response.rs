@@ -3160,6 +3160,38 @@ mod tests {
         }
     }
 
+    /// #16229: `agent-task recover` with no recovery step declares the step
+    /// reason as its failure; the summary carries it, not the generic message.
+    #[test]
+    fn recover_without_a_step_summarizes_the_declared_reason() {
+        let reason = "Cook status `gate_failed` admits no recovery step; inspect it with `agent-task status` or `agent-task diagnose`.";
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({
+                "schema": "homeboy/agent-task-cook-recovery/v1",
+                "cook_id": "cook-1",
+                "run_id": "run-1",
+                "status": "gate_failed",
+                "step": { "step": "none", "reason": reason },
+                "preflight": false,
+                "result": null,
+                "failure": {
+                    "code": "agent_task.recover_no_step",
+                    "message": reason,
+                    "details": { "status": "gate_failed", "run_id": "run-1" },
+                },
+            })),
+            1,
+            &CommandIdentity::with_operation("agent-task", "recover"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["summary"], reason);
+        assert_eq!(value["diagnostics"]["message"], reason);
+        assert_eq!(value["diagnostics"]["code"], "agent_task.recover_no_step");
+        assert_eq!(value["diagnostics"]["details"]["status"], "gate_failed");
+    }
+
     #[test]
     fn truly_causeless_nonzero_result_keeps_generic_failure() {
         let response = cli_response_for_json_result_for_identity(
