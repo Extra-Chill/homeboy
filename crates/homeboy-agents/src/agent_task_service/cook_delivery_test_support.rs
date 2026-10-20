@@ -66,6 +66,7 @@ pub fn record_cook_delivery_blocker_for_test(
         next_action: next_action.map(str::to_string),
         cause: None,
         evidence: RECORDED_BLOCKER_EVIDENCE.to_string(),
+        output: None,
     });
     delivery.base_movements = base_movements;
     metadata[COOK_DELIVERY_KEY] = CookDelivery::to_record(Some(&delivery), &artifacts);

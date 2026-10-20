@@ -631,6 +631,14 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         } else {
             lines.push(format!("Blocker: {blocker}"));
         }
+        // A failed gate's bounded output excerpt (#16218): the command alone
+        // does not say why it failed.
+        if let Some(output) =
+            string_value(payload, &["blocker", "output"]).filter(|output| !output.trim().is_empty())
+        {
+            lines.push("Output:".to_string());
+            lines.extend(output.lines().map(|line| format!("  {line}")));
+        }
     }
     if payload.get("blocker").is_none_or(Value::is_null) {
         if let Some(reason) = string_value(payload, &["reason"]) {
@@ -2498,6 +2506,34 @@ mod tests {
         assert!(summary.contains("Artifacts: 1\n"), "{summary}");
         assert!(
             summary.contains("Next: homeboy agent-task review agent-task-cook-attempt-1\n"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn gate_failure_excerpt_renders_as_status_output_block() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "mission": "agent-task-cook",
+            "run": "agent-task-cook-attempt-1",
+            "state": "candidate_recoverable",
+            "candidate": { "state": "gate_failed" },
+            "gates": [{ "id": "test", "state": "failed" }],
+            "blocker": {
+                "code": "gate_failed",
+                "message": "deterministic gate `test` failed",
+                "output": "gate: test\ncommand: cargo test\nexit code: 101\noutput:\ntest parser::rejects_empty ... FAILED",
+            },
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(
+            summary.contains("Blocker: deterministic gate `test` failed\nOutput:\n  gate: test\n"),
+            "{summary}"
+        );
+        assert!(summary.contains("  exit code: 101\n"), "{summary}");
+        assert!(
+            summary.contains("  test parser::rejects_empty ... FAILED\n"),
             "{summary}"
         );
     }

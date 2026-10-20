@@ -287,6 +287,7 @@ mod tests {
             reason: None,
             retry: None,
             daemon: None,
+            output: None,
         });
         let verdict = cook_verdict(&run);
         assert_eq!(
