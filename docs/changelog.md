@@ -4,6 +4,27 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.431.0] - 2026-10-20
+
+### Added
+- version-file locks, GitHub-release and npm sources, and a same-major policy for stack edges
+- refresh declared dependencies inside release commits
+- add deps stack refresh with a breaking verdict per updated edge
+
+### Changed
+- Classify missing gate executables as invalid gate declarations
+- agent-task recover: add replace-gates and publish steps; retire verify-replacement, record-replacement-gate-proof and finalize-pr --recover
+- Type the last direct agent-task state writes through the transition module (#15718 step 4b)
+- Explain substring cargo gate filters as gate declarations
+- Re-run Lab workspace staging when its receipt was never written
+- add end-to-end repository-cleanliness gate
+
+### Fixed
+- record Lab snapshot entries under their Git-tracked spelling
+- size and reclaim bytes inside explicit Cargo target registrations
+- reject unrunnable nested homeboy review test gates at admission
+- move remaining in-tree .homeboy/ writers to Homeboy-owned state outside the workspace
+
 ## [0.430.1] - 2026-10-20
 
 ### Changed
