@@ -3183,8 +3183,8 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         if checkpoint.phase == LabStagingPhase::AcceptedMaterializeWorkspace {
             return Ok(());
         }
-        // A recorded workspace is authoritative. A missing or tampered durable
-        // attachment is a recovery failure, never permission to sync again.
+        // Once the checkpoint has passed workspace materialization, its recorded
+        // workspace is authoritative; missing or tampered attachments fail closed.
         Self::durable_workspace(request)?
             .payload
             .validate(request, checkpoint)?;
@@ -3235,8 +3235,16 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         }
         match checkpoint.phase {
             LabStagingPhase::AcceptedMaterializeWorkspace => {
-                let workspace = Self::durable_workspace(request)
-                    .map_err(|_| Self::ambiguous_intent("workspace"))?;
+                let Some(workspace) =
+                    homeboy_agents::agent_task_lifecycle::try_load_private_run_attachment::<
+                        DurableLabWorkspaceStage,
+                    >(
+                        &request.recipe.run_id,
+                        DURABLE_LAB_WORKSPACE_STAGE_ATTACHMENT_KIND,
+                    )?
+                else {
+                    return Ok(None);
+                };
                 let mut completed = checkpoint.clone();
                 completed.phase = LabStagingPhase::MaterializeRuntime;
                 completed.stage_intent = None;
@@ -7694,18 +7702,48 @@ mod tests {
     }
 
     #[test]
-    fn production_recovery_fails_closed_for_an_intent_without_a_receipt() {
-        let request = execution_request();
-        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
-        let intent = checkpoint.intent_for_current_action();
-        checkpoint.stage_intent = Some(intent.clone());
-        let error = ProductionLabStagingOperations
-            .recover_stage(&request, &checkpoint, &intent)
-            .expect_err("an intent with no workspace receipt is ambiguous");
-        assert_eq!(
-            error.code,
-            homeboy_core::ErrorCode::ValidationInvalidArgument
-        );
+    fn workspace_intent_without_receipt_recovers_to_rematerialize() {
+        let _serial = global_state_lock().lock().expect("lock");
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let request = execution_request();
+            submit_recipe_run(&request.recipe.run_id);
+            let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+            let intent = checkpoint.intent_for_current_action();
+            checkpoint.stage_intent = Some(intent.clone());
+
+            let recovered = ProductionLabStagingOperations
+                .recover_stage(&request, &checkpoint, &intent)
+                .expect("an unreceipted workspace intent is re-run, not ambiguous");
+            assert!(recovered.is_none());
+        });
+    }
+
+    #[test]
+    fn workspace_intent_with_invalid_receipt_fails_closed() {
+        let _serial = global_state_lock().lock().expect("lock");
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let request = execution_request();
+            submit_recipe_run(&request.recipe.run_id);
+            let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+            let intent = checkpoint.intent_for_current_action();
+            checkpoint.stage_intent = Some(intent.clone());
+            let mut tampered = durable_workspace_state(&request);
+            tampered.stage["source_snapshot"]["remote_path"] = json!("/other");
+            homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
+                &request.recipe.run_id,
+                DURABLE_LAB_WORKSPACE_STAGE_ATTACHMENT_KIND,
+                &tampered,
+            )
+            .expect("persist tampered workspace receipt");
+
+            let error = ProductionLabStagingOperations
+                .recover_stage(&request, &checkpoint, &intent)
+                .expect_err("a recorded but invalid workspace receipt fails closed");
+            assert_eq!(
+                error.code,
+                homeboy_core::ErrorCode::ValidationInvalidArgument
+            );
+        });
     }
 
     struct CancellationAdapter(Arc<AtomicUsize>);

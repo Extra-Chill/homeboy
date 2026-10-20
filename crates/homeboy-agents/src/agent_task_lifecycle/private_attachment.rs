@@ -243,15 +243,19 @@ pub fn persist_private_run_attachment<T: Serialize + DeserializeOwned + Clone + 
     ))
 }
 
-pub fn load_private_run_attachment<T: Serialize + DeserializeOwned>(
+pub fn try_load_private_run_attachment<T: Serialize + DeserializeOwned>(
     run_id: &str,
     kind: &str,
-) -> Result<PrivateRunAttachment<T>> {
+) -> Result<Option<PrivateRunAttachment<T>>> {
     let run_id = validated_run_id(run_id)?;
     store::read_record(&run_id)?;
     let path = attachment_path(&run_id, kind)?;
     ensure_private_directory(&run_id)?;
-    let metadata = fs::symlink_metadata(&path).map_err(io_error("inspect private attachment"))?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("inspect private attachment")(error)),
+    };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(Error::validation_invalid_argument(
             "private_attachment",
@@ -282,5 +286,14 @@ pub fn load_private_run_attachment<T: Serialize + DeserializeOwned>(
         diagnostic
     })?;
     validate(&attachment, &run_id, kind)?;
-    Ok(attachment)
+    Ok(Some(attachment))
+}
+
+pub fn load_private_run_attachment<T: Serialize + DeserializeOwned>(
+    run_id: &str,
+    kind: &str,
+) -> Result<PrivateRunAttachment<T>> {
+    // Callers that require the attachment treat absence as an I/O failure.
+    try_load_private_run_attachment(run_id, kind)?
+        .ok_or_else(|| Error::internal_io("inspect private attachment", None))
 }
