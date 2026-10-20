@@ -834,7 +834,11 @@ fn retained_storage_report(
             store.reasons.join(", ")
         } else if store.reasons.iter().any(|reason| reason == "active_lease") {
             "active lease".to_string()
-        } else if !store.reasons.iter().any(|reason| reason == "age_expired") {
+        } else if !store
+            .reasons
+            .iter()
+            .any(|reason| reason == "age_expired" || reason == "orphaned_explicit_registration")
+        {
             "within age and size budget".to_string()
         } else {
             continue;

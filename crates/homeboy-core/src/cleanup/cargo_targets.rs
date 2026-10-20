@@ -973,9 +973,14 @@ fn cleanup_shared_cargo_targets_with_reserve_deficit(
             continue;
         }
         let capacity_eligible = reserve_deficit_bytes > 0;
-        let eligible = store.reasons.iter().any(|reason| reason == "age_expired")
-            || remaining > options.max_bytes
-            || capacity_eligible;
+        // An orphaned explicit registration holds no caller-owned bytes: its
+        // recorded target is gone, so the lifecycle record itself is always
+        // reclaimable.
+        let eligible =
+            store.reasons.iter().any(|reason| {
+                reason == "age_expired" || reason == "orphaned_explicit_registration"
+            }) || remaining > options.max_bytes
+                || capacity_eligible;
         if !eligible {
             *retained_by_reason
                 .entry("within age and size budget".to_string())
@@ -1353,8 +1358,9 @@ fn retain_recent_shared_cargo_targets(root: &Path, current: &[&Path]) {
 /// [`remove_store_if_unleased`], which re-checks both under the exclusive
 /// lock. A base store is also in use while any run-private store derived from
 /// it (owner `<base owner>:run:...`) is active, because that run promotes into
-/// it on release. Caller-owned explicit registrations and stores without
-/// lifecycle metadata are retained; cleanup reports them as skipped.
+/// it on release. Caller-owned explicit registrations are retained unless they
+/// hold strayed Cargo output, which is Homeboy-owned; stores without lifecycle
+/// metadata are retained too, and cleanup reports both as skipped or managed.
 /// Returns the removed store paths.
 fn evict_stale_shared_cargo_targets(
     root: &Path,
@@ -1375,7 +1381,13 @@ fn evict_stale_shared_cargo_targets(
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             continue;
         }
-        if !sidecar_absent(&path, EXPLICIT_TARGET_FILE) {
+        // A caller-owned explicit registration is retained unless it holds
+        // Cargo output (Extra-Chill/homeboy#16187): those bytes are
+        // Homeboy-owned and evictable when the store is idle. A lifecycle-only
+        // registration, or one whose contents cannot be measured, is kept.
+        if !sidecar_absent(&path, EXPLICIT_TARGET_FILE)
+            && !matches!(path_size(&path), Ok(bytes) if bytes > 0)
+        {
             continue;
         }
         let Some(last_used_unix_ms) = last_used(&path) else {
@@ -1440,18 +1452,52 @@ fn inventory(
         }
         match explicit_target_record(&path) {
             Ok(Some(record)) => {
+                // A registration directory is a lifecycle-only container for a
+                // caller-owned target (Extra-Chill/homeboy#16187). Cargo output
+                // observed inside it is Homeboy's responsibility: those bytes
+                // are inventoried and reclaimed like any managed store, and a
+                // registration whose recorded target vanished is an orphan.
+                // The recorded external path itself is never touched.
+                let active = store_is_active(&path, now, lease_ttl)?;
+                let registration_bytes = path_size(&path)?;
                 let target_path = PathBuf::from(&record.path);
-                let mut reasons = vec![format!("skipped:{CALLER_OWNED_EXPLICIT_TARGET}")];
-                if store_is_active(&path, now, lease_ttl)? {
-                    reasons.push("active_lease".to_string());
+                let last_used_unix_ms = last_used(&path).unwrap_or_default();
+                if registration_bytes > 0 {
+                    let mut reasons = Vec::new();
+                    if is_expired(last_used_unix_ms, now, older_than) {
+                        reasons.push("age_expired".to_string());
+                    }
+                    if active {
+                        reasons.push("active_lease".to_string());
+                    }
+                    stores.push(CargoTargetStore {
+                        path: path.to_string_lossy().to_string(),
+                        owner: read_owner(&path),
+                        size_bytes: registration_bytes,
+                        last_used_unix_ms,
+                        reasons,
+                    });
+                } else if !active && fs::symlink_metadata(&target_path).is_err() {
+                    stores.push(CargoTargetStore {
+                        path: path.to_string_lossy().to_string(),
+                        owner: read_owner(&path),
+                        size_bytes: 0,
+                        last_used_unix_ms,
+                        reasons: vec!["orphaned_explicit_registration".to_string()],
+                    });
+                } else {
+                    let mut reasons = vec![format!("skipped:{CALLER_OWNED_EXPLICIT_TARGET}")];
+                    if active {
+                        reasons.push("active_lease".to_string());
+                    }
+                    stores.push(CargoTargetStore {
+                        path: record.path,
+                        owner: read_owner(&path),
+                        size_bytes: observed_path_size(&target_path)?,
+                        last_used_unix_ms,
+                        reasons,
+                    });
                 }
-                stores.push(CargoTargetStore {
-                    path: record.path,
-                    owner: read_owner(&path),
-                    size_bytes: observed_path_size(&target_path)?,
-                    last_used_unix_ms: last_used(&path).unwrap_or_default(),
-                    reasons,
-                });
                 continue;
             }
             Ok(None) => {}
@@ -2819,5 +2865,271 @@ mod tests {
         assert!(!stale.exists());
         assert!(source.path().join("Cargo.toml").exists());
         assert!(absolute.path().join("artifact").exists());
+    }
+
+    /// Extra-Chill/homeboy#16187: Cargo output that strayed into an
+    /// explicit-target registration directory is Homeboy-owned. It is
+    /// inventoried at the registration path, offered to admission and cleanup
+    /// as reclaimable, and removed like any managed store, while the recorded
+    /// external target is never touched. That includes the reported incident
+    /// shape: a build tree inside a registration whose recorded path is
+    /// missing is still sized and reclaimed, not reported as a zero-byte
+    /// orphan.
+    #[test]
+    fn explicit_registration_holding_build_output_is_reclaimed_without_touching_the_target() {
+        let root = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        fs::write(external.path().join("artifact"), b"caller output").unwrap();
+        let external_target = external.path().display().to_string();
+        let registration = acquire_explicit_cargo_target_in(
+            root.path(),
+            "caller-owned",
+            source.path(),
+            &external_target,
+            now,
+        )
+        .unwrap();
+        let registration_dir = shared_store_dir(
+            root.path(),
+            &format!("explicit-cargo-target:{external_target}"),
+        );
+        fs::create_dir_all(registration_dir.join("debug")).unwrap();
+        fs::write(registration_dir.join("debug/x"), vec![b'x'; 9]).unwrap();
+        drop(registration);
+        let vanished = source.path().join("vanished-target");
+        let strayed = acquire_explicit_cargo_target_in(
+            root.path(),
+            "caller-owned",
+            source.path(),
+            "vanished-target",
+            now,
+        )
+        .unwrap();
+        let strayed_dir = shared_store_dir(
+            root.path(),
+            &format!("explicit-cargo-target:{}", vanished.display()),
+        );
+        fs::create_dir_all(strayed_dir.join("debug")).unwrap();
+        fs::write(strayed_dir.join("debug/y"), vec![b'y'; 5]).unwrap();
+        drop(strayed);
+        for dir in [&registration_dir, &strayed_dir] {
+            write_last_used(dir, now.checked_sub(Duration::from_secs(61)).unwrap()).unwrap();
+        }
+        assert!(registration_dir.is_dir());
+        assert!(strayed_dir.is_dir());
+        assert!(!vanished.exists(), "fixture requires a missing target");
+
+        let stores = inventory(
+            root.path(),
+            now,
+            Duration::from_secs(60),
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+        assert_eq!(stores.len(), 2);
+        let held = stores
+            .iter()
+            .find(|store| store.path == registration_dir.display().to_string())
+            .unwrap();
+        assert_eq!(held.size_bytes, 9);
+        assert!(held.reasons.iter().any(|reason| reason == "age_expired"));
+        let stray = stores
+            .iter()
+            .find(|store| store.path == strayed_dir.display().to_string())
+            .unwrap();
+        assert_eq!(stray.size_bytes, 5);
+        assert!(stray.reasons.iter().any(|reason| reason == "age_expired"));
+        assert!(!stores.iter().any(|store| store
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("skipped:"))));
+        assert!(!stores.iter().any(|store| store
+            .reasons
+            .iter()
+            .any(|reason| reason == "orphaned_explicit_registration")));
+
+        let retention = crate::defaults::RetentionConfig {
+            shared_store_reserve_bytes: 100,
+            shared_store_reserve_inodes: 10,
+            ..crate::defaults::RetentionConfig::default()
+        };
+        let error = admit_shared_cargo_target_with_capacity(
+            root.path(),
+            &retention,
+            FilesystemCapacity {
+                filesystem: "constrained-test-volume".to_string(),
+                available_bytes: 99,
+                available_inodes: 9,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.details["eligible_reclaimable_bytes"], 14);
+        assert_eq!(error.details["caller_owned_bytes"], 0);
+
+        let dry_run = cleanup_shared_cargo_targets(options(root.path(), false, now)).unwrap();
+        assert_eq!(dry_run.candidate_count, 2);
+        assert_eq!(dry_run.inventory_bytes, 14);
+        assert_eq!(dry_run.storage.managed_bytes, 14);
+        assert_eq!(dry_run.storage.protected_bytes, 0);
+        assert!(registration_dir.is_dir());
+        assert!(strayed_dir.is_dir());
+        assert!(external.path().join("artifact").is_file());
+
+        let output = cleanup_shared_cargo_targets(options(root.path(), true, now)).unwrap();
+        assert_eq!(output.applied_count, 2);
+        assert!(!registration_dir.exists());
+        assert!(!strayed_dir.exists());
+        assert_eq!(
+            fs::read(external.path().join("artifact")).unwrap(),
+            b"caller output"
+        );
+        assert!(!vanished.exists());
+    }
+
+    /// Extra-Chill/homeboy#16187: a registration whose recorded external
+    /// target is missing and whose lease is gone is an orphan: reported at the
+    /// registration path with size 0 and reclaimed on apply.
+    #[test]
+    fn orphaned_explicit_registration_without_a_lease_is_reclaimed() {
+        let root = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        let external_target = source.path().join("never-created-target");
+        let registration = acquire_explicit_cargo_target_in(
+            root.path(),
+            "caller-owned",
+            source.path(),
+            "never-created-target",
+            now,
+        )
+        .unwrap();
+        assert_eq!(registration.target_dir(), external_target.as_path());
+        assert!(
+            !external_target.exists(),
+            "fixture requires a missing target"
+        );
+        let registration_dir = shared_store_dir(
+            root.path(),
+            &format!("explicit-cargo-target:{}", external_target.display()),
+        );
+        drop(registration);
+
+        let stores = inventory(
+            root.path(),
+            now,
+            Duration::from_secs(60),
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+        assert_eq!(stores.len(), 1);
+        assert_eq!(stores[0].path, registration_dir.display().to_string());
+        assert_eq!(stores[0].size_bytes, 0);
+        assert_eq!(
+            stores[0].reasons,
+            vec!["orphaned_explicit_registration".to_string()]
+        );
+
+        let dry_run = cleanup_shared_cargo_targets(options(root.path(), false, now)).unwrap();
+        assert_eq!(dry_run.candidate_count, 1);
+        assert!(registration_dir.is_dir());
+
+        let output = cleanup_shared_cargo_targets(options(root.path(), true, now)).unwrap();
+        assert_eq!(output.applied_count, 1);
+        assert!(!registration_dir.exists());
+    }
+
+    /// Extra-Chill/homeboy#16187: an orphan whose lease is still live is not
+    /// reclaimable yet: it keeps the caller-owned classification and survives
+    /// an apply.
+    #[test]
+    fn orphaned_explicit_registration_with_an_active_lease_is_retained() {
+        let root = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        let external_target = source.path().join("never-created-target");
+        let registration = acquire_explicit_cargo_target_in(
+            root.path(),
+            "caller-owned",
+            source.path(),
+            "never-created-target",
+            now,
+        )
+        .unwrap();
+        assert!(
+            !external_target.exists(),
+            "fixture requires a missing target"
+        );
+        let registration_dir = shared_store_dir(
+            root.path(),
+            &format!("explicit-cargo-target:{}", external_target.display()),
+        );
+
+        let output = cleanup_shared_cargo_targets(options(root.path(), true, now)).unwrap();
+        assert_eq!(output.applied_count, 0);
+        assert_eq!(output.retained_by_reason[CALLER_OWNED_EXPLICIT_TARGET], 1);
+        assert!(registration_dir.is_dir());
+        assert!(registration_dir.join(EXPLICIT_TARGET_FILE).is_file());
+        assert!(!external_target.exists());
+        drop(registration);
+    }
+
+    /// Extra-Chill/homeboy#16187: post-acquire eviction agrees with the
+    /// inventory classification: build output inside an explicit registration
+    /// is evictable when the store is idle, a lifecycle-only registration is
+    /// not.
+    #[test]
+    fn eviction_reclaims_registration_output_but_not_pure_registrations() {
+        let root = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        fs::write(external.path().join("artifact"), b"caller output").unwrap();
+        let external_target = external.path().display().to_string();
+        let holding = acquire_explicit_cargo_target_in(
+            root.path(),
+            "caller-owned",
+            source.path(),
+            &external_target,
+            now,
+        )
+        .unwrap();
+        let holding_dir = shared_store_dir(
+            root.path(),
+            &format!("explicit-cargo-target:{external_target}"),
+        );
+        fs::write(holding_dir.join("debug-artifact"), vec![b'x'; 4]).unwrap();
+        drop(holding);
+        let pure = acquire_explicit_cargo_target_in(
+            root.path(),
+            "caller-owned",
+            source.path(),
+            "generated-target",
+            now,
+        )
+        .unwrap();
+        let pure_dir = shared_store_dir(
+            root.path(),
+            &format!(
+                "explicit-cargo-target:{}",
+                source.path().join("generated-target").display()
+            ),
+        );
+        drop(pure);
+        for dir in [&holding_dir, &pure_dir] {
+            write_last_used(dir, now.checked_sub(Duration::from_secs(61)).unwrap()).unwrap();
+        }
+
+        let removed =
+            evict_stale_shared_cargo_targets(root.path(), &[], 0, now, Duration::from_secs(3600))
+                .unwrap();
+
+        assert_eq!(removed, vec![holding_dir.clone()]);
+        assert!(pure_dir.is_dir());
+        assert_eq!(
+            fs::read(external.path().join("artifact")).unwrap(),
+            b"caller output"
+        );
     }
 }
