@@ -130,7 +130,15 @@ node ~/.config/homeboy/extensions/discord/scripts/notify.mjs \
   --run-id run-123 --status pass --title 'homeboy run pass' --body 'Run completed' --dry-run
 ```
 
-Discord content is bounded to 2,000 characters. The helper retries a Discord `429` at most twice, using the service's `retry_after` value capped at five seconds. Authentication and destination/input rejections are reported as typed `auth_error` or `input_error` results; credentials, webhook URLs, and destination IDs are never included in diagnostics. Result evidence exposes only a route kind and a safe destination classification.
+Discord content is bounded to 2,000 characters. The helper retries a Discord `429` at most twice, using the service's `retry_after` value capped at five seconds. Authentication and destination/input rejections are reported as typed `auth_error` or `input_error` results; credentials, webhook URLs, and destination IDs are never included in diagnostics.
+
+A request refused before any delivery attempt (missing or ambiguous auth mode, no destination, malformed route, or invalid configuration) is reported as a Homeboy terminal rejection, so the outbox stops instead of retrying an event that cannot succeed:
+
+```json
+{"schema":"homeboy/notification-transport-result/v1","status":"rejected","attempts":0,"terminal_rejection":{"schema":"homeboy/notification-transport-rejection/v1","reason_code":"not_configured","validation_field":"auth"},"error":{"kind":"input_error","message":"Configure exactly one auth mode: DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL."}}
+```
+
+Reason codes are `invalid_request`, `invalid_route`, `not_configured`, and `invalid_configuration`. Result evidence exposes only a route kind and a safe destination classification.
 
 `DISCORD_OPERATIONS_CHANNEL_ID` is an optional bot-mode operations fallback only
 when a run has no route. Without a route or this explicit fallback, bot delivery

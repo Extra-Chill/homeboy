@@ -30,6 +30,7 @@ await testAuthFailureClassification();
 await testTruncation();
 await testRedactionAndDryRun();
 await testTransportFlagIsAccepted();
+await testConfigurationFailuresAreTerminalRejections();
 await testDeprecatedBotTokenAlias();
 await testOwningSessionThreadDeliversThroughCommandSender();
 await testOwningSessionThreadDeliversThroughHttpSender();
@@ -400,6 +401,40 @@ async function testOperationsChannelDelivery() {
     assert.equal(result.delivery.destination, 'operations_channel');
     assert.equal(requests[0].url, `/api/v10/channels/${channelId}/messages`);
   });
+}
+
+// A request the transport refuses before any delivery attempt cannot succeed on
+// retry. It must use Homeboy's terminal rejection contract (schema, `rejected`,
+// zero attempts, reason code) so the outbox stops instead of retrying the event
+// until it dead-letters.
+async function testConfigurationFailuresAreTerminalRejections() {
+  const cases = [
+    [{}, {}, 'not_configured', 'auth'],
+    [{ DISCORD_BOT_TOKEN: secretToken, DISCORD_WEBHOOK_URL: 'https://example.test/hook' }, {}, 'not_configured', 'auth'],
+    [{ DISCORD_BOT_TOKEN: secretToken }, {}, 'not_configured', 'DISCORD_OPERATIONS_CHANNEL_ID'],
+    [{ DISCORD_BOT_TOKEN: secretToken, DISCORD_OPERATIONS_CHANNEL_ID: 'general' }, {}, 'invalid_configuration', 'DISCORD_OPERATIONS_CHANNEL_ID'],
+    [{ DISCORD_WEBHOOK_URL: 'not a url' }, {}, 'invalid_configuration', 'DISCORD_WEBHOOK_URL'],
+    [{ DISCORD_BOT_TOKEN: secretToken }, { route: 'discord:v1:thread:nope' }, 'invalid_route', 'route'],
+  ];
+  for (const [env, options, reasonCode, field] of cases) {
+    await withServer(async ({ baseUrl, requests }) => {
+      const run = await notifyRaw({ DISCORD_API_BASE_URL: `${baseUrl}/api/v10`, ...env }, options);
+      const result = JSON.parse(run.stdout);
+      const label = `${reasonCode}/${field}`;
+      assert.equal(run.code, 1, label);
+      assert.equal(result.schema, 'homeboy/notification-transport-result/v1', label);
+      assert.equal(result.status, 'rejected', label);
+      assert.equal(result.attempts, 0, label);
+      assert.deepEqual(
+        result.terminal_rejection,
+        { schema: 'homeboy/notification-transport-rejection/v1', reason_code: reasonCode, validation_field: field },
+        label,
+      );
+      assert.equal(result.error.kind, 'input_error', label);
+      assert.equal(requests.length, 0, label);
+      assert.doesNotMatch(run.stdout, new RegExp(secretToken), label);
+    });
+  }
 }
 
 async function testRouteLessBotFailsClosed() {

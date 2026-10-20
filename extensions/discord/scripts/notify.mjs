@@ -11,7 +11,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const validation = validate(args, process.env);
   if (!validation.ok) {
-    return finish(failure('input_error', validation.error));
+    return finish(rejection(validation));
   }
   // Deprecated configuration in use is reported on every envelope so an
   // operator sees it without failing delivery.
@@ -110,12 +110,12 @@ function parseArgs(tokens) {
 
 function validate(args, env) {
   if (args.error || !nonEmpty(args.runId) || !nonEmpty(args.status) || !nonEmpty(args.title) || !nonEmpty(args.body)) {
-    return { ok: false, error: args.error || 'run-id, status, title, and body must be non-empty.' };
+    return invalid('invalid_request', undefined, args.error || 'run-id, status, title, and body must be non-empty.');
   }
 
   const route = value(args.route);
   const parsedRoute = route === undefined ? undefined : parseRoute(route);
-  if (parsedRoute?.error) return { ok: false, error: parsedRoute.error };
+  if (parsedRoute?.error) return invalid('invalid_route', 'route', parsedRoute.error);
 
   const deprecations = [];
 
@@ -135,7 +135,7 @@ function validate(args, env) {
   // to read without interrupting the agent.
   if (parsedRoute?.kind === 'thread' && !isProgressOnlyStatus(args.status)) {
     const configured = sessionSender(env);
-    if (configured.error) return { ok: false, error: configured.error };
+    if (configured.error) return invalid('invalid_configuration', 'session_sender', configured.error);
     deprecations.push(...configured.deprecations);
     if (configured.sender) {
       return {
@@ -157,33 +157,33 @@ function validate(args, env) {
   }
   const webhookUrl = value(env.DISCORD_WEBHOOK_URL);
   if (Boolean(botToken) === Boolean(webhookUrl)) {
-    return { ok: false, error: 'Configure exactly one auth mode: DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL.' };
+    return invalid('not_configured', 'auth', 'Configure exactly one auth mode: DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL.');
   }
 
   const operationsChannelId = value(env.DISCORD_OPERATIONS_CHANNEL_ID);
   if (botToken) {
     const resolved = resolveBotDestination(parsedRoute, operationsChannelId);
-    if (resolved.error) return { ok: false, error: resolved.error };
+    if (resolved.error) return invalid(resolved.reason, 'DISCORD_OPERATIONS_CHANNEL_ID', resolved.error);
     const apiBase = value(env.DISCORD_API_BASE_URL) || 'https://discord.com/api/v10';
     let url;
     try {
       url = new URL(`channels/${encodeURIComponent(resolved.id)}/messages`, ensureApiBase(apiBase));
     } catch {
-      return { ok: false, error: 'DISCORD_API_BASE_URL must be a valid HTTP(S) URL.' };
+      return invalid('invalid_configuration', 'DISCORD_API_BASE_URL', 'DISCORD_API_BASE_URL must be a valid HTTP(S) URL.');
     }
-    if (!isHttp(url)) return { ok: false, error: 'DISCORD_API_BASE_URL must be an HTTP(S) URL.' };
+    if (!isHttp(url)) return invalid('invalid_configuration', 'DISCORD_API_BASE_URL', 'DISCORD_API_BASE_URL must be an HTTP(S) URL.');
     return { ok: true, mode: 'bot', ...resolved, url, headers: { authorization: `Bot ${botToken}`, 'content-type': 'application/json' }, deprecations };
   }
 
-  if (operationsChannelId) return { ok: false, error: 'Webhook mode does not use DISCORD_OPERATIONS_CHANNEL_ID.' };
-  if (parsedRoute?.kind === 'channel') return { ok: false, error: 'A channel route requires DISCORD_BOT_TOKEN; webhook delivery can only target its configured webhook channel or a thread.' };
+  if (operationsChannelId) return invalid('invalid_configuration', 'DISCORD_OPERATIONS_CHANNEL_ID', 'Webhook mode does not use DISCORD_OPERATIONS_CHANNEL_ID.');
+  if (parsedRoute?.kind === 'channel') return invalid('invalid_route', 'route', 'A channel route requires DISCORD_BOT_TOKEN; webhook delivery can only target its configured webhook channel or a thread.');
   let url;
   try {
     url = new URL(webhookUrl);
   } catch {
-    return { ok: false, error: 'DISCORD_WEBHOOK_URL must be a valid HTTP(S) URL.' };
+    return invalid('invalid_configuration', 'DISCORD_WEBHOOK_URL', 'DISCORD_WEBHOOK_URL must be a valid HTTP(S) URL.');
   }
-  if (!isHttp(url)) return { ok: false, error: 'DISCORD_WEBHOOK_URL must be an HTTP(S) URL.' };
+  if (!isHttp(url)) return invalid('invalid_configuration', 'DISCORD_WEBHOOK_URL', 'DISCORD_WEBHOOK_URL must be an HTTP(S) URL.');
   url.searchParams.set('wait', 'true');
   if (parsedRoute?.kind === 'thread') url.searchParams.set('thread_id', parsedRoute.id);
   return {
@@ -199,8 +199,8 @@ function validate(args, env) {
 
 function resolveBotDestination(route, operationsChannelId) {
   if (route) return { id: route.id, route_kind: route.kind, destination: `dynamic_${route.kind}` };
-  if (!operationsChannelId) return { error: 'Bot mode without --route requires DISCORD_OPERATIONS_CHANNEL_ID.' };
-  if (!isSnowflake(operationsChannelId)) return { error: 'DISCORD_OPERATIONS_CHANNEL_ID must be a Discord snowflake.' };
+  if (!operationsChannelId) return { reason: 'not_configured', error: 'Bot mode without --route requires DISCORD_OPERATIONS_CHANNEL_ID.' };
+  if (!isSnowflake(operationsChannelId)) return { reason: 'invalid_configuration', error: 'DISCORD_OPERATIONS_CHANNEL_ID must be a Discord snowflake.' };
   return { id: operationsChannelId, route_kind: 'operations', destination: 'operations_channel' };
 }
 
@@ -259,9 +259,31 @@ function failure(kind, error, delivery = undefined, attempts = 0, httpStatus = u
   };
 }
 
+// A validation failure happens before any delivery attempt and is fixed only by
+// changing the request or the transport's configuration, so retrying the same
+// event cannot succeed. Homeboy's terminal rejection contract tells its outbox
+// to stop instead of retrying the entry until it dead-letters.
+function invalid(reasonCode, field, error) {
+  return { ok: false, reasonCode, field, error };
+}
+
+function rejection(validation) {
+  return {
+    schema: 'homeboy/notification-transport-result/v1',
+    status: 'rejected',
+    attempts: 0,
+    terminal_rejection: {
+      schema: 'homeboy/notification-transport-rejection/v1',
+      reason_code: validation.reasonCode,
+      ...(validation.field === undefined ? {} : { validation_field: validation.field }),
+    },
+    error: { kind: 'input_error', message: validation.error },
+  };
+}
+
 function finish(result) {
   process.stdout.write(`${JSON.stringify(result)}\n`);
-  process.exitCode = result.status === 'failed' ? 1 : 0;
+  process.exitCode = result.status === 'failed' || result.status === 'rejected' ? 1 : 0;
 }
 
 // Statuses that announce progress rather than an outcome. Homeboy emits one of
