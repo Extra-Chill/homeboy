@@ -36,6 +36,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_path_to_error = "0.1"
 serde_yml = "0.0.12"
+toml = "1.1"
 heck = "0.5"
 uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
 shellexpand = "3.1"

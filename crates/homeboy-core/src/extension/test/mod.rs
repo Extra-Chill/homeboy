@@ -493,18 +493,19 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
             continue;
         };
 
-        if routing_file.starts_with("tests/") && routing_file.ends_with(".rs") {
-            let rest = routing_file.trim_start_matches("tests/");
-            if !rest.contains('/') {
+        let integration_targets =
+            cargo_integration_test_targets(component, test_file, &routing_file);
+        if !integration_targets.is_empty() {
+            for (target, module) in integration_targets {
                 candidates.insert((
-                    package,
+                    package.clone(),
                     "test".to_string(),
-                    rest.trim_end_matches(".rs").to_string(),
-                    None,
+                    target,
+                    module,
                     test_file.clone(),
                 ));
-                continue;
             }
+            continue;
         }
 
         let mut module_path = routing_file
@@ -548,16 +549,32 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
             continue;
         }
 
-        // A changed `src/**/tests/**` inline-test module that defines no test
-        // functions (e.g. a shared `support.rs`/fixture helper) would compile a
-        // cargo filter that matches zero tests. The runner treats "ran 0 tests"
-        // as a failure, producing a spurious test-phase failure with no counts.
-        // Fall back to the full suite instead of emitting an empty filter.
+        // Support files affect the parent test module, not just their own
+        // (test-free) module. Select the lib target when no parent is known.
         if is_inline_test_support_file(component, test_file, &routing_file) {
-            fallback_message = Some(
-                "Changed files include an inline test support module without test functions; running the full test command."
-                    .to_string(),
-            );
+            let Some(target) = cargo_lib_target(component, test_file, &package) else {
+                fallback_message = Some(
+                    "Changed Rust inline test has no resolvable lib target; running the full test command."
+                        .to_string(),
+                );
+                continue;
+            };
+            let mounted = path_attr_mounted_module_path(component, test_file, &routing_file);
+            let module = mounted.unwrap_or_else(|| module_path_from_routing_file(&routing_file));
+            // Nested helper directories may also contain no tests. Stop at
+            // the enclosing test module rather than filtering to helpers.
+            let segments = module.split("::").collect::<Vec<_>>();
+            let parent = segments
+                .iter()
+                .rposition(|part| *part == "tests" || *part == "test")
+                .map(|index| segments[..=index].join("::"));
+            candidates.insert((
+                package,
+                "lib".to_string(),
+                target,
+                parent,
+                test_file.clone(),
+            ));
             continue;
         }
 
@@ -673,6 +690,147 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
             "Scoped to the exact union of changed Rust test identities.".to_string(),
         ),
     ]
+}
+
+/// Discover Cargo integration targets without building the workspace. Explicit
+/// targets supplement auto-discovered roots and may use arbitrary entry paths.
+/// A helper without tests selects the entire owning target, since its users
+/// need not live in the helper's module.
+fn cargo_integration_test_targets(
+    component: &Component,
+    test_file: &str,
+    routing_file: &str,
+) -> Vec<(String, Option<String>)> {
+    let source = component_source_path(component).join(test_file);
+    let Some(root) = source
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.join("Cargo.toml").is_file())
+    else {
+        return Vec::new();
+    };
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Value>(&text).ok());
+    let mut targets = BTreeMap::new();
+    let autotests = manifest
+        .as_ref()
+        .and_then(|m| m.get("package"))
+        .and_then(|p| p.get("autotests"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true);
+    if autotests {
+        if let Ok(entries) = std::fs::read_dir(root.join("tests")) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+                    if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                        targets.insert(name.to_string(), path);
+                    }
+                } else if path.join("main.rs").is_file() {
+                    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                        targets.insert(name.to_string(), path.join("main.rs"));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(tests) = manifest
+        .as_ref()
+        .and_then(|m| m.get("test"))
+        .and_then(toml::Value::as_array)
+    {
+        for test in tests {
+            let Some(name) = test.get("name").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            let path = test
+                .get("path")
+                .and_then(toml::Value::as_str)
+                .map(|path| root.join(path))
+                .or_else(|| targets.get(name).cloned())
+                .unwrap_or_else(|| root.join(format!("tests/{name}.rs")));
+            targets.insert(name.to_string(), path);
+        }
+    }
+    let changed = root.join(routing_file);
+    let has_tests = source_file_declares_own_tests(component, test_file) == Some(true);
+    targets
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            if !entry.is_file() {
+                return None;
+            }
+            if changed == entry {
+                return Some((name, None));
+            }
+            // Prefer actual declarations, including renamed #[path] mounts and
+            // arbitrary filenames used as [[test]] crate roots.
+            if let Some(module) = integration_module_path(&entry, &changed) {
+                return Some((name, has_tests.then_some(module)));
+            }
+            let module_dir = if entry.file_stem().is_some_and(|s| s == "main" || s == "mod") {
+                entry.parent()?.to_path_buf()
+            } else {
+                entry.with_extension("")
+            };
+            let relative = changed.strip_prefix(module_dir).ok()?;
+            let module = module_path_from_routing_file(&relative.to_string_lossy());
+            Some((name, (has_tests && !module.is_empty()).then_some(module)))
+        })
+        .collect()
+}
+
+/// Follow out-of-line module declarations from a test crate root. Root module
+/// lookup is relative to its directory even for a custom entry filename.
+fn integration_module_path(entry: &Path, changed: &Path) -> Option<String> {
+    fn visit(
+        file: &Path,
+        module_dir: &Path,
+        changed: &Path,
+        prefix: &str,
+        visited: &mut BTreeSet<PathBuf>,
+    ) -> Option<String> {
+        let canonical = file.canonicalize().ok()?;
+        if visited.len() >= 256 || !visited.insert(canonical.clone()) {
+            return None;
+        }
+        if changed.canonicalize().ok()? == canonical {
+            return Some(prefix.to_string());
+        }
+        let contents = std::fs::read_to_string(file).ok()?;
+        let overrides = path_attr_mod_declarations(&contents)
+            .into_iter()
+            .map(|(path, name)| (name, path))
+            .collect::<BTreeMap<_, _>>();
+        for name in contents.lines().filter_map(parse_mod_declaration_ident) {
+            let child = if let Some(path) = overrides.get(&name) {
+                file.parent()?.join(path)
+            } else {
+                let flat = module_dir.join(format!("{name}.rs"));
+                if flat.is_file() {
+                    flat
+                } else {
+                    module_dir.join(&name).join("mod.rs")
+                }
+            };
+            let child_dir = if child.file_name().is_some_and(|name| name == "mod.rs") {
+                child.parent()?.to_path_buf()
+            } else {
+                child.with_extension("")
+            };
+            let module = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}::{name}")
+            };
+            if let Some(found) = visit(&child, &child_dir, changed, &module, visited) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    visit(entry, entry.parent()?, changed, "", &mut BTreeSet::new())
 }
 
 fn owning_cargo_package(component: &Component, test_file: &str) -> Option<String> {
@@ -1983,7 +2141,7 @@ mod tests {
     }
 
     #[test]
-    fn rust_cargo_changed_routing_falls_back_when_inline_support_module_has_no_tests() {
+    fn rust_cargo_changed_routing_scopes_inline_support_to_parent_tests() {
         let dir = TempDir::new().expect("temp dir should be created");
         let support_rel = "src/commands/agent_task/tests/support.rs";
         let support_path = dir.path().join(support_rel);
@@ -1994,6 +2152,12 @@ mod tests {
             "//! Shared helpers for the agent-task command tests.\n\npub(crate) fn fixture() {}\n",
         )
         .expect("write support module");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = 'fixture'\nversion = '0.1.0'\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
 
         let component = Component::new(
             "fixture-component".to_string(),
@@ -2003,9 +2167,108 @@ mod tests {
         );
 
         let env = rust_cargo_changed_test_env(&component, &[support_rel.to_string()]);
+        assert_union_candidates(
+            &env,
+            &["fixture::lib::fixture::commands::agent_task::tests"],
+        );
+        for relative in [
+            "src/commands/agent_task/tests/helpers/fixture.rs",
+            "src/commands/agent_task/tests/mod.rs",
+        ] {
+            let path = dir.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "pub fn fixture() {}").unwrap();
+            let env = rust_cargo_changed_test_env(&component, &[relative.into()]);
+            assert_union_candidates(
+                &env,
+                &["fixture::lib::fixture::commands::agent_task::tests"],
+            );
+        }
+    }
 
-        assert!(env.contains(&("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string())));
-        assert!(!env.iter().any(|(key, _)| key == "HOMEBOY_TEST_RUNNER_ARGS"));
+    #[test]
+    fn rust_cargo_changed_routing_maps_nested_integration_targets() {
+        // Exercise package-relative routing in a workspace, all Cargo entry
+        // layouts, nested mod.rs files, support files, and genuine orphans.
+        for (manifest_extra, entry, changed, expected) in [
+            (
+                "",
+                "tests/cli_binary.rs",
+                "tests/cli_binary/notification.rs",
+                Some("fixture::test::cli_binary::notification"),
+            ),
+            (
+                "",
+                "tests/cli_binary.rs",
+                "tests/cli_binary/deep/mod.rs",
+                Some("fixture::test::cli_binary::deep"),
+            ),
+            (
+                "",
+                "tests/cli_binary/main.rs",
+                "tests/cli_binary/deep/case.rs",
+                Some("fixture::test::cli_binary::deep::case"),
+            ),
+            (
+                "\n[[test]]\nname = 'custom'\npath = 'integration/entry.rs'\n",
+                "integration/entry.rs",
+                "integration/entry/case.rs",
+                Some("fixture::test::custom::case"),
+            ),
+            (
+                "",
+                "tests/cli_binary.rs",
+                "tests/cli_binary/support.rs",
+                Some("fixture::test::cli_binary::"),
+            ),
+            (
+                "\n[[test]]\nname = 'custom'\npath = 'integration/entry.rs'\n",
+                "integration/entry.rs",
+                "integration/case.rs",
+                Some("fixture::test::custom::renamed"),
+            ),
+            ("", "tests/unrelated.rs", "tests/orphan/case.rs", None),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let root = dir.path().join("crates/fixture");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("Cargo.toml"),
+                format!("[package]\nname = 'fixture'\nversion = '0.1.0'\n{manifest_extra}"),
+            )
+            .unwrap();
+            for path in [entry, changed] {
+                std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+                let contents = if path == entry && changed == "integration/case.rs" {
+                    "#[path = \"case.rs\"]\nmod renamed;"
+                } else if path.ends_with("support.rs") {
+                    "pub fn helper() {}"
+                } else {
+                    "#[test]\nfn works() {}"
+                };
+                std::fs::write(root.join(path), contents).unwrap();
+            }
+            let component = Component::new(
+                "fixture".into(),
+                dir.path().to_string_lossy().into(),
+                "/tmp/remote".into(),
+                None,
+            );
+            let env =
+                rust_cargo_changed_test_env(&component, &[format!("crates/fixture/{changed}")]);
+            if let Some(expected) = expected {
+                assert!(
+                    env.iter().any(|(_, value)| value == "rust_changed_union"),
+                    "{entry} / {changed}: {env:?}"
+                );
+                assert_union_candidates(&env, &[expected]);
+            } else {
+                assert!(
+                    env.contains(&("HOMEBOY_TEST_SCOPE_KIND".into(), "full".into())),
+                    "{env:?}"
+                );
+            }
+        }
     }
 
     #[test]
