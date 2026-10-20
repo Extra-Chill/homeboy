@@ -32,6 +32,11 @@ fn fixture(locked: &str, newest: &str) -> (tempfile::TempDir, ReleaseOptions) {
     std::fs::create_dir_all(&upstream).unwrap();
     std::fs::create_dir_all(&downstream).unwrap();
     git(&upstream, &["init", "-q", "-b", "main"]);
+    // Release steps run their own `git commit` without the fixture's `-c`
+    // identity; CI runners have no global identity.
+    git(&upstream, &["config", "user.name", "Fixture"]);
+    git(&upstream, &["config", "user.email", "fixture@example.test"]);
+    git(&upstream, &["config", "commit.gpgsign", "false"]);
     std::fs::write(upstream.join("README"), "upstream").unwrap();
     git(&upstream, &["add", "."]);
     git(&upstream, &["commit", "-qm", "fix: upstream"]);
@@ -61,6 +66,14 @@ fn fixture(locked: &str, newest: &str) -> (tempfile::TempDir, ReleaseOptions) {
     )
     .unwrap();
     git(&downstream, &["init", "-q", "-b", "main"]);
+    // Release steps run their own `git commit` without the fixture's `-c`
+    // identity; CI runners have no global identity.
+    git(&downstream, &["config", "user.name", "Fixture"]);
+    git(
+        &downstream,
+        &["config", "user.email", "fixture@example.test"],
+    );
+    git(&downstream, &["config", "commit.gpgsign", "false"]);
     git(&downstream, &["add", "."]);
     git(&downstream, &["commit", "-qm", "release: v0.1.0"]);
     git(&downstream, &["tag", "v0.1.0"]);
