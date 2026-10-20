@@ -55,9 +55,11 @@ class RefreshTests(unittest.TestCase):
 
     def test_workflow_contract(self):
         workflow = (ROOT / ".github/workflows/deps-refresh.yml").read_text()
-        for text in ("workflow_call:", "group: release", "cancel-in-progress: false", "startsWith(github.event.head_commit.message, 'release:')", "actions/create-github-app-token@v3", "persist-credentials: false", "steps.app-token.outputs.token || github.token", "homeboy deps stack refresh --dry-run", "commands: review lint,review test", "uses: ./.github/workflows/release.yml", "secrets: inherit", "force-with-lease"):
+        for text in ("workflow_call:", "group: release", "cancel-in-progress: false", "startsWith(github.event.head_commit.message, 'release:')", "actions/create-github-app-token@v3", "persist-credentials: false", "steps.app-token.outputs.token || github.token", "homeboy deps stack refresh --dry-run", "commands: review lint,review test", "uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2", "secrets: inherit", "force-with-lease"):
             source = workflow if text != "force-with-lease" else (ROOT / "scripts/deps/upsert-pr.sh").read_text()
             self.assertIn(text, source)
+        # A ./ path in a called workflow resolves in the caller's repo.
+        self.assertNotIn("uses: ./.github/workflows/", workflow)
         release = (ROOT / ".github/workflows/release.yml").read_text()
         start = "      - name: Generate GitHub App token"
         end = "      - uses: actions/checkout@v6"

@@ -135,7 +135,9 @@ jobs:
   release:
     needs: refresh
     if: needs.refresh.outputs.route == 'release'
-    uses: ./.github/workflows/release.yml
+    # A local `./` path in a called workflow resolves in the caller's repo
+    # ("workflow was not found"), so name this repo explicitly.
+    uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
     with:
       action-ref: ${{ needs.refresh.outputs.action-sha }}
       publisher-known-hosts: ${{ inputs.publisher-known-hosts }}
