@@ -260,6 +260,9 @@ pub struct GithubHostConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ComponentReleaseConfig {
+    /// Refresh declared dependency-stack edges inside the release commit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub refresh_dependencies: bool,
     /// Who owns cutting releases for this component.
     ///
     /// Absent (or `local`) preserves the default behaviour: a local
@@ -727,6 +730,23 @@ pub(super) fn is_false(value: &bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::ComponentReleaseConfig;
+
+    #[test]
+    fn refresh_dependencies_is_opt_in_and_round_trips() {
+        let default = ComponentReleaseConfig::default();
+        assert!(!default.refresh_dependencies);
+        assert!(serde_json::to_value(default)
+            .unwrap()
+            .get("refresh_dependencies")
+            .is_none());
+        let declared: ComponentReleaseConfig =
+            serde_json::from_value(serde_json::json!({"refresh_dependencies": true})).unwrap();
+        assert!(declared.refresh_dependencies);
+        assert_eq!(
+            serde_json::to_value(declared).unwrap()["refresh_dependencies"],
+            true
+        );
+    }
 
     #[test]
     fn manual_changelog_edit_policy_is_absent_when_defaulted() {

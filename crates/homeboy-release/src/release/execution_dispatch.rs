@@ -90,6 +90,23 @@ pub(super) fn execute_release_plan_step(
                 &context.component.local_path,
             )))
         }
+        "deps.stack.refresh" => {
+            let expected = step
+                .inputs
+                .get("preview")
+                .ok_or_else(|| Error::internal_unexpected("dependency refresh preview missing"))?;
+            Ok(Some(
+                match super::dependency_refresh::apply(context.component, expected) {
+                    Ok(data) => executor::step_success(
+                        "deps.stack.refresh",
+                        "deps.stack.refresh",
+                        Some(data),
+                        Vec::new(),
+                    ),
+                    Err(error) => failed_result("deps.stack.refresh", "deps.stack.refresh", error),
+                },
+            ))
+        }
         "changelog.finalize" => {
             executor::changelog::run_changelog_finalize(step, context.component, &mut context.state)
                 .map(Some)
@@ -850,6 +867,7 @@ pub(super) fn release_step_is_show_stopper(result: &ReleaseStepResult) -> bool {
     matches!(
         result.step_type.as_str(),
         "changelog.finalize"
+            | "deps.stack.refresh"
             | "preflight.default_branch"
             | "preflight.working_tree"
             | "preflight.head_identity"

@@ -16,6 +16,35 @@ homeboy release resolve <repository> --prefix <tag-prefix>
 
 By default Homeboy auto-detects the bump from commit history. Use `--bump <major|minor|patch|VERSION>` to force a bump type or explicit version.
 
+## Dependency refresh
+
+Opt in per component in `homeboy.json`:
+
+```json
+{
+  "release": { "refresh_dependencies": true }
+}
+```
+
+Before computing the next version, release previews the same implementation as
+`homeboy deps stack refresh`, using the component's declared `dependency_stack`.
+Each behind edge contributes `Update <package> to <version>` to the generated
+changelog. Nonbreaking updates alone are releasable (patch by default), even
+when HEAD is the previous release tag. Existing commit-derived bumps still apply.
+With no behind edges, release planning is unchanged.
+
+The executable `deps.stack.refresh` plan step runs after preflights and before
+changelog/version mutation. It uses the normal update/install/rebuild/post-update
+path; manifest and lockfile changes join the release commit, without a separate
+refresh commit or push. Custom update commands retain their normal semantics.
+The release rechecks its preview before applying; changed upstream resolution
+requires replanning. `--dry-run` only previews and never runs update commands.
+
+**Safety policy:** breaking (`true`) or unknown (`null`) refresh verdicts stop
+release with the dependency and reason, regardless of `--bump`. Update and review
+those ranges separately before releasing. Unresolvable or failed edges also
+block release. Refresh is not run in `--head` or prepared-release resume mode.
+
 ## Options
 
 - `--dry-run`: Preview the release plan without executing

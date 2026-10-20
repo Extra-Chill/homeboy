@@ -104,11 +104,42 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
             );
         }
     }
+    let refresh = if component.release.refresh_dependencies && !options.pipeline.head {
+        Some(super::dependency_refresh::preview(&component)?)
+    } else {
+        None
+    };
+    let has_refresh = refresh.as_ref().is_some_and(|r| r.updated_count > 0);
+    let mut effective_options = options.clone();
+    if has_refresh {
+        if effective_options.bump_type == "none" {
+            effective_options.bump_type = "patch".to_string();
+        }
+        // Dependency updates are release evidence even when HEAD is a release tag.
+        effective_options.bump_policy.force_empty_release = true;
+    }
+    let options = &effective_options;
     let mut semver_recommendation = if options.pipeline.head {
         None
     } else {
         build_semver_recommendation(&component, &options.bump_type, &release_scope)?
     };
+
+    if has_refresh && semver_recommendation.is_none() {
+        let (latest_tag, _) = super::planning_semver::resolve_tag_and_commits(&release_scope)?;
+        semver_recommendation = Some(ReleaseSemverRecommendation {
+            latest_tag,
+            range: "dependency-stack-refresh".to_string(),
+            commits: Vec::new(),
+            recommended_bump: Some("patch".to_string()),
+            requested_bump: options.bump_type.clone(),
+            is_underbump: false,
+            reasons: vec!["Declared dependency updates are releasable changes".to_string()],
+            non_conventional_commit_count: 0,
+            considered_commit_count: 0,
+            bump_policy: None,
+        });
+    }
 
     if !options.pipeline.head {
         // Catch "release vX.Y.Z already exists at HEAD" before the bump/semver
@@ -133,13 +164,13 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
             component_id,
             options,
             semver_recommendation.clone(),
-            release_already_at_head.as_deref(),
+            release_already_at_head.as_deref().filter(|_| !has_refresh),
         ) {
             return Ok(skip_plan);
         }
     }
 
-    let pending_entries = if options.pipeline.head {
+    let mut pending_entries = if options.pipeline.head {
         Default::default()
     } else {
         v.capture(
@@ -148,6 +179,21 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
         )
         .unwrap_or_default()
     };
+
+    if let Some(refresh) = refresh.as_ref().filter(|_| has_refresh) {
+        for edge in &refresh.edges {
+            if edge.state == homeboy_core::deps::DependencyStackEdgeRefreshState::Updated {
+                pending_entries
+                    .entry("changed".to_string())
+                    .or_default()
+                    .push(format!(
+                        "Update {} to {}",
+                        edge.package,
+                        edge.to.as_deref().unwrap_or_default()
+                    ));
+            }
+        }
+    }
 
     let version_baseline = if let Some(ref info) = version_info {
         if options.pipeline.head {
@@ -247,6 +293,22 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
     }
 
     let mut steps = build_preflight_steps(options, semver_recommendation.as_ref(), &extensions);
+    if let Some(refresh) = refresh.as_ref().filter(|_| has_refresh) {
+        let mut step =
+            homeboy_core::plan::PlanStep::ready("deps.stack.refresh", "deps.stack.refresh")
+                .label("Refresh declared dependency stack")
+                .build();
+        step.needs = steps
+            .iter()
+            .filter(|step| step.status == homeboy_core::plan::PlanStepStatus::Ready)
+            .map(|step| step.id.clone())
+            .collect();
+        step.inputs.insert(
+            "preview".to_string(),
+            serde_json::to_value(refresh).map_err(|e| Error::internal_unexpected(e.to_string()))?,
+        );
+        steps.push(step);
+    }
     steps.extend(build_release_steps_with_reconciliation(
         &component,
         &extensions,
@@ -264,6 +326,15 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
             (baseline.source != baseline.authoritative).then_some(baseline.source.as_str())
         }),
     )?);
+
+    if has_refresh {
+        if let Some(step) = steps
+            .iter_mut()
+            .find(|step| step.kind == "changelog.finalize")
+        {
+            step.needs.push("deps.stack.refresh".to_string());
+        }
+    }
 
     if options.dry_run {
         hints.push("Dry run: no changes will be made".to_string());
