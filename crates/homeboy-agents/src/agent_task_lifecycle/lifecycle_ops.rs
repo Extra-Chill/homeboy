@@ -5866,7 +5866,20 @@ fn converge_resolved_run_in_store(
     if runner_probe.performed {
         reconcile_runner_job_state_in_store(lifecycle_store, &mut record)?;
     }
+    let before_stale_annotation = record.clone();
     record.annotate_stale_running();
+    // An aged projection of a runner-backed run is not evidence that its job
+    // stopped. When the daemon job store this root owns shows the exact job
+    // still heartbeating, keep the run unmarked so nothing treats it as stale.
+    if record.is_stale_running()
+        && !before_stale_annotation.is_stale_running()
+        && observe_runner_job_in_store(lifecycle_store, &record).is_some_and(|evidence| {
+            evidence.source == "local_job_store"
+                && evidence.observation == RunnerJobObservation::Live
+        })
+    {
+        record = before_stale_annotation;
+    }
     if record != before_liveness_reconciliation {
         lifecycle_store.commit_record(&mut record)?;
     }

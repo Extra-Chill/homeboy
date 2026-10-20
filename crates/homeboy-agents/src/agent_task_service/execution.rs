@@ -3667,6 +3667,119 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_cancelled_cook_attempt_admits_a_durable_retry_but_operator_cancel_does_not() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+            let workspace = tempfile::tempdir().expect("workspace");
+            let cook_id = "reconcile-cancelled-cook";
+            let run_id = "reconcile-cancelled-cook-attempt-1";
+            let plan = one_task_plan("reconcile-cancelled-plan", workspace.path());
+            agent_task_lifecycle::submit_plan_in_store(&store, &plan, Some(run_id))
+                .expect("persist source attempt");
+            agent_task_lifecycle::record_cook_attempt_in_store(&store, cook_id, 1, run_id)
+                .expect("index Cook attempt");
+            agent_task_lifecycle::mark_running_in_store(&store, run_id).expect("running");
+            agent_task_lifecycle::rewrite_record_for_test_in_store(&store, run_id, |record| {
+                let metadata = record.metadata.as_object_mut().expect("metadata object");
+                metadata.remove("runner_pid");
+                metadata.remove("runner_process_start_identity");
+                record.metadata["cook_id"] = json!(cook_id);
+                record.metadata["cook_attempt"] = json!(1);
+                // The runner job this Lab attempt named is gone from the
+                // daemon's job store, and its projection heartbeat aged out.
+                record.metadata["runner_job_id"] = json!(uuid::Uuid::new_v4().to_string());
+                record.updated_at = Some(
+                    (chrono::Utc::now() - chrono::Duration::hours(2))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                );
+            })
+            .expect("stale runner-backed Cook attempt");
+            let recipe_store =
+                super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(&store);
+            recipe_store
+                .persist_recipe(&super::super::cook_recipe::AgentTaskCookRecipe {
+                    schema: super::super::cook_recipe::COOK_RECIPE_SCHEMA.to_string(),
+                    cook_id: cook_id.to_string(),
+                    attempts: vec![super::super::cook_recipe::AgentTaskCookRecipeAttempt {
+                        lineage: None,
+                        attempt: 1,
+                        run_id: run_id.to_string(),
+                        plan: plan.clone(),
+                    }],
+                    promotion_transport: json!({
+                        "provider_invocation": null,
+                        "attempt_dispatch": { "kind": "local" },
+                    }),
+                    gate_policy: json!({
+                        "verify": [],
+                        "private_verify": [],
+                        "private_gate_reveal": "summary_only",
+                    }),
+                    retry_budget: json!({
+                        "max_attempts": 2,
+                        "execution_budget": plan.options.execution_budget,
+                    }),
+                    finalization: json!({
+                        "no_finalize": true,
+                        "base": "main",
+                        "head": null,
+                        "title": "title",
+                        "commit_message": "message",
+                        "protected_branches": [],
+                        "ai_tool": "test",
+                        "ai_model": null,
+                        "ai_used_for": "test",
+                        "to_worktree": "target",
+                        "source_worktree_path": null,
+                        "task_base_sha": null,
+                    }),
+                    source_refs: Vec::new(),
+                    runtime_generation: homeboy_core::build_identity::current().display,
+                    sensitive_mappings: Vec::new(),
+                    harvest_context: Default::default(),
+                })
+                .expect("persist recipe");
+
+            let report = super::super::reconcile_run_in_store(&store, run_id, false)
+                .expect("reconcile stale attempt");
+            assert_eq!(report.reconciled, 1, "{report:?}");
+            let cancelled = store.read_record(run_id).expect("cancelled attempt");
+            assert_eq!(
+                cancelled.state(),
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(
+                cancelled.metadata["cancellation_provenance"]["actor"],
+                "fleet-reconciler"
+            );
+            assert_eq!(
+                cancelled.metadata["cancellation_provenance"]["cause"],
+                "reconcile"
+            );
+            assert_eq!(cancelled.metadata["cancel_reason"], "runner_job_not_found");
+
+            let retry = retryable_cook_attempt(&store, &cancelled)
+                .expect("reconcile cancellation leaves the Cook admitted")
+                .expect("durable Cook retry");
+            assert_eq!(retry.cook_id, cook_id);
+            assert_eq!(retry.attempt, 2);
+            retry_admission_in_root(&store, run_id)
+                .expect("reconcile-cancelled attempt admits a durable Cook retry");
+
+            // An operator cancelling the Cook ends the mission: no retry.
+            agent_task_lifecycle::cancel_run_in_store(&store, cook_id, Some("operator stop"))
+                .expect("operator cancels the Cook");
+            let error = retry_admission_in_root(&store, run_id)
+                .expect_err("operator cancellation fences retries");
+            assert!(
+                error.message.contains("Cook mission was cancelled"),
+                "{error:?}"
+            );
+        });
+    }
+
+    #[test]
     fn execution_step_cook_retry_reservation_freezes_preparation_before_recipe_binding_in_injected_root(
     ) {
         homeboy_core::test_support::with_isolated_home(|_| {

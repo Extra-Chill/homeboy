@@ -324,6 +324,22 @@ pub(crate) fn cancel_exact_run_in_store(
     run_id: &str,
     reason: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
+    cancel_exact_run_in_store_with_provenance(lifecycle_store, run_id, reason, None)
+}
+
+/// [`cancel_exact_run_in_store`] for a caller that is not an operator.
+///
+/// `provenance` is written as the run's `cancellation_provenance` (and so its
+/// immutable `run.cancelled` receipt) instead of the operator default. A
+/// reconciler records itself and the evidence it acted on, so the receipt never
+/// claims an operator requested a cancellation nobody asked for. An already
+/// retained canonical receipt still wins: its event key is immutable.
+pub(crate) fn cancel_exact_run_in_store_with_provenance(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    reason: Option<&str>,
+    provenance: Option<Value>,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let mut rooted_record = lifecycle_store.read_record(&run_id)?;
     ensure_rooted_exact_cancellation_supported(&rooted_record)?;
@@ -500,6 +516,14 @@ pub(crate) fn cancel_exact_run_in_store(
             // accepted) may already have emitted run.cancelled. Its keyed event
             // is immutable.
             if let Some(provenance) = canonical_provenance.clone() {
+                metadata.insert("cancellation_provenance".to_string(), provenance);
+            } else if let Some(provenance) = provenance.clone() {
+                let mut provenance = provenance;
+                if let Some(object) = provenance.as_object_mut() {
+                    object
+                        .entry("timestamp".to_string())
+                        .or_insert_with(|| json!(cancelled_at));
+                }
                 metadata.insert("cancellation_provenance".to_string(), provenance);
             } else {
                 metadata.entry("cancellation_provenance".to_string()).or_insert_with(|| json!({

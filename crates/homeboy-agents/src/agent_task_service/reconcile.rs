@@ -170,6 +170,40 @@ pub(super) fn verify_reconciled_postcondition(
     )))
 }
 
+/// Actor recorded on every cancellation reconciliation commits.
+pub(crate) const RECONCILER_ACTOR: &str = "fleet-reconciler";
+/// Cancellation cause for reconciliation; operator commands keep
+/// `operator_requested`. A reconcile cancellation is retryable work loss, not
+/// an operator's decision to end the mission.
+pub(crate) const RECONCILE_CANCELLATION_CAUSE: &str = "reconcile";
+
+/// The provenance a reconciliation cancel writes, naming the reconciler and the
+/// evidence it acted on.
+fn reconciler_cancellation_provenance(
+    reason: &str,
+    liveness: AgentTaskLiveness,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    runner_evidence: Option<&agent_task_lifecycle::RunnerJobEvidence>,
+) -> serde_json::Value {
+    let mut evidence = serde_json::json!({
+        "liveness": liveness.as_str(),
+        "record_updated_at": record.updated_at,
+        "stale_running_reason": record.stale_running_reason(),
+        "owner_pid": record.owner_pid(),
+    });
+    if let Some(runner_evidence) = runner_evidence {
+        evidence["runner_job"] = runner_evidence.to_value();
+    }
+    serde_json::json!({
+        "actor": RECONCILER_ACTOR,
+        "cause": RECONCILE_CANCELLATION_CAUSE,
+        "reason": reason,
+        "evidence": evidence,
+        "retryable": true,
+        "recovery_action": format!("homeboy agent-task retry {} --run", record.run_id),
+    })
+}
+
 pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileReport> {
     // One store for the whole sweep. Every run this classifies, expires, and
     // cancels is decided from a record read here; a decision taken against one
@@ -232,6 +266,31 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         }
 
         let record = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, &run.run_id)?;
+        // A runner-backed run is cancelled only once its exact runner job is
+        // verifiably gone or terminal. Decide that before claiming the action:
+        // a claimed no-op would otherwise be replayed under the same key on
+        // every tick, long after the job has actually ended.
+        let runner_evidence =
+            agent_task_lifecycle::observe_runner_job_in_store(&lifecycle_store, &record);
+        if let Some(evidence) = runner_evidence
+            .as_ref()
+            .filter(|evidence| !evidence.permits_cancellation())
+        {
+            runs.push(AgentTaskReconcileRun {
+                run_id: run.run_id,
+                liveness,
+                source: run.source,
+                authoritative_state,
+                stale_reason: Some(evidence.reason.to_string()),
+                action: "no-op",
+                error: None,
+            });
+            continue;
+        }
+        let stale_reason = runner_evidence
+            .as_ref()
+            .map(|evidence| evidence.reason.to_string())
+            .or(run.stale_reason);
         if dry_run {
             runs.push(AgentTaskReconcileRun {
                 run_id: run.run_id,
@@ -239,7 +298,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
                 source: run.source,
                 // Preview mutates nothing, so the observed state is the state.
                 authoritative_state,
-                stale_reason: run.stale_reason,
+                stale_reason,
                 action: "would-reconcile",
                 error: None,
             });
@@ -249,11 +308,21 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         // action key. The canonical action claim serializes concurrent daemon,
         // cleanup, and CLI replays, and its immutable acknowledgement is the
         // audit record for this fleet member.
-        let idempotency_key = format!(
-            "fleet-reconcile:{}:{}",
-            run.run_id,
-            record.updated_at.as_deref().unwrap_or(&record.submitted_at)
-        );
+        // The observed runner evidence is part of the decision identity, so a
+        // changed observation is a new decision rather than a replay.
+        let idempotency_key = match runner_evidence.as_ref() {
+            Some(evidence) => format!(
+                "fleet-reconcile:{}:{}:{}",
+                run.run_id,
+                record.updated_at.as_deref().unwrap_or(&record.submitted_at),
+                evidence.reason
+            ),
+            None => format!(
+                "fleet-reconcile:{}:{}",
+                run.run_id,
+                record.updated_at.as_deref().unwrap_or(&record.submitted_at)
+            ),
+        };
         let request = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             effect_id: homeboy_control_plane_contract::EffectId(format!(
@@ -284,7 +353,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
                     liveness,
                     source: run.source,
                     authoritative_state: current.state(),
-                    stale_reason: run.stale_reason,
+                    stale_reason,
                     action,
                     error: None,
                 });
@@ -296,7 +365,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
                     liveness,
                     source: run.source,
                     authoritative_state,
-                    stale_reason: run.stale_reason,
+                    stale_reason,
                     action: "failed",
                     error: acknowledgement.message,
                 });
@@ -308,7 +377,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
                     liveness,
                     source: run.source,
                     authoritative_state,
-                    stale_reason: run.stale_reason,
+                    stale_reason,
                     action: "failed",
                     error: Some(error.message),
                 });
@@ -408,13 +477,35 @@ pub(crate) fn reconcile_run_in_store(
                         action: "no-op",
                         error: None,
                     });
-                } else if dry_run {
+                } else if let Some(evidence) =
+                    agent_task_lifecycle::observe_runner_job_in_store(lifecycle_store, &refreshed)
+                        .filter(|evidence| !evidence.permits_cancellation())
+                {
+                    // A stale projection never proves its runner job is gone.
+                    // The job is live, heartbeating, or simply unverifiable, so
+                    // the run is left for its owning daemon to settle.
                     runs.push(AgentTaskReconcileRun {
                         run_id: resolved_run_id.clone(),
                         liveness,
                         source: run.source,
                         authoritative_state: refreshed.state(),
-                        stale_reason: run.stale_reason,
+                        stale_reason: Some(evidence.reason.to_string()),
+                        action: "no-op",
+                        error: None,
+                    });
+                } else if dry_run {
+                    let runner_evidence = agent_task_lifecycle::observe_runner_job_in_store(
+                        lifecycle_store,
+                        &refreshed,
+                    );
+                    runs.push(AgentTaskReconcileRun {
+                        run_id: resolved_run_id.clone(),
+                        liveness,
+                        source: run.source,
+                        authoritative_state: refreshed.state(),
+                        stale_reason: runner_evidence
+                            .map(|evidence| evidence.reason.to_string())
+                            .or(run.stale_reason),
                         action: "would-reconcile",
                         error: None,
                     });
@@ -513,14 +604,28 @@ pub(crate) fn reconcile_run_in_store(
                         }
                         continue;
                     }
-                    let reason = run
-                        .stale_reason
-                        .clone()
+                    // The runner job, when there is one, was verified gone or
+                    // terminal above. Name that evidence, not the projection.
+                    let runner_evidence = agent_task_lifecycle::observe_runner_job_in_store(
+                        lifecycle_store,
+                        &refreshed,
+                    );
+                    let reason = runner_evidence
+                        .as_ref()
+                        .map(|evidence| evidence.reason.to_string())
+                        .or_else(|| run.stale_reason.clone())
                         .unwrap_or_else(|| format!("reconciled stale-{} run", liveness.as_str()));
-                    match agent_task_lifecycle::cancel_exact_run_in_store(
+                    let provenance = reconciler_cancellation_provenance(
+                        &reason,
+                        liveness,
+                        &refreshed,
+                        runner_evidence.as_ref(),
+                    );
+                    match agent_task_lifecycle::cancel_exact_run_in_store_with_provenance(
                         &lifecycle_store,
                         resolved_run_id,
                         Some(&reason),
+                        Some(provenance),
                     ) {
                         Ok(record) => {
                             let verified =
@@ -1481,6 +1586,172 @@ mod tests {
                     .is_terminal()
             );
         });
+    }
+
+    /// A runner-local `running` record (the shape a Lab daemon reconciles for
+    /// its own runs) whose projection heartbeat aged past the liveness window
+    /// and that has no local owner pid: only its runner job can say whether the
+    /// work is still alive.
+    fn stale_runner_backed_run(run_id: &str, runner_job_id: &str) {
+        let plan = AgentTaskPlan::new("reconcile-runner-job-plan", Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+        agent_task_lifecycle::mark_running(run_id).expect("running");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            let metadata = record.metadata.as_object_mut().expect("metadata object");
+            metadata.remove("runner_pid");
+            metadata.remove("runner_process_start_identity");
+            record.metadata["runner_job_id"] = serde_json::json!(runner_job_id);
+            record.updated_at = Some(
+                (chrono::Utc::now() - chrono::Duration::hours(2))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            );
+        })
+        .expect("stale runner-backed projection");
+    }
+
+    fn local_job_store() -> homeboy_core::api_jobs::JobStore {
+        homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+            test_lifecycle_store().observation_db_path(),
+        )
+        .expect("local daemon job store")
+    }
+
+    #[test]
+    fn fleet_reconcile_never_cancels_a_stale_projection_of_a_live_runner_job() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let jobs = local_job_store();
+            let job = jobs.create("agent-task.run-plan");
+            jobs.start(job.id).expect("runner job is running");
+            let run_id = "reconcile-live-runner-job";
+            stale_runner_backed_run(run_id, &job.id.to_string());
+
+            let report = reconcile_stale_active_runs(false).expect("fleet reconcile");
+
+            assert_eq!(report.reconciled, 0, "{report:?}");
+            let run = report
+                .runs
+                .iter()
+                .find(|run| run.run_id == run_id)
+                .expect("stale projection is considered");
+            assert_eq!(run.action, "no-op");
+            assert_eq!(run.stale_reason.as_deref(), Some("runner_job_live"));
+            let retained = agent_task_lifecycle::exact_record(run_id).expect("retained run");
+            assert_eq!(
+                retained.state(),
+                agent_task_lifecycle::AgentTaskRunState::Running
+            );
+            assert!(retained.metadata.get("cancel_reason").is_none());
+            assert!(retained.metadata.get("cancellation_provenance").is_none());
+            assert!(
+                !retained.is_stale_running(),
+                "a heartbeating runner job keeps its projection out of stale-running"
+            );
+
+            // The scoped reconcile the daemon action performs is equally inert.
+            let scoped =
+                reconcile_run_in_store(&test_lifecycle_store(), run_id, false).expect("scoped");
+            assert_eq!(scoped.reconciled, 0, "{scoped:?}");
+            assert!(!agent_task_lifecycle::exact_record(run_id)
+                .expect("retained run")
+                .state()
+                .is_terminal());
+        });
+    }
+
+    #[test]
+    fn fleet_reconcile_cancels_a_verifiably_gone_runner_job_with_reconciler_provenance() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-gone-runner-job";
+            stale_runner_backed_run(run_id, &uuid::Uuid::new_v4().to_string());
+
+            let report = reconcile_stale_active_runs(false).expect("fleet reconcile");
+
+            assert_eq!(report.reconciled, 1, "{report:?}");
+            let cancelled = agent_task_lifecycle::exact_record(run_id).expect("cancelled run");
+            assert_eq!(
+                cancelled.state(),
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(cancelled.metadata["cancel_reason"], "runner_job_not_found");
+            let provenance = &cancelled.metadata["cancellation_provenance"];
+            assert_eq!(provenance["actor"], "fleet-reconciler");
+            assert_eq!(provenance["cause"], "reconcile");
+            assert_eq!(provenance["reason"], "runner_job_not_found");
+            assert_eq!(
+                provenance["evidence"]["runner_job"]["observation"],
+                "not_found"
+            );
+            assert_eq!(
+                provenance["evidence"]["runner_job"]["source"],
+                "local_job_store"
+            );
+            assert_ne!(
+                provenance["reason"], "runner_job_unverified_after_daemon_restart",
+                "no daemon restart was evidenced"
+            );
+        });
+    }
+
+    #[test]
+    fn fleet_reconcile_names_a_terminal_runner_job() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let jobs = local_job_store();
+            let job = jobs.create("agent-task.run-plan");
+            jobs.start(job.id).expect("runner job started");
+            jobs.cancel(job.id, "runner job ended")
+                .expect("runner job terminal");
+            let run_id = "reconcile-terminal-runner-job";
+            stale_runner_backed_run(run_id, &job.id.to_string());
+
+            let preview = reconcile_stale_active_runs(true).expect("preview");
+            let previewed = preview
+                .runs
+                .iter()
+                .find(|run| run.run_id == run_id)
+                .expect("candidate");
+            assert_eq!(previewed.action, "would-reconcile");
+            assert_eq!(
+                previewed.stale_reason.as_deref(),
+                Some("runner_job_terminal")
+            );
+
+            let report = reconcile_stale_active_runs(false).expect("fleet reconcile");
+            assert_eq!(report.reconciled, 1, "{report:?}");
+            let cancelled = agent_task_lifecycle::exact_record(run_id).expect("cancelled run");
+            assert_eq!(cancelled.metadata["cancel_reason"], "runner_job_terminal");
+            assert_eq!(
+                cancelled.metadata["cancellation_provenance"]["evidence"]["runner_job"]
+                    ["job_status"],
+                "cancelled"
+            );
+        });
+    }
+
+    #[test]
+    fn runner_job_observation_permits_cancellation_only_for_gone_or_terminal_jobs() {
+        use agent_task_lifecycle::RunnerJobObservation as Observation;
+        for observation in [
+            Observation::Live,
+            Observation::HeartbeatStale,
+            Observation::Unverifiable,
+        ] {
+            assert!(!observation.permits_cancellation(), "{observation:?}");
+        }
+        for observation in [
+            Observation::Terminal,
+            Observation::LostAfterDaemonRestart,
+            Observation::NotFound,
+            Observation::RunnerRemoved,
+        ] {
+            assert!(observation.permits_cancellation(), "{observation:?}");
+        }
+        assert_eq!(
+            Observation::LostAfterDaemonRestart.reason(),
+            "runner_job_lost_after_daemon_restart"
+        );
     }
 
     #[test]

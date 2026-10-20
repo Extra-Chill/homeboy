@@ -4390,7 +4390,7 @@ fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
             .iter()
             .find(|blocker| blocker.run_id == "unverified-runner")
             .expect("unverified runner blocks");
-        assert_eq!(runner.reason, "runner_job_unverified_after_daemon_restart");
+        assert_eq!(runner.reason, "runner_heartbeat_stale");
         assert_eq!(runner.recovery_command, "homeboy runner reconcile lab");
         assert!(!admission
             .blockers
@@ -4412,7 +4412,7 @@ fn stale_runner_blocker_clears_only_with_direct_zero_job_evidence() {
         scope: "runner `lab` and its persisted daemon generations".to_string(),
         postcondition: "idle".to_string(),
         liveness: "stale",
-        reason: "runner_job_unverified_after_daemon_restart".to_string(),
+        reason: "runner_heartbeat_stale".to_string(),
         action: "homeboy runner reconcile lab".to_string(),
         recovery_command: "homeboy runner reconcile lab".to_string(),
     };

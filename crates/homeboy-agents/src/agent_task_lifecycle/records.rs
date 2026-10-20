@@ -734,8 +734,12 @@ impl AgentTaskRunRecord {
             return;
         }
 
+        // The record names a runner job but its own heartbeat aged past the
+        // liveness window. That is all a projection can observe; whether the
+        // job itself is gone is decided only against the runner's job state
+        // (see `observe_runner_job_in_store`), never assumed here.
         let reason = if self.runner_job_id().is_some() {
-            "runner_job_unverified_after_daemon_restart"
+            RunnerJobObservation::HeartbeatStale.reason()
         } else if self.owner_pid().is_some() {
             "owner_process_not_running"
         } else {
@@ -1220,6 +1224,258 @@ impl AgentTaskLabHandoff {
             _ => None,
         }
     }
+}
+
+/// What reconciliation observed about the exact runner job a durable run names.
+///
+/// A runner-backed record is only a projection of a job some daemon owns. Its
+/// own `updated_at` can age while a long provider attempt keeps the job
+/// heartbeating, so staleness of the projection never proves the job is gone.
+/// This is the evidence a reconciler must hold before it may cancel such a run,
+/// and it names what was seen rather than what was assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerJobObservation {
+    /// The job is non-terminal and heartbeated within the liveness window.
+    Live,
+    /// The job is non-terminal but has not heartbeated within the window. The
+    /// owning daemon has not settled it, so it stays suspect, never cancelled.
+    HeartbeatStale,
+    /// The owning daemon recorded a terminal status for the job.
+    Terminal,
+    /// The owning daemon's restart reconciliation settled the job because the
+    /// daemon generation (lease) that accepted it was lost.
+    LostAfterDaemonRestart,
+    /// The authoritative job inventory holds no job with this id.
+    NotFound,
+    /// The runner that owned the job is authoritatively removed.
+    RunnerRemoved,
+    /// No authority could be consulted for the job.
+    Unverifiable,
+}
+
+impl RunnerJobObservation {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Live => "runner_job_live",
+            Self::HeartbeatStale => "runner_heartbeat_stale",
+            Self::Terminal => "runner_job_terminal",
+            Self::LostAfterDaemonRestart => "runner_job_lost_after_daemon_restart",
+            Self::NotFound => "runner_job_not_found",
+            Self::RunnerRemoved => "runner_removed",
+            Self::Unverifiable => "runner_job_unverifiable",
+        }
+    }
+
+    /// Only a job that is verifiably gone or terminal may have its durable run
+    /// cancelled by reconciliation.
+    pub fn permits_cancellation(self) -> bool {
+        matches!(
+            self,
+            Self::Terminal | Self::LostAfterDaemonRestart | Self::NotFound | Self::RunnerRemoved
+        )
+    }
+}
+
+/// The runner job evidence a reconciliation decision was taken from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RunnerJobEvidence {
+    pub runner_job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    /// The authority consulted: `local_job_store`, `runner_configuration`, or
+    /// `runner_live_job_inventory`.
+    pub source: &'static str,
+    pub observation: RunnerJobObservation,
+    pub reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_lease_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_stale_reason: Option<String>,
+    pub observed_at: String,
+}
+
+impl RunnerJobEvidence {
+    fn new(
+        record: &AgentTaskRunRecord,
+        runner_job_id: &str,
+        source: &'static str,
+        observation: RunnerJobObservation,
+    ) -> Self {
+        Self {
+            runner_job_id: runner_job_id.to_string(),
+            runner_id: record.runner_id().map(str::to_string),
+            source,
+            observation,
+            reason: observation.reason(),
+            job_status: None,
+            last_heartbeat_at_ms: None,
+            heartbeat_age_seconds: None,
+            daemon_lease_id: None,
+            job_stale_reason: None,
+            observed_at: now_timestamp(),
+        }
+    }
+
+    pub fn permits_cancellation(&self) -> bool {
+        self.observation.permits_cancellation()
+    }
+
+    fn from_job(
+        record: &AgentTaskRunRecord,
+        source: &'static str,
+        job: &homeboy_core::api_jobs::Job,
+        events: &[homeboy_core::api_jobs::JobEvent],
+        now_ms: u64,
+    ) -> Self {
+        let last_heartbeat_at_ms = events
+            .iter()
+            .map(|event| event.timestamp_ms)
+            .chain(std::iter::once(job.updated_at_ms))
+            .max()
+            .unwrap_or(job.updated_at_ms);
+        let heartbeat_age_ms = now_ms.saturating_sub(last_heartbeat_at_ms);
+        let window_ms =
+            u64::try_from(homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES.max(0))
+                .unwrap_or_default()
+                .saturating_mul(60_000);
+        let observation = if job.status.is_terminal() {
+            if job
+                .stale_reason
+                .as_deref()
+                .is_some_and(is_daemon_generation_loss_reason)
+            {
+                RunnerJobObservation::LostAfterDaemonRestart
+            } else {
+                RunnerJobObservation::Terminal
+            }
+        } else if heartbeat_age_ms < window_ms {
+            RunnerJobObservation::Live
+        } else {
+            RunnerJobObservation::HeartbeatStale
+        };
+        let mut evidence = Self::new(record, &job.id.to_string(), source, observation);
+        evidence.job_status = serde_json::to_value(job.status)
+            .ok()
+            .and_then(|status| status.as_str().map(str::to_string));
+        evidence.last_heartbeat_at_ms = Some(last_heartbeat_at_ms);
+        evidence.heartbeat_age_seconds = Some(heartbeat_age_ms / 1000);
+        evidence.daemon_lease_id = job.daemon_lease_id.clone();
+        evidence.job_stale_reason = job.stale_reason.clone();
+        evidence
+    }
+
+    pub fn to_value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+}
+
+/// Daemon restart reconciliation settles every job whose accepting daemon
+/// generation (lease) is gone with one of these reasons. They are the only
+/// evidence that justifies naming a daemon restart.
+fn is_daemon_generation_loss_reason(reason: &str) -> bool {
+    reason.contains("control plane lost")
+        || reason.contains("daemon lost")
+        || reason.contains("daemon lease owner process was not running")
+}
+
+/// Observe the exact job a runner-backed run names, from the job store of the
+/// daemon that owns it. Returns `None` for a record without a runner job.
+///
+/// The local daemon job store (the store below this lifecycle root) is
+/// consulted first: a runner daemon reconciling its own runs, or a controller
+/// that dispatched a targeted job, holds the job there. A record naming a
+/// remote runner that is not in this store relies on that runner's
+/// configuration and live-job inventory; anything short of authoritative
+/// removal or idle evidence is unverifiable and must not be cancelled.
+pub fn observe_runner_job_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> Option<RunnerJobEvidence> {
+    let runner_job_id = record.runner_job_id()?.to_string();
+    let local = observe_local_runner_job(lifecycle_store, record, &runner_job_id);
+    if let Some(evidence) = local
+        .as_ref()
+        .filter(|evidence| evidence.observation != RunnerJobObservation::NotFound)
+    {
+        return Some(evidence.clone());
+    }
+    let Some(runner_id) = record.runner_id() else {
+        // A runner-local record: this host's daemon job store is the only
+        // authority for its job, and it either answered or was unreadable.
+        return Some(local.unwrap_or_else(|| {
+            RunnerJobEvidence::new(
+                record,
+                &runner_job_id,
+                "local_job_store",
+                RunnerJobObservation::Unverifiable,
+            )
+        }));
+    };
+    if super::runner_authority(runner_id) == super::RunnerAuthority::Removed {
+        return Some(RunnerJobEvidence::new(
+            record,
+            &runner_job_id,
+            "runner_configuration",
+            RunnerJobObservation::RunnerRemoved,
+        ));
+    }
+    if record.is_locally_reconcilable_after_runner_idle() {
+        return Some(RunnerJobEvidence::new(
+            record,
+            &runner_job_id,
+            "runner_live_job_inventory",
+            RunnerJobObservation::NotFound,
+        ));
+    }
+    Some(RunnerJobEvidence::new(
+        record,
+        &runner_job_id,
+        "runner_live_job_inventory",
+        RunnerJobObservation::Unverifiable,
+    ))
+}
+
+/// `None` when the local job store exists but cannot be read.
+fn observe_local_runner_job(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    runner_job_id: &str,
+) -> Option<RunnerJobEvidence> {
+    let not_found = || {
+        RunnerJobEvidence::new(
+            record,
+            runner_job_id,
+            "local_job_store",
+            RunnerJobObservation::NotFound,
+        )
+    };
+    let path = lifecycle_store.observation_db_path();
+    if !homeboy_core::api_jobs::JobStore::exists_at_path(&path) {
+        return Some(not_found());
+    }
+    let store = homeboy_core::api_jobs::JobStore::open_without_reconciliation(&path).ok()?;
+    let Ok(job_id) = uuid::Uuid::parse_str(runner_job_id) else {
+        return Some(not_found());
+    };
+    let Ok(job) = store.get(job_id) else {
+        return Some(not_found());
+    };
+    let events = store.events(job_id).unwrap_or_default();
+    let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
+    Some(RunnerJobEvidence::from_job(
+        record,
+        "local_job_store",
+        &job,
+        &events,
+        now_ms,
+    ))
 }
 
 fn parse_rfc3339(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
