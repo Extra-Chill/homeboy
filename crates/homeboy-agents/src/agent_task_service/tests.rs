@@ -809,6 +809,87 @@ fn unmaterialized_admission_advances_as_its_first_attempt_materializes() {
 }
 
 #[test]
+fn materialized_attempt_inherits_cook_notification_route() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let parent = "routed-cook";
+        let child = "routed-cook-attempt-1";
+        let route = homeboy_core::notification_route::NotificationRoute {
+            transport: "discord.run-completion".to_string(),
+            route: "discord:v1:thread:16179".to_string(),
+        };
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            parent,
+            serde_json::json!({}),
+            "queued",
+            "test",
+        )
+        .unwrap();
+        agent_task_lifecycle::persist_notification_route(parent, &route).unwrap();
+        agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+            &store, parent, child,
+        )
+        .unwrap();
+        // The attempt is created by a process that does not hold the route.
+        agent_task_lifecycle::submit_plan_in_store(&store, &test_plan(), Some(child)).unwrap();
+        assert_eq!(
+            homeboy_core::notification_route::NotificationRoute::from_metadata(
+                &store.read_record(child).unwrap().metadata
+            ),
+            None
+        );
+
+        agent_task_lifecycle::record_cook_attempt_in_store(&store, parent, 1, child).unwrap();
+        assert_eq!(
+            homeboy_core::notification_route::NotificationRoute::from_metadata(
+                &store.read_record(child).unwrap().metadata
+            ),
+            Some(route.clone())
+        );
+        // Terminal announcements resolve the route from the attempt.
+        assert_eq!(
+            agent_task_lifecycle::durable_notification_route(child),
+            Some(route)
+        );
+    });
+}
+
+#[test]
+fn attempt_keeps_its_own_notification_route_over_the_cook_route() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let parent = "own-route-cook";
+        let child = "own-route-cook-attempt-1";
+        let route = |thread: &str| homeboy_core::notification_route::NotificationRoute {
+            transport: "discord.run-completion".to_string(),
+            route: format!("discord:v1:thread:{thread}"),
+        };
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            parent,
+            serde_json::json!({}),
+            "queued",
+            "test",
+        )
+        .unwrap();
+        agent_task_lifecycle::persist_notification_route(parent, &route("cook")).unwrap();
+        agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+            &store, parent, child,
+        )
+        .unwrap();
+        agent_task_lifecycle::submit_plan_in_store(&store, &test_plan(), Some(child)).unwrap();
+        agent_task_lifecycle::persist_notification_route(child, &route("attempt")).unwrap();
+
+        agent_task_lifecycle::record_cook_attempt_in_store(&store, parent, 1, child).unwrap();
+        assert_eq!(
+            homeboy_core::notification_route::NotificationRoute::from_metadata(
+                &store.read_record(child).unwrap().metadata
+            ),
+            Some(route("attempt"))
+        );
+    });
+}
+
+#[test]
 fn execution_step_published_admission_delivery_preserves_child_deferral_custody() {
     with_isolated_home(|_| {
         let store = test_lifecycle_store();

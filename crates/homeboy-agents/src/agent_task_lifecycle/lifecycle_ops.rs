@@ -7361,10 +7361,55 @@ pub fn record_cook_attempt_in_store(
         // while the index writer lock is held so an exit observer cannot fail
         // the parent between index publication and this transition.
         complete_detached_cook_handoff_parent_in_store(lifecycle_store, cook_id, run_id)?;
+        inherit_cook_notification_route_locked_in_store(lifecycle_store, cook_id, run_id)?;
         Ok(registration)
     })?;
     let index = registration.project_terminal_after_unlock_in_store(lifecycle_store)?;
     Ok(index)
+}
+
+/// An attempt carries its Cook's notification route (#16179).
+///
+/// A Cook persists `--notification-route` on its own record, but its attempts
+/// are created wherever the Cook executes, and that process does not always
+/// hold the route. Terminal announcements resolve the route from the attempt,
+/// so an attempt without one fell back to the default transport. Retries
+/// already copy the route onto the new run; this is the same rule for every
+/// attempt the Cook registers. An attempt's own route is left as is.
+fn inherit_cook_notification_route_locked_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+) -> Result<()> {
+    use homeboy_core::notification_route::{
+        NotificationRoute, NOTIFICATION_RESOLUTION_METADATA_KEY,
+    };
+    let cook_id = sanitize_run_id(cook_id);
+    let run_id = sanitize_run_id(run_id);
+    if cook_id == run_id {
+        return Ok(());
+    }
+    let Ok(cook) = lifecycle_store.read_record(&cook_id) else {
+        return Ok(());
+    };
+    let Some(route) = NotificationRoute::from_metadata(&cook.metadata) else {
+        return Ok(());
+    };
+    let resolution = cook
+        .metadata
+        .get(NOTIFICATION_RESOLUTION_METADATA_KEY)
+        .cloned();
+    lifecycle_store.mutate_record_locked_without_terminal_projection(&run_id, |attempt| {
+        if NotificationRoute::from_metadata(&attempt.metadata).is_some() {
+            return false;
+        }
+        route.insert_into_metadata(&mut attempt.metadata);
+        if let Some(resolution) = resolution {
+            attempt.metadata[NOTIFICATION_RESOLUTION_METADATA_KEY] = resolution;
+        }
+        true
+    })?;
+    Ok(())
 }
 
 // The ambient `record_cook_attempt_locked()` shim that used to sit here is gone;
