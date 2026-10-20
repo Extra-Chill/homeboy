@@ -147,6 +147,49 @@ jobs:
     secrets: inherit
 ```
 
+### Scheduled dependency refresh
+
+Consumers can pick up upstream releases even when they have no new commits:
+
+```yaml
+name: Dependency refresh
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+jobs:
+  refresh:
+    uses: Extra-Chill/homeboy-action/.github/workflows/deps-refresh.yml@v2
+    secrets: inherit
+```
+
+Declare `dependency_stack` in `homeboy.json` (Homeboy v0.431.0+). The workflow
+uses the same Homeboy installation and `HOMEBOY_APP_ID` / `HOMEBOY_APP_PRIVATE_KEY`
+token pattern as `release.yml`, with `github.token` as fallback. Install the App
+on the consumer with contents and pull-request write access: App-created PRs do
+not require the organization’s “Actions can create PRs” setting. Without App
+credentials, PR creation remains subject to that setting and token permissions.
+
+No outdated edges means no action. If all updates are non-breaking and
+`release.refresh_dependencies` is `true`, the workflow calls `release.yml`
+directly, retaining its failure-marker and release checks. Otherwise (including
+unknown breaking verdicts or consumers not opted into automatic releases), it
+refreshes dependencies and opens/updates `homeboy/deps-refresh`. It runs the same
+`review lint,review test` action entry point as reusable CI, lists versions and
+breaking reasons in the PR, and reports gate failures in both the PR and run.
+Failed/unresolvable edges fail closed rather than triggering a release.
+
+The workflow owns the `release` concurrency group (`cancel-in-progress: false`),
+matching the normal release caller above. **Do not add that group to the refresh
+caller itself**: the nested workflow already holds it. Scheduled callers should
+run from the default/release branch. Optional inputs are `action-ref` (default
+`v2`) and `publisher-known-hosts` (forwarded to release for SSH publishers).
+Release publishing secrets are inherited, just as with `release.yml`.
+
 ### Continuous Release
 
 Fully automated releases — no human input needed. Triggers on every push to main, checks for releasable conventional commits since the last tag, computes the version, generates changelog, bumps version targets, tags, creates a GitHub Release, and publishes.
