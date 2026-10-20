@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.431.9] - 2026-10-20
+
+### Changed
+- Carry a Cook's notification route onto every attempt it registers
+
 ## [0.431.8] - 2026-10-20
 
 ### Changed
