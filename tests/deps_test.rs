@@ -887,3 +887,425 @@ fn stack_outdated_dedupes_and_skips_edges_declared_for_other_downstreams() {
     assert_eq!(status.edge_count, 1);
     assert_eq!(status.exit_code(), 0);
 }
+
+// --- deps stack refresh -----------------------------------------------------
+
+/// Add a commit (and optional tags on it) to an existing upstream fixture
+/// repository, so a release range carries real commit messages.
+fn upstream_commit_with_tags(path: &std::path::Path, message: &str, tags: &[&str]) {
+    write_file(
+        &path.join("CHANGELOG.md"),
+        &format!("fixture change: {message}\n"),
+    );
+    git_fixture(path, &["add", "."]);
+    git_fixture(
+        path,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
+    for tag in tags {
+        git_fixture(path, &["tag", tag]);
+    }
+}
+
+fn refresh_edge_by_package<'a>(
+    result: &'a deps::DependencyStackRefreshResult,
+    package: &str,
+) -> &'a deps::DependencyStackEdgeRefreshResult {
+    result
+        .edges
+        .iter()
+        .find(|edge| edge.package == package)
+        .unwrap_or_else(|| panic!("no refresh edge reported for package {package}"))
+}
+
+#[test]
+fn stack_refresh_updates_behind_edge_and_leaves_current_untouched() {
+    let dir = tempdir().unwrap();
+    let upstream = dir.path().join("upstream");
+    upstream_repo_with_tags(&upstream, &["transformer-v0.17.0", "transformer-v0.18.0"]);
+    let repo = upstream.display().to_string();
+    let downstream_path = dir.path().join("downstream");
+    let source = |prefix: &str| {
+        Some(homeboy::core::component::DependencyStackEdgeSource {
+            repo: repo.clone(),
+            prefix: prefix.to_string(),
+        })
+    };
+
+    let mut behind = outdated_edge("fixture/behind", source("transformer"));
+    behind.update = Some("touch refresh-update-marker".to_string());
+    behind.post_update = vec!["touch refresh-post-marker".to_string()];
+    let mut current = outdated_edge("fixture/current", source("transformer"));
+    current.update = Some("touch refresh-current-marker".to_string());
+
+    let component = outdated_downstream(
+        &downstream_path,
+        &[("fixture/behind", "0.17.0"), ("fixture/current", "0.18.0")],
+        vec![behind, current],
+    );
+
+    let result =
+        deps::stack_refresh_for_component(&component, &downstream_path, false, true).unwrap();
+
+    assert_eq!(result.edge_count, 2);
+    assert_eq!(result.updated_count, 1);
+    assert_eq!(result.current_count, 1);
+    assert_eq!(result.failed_count, 0);
+    assert_eq!(result.unresolvable_count, 0);
+    assert_eq!(result.exit_code(), 0, "a clean refresh gates with exit 0");
+
+    let updated = refresh_edge_by_package(&result, "fixture/behind");
+    assert_eq!(
+        updated.state,
+        deps::DependencyStackEdgeRefreshState::Updated
+    );
+    assert_eq!(updated.from.as_deref(), Some("0.17.0"));
+    assert_eq!(updated.to.as_deref(), Some("0.18.0"));
+    // 0.x minors carry behavior changes: breaking without range inspection.
+    assert_eq!(updated.breaking, Some(true));
+    assert!(
+        updated.breaking_reasons[0].contains("0.x minor changes"),
+        "unexpected reasons: {:?}",
+        updated.breaking_reasons
+    );
+    assert!(result.breaking, "an updated breaking edge marks the run");
+    let phases: Vec<&str> = updated
+        .command_results
+        .iter()
+        .map(|command| command.phase.as_str())
+        .collect();
+    assert_eq!(phases, vec!["update", "post_update"]);
+    assert!(updated
+        .command_results
+        .iter()
+        .all(|command| !command.skipped));
+    assert!(downstream_path.join("refresh-update-marker").exists());
+    assert!(downstream_path.join("refresh-post-marker").exists());
+
+    let untouched = refresh_edge_by_package(&result, "fixture/current");
+    assert_eq!(
+        untouched.state,
+        deps::DependencyStackEdgeRefreshState::Current
+    );
+    assert_eq!(untouched.breaking, Some(false));
+    assert!(untouched.command_results.is_empty());
+    assert!(
+        !downstream_path.join("refresh-current-marker").exists(),
+        "a current edge's update path must not run"
+    );
+}
+
+#[test]
+fn stack_refresh_dry_run_mutates_nothing() {
+    let dir = tempdir().unwrap();
+    let upstream = dir.path().join("upstream");
+    upstream_repo_with_tags(&upstream, &["transformer-v0.17.0", "transformer-v0.18.0"]);
+    let downstream_path = dir.path().join("downstream");
+
+    let mut behind = outdated_edge(
+        "fixture/behind",
+        Some(homeboy::core::component::DependencyStackEdgeSource {
+            repo: upstream.display().to_string(),
+            prefix: "transformer".to_string(),
+        }),
+    );
+    behind.update = Some("touch refresh-update-marker".to_string());
+    behind.post_update = vec!["touch refresh-post-marker".to_string()];
+
+    let component = outdated_downstream(
+        &downstream_path,
+        &[("fixture/behind", "0.17.0")],
+        vec![behind],
+    );
+
+    let result =
+        deps::stack_refresh_for_component(&component, &downstream_path, true, true).unwrap();
+
+    assert!(result.dry_run);
+    assert_eq!(result.exit_code(), 0);
+    let planned = refresh_edge_by_package(&result, "fixture/behind");
+    assert_eq!(
+        planned.state,
+        deps::DependencyStackEdgeRefreshState::Updated
+    );
+    assert!(
+        planned
+            .command_results
+            .iter()
+            .all(|command| command.skipped),
+        "dry run must skip every command"
+    );
+    // The breaking verdict is still computed: it is read-only.
+    assert_eq!(planned.breaking, Some(true));
+    assert!(
+        !downstream_path.join("refresh-update-marker").exists()
+            && !downstream_path.join("refresh-post-marker").exists(),
+        "dry run must not run edge commands"
+    );
+}
+
+#[test]
+fn stack_refresh_reports_failed_edges_and_gates_on_exit_status() {
+    let dir = tempdir().unwrap();
+    let upstream = dir.path().join("upstream");
+    upstream_repo_with_tags(&upstream, &["transformer-v0.17.0", "transformer-v0.18.0"]);
+    let repo = upstream.display().to_string();
+    let downstream_path = dir.path().join("downstream");
+
+    let mut failing = outdated_edge(
+        "fixture/behind",
+        Some(homeboy::core::component::DependencyStackEdgeSource {
+            repo: repo.clone(),
+            prefix: "transformer".to_string(),
+        }),
+    );
+    failing.update = Some("exit 7".to_string());
+    failing.post_update = vec!["touch refresh-post-marker".to_string()];
+
+    let component = outdated_downstream(
+        &downstream_path,
+        &[("fixture/behind", "0.17.0")],
+        vec![failing, outdated_edge("fixture/untracked", None)],
+    );
+
+    let result =
+        deps::stack_refresh_for_component(&component, &downstream_path, false, true).unwrap();
+
+    let failed = refresh_edge_by_package(&result, "fixture/behind");
+    assert_eq!(failed.state, deps::DependencyStackEdgeRefreshState::Failed);
+    assert!(
+        failed.failure.as_deref().unwrap().contains("update"),
+        "unexpected failure: {:?}",
+        failed.failure
+    );
+    assert!(
+        !downstream_path.join("refresh-post-marker").exists(),
+        "post_update must not run after a failed update"
+    );
+
+    // An edge that cannot be checked never reads as current.
+    let unresolvable = refresh_edge_by_package(&result, "fixture/untracked");
+    assert_eq!(
+        unresolvable.state,
+        deps::DependencyStackEdgeRefreshState::Unresolvable
+    );
+    assert!(unresolvable.unresolvable_reason.is_some());
+    assert_eq!(unresolvable.breaking, None);
+
+    assert_eq!(result.failed_count, 1);
+    assert_eq!(result.unresolvable_count, 1);
+    assert_eq!(result.exit_code(), 1, "a failed edge gates with exit 1");
+    assert!(result
+        .gate_failure_message()
+        .contains("fixture/behind failed"));
+
+    // Nothing failed, one unresolvable -> exit 2.
+    let component = outdated_downstream(
+        &downstream_path,
+        &[("fixture/behind", "0.18.0")],
+        vec![outdated_edge("fixture/untracked", None)],
+    );
+    let result =
+        deps::stack_refresh_for_component(&component, &downstream_path, false, true).unwrap();
+    assert_eq!(result.unresolvable_count, 1);
+    assert_eq!(
+        result.exit_code(),
+        2,
+        "an unresolvable edge with no failures gates with exit 2"
+    );
+}
+
+#[test]
+fn stack_refresh_default_update_path_targets_the_newest_release() {
+    register_component_script_runner();
+    let dir = tempdir().unwrap();
+    let upstream = dir.path().join("upstream");
+    upstream_repo_with_tags(&upstream, &["transformer-v0.17.0", "transformer-v0.18.0"]);
+    let downstream_path = dir.path().join("downstream");
+    fs::create_dir_all(&downstream_path).unwrap();
+
+    let adapter = downstream_path.join("fixture-adapter.sh");
+    write_file(
+        &adapter,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> adapter-args.txt\n",
+    );
+    make_executable(&adapter);
+    write_file(
+        &downstream_path.join("homeboy.json"),
+        &format!(
+            r#"{{"id":"downstream","deps":{{
+                "provider": "fixture-adapter",
+                "packages": [{{
+                    "name": "fixture/behind",
+                    "manifest_section": "adapter-dependencies",
+                    "constraint": "0.17.0",
+                    "locked_version": "0.17.0"
+                }}],
+                "commands": {{
+                    "update": {{ "argv": ["{adapter}", "update", "{{package}}", "{{constraint}}"] }}
+                }}
+            }}}}"#,
+            adapter = adapter.display()
+        ),
+    );
+
+    // No custom `update` on the edge: the provider-backed default update runs
+    // with `--to <newest>`.
+    let component = stack_component(
+        "downstream",
+        &downstream_path.display().to_string(),
+        vec![outdated_edge(
+            "fixture/behind",
+            Some(homeboy::core::component::DependencyStackEdgeSource {
+                repo: upstream.display().to_string(),
+                prefix: "transformer".to_string(),
+            }),
+        )],
+    );
+
+    let result =
+        deps::stack_refresh_for_component(&component, &downstream_path, false, false).unwrap();
+
+    let updated = refresh_edge_by_package(&result, "fixture/behind");
+    assert_eq!(
+        updated.state,
+        deps::DependencyStackEdgeRefreshState::Updated
+    );
+    assert!(
+        updated.command_results[0].command.contains("--to 0.18.0"),
+        "default update must target the newest release: {}",
+        updated.command_results[0].command
+    );
+    assert!(
+        updated.command_results[0].command.contains("--no-install"),
+        "install=false must reach the default update: {}",
+        updated.command_results[0].command
+    );
+    assert_eq!(
+        fs::read_to_string(downstream_path.join("adapter-args.txt")).unwrap(),
+        "update\nfixture/behind\n0.18.0\n"
+    );
+}
+
+#[test]
+fn stack_refresh_breaking_verdict_covers_major_feat_bang_and_uninspectable_ranges() {
+    let dir = tempdir().unwrap();
+    let downstream_path = dir.path().join("downstream");
+
+    // Major bump: breaking from the version shape alone.
+    let major_upstream = dir.path().join("upstream-major");
+    upstream_repo_with_tags(&major_upstream, &["transformer-v2.0.0"]);
+    let mut edge = outdated_edge(
+        "fixture/behind",
+        Some(homeboy::core::component::DependencyStackEdgeSource {
+            repo: major_upstream.display().to_string(),
+            prefix: "transformer".to_string(),
+        }),
+    );
+    edge.update = Some("true".to_string());
+    let component = outdated_downstream(
+        &downstream_path,
+        &[("fixture/behind", "1.9.0")],
+        vec![edge.clone()],
+    );
+    let result =
+        deps::stack_refresh_for_component(&component, &downstream_path, true, true).unwrap();
+    let verdict = refresh_edge_by_package(&result, "fixture/behind");
+    assert_eq!(verdict.breaking, Some(true));
+    assert!(
+        verdict.breaking_reasons[0].contains("major version changes"),
+        "unexpected reasons: {:?}",
+        verdict.breaking_reasons
+    );
+
+    // A patch bump whose range carries a `feat!:` commit is breaking.
+    let bang_upstream = dir.path().join("upstream-bang");
+    upstream_repo_with_tags(&bang_upstream, &["transformer-v1.0.0"]);
+    upstream_commit_with_tags(
+        &bang_upstream,
+        "feat!: drop legacy API",
+        &["transformer-v1.0.1"],
+    );
+    edge.source = Some(homeboy::core::component::DependencyStackEdgeSource {
+        repo: bang_upstream.display().to_string(),
+        prefix: "transformer".to_string(),
+    });
+    let component = outdated_downstream(
+        &downstream_path,
+        &[("fixture/behind", "1.0.0")],
+        vec![edge.clone()],
+    );
+    let result =
+        deps::stack_refresh_for_component(&component, &downstream_path, true, true).unwrap();
+    let verdict = refresh_edge_by_package(&result, "fixture/behind");
+    assert_eq!(verdict.breaking, Some(true));
+    assert!(
+        verdict
+            .breaking_reasons
+            .iter()
+            .any(|reason| reason.contains("feat!: drop legacy API")),
+        "unexpected reasons: {:?}",
+        verdict.breaking_reasons
+    );
+    assert!(result.breaking);
+
+    // A patch bump whose range carries only non-breaking commits is clean.
+    let clean_upstream = dir.path().join("upstream-clean");
+    upstream_repo_with_tags(&clean_upstream, &["transformer-v1.0.0"]);
+    upstream_commit_with_tags(
+        &clean_upstream,
+        "fix: tighten parsing",
+        &["transformer-v1.0.1"],
+    );
+    edge.source = Some(homeboy::core::component::DependencyStackEdgeSource {
+        repo: clean_upstream.display().to_string(),
+        prefix: "transformer".to_string(),
+    });
+    let component = outdated_downstream(
+        &downstream_path,
+        &[("fixture/behind", "1.0.0")],
+        vec![edge.clone()],
+    );
+    let result =
+        deps::stack_refresh_for_component(&component, &downstream_path, true, true).unwrap();
+    let verdict = refresh_edge_by_package(&result, "fixture/behind");
+    assert_eq!(verdict.breaking, Some(false));
+    assert!(verdict.breaking_reasons.is_empty());
+    assert!(!result.breaking, "a clean range does not mark the run");
+
+    // The locked release was never tagged: the range cannot be inspected and
+    // the verdict is null, which callers (and the run) treat as breaking.
+    let gapped_upstream = dir.path().join("upstream-gapped");
+    upstream_repo_with_tags(&gapped_upstream, &["transformer-v1.0.1"]);
+    edge.source = Some(homeboy::core::component::DependencyStackEdgeSource {
+        repo: gapped_upstream.display().to_string(),
+        prefix: "transformer".to_string(),
+    });
+    let component =
+        outdated_downstream(&downstream_path, &[("fixture/behind", "1.0.0")], vec![edge]);
+    let result =
+        deps::stack_refresh_for_component(&component, &downstream_path, true, true).unwrap();
+    let verdict = refresh_edge_by_package(&result, "fixture/behind");
+    assert_eq!(verdict.breaking, None);
+    assert!(
+        verdict
+            .breaking_reasons
+            .iter()
+            .any(|reason| reason.contains("could not be fetched")),
+        "unexpected reasons: {:?}",
+        verdict.breaking_reasons
+    );
+    assert!(
+        result.breaking,
+        "a null verdict on an updated edge marks the run breaking"
+    );
+}

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod dependency_graph;
+mod stack_refresh;
 mod submodules;
 mod tool_preflight;
 pub use submodules::{
@@ -24,6 +25,11 @@ pub use dependency_graph::{
     DependencyStackCommandResult, DependencyStackEdgeOutdatedState,
     DependencyStackEdgeOutdatedStatus, DependencyStackEdgeStatus, DependencyStackOutdatedStatus,
     DependencyStackPlan, DependencyStackPlanStep, DependencyStackStatus,
+};
+pub use stack_refresh::{
+    release_range_breaking_verdict, stack_refresh, stack_refresh_for_component,
+    DependencyStackBreakingVerdict, DependencyStackEdgeRefreshResult,
+    DependencyStackEdgeRefreshState, DependencyStackRefreshResult,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1249,6 +1255,35 @@ pub fn stack_outdated_value_with_exit_code(
                 serde_json::json!({
                     "code": "deps_stack_outdated.gate_failed",
                     "message": status.gate_failure_message(),
+                }),
+            );
+        }
+    }
+    Ok((value, exit_code))
+}
+
+/// Serialize [`stack_refresh`] together with its gate exit status so the CLI
+/// resolves the refresh and the exit code in one pass.
+///
+/// A non-zero gate status carries a declared `failure` object naming the
+/// failed/unresolvable edges, so the command envelope reports the gate cause
+/// instead of an unnamed non-zero exit.
+pub fn stack_refresh_value_with_exit_code(
+    component: Option<&str>,
+    path: Option<&str>,
+    dry_run: bool,
+    install: bool,
+) -> Result<(serde_json::Value, i32)> {
+    let result = stack_refresh(component, path, dry_run, install)?;
+    let exit_code = result.exit_code();
+    let mut value = serialize_dependency_output(&result, "serialize deps stack refresh")?;
+    if exit_code != 0 {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "failure".to_string(),
+                serde_json::json!({
+                    "code": "deps_stack_refresh.gate_failed",
+                    "message": result.gate_failure_message(),
                 }),
             );
         }

@@ -16,6 +16,8 @@ homeboy deps <COMMAND>
 - `stack status` — list declared dependency stack edges
 - `stack plan <upstream>` — plan downstream updates for a merged upstream component or repo
 - `stack apply <upstream> [--to <constraint>] [--dry-run]` — run declared update, post-update, and test commands in dependency order
+- `stack outdated [component]` — report declared edges against each source's newest release
+- `stack refresh [component] [--path <path>] [--dry-run] [--no-install]` — roll declared edges forward to each source's newest release
 
 ## Dependency Stacks
 
@@ -55,6 +57,65 @@ homeboy deps stack apply extrachill-components --to ^0.5.2
 ```
 
 Custom `dependency_stack[].update` commands are executed as declared; include any constraint handling directly in the custom command when overriding the default provider-backed update.
+
+### Checking declared edges against released versions (`stack outdated`)
+
+An edge can declare a remote release `source` so the downstream resolves its
+upstream's newest release without the upstream being registered locally:
+
+```json
+{
+  "dependency_stack": [
+    {
+      "upstream": "example-org/html-to-blocks-converter",
+      "downstream": "block-format-bridge",
+      "package": "example-org/html-to-blocks-converter",
+      "source": {
+        "repo": "git@github.com:example-org/components.git",
+        "prefix": "html-to-blocks-converter"
+      }
+    }
+  ]
+}
+```
+
+`homeboy deps stack outdated` runs from the downstream checkout and reports
+each edge where this component is the `downstream` as `current`, `behind`, or
+`unresolvable`. An edge that cannot be checked never reads as current. The
+exit status gates on the result: `0` when every edge is current, `1` when at
+least one edge is behind, `2` when at least one edge is unresolvable and none
+are behind.
+
+### Rolling edges forward (`stack refresh`)
+
+`homeboy deps stack refresh` is the verb a scheduled CI job calls from the
+downstream checkout (or with `--path`). It runs the same evaluation as
+`stack outdated`, then applies each `behind` edge through the edge's existing
+update path — the same step `stack apply` runs: the edge's `update` command if
+set, otherwise the provider-backed default update with `--to <newest>`, then
+install/lockfile refresh unless `--no-install`, then `post_update`. It does
+not commit, push, or open PRs; landing the change belongs to the release plan
+and to CI automation.
+
+Each edge reports `from`, `to`, a `state` (`updated`, `current`,
+`unresolvable`, `failed`), and a `breaking` verdict (`true`, `false`, or
+`null`) with `breaking_reasons`. A range is breaking when:
+
+- the major version changes;
+- the major is 0 and the minor changes (0.x minors carry behavior changes);
+- a commit in the release range carries a conventional breaking marker
+  (`type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE` /
+  `BREAKING-CHANGE` footer), or the target release tag's notes do.
+
+When the range cannot be inspected (for example the locked version was never
+released under the source's tag namespace), the verdict is `null` with a
+reason, and callers must treat `null` as breaking. The JSON output carries a
+top-level `breaking` that is true when any updated edge is breaking or `null`.
+
+`--dry-run` prints the plan (including the breaking verdicts, which are
+read-only) and changes nothing. Exit status: `0` when nothing is behind or
+everything behind updated cleanly, `1` when at least one edge failed to
+update, `2` when at least one edge was unresolvable and none failed.
 
 ## Provider Boundary
 
