@@ -4647,13 +4647,17 @@ pub(crate) fn routing_ready() -> bool {
 /// Enable the production staging implementation after generic driver
 /// registration. Keeping this explicit prevents partial embedders from routing
 /// detached work before they initialize the Lab runtime.
+/// Enabling is idempotent and keyed on the installed adapter itself, so
+/// routing is ready exactly when an adapter is installed.
 pub fn enable_production_routing() {
-    static ENABLED: OnceLock<()> = OnceLock::new();
-    ENABLED.get_or_init(|| {
-        install_production_execution_adapter(Arc::new(StageExecutionAdapter::new(Arc::new(
+    let mut slot = provider_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if slot.is_none() {
+        *slot = Some(Arc::new(StageExecutionAdapter::new(Arc::new(
             ProductionLabStagingOperations,
         ))));
-    });
+    }
 }
 
 fn cancellations() -> &'static Mutex<HashMap<String, LabStagingCancellationToken>> {
@@ -5159,7 +5163,6 @@ mod tests {
     #[test]
     fn detached_staging_publishes_planned_ownership_before_daemon_convergence() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let _adapter_guard = global_state_lock().lock().expect("adapter lock");
             clear_installed_adapter();
             register();
             enable_production_routing();
@@ -5287,11 +5290,6 @@ mod tests {
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(keys, ["input", "run_id", "runner_id", "schema"].into());
-    }
-
-    fn global_state_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -6149,7 +6147,6 @@ mod tests {
             AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, CookRecipeStore,
         };
 
-        let _serial = global_state_lock().lock().expect("lock");
         // This fixture owns the explicit outbox drain below. Register the
         // agents scheduling seam without submitting a second controller job.
         homeboy_agents::agent_task_service::register_terminal_cook_scheduler(Arc::new(|request| {
@@ -6977,86 +6974,90 @@ mod tests {
 
     #[test]
     fn incompatible_handoff_identity_is_rejected_before_workspace_materialization() {
-        let operations = Arc::new(RecordedStageOperations::default());
-        operations.reject_handoff_identity_once();
-        let adapter = StageExecutionAdapter::new(operations.clone());
-        let error = adapter
-            .execute_with_checkpoint(
-                &execution_request(),
-                LabStagingCheckpoint::initial(&envelope()),
-                &LabStagingCancellationToken::default(),
-                |_| Ok(()),
-            )
-            .expect_err("stale runner identity must reject the staging operation");
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operations = Arc::new(RecordedStageOperations::default());
+            operations.reject_handoff_identity_once();
+            let adapter = StageExecutionAdapter::new(operations.clone());
+            let error = adapter
+                .execute_with_checkpoint(
+                    &execution_request(),
+                    LabStagingCheckpoint::initial(&envelope()),
+                    &LabStagingCancellationToken::default(),
+                    |_| Ok(()),
+                )
+                .expect_err("stale runner identity must reject the staging operation");
 
-        assert!(error.message.contains("before workspace materialization"));
-        assert_eq!(operations.calls(), ["validate", "handoff-identity"]);
+            assert!(error.message.contains("before workspace materialization"));
+            assert_eq!(operations.calls(), ["validate", "handoff-identity"]);
+        });
     }
 
     #[test]
     fn adapter_recovers_after_each_effect_before_completion_without_repeating_side_effects() {
-        // Odd persistence calls store intent. Even calls store the completion
-        // checkpoint, so crashing on each even call exercises every exact-once
-        // window after an injected side effect.
-        for crash_after in [2, 4, 6, 8, 10] {
-            let operations = Arc::new(RecordedStageOperations::default());
-            let adapter = StageExecutionAdapter::new(operations.clone());
-            let request = execution_request();
-            let token = LabStagingCancellationToken::default();
-            let mut persisted = Vec::new();
-            let interrupted = adapter.execute_with_checkpoint(
-                &request,
-                LabStagingCheckpoint::initial(&envelope()),
-                &token,
-                |checkpoint| {
-                    if persisted.len() + 1 == crash_after {
-                        Err(Error::internal_unexpected("simulated controller crash"))
-                    } else {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            // Odd persistence calls store intent. Even calls store the completion
+            // checkpoint, so crashing on each even call exercises every exact-once
+            // window after an injected side effect.
+            for crash_after in [2, 4, 6, 8, 10] {
+                let operations = Arc::new(RecordedStageOperations::default());
+                let adapter = StageExecutionAdapter::new(operations.clone());
+                let request = execution_request();
+                let token = LabStagingCancellationToken::default();
+                let mut persisted = Vec::new();
+                let interrupted = adapter.execute_with_checkpoint(
+                    &request,
+                    LabStagingCheckpoint::initial(&envelope()),
+                    &token,
+                    |checkpoint| {
+                        if persisted.len() + 1 == crash_after {
+                            Err(Error::internal_unexpected("simulated controller crash"))
+                        } else {
+                            persisted.push(checkpoint.clone());
+                            Ok(())
+                        }
+                    },
+                );
+                assert!(
+                    interrupted.is_err(),
+                    "crash point {crash_after} must interrupt"
+                );
+                let checkpoint = persisted.last().expect("checkpoint before crash").clone();
+                let completed = adapter
+                    .execute_with_checkpoint(&request, checkpoint, &token, |checkpoint| {
                         persisted.push(checkpoint.clone());
                         Ok(())
-                    }
-                },
-            );
-            assert!(
-                interrupted.is_err(),
-                "crash point {crash_after} must interrupt"
-            );
-            let checkpoint = persisted.last().expect("checkpoint before crash").clone();
-            let completed = adapter
-                .execute_with_checkpoint(&request, checkpoint, &token, |checkpoint| {
-                    persisted.push(checkpoint.clone());
-                    Ok(())
-                })
-                .unwrap_or_else(|error| panic!("resume after crash {crash_after}: {error:?}"));
+                    })
+                    .unwrap_or_else(|error| panic!("resume after crash {crash_after}: {error:?}"));
 
-            assert_eq!(completed.phase, LabStagingPhase::Completed);
-            assert_eq!(
-                operations
-                    .calls()
-                    .into_iter()
-                    .filter(|call| !matches!(*call, "validate" | "handoff-identity"))
-                    .collect::<Vec<_>>(),
-                ["workspace", "runtime", "hydration", "dispatch", "observe"]
-            );
-            assert_eq!(
-                persisted
-                    .iter()
-                    .map(|checkpoint| checkpoint.phase.clone())
-                    .collect::<Vec<_>>(),
-                [
-                    LabStagingPhase::AcceptedMaterializeWorkspace,
-                    LabStagingPhase::MaterializeRuntime,
-                    LabStagingPhase::MaterializeRuntime,
-                    LabStagingPhase::HydrateDependencies,
-                    LabStagingPhase::HydrateDependencies,
-                    LabStagingPhase::DispatchRunner,
-                    LabStagingPhase::DispatchRunner,
-                    LabStagingPhase::ObserveRunner,
-                    LabStagingPhase::ObserveRunner,
-                    LabStagingPhase::Completed,
-                ]
-            );
-        }
+                assert_eq!(completed.phase, LabStagingPhase::Completed);
+                assert_eq!(
+                    operations
+                        .calls()
+                        .into_iter()
+                        .filter(|call| !matches!(*call, "validate" | "handoff-identity"))
+                        .collect::<Vec<_>>(),
+                    ["workspace", "runtime", "hydration", "dispatch", "observe"]
+                );
+                assert_eq!(
+                    persisted
+                        .iter()
+                        .map(|checkpoint| checkpoint.phase.clone())
+                        .collect::<Vec<_>>(),
+                    [
+                        LabStagingPhase::AcceptedMaterializeWorkspace,
+                        LabStagingPhase::MaterializeRuntime,
+                        LabStagingPhase::MaterializeRuntime,
+                        LabStagingPhase::HydrateDependencies,
+                        LabStagingPhase::HydrateDependencies,
+                        LabStagingPhase::DispatchRunner,
+                        LabStagingPhase::DispatchRunner,
+                        LabStagingPhase::ObserveRunner,
+                        LabStagingPhase::ObserveRunner,
+                        LabStagingPhase::Completed,
+                    ]
+                );
+            }
+        });
     }
 
     #[test]
@@ -7089,7 +7090,6 @@ mod tests {
 
     #[test]
     fn checkpointed_runtime_stage_updates_the_persisted_parent_progress() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let request = execution_request();
             submit_recipe_run(&request.recipe.run_id);
@@ -7223,44 +7223,46 @@ mod tests {
 
     #[test]
     fn partial_or_cancelled_hydration_does_not_advance_the_checkpoint() {
-        for cancelled in [false, true] {
-            let operations = Arc::new(RecordedStageOperations::default());
-            if cancelled {
-                operations.cancel_during_hydration_once();
-            } else {
-                operations.fail_hydration_once();
+        homeboy_core::test_support::with_isolated_home(|_| {
+            for cancelled in [false, true] {
+                let operations = Arc::new(RecordedStageOperations::default());
+                if cancelled {
+                    operations.cancel_during_hydration_once();
+                } else {
+                    operations.fail_hydration_once();
+                }
+                let adapter = StageExecutionAdapter::new(operations.clone());
+                let request = execution_request();
+                let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+                checkpoint.phase = LabStagingPhase::HydrateDependencies;
+                checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
+                checkpoint.workspace_id = Some("workspace-1".to_string());
+                checkpoint.runtime_id = Some("runtime-1".to_string());
+                let mut persisted = Vec::new();
+                assert!(adapter
+                    .execute_with_checkpoint(
+                        &request,
+                        checkpoint,
+                        &LabStagingCancellationToken::default(),
+                        |next| {
+                            persisted.push(next.clone());
+                            Ok(())
+                        },
+                    )
+                    .is_err());
+                assert_eq!(persisted.len(), 2);
+                assert!(persisted.iter().all(|checkpoint| {
+                    checkpoint.phase == LabStagingPhase::HydrateDependencies
+                        && checkpoint.stage_intent.is_some()
+                }));
+                assert_eq!(persisted[1].phase_timings[0].phase, "hydration");
+                assert_eq!(
+                    persisted[1].phase_timings[0].status,
+                    if cancelled { "cancelled" } else { "failed" }
+                );
+                assert_eq!(operations.calls(), ["validate", "hydration"]);
             }
-            let adapter = StageExecutionAdapter::new(operations.clone());
-            let request = execution_request();
-            let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
-            checkpoint.phase = LabStagingPhase::HydrateDependencies;
-            checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
-            checkpoint.workspace_id = Some("workspace-1".to_string());
-            checkpoint.runtime_id = Some("runtime-1".to_string());
-            let mut persisted = Vec::new();
-            assert!(adapter
-                .execute_with_checkpoint(
-                    &request,
-                    checkpoint,
-                    &LabStagingCancellationToken::default(),
-                    |next| {
-                        persisted.push(next.clone());
-                        Ok(())
-                    },
-                )
-                .is_err());
-            assert_eq!(persisted.len(), 2);
-            assert!(persisted.iter().all(|checkpoint| {
-                checkpoint.phase == LabStagingPhase::HydrateDependencies
-                    && checkpoint.stage_intent.is_some()
-            }));
-            assert_eq!(persisted[1].phase_timings[0].phase, "hydration");
-            assert_eq!(
-                persisted[1].phase_timings[0].status,
-                if cancelled { "cancelled" } else { "failed" }
-            );
-            assert_eq!(operations.calls(), ["validate", "hydration"]);
-        }
+        });
     }
 
     #[test]
@@ -7435,28 +7437,30 @@ mod tests {
 
     #[test]
     fn retryable_observation_outage_keeps_the_original_child_recoverable() {
-        let operations = Arc::new(RecordedStageOperations::default());
-        operations.fail_observation_once();
-        let adapter = StageExecutionAdapter::new(operations.clone());
-        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
-        checkpoint.phase = LabStagingPhase::ObserveRunner;
-        checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
-        checkpoint.workspace_id = Some("workspace-1".to_string());
-        checkpoint.runtime_id = Some("runtime-1".to_string());
-        checkpoint.hydration_id = Some("hydration-1".to_string());
-        checkpoint.final_runner_job_id = Some("runner-job-1".to_string());
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operations = Arc::new(RecordedStageOperations::default());
+            operations.fail_observation_once();
+            let adapter = StageExecutionAdapter::new(operations.clone());
+            let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+            checkpoint.phase = LabStagingPhase::ObserveRunner;
+            checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
+            checkpoint.workspace_id = Some("workspace-1".to_string());
+            checkpoint.runtime_id = Some("runtime-1".to_string());
+            checkpoint.hydration_id = Some("hydration-1".to_string());
+            checkpoint.final_runner_job_id = Some("runner-job-1".to_string());
 
-        let completed = adapter
-            .execute_with_checkpoint(
-                &execution_request(),
-                checkpoint,
-                &LabStagingCancellationToken::default(),
-                |_| Ok(()),
-            )
-            .expect("retry observation");
+            let completed = adapter
+                .execute_with_checkpoint(
+                    &execution_request(),
+                    checkpoint,
+                    &LabStagingCancellationToken::default(),
+                    |_| Ok(()),
+                )
+                .expect("retry observation");
 
-        assert_eq!(completed.phase, LabStagingPhase::Completed);
-        assert_eq!(operations.calls(), ["validate", "observe", "observe"]);
+            assert_eq!(completed.phase, LabStagingPhase::Completed);
+            assert_eq!(operations.calls(), ["validate", "observe", "observe"]);
+        });
     }
 
     fn observe_checkpoint() -> LabStagingCheckpoint {
@@ -7706,7 +7710,6 @@ mod tests {
 
     #[test]
     fn workspace_intent_without_receipt_recovers_to_rematerialize() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let request = execution_request();
             submit_recipe_run(&request.recipe.run_id);
@@ -7723,7 +7726,6 @@ mod tests {
 
     #[test]
     fn workspace_intent_with_invalid_receipt_fails_closed() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let request = execution_request();
             submit_recipe_run(&request.recipe.run_id);
@@ -7836,7 +7838,6 @@ mod tests {
 
     #[test]
     fn execute_and_resume_use_the_controller_job_handle_boundary() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             clear_installed_adapter();
             let run_id = "lab-controller-harness";
@@ -7906,7 +7907,6 @@ mod tests {
 
     #[test]
     fn cancellation_signals_the_owned_token_before_adapter_confirmation() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let run_id = "cancel-authority";
             submit_recipe_run(run_id);
@@ -8011,9 +8011,10 @@ mod tests {
 
     #[test]
     fn production_adapter_readiness_fails_closed_when_uninstalled() {
-        let _serial = global_state_lock().lock().expect("lock");
-        clear_installed_adapter();
-        assert!(require_production_adapter().is_err());
+        homeboy_core::test_support::with_isolated_home(|_| {
+            clear_installed_adapter();
+            assert!(require_production_adapter().is_err());
+        });
     }
 
     fn durable_workspace_state(request: &LabStagingExecutionRequest) -> DurableLabWorkspaceStage {
@@ -8172,7 +8173,6 @@ mod tests {
 
     #[test]
     fn production_dispatch_recovery_rebuilds_receipt_after_accepted_bind_before_receipt() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let request = execution_request();
             submit_recipe_run(&request.recipe.run_id);
@@ -8288,37 +8288,40 @@ mod tests {
 
     #[test]
     fn registration_keeps_lab_routing_disabled_without_submission_hook() {
-        let _serial = global_state_lock().lock().expect("lock");
-        clear_installed_adapter();
-        register();
-        assert!(!routing_ready());
+        homeboy_core::test_support::with_isolated_home(|_| {
+            clear_installed_adapter();
+            register();
+            assert!(!routing_ready());
+        });
     }
 
     #[test]
     fn production_enablement_installs_the_staging_adapter() {
-        let _serial = global_state_lock().lock().expect("lock");
-        clear_installed_adapter();
-        register();
-        enable_production_routing();
-        assert!(routing_ready());
-        clear_installed_adapter();
+        homeboy_core::test_support::with_isolated_home(|_| {
+            clear_installed_adapter();
+            register();
+            enable_production_routing();
+            assert!(routing_ready());
+            clear_installed_adapter();
+        });
     }
 
     #[test]
     fn cancellation_guard_removes_token_after_adapter_error() {
-        let _serial = global_state_lock().lock().expect("lock");
-        let run_id = "adapter-error".to_string();
-        let token = LabStagingCancellationToken::default();
-        cancellations()
-            .lock()
-            .expect("lock")
-            .insert(run_id.clone(), token);
-        let result: Result<()> = {
-            let _cleanup = CancellationGuard(run_id.clone());
-            Err(Error::internal_unexpected("adapter failed"))
-        };
-        assert!(result.is_err());
-        assert!(!cancellations().lock().expect("lock").contains_key(&run_id));
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "adapter-error".to_string();
+            let token = LabStagingCancellationToken::default();
+            cancellations()
+                .lock()
+                .expect("lock")
+                .insert(run_id.clone(), token);
+            let result: Result<()> = {
+                let _cleanup = CancellationGuard(run_id.clone());
+                Err(Error::internal_unexpected("adapter failed"))
+            };
+            assert!(result.is_err());
+            assert!(!cancellations().lock().expect("lock").contains_key(&run_id));
+        });
     }
 
     #[test]
@@ -8599,7 +8602,6 @@ mod tests {
 
     #[test]
     fn prepare_recipe_lookup_failure_terminalizes_the_parent_with_retry_metadata() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let run_id = "prepare-plan-lookup-failure";
             submit_recipe_run(run_id);
@@ -8658,7 +8660,6 @@ mod tests {
 
     #[test]
     fn secret_bearing_recipe_never_reaches_public_or_durable_projection_surfaces() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             const MARKER: &str = "staging-secret-marker";
             let run_id = "secret-projection";
@@ -8815,7 +8816,6 @@ mod tests {
 
     #[test]
     fn durable_dispatch_carries_the_execution_bundle_for_oversized_provenance() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
             let remote_cwd = workspace.path().join("workspace");
@@ -8852,7 +8852,6 @@ mod tests {
 
     #[test]
     fn durable_dispatch_without_a_bundle_cannot_stage_oversized_provenance() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let (request, mut lab_metadata, _) =
                 oversized_durable_dispatch_inputs("/runner/ws", ("lease-1", "reservation-1"), None);
@@ -8875,7 +8874,6 @@ mod tests {
 
     #[test]
     fn durable_dispatch_without_a_verified_build_identity_fails_actionably() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let (request, lab_metadata, _) =
                 oversized_durable_dispatch_inputs("/runner/ws", ("lease-1", "reservation-1"), None);
@@ -8892,7 +8890,6 @@ mod tests {
 
     #[test]
     fn durable_dispatch_bundle_beats_job_override_authority() {
-        let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let (mut request, lab_metadata, _) = oversized_durable_dispatch_inputs(
                 "/runner/ws",
