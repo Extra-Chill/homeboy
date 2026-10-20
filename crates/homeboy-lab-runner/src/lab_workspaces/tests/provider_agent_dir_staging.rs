@@ -51,7 +51,7 @@ fn provider_agent_dir_staging_plan_omits_bin_and_native_binaries() {
 
 #[cfg(unix)]
 #[test]
-fn provider_agent_dir_staging_plan_omits_executable_files() {
+fn provider_agent_dir_staging_plan_keeps_portable_executable_scripts() {
     use std::os::unix::fs::PermissionsExt;
 
     let controller = tempfile::tempdir().expect("controller");
@@ -62,7 +62,9 @@ fn provider_agent_dir_staging_plan_omits_executable_files() {
 
     let receipt = plan_provider_agent_dir_staging(&agent).expect("staging plan");
 
-    assert_eq!(receipt.omitted, vec!["bin/", "prompts/tool.sh"]);
+    // A shebang script is portable across platforms; only native binaries
+    // and the platform tool cache are omitted.
+    assert_eq!(receipt.omitted, vec!["bin/"]);
 }
 
 #[cfg(unix)]

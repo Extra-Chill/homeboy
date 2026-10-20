@@ -87,8 +87,8 @@ fn collect_unportable(root: &Path, dir: &Path, omitted: &mut Vec<String>) -> Res
 }
 
 /// The single staging predicate: a `bin/` directory, or a regular file that
-/// is executable or carries native binary magic, is controller-platform
-/// specific and must not be staged onto a runner that may differ.
+/// carries native binary magic, is controller-platform specific and must not
+/// be staged onto a runner that may differ. Scripts stay: they are portable.
 pub(crate) fn is_runner_unportable(path: &Path, metadata: &fs::Metadata) -> bool {
     if metadata.is_dir() {
         return path.file_name().and_then(|name| name.to_str()) == Some("bin");
@@ -96,18 +96,7 @@ pub(crate) fn is_runner_unportable(path: &Path, metadata: &fs::Metadata) -> bool
     if !metadata.is_file() {
         return false;
     }
-    has_executable_bit(metadata) || has_native_binary_magic(path)
-}
-
-#[cfg(unix)]
-fn has_executable_bit(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn has_executable_bit(_metadata: &fs::Metadata) -> bool {
-    false
+    has_native_binary_magic(path)
 }
 
 fn has_native_binary_magic(path: &Path) -> bool {
