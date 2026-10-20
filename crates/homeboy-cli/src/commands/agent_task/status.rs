@@ -2588,6 +2588,9 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "lab_snapshot_failure": lab_snapshot_failure,
         "next_commands": next_commands,
     });
+    if let Some(output) = gate_failure_output(&record) {
+        value["gate_failure_output"] = Value::String(output);
+    }
     if let Some(projection) = lab_transport_failure_projection(&record, run_id) {
         value["lab_transport_failure"] = projection;
     }
@@ -2626,6 +2629,17 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
     preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
     Ok((value, 0))
+}
+
+/// The bounded output excerpt of the failed deterministic gate that blocked
+/// this Cook's delivery (#16218): gate, command, exit code, cwd and the
+/// relevant output lines, redacted. `None` when no gate failure is recorded.
+fn gate_failure_output(record: &AgentTaskRunRecord) -> Option<String> {
+    CookDelivery::from_run_metadata(&record.metadata)?
+        .blocker?
+        .output
+        .filter(|output| !output.trim().is_empty())
+        .map(|output| homeboy::core::redaction::redact_string(&output))
 }
 
 /// These fields are deliberately separate from secondary compact tables. They

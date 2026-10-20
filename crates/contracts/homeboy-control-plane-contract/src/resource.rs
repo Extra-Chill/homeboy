@@ -712,6 +712,11 @@ pub struct ControlPlaneBlocker {
     /// does not wait on the daemon.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon: Option<ControlPlaneBlockerDaemon>,
+    /// Bounded, redacted output excerpt of the failed deterministic gate
+    /// behind this blocker: command, exit code, cwd and the relevant output
+    /// lines (#16218). `None` for blockers that are not gate failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 /// The local controller daemon observation a queued admission's scheduling
@@ -951,6 +956,7 @@ mod tests {
             reason: None,
             retry: None,
             daemon: None,
+            output: None,
         });
         resource.owner = Some(ControlPlaneOwner {
             kind: "runner".to_string(),

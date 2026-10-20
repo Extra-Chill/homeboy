@@ -1,3 +1,4 @@
+pub mod failure_excerpt;
 pub mod placement;
 
 use std::collections::BTreeMap;

@@ -32,6 +32,7 @@ use super::cook_baseline::compare_gate_failures_to_verified_base;
 use super::cook_promotion::*;
 use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
+use crate::agent_task_gate::failure_excerpt::gate_failure_excerpt_from_value;
 use crate::agent_task_gate::AgentTaskGateStatus;
 use crate::agent_task_lifecycle::{
     self, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -269,6 +270,10 @@ pub struct CookDeliveryGate {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proof_refs: Vec<String>,
+    /// Bounded failure excerpt for a failed gate: command, exit code, cwd and
+    /// the relevant output lines (#16218).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +317,9 @@ pub struct CookDeliveryBlocker {
     pub cause: Option<String>,
     /// JSON pointer into run metadata holding the blocker's evidence.
     pub evidence: String,
+    /// Bounded output excerpt of the failed gate behind this blocker (#16218).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 impl CookDelivery {
@@ -661,6 +669,7 @@ fn read_gates(promotion: &Value) -> Vec<CookDeliveryGate> {
                     .or_else(|| string_at(gate, "/summary"))
                     .or_else(|| string_at(gate, "/message")),
                 proof_refs,
+                output: gate_failure_excerpt_from_value(gate),
             })
         })
         .collect()
@@ -725,6 +734,7 @@ fn gate_blocker(code: CookDeliveryBlockerCode, gates: &[CookDeliveryGate]) -> Co
         next_action: None,
         cause: None,
         evidence: "/cook_delivery/artifacts/promotion".to_string(),
+        output: gate.and_then(|gate| gate.output.clone()),
     }
 }
 
@@ -737,6 +747,7 @@ fn manual_failure_blocker(failure: &Value) -> CookDeliveryBlocker {
         next_action: None,
         cause: string_at(failure, "/error/code"),
         evidence: "/cook_delivery/artifacts/manual/failure".to_string(),
+        output: None,
     }
 }
 
@@ -750,6 +761,7 @@ fn finalization_blocker(finalization: &Value) -> Option<CookDeliveryBlocker> {
         next_action: None,
         cause: string_at(finalization, "/code"),
         evidence: "/cook_delivery/artifacts/finalization".to_string(),
+        output: None,
     })
 }
 
@@ -883,6 +895,7 @@ impl CookDeliveryContext<'_, '_> {
             next_action: None,
             cause: None,
             evidence: RECORDED_BLOCKER_EVIDENCE.to_string(),
+            output: None,
         };
         let stop_reason = format!("{}: {}", code.as_str(), blocker.message);
         (self.lifecycle_store).record_cook_delivery_blocker(

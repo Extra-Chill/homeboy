@@ -67,6 +67,9 @@ use crate::agent_task_service::{CookDelivery, CookDeliveryBlocker};
 const ID_BOUND: usize = 128;
 const STATE_BOUND: usize = 64;
 const MESSAGE_BOUND: usize = 256;
+/// A gate failure excerpt is bounded at its source; this is the projection's
+/// own ceiling for the `blocker.output` field (#16218).
+const GATE_OUTPUT_BOUND: usize = 6 * 1024;
 const GATE_BOUND: usize = 12;
 pub(crate) const REF_BOUND: usize = 32;
 const STATUS_ARTIFACT_REF_BOUND: usize = 12;
@@ -4687,6 +4690,7 @@ fn blocker(
             reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
             retry: None,
             daemon: None,
+            output: None,
         });
     }
     if let Some(reason) = record.stale_running_reason() {
@@ -4697,6 +4701,7 @@ fn blocker(
             reason: None,
             retry: None,
             daemon: None,
+            output: None,
         });
     }
     if record.state().is_terminal() {
@@ -4709,6 +4714,7 @@ fn blocker(
                     reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
                     retry: None,
                     daemon: None,
+                    output: None,
                 });
             }
         }
@@ -4724,6 +4730,7 @@ fn blocker(
                 reason: Some(reason),
                 retry,
                 daemon,
+                output: None,
             });
         }
     }
@@ -4746,6 +4753,7 @@ fn blocker(
             reason: None,
             retry: None,
             daemon: None,
+            output: None,
         });
     }
     if matches!(
@@ -4760,6 +4768,7 @@ fn blocker(
                 reason: Some(redacted_bounded(&stop.violation.remedy(), MESSAGE_BOUND)),
                 retry: None,
                 daemon: None,
+                output: None,
             });
         }
     }
@@ -4780,6 +4789,7 @@ fn blocker(
                 reason: None,
                 retry: None,
                 daemon: None,
+                output: None,
             });
         }
     }
@@ -4795,6 +4805,7 @@ fn blocker(
             reason: None,
             retry: None,
             daemon: None,
+            output: None,
         })
 }
 
@@ -5011,6 +5022,11 @@ fn delivery_blocker(blocker: &CookDeliveryBlocker) -> ControlPlaneBlocker {
             .map(|action| redacted_bounded(action, MESSAGE_BOUND)),
         retry: None,
         daemon: None,
+        output: blocker
+            .output
+            .as_deref()
+            .filter(|output| !output.trim().is_empty())
+            .map(|output| redacted_bounded(output, GATE_OUTPUT_BOUND)),
     }
 }
 
@@ -5284,6 +5300,7 @@ fn generic_observation_run_summary(
             reason: None,
             retry: None,
             daemon: None,
+            output: None,
         });
     resource.artifacts = generic_observation_artifacts(record);
     Ok(resource)
@@ -9555,6 +9572,47 @@ mod tests {
         let blocker = resource.blocker.expect("delivery blocker");
         assert_eq!(blocker.code.as_deref(), Some("gate_failed"));
         assert_eq!(blocker.message, "deterministic gate `test` failed");
+    }
+
+    #[test]
+    fn gate_failure_excerpt_projects_into_gate_failed_status_blocker() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.set_state_for_test(
+            crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
+        );
+        record.lifecycle.execution.state =
+            homeboy_core::run_lifecycle_record::RunExecutionState::CandidateRecoverable;
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/promotion/status",
+            json!("gate_failed"),
+        );
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/promotion/deterministic_gates",
+            json!([{
+                "id": "test",
+                "status": "failed",
+                "command": ["sh", "-c", "cargo test -p demo"],
+                "exit_code": 101,
+                "cwd": {"requested": "/work", "effective": "/work"},
+                "stdout": "test parser::rejects_empty ... FAILED\ntest result: FAILED. 1 passed; 1 failed",
+            }]),
+        );
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/finalization",
+            serde_json::Value::Null,
+        );
+
+        let resource = project_record(&record, None).expect("project gate failure");
+        let blocker = resource.blocker.expect("delivery blocker");
+        assert_eq!(blocker.code.as_deref(), Some("gate_failed"));
+        let output = blocker.output.expect("gate failure output");
+        assert!(output.contains("exit code: 101"), "{output}");
+        assert!(output.contains("command: sh -c cargo test -p demo"));
+        assert!(output.contains("cwd: /work"));
+        assert!(output.contains("test parser::rejects_empty ... FAILED"));
     }
 
     #[test]

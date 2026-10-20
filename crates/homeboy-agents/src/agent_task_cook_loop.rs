@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use crate::agent_task::{
     AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
+use crate::agent_task_gate::failure_excerpt::gate_failure_excerpt;
 use crate::agent_task_gate::{
     text_tail, AgentTaskGateDiagnosticProducer, AgentTaskGateDiagnosticRecord,
     AgentTaskGateFailureClassification, AgentTaskGateReport, AgentTaskGateRevealPolicy,
@@ -206,6 +207,10 @@ pub struct AgentTaskCookLoopGateFailure {
     pub stdout_tail: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr_tail: String,
+    /// Bounded gate failure excerpt (id, command, exit code, cwd, environment
+    /// and the relevant output lines) shown to the gate-fix agent (#16218).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub failure_excerpt: String,
     pub summary: String,
     pub agent_feedback: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -561,7 +566,11 @@ fn build_follow_up_request(
         }
     });
     restore_homeboy_facts(&mut request, homeboy_facts);
+    request.instructions = strip_gate_failure_prompt_section(&request.instructions).to_string();
     apply_prompt_template(&mut request, PromptPurpose::FollowUp);
+    if let Some(section) = gate_failure_prompt_section(&agent_visible_failed_gates) {
+        request.instructions = format!("{}\n\n{section}", request.instructions.trim_end());
+    }
     request.source_refs.push(AgentTaskSourceRef {
         kind: "agent-task-run".to_string(),
         uri: options
@@ -699,10 +708,15 @@ fn no_change_feedback(
                 } else {
                     failure.command.as_str()
                 };
-                format!(
+                let line = format!(
                     "- `{}` exited {}: {}",
                     label, failure.exit_code, failure.summary
-                )
+                );
+                if failure.failure_excerpt.is_empty() {
+                    line
+                } else {
+                    format!("{line}\n\n```text\n{}\n```", failure.failure_excerpt)
+                }
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -712,6 +726,34 @@ fn no_change_feedback(
         "## Homeboy cook loop: attempt {next_attempt} of {max}\n\nThe previous attempt finished without changing any files in the workspace.{gates}\n\nYour deliverable is a committed change in this workspace that completes the task above, with tests. Build on what the previous attempt learned rather than restarting the investigation. If the task genuinely needs no change, declare a verified intentional no-change verdict instead of returning an empty result.",
         max = options.max_attempts,
     )
+}
+
+/// Heading of the gate failure section appended to a gate-fix prompt.
+const GATE_FAILURE_PROMPT_HEADING: &str = "## Homeboy cook loop: deterministic gate failure output";
+
+/// The gate-fix prompt section carrying each failed gate's bounded output
+/// excerpt (#16218), or `None` when no agent-visible excerpt exists.
+fn gate_failure_prompt_section(failed_gates: &[AgentTaskCookLoopGateFailure]) -> Option<String> {
+    let excerpts = failed_gates
+        .iter()
+        .filter(|failure| !failure.failure_excerpt.is_empty())
+        .map(|failure| format!("```text\n{}\n```", failure.failure_excerpt))
+        .collect::<Vec<_>>();
+    (!excerpts.is_empty()).then(|| {
+        format!(
+            "{GATE_FAILURE_PROMPT_HEADING}\n\nThe previous attempt's candidate failed these deterministic gates. Fix the cause shown in the output below so the gate passes; do not guess from the command alone.\n\n{}",
+            excerpts.join("\n\n")
+        )
+    })
+}
+
+/// Instructions without a gate failure section left by an earlier gate-fix
+/// attempt, so excerpts never accumulate across retries.
+fn strip_gate_failure_prompt_section(instructions: &str) -> &str {
+    instructions
+        .find(GATE_FAILURE_PROMPT_HEADING)
+        .map(|index| instructions[..index].trim_end())
+        .unwrap_or(instructions)
 }
 
 /// Whether a task is expected to produce a code change (a patch-writing policy
@@ -921,6 +963,7 @@ fn gate_failure(
             .unwrap_or_default(),
         stdout_tail,
         stderr_tail,
+        failure_excerpt: gate_failure_excerpt(gate).unwrap_or_default(),
         summary,
         agent_feedback,
         diagnostics,
@@ -955,6 +998,7 @@ fn agent_visible_gate_failure(
             classification: failure.classification,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
+            failure_excerpt: String::new(),
             summary: format!(
                 "private deterministic gate {} failed; detailed evidence is withheld by policy",
                 failure.gate_id
@@ -972,6 +1016,7 @@ fn agent_visible_gate_failure(
             classification: failure.classification,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
+            failure_excerpt: String::new(),
             summary: "private deterministic gate failed; evidence redacted".to_string(),
             agent_feedback: "A private deterministic verification gate failed. Details are redacted; continue from the public task objective and visible gate evidence.".to_string(),
             diagnostics: Vec::new(),
@@ -986,6 +1031,7 @@ fn agent_visible_gate_failure(
             classification: failure.classification,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
+            failure_excerpt: String::new(),
             summary: "private deterministic gate failed".to_string(),
             agent_feedback: "A private deterministic verification gate failed.".to_string(),
             diagnostics: Vec::new(),
@@ -1210,6 +1256,54 @@ mod tests {
         AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionSource,
         AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
     };
+
+    #[test]
+    fn gate_failure_excerpt_reaches_gate_fix_prompt() {
+        let mut gate = failed_gate();
+        gate.stdout = "running 2 tests\ntest parser::rejects_empty ... FAILED\n\nfailures:\n    parser::rejects_empty\n\ntest result: FAILED. 1 passed; 1 failed".to_string();
+        gate.cwd = Some(crate::agent_task_gate::AgentTaskGateCwdEvidence {
+            requested: "/work".to_string(),
+            effective: "/work/crates/demo".to_string(),
+        });
+        let options = |source_request: AgentTaskRequest| AgentTaskCookLoopOptions {
+            source_request,
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![gate.clone()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-16218".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        };
+        let report = evaluate_cook_loop(options(source_request()));
+        let excerpt = &report.failed_gates[0].failure_excerpt;
+        assert!(excerpt.contains("exit code: 101"), "{excerpt}");
+        assert!(excerpt.contains("parser::rejects_empty"), "{excerpt}");
+        assert!(excerpt.contains("cwd: /work/crates/demo (requested /work)"));
+        let request = report.follow_up_request.expect("follow-up request");
+        assert!(request.instructions.contains(GATE_FAILURE_PROMPT_HEADING));
+        assert!(request.instructions.contains(excerpt.as_str()));
+        assert_eq!(
+            request.inputs["cook_loop"]["failed_gates"][0]["failure_excerpt"],
+            json!(excerpt)
+        );
+
+        // A second gate-fix attempt replaces, never accumulates, the section.
+        let second = evaluate_cook_loop(options(request))
+            .follow_up_request
+            .expect("second follow-up");
+        assert_eq!(
+            second
+                .instructions
+                .matches(GATE_FAILURE_PROMPT_HEADING)
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn red_gate_creates_follow_up_request_with_failure_evidence_and_diff() {
@@ -1526,8 +1620,12 @@ mod tests {
         let request = report.follow_up_request.expect("follow-up request");
         assert_eq!(request.executor, source.executor);
         // Without an operator template the follow-up prompt is the operator's
-        // original prompt; gate evidence travels in `inputs.cook_loop`.
-        assert_eq!(request.instructions, source.instructions);
+        // original prompt plus the failed gate's output excerpt (#16218); the
+        // structured gate evidence travels in `inputs.cook_loop`.
+        assert!(request
+            .instructions
+            .starts_with(source.instructions.trim_end()));
+        assert!(request.instructions.contains(GATE_FAILURE_PROMPT_HEADING));
     }
 
     #[test]
@@ -2152,6 +2250,7 @@ mod tests {
             classification: AgentTaskGateFailureClassification::CandidateCode,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
+            failure_excerpt: String::new(),
             summary: String::new(),
             agent_feedback: String::new(),
             diagnostics: vec![AgentTaskCookLoopFailureDiagnostic {
