@@ -391,13 +391,15 @@ if kill -0 "$host_descendant_pid" 2>/dev/null; then
     exit 1
 fi
 
-# --- Routing: the dispatcher routes *-smoke.php to this real-WP smoke backend
-# purely by file type (no test_backend toggle). A --file smoke run goes straight
-# to the smoke backend; the PHPUnit backend is not involved.
+# --- Routing: a *-smoke.php declared in wordpress_test_paths routes to this
+# real-WP smoke backend (an undeclared one is standalone by convention). A
+# --file smoke run goes straight to the smoke backend; the PHPUnit backend is
+# not involved.
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_SETTINGS_JSON='{"wordpress_test_paths":["tests/alpha-smoke.php"]}' \
 HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX" \
 FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/alpha-smoke.php > "${TMPDIR}/router.out"

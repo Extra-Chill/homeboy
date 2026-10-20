@@ -14,9 +14,9 @@ set -euo pipefail
 #     `json.dumps(record_without_that_key, sort_keys=True, separators=(",",":"))`,
 #     which is the byte layout core reproduces by hand.
 #
-# Enumeration must also match the runner's default release gates. Explicit
-# diagnostic smoke targets must not become required checks merely because the
-# suite is sharded.
+# Enumeration must also match the runner's default release gates: canonical
+# PHPUnit discovery plus the convention-discovered standalone PHP smokes
+# (tests/**/*-smoke.php), and nothing else.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -61,7 +61,8 @@ fi
 SH
 chmod +x "$discovery_stub"
 
-# Explicit diagnostic smokes remain routable, but are not release-gate inventory.
+# PHP smokes under tests/ are standalone members by convention, nested or not;
+# JS/shell smokes and node tests are not inventory members.
 printf '<?php\n' > "${plugin}/tests/alpha-smoke.php"
 printf '<?php\n' > "${plugin}/tests/nested/beta-smoke.php"
 printf '// js\n'  > "${plugin}/tests/gamma-smoke.js"
@@ -114,7 +115,10 @@ assert len(ids) == len(set(ids)), "test ids must be unique"
 expected = {
     "tests/ZetaTest.php": ("test", "phpunit"),
     "tests/test-eta.php": ("test", "phpunit"),
+    "tests/alpha-smoke.php": ("test", "standalone-php"),
+    "tests/nested/beta-smoke.php": ("test", "standalone-php"),
 }
+assert ids == sorted(ids), f"members are not sorted: {ids}"
 assert set(ids) == set(expected), f"enumerated {sorted(ids)}"
 
 by_id = {t["id"]: t for t in doc["tests"]}
@@ -136,13 +140,13 @@ print(f"PASS: enumerated {len(ids)} canonical full-suite tests, fingerprints are
 PY
 
 custom_settings="$(jq -cn --arg source "${plugin}/custom-suite" \
-    '{wp_codebox_phpunit_test_root:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom",wp_codebox_phpunit_mounts:[{source:$source,target:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom"}]}')"
+    '{standalone_php_test_paths:[],wp_codebox_phpunit_test_root:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom",wp_codebox_phpunit_mounts:[{source:$source,target:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom"}]}')"
 HOMEBOY_SETTINGS_JSON="$custom_settings" run_producer "${WORKDIR}/custom.json" > /dev/null || fail "configured test-root inventory failed"
 python3 - "${WORKDIR}/custom.json" <<'PY' || fail "configured test-root assertions failed"
 import json, sys
 doc = json.load(open(sys.argv[1]))
 assert [test["id"] for test in doc["tests"]] == ["custom-suite/behavior-spec.php"], doc["tests"]
-print("PASS: configured PHPUnit root defines canonical inventory membership")
+print("PASS: configured PHPUnit root defines canonical inventory membership; explicit [] selects no standalone smokes")
 PY
 
 # Determinism: identical input must produce an identical document, or a shard

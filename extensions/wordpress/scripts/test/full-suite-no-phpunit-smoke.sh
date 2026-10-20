@@ -51,15 +51,23 @@ run_router() {
         bash "${EXTENSION_PATH}/scripts/test/test-runner.sh"
 }
 
-HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"skip"}' run_router > "${TMPDIR}/skip.out"
+# An explicit standalone_php_test_paths: [] replaces the convention default and
+# selects nothing, so the component has no tests at all and the no-PHPUnit
+# policy decides the outcome.
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"skip","standalone_php_test_paths":[]}' run_router > "${TMPDIR}/skip.out"
 grep -Fq "Skipping PHPUnit: no canonical test files were discovered." "${TMPDIR}/skip.out"
+grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=2 selected=0 routed=0 excluded=2" "${TMPDIR}/skip.out"
 if grep -Fq "PHPUNIT_RUNTIME_INVOKED" "${TMPDIR}/skip.out"; then
     echo "Skip policy must not invoke PHPUnit for a smoke-only component." >&2
     exit 1
 fi
+if grep -Fq "PHP_SMOKE_BEGIN:" "${TMPDIR}/skip.out"; then
+    echo "An explicit empty standalone_php_test_paths must run no standalone smokes." >&2
+    exit 1
+fi
 
 set +e
-HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail"}' run_router > "${TMPDIR}/fail.out" 2>&1
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","standalone_php_test_paths":[]}' run_router > "${TMPDIR}/fail.out" 2>&1
 status=$?
 set -e
 if [ "$status" -ne 1 ]; then
@@ -68,7 +76,7 @@ if [ "$status" -ne 1 ]; then
 fi
 grep -Fq "ERROR: no canonical PHPUnit test files were discovered." "${TMPDIR}/fail.out"
 
-# Full-suite runs consume the generic standalone_php_test_paths contract. Its
+# A declared standalone_php_test_paths list replaces the convention default. Its
 # declared executable runs through bounded host PHP; nearby support files remain
 # excluded and the standalone-only result is normalized with exact counts.
 HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","standalone_php_test_paths":["tests/contract-smoke.php"]}' \
@@ -125,14 +133,20 @@ grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_SUMMARY:candidates=2 selected=1 routed=1 ex
 # Both declarations reconcile into one executed-test ledger.
 jq -e '.total == 2 and .passed == 2 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/wordpress-paths-results.json" >/dev/null
 
-# A wordpress_test_paths-only component still runs its declared smoke even with
-# no standalone declaration and no PHPUnit tests.
+# A component declaring only wordpress_test_paths keeps the convention default
+# for standalone smokes. The file both match (overlapping-smoke.php matches the
+# default tests/**/*-smoke.php) runs only as a booted-WordPress test.
 HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","wordpress_test_paths":["tests/overlapping-smoke.php"]}' \
 HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
 HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/wordpress-only-results.json" \
 run_router > "${TMPDIR}/wordpress-only.out"
 grep -Fq "HOST_SMOKE_WP_INVOKED:tests/overlapping-smoke.php" "${TMPDIR}/wordpress-only.out"
-jq -e '.total == 1 and .passed == 1 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/wordpress-only-results.json" >/dev/null
+grep -Fq "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/contract-smoke.php:runner=host-php-smoke" "${TMPDIR}/wordpress-only.out"
+if grep -Fq "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/overlapping-smoke.php:" "${TMPDIR}/wordpress-only.out"; then
+    echo "A file matched by both the default and wordpress_test_paths must run only as a WordPress test." >&2
+    exit 1
+fi
+jq -e '.total == 2 and .passed == 2 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/wordpress-only-results.json" >/dev/null
 
 # Invalid declarations fail closed instead of silently dropping tests.
 set +e
@@ -141,7 +155,59 @@ invalid_status=$?
 set -e
 [ "$invalid_status" -ne 0 ] || { echo "A non-array wordpress_test_paths must fail." >&2; exit 1; }
 grep -Fq "ERROR: wordpress_test_paths must be an array of strings." "${TMPDIR}/invalid.out"
+set +e
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","test_path_excludes":[1]}' run_router > "${TMPDIR}/invalid-excludes.out" 2>&1
+invalid_status=$?
+set -e
+[ "$invalid_status" -ne 0 ] || { echo "A non-string test_path_excludes entry must fail." >&2; exit 1; }
+grep -Fq "ERROR: test_path_excludes must be an array of strings." "${TMPDIR}/invalid-excludes.out"
 rm -f "${component}/tests/overlapping-smoke.php"
+
+# Convention-first discovery (#2967): with no test-path settings at all, every
+# tests/**/*-smoke.php runs as a standalone PHP smoke, including nested ones
+# (`**` matches zero or more directories), in sorted order.
+mkdir -p "${component}/tests/nested/deep" "${component}/tests/fixtures"
+printf '%s\n' '<?php // Nested standalone smoke.' > "${component}/tests/nested/deep/nested-smoke.php"
+printf '%s\n' '<?php // Fixture that happens to match the convention.' > "${component}/tests/fixtures/fixture-smoke.php"
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail"}' \
+HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
+HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/default-results.json" \
+run_router > "${TMPDIR}/default.out"
+grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=4 selected=3 routed=3 excluded=1 passed=3 failed=0" "${TMPDIR}/default.out"
+default_routes="$(grep -F "FULL_SUITE_STANDALONE_PHP_ROUTE:" "${TMPDIR}/default.out" | cut -d: -f2)"
+expected_routes=$'tests/contract-smoke.php\ntests/fixtures/fixture-smoke.php\ntests/nested/deep/nested-smoke.php'
+[ "$default_routes" = "$expected_routes" ] || { printf 'Unexpected default discovery routes:\n%s\n' "$default_routes" >&2; exit 1; }
+grep -Fq "PHP_SMOKE_OK:tests/nested/deep/nested-smoke.php" "${TMPDIR}/default.out"
+if grep -Fq "HOST_SMOKE_WP_INVOKED" "${TMPDIR}/default.out"; then
+    echo "Default discovery must not route anything to booted WordPress." >&2
+    exit 1
+fi
+jq -e '.total == 3 and .passed == 3 and .failed == 0 and .source == "full-suite-host-php"' "${TMPDIR}/default-results.json" >/dev/null
+
+# test_path_excludes removes fixtures/helpers the convention would select.
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","test_path_excludes":["tests/fixtures/**"]}' run_router > "${TMPDIR}/excludes.out"
+grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=4 selected=2 routed=2 excluded=2 passed=2 failed=0" "${TMPDIR}/excludes.out"
+if grep -Fq "tests/fixtures/fixture-smoke.php" "${TMPDIR}/excludes.out"; then
+    echo "An excluded fixture must not be selected." >&2
+    exit 1
+fi
+
+# Excludes also remove wordpress_test_paths matches.
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","wordpress_test_paths":["tests/fixtures/*.php"],"test_path_excludes":["tests/fixtures/**"]}' run_router > "${TMPDIR}/excludes-wordpress.out"
+grep -Fq "FULL_SUITE_WORDPRESS_SMOKE_SUMMARY:candidates=0 selected=0 routed=0 excluded=0" "${TMPDIR}/excludes-wordpress.out"
+if grep -Fq "HOST_SMOKE_WP_INVOKED" "${TMPDIR}/excludes-wordpress.out"; then
+    echo "An excluded wordpress_test_paths match must not reach booted WordPress." >&2
+    exit 1
+fi
+
+# A new smoke added under tests/ is picked up without any settings edit.
+mkdir -p "${component}/tests/added"
+printf '%s\n' '<?php // Added later; no homeboy.json change.' > "${component}/tests/added/later-smoke.php"
+HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"fail","test_path_excludes":["tests/fixtures/**"]}' run_router > "${TMPDIR}/added.out"
+grep -Fq "FULL_SUITE_STANDALONE_PHP_ROUTE:tests/added/later-smoke.php:runner=host-php-smoke" "${TMPDIR}/added.out"
+grep -Fq "PHP_SMOKE_OK:tests/added/later-smoke.php" "${TMPDIR}/added.out"
+grep -Fq "FULL_SUITE_STANDALONE_PHP_SUMMARY:candidates=5 selected=3 routed=3 excluded=2 passed=3 failed=0" "${TMPDIR}/added.out"
+rm -rf "${component}/tests/nested" "${component}/tests/fixtures" "${component}/tests/added"
 
 HOMEBOY_SETTINGS_JSON='{"phpunit_no_tests":"skip","wp_codebox_phpunit_test_root":"/unresolved/tests"}' run_router > "${TMPDIR}/explicit.out"
 grep -Fq "PHPUNIT_RUNTIME_INVOKED" "${TMPDIR}/explicit.out"

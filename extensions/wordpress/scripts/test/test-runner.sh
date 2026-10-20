@@ -76,92 +76,55 @@ homeboy_wordpress_discover_phpunit_files() {
 # settings; there is no other consumer-repo declaration file.
 #
 #   standalone_php_test_paths  executable PHP scripts that run on host PHP with
-#                              no booted WordPress.
-#   wordpress_test_paths       PHP smokes outside canonical PHPUnit locations
-#                              that need a booted WordPress. Full-suite runs
-#                              execute them through the host-smoke backend.
+#                              no booted WordPress. Absent means the convention
+#                              default ["tests/**/*-smoke.php"]; present
+#                              replaces it, so [] selects none.
+#   wordpress_test_paths       PHP smokes that need a booted WordPress.
+#                              Full-suite runs execute them through the
+#                              host-smoke backend.
+#   test_path_excludes         fixtures/helpers removed from both lists.
 #
-# Both settings hold component-relative paths or shell-glob patterns. They
-# classify already-selected files; they never broaden a changed scope or turn
-# support files into tests by default. A file matching both declarations is a
-# booted-WordPress test: the narrower wordpress_test_paths entry overrides a
-# broad standalone glob. Each list parses once per run and caches.
-homeboy_wordpress_load_declared_test_paths() {
-    local setting="$1"
-    local cache_var="HOMEBOY_WORDPRESS_DECLARED_${setting^^}"
-    local declared_paths declared_path
+# test_path_resolver.py is the only implementation of these globs; the
+# inventory producer imports the same module. A file matching both lists is a
+# booted-WordPress test. The selection resolves once per run and caches.
+homeboy_wordpress_resolve_test_paths() {
+    local resolved environment path
 
-    if [ -n "${!cache_var+x}" ]; then
-        return 0
-    fi
+    [ -z "${HOMEBOY_WORDPRESS_TEST_PATHS_RESOLVED+x}" ] || return 0
+    resolved="$(python3 "${SCRIPT_DIR}/test_path_resolver.py" "$PLUGIN_PATH")" || return 2
 
-    # Read the raw settings payload: homeboy_setting swallows jq errors, and an
-    # invalid declaration must fail closed rather than silently drop tests.
-    declared_paths="$(homeboy_settings_json | jq -r --arg setting "$setting" '
-        .[$setting] // []
-        | if type == "array" and all(.[]; type == "string") then .[] else error("expected an array of strings") end
-    ' 2>/dev/null)" || {
-        echo "ERROR: ${setting} must be an array of strings." >&2
-        return 2
-    }
-    while IFS= read -r declared_path; do
-        [ -n "$declared_path" ] || continue
-        case "$declared_path" in
-            /*|..|../*|*/../*)
-                echo "ERROR: ${setting} contains an invalid component-relative selector: ${declared_path}" >&2
-                return 2
-                ;;
+    HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_FILES=""
+    HOMEBOY_WORDPRESS_WORDPRESS_TEST_FILES=""
+    while IFS=$'\t' read -r environment path; do
+        [ -n "$path" ] || continue
+        case "$environment" in
+            standalone-php) HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_FILES+="${HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_FILES:+$'\n'}${path}" ;;
+            wordpress) HOMEBOY_WORDPRESS_WORDPRESS_TEST_FILES+="${HOMEBOY_WORDPRESS_WORDPRESS_TEST_FILES:+$'\n'}${path}" ;;
         esac
-    done <<< "$declared_paths"
-    printf -v "$cache_var" '%s' "$declared_paths"
+    done <<< "$resolved"
+    HOMEBOY_WORDPRESS_TEST_PATHS_RESOLVED=1
 }
 
-homeboy_wordpress_matches_declared_test_paths() {
-    local setting="$1"
+# Membership in a newline-delimited resolved list. Returns 2 when the settings
+# are invalid so callers fail closed instead of silently dropping tests.
+homeboy_wordpress_in_resolved_test_files() {
+    local list_var="$1"
     local test_file="$2"
-    local cache_var="HOMEBOY_WORDPRESS_DECLARED_${setting^^}"
-    local declared_path
 
-    homeboy_wordpress_load_declared_test_paths "$setting" || return 2
-    while IFS= read -r declared_path; do
-        [ -n "$declared_path" ] || continue
-        # Unquoted on purpose: declarations are shell-glob patterns.
-        # shellcheck disable=SC2053
-        if [[ "$test_file" == $declared_path ]]; then
-            return 0
-        fi
-    done <<< "${!cache_var}"
-    return 1
+    homeboy_wordpress_resolve_test_paths || return 2
+    [[ $'\n'"${!list_var}"$'\n' == *$'\n'"${test_file}"$'\n'* ]]
 }
 
 homeboy_wordpress_is_declared_wordpress_test_file() {
-    case "$1" in
-        *.php) ;;
-        *) return 1 ;;
-    esac
-    homeboy_wordpress_matches_declared_test_paths wordpress_test_paths "$1"
+    homeboy_wordpress_in_resolved_test_files HOMEBOY_WORDPRESS_WORDPRESS_TEST_FILES "$1"
 }
 
 homeboy_wordpress_is_declared_standalone_php_test_file() {
-    local test_file="$1"
-    local wordpress_status
-
-    case "$test_file" in
-        *.php) ;;
-        *) return 1 ;;
-    esac
-
-    if homeboy_wordpress_is_declared_wordpress_test_file "$test_file"; then
-        return 1
-    else
-        wordpress_status=$?
-        [ "$wordpress_status" -eq 1 ] || return "$wordpress_status"
-    fi
-    homeboy_wordpress_matches_declared_test_paths standalone_php_test_paths "$test_file"
+    homeboy_wordpress_in_resolved_test_files HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_FILES "$1"
 }
 
-# Resolve the environment a selected PHP smoke runs in: standalone-php when
-# standalone_php_test_paths declares it, otherwise booted WordPress.
+# Resolve the environment a selected PHP smoke runs in: standalone-php when the
+# resolved standalone selection holds it, otherwise booted WordPress.
 homeboy_wordpress_test_environment() {
     local test_file="$1"
     local declared_status
@@ -177,40 +140,25 @@ homeboy_wordpress_test_environment() {
 }
 
 homeboy_wordpress_collect_full_suite_standalone_php_files() {
-    local test_file test_rel declared_status
-    local selected=0
-    local routed=0
-    local excluded=0
+    local test_rel candidates
 
-    FULL_SUITE_STANDALONE_PHP_FILES=""
+    homeboy_wordpress_resolve_test_paths || return 2
+    FULL_SUITE_STANDALONE_PHP_FILES="$HOMEBOY_WORDPRESS_STANDALONE_PHP_TEST_FILES"
     FULL_SUITE_STANDALONE_PHP_SELECTED=0
-    FULL_SUITE_STANDALONE_PHP_ROUTED=0
-    FULL_SUITE_STANDALONE_PHP_EXCLUDED=0
-
-    while IFS= read -r test_file; do
-        [ -n "$test_file" ] || continue
-        test_rel="${test_file#"${PLUGIN_PATH}/"}"
-        if homeboy_wordpress_is_declared_standalone_php_test_file "$test_rel"; then
-            selected=$((selected + 1))
-            FULL_SUITE_STANDALONE_PHP_FILES+="${FULL_SUITE_STANDALONE_PHP_FILES:+$'\n'}${test_rel}"
-            routed=$((routed + 1))
-            echo "FULL_SUITE_STANDALONE_PHP_ROUTE:${test_rel}:runner=host-php-smoke"
-        else
-            declared_status=$?
-            [ "$declared_status" -eq 1 ] || return "$declared_status"
-            # Only declared files belong to this standalone suite. Everything
-            # else retains its existing PHPUnit/support-file classification.
-            excluded=$((excluded + 1))
-        fi
-    done < <(find "$PLUGIN_PATH" -type f -name '*.php' -print | sort)
-
-    FULL_SUITE_STANDALONE_PHP_SELECTED="$selected"
-    FULL_SUITE_STANDALONE_PHP_ROUTED="$routed"
-    FULL_SUITE_STANDALONE_PHP_EXCLUDED="$excluded"
+    while IFS= read -r test_rel; do
+        [ -n "$test_rel" ] || continue
+        FULL_SUITE_STANDALONE_PHP_SELECTED=$((FULL_SUITE_STANDALONE_PHP_SELECTED + 1))
+        echo "FULL_SUITE_STANDALONE_PHP_ROUTE:${test_rel}:runner=host-php-smoke"
+    done <<< "$FULL_SUITE_STANDALONE_PHP_FILES"
+    FULL_SUITE_STANDALONE_PHP_ROUTED="$FULL_SUITE_STANDALONE_PHP_SELECTED"
+    # Every other component PHP file keeps its PHPUnit/support-file
+    # classification; the ledger counts it as excluded from this suite.
+    candidates="$(find "$PLUGIN_PATH" -type f -name '*.php' -print | wc -l)"
+    FULL_SUITE_STANDALONE_PHP_EXCLUDED=$((candidates - FULL_SUITE_STANDALONE_PHP_SELECTED))
 }
 
 # Regenerate the current test inventory without running any of it: canonical
-# PHPUnit discovery plus the declared standalone PHP suite, exactly the suite
+# PHPUnit discovery plus the resolved standalone PHP suite, exactly the suite
 # full-suite execution would run, bound to the fingerprints core re-derives.
 # Inventory-only mode writes the plan-time document with this; shard replay
 # regenerates with it to prove an assigned shard still matches the current
@@ -218,20 +166,15 @@ homeboy_wordpress_collect_full_suite_standalone_php_files() {
 homeboy_wordpress_regenerate_test_inventory() {
     local output_file="$1"
     local runner="$2"
-    local discovery_tmp standalone_tmp
+    local discovery_tmp
 
+    # Fail closed on invalid test-path settings before asking WP Codebox for
+    # discovery; the producer resolves the same selection through the shared
+    # resolver module.
+    homeboy_wordpress_resolve_test_paths || return 2
     discovery_tmp="$(mktemp)" || return 1
-    standalone_tmp="$(mktemp)" || {
-        rm -f "$discovery_tmp"
-        return 1
-    }
-    if ! homeboy_wordpress_collect_full_suite_standalone_php_files >/dev/null; then
-        rm -f "$discovery_tmp" "$standalone_tmp"
-        return 2
-    fi
-    printf '%s' "$FULL_SUITE_STANDALONE_PHP_FILES" > "$standalone_tmp"
     if ! homeboy_wordpress_discover_phpunit_files "$discovery_tmp"; then
-        rm -f "$discovery_tmp" "$standalone_tmp"
+        rm -f "$discovery_tmp"
         return 2
     fi
     if ! python3 "${SCRIPT_DIR}/test-inventory.py" \
@@ -240,12 +183,11 @@ homeboy_wordpress_regenerate_test_inventory() {
         --runner "$runner" \
         --package "${HOMEBOY_COMPONENT_ID:-wordpress}" \
         --discovery-file "$discovery_tmp" \
-        --standalone-list "$standalone_tmp" \
         --output "$output_file"; then
-        rm -f "$discovery_tmp" "$standalone_tmp"
+        rm -f "$discovery_tmp"
         return 2
     fi
-    rm -f "$discovery_tmp" "$standalone_tmp"
+    rm -f "$discovery_tmp"
 }
 
 # Inventory-only mode enumerates the suite without running any of it, so that
@@ -255,8 +197,8 @@ homeboy_wordpress_regenerate_test_inventory() {
 # complete enumeration rather than a changed-test execution.
 #
 # The enumerated suite is the one full-suite execution runs: WP Codebox
-# canonical PHPUnit discovery plus the declared standalone PHP suite. Empty
-# PHPUnit discovery is valid when standalone declarations exist, because a
+# canonical PHPUnit discovery plus the resolved standalone PHP suite. Empty
+# PHPUnit discovery is valid when the standalone selection is non-empty, because a
 # component's default release suite may be entirely standalone (#2719).
 #
 # The document is written by a Python producer, not by this shell, because the
@@ -291,9 +233,10 @@ if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = "1" ]; then
 fi
 
 # WordPress tests run through the selected runtime backend against real
-# WordPress. The default suite is PHPUnit. Standalone smoke scripts are
-# diagnostic/operator targets and run only when selected explicitly with --file,
-# --host-smoke-file, or the HOMEBOY_WORDPRESS_HOST_SMOKE_FILES scope environment.
+# WordPress. The default suite is PHPUnit plus the resolved standalone PHP and
+# wordpress_test_paths selections. Any smoke can also be selected explicitly
+# with --file, --host-smoke-file, or the HOMEBOY_WORDPRESS_HOST_SMOKE_FILES
+# scope environment.
 
 # Resolve declared validation dependencies into the same environment contract
 # the booted-WordPress backend publishes: a JSON roster plus one variable per
@@ -1136,6 +1079,8 @@ if [ -z "$TARGET_FILE" ] && [ "${HOMEBOY_TEST_SCOPE_KIND:-}" = "exclusive_env" ]
     if [ "${HOMEBOY_TEST_SCOPE_ENV_NAME:-}" = "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES" ] && [ -n "${HOMEBOY_TEST_SCOPE_ENV_VALUE:-}" ]; then
         standalone_php_smoke_files=""
         wordpress_smoke_files=""
+        # Resolve once here; the classifier below runs in command substitutions.
+        homeboy_wordpress_resolve_test_paths || exit $?
         while IFS= read -r scoped_smoke_file; do
             [ -n "$scoped_smoke_file" ] || continue
             if ! scoped_smoke_rel="$(homeboy_wordpress_rel_test_file "$scoped_smoke_file")"; then
@@ -1304,6 +1249,8 @@ homeboy_wordpress_run_php_smoke_files() {
     local status=0
 
     WORDPRESS_CHANGED_SCOPE_HOST_PHP_FILES=0
+    # Resolve once here; the classifier below runs in command substitutions.
+    homeboy_wordpress_resolve_test_paths || return $?
 
     while IFS= read -r smoke_rel; do
         [ -n "$smoke_rel" ] || continue
@@ -1348,30 +1295,20 @@ homeboy_wordpress_write_host_php_results() {
     fi
 }
 
-# Select the booted-WordPress smokes a full suite must dispatch: every component
-# PHP file wordpress_test_paths declares. Only executable smoke shapes are
-# routed; a declared support file is recorded as an explicit exclusion so the
-# ledger still accounts for every declared file.
+# Select the booted-WordPress smokes a full suite must dispatch: every resolved
+# wordpress_test_paths file. Only executable smoke shapes are routed; a
+# declared support file is recorded as an explicit exclusion so the ledger
+# still accounts for every declared file.
 homeboy_wordpress_collect_full_suite_wordpress_smoke_files() {
-    local test_file test_rel declared_status
+    local test_rel
 
     FULL_SUITE_WORDPRESS_SMOKE_FILES=""
     FULL_SUITE_WORDPRESS_SMOKE_SELECTED=0
     FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED=0
 
-    homeboy_wordpress_load_declared_test_paths wordpress_test_paths || return $?
-    [ -n "$HOMEBOY_WORDPRESS_DECLARED_WORDPRESS_TEST_PATHS" ] || return 0
-
-    while IFS= read -r test_file; do
-        [ -n "$test_file" ] || continue
-        test_rel="${test_file#"${PLUGIN_PATH}/"}"
-        if homeboy_wordpress_is_declared_wordpress_test_file "$test_rel"; then
-            :
-        else
-            declared_status=$?
-            [ "$declared_status" -eq 1 ] || return "$declared_status"
-            continue
-        fi
+    homeboy_wordpress_resolve_test_paths || return 2
+    while IFS= read -r test_rel; do
+        [ -n "$test_rel" ] || continue
         if ! homeboy_wordpress_is_php_smoke_file "$test_rel"; then
             echo "FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED:${test_rel}:reason=unsupported_test_shape"
             FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED=$((FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED + 1))
@@ -1380,7 +1317,7 @@ homeboy_wordpress_collect_full_suite_wordpress_smoke_files() {
         FULL_SUITE_WORDPRESS_SMOKE_FILES+="${FULL_SUITE_WORDPRESS_SMOKE_FILES:+$'\n'}${test_rel}"
         FULL_SUITE_WORDPRESS_SMOKE_SELECTED=$((FULL_SUITE_WORDPRESS_SMOKE_SELECTED + 1))
         echo "FULL_SUITE_WORDPRESS_SMOKE_ROUTE:${test_rel}:runner=host-smoke-wp"
-    done < <(find "$PLUGIN_PATH" -type f -name '*.php' -print | sort)
+    done <<< "$HOMEBOY_WORDPRESS_WORDPRESS_TEST_FILES"
 }
 
 homeboy_wordpress_replay_test_shard() {
@@ -1637,6 +1574,7 @@ if [ -n "$TARGET_FILE" ]; then
         tests/*.php|tests/*/*.php|tests/*/*/*.php|tests/*/*/*/*.php)
             case "$target_base" in
                 *-smoke.php)
+                    homeboy_wordpress_resolve_test_paths || exit $?
                     target_environment="$(homeboy_wordpress_test_environment "$target_rel")" || exit $?
                     if [ "$target_environment" = "standalone-php" ]; then
                         # The sibling branch execs, so it terminates here. This
@@ -1668,9 +1606,9 @@ if [ -n "$TARGET_FILE" ]; then
     esac
 fi
 
-# Full-suite run (no --file, no changed-file scope): declared standalone PHP
-# tests are part of the suite, while convention-only smoke scripts remain
-# explicit diagnostic targets. The declaration uses the same classifier and
+# Full-suite run (no --file, no changed-file scope): the resolved standalone PHP
+# selection (convention default tests/**/*-smoke.php unless the component
+# declares its own list) is part of the suite. It uses the same resolver and
 # bounded host-PHP runner as changed scopes.
 homeboy_wordpress_collect_full_suite_standalone_php_files || exit $?
 # A mixed changed-file scope reaches this tail for its PHPUnit half. Selecting

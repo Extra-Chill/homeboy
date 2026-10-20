@@ -23,14 +23,16 @@ Two details are load-bearing and easy to get wrong:
   reason, and orders by components because Rust's `Ord for PathBuf` does.
 
 The suite is the same one normal full-suite execution runs: canonical PHPUnit
-discovery from WP Codebox, plus the component's declared standalone PHP tests
-(the files `standalone_php_test_paths` declares in homeboy.json extension
-settings, resolved by the runner and handed over as component-relative
-paths). Core validates members structurally and refuses unknown fields, so a
+discovery from WP Codebox, plus the component's standalone PHP tests as
+`test_path_resolver.resolve` selects them from the homeboy.json extension
+settings in `HOMEBOY_SETTINGS_JSON` (convention default
+`tests/**/*-smoke.php`, minus `wordpress_test_paths` and
+`test_path_excludes`). The runner shells out to the same module, so the
+two cannot disagree. Core validates members structurally and refuses unknown fields, so a
 member's runner/environment identity is carried in the existing `target` field
-— `phpunit` for discovered PHPUnit files, `standalone-php` for declared
+— `phpunit` for discovered PHPUnit files, `standalone-php` for selected
 standalone tests — rather than in a new field. A file both PHPUnit discovery
-and the declaration claim is a standalone member, matching the classifier
+and the standalone selection claim is a standalone member, matching the classifier
 precedence the runner itself applies. Empty PHPUnit discovery is valid when
 the standalone list is non-empty; both empty is refused.
 
@@ -46,6 +48,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
+# The resolver lives beside this script; never leave bytecode in the extension.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_path_resolver  # noqa: E402
 
 SCHEMA = "homeboy/test-inventory/v1"
 
@@ -187,35 +194,12 @@ def host_test_path(project, plugin_slug, sandbox_path):
     fail(f"discovered PHPUnit file has no declared host mount: {sandbox_path}")
 
 
-def standalone_test_paths(standalone_list, project):
-    """Read the runner-resolved standalone PHP suite (component-relative paths).
-
-    The runner resolves `standalone_php_test_paths` with its own classifier
-    (a `wordpress_test_paths` match overrides it), so this producer
-    only has to validate shape: relative, inside the component, present on
-    disk. Duplicates are collapsed because members are keyed by id anyway.
-    """
-    if not standalone_list:
-        return []
+def standalone_test_paths(project):
+    """Resolve the standalone PHP suite through the shared resolver."""
     try:
-        lines = Path(standalone_list).read_text().splitlines()
-    except OSError as error:
-        fail(f"could not read the declared standalone PHP test list: {error}")
-    paths = []
-    seen = set()
-    for line in lines:
-        relative = line.strip()
-        if not relative or relative in seen:
-            continue
-        seen.add(relative)
-        candidate = Path(relative)
-        if candidate.is_absolute() or ".." in candidate.parts or "." in candidate.parts:
-            fail(f"declared standalone PHP test path must be component-relative: {relative}")
-        path = project / relative
-        if not path.is_file():
-            fail(f"declared standalone PHP test file is missing on the host: {path}")
-        paths.append(relative)
-    return paths
+        return test_path_resolver.resolve(project, settings())["standalone-php"]
+    except test_path_resolver.TestPathError as error:
+        fail(str(error))
 
 
 def enumerate_tests(project, package, discovery_file, standalone_paths):
@@ -256,7 +240,7 @@ def enumerate_tests(project, package, discovery_file, standalone_paths):
         }
     for relative in standalone_paths:
         path = project / relative
-        # A file both the PHPUnit discovery and the standalone declaration
+        # A file both the PHPUnit discovery and the standalone selection
         # claim is a standalone member: that is the precedence the runner's
         # own classifier applies, so the inventory must not disagree.
         tests[relative] = {
@@ -294,11 +278,6 @@ def main():
     parser.add_argument("--runner", default="wordpress", help="declared runner identity")
     parser.add_argument("--package", default="", help="package label recorded on each test")
     parser.add_argument("--discovery-file", required=True, help="WP Codebox canonical discovery result")
-    parser.add_argument(
-        "--standalone-list",
-        default=None,
-        help="file of runner-resolved standalone PHP test paths (component-relative, one per line)",
-    )
     parser.add_argument("--output", required=True, help="file to write the inventory to")
     args = parser.parse_args()
 
@@ -307,7 +286,7 @@ def main():
     package = args.package or Path(args.project).resolve().name
 
     project = Path(args.project).resolve()
-    standalone_paths = standalone_test_paths(args.standalone_list, project)
+    standalone_paths = standalone_test_paths(project)
     tests = enumerate_tests(project, package, args.discovery_file, standalone_paths)
     if not tests:
         # Core refuses an empty inventory, and it is right to: an empty
@@ -315,7 +294,7 @@ def main():
         # sharding nothing would report a green suite that ran no tests.
         fail(
             f"no test files found under {root}: PHPUnit discovery is empty "
-            "and no standalone PHP tests are declared"
+            "and no standalone PHP tests are selected"
         )
 
     inventory = build_inventory(

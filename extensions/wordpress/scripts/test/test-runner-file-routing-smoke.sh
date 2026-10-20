@@ -377,6 +377,8 @@ run_changed_scope() {
     return "$status"
 }
 
+# An explicit standalone_php_test_paths: [] replaces the convention default and
+# selects no standalone smokes, so a *-smoke.php file routes to booted WordPress.
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
 HOMEBOY_COMPONENT_ID="component" \
@@ -384,6 +386,7 @@ HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND="experimental-runtime" \
 HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="${TMPDIR}/stubs/host-smoke-wp.sh" \
+HOMEBOY_SETTINGS_JSON='{"standalone_php_test_paths":[]}' \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/import-agent-ability-smoke.php > "${TMPDIR}/smoke-file.out"
 
 assert_contains "${TMPDIR}/smoke-file.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"

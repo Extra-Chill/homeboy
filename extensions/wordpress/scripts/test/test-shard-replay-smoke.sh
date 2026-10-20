@@ -90,16 +90,14 @@ SH
 
 inventory="${WORKDIR}/inventory.json"
 discovery="${WORKDIR}/discovery.json"
-standalone_list="${WORKDIR}/standalone-list.txt"
-printf '%s\n' 'tests/contract-check.php' 'tests/failing-check.php' > "$standalone_list"
 HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY=1 "${WORKDIR}/stubs/wp-codebox.sh" > "$discovery"
+HOMEBOY_SETTINGS_JSON="$standalone_settings" \
 python3 "${EXTENSION_PATH}/scripts/test/test-inventory.py" \
     --project "$component" \
     --extension-path "$EXTENSION_PATH" \
     --runner wordpress \
     --package component \
     --discovery-file "$discovery" \
-    --standalone-list "$standalone_list" \
     --output "$inventory" >/dev/null
 
 mixed_members="$(python3 - "$inventory" <<'PY'

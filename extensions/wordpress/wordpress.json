@@ -625,15 +625,22 @@
       "id": "standalone_php_test_paths",
       "label": "Standalone PHP test paths",
       "type": "array",
-      "default": [],
-      "description": "Component-relative PHP paths or shell-glob patterns that identify executable standalone PHP tests. Matching files run through the bounded host-PHP runner with no booted WordPress in full suites, changed-file scopes, and shard replay; PHPUnit and *-smoke.php conventions remain available without this declaration."
+      "default": ["tests/**/*-smoke.php"],
+      "description": "Component-relative PHP paths or globs (`**` matches zero or more directories) that identify executable standalone PHP tests. Matching files run through the bounded host-PHP runner with no booted WordPress in full suites, changed-file scopes, and shard replay. Absent means the convention default tests/**/*-smoke.php; a declared list replaces the default, and [] selects none."
     },
     {
       "id": "wordpress_test_paths",
       "label": "Booted-WordPress test paths",
       "type": "array",
       "default": [],
-      "description": "Component-relative PHP paths or shell-glob patterns that identify booted-WordPress smokes outside canonical PHPUnit locations. Full-suite runs execute matching tests/**/*-smoke.php files through the host-smoke WordPress backend. A file matching both this and standalone_php_test_paths runs in booted WordPress."
+      "description": "Component-relative PHP paths or globs that identify booted-WordPress smokes outside canonical PHPUnit locations. Full-suite runs execute matching tests/**/*-smoke.php files through the host-smoke WordPress backend. A file matching both this and standalone_php_test_paths runs only in booted WordPress."
+    },
+    {
+      "id": "test_path_excludes",
+      "label": "Test path excludes",
+      "type": "array",
+      "default": [],
+      "description": "Component-relative PHP paths or globs removed from both standalone_php_test_paths and wordpress_test_paths, for fixtures and helpers that match a test convention but are not tests."
     },
     {
       "id": "validation_dependencies",

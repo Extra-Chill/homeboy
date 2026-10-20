@@ -148,28 +148,35 @@ Available factories from the WordPress test framework: `user`, `post`,
 
 ### Real-WordPress host smokes
 
-Standalone smoke files matching `tests/**/*-smoke.php` are diagnostic/operator
-targets, not default release gates. A component declares test environments in
-its `homeboy.json` WordPress extension settings:
+PHP smoke files are discovered by convention: every `tests/**/*-smoke.php`
+(nested at any depth) runs in the full suite as a standalone PHP smoke on host
+PHP. A component with conventional names needs no test-path configuration at
+all. Its `homeboy.json` WordPress extension settings list only exceptions:
 
 ```json
 {
   "extensions": {
     "wordpress": {
       "settings": {
-        "standalone_php_test_paths": ["tests/smoke/*-smoke.php"],
-        "wordpress_test_paths": ["tests/smoke/runtime-smoke.php"]
+        "wordpress_test_paths": ["tests/smoke/runtime-smoke.php"],
+        "test_path_excludes": ["tests/fixtures/**"]
       }
     }
   }
 }
 ```
 
-`standalone_php_test_paths` files run directly with PHP, while
-`wordpress_test_paths` files are mounted with the component and executed via
-`wordpress.run-php`. Both accept component-relative paths or shell-glob
-patterns, and full-suite runs execute both declarations. A file matching both
-runs in booted WordPress. Undeclared smokes keep the `wordpress` environment.
+| Setting | Default | Meaning |
+|---|---|---|
+| `standalone_php_test_paths` | `["tests/**/*-smoke.php"]` | Files run directly with PHP. Declaring it replaces the default; `[]` selects none. |
+| `wordpress_test_paths` | `[]` | Files mounted with the component and executed via `wordpress.run-php` in booted WordPress. A file matched by both lists runs only here. |
+| `test_path_excludes` | `[]` | Fixtures/helpers removed from both lists. |
+
+All three take component-relative globs; `*` stays within one directory and
+`**` matches zero or more directories. The selection is de-duplicated, sorted,
+and resolved by one shared resolver (`scripts/test/test_path_resolver.py`) for
+both test execution and shard inventories, so a new smoke added under `tests/`
+is picked up without a settings edit.
 
 Standalone PHP smokes receive `HOMEBOY_WORDPRESS_CORE_ROOT`, a WordPress core
 source tree resolved through `wp-codebox wordpress-source` at the configured
@@ -183,8 +190,8 @@ To rerun one existing smoke on demand before pushing:
 homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
-Use `--file` for a `standalone_php_test_paths`-declared standalone PHP smoke. The focused command
-does not change default test discovery or add smokes to CI.
+Use `--file` for a standalone PHP smoke. The focused command does not change
+default test discovery.
 Output preserves the machine-readable `HOST_SMOKE_BEGIN`,
 `HOST_SMOKE_PROGRESS`, `HOST_SMOKE_OK`, `HOST_SMOKE_FAIL`, and
 `HOST_SMOKE_SUMMARY` markers.

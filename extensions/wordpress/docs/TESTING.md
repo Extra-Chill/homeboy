@@ -67,29 +67,46 @@ rejected with a clear error.
 
 ## Real-WordPress host smokes
 
-Standalone PHP smoke files can live under `tests/**/*-smoke.php`. They are
-diagnostic/operator targets, not default release gates. Declare smoke
-environments in the component's `homeboy.json` WordPress extension settings;
-the extension reads no other consumer-repo file. `standalone_php_test_paths`
-selects scripts that run directly with PHP, and `wordpress_test_paths` selects
-smokes that need the selected runtime backend with component mounts,
-dependency mounts, drop-in handling, WordPress version selection, and
-`wordpress.run-php`. Both accept component-relative paths or shell-glob
-patterns. A file matching both runs in booted WordPress; undeclared smokes keep
-the `wordpress` environment. Full-suite runs execute both declarations:
+PHP smokes are discovered by convention. Every `tests/**/*-smoke.php` file,
+nested at any depth, is a standalone PHP smoke that full-suite runs, changed
+scopes, shard inventories, and shard replay all include. A component whose
+smokes follow the naming convention needs no test-path configuration at all.
+
+The component's `homeboy.json` WordPress extension settings (the extension
+reads no other consumer-repo file) list only the exceptions:
+
+- `standalone_php_test_paths` — scripts that run directly with PHP. Absent
+  means the default `["tests/**/*-smoke.php"]`; a declared list replaces the
+  default, and `[]` selects none.
+- `wordpress_test_paths` — smokes that need the selected runtime backend with
+  component mounts, dependency mounts, drop-in handling, WordPress version
+  selection, and `wordpress.run-php`. A file matched by both lists runs only
+  as a WordPress test.
+- `test_path_excludes` — fixtures and helpers removed from both lists.
 
 ```json
 {
   "extensions": {
     "wordpress": {
       "settings": {
-        "standalone_php_test_paths": ["tests/smoke/*-smoke.php"],
-        "wordpress_test_paths": ["tests/smoke/runtime-smoke.php"]
+        "wordpress_test_paths": ["tests/smoke/runtime-smoke.php"],
+        "test_path_excludes": ["tests/fixtures/**"]
       }
     }
   }
 }
 ```
+
+All three take component-relative globs matched per path segment: `*`, `?`,
+and `[...]` never cross `/`, and `**` matches zero or more directories, so
+`tests/**/*-smoke.php` selects both `tests/a-smoke.php` and
+`tests/x/y/b-smoke.php`. Only existing `.php` files are selected; wildcards do
+not descend into `vendor/`, `node_modules/`, or `.git/`. The result is
+de-duplicated and sorted. One resolver,
+`scripts/test/test_path_resolver.py`, computes it for both `test-runner.sh` and
+the shard inventory producer `test-inventory.py`, so a new smoke added under
+`tests/` is picked up without a settings edit. Invalid settings fail the run
+with an `ERROR:` line naming the setting.
 
 The booted runtime sets `WP_PATH=/wordpress` in each WordPress smoke child.
 Declared validation dependencies are exposed as a JSON object in
@@ -125,7 +142,7 @@ fail with their own message.
 homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
-Use `--file tests/contract-smoke.php` to run a declared standalone PHP smoke.
+Use `--file tests/contract-smoke.php` to run one standalone PHP smoke.
 The real-WordPress focused path preserves the machine-readable `HOST_SMOKE_BEGIN`,
 `HOST_SMOKE_PROGRESS`, `HOST_SMOKE_OK`, `HOST_SMOKE_FAIL`, and
 `HOST_SMOKE_SUMMARY` markers, and fails fast with the selected script name.
@@ -182,10 +199,10 @@ generic `runtime-agent-full-run.yml` workflow.
 ## WordPress test runtime status
 
 WordPress PHPUnit files run through the selected runtime backend, with
-`wp-codebox` as the current default implementation. Explicitly selected
-standalone `tests/**/*-smoke.php` files use the same real-WordPress path for
-component mounts, dependency mounts, drop-ins, file routing, WordPress version
-selection, and artifact parsing when an operator chooses to run one.
+`wp-codebox` as the current default implementation. `wordpress_test_paths`
+smokes use the same real-WordPress path for component mounts, dependency
+mounts, drop-ins, file routing, WordPress version selection, and artifact
+parsing.
 
 ## Dependencies
 
