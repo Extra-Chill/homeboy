@@ -19563,7 +19563,7 @@ fn with_corrected_gate_candidate(
                 .as_ref()
                 .unwrap()
                 .classification,
-            crate::agent_task_gate::AgentTaskGateFailureClassification::ZeroTestsSelected
+            crate::agent_task_gate::AgentTaskGateFailureClassification::GateDeclaration
         );
         std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
         let mut options = batch_cook_options(

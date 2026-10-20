@@ -1172,6 +1172,32 @@ pub struct AgentTaskGateCargoSelection {
     pub recovery: Option<AgentTaskGateCargoSelectionRecovery>,
 }
 
+/// Why a focused Cargo selection cannot prove a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusedCargoSelectionProblem {
+    /// The filter selected no tests.
+    NoTests,
+    /// The filter selected tests by substring, not by exact ID or module prefix.
+    Substring,
+}
+
+impl AgentTaskGateCargoSelection {
+    fn focused_problem(&self) -> Option<FocusedCargoSelectionProblem> {
+        if self.mode != "focused" {
+            None
+        } else if self.selected_count == 0 {
+            Some(FocusedCargoSelectionProblem::NoTests)
+        } else if !matches!(
+            self.filter_interpretation.as_str(),
+            "exact" | "module_prefix"
+        ) {
+            Some(FocusedCargoSelectionProblem::Substring)
+        } else {
+            None
+        }
+    }
+}
+
 /// Reviewer-facing recovery for a focused Cargo selection failure.
 ///
 /// Both the argv and rendered command are derived from the declared command,
@@ -4451,31 +4477,36 @@ fn gate_failure_evidence(
         stderr.contains(&format!("Missing script: \"{script}\""))
             || stderr.contains(&format!("Missing script: {script}"))
     });
-    let invalid_focused_selection = cargo_selection.is_some_and(|selection| {
-        selection.mode == "focused"
-            && (selection.selected_count == 0
-                || !matches!(
-                    selection.filter_interpretation.as_str(),
-                    "exact" | "module_prefix"
-                ))
+    let selection_problem = cargo_selection.and_then(|selection| {
+        selection
+            .focused_problem()
+            .map(|problem| (selection, problem))
     });
     let shell_rejection = gate_shell_rejection(exit_code, stderr);
     let target_unresolved = homeboy_gate_target_unresolved(stdout, stderr);
-    let classification = invalid_focused_selection
-        .then_some(AgentTaskGateFailureClassification::ZeroTestsSelected)
-        .or_else(|| {
-            (missing_script.is_some() || shell_rejection.is_some() || target_unresolved)
-                .then_some(AgentTaskGateFailureClassification::GateDeclaration)
-        })
-        .unwrap_or(AgentTaskGateFailureClassification::CandidateCode);
-    let summary = if let Some(selection) = cargo_selection.filter(|_| invalid_focused_selection) {
-        format!(
-            "invalid_focused_cargo_selection: filter {:?} selected {} test IDs ({:?}) with {} interpretation",
-            selection.filter,
-            selection.selected_count,
-            selection.selected_ids,
-            selection.filter_interpretation,
-        )
+    let classification = match selection_problem {
+        Some((_, FocusedCargoSelectionProblem::NoTests)) => {
+            AgentTaskGateFailureClassification::ZeroTestsSelected
+        }
+        Some((_, FocusedCargoSelectionProblem::Substring)) => {
+            AgentTaskGateFailureClassification::GateDeclaration
+        }
+        None if missing_script.is_some() || shell_rejection.is_some() || target_unresolved => {
+            AgentTaskGateFailureClassification::GateDeclaration
+        }
+        None => AgentTaskGateFailureClassification::CandidateCode,
+    };
+    let summary = if let Some((selection, problem)) = selection_problem {
+        let filter = selection.filter.as_deref().unwrap_or_default();
+        match problem {
+            FocusedCargoSelectionProblem::NoTests => format!(
+                "invalid_focused_cargo_selection: filter {filter:?} selected no tests"
+            ),
+            FocusedCargoSelectionProblem::Substring => format!(
+                "invalid_focused_cargo_selection: filter {filter:?} is a substring match that selected {} tests ({:?}); a focused gate needs an exact test ID with `-- --exact`, or a module path prefix from the crate root so every selected test ID starts with `{filter}::`",
+                selection.selected_count, selection.selected_ids,
+            ),
+        }
     } else {
         match (missing_script, shell_rejection.as_deref()) {
             (Some(script), _) => {
@@ -4492,7 +4523,7 @@ fn gate_failure_evidence(
             }
         }
     };
-    let agent_feedback = if invalid_focused_selection {
+    let agent_feedback = if selection_problem.is_some() {
         cargo_selection
             .and_then(|selection| selection.recovery.as_ref())
             .map(|recovery| match recovery.action.as_str() {
@@ -4608,14 +4639,7 @@ fn effective_gate_exit_code(
     runner_exit_code: i32,
     cargo_selection: Option<&AgentTaskGateCargoSelection>,
 ) -> i32 {
-    if cargo_selection.is_some_and(|selection| {
-        selection.mode == "focused"
-            && (selection.selected_count == 0
-                || !matches!(
-                    selection.filter_interpretation.as_str(),
-                    "exact" | "module_prefix"
-                ))
-    }) {
+    if cargo_selection.is_some_and(|selection| selection.focused_problem().is_some()) {
         1
     } else {
         runner_exit_code
@@ -5748,6 +5772,18 @@ mod tests {
         );
         assert_eq!(ambiguous.selected_count, 2);
         assert_eq!(effective_gate_exit_code(0, Some(&ambiguous)), 1);
+        let evidence =
+            gate_failure_evidence("cargo test selected_test", 1, "", "", Some(&ambiguous));
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::GateDeclaration
+        );
+        assert!(evidence
+            .summary
+            .contains("\"selected_test\" is a substring match"));
+        assert!(evidence.summary.contains("selected 2 tests"));
+        assert!(evidence.summary.contains("`-- --exact`"));
+        assert!(evidence.summary.contains("starts with `selected_test::`"));
         let multiple_recovery = ambiguous.recovery.expect("discovery recovery metadata");
         assert_eq!(multiple_recovery.action, "discover_and_choose");
         assert_eq!(multiple_recovery.command, "cargo test -- --list");
