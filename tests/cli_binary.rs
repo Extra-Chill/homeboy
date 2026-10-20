@@ -34,6 +34,8 @@ mod promotion_provider_stdin;
 mod recover_preflight;
 #[path = "cli_binary/refactor_rename_test.rs"]
 mod refactor_rename_test;
+#[path = "cli_binary/repository_cleanliness.rs"]
+mod repository_cleanliness;
 #[path = "cli_binary/review_dirty_preflight.rs"]
 mod review_dirty_preflight;
 #[path = "cli_binary/review_option_order.rs"]
