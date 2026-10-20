@@ -27,7 +27,11 @@ pub struct CookOptionValues {
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
     /// Provider ID when multiple providers serve the backend.
-    #[arg(long, visible_alias = "dispatch-provider-id", value_name = "PROVIDER_ID")]
+    #[arg(
+        long,
+        visible_alias = "dispatch-provider-id",
+        value_name = "PROVIDER_ID"
+    )]
     pub selector: Option<String>,
     /// Model override passed through to the provider.
     #[arg(long, value_name = "MODEL")]
