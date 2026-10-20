@@ -27,17 +27,16 @@ fn execute_retry_step_fixture(
 }
 
 #[derive(Parser)]
-struct FinalizePrCli {
+struct RecoverCli {
     #[command(flatten)]
-    args: FinalizePrArgs,
+    args: super::super::RecoverArgs,
 }
 
 #[test]
-fn finalize_pr_parses_supplied_review_form_spec_and_authorship() {
+fn recover_parses_supplied_review_form_spec_and_authorship() {
     for spec in ["{}", "@/tmp/review-form.json", "-"] {
-        let cli = FinalizePrCli::try_parse_from([
+        let cli = RecoverCli::try_parse_from([
             "homeboy",
-            "--recover",
             "cook-9866-attempt-1",
             "--review-form",
             spec,
@@ -6198,41 +6197,41 @@ fn retry_force_alias_parses_as_force() {
     assert!(args.force);
 }
 
+fn parse_recover(argv: &[&str]) -> super::super::RecoverArgs {
+    let mut full = vec!["homeboy", "agent-task", "recover"];
+    full.extend_from_slice(argv);
+    let cli = Cli::try_parse_from(&full).expect("recover parses");
+    let Commands::AgentTask(args) = cli.command else {
+        panic!("agent-task command");
+    };
+    let AgentTaskCommand::Recover(args) = args.command else {
+        panic!("recover command");
+    };
+    args
+}
+
 #[test]
-fn replacement_gate_proof_command_requires_typed_proof_and_operator_authorization() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "record-replacement-gate-proof",
+fn recover_accepts_external_replacement_proof_with_operator_authorization() {
+    let args = parse_recover(&[
         "cook-11290-attempt-1",
         "--promotion",
         "@replacement.json",
         "--authorize-external-proof",
         "Chris approved durable evidence",
         "--accept-inherited-failures",
-    ])
-    .expect("replacement proof command parses");
-    let Commands::AgentTask(args) = cli.command else {
-        panic!("agent-task command");
-    };
-    let AgentTaskCommand::RecordReplacementGateProof(args) = args.command else {
-        panic!("replacement proof command");
-    };
-    assert_eq!(args.run_id, "cook-11290-attempt-1");
-    assert_eq!(args.promotion, "@replacement.json");
+    ]);
+    assert_eq!(args.id, "cook-11290-attempt-1");
+    assert_eq!(args.promotion.as_deref(), Some("@replacement.json"));
     assert_eq!(
         args.authorize_external_proof.as_deref(),
         Some("Chris approved durable evidence")
     );
-    assert!(args.accept_inherited_failures);
+    assert!(args.gates.accept_inherited_failures);
 }
 
 #[test]
-fn verify_replacement_command_accepts_corrected_gates_and_authorization() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "verify-replacement",
+fn recover_accepts_corrected_gates_and_authorization() {
+    let args = parse_recover(&[
         "cook-12788",
         "--verify",
         "cargo test exact::replacement",
@@ -6240,24 +6239,91 @@ fn verify_replacement_command_accepts_corrected_gates_and_authorization() {
         "Chris approved corrected gate evidence",
         "--authorize-interrupted-rerun",
         "Chris approved rerunning after the interrupted executor",
-    ])
-    .expect("replacement verification command parses");
-    let Commands::AgentTask(args) = cli.command else {
-        panic!("agent-task command");
-    };
-    let AgentTaskCommand::VerifyReplacement(args) = args.command else {
-        panic!("replacement verification command");
-    };
-    assert_eq!(args.cook_or_attempt_id, "cook-12788");
+    ]);
+    assert_eq!(args.id, "cook-12788");
     assert_eq!(args.gates.verify, ["cargo test exact::replacement"]);
     assert_eq!(
-        args.authorize_external_proof,
-        "Chris approved corrected gate evidence"
+        args.authorize_external_proof.as_deref(),
+        Some("Chris approved corrected gate evidence")
     );
     assert_eq!(
         args.authorize_interrupted_rerun.as_deref(),
         Some("Chris approved rerunning after the interrupted executor")
     );
+}
+
+#[test]
+fn removed_replacement_verbs_and_finalize_recover_are_rejected() {
+    for argv in [
+        vec![
+            "verify-replacement",
+            "cook-12788",
+            "--verify",
+            "true",
+            "--authorize-external-proof",
+            "x",
+        ],
+        vec![
+            "record-replacement-gate-proof",
+            "cook-12788",
+            "--promotion",
+            "{}",
+            "--authorize-external-proof",
+            "x",
+        ],
+        vec!["finalize-pr", "--recover", "cook-12788"],
+    ] {
+        let mut full = vec!["homeboy", "agent-task"];
+        full.extend(argv.iter().copied());
+        assert!(
+            Cli::try_parse_from(&full).is_err(),
+            "{argv:?} must not parse"
+        );
+    }
+}
+
+#[test]
+fn recover_refuses_replacement_inputs_without_authorization_or_proof() {
+    with_temp_home(|| {
+        let performer = FixtureCookRecoveryPerformer {
+            executor: Arc::new(CountingCookExecutor::default()),
+        };
+        for argv in [
+            vec!["cook-12788", "--verify", "true"],
+            vec!["cook-12788", "--accept-inherited-failures"],
+        ] {
+            let error = super::super::recover::recover_with(parse_recover(&argv), &performer)
+                .expect_err("replacement inputs without authorization are refused");
+            assert!(
+                error.message.contains("--authorize-external-proof"),
+                "{argv:?}: {}",
+                error.message
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "homeboy",
+                "agent-task",
+                "recover",
+                "cook-12788",
+                "--promotion",
+                "{}"
+            ])
+            .is_err(),
+            "--promotion requires --authorize-external-proof"
+        );
+        let error = super::super::recover::recover_with(
+            parse_recover(&["cook-12788", "--authorize-external-proof", "x"]),
+            &performer,
+        )
+        .expect_err("authorization alone names no proof");
+        assert!(error.message.contains("--promotion"), "{}", error.message);
+        assert_eq!(
+            performer.executor.executions.load(Ordering::SeqCst),
+            0,
+            "a refused replacement request executes nothing"
+        );
+    });
 }
 
 /// Regression for #15672: Cook admission and preview apply the spine's
@@ -6312,7 +6378,7 @@ fn cook_preflight_rejects_reviewer_unsafe_verify_file_and_names_the_token() {
 }
 
 #[test]
-fn verify_replacement_file_gates_are_snapshotted_before_execution() {
+fn recover_replacement_file_gates_are_snapshotted_before_execution() {
     let temp = tempfile::tempdir().expect("tempdir");
     let public = temp.path().join("public-gate.sh");
     let private = temp.path().join("private-gate.sh");
@@ -6321,7 +6387,7 @@ fn verify_replacement_file_gates_are_snapshotted_before_execution() {
     let cli = Cli::try_parse_from([
         "homeboy",
         "agent-task",
-        "verify-replacement",
+        "recover",
         "cook-12788",
         "--verify-file",
         public.to_str().expect("public path"),
@@ -6334,8 +6400,8 @@ fn verify_replacement_file_gates_are_snapshotted_before_execution() {
     let Commands::AgentTask(args) = cli.command else {
         panic!("agent-task command");
     };
-    let AgentTaskCommand::VerifyReplacement(mut args) = args.command else {
-        panic!("replacement verification command");
+    let AgentTaskCommand::Recover(mut args) = args.command else {
+        panic!("recover command");
     };
     args.gates
         .snapshot_file_inputs()

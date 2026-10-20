@@ -3673,7 +3673,7 @@ fn promotion_handoff(report: &crate::agent_task_promotion::AgentTaskPromotionRep
         },
         "boundary": report.status.handoff_boundary(),
         "finalize_command": report.source.run_id.as_ref().map(|run_id| format!(
-            "homeboy agent-task finalize-pr --recover {run_id}"
+            "homeboy agent-task recover {run_id}"
         )),
         "next_actions": [next_action],
     })

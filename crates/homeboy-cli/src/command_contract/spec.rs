@@ -797,9 +797,9 @@ const REFACTOR_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
 
 const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
-        &["verify-replacement"],
-        mutating_safety(),
-        "executes operator-supplied deterministic shell gates and records durable replacement proof",
+        &["recover"],
+        with_dry_run(mutating_safety(), "--preflight"),
+        "performs the stopped Cook's one recovery step; with --authorize-external-proof and corrected gates it executes operator-supplied deterministic shell gates and records durable replacement proof; --preflight only reports the step",
     ),
     paths_safety(
         &["promote"],
@@ -987,13 +987,14 @@ mod tests {
     }
 
     #[test]
-    fn verify_replacement_is_declared_mutating_shell_execution() {
+    fn recover_is_declared_mutating_shell_execution_with_preflight() {
         let agent_task = registered_command("agent-task").expect("agent-task command spec");
         let safety = agent_task
-            .path_safety(&["verify-replacement"])
-            .expect("verify-replacement safety");
+            .path_safety(&["recover"])
+            .expect("recover safety");
 
         assert!(safety.safety.mutates);
+        assert_eq!(safety.safety.dry_run_flag, Some("--preflight"));
         assert!(safety
             .output_notes
             .is_some_and(|notes| notes.contains("shell gates")));

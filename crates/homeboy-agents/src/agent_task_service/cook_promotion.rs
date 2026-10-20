@@ -1535,6 +1535,55 @@ pub(crate) fn persisted_promotion_for_attempt_in_store(
     persisted_promotion_from_record(run_id, record)
 }
 
+/// Whether `promotion` is an already-applied candidate whose verification
+/// failed or never completed and that no replacement proof has made
+/// finalization-eligible. This is the only state replacement gates accept.
+pub(crate) fn applied_candidate_needs_replacement_gates(
+    promotion: &AgentTaskPromotionReport,
+    accept_inherited_failures: bool,
+) -> bool {
+    matches!(
+        promotion.status,
+        AgentTaskPromotionStatus::GateFailed | AgentTaskPromotionStatus::VerificationPending
+    ) && promotion.status.patch_promoted()
+        && promotion.provenance.get("replacement_gate_proof").is_none()
+        && !promotion.finalization_eligible(accept_inherited_failures)
+}
+
+/// Read-only admission for `recover --preflight` with replacement-gate
+/// inputs: the attempt must hold an applied candidate whose gates failed.
+pub(crate) fn ensure_replacement_gate_candidate(run_id: &str) -> Result<()> {
+    let admitted = persisted_promotion_for_attempt(run_id)?
+        .is_some_and(|promotion| applied_candidate_needs_replacement_gates(&promotion, false));
+    if admitted {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "replace-gates",
+        "replacement gates require an already-applied candidate whose verification failed or did not complete",
+        Some(run_id.to_string()),
+        Some(vec![format!("homeboy agent-task status {run_id}")]),
+    ))
+}
+
+/// A validated manual-finalization intent is recorded for `run_id` and no PR
+/// receipt has been recorded for it yet.
+/// Whether `run_id` records a validated manual-finalization intent, published
+/// or not. Publishing it again replays the recorded receipt.
+pub(crate) fn manual_finalization_intent_recorded(run_id: &str) -> bool {
+    agent_task_lifecycle::exact_record(run_id)
+        .is_ok_and(|record| recorded_manual_finalization_intent(&record.metadata).is_some())
+}
+
+pub(crate) fn manual_finalization_publication_pending(run_id: &str) -> bool {
+    let Ok(record) = agent_task_lifecycle::exact_record(run_id) else {
+        return false;
+    };
+    recorded_manual_finalization_intent(&record.metadata).is_some()
+        && !recorded_finalization_receipt(&record.metadata)
+            .is_some_and(cook_finalization_is_pr_receipt)
+}
+
 /// Records green verification produced after an infrastructure-invalid gate
 /// failure without rewriting the original promotion evidence. The replacement
 /// must describe the exact already-applied candidate, so recovery never
@@ -2374,17 +2423,17 @@ fn interrupted_replacement_gate_execution_error(run_id: &str) -> Error {
         "replacement gate execution was interrupted after its durable start fence; Homeboy will not rerun shell gates automatically",
         Some(run_id.to_string()),
         Some(vec![format!(
-            "Run homeboy agent-task record-replacement-gate-proof {run_id} --promotion @replacement.json --authorize-external-proof <authorization> with candidate-bound external proof."
+            "Run homeboy agent-task recover {run_id} --promotion @replacement.json --authorize-external-proof <authorization> with candidate-bound external proof."
         )]),
     );
     error.details["recovery"] = serde_json::json!({
         "kind": "external_candidate_bound_proof_required",
         "run_id": run_id,
         "command": format!(
-            "homeboy agent-task verify-replacement {run_id} --authorize-external-proof <proof-authorization> --authorize-interrupted-rerun <rerun-authorization> --verify '<candidate-bound command>'"
+            "homeboy agent-task recover {run_id} --authorize-external-proof <proof-authorization> --authorize-interrupted-rerun <rerun-authorization> --verify '<candidate-bound command>'"
         ),
         "external_proof_command": format!(
-            "homeboy agent-task record-replacement-gate-proof {run_id} --promotion @replacement.json --authorize-external-proof <authorization>"
+            "homeboy agent-task recover {run_id} --promotion @replacement.json --authorize-external-proof <authorization>"
         ),
     });
     error
@@ -6395,7 +6444,7 @@ fn review_form_for_finalization_in_store(
             Error::validation_invalid_argument(
                 "review_form",
                 format!(
-                    "cook finalization requires an AI-authored review form on run {run_id}; none was recorded. Supply a complete replacement with `homeboy agent-task finalize-pr --recover {run_id} --review-form @FORM.json`. {}",
+                    "cook finalization requires an AI-authored review form on run {run_id}; none was recorded. Supply a complete replacement with `homeboy agent-task recover {run_id} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`. {}",
                     crate::agent_task_review_dossier::AiFilledReviewForm::requirement_feedback()
                 ),
                 None,
@@ -7106,6 +7155,12 @@ pub(crate) fn cook_failure_context_with_stores(
                     .and_then(|record| record.metadata.get("cook_continuation_admission")),
                 retry_admitted || (cook_status.is_gate_failure() && continuation_pending),
             );
+            let delivered_candidate = delivered_candidate_facts(
+                &recipe,
+                record.as_ref(),
+                delivery.as_ref(),
+                lifecycle_store,
+            );
             cook_recovery_actions_with_prefix(
                 status,
                 &chronological_latest_run_id,
@@ -7121,6 +7176,7 @@ pub(crate) fn cook_failure_context_with_stores(
                 ),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
                 agent_incomplete_reason(lifecycle_store, record_run_id).as_deref(),
+                delivered_candidate,
                 record.as_ref().and_then(lab_handoff_runtime_recovery),
                 record
                     .as_ref()
@@ -7639,6 +7695,83 @@ fn agent_incomplete_reason(
         .map(str::to_string)
 }
 
+/// Facts about the attempt's applied candidate that select the replacement
+/// gate and publication steps.
+#[derive(Debug, Clone, Copy, Default)]
+struct DeliveredCandidateFacts {
+    /// Applied candidate whose gates failed or never completed, without
+    /// replacement proof.
+    applied_gate_failure: bool,
+    /// Verified, unpublished candidate with a publishable review form.
+    publish_ready: bool,
+}
+
+fn delivered_candidate_facts(
+    recipe: &super::AgentTaskCookRecipe,
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+    delivery: Option<&super::CookDelivery>,
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+) -> DeliveredCandidateFacts {
+    let Some(record) = record else {
+        return DeliveredCandidateFacts::default();
+    };
+    let Some(promotion) = persisted_promotion_from_record(&record.run_id, record.clone())
+        .ok()
+        .flatten()
+    else {
+        return DeliveredCandidateFacts::default();
+    };
+    let accept_inherited_failures = super::cook_recipe::reconstruct_adoption_options(recipe)
+        .map(|options| options.gates.accept_inherited_failures)
+        .unwrap_or(false);
+    let applied_gate_failure =
+        applied_candidate_needs_replacement_gates(&promotion, accept_inherited_failures);
+    let publish_ready = matches!(
+        promotion.status,
+        AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
+    ) && promotion.finalization_eligible(accept_inherited_failures)
+        && promotion
+            .patch_artifact
+            .sha256
+            .as_deref()
+            .is_some_and(|sha| !sha.is_empty())
+        && !delivery.is_some_and(super::CookDelivery::published)
+        && publishable_review_form(lifecycle_store, &record.run_id);
+    DeliveredCandidateFacts {
+        applied_gate_failure,
+        publish_ready,
+    }
+}
+
+/// The attempt's recorded review form exists and is publishable, so
+/// publication from the durable record needs no operator-supplied form.
+fn publishable_review_form(
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    run_id: &str,
+) -> bool {
+    let owned;
+    let store = match lifecycle_store {
+        Some(store) => store,
+        None => match agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment() {
+            Ok(store) => {
+                owned = store;
+                &owned
+            }
+            Err(_) => return false,
+        },
+    };
+    selected_outcome_for_attempt_in_store(store, run_id)
+        .ok()
+        .and_then(|outcome| {
+            crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
+                &outcome.outputs,
+            )
+            .ok()
+            .flatten()
+        })
+        .is_some_and(|form| form.validate().is_ok() && form.ensure_publishable().is_ok())
+}
+
 struct CookRecoveryActions {
     legal_actions: Vec<super::AgentTaskCookRecoveryAction>,
     next_actions: Vec<super::AgentTaskCookRecoveryAction>,
@@ -7670,6 +7803,7 @@ fn cook_recovery_actions(
         ambiguous_artifact_ids,
         false,
         None,
+        DeliveredCandidateFacts::default(),
         lab_runtime_recovery,
         None,
     )
@@ -7685,6 +7819,7 @@ fn cook_recovery_actions_with_prefix(
     ambiguous_artifact_ids: Vec<String>,
     continuation_rearm_required: bool,
     agent_incomplete_reason: Option<&str>,
+    delivered_candidate: DeliveredCandidateFacts,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
     prefix: Option<String>,
 ) -> CookRecoveryActions {
@@ -7701,6 +7836,8 @@ fn cook_recovery_actions_with_prefix(
             continuation_rearm_required,
             run_id,
             agent_incomplete_reason,
+            applied_gate_failure: delivered_candidate.applied_gate_failure,
+            publish_ready: delivered_candidate.publish_ready,
         });
     if !recovery_legal {
         let reason = match &step {

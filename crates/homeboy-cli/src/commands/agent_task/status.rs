@@ -6611,7 +6611,7 @@ mod tests {
     fn placement_rewrite_threads_one_resolved_prefix_through_nested_commands() {
         let mut value = json!({
             "command": "homeboy agent-task status cook-1",
-            "nested": ["homeboy agent-task finalize-pr --recover cook-1"],
+            "nested": ["homeboy agent-task recover cook-1"],
         });
 
         preserve_controller_owner_placement_with_prefix(
@@ -6626,7 +6626,7 @@ mod tests {
         );
         assert_eq!(
             value["nested"][0],
-            "homeboy --placement local agent-task finalize-pr --recover cook-1"
+            "homeboy --placement local agent-task recover cook-1"
         );
     }
 
@@ -7044,7 +7044,7 @@ mod tests {
             "run_id": "adopted-three-gate",
             "status": "review_ready",
             "pr_url": "https://github.com/Extra-Chill/homeboy/pull/422",
-            "handoff": { "finalize_command": "homeboy agent-task finalize-pr --recover adopted-three-gate" },
+            "handoff": { "finalize_command": "homeboy agent-task recover adopted-three-gate" },
             "gates": [gate.clone(), gate.clone(), gate],
             "promotion": { "gates": (0..100).map(|_| json!({ "proof": "x".repeat(1024) })).collect::<Vec<_>>() },
         });
@@ -7066,7 +7066,7 @@ mod tests {
         );
         assert_eq!(
             projected["actionable"]["next_action"]["command"],
-            "homeboy agent-task finalize-pr --recover adopted-three-gate"
+            "homeboy agent-task recover adopted-three-gate"
         );
         assert_eq!(projected["evidence_refs"].as_array().unwrap().len(), 1);
         assert_eq!(
@@ -7074,7 +7074,7 @@ mod tests {
             "homeboy://evidence/three-gate-proof"
         );
         assert!(early.contains("https://github.com/Extra-Chill/homeboy/pull/422"));
-        assert!(early.contains("finalize-pr --recover adopted-three-gate"));
+        assert!(early.contains("recover adopted-three-gate"));
 
         let oversized = bounded_full_operation_report(
             json!({

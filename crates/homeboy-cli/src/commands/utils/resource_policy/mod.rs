@@ -2300,12 +2300,12 @@ mod tests {
         let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
         let command = homeboy_agents::agent_task_service::cook_recovery_command_with_prefix(
             "homeboy --placement local",
-            &["finalize-pr", "--recover", "cook-local-finalize"],
+            &["recover", "cook-local-finalize"],
         );
         let argv = shlex::split(&command).expect("emitted local recovery command is shell-safe");
         let cli = Cli::try_parse_from(argv).expect("emitted local recovery command parses");
         let warning = evaluate(
-            lab_supported_hot("agent-task finalize-pr"),
+            lab_supported_hot("agent-task recover"),
             &resources(ResourceRecommendation::Warm),
         )
         .expect("warm machines require placement admission");

@@ -15171,7 +15171,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         assert_eq!(awaiting.state, "candidate_awaiting_finalization");
         assert_eq!(
             awaiting.next_action.expect("recovery action").command,
-            format!("homeboy agent-task finalize-pr --recover {follow_up_run_id}"),
+            format!("homeboy agent-task recover {follow_up_run_id}"),
             "the bound form-only continuation owns failed-finalization recovery"
         );
         let unrelated_run_id = format!("{cook_id}-unrelated-continuation");
@@ -19232,6 +19232,39 @@ fn cook_owned_unpushed_candidate_requires_one_exact_promoted_commit() {
     });
 }
 
+/// Performs only the replacement-gate and publication steps, through their
+/// default service handlers; every other step is a test failure.
+struct ReplacementOnlyRecoveryPerformer;
+
+impl crate::agent_task_service::CookRecoveryPerformer for ReplacementOnlyRecoveryPerformer {
+    fn continue_cook(
+        &self,
+        run_id: &str,
+        _rearm: bool,
+        _artifact_id: Option<&str>,
+        _overrides: &crate::agent_task_service::CookRecoveryOverrides,
+    ) -> Result<(serde_json::Value, i32)> {
+        panic!("replacement recovery must not continue {run_id}")
+    }
+
+    fn preflight_continue_cook(
+        &self,
+        run_id: &str,
+        _rearm: bool,
+        _artifact_id: Option<&str>,
+    ) -> Result<(serde_json::Value, i32)> {
+        panic!("replacement recovery must not preflight continuation of {run_id}")
+    }
+
+    fn retry(&self, run_id: &str) -> Result<(serde_json::Value, i32)> {
+        panic!("replacement recovery must not retry {run_id}")
+    }
+
+    fn reconcile(&self, run_id: &str) -> Result<(serde_json::Value, i32)> {
+        panic!("replacement recovery must not reconcile {run_id}")
+    }
+}
+
 #[test]
 fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_proof() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -19390,19 +19423,64 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             "external_candidate_bound_proof_required"
         );
         assert!(!gate_log.exists());
-        let replacement = verify_replacement_gates(
-            "cook-verify-replacement",
-            VerifyGateOptions {
+        // The corrected gates reach the candidate through `agent-task recover`,
+        // which resolves the Cook ID to the attempt `status` reports (#15886).
+        let replace_gates = crate::agent_task_service::CookReplaceGatesRequest {
+            proof: crate::agent_task_service::CookReplacementProof::Gates(VerifyGateOptions {
                 verify: vec![reviewer_gate.clone()],
                 private_verify: vec![gate.clone()],
                 execution_policy: crate::agent_task_gate::AgentTaskGateExecutionPolicy::ContinueAll,
                 accept_inherited_failures: true,
                 ..Default::default()
+            }),
+            authorize_external_proof: "Chris approved corrected gate evidence".to_string(),
+            authorize_interrupted_rerun: Some(
+                "Chris approved rerunning after the interrupted executor".to_string(),
+            ),
+        };
+        let (preflight, preflight_exit_code) = crate::agent_task_service::recover_cook(
+            "cook-verify-replacement",
+            crate::agent_task_service::CookRecoveryRequest {
+                preflight: true,
+                replace_gates: Some(replace_gates.clone()),
+                ..Default::default()
             },
-            "Chris approved corrected gate evidence".to_string(),
-            Some("Chris approved rerunning after the interrupted executor".to_string()),
+            &ReplacementOnlyRecoveryPerformer,
         )
-        .expect("replacement gates complete");
+        .expect("recover --preflight names replacement gates");
+        assert_eq!(preflight_exit_code, 0);
+        assert_eq!(preflight.run_id, "run-verify-replacement");
+        assert_eq!(
+            preflight.step,
+            crate::agent_task_service::CookRecoveryStep::ReplaceGates
+        );
+        assert!(preflight.result.is_none());
+        assert!(!gate_log.exists(), "preflight executes no gate");
+        let (recovered, recovered_exit_code) = crate::agent_task_service::recover_cook(
+            "cook-verify-replacement",
+            crate::agent_task_service::CookRecoveryRequest {
+                replace_gates: Some(replace_gates),
+                ..Default::default()
+            },
+            &ReplacementOnlyRecoveryPerformer,
+        )
+        .expect("recover performs replacement gates");
+        assert_eq!(recovered_exit_code, 0);
+        assert_eq!(
+            recovered.step,
+            crate::agent_task_service::CookRecoveryStep::ReplaceGates
+        );
+        let mut result = recovered.result.expect("replacement proof");
+        let handoff = result
+            .as_object_mut()
+            .and_then(|object| object.remove("handoff"))
+            .expect("replacement handoff");
+        assert_eq!(
+            handoff["next_command"],
+            "homeboy agent-task recover run-verify-replacement"
+        );
+        let replacement: AgentTaskPromotionReport =
+            serde_json::from_value(result).expect("typed replacement proof");
 
         assert_eq!(replacement.status, AgentTaskPromotionStatus::GateFailed);
         assert_eq!(replacement.patch_artifact.id, "committed-changes");
@@ -21726,11 +21804,8 @@ fn standalone_manual_preflight_recovers_merged_publication_without_republishing(
         )
         .expect("remove fixture recipe before continuation");
 
-        let continuation = format!("homeboy agent-task finalize-pr --recover {run_id}");
-        assert_eq!(
-            continuation,
-            "homeboy agent-task finalize-pr --recover manual-11974"
-        );
+        let continuation = format!("homeboy agent-task recover {run_id}");
+        assert_eq!(continuation, "homeboy agent-task recover manual-11974");
         let mut publish_backend = CaptureBackend {
             candidate_state: Some(candidate),
             merged_pr: Some(AgentTaskPrRef {
@@ -22800,10 +22875,10 @@ fn failed_attempt_manual_preflight_hydrates_serialized_intent_and_publishes() {
             17
         );
 
-        let continuation = format!("homeboy agent-task finalize-pr --recover {run_id}");
+        let continuation = format!("homeboy agent-task recover {run_id}");
         assert_eq!(
             continuation,
-            "homeboy agent-task finalize-pr --recover cook-13977-attempt-1"
+            "homeboy agent-task recover cook-13977-attempt-1"
         );
         let mut backend = CaptureBackend {
             candidate_state: Some(candidate),

@@ -329,20 +329,17 @@ mod tests {
     }
 
     #[test]
-    fn recovery_rejects_model_overrides_so_durable_provenance_wins() {
-        for flag in ["--model", "--ai-model"] {
+    fn finalize_pr_no_longer_recovers_a_durable_cook() {
+        for argv in [
+            vec!["finalize-pr", "--recover", "cook-a"],
+            vec!["finalize-pr", "--recover", "cook-a", "--preflight"],
+            vec!["finalize-pr", "--recover", "cook-a", "--review-form", "{}"],
+        ] {
+            let mut full = vec!["homeboy", "agent-task"];
+            full.extend(argv.iter().copied());
             assert!(
-                Cli::try_parse_from([
-                    "homeboy",
-                    "agent-task",
-                    "finalize-pr",
-                    "--recover",
-                    "cook-a",
-                    flag,
-                    "openai/gpt-5.6-sol",
-                ])
-                .is_err(),
-                "recovery must reject {flag} instead of silently discarding it"
+                Cli::try_parse_from(&full).is_err(),
+                "{argv:?} must be rejected; a stopped Cook publishes through `recover`"
             );
         }
     }
@@ -385,15 +382,12 @@ mod tests {
         };
         assert_eq!(args.component.as_deref(), Some("nested-component"));
 
-        // #14728: --component no longer conflicts with --recover. It is a
-        // documented fallback Homeboy consults only when a pre-existing
-        // durable record carries no recorded component identity; Cook's own
-        // recorded identity otherwise wins.
+        // #14728: the component fallback for a durable record that recorded no
+        // identity is a `recover` publication input.
         let cli = Cli::try_parse_from([
             "homeboy",
             "agent-task",
-            "finalize-pr",
-            "--recover",
+            "recover",
             "cook-a",
             "--component",
             "nested-component",
@@ -402,10 +396,10 @@ mod tests {
         let Commands::AgentTask(agent_task) = cli.command else {
             panic!("expected agent-task command");
         };
-        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
-            panic!("expected finalize-pr command");
+        let AgentTaskCommand::Recover(args) = agent_task.command else {
+            panic!("expected recover command");
         };
-        assert_eq!(args.recover.as_deref(), Some("cook-a"));
+        assert_eq!(args.id, "cook-a");
         assert_eq!(args.component.as_deref(), Some("nested-component"));
     }
 
@@ -558,8 +552,14 @@ mod tests {
             "homeboy",
             "agent-task",
             "finalize-pr",
-            "--recover",
+            "--run-id",
             "run-a",
+            "--path",
+            "/tmp/run-a",
+            "--title",
+            "Run A",
+            "--commit-message",
+            "run a",
             "--full",
         ])
         .expect("finalize full parses");
@@ -628,6 +628,51 @@ pub struct RecoverArgs {
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,
+    /// Replace-gates step: explicit operator authorization for the replacement
+    /// proof recorded for an applied candidate whose gates failed. Required
+    /// with corrected gates (`--verify`/`--verify-file`) or `--promotion`.
+    #[arg(long, value_name = "TEXT")]
+    pub authorize_external_proof: Option<String>,
+    /// Replace-gates step: explicit authorization to rerun corrected gates
+    /// after an interrupted replacement execution. Homeboy still refuses while
+    /// the original operation lease is live.
+    #[arg(long, value_name = "TEXT", requires = "authorize_external_proof")]
+    pub authorize_interrupted_rerun: Option<String>,
+    /// Replace-gates step: complete typed promotion report produced by an
+    /// external, candidate-bound gate executor: inline JSON, `@FILE`, or `-`.
+    #[arg(
+        long,
+        value_name = "JSON|@FILE|-",
+        requires = "authorize_external_proof",
+        conflicts_with = "authorize_interrupted_rerun"
+    )]
+    pub promotion: Option<String>,
+    /// Replace-gates step: corrected verification gates executed against the
+    /// already-applied candidate.
+    #[command(flatten)]
+    pub gates: VerifyGateArgs,
+    /// Publish step: complete typed AI review form for a candidate whose
+    /// provider outcome recorded none (or declared the task incomplete):
+    /// inline JSON, `@FILE`, or `-`.
+    #[arg(long, value_name = "JSON|@FILE|-")]
+    pub review_form: Option<String>,
+    /// Tool that authored the supplied review form.
+    #[arg(long, value_name = "TOOL", requires = "review_form")]
+    pub review_form_tool: Option<String>,
+    /// Concrete model that authored the supplied review form.
+    #[arg(long, value_name = "MODEL", requires = "review_form")]
+    pub review_form_model: Option<String>,
+    /// Operator or agent identity submitting the supplied review form.
+    #[arg(long, value_name = "IDENTITY", requires = "review_form")]
+    pub review_form_author: Option<String>,
+    /// Publish step: explicit reviewer override in `TARGET=VALUE@PROVENANCE`
+    /// form. Overrides require a recorded or supplied review form.
+    #[arg(long = "review-override", value_name = "TARGET=VALUE@PROVENANCE")]
+    pub review_overrides: Vec<String>,
+    /// Publish step: registered component identity, consulted only when the
+    /// durable record carries no recorded component identity.
+    #[arg(long, value_name = "COMPONENT_ID")]
+    pub component: Option<String>,
 }
 
 impl RecoverArgs {
@@ -829,22 +874,14 @@ pub struct FinalizePrArgs {
     /// Include complete finalization and gate evidence.
     #[arg(long)]
     pub full: bool,
-    /// Hydrate finalization from a durable Cook recipe or a validated manual-finalization record.
-    #[arg(
-        long,
-        value_name = "RUN_OR_COOK_ID",
-        conflicts_with = "manual_finalization"
-    )]
-    pub recover: Option<String>,
     /// Durable run ID for a manual finalization record.
-    #[arg(long, value_name = "ID", required_unless_present = "recover")]
-    pub run_id: Option<String>,
+    #[arg(long, value_name = "ID")]
+    pub run_id: String,
     /// Worktree path containing the manual finalization candidate.
-    #[arg(long, value_name = "PATH", required_unless_present = "recover")]
-    pub path: Option<String>,
-    /// Registered component identity for disambiguating a shared-repository worktree. With
-    /// `--recover`, Homeboy prefers the component identity Cook durably recorded at admission;
-    /// this is a fallback for pre-existing durable records with no recorded identity.
+    #[arg(long, value_name = "PATH")]
+    pub path: String,
+    /// Registered component identity for disambiguating a shared-repository worktree.
+    /// A stopped Cook publishes through `agent-task recover`, which takes the same fallback.
     #[arg(long, value_name = "COMPONENT_ID")]
     pub component: Option<String>,
     /// Base branch for the manual finalization candidate.
@@ -857,11 +894,11 @@ pub struct FinalizePrArgs {
     #[arg(long, value_name = "BRANCH")]
     pub head: Option<String>,
     /// Pull request title for the manual finalization candidate.
-    #[arg(long, value_name = "TEXT", required_unless_present = "recover")]
-    pub title: Option<String>,
+    #[arg(long, value_name = "TEXT")]
+    pub title: String,
     /// Commit message for the manual finalization candidate.
-    #[arg(long, value_name = "TEXT", required_unless_present = "recover")]
-    pub commit_message: Option<String>,
+    #[arg(long, value_name = "TEXT")]
+    pub commit_message: String,
     /// Reviewer-facing evidence for the finalization dossier.
     #[command(flatten)]
     pub evidence: review::FinalizePrEvidenceArgs,
@@ -898,56 +935,15 @@ pub struct FinalizePrArgs {
     /// Related issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL.
     #[arg(long = "relates-to", value_name = "ISSUE_REF")]
     pub relates_to: Vec<String>,
-    /// Explicit reviewer override in `TARGET=VALUE@PROVENANCE` form. Overrides require a recorded review form; use `--review-form` with `--recover` to supply one when it is absent.
+    /// Explicit reviewer override in `TARGET=VALUE@PROVENANCE` form.
     #[arg(long = "review-override", value_name = "TARGET=VALUE@PROVENANCE")]
     pub review_overrides: Vec<String>,
-    /// Complete typed AI review form to supply for a recovered Cook whose historical provider outcome did not record one: inline JSON, `@FILE`, or `-`.
-    #[arg(long, value_name = "JSON|@FILE|-", requires = "recover")]
-    pub review_form: Option<String>,
-    /// Tool that authored the supplied review form.
-    #[arg(long, value_name = "TOOL", requires = "review_form")]
-    pub review_form_tool: Option<String>,
-    /// Concrete model that authored the supplied review form.
-    #[arg(long, value_name = "MODEL", requires = "review_form")]
-    pub review_form_model: Option<String>,
-    /// Operator or agent identity submitting the supplied review form.
-    #[arg(long, value_name = "IDENTITY", requires = "review_form")]
-    pub review_form_author: Option<String>,
     /// Validate the complete hydrated dossier and candidate without publishing.
     #[arg(long)]
     pub preflight: bool,
     /// Publish corrected, independently verified work without a promotion lineage. The ID must identify a failed attempt (a Cook ID resolves to its newest attempt, which must be failed), or be unused so Homeboy can reserve a durable manual-finalization record for its intent and receipt.
     #[arg(long)]
     pub manual_finalization: bool,
-}
-#[derive(Args, Debug)]
-pub struct RecordReplacementGateProofArgs {
-    /// Durable Cook attempt whose applied candidate has infrastructure-invalid gates.
-    pub run_id: String,
-    /// Complete typed promotion report from the replacement gate executor: inline JSON, `@FILE`, or `-`.
-    #[arg(long, value_name = "JSON|@FILE|-")]
-    pub promotion: String,
-    /// Explicit operator authorization for externally produced proof.
-    #[arg(long, value_name = "TEXT")]
-    pub authorize_external_proof: Option<String>,
-    /// Accept candidate failures proven identical against the immutable base.
-    #[arg(long)]
-    pub accept_inherited_failures: bool,
-}
-#[derive(Args, Debug)]
-pub struct VerifyReplacementArgs {
-    /// Durable Cook id or exact attempt whose applied candidate has failed gates.
-    #[arg(value_name = "COOK_OR_ATTEMPT_ID")]
-    pub cook_or_attempt_id: String,
-    /// Explicit operator authorization for the replacement proof recorded by this command.
-    #[arg(long, value_name = "TEXT")]
-    pub authorize_external_proof: String,
-    /// Explicit operator authorization to rerun gates after an interrupted replacement execution. Homeboy still refuses while the original operation lease is live.
-    #[arg(long, value_name = "TEXT")]
-    pub authorize_interrupted_rerun: Option<String>,
-    /// Verification gate configuration for the replacement candidate.
-    #[command(flatten)]
-    pub gates: VerifyGateArgs,
 }
 #[derive(Args, Debug)]
 pub struct GateFeedbackArgs {
