@@ -3579,6 +3579,8 @@ fn cook_finalization_options_with_stores_and_review_form(
             review_form,
         )?;
     review_dossier.overrides = overrides;
+    review_dossier.source_relationships =
+        cook_task_issue_relationships(&options.workspace.source_refs, Path::new(&path));
     // A non-empty option is an explicit operator disclosure. Otherwise retain
     // the validated review form's process statement as durable PR provenance.
     let ai_used_for = if options.ai_disclosure.ai_used_for.trim().is_empty() {
@@ -3697,6 +3699,29 @@ fn cook_finalization_options_with_stores_and_review_form(
         draft_pr: options.finalization.draft_pr,
         repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
     })
+}
+
+/// Source relationships for the Cook PR: the task's source refs (the same refs
+/// that feed `Reviewer-resolvable evidence from source_refs[N]`) mapped against
+/// the GitHub repository the PR is opened against, the worktree's `origin`.
+fn cook_task_issue_relationships(
+    source_refs: &[String],
+    worktree: &Path,
+) -> Vec<crate::agent_task_review_dossier::AgentTaskReviewIssueRelationship> {
+    let destination = homeboy_core::git::remote_origin_url(worktree)
+        .and_then(|remote| homeboy_core::git::release_download::parse_github_url(&remote));
+    let mut relationships = Vec::new();
+    for source_ref in source_refs {
+        if let Some(relationship) = crate::agent_task_review_dossier::task_issue_relationship(
+            source_ref,
+            destination.as_ref(),
+        ) {
+            if !relationships.contains(&relationship) {
+                relationships.push(relationship);
+            }
+        }
+    }
+    relationships
 }
 
 /// The subject a Cook candidate is committed under.

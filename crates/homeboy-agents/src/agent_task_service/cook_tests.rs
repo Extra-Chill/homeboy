@@ -26089,6 +26089,14 @@ fn run_cook_preserves_prior_failed_candidate_before_detached_dispatch() {
 fn commit_message_finalization_options(
     commit_message: &str,
 ) -> crate::agent_task_finalization::AgentTaskPrFinalizationOptions {
+    finalization_options_for_task(commit_message, None, Vec::new())
+}
+
+fn finalization_options_for_task(
+    commit_message: &str,
+    origin: Option<&str>,
+    source_refs: Vec<String>,
+) -> crate::agent_task_finalization::AgentTaskPrFinalizationOptions {
     let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
     let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
@@ -26103,6 +26111,11 @@ fn commit_message_finalization_options(
     // Prompt-only Cook: the title comes from the agent form.
     options.finalization.title.clear();
     options.finalization.commit_message = commit_message.to_string();
+    options.workspace.source_refs = source_refs;
+    if let Some(origin) = origin {
+        git_output(target.path(), &["init", "-q"]).expect("init destination checkout");
+        git_output(target.path(), &["remote", "add", "origin", origin]).expect("add origin");
+    }
     recipe_store
         .persist_initial_recipe(&options)
         .expect("persist the recipe");
@@ -26162,4 +26175,61 @@ fn cook_commit_subject_falls_back_only_when_no_title_exists() {
         cook_commit_message("", "Guard the reload path", Some("blocks-engine")),
         "Guard the reload path"
     );
+}
+
+fn task_issue_relationship_pr_body(origin: &str, task_url: &str) -> String {
+    let mut options = finalization_options_for_task("", Some(origin), vec![task_url.to_string()]);
+    crate::agent_task_review_dossier::enrich_dossier(
+        &mut options.review_dossier,
+        &options.evidence.source_refs,
+        &options.evidence.artifact_refs,
+        &[],
+        &options.evidence.verification.ci_expected,
+        None,
+    );
+    options
+        .review_dossier
+        .validate(&options.review_profile)
+        .expect("enriched Cook dossier stays valid");
+    crate::agent_task_review_dossier::render_review_dossier(
+        &options.review_dossier,
+        &options.review_profile,
+    )
+}
+
+#[test]
+fn cook_pr_body_closes_same_repo_task_issue_relationship() {
+    let body = task_issue_relationship_pr_body(
+        "git@github.com:Fixture-Owner/fixture-repo.git",
+        "https://github.com/fixture-owner/Fixture-Repo/issues/16247",
+    );
+    assert!(body.contains("Closes #16247"), "{body}");
+}
+
+#[test]
+fn cook_pr_body_relates_cross_repo_task_issue_relationship() {
+    let body = task_issue_relationship_pr_body(
+        "https://github.com/Fixture-Owner/fixture-repo.git",
+        "https://github.com/Fixture-Owner/other-repo/issues/42",
+    );
+    assert!(
+        body.contains("Relates to Fixture-Owner/other-repo#42"),
+        "{body}"
+    );
+    assert!(!body.contains("Closes"), "{body}");
+}
+
+#[test]
+fn cook_pr_body_never_closes_pull_request_or_external_task_issue_relationship() {
+    for task_url in [
+        "https://github.com/Fixture-Owner/fixture-repo/pull/16000",
+        "https://linear.app/extra-chill/issue/HB-12",
+    ] {
+        let body = task_issue_relationship_pr_body(
+            "https://github.com/Fixture-Owner/fixture-repo.git",
+            task_url,
+        );
+        assert!(!body.contains("Closes"), "{task_url}: {body}");
+        assert!(body.contains("Relates to"), "{task_url}: {body}");
+    }
 }
