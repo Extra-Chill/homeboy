@@ -660,7 +660,7 @@ jobs:
         if: steps.baseline-selection-policy.outputs.runner != ''
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
-          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-baseline-inventory.json
+          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
           HOMEBOY_RUST_TEST_RUNNER: ${{ steps.baseline-selection-policy.outputs.runner }}
           HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
         uses: ./.homeboy-action
@@ -687,7 +687,7 @@ jobs:
         env:
           CANDIDATE_MANIFEST: candidate-phase/candidate/manifest.json
           COMMAND: ${{ matrix.command }}
-          BASELINE_INVENTORY_FILE: ${{ github.workspace }}/homeboy-baseline-inventory.json
+          BASELINE_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
           BASELINE_SELECTION_FILE: ${{ github.workspace }}/homeboy-baseline-selection.json
         run: python3 .homeboy-action/scripts/core/select-baseline-tests.py materialize
       - name: Run baseline ${{ matrix.title }}
