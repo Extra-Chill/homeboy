@@ -1911,6 +1911,68 @@ fn validate_legacy_replacement_candidate_checkout(
     Ok(())
 }
 
+/// Name the gate(s) that kept a replacement proof from being green, with
+/// bounded output tails, so operators can act without re-reading the run.
+fn replacement_green_gate_status_error(
+    run_id: &str,
+    replacement: &AgentTaskPromotionReport,
+    accept_inherited_failures: bool,
+) -> Error {
+    const TAIL_LINES: usize = 40;
+    let failing = replacement
+        .finalization_blocking_gates(accept_inherited_failures)
+        .collect::<Vec<_>>();
+    let tail = |captured: &str, evidence: Option<&str>| {
+        let source = if captured.is_empty() {
+            evidence.unwrap_or_default()
+        } else {
+            captured
+        };
+        bounded_gate_detail(&crate::agent_task_gate::text_tail(source, TAIL_LINES))
+    };
+    let failing_gates = failing
+        .iter()
+        .map(|gate| {
+            let evidence = gate.failure_evidence.as_ref();
+            let executed = gate.skip_reason.is_none()
+                && !matches!(
+                    gate.status,
+                    crate::agent_task_gate::AgentTaskGateStatus::Skipped
+                        | crate::agent_task_gate::AgentTaskGateStatus::Deferred
+                        | crate::agent_task_gate::AgentTaskGateStatus::Unavailable
+                );
+            serde_json::json!({
+                "gate_id": gate.id,
+                "status": gate.status,
+                "exit_code": gate.exit_code,
+                "termination": gate.termination,
+                "executed": executed,
+                "skip_reason": gate.skip_reason,
+                "stdout_tail": tail(&gate.stdout, evidence.map(|e| e.stdout_tail.as_str())),
+                "stderr_tail": tail(&gate.stderr, evidence.map(|e| e.stderr_tail.as_str())),
+            })
+        })
+        .collect::<Vec<_>>();
+    let suffix = match failing.first() {
+        Some(gate) => format!(" (gate `{}` exited {})", gate.id, gate.exit_code),
+        None => String::new(),
+    };
+    let mut error = Error::validation_invalid_argument(
+        "replacement_gate_proof",
+        format!(
+            "replacement proof is not finalization-eligible: failed `green_gate_status`{suffix}"
+        ),
+        Some(run_id.to_string()),
+        None,
+    );
+    error.details["failed_eligibility_predicate"] = serde_json::json!("green_gate_status");
+    if let Some(gate) = failing.first() {
+        error.details["gate_id"] = serde_json::json!(gate.id);
+    }
+    error.details["failing_gates"] = serde_json::json!(failing_gates);
+    error
+}
+
 /// Admission and recovery share the same gate facts: an accepted replacement
 /// must be able to hydrate a reviewer-runnable finalization dossier.
 fn validate_replacement_proof_finalization_eligibility(
@@ -1942,7 +2004,11 @@ fn validate_replacement_proof_finalization_eligibility(
         return Err(failed("verified_base", None));
     }
     if !replacement.finalization_eligible(accept_inherited_failures) {
-        return Err(failed("green_gate_status", None));
+        return Err(replacement_green_gate_status_error(
+            run_id,
+            replacement,
+            accept_inherited_failures,
+        ));
     }
     let candidate_checkout = replacement.provenance.get("candidate_checkout");
     for gate in &replacement.deterministic_gates {
@@ -8521,5 +8587,87 @@ mod replacement_gate_supervision_tests {
             supervision.heartbeat_interval,
             gates.gate_heartbeat_interval()
         );
+    }
+}
+
+#[cfg(test)]
+mod replacement_green_gate_status_tests {
+    use super::*;
+
+    fn replacement(gates: Value) -> AgentTaskPromotionReport {
+        serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "applied",
+            "source": {"kind": "aggregate", "task_id": "task", "run_id": "run-16236"},
+            "to_worktree": "homeboy@16236",
+            "target": {"worktree": "homeboy@16236", "path": "/tmp/homeboy-16236"},
+            "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch", "sha256": "sha"},
+            "deterministic_gates": gates,
+            "operator_notification": {"status": "completed", "message": "complete"},
+            "verified_base": {"base": "main", "sha": "verified-base"},
+            "provenance": {}
+        }))
+        .expect("replacement report fixture")
+    }
+
+    #[test]
+    fn non_green_replacement_gate_is_named_with_exit_code_and_tail() {
+        let report = replacement(serde_json::json!([
+            {"id": "gate-0", "status": "succeeded", "command": ["sh", "-c", "true"], "exit_code": 0},
+            {"id": "gate-1", "status": "failed", "command": ["sh", "-c", "cargo test"],
+             "exit_code": 101, "stdout": "running 3 tests\ntest it_breaks ... FAILED",
+             "stderr": "thread 'it_breaks' panicked: marker-16236"}
+        ]));
+
+        let error =
+            validate_replacement_proof_finalization_eligibility("run-16236", &report, false)
+                .expect_err("non-green replacement gate is rejected");
+
+        assert!(
+            error
+                .message
+                .contains("failed `green_gate_status` (gate `gate-1` exited 101)"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            error.details["failed_eligibility_predicate"],
+            "green_gate_status"
+        );
+        assert_eq!(error.details["gate_id"], "gate-1");
+        let failing = error.details["failing_gates"]
+            .as_array()
+            .expect("failing gates");
+        assert_eq!(failing.len(), 1);
+        assert_eq!(failing[0]["gate_id"], "gate-1");
+        assert_eq!(failing[0]["status"], "failed");
+        assert_eq!(failing[0]["exit_code"], 101);
+        assert_eq!(failing[0]["executed"], true);
+        assert!(failing[0]["stdout_tail"]
+            .as_str()
+            .unwrap()
+            .contains("it_breaks ... FAILED"));
+        assert!(failing[0]["stderr_tail"]
+            .as_str()
+            .unwrap()
+            .contains("marker-16236"));
+    }
+
+    #[test]
+    fn replacement_gate_tail_is_bounded() {
+        let huge = "x".repeat(64 * 1024);
+        let report = replacement(serde_json::json!([
+            {"id": "gate-1", "status": "failed", "command": ["sh", "-c", "cargo test"],
+             "exit_code": 101, "stderr": huge}
+        ]));
+
+        let error =
+            validate_replacement_proof_finalization_eligibility("run-16236", &report, false)
+                .expect_err("non-green replacement gate is rejected");
+
+        let tail = error.details["failing_gates"][0]["stderr_tail"]
+            .as_str()
+            .unwrap();
+        assert!(tail.len() <= 4096 + "…[truncated]".len());
     }
 }
