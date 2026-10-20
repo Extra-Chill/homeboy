@@ -66,12 +66,28 @@ pub use cook_pre_execution::{
 };
 pub use cook_promotion::*;
 pub use cook_recipe::*;
+pub(crate) use cook_recovery::cook_recovery_status;
 pub use cook_recovery::{
     cook_recovery_delegation, plan_cook_recovery, recover_cook, CookPublishRequest,
     CookRecoveryOverrides, CookRecoveryPerformer, CookRecoveryPlan, CookRecoveryReport,
     CookRecoveryRequest, CookRecoveryStep, CookReplaceGatesRequest, CookReplacementProof,
     COOK_RECOVERY_SCHEMA,
 };
+
+/// Observe the local controller daemon with the one freshness report
+/// `homeboy daemon status` renders (#16181). Queued work is scheduled by that
+/// daemon's step jobs, so this observation — never a second liveness probe —
+/// decides whether a waiting admission can still be scheduled. `None` when the
+/// report itself is unreadable; a missing observation never claims a live
+/// daemon, it only declines to name the blocker.
+pub fn scheduling_daemon_evidence(
+) -> Option<homeboy_control_plane_contract::ControlPlaneBlockerDaemon> {
+    let status = homeboy_core::daemon::read_status().ok()?;
+    Some(homeboy_control_plane_contract::ControlPlaneBlockerDaemon {
+        admits_work: status.admits_work(),
+        summary: status.render_summary(),
+    })
+}
 #[cfg(test)]
 pub(crate) use cook_step::finalize_detached_cook_attempt;
 pub use cook_step::*;

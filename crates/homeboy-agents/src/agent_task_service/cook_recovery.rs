@@ -57,6 +57,12 @@ pub enum CookRecoveryStep {
     /// The verified candidate is unpublished; publish it from the durable Cook
     /// record or validated manual-finalization intent.
     Publish,
+    /// The Cook produced no candidate patch, but the destination worktree's
+    /// branch holds commits ahead of its recorded base: the operator's verified
+    /// work is the candidate. Adopt that exact revision into the Cook
+    /// (`agent-task adopt <cook> --candidate-ref <head-sha>`) instead of
+    /// replaying provider work that would end `no_changes` again (#16181).
+    Adopt { candidate_ref: String },
     /// Nothing `recover` can perform; `reason` names what is required.
     None { reason: String },
 }
@@ -76,6 +82,7 @@ impl CookRecoveryStep {
             Self::Reconcile => "reconcile",
             Self::ReplaceGates => "replace_gates",
             Self::Publish => "publish",
+            Self::Adopt { .. } => "adopt",
             Self::None { .. } => return None,
         })
     }
@@ -110,6 +117,10 @@ impl CookRecoveryStep {
                     command: command(&["recover", run_id, "--artifact-id", artifact_id]),
                 })
                 .collect(),
+            Self::Adopt { candidate_ref } => vec![super::AgentTaskCookRecoveryAction {
+                action: action.to_string(),
+                command: command(&["adopt", run_id, "--candidate-ref", candidate_ref]),
+            }],
             _ => vec![super::AgentTaskCookRecoveryAction {
                 action: action.to_string(),
                 command: command(&["recover", run_id]),
@@ -147,6 +158,11 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// The attempt's applied candidate is verified, carries a publishable
     /// review form, and has no publication receipt.
     pub publish_ready: bool,
+    /// HEAD of the destination worktree when its branch holds commits ahead
+    /// of the recorded base (#16181). A terminal `no_changes` attempt in that
+    /// state is adoptable: the operator's committed work is the candidate the
+    /// provider could not produce.
+    pub adoptable_candidate_ref: Option<&'a str>,
 }
 
 /// Decide the single next recovery step from durable Cook evidence.
@@ -192,6 +208,13 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
     }
     if inputs.publish_ready && !status_is_settled(&status) {
         return CookRecoveryStep::Publish;
+    }
+    if status == CookStatus::NoChanges {
+        if let Some(candidate_ref) = inputs.adoptable_candidate_ref {
+            return CookRecoveryStep::Adopt {
+                candidate_ref: candidate_ref.to_string(),
+            };
+        }
     }
     if status == CookStatus::PreExecutionFailure && inputs.retry_admitted {
         return CookRecoveryStep::Retry;
@@ -374,6 +397,9 @@ pub trait CookRecoveryPerformer {
     fn retry(&self, run_id: &str) -> Result<(Value, i32)>;
     /// `reconcile <run_id> --apply`.
     fn reconcile(&self, run_id: &str) -> Result<(Value, i32)>;
+    /// Adopt the operator's committed candidate revision into the Cook for a
+    /// [`CookRecoveryStep::Adopt`] step (#16181).
+    fn adopt(&self, run_id: &str, candidate_ref: &str) -> Result<(Value, i32)>;
     /// Record replacement proof for the exact applied candidate of `run_id`.
     fn replace_gates(
         &self,
@@ -648,6 +674,7 @@ pub fn recover_cook(
         CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, None, &none)?,
         CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => performer.retry(run_id)?,
         CookRecoveryStep::Reconcile => performer.reconcile(run_id)?,
+        CookRecoveryStep::Adopt { candidate_ref } => performer.adopt(run_id, candidate_ref)?,
         CookRecoveryStep::ReplaceGates => {
             let Some(replace_gates) = replace_gates else {
                 return Err(replace_gates_inputs_required(run_id));
@@ -787,6 +814,9 @@ fn validate_overrides(
                 "the recovery step promotes an existing patch artifact; it reserves no provider attempt to override",
             )
         }
+        CookRecoveryStep::Adopt { .. } => refuse(
+            "the recovery step adopts the worktree's committed candidate; it reserves no provider attempt to override",
+        ),
         CookRecoveryStep::ForkReplacement => refuse(
             "the recovery step forks a replacement attempt that preserves the checkpoint; it accepts no overrides",
         ),
@@ -940,6 +970,79 @@ mod tests {
             step("candidate_recoverable", |_| {}),
             CookRecoveryStep::Continue,
             "other recoverable candidates still continue"
+        );
+    }
+
+    #[test]
+    fn no_changes_with_commits_ahead_adopts_the_worktree_head() {
+        assert_eq!(
+            step("no_changes", |inputs| inputs.adoptable_candidate_ref =
+                Some("abc123")),
+            CookRecoveryStep::Adopt {
+                candidate_ref: "abc123".to_string()
+            }
+        );
+        assert_eq!(
+            step("no_changes", |_| {}),
+            CookRecoveryStep::Continue,
+            "no_changes with nothing ahead of base keeps today's recovery"
+        );
+        assert_ne!(
+            step("gate_failed", |inputs| {
+                inputs.retry_admitted = true;
+                inputs.adoptable_candidate_ref = Some("abc123");
+            }),
+            CookRecoveryStep::Adopt {
+                candidate_ref: "abc123".to_string()
+            },
+            "only a no_changes attempt adopts"
+        );
+    }
+
+    #[test]
+    fn head_ahead_of_base_requires_a_strict_descendant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .expect("git");
+            assert!(output.status.success(), "git {args:?}");
+            String::from_utf8(output.stdout)
+                .expect("utf8")
+                .trim()
+                .to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            super::super::cook_promotion::head_ahead_of_base(dir.path(), &base),
+            None,
+            "HEAD equal to base is not ahead"
+        );
+        git(&["commit", "-q", "--allow-empty", "-m", "fix"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            super::super::cook_promotion::head_ahead_of_base(dir.path(), &base),
+            Some(head)
+        );
+        assert_eq!(
+            super::super::cook_promotion::head_ahead_of_base(
+                dir.path(),
+                "0000000000000000000000000000000000000000"
+            ),
+            None,
+            "an unknown base is not an ancestor"
         );
     }
 

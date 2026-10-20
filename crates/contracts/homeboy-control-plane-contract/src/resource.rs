@@ -175,6 +175,12 @@ pub struct ControlPlaneRun {
     pub publication: Option<ControlPlaneStateSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_eligibility: Option<ControlPlaneActionEligibilityReport>,
+    /// The one recovery step (#15925) this run's durable Cook state names when
+    /// `agent-task recover` performs it, so `status` and `review` read the same
+    /// decision instead of re-deciding recovery (#16181). `None` for every
+    /// state whose projections are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<ControlPlaneRecovery>,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
@@ -207,6 +213,7 @@ impl ControlPlaneRun {
             gates: Vec::new(),
             publication: None,
             action_eligibility: None,
+            recovery: None,
             created_at: String::new(),
             updated_at: None,
             finished_at: None,
@@ -214,6 +221,26 @@ impl ControlPlaneRun {
             artifacts: Vec::new(),
         }
     }
+}
+
+/// The one recovery step (#15925) a run's durable Cook state names, projected
+/// so `status` and `review` name exactly the command `agent-task recover`
+/// performs (#16181).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneRecovery {
+    /// The Cook this recovery finalizes.
+    pub cook_id: String,
+    /// The attempt the recovery operates on.
+    pub run: RunId,
+    /// Typed step name as `agent-task recover` reports it (for example
+    /// `adopt`).
+    pub step: String,
+    /// Candidate revision the step names, when the step carries one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_ref: Option<String>,
+    /// Exact command that performs the step.
+    pub command: String,
 }
 
 /// A runtime-neutral projection of an immutable execution-placement decision.
@@ -679,6 +706,27 @@ pub struct ControlPlaneBlocker {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<ControlPlaneAdmissionRetry>,
+    /// Live evidence about the local controller daemon when this blocker waits
+    /// on daemon-driven scheduling (#16181). Queued work is scheduled by that
+    /// daemon, so its absence is the operative blocker. `None` when the blocker
+    /// does not wait on the daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<ControlPlaneBlockerDaemon>,
+}
+
+/// The local controller daemon observation a queued admission's scheduling
+/// depends on, taken from the same freshness report `homeboy daemon status`
+/// renders (#16181).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneBlockerDaemon {
+    /// Whether the observed daemon admits scheduling work right now. `false`
+    /// means the lease is missing, the recorded process is dead, or the API is
+    /// unreachable, so the scheduled reconciliation can never run.
+    pub admits_work: bool,
+    /// Plain-language summary rendered from the same evidence as
+    /// `admits_work`, ready to name the blocker to an operator.
+    pub summary: String,
 }
 
 /// Bounded automatic reconciliation state for a durable admission blocker.
@@ -902,6 +950,7 @@ mod tests {
             state: None,
             reason: None,
             retry: None,
+            daemon: None,
         });
         resource.owner = Some(ControlPlaneOwner {
             kind: "runner".to_string(),

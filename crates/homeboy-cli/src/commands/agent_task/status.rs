@@ -422,6 +422,7 @@ fn compact_control_plane_status(value: Value) -> Value {
         "gates_omitted": value.get("gates").and_then(Value::as_array)
             .map(|gates| gates.len().saturating_sub(COMPACT_REF_LIMIT)).unwrap_or_default(),
         "publication": bounded_control_plane_value(value.get("publication").unwrap_or(&Value::Null)),
+        "recovery": bounded_control_plane_value(value.get("recovery").unwrap_or(&Value::Null)),
         "next_action": { "command": next_action },
         "action_eligibility": {
             "actions": selected_action,
