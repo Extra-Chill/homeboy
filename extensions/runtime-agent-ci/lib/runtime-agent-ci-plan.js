@@ -67,7 +67,7 @@ function runtimeAgentCiRunnerSpec(options = {}, context = {}) {
   const taskExecutorConfig = context.taskExecutorConfig || runtimeAgentCiTaskExecutorConfig;
   const config = taskExecutorConfig(options);
   // The executor runtime is only populated from an explicit runtime selector; a
-  // bare backend (e.g. { backend: 'opencode' }) must not imply a runtime, and the
+  // bare backend (e.g. { backend: 'pi' }) must not imply a runtime, and the
   // resolution must not fall back to DEFAULT_RUNTIME_ID here. Using the shared
   // runtimeIdFromOptions (which derives runtime from options.backend and defaults
   // to DEFAULT_RUNTIME_ID) would break that contract.

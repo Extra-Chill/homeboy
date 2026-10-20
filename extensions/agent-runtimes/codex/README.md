@@ -45,4 +45,4 @@ the outcome. The declared Codex secret env names are:
 The runtime advertises CLI execution, repository workspace materialization,
 workspace tools, patch/report artifacts, structured outcomes, provider-owned auth,
 provider-owned sessions, and provider-owned cancellation. It does not advertise a
-WordPress sandbox or nested OpenCode orchestration.
+WordPress sandbox or nested agent orchestration.

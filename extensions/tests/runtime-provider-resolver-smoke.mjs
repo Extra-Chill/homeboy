@@ -19,7 +19,7 @@ const registry = runtimeRegistry({ repoRoot: rootDir });
 assert.equal(DEFAULT_RUNTIME_ID, 'local-shell');
 assert.ok(registry['local-shell'], 'local-shell is registered as the default runtime provider');
 assert.equal(registry['wp-codebox'], undefined, 'wp-codebox is a runtime dependency, not an agent-task provider');
-assert.ok(registry.opencode, 'opencode is registered as a selectable runtime provider');
+assert.ok(registry.pi, 'pi is registered as a selectable runtime provider');
 
 const defaultRuntime = resolveRuntimeProvider(undefined, { repoRoot: rootDir, workspace });
 assert.equal(defaultRuntime.id, 'local-shell');
@@ -31,19 +31,19 @@ assert.equal(defaultRuntime.executor.path, path.join(rootDir, 'agent-runtimes/lo
 
 assert.throws(() => resolveRuntimeProvider('wp-codebox', { repoRoot: rootDir, workspace }), /Unsupported agent_runtime: wp-codebox/);
 
-const opencodeRuntime = resolveRuntimeProvider('opencode', {
+const piRuntime = resolveRuntimeProvider('pi', {
 	repoRoot: rootDir,
 	workspace,
+	executor_status: 'experimental',
 });
-assert.equal(opencodeRuntime.id, 'opencode');
-assert.equal(opencodeRuntime.checkout.repo, '');
-assert.equal(opencodeRuntime.executor.backend, 'opencode');
-assert.equal(opencodeRuntime.executor.path, path.join(rootDir, 'agent-runtimes/opencode/scripts/agent/homeboy-opencode-agent-task-executor.cjs'));
-assert.equal(opencodeRuntime.manifest.agent_task_executors[0].status, 'active');
-assert.equal(opencodeRuntime.manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
-assert.equal(opencodeRuntime.manifest.name, 'OpenCode');
-assert.equal(JSON.stringify(opencodeRuntime.manifest).includes('wp-codebox'), false);
-assert.equal(JSON.stringify(opencodeRuntime.manifest).includes('WP Codebox'), false);
+assert.equal(piRuntime.id, 'pi');
+assert.equal(piRuntime.checkout.repo, '');
+assert.equal(piRuntime.executor.backend, 'pi');
+assert.equal(piRuntime.executor.path, path.join(rootDir, 'agent-runtimes/pi/scripts/agent/homeboy-pi-agent-task-executor.cjs'));
+assert.equal(piRuntime.executor.status, 'experimental');
+assert.equal(piRuntime.manifest.name, 'Pi');
+assert.equal(JSON.stringify(piRuntime.manifest).includes('wp-codebox'), false);
+assert.equal(JSON.stringify(piRuntime.manifest).includes('WP Codebox'), false);
 
 const tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-provider-')));
 const externalRuntimeDir = path.join(tempDir, 'external-runtime');

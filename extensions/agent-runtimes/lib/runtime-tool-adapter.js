@@ -80,23 +80,6 @@ function readyRuntimeToolEvidence(readiness, capabilities) {
 		&& ['version_command', 'protocol', 'declared_probe'].includes(evidence.kind);
 }
 
-function applyOpenCodeRuntimeTools(content = {}, request = {}, env = process.env) {
-	const tools = resolvedRuntimeTools(request, env);
-	if (tools.length === 0) {
-		return content;
-	}
-	const mcp = objectValue(content.mcp);
-	for (const tool of tools) {
-		mcp[tool.id] = {
-			type: 'local',
-			command: [...tool.argv],
-			environment: runtimeToolEnvironment(tool, env),
-			enabled: true,
-		};
-	}
-	return { ...content, mcp };
-}
-
 function codexRuntimeToolConfigArgs(request = {}, env = process.env) {
 	return resolvedRuntimeTools(request, env).flatMap((tool) => {
 		const key = `mcp_servers.${tool.id}`;
@@ -158,7 +141,6 @@ module.exports = {
 	RAW_RUNTIME_TOOLS_ENV,
 	RESOLVED_RUNTIME_TOOLS_ENV,
 	adapterRuntimeToolRequest,
-	applyOpenCodeRuntimeTools,
 	codexRuntimeToolConfigArgs,
 	resolvedRuntimeTools,
 	runtimeToolSecretEnvNames,

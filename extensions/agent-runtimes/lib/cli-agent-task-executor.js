@@ -39,7 +39,7 @@ const DEFAULT_PROCESS_ENV_ALLOWLIST = [
 /**
  * Build a CLI agent-task executor from a per-provider configuration.
  *
- * The four standalone CLI runtimes (codex, claude-code, opencode, pi) share a
+ * The standalone CLI runtimes (codex, claude-code, pi) share a
  * single execution spine: validate the AgentTaskRequest, optionally run a
  * provider preflight, resolve the command, spawn it synchronously, and map the
  * spawn result onto a normalized AgentTaskOutcome. Every genuine per-provider

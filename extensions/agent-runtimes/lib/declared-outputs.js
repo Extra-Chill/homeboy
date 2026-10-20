@@ -121,7 +121,7 @@ function boundedStructuredOutput(value) {
 
 /**
  * Diagnostics for missing or oversized outputs. `runtime` names the class
- * prefix and the message subject, e.g. ('opencode', 'OpenCode').
+ * prefix and the message subject, e.g. ('pi', 'Pi').
  */
 function outputDiagnostics(missing, oversized, { runtime = 'agent', label = 'The agent' } = {}) {
 	return [

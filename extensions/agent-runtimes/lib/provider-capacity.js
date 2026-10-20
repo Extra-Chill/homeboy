@@ -5,7 +5,7 @@
  *
  * Each runtime supplies how to find its connected accounts (`accounts`) and
  * the pool scope prefix; the usage endpoints, account labelling, and pool
- * summary are shared so opencode and pi report capacity identically.
+ * summary are shared so every runtime reports capacity identically.
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -53,12 +53,6 @@ const CAPACITY_PROVIDERS = {
 		headers: (account) => ({ Authorization: account.credential }),
 		windows: zaiWindows,
 	},
-	// OpenCode Zen stores this provider as an API key in the auth store.
-	'opencode-go': {
-		url: 'https://opencode.ai/zen/go/v1/usage',
-		headers: (account) => ({ Authorization: `Bearer ${account.credential}` }),
-		windows: opencodeGoWindows,
-	},
 	// Grok Build's billing endpoint backs the xai plan (see xai-org/grok-build
 	// crates/codegen/xai-grok-shell/src/extensions/billing.rs).
 	xai: {
@@ -70,19 +64,18 @@ const CAPACITY_PROVIDERS = {
 
 const ANTHROPIC_WINDOWS = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'seven_day_oauth_apps'];
 const ZAI_WINDOW_UNITS = { 3: 'hour', 4: 'day', 5: 'month', 6: 'week' };
-const OPENCODE_GO_WINDOWS = ['rolling', 'weekly', 'monthly'];
 
 /**
  * Look up plan capacity for one provider across every connected account.
  *
  * `options.accounts(provider)` returns the runtime's connected accounts as
  * `{ label, named?, credential, accountId?, expires?, lastUsed? }`, and
- * `options.scopePrefix` names the runtime's pool (`opencode`, `pi`).
+ * `options.scopePrefix` names the runtime's pool (e.g. `pi`).
  *
  * Resolves to null when the provider publishes no usage endpoint or has no
  * stored credential. Otherwise resolves to `{ scope, accounts, capacity?,
  * exhausted, diagnostic? }`: `scope` is the stable, non-secret pool id shared
- * by every route on the provider (`opencode:<provider>`), `accounts` reports
+ * by every route on the provider (`<scopePrefix>:<provider>`), `accounts` reports
  * each account's state, and `capacity` matches Homeboy's readiness `capacity`
  * contract for the pool (percent remaining on the best available account, or
  * the earliest reset when every account is exhausted).
@@ -276,19 +269,6 @@ function zaiWindows(body) {
 			limit.percentage,
 			isoTime(limit.nextResetTime),
 		));
-}
-
-function opencodeGoWindows(body) {
-	return OPENCODE_GO_WINDOWS
-		.filter((name) => body?.usage?.[name] && typeof body.usage[name] === 'object')
-		.map((name) => {
-			const window = body.usage[name];
-			const mapped = percentWindow(name, finiteNumber(window.percent) ? window.percent : 0, isoTime(window.resetsAt));
-			// A rate-limited window is spent even when its percent has not
-			// caught up to 100 yet.
-			if (window.status === 'rate-limited') mapped.exhausted = true;
-			return mapped;
-		});
 }
 
 function xaiHeaders(account) {

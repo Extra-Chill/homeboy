@@ -53,12 +53,12 @@ fixture_node() {
 
 # Resolution is the invariant under test, so assert the resolved paths directly
 # instead of inferring them from a runtime's exit code. The shared runtimes
-# themselves depend on ambient tooling (the opencode executor spawns `homeboy`
+# themselves depend on ambient tooling (the pi executor spawns `homeboy`
 # for contract constants), which is not what an installed-layout packaging test
 # should be gated on.
 for target in \
     "wp-codebox/lib/runtime-setup.cjs" \
-    "opencode/scripts/agent/homeboy-opencode-agent-task-executor.cjs"; do
+    "pi/scripts/agent/homeboy-pi-agent-task-executor.cjs"; do
     resolved="$(fixture_node "${EXTENSION_DIR}/scripts/lib/agent-runtime-paths.cjs" "${target}" 2>&1)"
     expected="$(cd "$(dirname "${HOMEBOY_ROOT}")" && pwd -P)/$(basename "${HOMEBOY_ROOT}")/agent-runtimes/${target}"
     [ "$resolved" = "$expected" ] || fail "Expected installed resolution of ${target} to ${expected}, got: ${resolved}"
@@ -79,16 +79,6 @@ NODE
 )"
 expected_version="$(fixture_node -p "require(process.argv[1]).wp_codebox.minimum_version" "${EXTENSION_DIR}/wordpress.json" 2>&1)"
 [ "${selection_output}" = "${expected_version}" ] || fail "Installed WP Codebox runtime-selection shim failed to load: ${selection_output}"
-
-# The opencode wrapper's only job is to resolve and require the shared runtime,
-# so assert that it gets past resolution. What the runtime then does with an
-# empty request is out of scope here.
-executor_output="$(fixture_node "${EXTENSION_DIR}/scripts/agent/homeboy-opencode-agent-task-executor.cjs" </dev/null 2>&1)"
-case "$executor_output" in
-    *"Cannot find module"*|*"could not resolve shared agent runtime file"*)
-        fail "Installed opencode executor wrapper failed to load the shared runtime: ${executor_output}"
-        ;;
-esac
 
 # The PHPUnit adapter resolves its runtime-selection module before it validates
 # its own environment, so reaching the HOMEBOY_COMPONENT_PATH error is proof the
@@ -142,7 +132,7 @@ esac
 # A core binding can include unrelated agent runtimes without making generic
 # PHPUnit parsing depend on the optional WP Codebox runtime.
 UNRELATED_RUNTIMES_DIR="${FIXTURE_ROOT}/unrelated-agent-runtimes"
-mkdir -p "${UNRELATED_RUNTIMES_DIR}/opencode"
+mkdir -p "${UNRELATED_RUNTIMES_DIR}/pi"
 generic_bound_output="$(HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="${FIXTURE_ROOT}/write-test-results.sh" \
     HOMEBOY_SHARED_LIB_DIR="${SHARED_LIB_DIR}" \
     HOMEBOY_AGENT_RUNTIMES_DIR="${UNRELATED_RUNTIMES_DIR}" \
@@ -200,8 +190,8 @@ assert payload["failures"][0]["test_id"] == "Example\\ParserTest::test_failure_i
 PY
 
 # WordPress-owned runtime selection remains available without the experimental
-# shared runtime. Wrappers that still consume shared runtimes must name what is
-# missing instead of emitting a bare MODULE_NOT_FOUND stack.
+# shared runtime. Resolving a shared runtime file must name what is missing
+# instead of emitting a bare MODULE_NOT_FOUND stack.
 rm -rf "${HOMEBOY_ROOT}/agent-runtimes"
 adapter_output="$(HOMEBOY_SETTINGS_JSON='{}' fixture_node "${EXTENSION_DIR}/scripts/test/wp-codebox-phpunit-adapter.mjs" 2>&1)"
 case "$adapter_output" in
@@ -209,9 +199,9 @@ case "$adapter_output" in
     *) fail "Expected installed PHPUnit adapter to remain independent of shared runtimes, got: ${adapter_output}" ;;
 esac
 
-missing_output="$(fixture_node "${EXTENSION_DIR}/scripts/agent/homeboy-opencode-agent-task-executor.cjs" </dev/null 2>&1)"
+missing_output="$(fixture_node "${EXTENSION_DIR}/scripts/lib/agent-runtime-paths.cjs" "pi/scripts/agent/homeboy-pi-agent-task-executor.cjs" 2>&1)"
 missing_status=$?
-[ "$missing_status" -ne 0 ] || fail "Expected missing shared runtime to fail the opencode wrapper"
+[ "$missing_status" -ne 0 ] || fail "Expected missing shared runtime to fail resolution"
 case "$missing_output" in
     *"could not resolve shared agent runtime file"*"${HOMEBOY_ROOT}/agent-runtimes"*"homeboy extension install wordpress"*) ;;
     *) fail "Expected an actionable missing-runtime diagnostic, got: ${missing_output}" ;;

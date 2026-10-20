@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 /**
  * Regression guard for Extra-Chill/homeboy#7736.
  *
- * The CLI agent-task executor runtimes (opencode, codex, claude-code, and pi)
+ * The CLI agent-task executor runtimes (codex, claude-code, and pi)
  * each `require('../../../agent-task-contracts')`, which from
  * an installed runtime at `~/.config/homeboy/agent-runtimes/<runtime>/lib/`
  * resolves to `~/.config/homeboy/agent-task-contracts/`. That directory only
@@ -148,7 +148,6 @@ assert.ok(
 // siblings under the install root, exactly as they are siblings under repoRoot.
 const executorEntrypoints = [
 	'agent-runtimes/lib/cli-agent-task-executor.js',
-	'agent-runtimes/opencode/lib/opencode-agent-task-executor.js',
 	'agent-runtimes/codex/lib/codex-agent-task-executor.js',
 	'agent-runtimes/claude-code/lib/claude-code-agent-task-executor.js',
 	'agent-runtimes/pi/lib/pi-agent-task-executor.js',

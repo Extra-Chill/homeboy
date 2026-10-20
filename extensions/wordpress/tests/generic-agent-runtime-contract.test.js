@@ -84,28 +84,30 @@ try {
 	fs.rmSync(tmpRoot, { recursive: true, force: true });
 }
 
-assert.deepEqual(dependencyEntries({ RUNTIME_PROVIDER: 'opencode', PROVIDER: 'opencode' }), []);
+assert.deepEqual(dependencyEntries({ RUNTIME_PROVIDER: 'pi', PROVIDER: 'pi' }), []);
 
 const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-config-'));
 try {
 	const config = buildConfig({
 		GITHUB_WORKSPACE: configRoot,
 		RUNNER_TEMP: path.join(configRoot, 'runner-temp'),
-		WORKLOAD_ID: 'opencode-smoke',
+		WORKLOAD_ID: 'pi-smoke',
 		TARGET_REPO: 'Extra-Chill/example-target',
-		RUNTIME: 'opencode',
-		PROFILE: 'opencode-ci',
+		RUNTIME: 'pi',
+		PROFILE: 'pi-ci',
 		RUNTIME_PROFILES: JSON.stringify({
-			'opencode-ci': {
-				id: 'opencode-ci',
-				runtime_task_ability: 'opencode/run-task',
+			'pi-ci': {
+				id: 'pi-ci',
+				runtime_task_ability: 'pi/run-task',
 			},
 		}),
-		PROVIDER: 'opencode',
+		PROVIDER: 'pi',
+		// Pi's executor is declared experimental; select it explicitly.
+		EXECUTOR_STATUS: 'experimental',
 	});
-	assert.equal(config.runtime_id, 'opencode');
-	assert.equal(config.runtime_profile, 'opencode-ci');
-	assert.equal(config.runtime_requirements.runtime_task_ability, 'opencode/run-task');
+	assert.equal(config.runtime_id, 'pi');
+	assert.equal(config.runtime_profile, 'pi-ci');
+	assert.equal(config.runtime_requirements.runtime_task_ability, 'pi/run-task');
 	assert.equal(config.runtime_bin, undefined);
 } finally {
 	fs.rmSync(configRoot, { recursive: true, force: true });
@@ -116,12 +118,12 @@ assert.throws(
 	/backend is required/
 );
 assert.equal(
-	agentTaskRunnerSpec({ backend: 'opencode', runtime: 'opencode', config: {} }).executor.backend,
-	'opencode'
+	agentTaskRunnerSpec({ backend: 'pi', runtime: 'pi', config: {} }).executor.backend,
+	'pi'
 );
 assert.equal(
-	agentTaskRunnerSpec({ backend: 'opencode', runtime: 'opencode', config: {} }).executor.runtime,
-	'opencode'
+	agentTaskRunnerSpec({ backend: 'pi', runtime: 'pi', config: {} }).executor.runtime,
+	'pi'
 );
 
 const runtimeProfile = {
@@ -130,7 +132,7 @@ const runtimeProfile = {
 };
 assert.equal(
 	runtimeAgentCiRunnerSpec({
-		backend: 'opencode',
+		backend: 'pi',
 		ability: 'example/run-task',
 		runtime_profile: 'example-runtime-ci',
 		runtime_profiles: { 'example-runtime-ci': runtimeProfile },
@@ -139,21 +141,21 @@ assert.equal(
 );
 assert.equal(
 	runtimeAgentCiRunnerSpec({
-		runtime: 'opencode',
+		runtime: 'pi',
 		ability: 'example/run-task',
 		runtime_profile: 'example-runtime-ci',
 		runtime_profiles: { 'example-runtime-ci': runtimeProfile },
 	}).executor.backend,
-	'opencode'
+	'pi'
 );
 assert.equal(
 	runtimeAgentCiRunnerSpec({
-		runtime: 'opencode',
+		runtime: 'pi',
 		ability: 'example/run-task',
 		runtime_profile: 'example-runtime-ci',
 		runtime_profiles: { 'example-runtime-ci': runtimeProfile },
 	}).executor.runtime,
-	'opencode'
+	'pi'
 );
 assert.equal(
 	runtimeAgentCiRunnerSpec({

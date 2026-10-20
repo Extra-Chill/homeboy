@@ -37,7 +37,7 @@ Each `agent_task_executors[]` entry must declare:
 - `schema`: provider declaration schema, currently `homeboy/agent-task-executor-provider/v1`.
 - `id`: stable provider id. Use a namespaced id such as `runtime-id.provider-id`.
 - `label`: human-readable provider label.
-- `backend`: backend selector value used by requests, for example `codebox` or `opencode`.
+- `backend`: backend selector value used by requests, for example `codebox` or `pi`.
 - `invocation.argv`: argv-form command Homeboy runs after interpolation.
 - `request_schema`: accepted request schema, currently `homeboy/agent-task-request/v1`.
 - `outcome_schema`: emitted outcome schema, currently `homeboy/agent-task-outcome/v1`.
