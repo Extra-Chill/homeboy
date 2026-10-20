@@ -188,6 +188,23 @@ impl CookRecoveryPerformer for CliCookRecoveryPerformer {
             idempotency_key: None,
         })
     }
+
+    fn adopt(&self, run_id: &str, candidate_ref: &str) -> homeboy::core::Result<(Value, i32)> {
+        let result = homeboy::agents::agent_task_service::
+            adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
+                run_id,
+                None,
+                candidate_ref,
+                homeboy::agents::agent_task_service::AgentTaskCandidateAdoptionOptions::default(),
+                crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+                std::sync::Arc::new(
+                    homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+                ),
+            )?;
+        let value = serde_json::to_value(result.value)
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+        Ok((value, result.exit_code))
+    }
 }
 
 #[cfg(test)]

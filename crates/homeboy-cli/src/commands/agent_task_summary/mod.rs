@@ -642,9 +642,21 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     {
         let next_attempt_at = string_value(payload, &["blocker", "retry", "next_attempt_at"])
             .unwrap_or("the recorded retry time");
-        lines.push(format!(
-            "Retry: automatic reconciliation scheduled for {next_attempt_at}; waiting is recommended"
-        ));
+        // Waiting is only recommended when a live daemon will actually pick
+        // the work up; a dead daemon is the blocker and gets its recovery
+        // command below (#16181).
+        if payload.pointer("/blocker/daemon/admits_work") == Some(&Value::Bool(false)) {
+            lines.push(format!(
+                "Retry: automatic reconciliation scheduled for {next_attempt_at}; the local controller daemon is not admitting work"
+            ));
+            if let Some(summary) = string_value(payload, &["blocker", "daemon", "summary"]) {
+                lines.push(format!("Daemon: {summary}"));
+            }
+        } else {
+            lines.push(format!(
+                "Retry: automatic reconciliation scheduled for {next_attempt_at}; waiting is recommended"
+            ));
+        }
     }
     lines.push(format!(
         "Artifacts: {}",
@@ -670,6 +682,12 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
             return remedy.to_string();
         }
     }
+    // The projected single recovery step (#15925) is exactly what `recover`
+    // performs for this durable state; when the state names an adopt, that
+    // command outranks a resume that would replay nothing (#16181).
+    if let Some(command) = payload.pointer("/recovery/command").and_then(Value::as_str) {
+        return command.to_string();
+    }
     // A blocked finalization is recovered by the Cook continuation that owns
     // publication; resume only re-reads terminal evidence (#15017). `recover`
     // performs that continuation as the Cook's one next step (#15925).
@@ -679,6 +697,12 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
     if string_value(payload, &["blocker", "retry", "disposition"])
         == Some("automatic_reconciliation_scheduled")
     {
+        // The scheduled reconciliation runs on the local controller daemon.
+        // When that daemon is down the wait can never be scheduled, so name
+        // its recovery instead of recommending waiting (#16181).
+        if payload.pointer("/blocker/daemon/admits_work") == Some(&Value::Bool(false)) {
+            return "homeboy daemon recover".to_string();
+        }
         return format!("homeboy agent-task status {run_id} --watch");
     }
     // A verification-pending candidate holds a promoted but unverified
@@ -1051,6 +1075,85 @@ fn finish(lines: Vec<String>) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn queued_status(daemon: Option<Value>) -> Value {
+        let mut blocker = json!({
+            "reason": "queued: admitted to homeboy-lab; waiting for execution scheduling",
+            "retry": {
+                "disposition": "automatic_reconciliation_scheduled",
+                "next_attempt_at": "2026-10-19T22:40:00Z"
+            }
+        });
+        if let Some(daemon) = daemon {
+            blocker["daemon"] = daemon;
+        }
+        json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "agent-task-1",
+            "state": "running",
+            "blocker": blocker,
+        })
+    }
+
+    #[test]
+    fn queued_status_behind_a_dead_daemon_names_daemon_recover() {
+        let payload = queued_status(Some(json!({
+            "admits_work": false,
+            "summary": "no daemon lease is recorded and the daemon API is unreachable"
+        })));
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload)
+            .expect("status summary");
+        assert!(!summary.contains("waiting is recommended"), "{summary}");
+        assert!(
+            summary.contains("Daemon: no daemon lease is recorded"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("Next: homeboy daemon recover"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn queued_status_with_a_live_daemon_still_recommends_waiting() {
+        for daemon in [
+            None,
+            Some(json!({ "admits_work": true, "summary": "live" })),
+        ] {
+            let payload = queued_status(daemon);
+            let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload)
+                .expect("status summary");
+            assert!(summary.contains("waiting is recommended"), "{summary}");
+            assert!(
+                summary.contains("Next: homeboy agent-task status agent-task-1 --watch"),
+                "{summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn projected_adopt_recovery_is_the_next_action() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "agent-task-1-attempt-3",
+            "mission": "agent-task-1",
+            "state": "partial_failure",
+            "candidate": { "state": "no_changes" },
+            "recovery": {
+                "cook_id": "agent-task-1",
+                "run": "agent-task-1-attempt-3",
+                "step": "adopt",
+                "candidate_ref": "abc123",
+                "command": "homeboy agent-task adopt agent-task-1 --candidate-ref abc123"
+            }
+        });
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload)
+            .expect("status summary");
+        assert!(
+            summary.contains("Next: homeboy agent-task adopt agent-task-1 --candidate-ref abc123"),
+            "{summary}"
+        );
+    }
 
     #[test]
     fn cook_preview_summary_renders_the_terminal_preview_payload() {

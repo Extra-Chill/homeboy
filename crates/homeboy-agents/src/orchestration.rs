@@ -13,36 +13,36 @@ use homeboy_control_plane_contract::{
     ControlPlaneActionOutcome, ControlPlaneActionPayload, ControlPlaneActionRequest,
     ControlPlaneActionResource, ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition,
     ControlPlaneAttempt, ControlPlaneAttemptListRequest, ControlPlaneAttemptPage,
-    ControlPlaneBlocker, ControlPlaneCancelDisposition, ControlPlaneCancelParameters,
-    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneEffectAudit,
-    ControlPlaneEffectExecutionState, ControlPlaneEffectState, ControlPlaneEffectStatus,
-    ControlPlaneEffectTerminal, ControlPlaneError, ControlPlaneErrorClass,
-    ControlPlaneEventAppendRequest, ControlPlaneEventRetention, ControlPlaneEventSource,
-    ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
-    ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
+    ControlPlaneBlocker, ControlPlaneBlockerDaemon, ControlPlaneCancelDisposition,
+    ControlPlaneCancelParameters, ControlPlaneCancelResult, ControlPlaneCapabilities,
+    ControlPlaneEffectAudit, ControlPlaneEffectExecutionState, ControlPlaneEffectState,
+    ControlPlaneEffectStatus, ControlPlaneEffectTerminal, ControlPlaneError,
+    ControlPlaneErrorClass, ControlPlaneEventAppendRequest, ControlPlaneEventRetention,
+    ControlPlaneEventSource, ControlPlaneEvidenceRef, ControlPlaneExecution,
+    ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
-    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneRef, ControlPlaneReference,
-    ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
-    ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
-    ControlPlaneRunPlacement, ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
-    ControlPlaneRunPlacementSelected, ControlPlaneRunReview, ControlPlaneRunReviewRequest,
-    ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState, ControlPlaneStateSummary,
-    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
-    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EffectId, EventCursor, ExecutionId,
-    MissionCursor, MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_FENCE_SCHEMA,
-    CONTROL_PLANE_ACTION_INTENT_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
-    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
-    CONTROL_PLANE_EFFECT_AUDIT_SCHEMA, CONTROL_PLANE_EFFECT_STATUS_SCHEMA,
-    CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
-    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
-    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
-    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
-    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA,
-    CONTROL_PLANE_REARM_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
-    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
-    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneRecovery, ControlPlaneRef,
+    ControlPlaneReference, ControlPlaneReferencePage, ControlPlaneReferenceRegistration,
+    ControlPlaneReferenceType, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest,
+    ControlPlaneRunPage, ControlPlaneRunPlacement, ControlPlaneRunPlacementEffective,
+    ControlPlaneRunPlacementRequested, ControlPlaneRunPlacementSelected, ControlPlaneRunReview,
+    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState,
+    ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
+    ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage, EffectId, EventCursor,
+    ExecutionId, MissionCursor, MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId,
+    TaskCursor, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    CONTROL_PLANE_ACTION_FENCE_SCHEMA, CONTROL_PLANE_ACTION_INTENT_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
+    CONTROL_PLANE_CANCEL_RESULT_SCHEMA, CONTROL_PLANE_EFFECT_AUDIT_SCHEMA,
+    CONTROL_PLANE_EFFECT_STATUS_SCHEMA, CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA,
+    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
+    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
+    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
+    CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+    CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA, CONTROL_PLANE_REARM_RESULT_SCHEMA,
+    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
+    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_control_plane_contract::{
     ControlPlanePlacementUpdateParameters, ControlPlaneQuarantineParameters,
@@ -1630,7 +1630,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
             "failure_reasons": failure_reasons,
             "execution_states": review_execution_states(aggregate.as_ref(), aggregate_review.as_ref(), &canonical_candidate, delivery.as_ref(), &resource),
             "canonical_candidate": canonical_candidate,
-            "next_actions": review_next_actions(record, aggregate_review.as_ref(), request.to_worktree.is_some()),
+            "next_actions": review_next_actions(
+                record,
+                aggregate_review.as_ref(),
+                request.to_worktree.is_some(),
+                resource.recovery.as_ref(),
+            ),
             "cleanup_evidence": cleanup_evidence,
             "transport": { "authoritative": "homeboy-agent-task-lifecycle", "chat_state_required": false },
             "action_eligibility": resource.action_eligibility,
@@ -2386,21 +2391,39 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             Ok((current, reconciliation))
                         })();
                         match resumed {
-                            Ok((current, reconciliation)) => (
-                                ControlPlaneActionOutcome::Succeeded,
-                                project_record(&current, None)?,
-                                ControlPlaneActionPayload {
-                                    schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
-                                    data: serde_json::json!({
-                                        "schema": "homeboy/unmaterialized-cook-resume/v1",
-                                        "status": current.metadata["unmaterialized_cook_admission"]["state"],
-                                        "run_id": requested_id,
-                                        "idempotent": true,
-                                        "reconciliation": reconciliation,
-                                    }),
-                                },
-                                None,
-                            ),
+                            Ok((current, reconciliation)) => {
+                                let mut data = serde_json::json!({
+                                    "schema": "homeboy/unmaterialized-cook-resume/v1",
+                                    "status": current.metadata["unmaterialized_cook_admission"]["state"],
+                                    "run_id": requested_id,
+                                    "idempotent": true,
+                                    "reconciliation": reconciliation,
+                                });
+                                // The re-armed admission waits on the local
+                                // controller daemon's scheduling. When that
+                                // daemon is down the resume cannot ever be
+                                // picked up, so name it and its recovery
+                                // instead of leaving the operator waiting
+                                // (#16181).
+                                if let Some(daemon) =
+                                    crate::agent_task_service::scheduling_daemon_evidence()
+                                        .filter(|daemon| !daemon.admits_work)
+                                {
+                                    data["blocker"] = serde_json::json!({
+                                        "daemon": daemon,
+                                        "next_action": "homeboy daemon recover",
+                                    });
+                                }
+                                (
+                                    ControlPlaneActionOutcome::Succeeded,
+                                    project_record(&current, None)?,
+                                    ControlPlaneActionPayload {
+                                        schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
+                                        data,
+                                    },
+                                    None,
+                                )
+                            }
                             Err(error) => (
                                 ControlPlaneActionOutcome::Failed,
                                 project_record(&record, None)?,
@@ -3330,6 +3353,7 @@ fn review_next_actions(
     record: &AgentTaskRunRecord,
     review: Option<&crate::agent_tasks::AgentTaskAggregateReport>,
     has_target: bool,
+    recovery: Option<&ControlPlaneRecovery>,
 ) -> Vec<String> {
     if record.state() == AgentTaskRunState::Queued {
         return vec![
@@ -3338,6 +3362,11 @@ fn review_next_actions(
     }
     if record.state() == AgentTaskRunState::Running {
         return vec!["inspect progress with `homeboy agent-task status <run-id>` and `homeboy agent-task logs <run-id>`".to_string()];
+    }
+    // The projected single recovery step outranks aggregate-derived actions:
+    // it is what `agent-task recover` performs for this state (#15925, #16181).
+    if let Some(recovery) = recovery {
+        return vec![recovery.command.clone()];
     }
     let Some(review) = review else {
         return vec!["terminal run has no aggregate artifact; inspect lifecycle status for finalization errors".to_string()];
@@ -4100,12 +4129,40 @@ fn project_summary_fields(
     resource.candidate = candidate(record, delivery.as_ref());
     resource.gates = gates(record, delivery.as_ref());
     resource.publication = delivery.as_ref().and_then(publication);
+    resource.recovery = projected_cook_recovery(record);
     if resource.state.is_terminal() {
         resource.finished_at = record.updated_at.clone();
     }
     resource.evidence = evidence_refs(record);
     resource.artifacts = compact_status_artifact_refs(artifact_refs(record));
     Ok(resource)
+}
+
+/// The one recovery step (#15925) projected into status and review when the
+/// durable Cook state names an adopt (#16181): a terminal `no_changes` attempt
+/// whose destination worktree holds commits ahead of its base is finalized by
+/// adopting that worktree HEAD, not by resuming. This reads the same
+/// [`plan_cook_recovery`] decision `agent-task recover` performs, so the
+/// projections and the recover entry point can never disagree. Every other
+/// state projects no recovery, leaving today's projections unchanged.
+fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRecovery> {
+    if crate::agent_task_service::cook_recovery_status(record) != "no_changes" {
+        return None;
+    }
+    let plan = crate::agent_task_service::plan_cook_recovery(&record.run_id).ok()?;
+    let crate::agent_task_service::CookRecoveryStep::Adopt { candidate_ref } = plan.step else {
+        return None;
+    };
+    Some(ControlPlaneRecovery {
+        cook_id: plan.cook_id.clone(),
+        run: RunId::new(&plan.run_id).ok()?,
+        step: "adopt".to_string(),
+        candidate_ref: Some(candidate_ref.clone()),
+        command: format!(
+            "homeboy agent-task adopt {} --candidate-ref {candidate_ref}",
+            plan.cook_id
+        ),
+    })
 }
 
 fn project_dead_candidate_adoption(record: &AgentTaskRunRecord) -> AgentTaskRunRecord {
@@ -4629,6 +4686,7 @@ fn blocker(
             state: None,
             reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
             retry: None,
+            daemon: None,
         });
     }
     if let Some(reason) = record.stale_running_reason() {
@@ -4638,6 +4696,7 @@ fn blocker(
             state: None,
             reason: None,
             retry: None,
+            daemon: None,
         });
     }
     if record.state().is_terminal() {
@@ -4649,18 +4708,22 @@ fn blocker(
                     state: failure["classification"].as_str().map(str::to_string),
                     reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
                     retry: None,
+                    daemon: None,
                 });
             }
         }
     }
     if let Some(admission) = record.metadata.get("unmaterialized_cook_admission") {
-        if let Some((state, reason, retry)) = unmaterialized_admission_blocker(record, admission) {
+        if let Some((state, reason, retry, daemon)) =
+            unmaterialized_admission_blocker(record, admission)
+        {
             return Some(ControlPlaneBlocker {
                 code: Some(state.clone()),
                 message: reason.clone(),
                 state: Some(state),
                 reason: Some(reason),
                 retry,
+                daemon,
             });
         }
     }
@@ -4682,6 +4745,7 @@ fn blocker(
             state: None,
             reason: None,
             retry: None,
+            daemon: None,
         });
     }
     if matches!(
@@ -4695,6 +4759,7 @@ fn blocker(
                 state: None,
                 reason: Some(redacted_bounded(&stop.violation.remedy(), MESSAGE_BOUND)),
                 retry: None,
+                daemon: None,
             });
         }
     }
@@ -4714,6 +4779,7 @@ fn blocker(
                 state: None,
                 reason: None,
                 retry: None,
+                daemon: None,
             });
         }
     }
@@ -4728,13 +4794,19 @@ fn blocker(
             state: None,
             reason: None,
             retry: None,
+            daemon: None,
         })
 }
 
 fn unmaterialized_admission_blocker(
     record: &AgentTaskRunRecord,
     admission: &Value,
-) -> Option<(String, String, Option<ControlPlaneAdmissionRetry>)> {
+) -> Option<(
+    String,
+    String,
+    Option<ControlPlaneAdmissionRetry>,
+    Option<ControlPlaneBlockerDaemon>,
+)> {
     let state = admission.get("state")?.as_str()?.trim();
     if !matches!(
         state,
@@ -4759,6 +4831,14 @@ fn unmaterialized_admission_blocker(
     } else {
         ControlPlaneAdmissionRetryDisposition::AutomaticReconciliationScheduled
     };
+    // The scheduled reconciliation runs on the local controller daemon, so the
+    // admission's own freshness report decides whether waiting can ever
+    // schedule the work (#16181). An exhausted budget names no daemon: nothing
+    // is waiting on scheduling anymore.
+    let daemon = (disposition
+        == ControlPlaneAdmissionRetryDisposition::AutomaticReconciliationScheduled)
+        .then(crate::agent_task_service::scheduling_daemon_evidence)
+        .flatten();
     Some((
         state.to_string(),
         reason,
@@ -4769,6 +4849,7 @@ fn unmaterialized_admission_blocker(
             next_attempt_at,
             disposition,
         }),
+        daemon,
     ))
 }
 
@@ -4929,6 +5010,7 @@ fn delivery_blocker(blocker: &CookDeliveryBlocker) -> ControlPlaneBlocker {
             .as_deref()
             .map(|action| redacted_bounded(action, MESSAGE_BOUND)),
         retry: None,
+        daemon: None,
     }
 }
 
@@ -5201,6 +5283,7 @@ fn generic_observation_run_summary(
             state: None,
             reason: None,
             retry: None,
+            daemon: None,
         });
     resource.artifacts = generic_observation_artifacts(record);
     Ok(resource)

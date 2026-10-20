@@ -2117,6 +2117,10 @@ impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookR
     fn reconcile(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
         panic!("a recipe-only attempt holds no promotion claim: {run_id}")
     }
+
+    fn adopt(&self, run_id: &str, candidate_ref: &str) -> homeboy::core::Result<(Value, i32)> {
+        panic!("a recipe-only attempt adopts no worktree candidate {candidate_ref}: {run_id}")
+    }
 }
 
 /// `agent-task recover --preflight` for `id`, through the same continuation

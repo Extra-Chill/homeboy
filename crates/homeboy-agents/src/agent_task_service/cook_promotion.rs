@@ -7161,6 +7161,11 @@ pub(crate) fn cook_failure_context_with_stores(
                 delivery.as_ref(),
                 lifecycle_store,
             );
+            // The adopt observation only matters for a terminal `no_changes`
+            // attempt; skip the worktree inspection for every other state.
+            let adoptable_candidate_ref = (status == "no_changes")
+                .then(|| no_changes_adoption_candidate(&recipe))
+                .flatten();
             cook_recovery_actions_with_prefix(
                 status,
                 &chronological_latest_run_id,
@@ -7176,6 +7181,7 @@ pub(crate) fn cook_failure_context_with_stores(
                 ),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
                 agent_incomplete_reason(lifecycle_store, record_run_id).as_deref(),
+                adoptable_candidate_ref.as_deref(),
                 delivered_candidate,
                 record.as_ref().and_then(lab_handoff_runtime_recovery),
                 record
@@ -7706,6 +7712,83 @@ struct DeliveredCandidateFacts {
     publish_ready: bool,
 }
 
+/// HEAD of the Cook's destination worktree when the worktree's branch holds
+/// commits ahead of the recorded immutable task base (#16181). A terminal
+/// `no_changes` attempt in that state is adoptable: the operator's verified
+/// commits are the candidate the provider could not produce. Only a Cook
+/// sourced with `--cwd` records a source worktree path; every other shape,
+/// an absent base, or an unreadable worktree keeps today's recovery. The
+/// `adopt` step itself still validates cleanliness and lineage.
+fn no_changes_adoption_candidate(recipe: &super::AgentTaskCookRecipe) -> Option<String> {
+    let worktree = recipe
+        .finalization
+        .get("source_worktree_path")?
+        .as_str()
+        .map(std::path::PathBuf::from)?;
+    if !worktree.is_dir() {
+        return None;
+    }
+    let base = recipe
+        .finalization
+        .get("task_base_sha")
+        .and_then(Value::as_str)
+        .filter(|base| !base.trim().is_empty())
+        .or_else(|| {
+            recipe
+                .attempts
+                .first()
+                .and_then(|attempt| attempt.plan.metadata.pointer("/cook_workspace_base/sha"))
+                .and_then(Value::as_str)
+                .filter(|base| !base.trim().is_empty())
+        })?
+        .trim()
+        .to_string();
+    head_ahead_of_base(&worktree, &base)
+}
+
+/// HEAD of `worktree` when `base` is a strict ancestor of it. Ahead of base
+/// means at least one commit between the two; unrelated histories and a HEAD
+/// equal to base are not adoptable candidates.
+pub(crate) fn head_ahead_of_base(worktree: &std::path::Path, base: &str) -> Option<String> {
+    let head = git_stdout(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])?
+        .trim()
+        .to_string();
+    git_success(worktree, &["merge-base", "--is-ancestor", base, &head])?;
+    let ahead = git_stdout(
+        worktree,
+        &["rev-list", "--count", &format!("{base}..{head}")],
+    )?;
+    ahead
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|count| *count > 0)?;
+    Some(head)
+}
+
+fn git_success(dir: &std::path::Path, args: &[&str]) -> Option<()> {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .ok()
+        .filter(|status| status.success())
+        .map(|_| ())
+}
+
+fn git_stdout(dir: &std::path::Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
+}
+
 fn delivered_candidate_facts(
     recipe: &super::AgentTaskCookRecipe,
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
@@ -7803,6 +7886,7 @@ fn cook_recovery_actions(
         ambiguous_artifact_ids,
         false,
         None,
+        None,
         DeliveredCandidateFacts::default(),
         lab_runtime_recovery,
         None,
@@ -7819,6 +7903,7 @@ fn cook_recovery_actions_with_prefix(
     ambiguous_artifact_ids: Vec<String>,
     continuation_rearm_required: bool,
     agent_incomplete_reason: Option<&str>,
+    adoptable_candidate_ref: Option<&str>,
     delivered_candidate: DeliveredCandidateFacts,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
     prefix: Option<String>,
@@ -7836,6 +7921,7 @@ fn cook_recovery_actions_with_prefix(
             continuation_rearm_required,
             run_id,
             agent_incomplete_reason,
+            adoptable_candidate_ref,
             applied_gate_failure: delivered_candidate.applied_gate_failure,
             publish_ready: delivered_candidate.publish_ready,
         });

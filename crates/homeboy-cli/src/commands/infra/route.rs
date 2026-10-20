@@ -1028,7 +1028,7 @@ fn admit_unmaterialized_cook(
         return Ok(exit_code);
     }
     let admission = record.metadata["unmaterialized_cook_admission"].clone();
-    let output = serde_json::json!({
+    let mut output = serde_json::json!({
         "schema": "homeboy/unmaterialized-cook-admission-result/v1",
         "status": "pending_resource_admission",
         "admission_state": admission["state"],
@@ -1039,6 +1039,19 @@ fn admit_unmaterialized_cook(
         "commands": admission["commands"],
         "execution_scheduling": record.metadata["execution_scheduling"],
     });
+    // The queued admission is scheduled by the local controller daemon. When
+    // that daemon is down the wait cannot ever be scheduled, so the admission
+    // result names the dead daemon and its recovery instead of leaving the
+    // operator waiting on nothing (#16181). A live (or unobservable) daemon
+    // keeps today's output unchanged.
+    if let Some(daemon) = homeboy::agents::agent_task_service::scheduling_daemon_evidence()
+        .filter(|daemon| !daemon.admits_work)
+    {
+        output["blocker"] = serde_json::json!({
+            "daemon": daemon,
+            "next_action": "homeboy daemon recover",
+        });
+    }
     let stdout = serde_json::to_string_pretty(&output).map_err(|error| {
         Error::internal_json(
             error.to_string(),

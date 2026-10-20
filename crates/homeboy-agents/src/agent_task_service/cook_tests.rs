@@ -19251,6 +19251,10 @@ impl crate::agent_task_service::CookRecoveryPerformer for ReplacementOnlyRecover
     fn reconcile(&self, run_id: &str) -> Result<(serde_json::Value, i32)> {
         panic!("replacement recovery must not reconcile {run_id}")
     }
+
+    fn adopt(&self, run_id: &str, candidate_ref: &str) -> Result<(serde_json::Value, i32)> {
+        panic!("replacement recovery must not adopt {candidate_ref} into {run_id}")
+    }
 }
 
 #[test]
