@@ -18,6 +18,9 @@ mod executor;
 // the release workspace finalizer is their only consumer. Public because
 // `homeboy release readiness show` reads records back out of the store.
 mod changelog_history;
+mod dependency_refresh;
+#[cfg(test)]
+mod dependency_refresh_tests;
 pub mod operation_record;
 mod orchestrator;
 mod package_recovery;
@@ -26,9 +29,6 @@ mod pipeline_capabilities;
 mod pipeline_summary;
 mod plan_steps;
 mod planner;
-mod dependency_refresh;
-#[cfg(test)]
-mod dependency_refresh_tests;
 mod planning_changelog;
 mod planning_git;
 mod planning_policy;
