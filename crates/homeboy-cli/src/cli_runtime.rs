@@ -3234,6 +3234,15 @@ fn preflight_hot_command_with_input(
         output_runtime::emit_json_result_for_identity(Err(err), output_file, 2, command_identity);
         return Some(2);
     }
+    if review_test_preflight_only(cli) {
+        output_runtime::emit_json_result_for_identity(
+            Ok(serde_json::json!({ "preflight": "ready", "capability": "test" })),
+            output_file,
+            0,
+            command_identity,
+        );
+        return Some(0);
+    }
     if let Some(hot_command) = resource_policy::hot_command_for_cli(cli) {
         if let Ok((resources, _)) = preflight() {
             let mut lab_readiness = if hot_command.lab_offload_supported {
@@ -3674,6 +3683,17 @@ fn nonlocal_cook_requires_durable_admission(cli: &Cli) -> bool {
                 command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
             })
         )
+}
+
+/// `review test --preflight-only`: stop once the capability preflight passed.
+fn review_test_preflight_only(cli: &Cli) -> bool {
+    let Commands::Review(review) = &cli.command else {
+        return false;
+    };
+    matches!(
+        review.command.as_ref(),
+        Some(crate::commands::review::ReviewCommand::Test(args)) if args.preflight_only
+    )
 }
 
 /// Verify `review test` can execute without creating work, admitting controller

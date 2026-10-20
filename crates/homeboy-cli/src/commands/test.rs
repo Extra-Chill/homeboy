@@ -115,6 +115,13 @@ pub struct TestArgs {
     #[arg(long, alias = "summary")]
     pub json_summary: bool,
 
+    /// Resolve the component and its test capability, then exit without
+    /// running tests. Exits 0 when `review test` could run here and 2 with the
+    /// resolution error otherwise. Cook runs this before provider execution so
+    /// an unrunnable verify gate is rejected before a provider is paid for.
+    #[arg(long)]
+    pub preflight_only: bool,
+
     #[arg(skip)]
     pub restore_checkout: bool,
 }
@@ -143,6 +150,7 @@ impl TestArgs {
             setting_args: SettingArgs::default(),
             args: Vec::new(),
             json_summary: false,
+            preflight_only: false,
             restore_checkout: false,
         }
     }

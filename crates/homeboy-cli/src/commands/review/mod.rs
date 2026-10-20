@@ -1766,6 +1766,7 @@ fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         setting_args: Default::default(),
         args: Vec::new(),
         json_summary: args.summary,
+        preflight_only: false,
         restore_checkout: true,
     }
 }

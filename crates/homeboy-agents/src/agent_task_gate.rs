@@ -452,6 +452,22 @@ impl VerifyGateOptions {
         self.gate_toolchains.clone()
     }
 
+    /// Resolution probes for declared gates that are nested `homeboy review
+    /// test` invocations, paired with the gate each one stands for. Such a gate
+    /// fails before it checks any code when its component or test capability
+    /// does not resolve in the isolated gate environment (Extra-Chill/homeboy#16157),
+    /// so the same command with `--preflight-only` decides it before a provider
+    /// is paid for (Extra-Chill/homeboy#16159).
+    pub(crate) fn gate_target_probes(&self) -> Vec<(String, AgentTaskGateToolchainRequirement)> {
+        self.verify
+            .iter()
+            .chain(&self.private_verify)
+            .filter_map(|command| {
+                homeboy_review_test_probe(command).map(|probe| (command.clone(), probe))
+            })
+            .collect()
+    }
+
     /// Reject repository-owned npm gate declarations that no candidate patch can
     /// repair before a provider is admitted.
     pub(crate) fn preflight_declarations(&self, workspace: &Path) -> Result<()> {
@@ -510,6 +526,35 @@ impl VerifyGateOptions {
             .chain(&self.private_verify)
             .any(|command| npm_run_script(command).is_some())
     }
+}
+
+/// `homeboy review test <args>` as an argv probe that stops after resolution.
+/// Only plain word lists qualify: a gate with shell syntax is a program the
+/// probe cannot reproduce faithfully, so it is left to run as declared.
+fn homeboy_review_test_probe(command: &str) -> Option<AgentTaskGateToolchainRequirement> {
+    if command
+        .chars()
+        .any(|character| "|&;<>()$`\\\"'*?[]{}~#".contains(character))
+    {
+        return None;
+    }
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    if tokens.len() < 3 || tokens[..3] != ["homeboy", "review", "test"] {
+        return None;
+    }
+    let passthrough = tokens
+        .iter()
+        .position(|token| *token == "--")
+        .unwrap_or(tokens.len());
+    let mut probe_arguments: Vec<String> = tokens[1..passthrough]
+        .iter()
+        .map(|token| token.to_string())
+        .collect();
+    probe_arguments.push("--preflight-only".to_string());
+    Some(AgentTaskGateToolchainRequirement {
+        command: tokens[0].to_string(),
+        probe_arguments,
+    })
 }
 
 fn npm_run_script(command: &str) -> Option<&str> {
@@ -4095,8 +4140,49 @@ pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOption
             None,
             gates.gate_timeout(),
         )?;
+        for (gate, probe) in gates.gate_target_probes() {
+            preflight_gate_toolchains(
+                cwd,
+                &environment,
+                std::slice::from_ref(&probe),
+                &[],
+                None,
+                gates.gate_timeout(),
+            )
+            .map_err(|error| gate_target_preflight_error(&gate, &probe, error))?;
+        }
     }
     Ok(())
+}
+
+/// A declared gate whose target does not resolve in the gate environment is a
+/// broken declaration, not a toolchain outage: no candidate can repair it and
+/// retrying the same declaration cannot succeed.
+fn gate_target_preflight_error(
+    gate: &str,
+    probe: &AgentTaskGateToolchainRequirement,
+    cause: Error,
+) -> Error {
+    let remediation = "Declare a gate that runs from the repository itself (for example its own test script), or give the component a portable homeboy.json that provides the test capability, then retry Cook.";
+    let mut error = Error::validation_invalid_argument(
+        "gate declaration",
+        format!(
+            "declared gate `{gate}` cannot run in the gate environment: `{} {}` failed. {remediation}",
+            probe.command,
+            probe.probe_arguments.join(" "),
+        ),
+        Some(gate.to_string()),
+        None,
+    );
+    error.retryable = Some(false);
+    error.details = json!({
+        "failure_classification": "gate_declaration",
+        "command": gate,
+        "probe": { "command": probe.command, "arguments": probe.probe_arguments },
+        "remediation": remediation,
+        "cause": { "code": cause.code.as_str(), "message": cause.message, "details": cause.details },
+    });
+    error
 }
 
 fn preflight_gate_toolchains_local(
@@ -9224,6 +9310,108 @@ mod tests {
         }
         assert!(error.message.contains("gate toolchain preflight"));
         assert!(!error.message.contains("Fix the code"));
+    }
+
+    #[test]
+    fn homeboy_review_test_gates_derive_a_preflight_only_probe() {
+        let probe = |command: &str| {
+            homeboy_review_test_probe(command).map(|probe| {
+                assert_eq!(probe.command, "homeboy");
+                probe.probe_arguments.join(" ")
+            })
+        };
+        assert_eq!(
+            probe("homeboy review test blocks-engine").as_deref(),
+            Some("review test blocks-engine --preflight-only")
+        );
+        // Passthrough runner arguments are not resolution inputs.
+        assert_eq!(
+            probe("homeboy review test demo --setting mode=fast -- --filter unit").as_deref(),
+            Some("review test demo --setting mode=fast --preflight-only")
+        );
+        for command in [
+            "homeboy review lint demo",
+            "cd php && composer test",
+            "homeboy review test demo && echo ok",
+            "homeboy review test $COMPONENT",
+            "./homeboy review test demo",
+        ] {
+            assert_eq!(probe(command), None, "{command}");
+        }
+    }
+
+    /// A nested `homeboy review test` gate whose component does not resolve in
+    /// the gate environment is rejected at admission as a gate declaration,
+    /// before a provider runs (Extra-Chill/homeboy#16159). A gate that resolves
+    /// passes the same probe.
+    #[cfg(unix)]
+    #[test]
+    fn gate_preflight_rejects_an_unresolvable_homeboy_gate_as_a_declaration() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_mutex();
+        if !rerun_alone_to_replace_path(
+            "gate_preflight_rejects_an_unresolvable_homeboy_gate_as_a_declaration",
+        ) {
+            return;
+        }
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin = tempfile::tempdir().expect("bin");
+        let homeboy = bin.path().join("homeboy");
+        // Stands in for the real CLI: only `--preflight-only` is allowed, and
+        // only `ready-component` resolves.
+        fs::write(
+            &homeboy,
+            r#"#!/bin/sh
+eval "last=\${$#}"
+[ "$last" = "--preflight-only" ] || { echo "probe ran the gate" >&2; exit 9; }
+[ "$3" = "ready-component" ] && { echo '{"success":true,"data":{"preflight":"ready"}}'; exit 0; }
+echo '{"success":false,"diagnostics":{"code":"component.not_found","message":"Component not found"}}'
+exit 2
+"#,
+        )
+        .expect("homeboy");
+        let mut permissions = fs::metadata(&homeboy).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&homeboy, permissions).expect("executable");
+        let prior_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.path().display()));
+
+        let gates = |command: &str| VerifyGateOptions {
+            verify: vec![command.to_string()],
+            ..VerifyGateOptions::default()
+        };
+        let ready = preflight_verify_gate_options(
+            workspace.path(),
+            &gates("homeboy review test ready-component"),
+        );
+        let rejected = preflight_verify_gate_options(
+            workspace.path(),
+            &gates("homeboy review test missing-component"),
+        );
+
+        match prior_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        ready.expect("a resolvable gate passes admission");
+        let error = rejected.expect_err("an unresolvable gate is rejected at admission");
+        assert_eq!(error.details["failure_classification"], "gate_declaration");
+        assert_eq!(
+            error.details["command"],
+            "homeboy review test missing-component"
+        );
+        assert_eq!(
+            error.details["probe"]["arguments"],
+            serde_json::json!(["review", "test", "missing-component", "--preflight-only"])
+        );
+        assert_eq!(error.retryable, Some(false));
+        assert!(
+            error.message.contains("cannot run in the gate environment")
+                && !error.message.contains("toolchain"),
+            "{}",
+            error.message
+        );
     }
 
     #[cfg(unix)]
