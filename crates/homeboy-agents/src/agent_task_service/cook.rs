@@ -6248,6 +6248,7 @@ fn run_cook_spine(
     }
     let required_toolchains = options.gates.required_toolchains();
     let preflight = if required_toolchains.is_empty()
+        && options.gates.gate_target_probes().is_empty()
         && options.gates.gate_package_artifacts.is_empty()
         && options.gates.gate_environment.extension_inputs.is_empty()
     {

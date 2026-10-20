@@ -366,10 +366,25 @@ pub(super) fn preflight(
         != Some("ready")
         || receipt.report.status != AgentTaskGateStatus::Skipped
     {
+        // The runner reports why it is not ready (a failed probe, a missing
+        // package artifact) as a redacted diagnostic on the receipt. Carry it
+        // so the operator sees the cause rather than only "not ready".
+        let diagnostic = receipt
+            .report
+            .lab_receipt
+            .as_ref()
+            .and_then(|lab_receipt| lab_receipt.get("diagnostic"))
+            .cloned();
+        let cause = diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .map(|message| format!(": {message}"))
+            .unwrap_or_default();
         return Err(Error::new(
             homeboy_core::ErrorCode::RunnerLabTransportFailure,
-            "runner did not return a ready non-execution readiness receipt",
-            serde_json::json!({"gate_disposition":"unavailable", "stage":"readiness", "artifact_ref":receipt.artifact_ref}),
+            format!("runner did not return a ready non-execution readiness receipt{cause}"),
+            serde_json::json!({"gate_disposition":"unavailable", "stage":"readiness", "artifact_ref":receipt.artifact_ref, "diagnostic":diagnostic}),
         ));
     }
     Ok(())
