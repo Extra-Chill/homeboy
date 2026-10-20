@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.431.4] - 2026-10-20
+
+### Changed
+- Promote a sole recoverable patch larger than 1 MiB; compare over-budget candidates by stored SHA-256
+- agent-task recover with no step declares its cause
+- run Lint in the reusable workflow so it shares the candidate binary
+- Reconcile cancels a runner-backed run only when its exact job is gone
+
+### Fixed
+- scope nested integration tests and inline support modules to their owning target
+
 ## [0.431.3] - 2026-10-20
 
 ### Changed
