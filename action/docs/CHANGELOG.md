@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.21.0] - 2026-10-20
+
+### Added
+- reusable deps-refresh workflow routes non-breaking refreshes to release and breaking ones to a PR
+
 ## [2.20.21] - 2026-10-19
 
 ### Fixed
