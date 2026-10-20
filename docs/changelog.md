@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.431.3] - 2026-10-20
+
+### Changed
+- one shared Cook options group for cook and cook-batch
+- Name daemon recover for queued work behind a dead daemon, and adopt for no_changes Cooks ahead of base
+- Serialize Lab staging controller tests behind the isolated home lock
+
 ## [0.431.2] - 2026-10-20
 
 ### Changed
