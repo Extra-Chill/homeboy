@@ -198,7 +198,7 @@ fn cook_preview_reports_the_readiness_bound_rotation_route() {
 }
 
 /// Exercise the ordinary CLI -> Cook compile -> runtime provider wrapper ->
-/// actual `pi run` argv boundary. The runtime adapter is the installed
+/// actual `pi --mode json` argv boundary. The runtime adapter is the installed
 /// Pi adapter; only the final Pi executable is replaced by a local
 /// argv recorder, so no inference or provider credentials are used.
 #[cfg(unix)]
@@ -263,7 +263,21 @@ fn acknowledged_cook_launches_pi_with_the_concrete_cli_model() {
     std::fs::write(
         &fake_pi,
         format!(
-            "#!/usr/bin/env node\nconst fs=require('node:fs');const args=process.argv.slice(2);if(args[0]==='--version'){{process.stdout.write('pi 1.0.0\\n');process.exit(0);}}if(args[0]==='auth'&&args[1]==='list'){{process.stdout.write('anthropic\\n');process.exit(0);}}if(args[0]==='models'&&args[1]==='anthropic'){{process.stdout.write('anthropic/claude-sonnet-5\\n');process.exit(0);}}if(args[0]==='debug'&&args[1]==='agent'){{const cwd=process.cwd();process.stdout.write(JSON.stringify({{permission:{{external_directory:{{[cwd]:'allow',[cwd+'/**']:'allow'}},read:'allow',glob:'allow',grep:'allow',edit:'allow',bash:'allow'}}}}));process.exit(0);}}if(args[0]==='run'){{fs.appendFileSync({capture:?},JSON.stringify(args)+'\\n');process.exit(0);}}process.exit(0);\n"
+            r#"#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === '--version') {{
+    process.stdout.write('pi 1.0.0\n');
+}} else if (args[0] === '--list-models') {{
+    process.stdout.write('provider model\nzai-coding-plan glm-5.3-flash\nanthropic claude-sonnet-5\n');
+}} else if (args.includes('--mode') && args[args.indexOf('--mode') + 1] === 'json') {{
+    fs.appendFileSync({capture:?}, JSON.stringify(args) + '\n');
+    process.stdout.write(JSON.stringify({{type: 'agent_end', messages: []}}) + '\n');
+}} else {{
+    console.error('Unexpected Pi invocation: ' + JSON.stringify(args));
+    process.exit(1);
+}}
+"#
         ),
     )
     .expect("write fake Pi executable");
@@ -361,8 +375,7 @@ fn acknowledged_cook_launches_pi_with_the_concrete_cli_model() {
     let run = invocations
         .iter()
         .find(|argv| {
-            argv.first().is_some_and(|arg| arg == "run")
-                && !argv.windows(2).any(|pair| pair == ["--agent", "homeboy-readiness"])
+            argv.windows(2).any(|pair| pair == ["--mode", "json"])
         })
         .unwrap_or_else(|| {
             panic!(

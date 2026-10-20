@@ -1195,7 +1195,14 @@ mod tests {
     fn runner_temp_owner_scopes_workload_bytes_and_preserves_unknown_entries() {
         let _guard = homeboy_core::test_support::home_env_guard();
         let root = tempfile::tempdir().expect("runtime temp root");
-        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", root.path());
+        // Cleanup also scans the socket-safe invocation root. Isolate that
+        // root too: other processes can remove their entries during our scan.
+        let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
+        let _runtime_root = ProcessEnvVarGuard::set(
+            homeboy_core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+            runtime_root.path().as_os_str(),
+        );
+        let _temp_root = ProcessEnvVarGuard::set("HOMEBOY_RUNTIME_TMPDIR", root.path().as_os_str());
         let run_id = "runner-workload-1";
         let owner = runner_temp_owner(&HashMap::from([(
             "HOMEBOY_RUN_ID".to_string(),
@@ -1269,7 +1276,6 @@ mod tests {
         );
         assert!(!path.exists());
         assert!(unknown.exists());
-        std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
     }
 
     #[cfg(unix)]

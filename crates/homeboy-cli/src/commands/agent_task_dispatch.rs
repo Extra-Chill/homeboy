@@ -345,7 +345,10 @@ mod tests {
 
     #[test]
     fn dispatch_request_errors_when_backend_and_default_are_absent() {
-        let error = dispatch_service::resolve_dispatch_request_with_default(
+        // Pi is selected automatically when installed. Exercise the missing-route
+        // case without depending on the developer/CI host's provider catalog.
+        let catalog = homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::default();
+        let error = dispatch_service::resolve_dispatch_request_with_default_and_catalog(
             DispatchArgs {
                 prompt: Some("run without default".to_string()),
                 prompt_is_literal: false,
@@ -373,6 +376,7 @@ mod tests {
             }
             .into(),
             |_| Ok(None),
+            &catalog,
         )
         .expect_err("missing backend should fail");
 
