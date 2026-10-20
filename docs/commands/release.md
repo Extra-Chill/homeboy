@@ -37,6 +37,12 @@ The executable `deps.stack.refresh` plan step runs after preflights and before
 changelog/version mutation. It uses the normal update/install/rebuild/post-update
 path; manifest and lockfile changes join the release commit, without a separate
 refresh commit or push. Custom update commands retain their normal semantics.
+When refresh changes dependencies, `post_refresh.test` reruns the component's
+normal test quality check (`scripts.test`, or the same `review test` runner as
+preflight) against the refreshed tree before changelog/version changes and tagging.
+This check also runs for version-file pins and tag-only releases, independently
+of artifact gates and preflight `--skip-checks`. Failure aborts release without
+creating a tag. With no behind edges, no extra test step is added.
 The release rechecks its preview before applying; changed upstream resolution
 requires replanning. `--dry-run` only previews and never runs update commands.
 

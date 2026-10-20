@@ -308,6 +308,16 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
             serde_json::to_value(refresh).map_err(|e| Error::internal_unexpected(e.to_string()))?,
         );
         steps.push(step);
+        // Refresh can change pins after the initial quality checks (including
+        // version-file edges with no edge-local hooks). Always test that tree,
+        // even for tag-only releases or when preflight checks were skipped.
+        steps.push(homeboy_core::plan::PlanStep::ready_labeled(
+            "post_refresh.test",
+            "preflight.test",
+            "Test refreshed dependency stack",
+            vec!["deps.stack.refresh".to_string()],
+            homeboy_core::plan::PlanValues::new(),
+        ));
     }
     steps.extend(build_release_steps_with_reconciliation(
         &component,
@@ -328,11 +338,13 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
     )?);
 
     if has_refresh {
-        if let Some(step) = steps
-            .iter_mut()
-            .find(|step| step.kind == "changelog.finalize")
-        {
-            step.needs.push("deps.stack.refresh".to_string());
+        for step in steps.iter_mut().filter(|step| {
+            matches!(
+                step.kind.as_str(),
+                "changelog.finalize" | "version.reconcile"
+            )
+        }) {
+            step.needs.push("post_refresh.test".to_string());
         }
     }
 
