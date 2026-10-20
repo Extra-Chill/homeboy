@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.52.3] - 2026-10-20
+
+### Changed
+- Delete the OpenCode agent runtime
+
 ## [3.52.2] - 2026-10-19
 
 ### Fixed
