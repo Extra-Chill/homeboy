@@ -74,7 +74,7 @@ pub(crate) fn record_cook_delivery(
                 delivery_run_state(previous.as_ref(), delivery.as_ref(), current)
             }
         }
-        .filter(|state| *state != current.state);
+        .filter(|state| *state != current.state());
         if next_state.is_none() && prepared == *current {
             return None;
         }
@@ -83,7 +83,7 @@ pub(crate) fn record_cook_delivery(
             set_run_state(&mut prepared, state);
         }
         let prepared = Box::new(prepared);
-        Some(if prepared.state == current.state {
+        Some(if prepared.state() == current.state() {
             AgentTaskTransition::Annotate { prepared }
         } else {
             AgentTaskTransition::CommitRecord { prepared }
@@ -111,14 +111,14 @@ fn delivery_run_state(
     let next = next?;
     // A cancelled run keeps its cancellation (#16046), and a receipt that
     // leaves the delivery unchanged moves nothing.
-    if run.state == AgentTaskRunState::Cancelled || previous == Some(next) {
+    if run.state() == AgentTaskRunState::Cancelled || previous == Some(next) {
         return None;
     }
     match next.lifecycle().run_state? {
-        AgentTaskRunState::CandidateRecoverable => (run.state
+        AgentTaskRunState::CandidateRecoverable => (run.state()
             != AgentTaskRunState::CandidateRecoverable)
             .then_some(AgentTaskRunState::CandidateRecoverable),
-        AgentTaskRunState::Succeeded => (run.state == AgentTaskRunState::CandidateRecoverable
+        AgentTaskRunState::Succeeded => (run.state() == AgentTaskRunState::CandidateRecoverable
             && previous.is_some_and(CookDelivery::is_unverified)
             && run.candidate_adoption.is_none())
         .then_some(AgentTaskRunState::Succeeded),

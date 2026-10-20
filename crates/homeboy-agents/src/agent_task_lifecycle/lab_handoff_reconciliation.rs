@@ -46,7 +46,7 @@ pub fn reconcile_active_lab_runner_handoffs_in_store(
     // Scan the stored snapshot so this operation owns and reports its expiry
     // mutations. Reads never expire a handoff (#15718).
     for record in lifecycle_store.read_records()? {
-        if record.state == AgentTaskRunState::Running && record.has_accepted_lab_handoff() {
+        if record.state() == AgentTaskRunState::Running && record.has_accepted_lab_handoff() {
             accepted_run_ids.push(record.run_id);
         } else if has_expired_pending_runner_submission_intent(&record, now) {
             expired_run_ids.push(record.run_id);
@@ -85,7 +85,7 @@ pub(crate) fn has_expired_pending_runner_submission_intent(
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Queued | AgentTaskRunState::Running
     ) && record.runner_job_id().is_none()
         && record.lab_handoff.as_ref().is_some_and(|handoff| {
@@ -227,7 +227,7 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
 
     let mut record =
         cancel_run_in_store(lifecycle_store, run_id, Some(EXPIRED_LAB_HANDOFF_REASON))?;
-    if record.state != AgentTaskRunState::Cancelled {
+    if record.state() != AgentTaskRunState::Cancelled {
         return Ok(false);
     }
     let expired_at = now_timestamp();
@@ -289,7 +289,7 @@ pub(crate) fn reconcile_runner_job_state_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
 ) -> Result<()> {
-    if record.state != AgentTaskRunState::Running {
+    if record.state() != AgentTaskRunState::Running {
         return Ok(());
     }
     let (Some(runner_id), Some(job_id)) = (
@@ -429,12 +429,7 @@ pub(crate) fn apply_runner_job_terminal_state(
         _ => return,
     };
     record.updated_at = Some(now_timestamp());
-    set_run_state(record, run_state);
-    for task in &mut record.tasks {
-        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-            task.state = task_state;
-        }
-    }
+    settle_run(record, run_state, task_state);
     let runner_identity = record
         .runner_id()
         .zip(record.runner_job_id())

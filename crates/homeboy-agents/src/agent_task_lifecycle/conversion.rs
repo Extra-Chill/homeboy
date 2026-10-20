@@ -190,18 +190,16 @@ pub(crate) fn workflow_evidence_refs(
 }
 
 pub(crate) fn queued_task(request: &crate::agent_task::AgentTaskRequest) -> AgentTaskRunTask {
-    AgentTaskRunTask {
-        task_id: request.task_id.clone(),
-        state: AgentTaskState::Queued,
-        backend: request.executor.backend.clone(),
-        selector: request.executor.selector.clone(),
-        model: request.executor.model.clone(),
-        provider_ref: request
-            .executor
-            .selector
-            .as_ref()
-            .map(|selector| format!("{}:{selector}", request.executor.backend)),
-    }
+    let mut task =
+        AgentTaskRunTask::queued(request.task_id.clone(), request.executor.backend.clone());
+    task.selector = request.executor.selector.clone();
+    task.model = request.executor.model.clone();
+    task.provider_ref = request
+        .executor
+        .selector
+        .as_ref()
+        .map(|selector| format!("{}:{selector}", request.executor.backend));
+    task
 }
 
 pub(crate) fn tasks_for_aggregate(
@@ -223,9 +221,9 @@ pub(crate) fn tasks_for_aggregate(
                 .rev()
                 .find(|event| event.task_id == request.task_id)
             {
-                task.state = event.state;
+                project_task_state(&mut task, event.state);
             } else if let Some(outcome) = outcome {
-                task.state = task_state_for_outcome_status(outcome.status);
+                project_task_state(&mut task, task_state_for_outcome_status(outcome.status));
             }
             if let Some(outcome) = outcome {
                 let (backend, selector, model) = terminal_executor_identity(outcome, request);
@@ -245,16 +243,11 @@ pub(crate) fn tasks_for_aggregate(
             .outcomes
             .iter()
             .find(|outcome| outcome.task_id == step.id);
-        AgentTaskRunTask {
-            task_id: step.id.clone(),
-            state: outcome
-                .map(|outcome| task_state_for_outcome_status(outcome.status))
-                .unwrap_or(AgentTaskState::Queued),
-            backend: "artifact-postprocess".to_string(),
-            selector: None,
-            model: None,
-            provider_ref: None,
+        let mut task = AgentTaskRunTask::queued(step.id.clone(), "artifact-postprocess");
+        if let Some(outcome) = outcome {
+            project_task_state(&mut task, task_state_for_outcome_status(outcome.status));
         }
+        task
     }));
     tasks
 }

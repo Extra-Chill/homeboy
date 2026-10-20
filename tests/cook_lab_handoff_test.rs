@@ -795,7 +795,7 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
         let attempt = lifecycle_store
             .read_record(&attempt_id)
             .expect("read step-owned attempt");
-        if attempt.state.is_terminal() {
+        if attempt.state().is_terminal() {
             break;
         }
         assert!(

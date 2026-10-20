@@ -40,7 +40,7 @@ pub fn record_pre_execution_failure_in_store(
         // A completed provider candidate still needs its non-terminal transport
         // follow-up marker. Bare cancellation and other terminal winners are
         // returned unchanged rather than being overwritten by this aggregate.
-        if record.state.is_terminal() && !record.has_recorded_provider_progress() {
+        if record.state().is_terminal() && !record.has_recorded_provider_progress() {
             return Ok((record, None));
         }
         record_pre_execution_failure_locked(lifecycle_store, record, plan, phase, error)
@@ -56,7 +56,7 @@ pub fn record_pre_execution_failure_in_store(
             &aggregate,
             None,
         )?;
-    } else if record.state.is_terminal() {
+    } else if record.state().is_terminal() {
         lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
     }
     Ok(record)
@@ -75,7 +75,7 @@ pub fn record_interrupted_local_owner_in_store(
         let mut record = lifecycle_store.read_record(&run_id)?;
         // A remote owner settles its own attempt; losing a local observer
         // (a detached launcher or execution step) never interrupts it.
-        if record.state.is_terminal() || record.has_remote_execution_owner() {
+        if record.state().is_terminal() || record.has_remote_execution_owner() {
             return Ok((record, None));
         }
         let decision = annotate_local_provider_ownership(&mut record);
@@ -102,7 +102,7 @@ pub fn record_interrupted_local_owner_in_store(
             &aggregate,
             None,
         )?;
-    } else if record.state.is_terminal() {
+    } else if record.state().is_terminal() {
         lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
     }
     Ok(record)
@@ -620,7 +620,7 @@ pub fn record_workspace_snapshot_fence_invalidation_in_store(
         let consumed = record.metadata["provider_executions_consumed"]
             .as_u64()
             .unwrap_or(u64::MAX);
-        if record.state != AgentTaskRunState::Failed
+        if record.state() != AgentTaskRunState::Failed
             || !is_snapshot_invalidated
             || record.has_recorded_provider_progress()
             || consumed != 0
@@ -643,7 +643,7 @@ pub fn record_workspace_snapshot_fence_invalidation_in_store(
             &aggregate,
             None,
         )?;
-    } else if record.state.is_terminal() {
+    } else if record.state().is_terminal() {
         lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
     }
     Ok(record)
@@ -2022,7 +2022,7 @@ fn project_terminal_artifacts_in_store(
 ) -> Result<()> {
     let existing = store.get_run(&record.run_id)?;
     let Some(status) = terminal_observation_status(
-        &record.state,
+        &record.state(),
         existing.as_ref().map(|run| &run.metadata_json),
     ) else {
         return Ok(());
@@ -2040,7 +2040,10 @@ fn project_terminal_artifacts_in_store(
     existing_metadata
         .as_object_mut()
         .expect("object checked above")
-        .insert("agent_task_terminal_state".to_string(), json!(record.state));
+        .insert(
+            "agent_task_terminal_state".to_string(),
+            json!(record.state()),
+        );
     store.upsert_imported_run_preserving_terminal(&homeboy_core::observation::RunRecord {
         id: record.run_id.clone(),
         kind: "agent-task".to_string(),
@@ -2981,7 +2984,7 @@ pub(crate) fn apply_aggregate_to_record(
 ) {
     record.updated_at = Some(now_timestamp());
     let terminal_state = run_state_for_aggregate(aggregate);
-    if record.state != AgentTaskRunState::Cancelled {
+    if record.state() != AgentTaskRunState::Cancelled {
         // A controller failure is durable terminal evidence. Never project an
         // aggregate as successful while that evidence remains attached.
         set_run_state(

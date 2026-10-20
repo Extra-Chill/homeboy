@@ -517,7 +517,7 @@ fn dispatch_report(
         schema: DISPATCH_RESULT_SCHEMA,
         run_id: record.run_id.clone(),
         plan_id: record.plan_id.clone(),
-        state: record.state,
+        state: record.state(),
         plan_path: record.plan_path.clone(),
         aggregate_path: record.aggregate_path.clone(),
         task_count: record.tasks.len(),
@@ -1228,7 +1228,7 @@ mod tests {
             let result =
                 dispatch(request.clone(), executor()).expect("execute configured rotation");
             assert_eq!(result.exit_code, 0);
-            assert!(result.value.record.state.is_terminal());
+            assert!(result.value.record.state().is_terminal());
             let attempted = || {
                 std::fs::read_to_string(&capture)
                     .unwrap()

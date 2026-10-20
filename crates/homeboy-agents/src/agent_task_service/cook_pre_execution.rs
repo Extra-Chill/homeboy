@@ -584,7 +584,7 @@ pub fn retryable_pre_execution_failure(record: &agent_task_lifecycle::AgentTaskR
 pub(crate) fn runtime_admission_cancellation_requested(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> bool {
-    record.state.is_terminal() && !retryable_pre_execution_failure(record)
+    record.state().is_terminal() && !retryable_pre_execution_failure(record)
 }
 
 #[derive(Debug)]
@@ -972,13 +972,13 @@ mod tests {
                 .expect("record retryable pre-execution failure");
 
             let record = lifecycle_store.read_record(run_id).expect("read record");
-            assert!(record.state.is_terminal());
+            assert!(record.state().is_terminal());
             assert!(!runtime_admission_cancellation_requested(&record));
             let rearmed = lifecycle_store
                 .submit_plan_with_current_runtime(&plan, run_id)
                 .expect("retryable pre-execution record reacquires runtime admission");
             assert_eq!(
-                rearmed.state,
+                rearmed.state(),
                 agent_task_lifecycle::AgentTaskRunState::Queued
             );
             assert_eq!(
@@ -1118,7 +1118,7 @@ mod tests {
                 .expect("write scheduler aggregate");
             let record = lifecycle_store
                 .mutate_record(run_id, |record| {
-                    record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
                     record.metadata["provider_executions_consumed"] = serde_json::json!(0);
                     true
                 })
@@ -1375,7 +1375,7 @@ mod tests {
             .unwrap();
             store
                 .mutate_record(cook_id, |record| {
-                    record.state = agent_task_lifecycle::AgentTaskRunState::Cancelled;
+                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Cancelled);
                     record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
                         serde_json::json!("cancelled");
                     true
@@ -1396,14 +1396,17 @@ mod tests {
         let left = left_store.read_record(run_id).unwrap();
         let right = right_store.read_record(run_id).unwrap();
         assert_eq!(
-            left.state,
+            left.state(),
             agent_task_lifecycle::AgentTaskRunState::Cancelled
         );
         assert_eq!(
             left.metadata["cancel_reason"],
             "detached Cook handoff cancelled"
         );
-        assert_eq!(right.state, agent_task_lifecycle::AgentTaskRunState::Queued);
+        assert_eq!(
+            right.state(),
+            agent_task_lifecycle::AgentTaskRunState::Queued
+        );
         assert!(right.metadata.get("cancelled_at").is_none());
     }
 

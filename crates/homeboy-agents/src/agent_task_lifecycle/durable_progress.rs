@@ -205,7 +205,7 @@ pub(crate) fn prepared_progress_events(
         .metadata
         .get("cancellation_provenance")
         .and_then(Value::as_object)
-        .filter(|_| record.state == AgentTaskRunState::Cancelled)
+        .filter(|_| record.state() == AgentTaskRunState::Cancelled)
     {
         events.push(prepare_provenance_event(
             &run,
@@ -572,9 +572,9 @@ pub(crate) fn prepared_transition_event(
             json!({
                 "transition": transition,
                 "from": from,
-                "to": record.state,
+                "to": record.state(),
                 "revision": record.revision,
-                "message": format!("run transitioned to {:?}", record.state),
+                "message": format!("run transitioned to {:?}", record.state()),
             }),
         )?,
     )

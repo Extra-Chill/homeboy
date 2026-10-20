@@ -171,7 +171,7 @@ fn controller_terminal_run(
             "owning run was dispatched to a runner that may hold a workspace claim",
         ));
     }
-    if !controller.state.is_terminal() || !controller.run_state_projections_agree() {
+    if !controller.state().is_terminal() || !controller.run_state_projections_agree() {
         return Err(refuse(
             MissingActiveWorktreeReason::LiveRun,
             "durable controller run is active or has conflicting state projection",
@@ -191,11 +191,12 @@ fn controller_terminal_run(
         ));
     }
     Ok(TerminalRun {
-        state: controller.state,
+        state: controller.state(),
         revision: controller.workspace_lifecycle_revision,
         evidence: format!(
             "{:?}@{}",
-            controller.state, controller.workspace_lifecycle_revision
+            controller.state(),
+            controller.workspace_lifecycle_revision
         ),
     })
 }
@@ -1554,7 +1555,7 @@ pub(crate) fn renew_record_workspace_owner_in_store(
     store: &WorkspaceClaimStore,
     record: &mut AgentTaskRunRecord,
 ) -> Result<()> {
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         return Ok(());
     }
     let Some(lease) = record.workspace_owner_lease.as_ref() else {
@@ -1605,7 +1606,7 @@ pub(crate) fn release_terminal_record_workspace_owner_in_store(
     store: &WorkspaceClaimStore,
     record: &AgentTaskRunRecord,
 ) -> Result<()> {
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         if let Some(lease) = record.workspace_owner_lease.as_ref() {
             store.release_owner(lease, now_ms())?;
         }
@@ -1832,31 +1833,17 @@ mod tests {
         metadata: serde_json::Value,
     ) -> AgentTaskRunRecord {
         use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
-        let record = AgentTaskRunRecord {
-            schema: super::super::records::schemas::RUN.to_string(),
-            run_id: run_id.to_string(),
-            plan_id: "plan".to_string(),
-            state,
-            revision: 0,
-            submitted_at: "2026-08-13T00:00:00Z".to_string(),
-            updated_at: None,
-            plan_path: store.controller_plan_path(run_id).display().to_string(),
-            aggregate_path: None,
-            totals: None,
-            tasks: Vec::new(),
-            artifact_refs: Vec::new(),
-            provider_handles: Vec::new(),
-            latest_executor_evidence: None,
-            lifecycle: RunLifecycleRecord::with_execution_state(state.into()),
-            lab_handoff: None,
-            candidate_adoption: None,
-            adoption_run_id: None,
-            acceptance: None,
-            workspace_identity: None,
-            workspace_lifecycle_revision: 0,
-            workspace_owner_lease: None,
-            workspace_claim: None,
-            metadata,
+        let record = {
+            let mut record = AgentTaskRunRecord::new_queued(
+                run_id.to_string(),
+                "plan".to_string(),
+                store.controller_plan_path(run_id).display().to_string(),
+                "2026-08-13T00:00:00Z".to_string(),
+            );
+            record.lifecycle = RunLifecycleRecord::with_execution_state(state.into());
+            record.metadata = metadata;
+            record.set_state_for_test(state);
+            record
         };
         store.write_record(&record).expect("controller run");
         record

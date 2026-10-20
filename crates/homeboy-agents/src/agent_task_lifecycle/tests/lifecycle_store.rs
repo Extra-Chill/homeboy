@@ -2,7 +2,7 @@ use std::sync::{Arc, Barrier};
 
 use super::{succeeded_aggregate, test_plan};
 use crate::agent_task_lifecycle::{
-    records::schemas, AgentTaskLabHandoff, AgentTaskLabHandoffAuthority, AgentTaskLabHandoffState,
+    AgentTaskLabHandoff, AgentTaskLabHandoffAuthority, AgentTaskLabHandoffState,
     AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
 };
 use homeboy_core::run_lifecycle_record::{RunExecutionState, RunLifecycleRecord};
@@ -10,31 +10,17 @@ use serde_json::json;
 
 fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentTaskRunRecord {
     let plan = test_plan();
-    AgentTaskRunRecord {
-        schema: schemas::RUN.to_string(),
-        run_id: run_id.to_string(),
-        plan_id: plan.plan_id,
-        state: AgentTaskRunState::Queued,
-        revision: 0,
-        submitted_at: "2026-08-13T00:00:00Z".to_string(),
-        updated_at: None,
-        plan_path: store.controller_plan_path(run_id).display().to_string(),
-        aggregate_path: None,
-        totals: None,
-        tasks: Vec::new(),
-        artifact_refs: Vec::new(),
-        provider_handles: Vec::new(),
-        latest_executor_evidence: None,
-        lifecycle: RunLifecycleRecord::with_execution_state(RunExecutionState::Queued),
-        lab_handoff: None,
-        candidate_adoption: None,
-        adoption_run_id: None,
-        acceptance: None,
-        workspace_identity: None,
-        workspace_lifecycle_revision: 0,
-        workspace_owner_lease: None,
-        workspace_claim: None,
-        metadata: json!({ "store_marker": marker }),
+    {
+        let mut record = AgentTaskRunRecord::new_queued(
+            run_id.to_string(),
+            plan.plan_id,
+            store.controller_plan_path(run_id).display().to_string(),
+            "2026-08-13T00:00:00Z".to_string(),
+        );
+        record.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Queued);
+        record.metadata = json!({ "store_marker": marker });
+        record.set_state_for_test(AgentTaskRunState::Queued);
+        record
     }
 }
 
@@ -104,14 +90,14 @@ fn active_records_are_exactly_the_non_terminal_agent_task_runs() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     let mut queued = record(&store, "queued-run", "live");
-    queued.state = AgentTaskRunState::Queued;
+    queued.set_state_for_test(AgentTaskRunState::Queued);
     let mut running = record(&store, "running-run", "live");
-    running.state = AgentTaskRunState::Running;
+    running.set_state_for_test(AgentTaskRunState::Running);
     running.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Running);
     let mut finished = record(&store, "finished-run", "done");
-    finished.state = AgentTaskRunState::Succeeded;
+    finished.set_state_for_test(AgentTaskRunState::Succeeded);
     let mut cancelled = record(&store, "cancelled-run", "done");
-    cancelled.state = AgentTaskRunState::Cancelled;
+    cancelled.set_state_for_test(AgentTaskRunState::Cancelled);
     for record in [&queued, &running, &finished, &cancelled] {
         store.write_record(record).expect("commit record");
     }
@@ -253,7 +239,7 @@ fn detached_handoff_fences_resolve_only_from_the_explicit_lifecycle_root() {
         (&right, AgentTaskRunState::Cancelled, "cancelled"),
     ] {
         let mut handoff = record(store, cook_id, fence);
-        handoff.state = state;
+        handoff.set_state_for_test(state);
         handoff.metadata["detached_cook_handoff"] = json!({
             "cook_id": cook_id,
             "state": "pending",
@@ -377,7 +363,7 @@ fn terminal_record_authority_is_written_only_below_its_lifecycle_root() {
     let right = AgentTaskLifecycleStore::new(right_context.path_roots());
     let run_id = "same-terminal-record";
     let mut terminal = record(&left, run_id, "terminal");
-    terminal.state = AgentTaskRunState::Succeeded;
+    terminal.set_state_for_test(AgentTaskRunState::Succeeded);
     terminal.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Succeeded);
     terminal.lab_handoff = Some(AgentTaskLabHandoff {
         state: AgentTaskLabHandoffState::Accepted,

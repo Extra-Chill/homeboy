@@ -52,7 +52,8 @@ fn already_terminal_error(record: &AgentTaskRunRecord) -> Error {
         ALREADY_TERMINAL_FIELD,
         format!(
             "agent-task run '{}' is already terminal with state {:?}",
-            record.run_id, record.state
+            record.run_id,
+            record.state()
         ),
         Some(record.run_id.clone()),
         None,
@@ -85,7 +86,7 @@ fn retained_cancellation_receipt(
 /// active-run SQL and the lifecycle read all disagree about. Checked once, by
 /// the single lifecycle write path, so no commit kind can bypass it.
 pub(crate) fn validate_cancellation_invariant(record: &AgentTaskRunRecord) -> Result<()> {
-    if record.state == AgentTaskRunState::Cancelled
+    if record.state() == AgentTaskRunState::Cancelled
         || record.metadata.get("cancellation_provenance").is_none()
     {
         return Ok(());
@@ -95,7 +96,8 @@ pub(crate) fn validate_cancellation_invariant(record: &AgentTaskRunRecord) -> Re
         format!(
             "agent-task run '{}' cannot record cancellation provenance in state {:?}; \
              provenance is committed only with the transition to Cancelled",
-            record.run_id, record.state
+            record.run_id,
+            record.state()
         ),
         Some(record.run_id.clone()),
         None,
@@ -227,7 +229,7 @@ pub fn cancel_run_in_store(
         // that literal terminal attempt still receives the terminal-state error.
         if resolved_run_id != requested_run_id {
             let resolved_record = lifecycle_store.read_record(&resolved_run_id)?;
-            if resolved_record.state.is_terminal() {
+            if resolved_record.state().is_terminal() {
                 return Ok(resolved_record);
             }
         }
@@ -283,7 +285,7 @@ pub fn cancel_claimed_detached_cook_in_store(
         if parent.metadata["detached_cook_handoff"]["launcher_id"] != launcher_id {
             return Ok(false);
         }
-        if !parent.state.is_terminal() {
+        if !parent.state().is_terminal() {
             let _ = lifecycle_store.mutate_record_locked_without_terminal_projection(
                 &cook_id,
                 |record| {
@@ -339,7 +341,7 @@ pub(crate) fn cancel_exact_run_in_store(
     if submission_handoff_open {
         let requested_at = now_timestamp();
         lifecycle_store.mutate_record(&run_id, |record| {
-            if record.state.is_terminal() {
+            if record.state().is_terminal() {
                 return false;
             }
             record.ensure_metadata_object().insert(
@@ -380,7 +382,7 @@ pub(crate) fn cancel_exact_run_in_store(
         if job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
             let recovery_action = format!("homeboy agent-task cancel {run_id}");
             let _ = lifecycle_store.mutate_record(&run_id, |record| {
-                if record.state.is_terminal() {
+                if record.state().is_terminal() {
                     return false;
                 }
                 record.ensure_metadata_object().insert(
@@ -409,7 +411,7 @@ pub(crate) fn cancel_exact_run_in_store(
             let mut blocker = None;
             return lifecycle_store
                 .mutate_record_locked_without_terminal_projection(&run_id, |record| {
-                    if record.state.is_terminal() {
+                    if record.state().is_terminal() {
                         return false;
                     }
                     if let Err(error) = ensure_rooted_exact_cancellation_supported(record) {
@@ -436,8 +438,8 @@ pub(crate) fn cancel_exact_run_in_store(
         };
         let cancellation = if controller_cancelled {
             LiveCancellationOutcome::NotRunning
-        } else if record.state == AgentTaskRunState::Running
-            || (record.state == AgentTaskRunState::Queued
+        } else if record.state() == AgentTaskRunState::Running
+            || (record.state() == AgentTaskRunState::Queued
                 && record.runner_id().is_some()
                 && record.runner_job_id().is_some())
         {
@@ -458,7 +460,7 @@ pub(crate) fn cancel_exact_run_in_store(
                 return lifecycle_store.mutate_record_locked_without_terminal_projection(
                     &run_id,
                     |current| {
-                        if current.state.is_terminal() {
+                        if current.state().is_terminal() {
                             return false;
                         }
                         retain_pending_runner_cancellation(current, job, events, reason);
@@ -469,7 +471,7 @@ pub(crate) fn cancel_exact_run_in_store(
         }
         let mut blocker = None;
         lifecycle_store.mutate_record_locked_without_terminal_projection(&run_id, |record| {
-            if record.state.is_terminal() {
+            if record.state().is_terminal() {
                 return false;
             }
             if let Err(error) = ensure_rooted_exact_cancellation_supported(record) {
@@ -481,12 +483,7 @@ pub(crate) fn cancel_exact_run_in_store(
             }
             let cancelled_at = now_timestamp();
             record.updated_at = Some(cancelled_at.clone());
-            set_run_state(record, AgentTaskRunState::Cancelled);
-            for task in &mut record.tasks {
-                if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-                    task.state = AgentTaskState::Cancelled;
-                }
-            }
+            settle_run(record, AgentTaskRunState::Cancelled, AgentTaskState::Cancelled);
             let runner_id = record.runner_id().map(str::to_string);
             let runner_job_id = record.runner_job_id().map(str::to_string);
             let record_run_id = record.run_id.clone();
@@ -580,7 +577,7 @@ pub(crate) fn cancel_exact_run_in_store(
         lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
     }
     let record = committed.unwrap_or(lifecycle_store.read_record(&run_id)?);
-    if record.state == AgentTaskRunState::Cancelled {
+    if record.state() == AgentTaskRunState::Cancelled {
         crate::controller_scratch::finalize_run_at_explicit_roots(
             &lifecycle_store.data_root(),
             &lifecycle_store.artifact_root(),
@@ -597,12 +594,13 @@ pub(crate) fn cancel_exact_run_in_store(
 pub(super) fn ensure_rooted_exact_cancellation_supported(
     record: &AgentTaskRunRecord,
 ) -> Result<()> {
-    if record.state.is_terminal() && !record.owner_process_is_running() {
+    if record.state().is_terminal() && !record.owner_process_is_running() {
         return Err(Error::validation_invalid_argument(
             "run_id",
             format!(
                 "agent-task run '{}' is already terminal with state {:?}",
-                record.run_id, record.state
+                record.run_id,
+                record.state()
             ),
             Some(record.run_id.clone()),
             None,
@@ -656,7 +654,7 @@ fn defer_cancellation_for_terminal_provider(
 }
 
 fn successful_provider_execution_is_pending_import(record: &AgentTaskRunRecord) -> bool {
-    record.state == AgentTaskRunState::Running
+    record.state() == AgentTaskRunState::Running
         && !record.is_runner_backed()
         && record.metadata["provider_executions"]
             .as_array()
@@ -706,11 +704,11 @@ fn cancel_resolved_run_in_store(
         .and_then(Value::as_str)
         .map(str::to_string);
     let submission_handoff_open = submission_state.as_deref() == Some("preparing");
-    if submission_handoff_open && !record.state.is_terminal() {
+    if submission_handoff_open && !record.state().is_terminal() {
         let requested_at = now_timestamp();
         let record_run_id = record.run_id.clone();
         lifecycle_store.mutate_record(&record_run_id, |record| {
-            if record.state.is_terminal() {
+            if record.state().is_terminal() {
                 return false;
             }
             record.ensure_metadata_object().insert(
@@ -867,7 +865,7 @@ fn cancel_resolved_run_in_store(
         })?;
         return Ok(CancelResolvedOutcome::Cancelled(record));
     }
-    if record.state == AgentTaskRunState::Cancelled {
+    if record.state() == AgentTaskRunState::Cancelled {
         let cancelled_at = record
             .metadata
             .get("cancelled_at")
@@ -886,7 +884,7 @@ fn cancel_resolved_run_in_store(
     }
 
     if matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Succeeded
             | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
@@ -899,7 +897,7 @@ fn cancel_resolved_run_in_store(
     // the aggregate. Its terminal reservation is durable proof that cancelling
     // now would overwrite completed work; leave the run joinable so the late
     // aggregate import is authoritative.
-    if record.state == AgentTaskRunState::Running
+    if record.state() == AgentTaskRunState::Running
         && !record.is_runner_backed()
         && record.metadata["provider_executions"]
             .as_array()
@@ -936,7 +934,7 @@ fn cancel_resolved_run_in_store(
         let cancellation_reason = reason.unwrap_or("agent-task cancellation requested");
         let requested_at = now_timestamp();
         let marked = lifecycle_store.mutate_record(&record.run_id, |record| {
-            if record.state.is_terminal() {
+            if record.state().is_terminal() {
                 return false;
             }
             record.ensure_metadata_object().insert(
@@ -953,7 +951,9 @@ fn cancel_resolved_run_in_store(
         let Some(marked) = marked else {
             let terminal = lifecycle_store.read_record(&record.run_id)?;
             return Ok(
-                if terminal.state.is_terminal() && terminal.state != AgentTaskRunState::Cancelled {
+                if terminal.state().is_terminal()
+                    && terminal.state() != AgentTaskRunState::Cancelled
+                {
                     CancelResolvedOutcome::RaceWonByTerminalRunnerResult(terminal)
                 } else {
                     CancelResolvedOutcome::Cancelled(terminal)
@@ -975,7 +975,7 @@ fn cancel_resolved_run_in_store(
         let controller_job_status = controller_job.status;
         let requested_at = now_timestamp();
         let updated = lifecycle_store.mutate_record(&record.run_id, |record| {
-            if record.state.is_terminal() {
+            if record.state().is_terminal() {
                 return false;
             }
             record.ensure_metadata_object().insert(
@@ -994,7 +994,9 @@ fn cancel_resolved_run_in_store(
         let Some(updated) = updated else {
             let terminal = lifecycle_store.read_record(&record.run_id)?;
             return Ok(
-                if terminal.state.is_terminal() && terminal.state != AgentTaskRunState::Cancelled {
+                if terminal.state().is_terminal()
+                    && terminal.state() != AgentTaskRunState::Cancelled
+                {
                     CancelResolvedOutcome::RaceWonByTerminalRunnerResult(terminal)
                 } else {
                     CancelResolvedOutcome::Cancelled(terminal)
@@ -1018,8 +1020,8 @@ fn cancel_resolved_run_in_store(
     // queued before the provider starts. Project cancellation to that job too.
     let cancellation = if controller_cancelled {
         LiveCancellationOutcome::NotRunning
-    } else if record.state == AgentTaskRunState::Running
-        || (record.state == AgentTaskRunState::Queued
+    } else if record.state() == AgentTaskRunState::Running
+        || (record.state() == AgentTaskRunState::Queued
             && record.runner_id().is_some()
             && record.runner_job_id().is_some())
     {
@@ -1041,7 +1043,7 @@ fn cancel_resolved_run_in_store(
                 },
             )?;
             return Ok(
-                if record.state.is_terminal() && record.state != AgentTaskRunState::Cancelled {
+                if record.state().is_terminal() && record.state() != AgentTaskRunState::Cancelled {
                     CancelResolvedOutcome::RaceWonByTerminalRunnerResult(record)
                 } else {
                     CancelResolvedOutcome::Cancelled(record)
@@ -1067,10 +1069,10 @@ fn cancel_resolved_run_in_store(
     let record = lifecycle_store.mutate_record(&record.run_id, |record| {
         // An aggregate or runner projection may have finished after the live
         // cancellation transport returned. Its terminal state is authoritative.
-        if record.state.is_terminal() {
+        if record.state().is_terminal() {
             return false;
         }
-        if record.state == AgentTaskRunState::Running
+        if record.state() == AgentTaskRunState::Running
             && !record.is_runner_backed()
             && record.metadata["provider_executions"]
                 .as_array()
@@ -1088,14 +1090,9 @@ fn cancel_resolved_run_in_store(
         }
 
         let cancelled_at = now_timestamp();
-        let was_stale_running = record.state == AgentTaskRunState::Running;
+        let was_stale_running = record.state() == AgentTaskRunState::Running;
         record.updated_at = Some(cancelled_at.clone());
-        set_run_state(record, AgentTaskRunState::Cancelled);
-        for task in &mut record.tasks {
-            if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-                task.state = AgentTaskState::Cancelled;
-            }
-        }
+        settle_run(record, AgentTaskRunState::Cancelled, AgentTaskState::Cancelled);
 
         let detached_handoff_parent =
             record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id;
@@ -1179,7 +1176,7 @@ fn cancel_resolved_run_in_store(
         true
     })?
     .unwrap_or(lifecycle_store.read_record(&record.run_id)?);
-    if record.state == AgentTaskRunState::Cancelled {
+    if record.state() == AgentTaskRunState::Cancelled {
         // The same two rooted side effects `cancel_exact_run_in_store` already
         // uses: scratch finalization needs both the data and artifact roots,
         // and admission release needs the controller-runtime store below this
@@ -1195,7 +1192,7 @@ fn cancel_resolved_run_in_store(
         )?;
         return Ok(CancelResolvedOutcome::Cancelled(record));
     }
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         return Ok(CancelResolvedOutcome::AlreadyTerminal(record));
     }
     Ok(CancelResolvedOutcome::Cancelled(record))
@@ -1317,12 +1314,11 @@ pub(super) fn reconcile_controller_job_cancellation_in_store(
     }
 
     let cancelled_at = now_timestamp();
-    set_run_state(record, AgentTaskRunState::Cancelled);
-    for task in &mut record.tasks {
-        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-            task.state = AgentTaskState::Cancelled;
-        }
-    }
+    settle_run(
+        record,
+        AgentTaskRunState::Cancelled,
+        AgentTaskState::Cancelled,
+    );
     let metadata = record.ensure_metadata_object();
     terminalize_running_provider_executions(metadata, &cancelled_at);
     metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
@@ -1503,7 +1499,7 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     let refuses_cancellation = |record: &AgentTaskRunRecord| {
         matches!(
-            record.state,
+            record.state(),
             AgentTaskRunState::Succeeded
                 | AgentTaskRunState::PartialRecoverable
                 | AgentTaskRunState::PartialFailure
@@ -1516,7 +1512,8 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
             "run_id",
             format!(
                 "agent-task run '{}' is already terminal with state {:?}",
-                record.run_id, record.state
+                record.run_id,
+                record.state()
             ),
             Some(record.run_id),
             None,
@@ -1544,12 +1541,11 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
 fn cancel_record_with_opaque_provider_handles(record: &mut AgentTaskRunRecord) {
     let cancelled_at = now_timestamp();
     record.updated_at = Some(cancelled_at.clone());
-    set_run_state(record, AgentTaskRunState::Cancelled);
-    for task in &mut record.tasks {
-        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-            task.state = AgentTaskState::Cancelled;
-        }
-    }
+    settle_run(
+        record,
+        AgentTaskRunState::Cancelled,
+        AgentTaskState::Cancelled,
+    );
     for handle in &mut record.provider_handles {
         if !matches!(
             handle.state,
@@ -1618,7 +1614,7 @@ mod tests {
             let cancelled = cancel_run(cook_id, None).expect("cancel detached Cook parent");
 
             assert_eq!(cancelled.run_id, cook_id);
-            assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+            assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
             let error =
                 record_cook_attempt_in_store(&test_lifecycle_store(), cook_id, 1, attempt_id)
                     .expect_err("cancelled handoff fence rejects late Cook index publication");
@@ -1715,7 +1711,7 @@ mod tests {
             assert_eq!(
                 exact_record(attempt_id)
                     .expect("read durable child outcome")
-                    .state,
+                    .state(),
                 AgentTaskRunState::Cancelled
             );
             assert!(
@@ -1761,7 +1757,7 @@ mod tests {
                 .expect("Cook cancellation converges after terminal index publication");
 
             assert_eq!(cancelled.run_id, attempt_id);
-            assert_eq!(cancelled.state, AgentTaskRunState::Succeeded);
+            assert_eq!(cancelled.state(), AgentTaskRunState::Succeeded);
             assert!(cook_index_exists(cook_id).expect("inspect durable Cook index"));
         });
     }
@@ -1790,7 +1786,7 @@ mod tests {
             let cancelled = cancel_run(cook_id, None)
                 .expect("Cook alias cancel admits a just-finished attempt");
             assert_eq!(cancelled.run_id, attempt_id);
-            assert_eq!(cancelled.state, AgentTaskRunState::Succeeded);
+            assert_eq!(cancelled.state(), AgentTaskRunState::Succeeded);
         });
     }
 
@@ -1881,12 +1877,12 @@ mod tests {
                     let resolved = cancel_run(&cook_id, None)
                         .expect("cancelling a Cook alias with a terminal child is idempotent");
                     assert_eq!(resolved.run_id, attempt_id);
-                    assert_eq!(resolved.state, terminal_state);
+                    assert_eq!(resolved.state(), terminal_state);
                 }
                 assert_eq!(
                     exact_record(&attempt_id)
                         .expect("read terminal child")
-                        .state,
+                        .state(),
                     terminal_state,
                     "parent cancellation must preserve the terminal child"
                 );
@@ -1992,11 +1988,11 @@ mod tests {
             .expect("cancel running child in selected root");
 
         assert_eq!(
-            left.read_record(run_id).expect("read left child").state,
+            left.read_record(run_id).expect("read left child").state(),
             AgentTaskRunState::Cancelled
         );
         assert_eq!(
-            right.read_record(run_id).expect("read right child").state,
+            right.read_record(run_id).expect("read right child").state(),
             AgentTaskRunState::Running
         );
     }
@@ -2024,7 +2020,7 @@ mod tests {
         let record = cancel_exact_run_in_store(&store, run_id, Some("parent cancelled"))
             .expect("defer cancellation for successful provider");
 
-        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(record.state(), AgentTaskRunState::Running);
         assert_eq!(
             record.metadata["cancellation_deferred_for_terminal_provider"]["reason"],
             "parent cancelled"

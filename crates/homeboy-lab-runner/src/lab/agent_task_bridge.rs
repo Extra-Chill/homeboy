@@ -427,7 +427,7 @@ impl AgentTaskRunRecordSummary {
         Self {
             run_id: record.run_id.clone(),
             plan_id: record.plan_id.clone(),
-            state: record.state,
+            state: record.state(),
             aggregate_path: record.aggregate_path.clone(),
             task_count: record.tasks.len(),
         }
@@ -1334,7 +1334,7 @@ mod tests {
                 serde_json::from_str(&fs::read_to_string(aggregate_path).expect("aggregate"))
                     .expect("aggregate JSON");
 
-            assert_eq!(record.state, AgentTaskRunState::Succeeded);
+            assert_eq!(record.state(), AgentTaskRunState::Succeeded);
             assert_eq!(record.metadata["runner_id"], "lab-default");
             assert_eq!(record.metadata["runner_job_id"], "job-completed-noop");
             assert_eq!(

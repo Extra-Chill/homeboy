@@ -163,7 +163,7 @@ pub(crate) fn execute_claimed_plan(
         {
             return Ok(outcome);
         }
-        if existing.state != AgentTaskRunState::Running {
+        if existing.state() != AgentTaskRunState::Running {
             return Err(Error::validation_invalid_argument(
                 "run",
                 format!(
@@ -246,14 +246,14 @@ pub(crate) fn stage_prepared_plan(
             prepared.claimed_plan_enrichment,
         )?;
         if let Some(existing) = existing {
-            if existing.state.is_terminal()
+            if existing.state().is_terminal()
                 && !crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
                     &existing,
                 )
             {
                 return Ok(existing);
             }
-            if existing.state == AgentTaskRunState::Running {
+            if existing.state() == AgentTaskRunState::Running {
                 return Err(Error::validation_invalid_argument(
                     "run",
                     format!("agent-task run '{}' is already running", existing.run_id),
@@ -316,7 +316,7 @@ pub(crate) fn reject_prepared_plan(
             prepared.claimed_plan_enrichment,
         )?;
         if existing.as_ref().is_some_and(|record| {
-            record.state.is_terminal()
+            record.state().is_terminal()
                 && !crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
                     record,
                 )
@@ -325,7 +325,7 @@ pub(crate) fn reject_prepared_plan(
         }
         let submitted = if existing
             .as_ref()
-            .is_some_and(|record| record.state == AgentTaskRunState::Running)
+            .is_some_and(|record| record.state() == AgentTaskRunState::Running)
         {
             lifecycle_store.write_controller_plan(request.run.as_str(), &prepared.plan)?;
             let binding = submission_metadata(request, &prepared.plan, &identity)
@@ -404,7 +404,7 @@ fn submit_prepared_plan_locked(
         // must agree, or a controller recovering a stale child's `run_plan`
         // dispatch (`refresh_stale_running_child_actions` resets the action
         // for redispatch) can never get far enough to reach that reclaim.
-        if existing.state == AgentTaskRunState::Running
+        if existing.state() == AgentTaskRunState::Running
             && !accepted_runner_handoff_can_materialize(&existing)
             && existing.owner_process_is_running()
         {
@@ -511,7 +511,7 @@ fn terminal_reuse_outcome(
     if crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(&existing) {
         return Ok(None);
     }
-    if !existing.state.is_terminal() {
+    if !existing.state().is_terminal() {
         return Ok(None);
     }
     let aggregate = match store.read_aggregate(&existing.run_id) {
@@ -521,7 +521,7 @@ fn terminal_reuse_outcome(
                 "run_id",
                 format!(
                     "agent-task run '{}' is terminal with state {:?} but has no durable aggregate evidence",
-                    existing.run_id, existing.state
+                    existing.run_id, existing.state()
                 ),
                 Some(existing.run_id.clone()),
                 Some(vec![format!(
@@ -668,14 +668,14 @@ fn submission_identity(
     };
     let plan_fingerprint = plan_fingerprint(plan)?;
     let queue_to_run = queued_plan_enrichment
-        && existing.state == AgentTaskRunState::Queued
+        && existing.state() == AgentTaskRunState::Queued
         && !request.queue_only;
     let claimed_queue_to_run = claimed_plan_enrichment
-        && existing.state == AgentTaskRunState::Running
+        && existing.state() == AgentTaskRunState::Running
         && metadata["queue_only"].as_bool() == Some(true)
         && !request.queue_only;
     let concurrent_queue_completion = queued_plan_enrichment
-        && existing.state.is_terminal()
+        && existing.state().is_terminal()
         && metadata["queue_only"].as_bool() == Some(false)
         && !request.queue_only;
     if metadata["schema"] != SUBMISSION_METADATA_SCHEMA
@@ -981,7 +981,7 @@ mod tests {
             .expect("execute prepared plan");
 
             assert_eq!(calls.load(Ordering::SeqCst), 1);
-            assert_eq!(outcome.record.state, AgentTaskRunState::Succeeded);
+            assert_eq!(outcome.record.state(), AgentTaskRunState::Succeeded);
         });
     }
 
@@ -1022,7 +1022,7 @@ mod tests {
             assert_eq!(
                 agent_task_lifecycle::status("submission-running-replay")
                     .expect("record")
-                    .state,
+                    .state(),
                 AgentTaskRunState::Running
             );
         });

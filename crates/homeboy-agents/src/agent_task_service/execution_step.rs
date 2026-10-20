@@ -103,7 +103,7 @@ impl ExecutionStepIntent {
 
     pub fn authorizes(&self, record: &AgentTaskRunRecord) -> bool {
         record.run_id == self.subject_id
-            && record.state == AgentTaskRunState::Queued
+            && record.state() == AgentTaskRunState::Queued
             && record.metadata["execution_scheduling"]["epoch"].as_u64() == Some(self.epoch)
             && record.metadata["execution_scheduling"]["current_intent_id"].as_str()
                 == Some(self.intent_id.as_str())
@@ -441,7 +441,7 @@ pub(super) fn consume_execution_terminal_in_store(
     let committed = store.transition_when(subject, |stored| {
         if stored.metadata["execution_scheduling"]["current_intent_id"].as_str()
             != Some(&delivery.key)
-            || (stored.state.is_terminal()
+            || (stored.state().is_terminal()
                 && stored.metadata["detached_cook_handoff"]["state"] != "redirected")
         {
             return None;
@@ -474,7 +474,7 @@ pub(super) fn consume_execution_terminal_in_store(
             }
         }
         if delivery.cancelled
-            && stored.state.is_terminal()
+            && stored.state().is_terminal()
             && execution_record.run_id != stored.run_id
         {
             disposition = "cancelled";
@@ -500,8 +500,8 @@ pub(super) fn consume_execution_terminal_in_store(
             // A published attempt already owns a deferral or its durable
             // terminal result. Never manufacture another initial admission.
             disposition = "published";
-            if !execution_record.state.is_terminal()
-                && !(execution_record.state == AgentTaskRunState::Queued
+            if !execution_record.state().is_terminal()
+                && !(execution_record.state() == AgentTaskRunState::Queued
                     && execution_record.metadata["execution_scheduling"]["current_intent_id"]
                         .is_string())
             {
@@ -611,7 +611,7 @@ pub(super) fn consume_execution_terminal_in_store(
         store.transition_when(subject, |record| {
             (record.metadata["execution_scheduling"]["current_intent_id"].as_str()
                 == Some(&delivery.key)
-                && !record.state.is_terminal())
+                && !record.state().is_terminal())
             .then(|| deterministic_failure(&error, delivery))
         })?;
         disposition = "failed";
@@ -627,7 +627,7 @@ pub(super) fn consume_execution_terminal_in_store(
             // poison delivery to retry forever. A new step owner still wins.
             store.transition_when(&run_id, |record| {
                 let key = record.metadata["execution_scheduling"]["current_intent_id"].as_str();
-                (!record.state.is_terminal() && key.is_none_or(|key| key == delivery.key))
+                (!record.state().is_terminal() && key.is_none_or(|key| key == delivery.key))
                     .then(|| deterministic_failure(&error, delivery))
             })?;
         }

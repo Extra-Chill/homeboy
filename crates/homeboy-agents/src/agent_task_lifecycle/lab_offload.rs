@@ -219,7 +219,7 @@ pub(crate) fn record_lab_offload_phase_with_submission_in_store(
 ) -> Result<AgentTaskRunRecord> {
     let placeholder_workspace = input.remote_workspace.unwrap_or("pending");
     let record = match lifecycle_store.read_record(&sanitize_run_id(input.requested_run_id)) {
-        Ok(record) if record.state.is_terminal() => return Ok(record),
+        Ok(record) if record.state().is_terminal() => return Ok(record),
         Ok(record)
             if record.metadata["kind"] == "lab_offload_controller_proxy"
                 && record.runner_id() == Some(input.runner_id)
@@ -240,7 +240,7 @@ pub(crate) fn record_lab_offload_phase_with_submission_in_store(
         )?,
     };
     let updated = lifecycle_store.mutate_record(&record.run_id, |record| {
-        if record.state.is_terminal() {
+        if record.state().is_terminal() {
             return false;
         }
         record.updated_at = Some(now_timestamp());
@@ -292,7 +292,7 @@ pub fn record_local_lab_identity_fallback_in_store(
     fallback_reason: &str,
 ) -> Result<AgentTaskRunRecord> {
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         return Ok(record);
     }
     if record.has_accepted_lab_handoff() || record.runner_job_id().is_some() {
@@ -541,7 +541,7 @@ fn annotate_live_record(
     annotate: impl FnOnce(&mut AgentTaskRunRecord),
 ) -> Result<AgentTaskRunRecord> {
     let annotated = lifecycle_store.mutate_record(run_id, |record| {
-        if record.state.is_terminal() {
+        if record.state().is_terminal() {
             return false;
         }
         annotate(record);
@@ -735,7 +735,7 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
             ));
         }
     }
-    let expired_unaccepted_handoff = record.state == AgentTaskRunState::Cancelled
+    let expired_unaccepted_handoff = record.state() == AgentTaskRunState::Cancelled
         && record.lab_handoff.as_ref().is_some_and(|handoff| {
             handoff.state == AgentTaskLabHandoffState::Expired
                 && handoff.authority == AgentTaskLabHandoffAuthority::Controller
@@ -743,7 +743,7 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
         });
     if !expired_unaccepted_handoff
         && matches!(
-            record.state,
+            record.state(),
             AgentTaskRunState::Succeeded
                 | AgentTaskRunState::PartialRecoverable
                 | AgentTaskRunState::PartialFailure
@@ -774,13 +774,8 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
         ));
     }
     record.updated_at = Some(now_timestamp());
-    set_run_state(&mut record, AgentTaskRunState::Running);
+    start_run(&mut record);
     update_lifecycle_heartbeat(&mut record);
-    for task in &mut record.tasks {
-        if task.state == AgentTaskState::Queued {
-            task.state = AgentTaskState::Running;
-        }
-    }
     let accepted_at = record.updated_at.clone();
     let accepted_at = accepted_at.unwrap_or_else(now_timestamp);
     let pending_handoff = record.lab_handoff.clone().unwrap_or_else(|| {
@@ -1033,7 +1028,7 @@ fn record_lab_offload_proxy_in_store(
         .controller_plan_path(&run_id)
         .display()
         .to_string();
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         return Ok(record);
     }
     {
@@ -1189,12 +1184,7 @@ fn fail_missing_lab_attempt_plan_in_store(
     error: &Error,
 ) -> Result<()> {
     record.updated_at = Some(now_timestamp());
-    set_run_state(record, AgentTaskRunState::Failed);
-    for task in &mut record.tasks {
-        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-            task.state = AgentTaskState::Failed;
-        }
-    }
+    settle_run(record, AgentTaskRunState::Failed, AgentTaskState::Failed);
     let metadata = record.ensure_metadata_object();
     metadata.insert(
         "pre_execution_failure".to_string(),

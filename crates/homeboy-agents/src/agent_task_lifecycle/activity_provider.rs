@@ -503,7 +503,7 @@ mod tests {
                 super::super::AgentTaskRunState::Running,
             ] {
                 let mut attempt = store.read_record(&other).unwrap();
-                attempt.state = state;
+                attempt.set_state_for_test(state);
                 attempt.metadata["runner_pid"] = serde_json::json!(std::process::id());
                 // The store owns the revision; keep the written copy in step.
                 store.write_record_in_place(&mut attempt).unwrap();

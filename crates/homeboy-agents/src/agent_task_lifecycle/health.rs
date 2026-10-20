@@ -66,7 +66,7 @@ pub(crate) fn diagnose_run(
     {
         // Older record shapes are not migrated; they fail to load (#15742).
         Some(AgentTaskRecordHealthReason::MalformedMetadata)
-    } else if RunExecutionState::from(record.state) != record.lifecycle.execution.state {
+    } else if RunExecutionState::from(record.state()) != record.lifecycle.execution.state {
         Some(AgentTaskRecordHealthReason::ConflictingProjections)
     } else {
         None

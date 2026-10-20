@@ -211,7 +211,7 @@ pub(crate) fn reconcile_deferred_candidate_in_store(
         .aggregate_path(&run_id)
         .display()
         .to_string();
-    let decided_from = record.state;
+    let decided_from = record.state();
     apply_aggregate_to_record(&mut record, &plan, &aggregate, aggregate_path);
     record = lifecycle_store.project_terminal_aggregate(&record, decided_from, &aggregate)?;
     record_terminal_artifact_projection_in_store(lifecycle_store, &mut record, &aggregate)?;
@@ -402,7 +402,7 @@ pub fn recover_single_task_aggregate_from_executor_outcome_in_store(
         .display()
         .to_string();
     apply_aggregate_to_record(&mut recovered_record, &plan, &aggregate, aggregate_path);
-    lifecycle_store.project_terminal_aggregate(&recovered_record, record.state, &aggregate)?;
+    lifecycle_store.project_terminal_aggregate(&recovered_record, record.state(), &aggregate)?;
     Ok(lifecycle_store.aggregate_path(&record.run_id))
 }
 
@@ -551,7 +551,7 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         if handoff["cook_id"] == cook_id
             && handoff["launcher_id"] == launcher_id
             && handoff["cancellation_fence"]["state"] == "open"
-            && !existing.state.is_terminal()
+            && !existing.state().is_terminal()
             && detached_cook_launcher_is_live(&existing, chrono::Utc::now())
         {
             return Ok(existing);
@@ -563,7 +563,7 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         .flatten();
     let claimed = lifecycle_store.mutate_record(&cook_id, |record| {
         let handoff = &record.metadata["detached_cook_handoff"];
-        let reclaimable_pre_projection_failure = record.state == AgentTaskRunState::Failed
+        let reclaimable_pre_projection_failure = record.state() == AgentTaskRunState::Failed
             && handoff["state"] == "exited_before_handoff"
             && handoff["admission_state"] == "failed"
             && lifecycle_store.read_cook_index(&cook_id).is_err()
@@ -571,7 +571,7 @@ pub fn claim_detached_cook_handoff_parent_in_store(
             && !handoff["materializing_attempt_run_id"].is_string();
         if handoff["cook_id"] != cook_id
             || handoff["cancellation_fence"]["state"] != "open"
-            || (record.state.is_terminal() && !reclaimable_pre_projection_failure)
+            || (record.state().is_terminal() && !reclaimable_pre_projection_failure)
             || (!reclaimable_pre_projection_failure
                 && (handoff["state"] != "pending"
                     || handoff["admission_state"] != "pre_supervisor"
@@ -629,7 +629,7 @@ pub fn claim_detached_cook_handoff_parent_in_store(
             record.metadata["detached_cook_handoff"]["launcher_id"].clone();
         error.details["launcher_live"] =
             json!(detached_cook_launcher_is_live(&record, chrono::Utc::now()));
-        error.details["run_state"] = json!(format!("{:?}", record.state));
+        error.details["run_state"] = json!(format!("{:?}", record.state()));
     }
     Err(error)
 }
@@ -650,7 +650,7 @@ pub fn transfer_detached_cook_handoff_launcher_in_store(
         .flatten();
     let updated = lifecycle_store.mutate_record(&cook_id, |record| {
         let handoff = &record.metadata["detached_cook_handoff"];
-        if record.state.is_terminal()
+        if record.state().is_terminal()
             || handoff["cook_id"] != cook_id
             || handoff["launcher_id"] != launcher_id
             || handoff["state"] != "pending"
@@ -788,7 +788,7 @@ pub fn prepare_unmaterialized_cook_admission(
                 homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
                     &runtime_root,
                     run_id,
-                    || Ok(store.read_record(run_id)?.state.is_terminal()),
+                    || Ok(store.read_record(run_id)?.state().is_terminal()),
                 )
             },
         )
@@ -951,7 +951,7 @@ fn record_unmaterialized_cook_admission_locked(
                 homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
                     &runtime_root,
                     run_id,
-                    || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
+                    || Ok(lifecycle_store.read_record(run_id)?.state().is_terminal()),
                 )
             },
         )?;
@@ -968,7 +968,7 @@ fn record_unmaterialized_cook_admission_locked(
     let reason = homeboy_core::redaction::redact_string(reason);
     let binding_for_write = binding.clone();
     let record = mutate_with_execution_intent(lifecycle_store, &cook_id, |record| {
-        if record.state.is_terminal()
+        if record.state().is_terminal()
             || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"]
                 == "cancelled"
         {
@@ -1208,12 +1208,13 @@ pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRun
     else {
         return Ok(current);
     };
-    if current.state != AgentTaskRunState::Queued {
+    if current.state() != AgentTaskRunState::Queued {
         return Ok(current);
     }
     let updated = mutate_with_execution_intent(&store, &cook_id, |record| {
+        let queued = record.state() == AgentTaskRunState::Queued;
         let admission = &mut record.metadata["unmaterialized_cook_admission"];
-        if record.state != AgentTaskRunState::Queued || !admission.is_object() {
+        if !queued || !admission.is_object() {
             return Ok(false);
         }
         admission["reason"] = json!("explicit scoped resume requested");
@@ -1262,8 +1263,9 @@ pub fn update_unmaterialized_cook_placement_in_store(
                     .as_str()
                     .is_some_and(|run_id| store.read_record(run_id).is_ok());
             let already_local = record.metadata["placement_update"]["placement"] == "local";
+            let queued = record.state() == AgentTaskRunState::Queued;
             let admission = &mut record.metadata["unmaterialized_cook_admission"];
-            if record.state != AgentTaskRunState::Queued
+            if !queued
                 || !admission.is_object()
                 || execution_started
             {
@@ -1370,7 +1372,7 @@ pub fn require_detached_cook_handoff_fence_open_in_store(
     if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
         return Ok(());
     }
-    if record.state == AgentTaskRunState::Cancelled
+    if record.state() == AgentTaskRunState::Cancelled
         || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] != "open"
     {
         return Err(Error::validation_invalid_argument(
@@ -1402,7 +1404,7 @@ pub fn record_detached_cook_handoff_child_in_store(
         // A concurrent observer may have already terminalized the handoff
         // before this attachment write acquired the record lock. Keep that
         // classification intact for the launcher to report.
-        if record.state.is_terminal()
+        if record.state().is_terminal()
             || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] != "open"
         {
             return false;
@@ -1447,7 +1449,7 @@ pub fn record_claimed_detached_cook_handoff_supervision_in_store(
     let job_id = job_id.to_string();
     let updated = lifecycle_store.mutate_record(&cook_id, |record| {
         let handoff = &record.metadata["detached_cook_handoff"];
-        if record.state.is_terminal()
+        if record.state().is_terminal()
             || handoff["cook_id"] != cook_id
             || handoff["state"] != "pending"
             || handoff["admission_state"] != "pre_supervisor"
@@ -1474,7 +1476,7 @@ pub fn record_claimed_detached_cook_handoff_supervision_in_store(
             None,
         );
         if let Some(record) = existing {
-            error.details["run_state"] = json!(format!("{:?}", record.state));
+            error.details["run_state"] = json!(format!("{:?}", record.state()));
             error.details["handoff_state"] =
                 record.metadata["detached_cook_handoff"]["state"].clone();
             error.details["admission_state"] =
@@ -1544,7 +1546,7 @@ pub fn reserve_detached_cook_handoff_materialization_in_store(
         if record.metadata["detached_cook_handoff"]["state"] == "redirected" {
             return true;
         }
-        if record.state.is_terminal()
+        if record.state().is_terminal()
             || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] != "open"
             || record.metadata["detached_cook_handoff"]["state"] != "pending"
         {
@@ -1593,7 +1595,7 @@ pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
     let Some(attempt_run_id) = handoff["materializing_attempt_run_id"].as_str() else {
         return Ok(false);
     };
-    if handoff["cook_id"] != cook_id || parent.state != AgentTaskRunState::Cancelled {
+    if handoff["cook_id"] != cook_id || parent.state() != AgentTaskRunState::Cancelled {
         return Ok(false);
     }
     let Ok(child) = lifecycle_store.read_record(attempt_run_id) else {
@@ -1601,7 +1603,7 @@ pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
     };
     // The reservation makes an unindexed child reachable, but it does not give
     // parent cancellation authority to overwrite a child that already finished.
-    if child.state.is_terminal() {
+    if child.state().is_terminal() {
         return Ok(false);
     }
     super::cancellation::cancel_exact_run_in_store(
@@ -1639,7 +1641,7 @@ pub fn fail_detached_cook_handoff_parent_in_store(
     let cook_id = sanitize_run_id(cook_id);
     let record = lifecycle_store.transition_when(&cook_id, |record| {
         if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
-            || record.state.is_terminal()
+            || record.state().is_terminal()
             || record.metadata["detached_cook_handoff"]["state"] != "pending"
             || lifecycle_store.read_cook_index(&cook_id).is_ok()
             || record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"]
@@ -1670,7 +1672,7 @@ pub fn fail_claimed_detached_cook_handoff_parent_in_store(
         let handoff = &record.metadata["detached_cook_handoff"];
         if handoff["cook_id"] != cook_id
             || handoff["launcher_id"] != launcher_id
-            || record.state.is_terminal()
+            || record.state().is_terminal()
             || handoff["state"] != "pending"
             || handoff["admission_state"] != "pre_supervisor"
         {
@@ -1700,7 +1702,7 @@ pub fn fail_supervised_detached_cook_handoff_parent_in_store(
             || handoff["child_pid"] != child_pid
             || handoff["child_start_identity"] != child_start_identity
             || handoff["cancellation_fence"]["state"] != "open"
-            || record.state.is_terminal()
+            || record.state().is_terminal()
             || handoff["state"] != "pending"
             || handoff["admission_state"] != "supervising"
         {
@@ -1748,7 +1750,7 @@ fn complete_detached_cook_handoff_parent_in_store(
     let _ =
         lifecycle_store.transition_when_locked_without_terminal_projection(&cook_id, |record| {
             if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
-                || record.state.is_terminal()
+                || record.state().is_terminal()
                 || record.metadata["detached_cook_handoff"]["state"] != "pending"
             {
                 return None;
@@ -1814,7 +1816,7 @@ pub fn detached_cook_admission_is_live(
     match record.metadata["detached_cook_handoff"]["admission_state"].as_str() {
         Some("supervising") => true,
         Some("unmaterialized") => {
-            record.state == AgentTaskRunState::Queued
+            record.state() == AgentTaskRunState::Queued
                 && record.metadata["unmaterialized_cook_admission"]["state"]
                     .as_str()
                     .is_some_and(|state| {
@@ -1870,7 +1872,7 @@ pub fn expire_detached_cook_admission_in_store(
         cook_id,
         "detached Cook admission lease expired before child or supervisor ownership attached",
     )?;
-    Ok(terminal.state == AgentTaskRunState::Failed
+    Ok(terminal.state() == AgentTaskRunState::Failed
         && terminal.metadata["detached_cook_handoff"]["admission_state"] == "failed")
 }
 
@@ -2762,10 +2764,11 @@ where
         .map(sanitize_run_id)
         .unwrap_or_else(default_run_id);
     if let Ok(existing) = lifecycle_store.read_record_bounded(&run_id) {
-        if existing.metadata["execution_scheduling"].is_object() && !existing.state.is_terminal() {
+        if existing.metadata["execution_scheduling"].is_object() && !existing.state().is_terminal()
+        {
             let owner = &existing.metadata["execution_step_owner"];
             let current_job = std::env::var(homeboy_core::daemon::step_job::STEP_JOB_ID_ENV).ok();
-            if existing.state != AgentTaskRunState::Running
+            if existing.state() != AgentTaskRunState::Running
                 || owner["pid"].as_u64() != Some(u64::from(std::process::id()))
                 || owner["job_id"].as_str() != current_job.as_deref()
                 || owner["process_start_identity"]
@@ -2944,32 +2947,18 @@ where
         }
     }
 
-    let mut record = AgentTaskRunRecord {
-        schema: schemas::RUN.to_string(),
-        run_id: run_id.clone(),
-        plan_id: plan.plan_id.clone(),
-        state: AgentTaskRunState::Queued,
-        revision: 0,
-        submitted_at: now_timestamp(),
-        updated_at: None,
-        plan_path: plan_path.display().to_string(),
-        aggregate_path: None,
-        totals: None,
-        tasks: plan.tasks.iter().map(queued_task).collect(),
-        artifact_refs: Vec::new(),
-        provider_handles: Vec::new(),
-        latest_executor_evidence: None,
-        lifecycle: lifecycle_for_submitted_plan(plan),
-        lab_handoff: None,
-        candidate_adoption: None,
-        adoption_run_id: None,
-        acceptance: None,
-        workspace_identity: plan.workspace_identity.clone(),
-        workspace_lifecycle_revision: plan.workspace_lifecycle_revision,
-        workspace_owner_lease: plan.workspace_owner_lease.clone(),
-        workspace_claim: None,
-        metadata,
-    };
+    let mut record = AgentTaskRunRecord::new_queued(
+        run_id.clone(),
+        plan.plan_id.clone(),
+        plan_path.display().to_string(),
+        now_timestamp(),
+    );
+    record.tasks = plan.tasks.iter().map(queued_task).collect();
+    record.lifecycle = lifecycle_for_submitted_plan(plan);
+    record.workspace_identity = plan.workspace_identity.clone();
+    record.workspace_lifecycle_revision = plan.workspace_lifecycle_revision;
+    record.workspace_owner_lease = plan.workspace_owner_lease.clone();
+    record.metadata = metadata;
     let mut preserved_controller_runtime = None;
     let mut pre_execution_recovery = false;
     let mut pre_execution_runtime_recovery = false;
@@ -2992,8 +2981,8 @@ where
         // only sets it when the record it mutates is already `Running`.
         // Preserve that state here so the reclaim it is about to record stays
         // durable evidence instead of silently reading as a fresh start.
-        if existing.state == AgentTaskRunState::Running && !existing.owner_process_is_running() {
-            set_run_state(&mut record, existing.state);
+        if existing.state() == AgentTaskRunState::Running && !existing.owner_process_is_running() {
+            set_run_state(&mut record, existing.state());
         }
         let existing_fanout = canonical_fanout_mission(&existing.metadata)?;
         let submitted_fanout = canonical_fanout_mission(&record.metadata)?;
@@ -3152,7 +3141,7 @@ where
             // any provider work in case cancellation won immediately after.
             // Bounded: this run's own just-committed row, not history (#14962).
             if let Ok(cancelled) = lifecycle_store.read_record_bounded(&run_id) {
-                if cancelled.state.is_terminal() && !pre_execution_runtime_recovery {
+                if cancelled.state().is_terminal() && !pre_execution_runtime_recovery {
                     return Ok(cancelled);
                 }
             }
@@ -3186,7 +3175,7 @@ where
                 let runtime = record.metadata[key].clone();
                 let runner_runtime = record.metadata.get("runner_execution_runtime").cloned();
                 if let Some(updated) = lifecycle_store.mutate_record(&run_id, |stored| {
-                    if stored.state.is_terminal() {
+                    if stored.state().is_terminal() {
                         return false;
                     }
                     stored.metadata[key] = runtime;
@@ -3205,7 +3194,7 @@ where
             // pre-execution admission failure when the waiter wakes up.
             // Bounded: this run's own just-committed row, not history (#14962).
             if let Ok(cancelled) = lifecycle_store.read_record_bounded(&run_id) {
-                if cancelled.state == AgentTaskRunState::Cancelled
+                if cancelled.state() == AgentTaskRunState::Cancelled
                     || cancelled.metadata["controller_admission_cancellation_requested"] == true
                 {
                     return Ok(cancelled);
@@ -3703,7 +3692,7 @@ pub fn mark_running_in_store(
     lifecycle_store.transition_when(&run_id, |stored| {
         let mut prepared = stored.clone();
         let record = &mut prepared;
-        if record.state == AgentTaskRunState::Queued && record.metadata["execution_scheduling"].is_object() {
+        if record.state() == AgentTaskRunState::Queued && record.metadata["execution_scheduling"].is_object() {
             error = Some(Error::validation_invalid_argument(
                 "run_id", "queued execution is owned by its exact durable step", Some(run_id.clone()), None,
             ));
@@ -3718,7 +3707,7 @@ pub fn mark_running_in_store(
             ));
             return None;
         }
-        if record.state == AgentTaskRunState::Running && record.owner_process_is_running() {
+        if record.state() == AgentTaskRunState::Running && record.owner_process_is_running() {
             error = Some(Error::validation_invalid_argument(
                 "run_id",
                 format!(
@@ -3731,27 +3720,22 @@ pub fn mark_running_in_store(
             ));
             return None;
         }
-        if record.state.is_terminal() {
+        if record.state().is_terminal() {
             error = Some(Error::validation_invalid_argument(
                 "run_id",
                 format!(
                     "agent-task run '{}' is already terminal with state {:?}",
-                    record.run_id, record.state
+                    record.run_id, record.state()
                 ),
                 Some(record.run_id.clone()),
                 None,
             ));
             return None;
         }
-        let reclaimed_stale = record.state == AgentTaskRunState::Running;
+        let reclaimed_stale = record.state() == AgentTaskRunState::Running;
         record.updated_at = Some(now_timestamp());
-        set_run_state(record, AgentTaskRunState::Running);
+        start_run(record);
         update_lifecycle_heartbeat(record);
-        for task in &mut record.tasks {
-            if task.state == AgentTaskState::Queued {
-                task.state = AgentTaskState::Running;
-            }
-        }
         record.record_runner_metadata(reclaimed_stale);
         Some(AgentTaskTransition::Advance {
             kind: AgentTaskAdvance::Start,
@@ -3801,7 +3785,7 @@ pub fn defer_cook_runtime_admission_in_store(
         let mut prepared = stored.clone();
         let record = &mut prepared;
         if !matches!(
-            record.state,
+            record.state(),
             AgentTaskRunState::Queued | AgentTaskRunState::Running
         ) || !crate::agent_task_service::has_unambiguous_zero_execution(record)
         {
@@ -4251,7 +4235,7 @@ pub fn record_cook_progress_with_activity_in_store(
             }
             metadata.insert("cook_progress".to_string(), progress);
         }
-        if !record.state.is_terminal()
+        if !record.state().is_terminal()
             && (!record.is_runner_backed() || record.is_controller_pre_provider_phase())
         {
             record.updated_at = Some(now_timestamp());
@@ -4410,7 +4394,7 @@ pub fn record_cook_terminal_result_in_store(
         // A cancelled Cook keeps its cancellation: the provenance that minted
         // its `run.cancelled` receipt is valid only on a `Cancelled` record
         // (#15718), and the cancellation is the cause of the missing candidate.
-        if terminal_status == "no_candidate" && record.state != AgentTaskRunState::Cancelled {
+        if terminal_status == "no_candidate" && record.state() != AgentTaskRunState::Cancelled {
             set_run_state(record, AgentTaskRunState::PartialFailure);
         }
         true
@@ -4458,7 +4442,7 @@ pub fn record_provider_execution_terminal_with_model_in_store(
     let execution_key = format!("{task_id}:{attempt}");
     let mut found = false;
     let record = lifecycle_store.mutate_record(&run_id, |record| {
-        let cancelled = record.state == AgentTaskRunState::Cancelled;
+        let cancelled = record.state() == AgentTaskRunState::Cancelled;
         let Some(execution) = record
             .ensure_metadata_object()
             .get_mut("provider_executions")
@@ -4718,7 +4702,7 @@ pub(crate) enum LocalProviderOwnerDecision {
 pub(crate) fn annotate_local_provider_ownership(
     record: &mut AgentTaskRunRecord,
 ) -> LocalProviderOwnerDecision {
-    if record.state != AgentTaskRunState::Running || record.is_runner_backed() {
+    if record.state() != AgentTaskRunState::Running || record.is_runner_backed() {
         return LocalProviderOwnerDecision::NotApplicable;
     }
     let Some(executions) = record
@@ -4918,7 +4902,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
         .read_records()?
         .into_iter()
         .filter(|record| {
-            record.state == AgentTaskRunState::Queued
+            record.state() == AgentTaskRunState::Queued
                 && !is_transport_proxy(record)
                 && !is_unmaterialized_cook_admission(record)
                 && record.metadata.get("queue_quarantine").is_none()
@@ -5062,7 +5046,7 @@ fn quarantine_queued_run_in_store(
 ) -> Result<()> {
     let diagnostic = redacted_queue_diagnostic(plan, error);
     let _ = lifecycle_store.mutate_record(&record.run_id, |quarantined| {
-        if quarantined.state != AgentTaskRunState::Queued
+        if quarantined.state() != AgentTaskRunState::Queued
             || quarantined.metadata.get("queue_quarantine").is_some()
         {
             return false;
@@ -5197,7 +5181,7 @@ pub fn rearm_quarantined_run_in_store(
         })?;
     let mut failure = None;
     let updated = lifecycle_store.mutate_record(&run_id, |record| {
-        if record.state != AgentTaskRunState::Queued
+        if record.state() != AgentTaskRunState::Queued
             || record.metadata.get("queue_quarantine").is_none()
         {
             return false;
@@ -5241,7 +5225,7 @@ pub fn quarantine_queued_run_exact_in_store(
     let operator_reason = normalized_operator_quarantine_reason(reason);
     lifecycle_store
         .mutate_record(&run_id, |record| {
-            if record.state != AgentTaskRunState::Queued
+            if record.state() != AgentTaskRunState::Queued
                 || record.metadata.get("queue_quarantine").is_some()
             {
                 return false;
@@ -5372,7 +5356,7 @@ pub fn reconcile_terminal_artifact_projection_in_store(
     run_id: &str,
 ) -> Result<bool> {
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    if !record.state.is_terminal() {
+    if !record.state().is_terminal() {
         return Ok(false);
     }
 
@@ -5457,10 +5441,10 @@ pub fn runner_diagnostic_probe(record: &AgentTaskRunRecord) -> AgentTaskRunnerDi
     let runner_id = record.runner_id().map(str::to_string);
     let runner_job_id = record.runner_job_id().map(str::to_string);
     let applicable = matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Queued | AgentTaskRunState::Running
-    ) || (record.state.is_terminal()
-        && record.state != AgentTaskRunState::Succeeded);
+    ) || (record.state().is_terminal()
+        && record.state() != AgentTaskRunState::Succeeded);
     let skipped_reason = if is_controller_local(record) {
         Some(RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL)
     } else if !applicable {
@@ -5523,7 +5507,7 @@ pub fn runner_probe_plan(
         Some(RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL)
     } else if options.runner_probe == AgentTaskRunnerProbe::Never {
         Some(RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT)
-    } else if record.state != AgentTaskRunState::Running {
+    } else if record.state() != AgentTaskRunState::Running {
         Some(RUNNER_PROBE_SKIPPED_NOT_RUNNING)
     } else {
         None
@@ -5609,7 +5593,7 @@ fn candidate_adoption_terminal_state_is_known(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
 ) -> bool {
-    if record.state != AgentTaskRunState::CandidateRecoverable
+    if record.state() != AgentTaskRunState::CandidateRecoverable
         || record.metadata.get("pre_execution_failure").is_none()
     {
         return false;
@@ -5626,7 +5610,7 @@ fn candidate_adoption_terminal_state_is_known(
         .is_none_or(|remediation_run_id| {
             lifecycle_store
                 .read_record_bounded(remediation_run_id)
-                .is_ok_and(|remediation| remediation.state.is_terminal())
+                .is_ok_and(|remediation| remediation.state().is_terminal())
         })
 }
 
@@ -5646,7 +5630,7 @@ pub(crate) fn reconcile_terminal_cook_provider_result_with_scheduler(
 ) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     let record = lifecycle_store.read_record(run_id)?;
-    if !record.state.is_terminal() {
+    if !record.state().is_terminal() {
         return Ok(record);
     }
     let recipe_store =
@@ -5825,7 +5809,7 @@ fn converge_resolved_run_in_store(
         lifecycle_store,
         &mut record,
     )? {
-        if record.state.is_terminal() {
+        if record.state().is_terminal() {
             record = match lifecycle_store.commit_terminal_record(&record)? {
                 super::terminal_transition::TerminalRecordCommit::Committed(committed)
                 | super::terminal_transition::TerminalRecordCommit::Superseded(committed) => {
@@ -5836,7 +5820,7 @@ fn converge_resolved_run_in_store(
             lifecycle_store.commit_record(&mut record)?;
         }
     }
-    if !record.state.is_terminal() {
+    if !record.state().is_terminal() {
         let controller_plan = lifecycle_store.read_controller_plan(&record.run_id)?;
         if let Ok(aggregate) = lifecycle_store.read_aggregate(&record.run_id) {
             let aggregate_path = lifecycle_store
@@ -5853,11 +5837,11 @@ fn converge_resolved_run_in_store(
             );
 
             if reconciled != record {
-                let committed = if reconciled.state.is_terminal() {
+                let committed = if reconciled.state().is_terminal() {
                     lifecycle_store
-                        .project_terminal_aggregate(&reconciled, record.state, &aggregate)
+                        .project_terminal_aggregate(&reconciled, record.state(), &aggregate)
                         .map(|committed| reconciled = committed)
-                } else if reconciled.state != record.state {
+                } else if reconciled.state() != record.state() {
                     lifecycle_store.advance_record(&mut reconciled, AgentTaskAdvance::Start)
                 } else {
                     lifecycle_store.commit_record(&mut reconciled)
@@ -5901,7 +5885,7 @@ fn converge_resolved_run_in_store(
             record = committed;
         }
     }
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         if let Ok(aggregate) = lifecycle_store.read_aggregate(&record.run_id) {
             if !crate::agent_task_lifecycle::terminal_artifact_projection_is_verified_in_store(
                 lifecycle_store,
@@ -5919,7 +5903,7 @@ fn converge_resolved_run_in_store(
     // Convergence only writes the durable continuation signal. The separate
     // consumer owns execution and cannot inherit a local closure.
     if matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Succeeded
             | AgentTaskRunState::CandidateRecoverable
             | AgentTaskRunState::PartialRecoverable
@@ -6281,7 +6265,7 @@ pub(crate) fn mark_resuming_in_store(
 ) -> Result<AgentTaskRunRecord> {
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Succeeded
             | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
@@ -6292,7 +6276,8 @@ pub(crate) fn mark_resuming_in_store(
             "run_id",
             format!(
                 "agent-task run '{}' is already terminal with state {:?}",
-                record.run_id, record.state
+                record.run_id,
+                record.state()
             ),
             Some(record.run_id),
             None,
@@ -6337,7 +6322,7 @@ fn retry_unmaterialized_cook_admission_locked(
     force: bool,
 ) -> Result<(AgentTaskRunRecord, bool)> {
     let source = lifecycle_store.read_record(&sanitize_run_id(source_run_id))?;
-    if !source.state.is_terminal() || !is_unmaterialized_cook_admission(&source) {
+    if !source.state().is_terminal() || !is_unmaterialized_cook_admission(&source) {
         return Err(Error::validation_invalid_argument(
             "run_id",
             "retry requires a terminal unmaterialized Cook admission",
@@ -6360,7 +6345,7 @@ fn retry_unmaterialized_cook_admission_locked(
             && source_request_ref.is_some()
             && source_request_ref == existing_request_ref
         {
-            if !force && !existing.state.is_terminal() {
+            if !force && !existing.state().is_terminal() {
                 return Ok((existing, false));
             }
             if force {
@@ -6387,7 +6372,10 @@ fn retry_unmaterialized_cook_admission_locked(
         })
         .collect::<Vec<_>>();
     successors.sort_by(|left, right| left.run_id.cmp(&right.run_id));
-    if let Some(active) = successors.iter().find(|record| !record.state.is_terminal()) {
+    if let Some(active) = successors
+        .iter()
+        .find(|record| !record.state().is_terminal())
+    {
         if !force {
             return Err(active_retry_successor_error(active));
         }
@@ -6640,7 +6628,7 @@ fn retry_with_force_inner_in_store(
             homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
                 &runtime_root,
                 run_id,
-                || Ok(lifecycle_store.read_record(run_id)?.state.is_terminal()),
+                || Ok(lifecycle_store.read_record(run_id)?.state().is_terminal()),
             )
         },
     )
@@ -6753,7 +6741,10 @@ where
             })
             .collect::<Vec<_>>();
         successors.sort_by(|left, right| left.run_id.cmp(&right.run_id));
-        if let Some(active) = successors.iter().find(|record| !record.state.is_terminal()) {
+        if let Some(active) = successors
+            .iter()
+            .find(|record| !record.state().is_terminal())
+        {
             if !force {
                 // A caller can lose the response after the first durable write.
                 // Replaying its exact requested successor is an idempotent read,
@@ -7044,7 +7035,9 @@ fn active_retry_successor_error(record: &AgentTaskRunRecord) -> Error {
         "run_id",
         format!(
             "active retry successor '{}' is {:?}; inspect it with `homeboy agent-task status {}`",
-            record.run_id, record.state, record.run_id
+            record.run_id,
+            record.state(),
+            record.run_id
         ),
         Some(record.run_id.clone()),
         Some(vec![format!("homeboy agent-task status {}", record.run_id)]),
@@ -7379,7 +7372,7 @@ pub(crate) fn record_cook_attempt_locked_in_store(
         // terminal first-handoff placeholder no longer owns that boundary.
         if !lifecycle_store.cook_index_exists(&cook_id)
             && handoff["cook_id"] == cook_id
-            && (((parent.state.is_terminal() && handoff["state"] != "redirected")
+            && (((parent.state().is_terminal() && handoff["state"] != "redirected")
                 || handoff["cancellation_fence"]["state"] == "cancelled")
                 && !reserved_child
                 || (handoff["state"] != "pending" && handoff["state"] != "redirected"))

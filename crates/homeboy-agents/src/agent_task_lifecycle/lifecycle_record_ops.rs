@@ -14,60 +14,6 @@ pub(crate) fn lifecycle_for_submitted_plan(plan: &AgentTaskPlan) -> RunLifecycle
     lifecycle
 }
 
-/// Single authoritative setter for a run's state. It writes both the
-/// top-level `record.state` and the derived `lifecycle.execution.state`
-/// projection together, so the two cannot silently diverge: every state
-/// transition routes through here instead of assigning `record.state`
-/// separately from refreshing the lifecycle projection.
-pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: AgentTaskRunState) {
-    record.state = state;
-    let timestamp = record.updated_at.clone().unwrap_or_else(now_timestamp);
-    record.lifecycle.execution.state = RunExecutionState::from(state);
-    record.lifecycle.execution.updated_at = Some(timestamp.clone());
-    if state == AgentTaskRunState::Running && record.lifecycle.execution.started_at.is_none() {
-        record.lifecycle.execution.started_at = Some(timestamp.clone());
-    }
-    // A terminal run has finished executing, so stamp `finished_at`. Use the
-    // canonical terminal set (`is_terminal`) rather than a hand-listed subset:
-    // the previous inline list omitted `CandidateRecoverable`, so a run that
-    // finished with a recoverable candidate never got a `finished_at` here —
-    // while the legacy-record migration path (`health.rs`) stamps it for every
-    // non-Queued/Running state. This aligns the live setter with that path and
-    // with the single terminal definition.
-    if state.is_terminal() {
-        record.lifecycle.execution.finished_at = Some(timestamp.clone());
-    }
-    record.lifecycle.updated_at = Some(timestamp);
-    // `set_run_state` is the single writer that keeps the authoritative run
-    // state and its generic lifecycle projection in lockstep. Assert the
-    // invariant the record-health check enforces (`ConflictingProjections`) so a
-    // future edit to this setter that breaks the pairing fails fast in dev/tests
-    // rather than silently emitting divergent records.
-    debug_assert!(
-        record.run_state_projections_agree(),
-        "set_run_state must leave run-state projections in agreement"
-    );
-}
-
-/// Return a zero-execution run to the queue and drop its exact-step owner.
-pub(crate) fn reset_for_requeue(record: &mut AgentTaskRunRecord) {
-    set_run_state(record, AgentTaskRunState::Queued);
-    record.lifecycle.execution.started_at = None;
-    record.lifecycle.execution.finished_at = None;
-    for task in &mut record.tasks {
-        task.state = AgentTaskState::Queued;
-    }
-    let metadata = record.ensure_metadata_object();
-    for key in [
-        "execution_step_owner",
-        "runner_pid",
-        "runner_process_start_identity",
-        "runner_started_at",
-    ] {
-        metadata.remove(key);
-    }
-}
-
 pub(crate) fn update_lifecycle_heartbeat(record: &mut AgentTaskRunRecord) {
     let timestamp = record.updated_at.clone().unwrap_or_else(now_timestamp);
     record.lifecycle.heartbeat = Some(RunHeartbeat {
@@ -78,7 +24,7 @@ pub(crate) fn update_lifecycle_heartbeat(record: &mut AgentTaskRunRecord) {
 }
 
 pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan: &AgentTaskPlan) {
-    set_run_state(record, record.state);
+    set_run_state(record, record.state());
     record.lifecycle.cleanup = cleanup_lifecycle_for_plan(plan, record.updated_at.clone());
     let durable_task_ids: std::collections::HashSet<&str> = record.metadata["provider_executions"]
         .as_array()
@@ -103,7 +49,7 @@ pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan
             .iter()
             .any(|handle| handle.task_id == task.task_id)
             || matches!(
-                task.state,
+                task.state(),
                 AgentTaskState::Queued | AgentTaskState::Blocked | AgentTaskState::Skipped
             )
         {
@@ -115,7 +61,7 @@ pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan
         provider_runtime.push(ProviderRuntimeLifecycle {
             task_id: task.task_id.clone(),
             backend: task.backend.clone(),
-            state: provider_runtime_state_for_task_state(Some(task.state)),
+            state: provider_runtime_state_for_task_state(Some(task.state())),
             stream_uri: None,
             external_runtime_ids: Vec::new(),
             metadata: json!({

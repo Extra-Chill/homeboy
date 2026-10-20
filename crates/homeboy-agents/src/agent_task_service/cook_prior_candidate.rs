@@ -179,7 +179,7 @@ pub(crate) fn prior_failed_attempt_owner(
         // Without durable owner evidence the dirt cannot be attributed.
         return Ok(None);
     };
-    if !owner_record.state.is_terminal() || owner_record.state == AgentTaskRunState::Succeeded {
+    if !owner_record.state().is_terminal() || owner_record.state() == AgentTaskRunState::Succeeded {
         return Ok(None);
     }
     let Ok(path) = std::fs::canonicalize(&record.worktree_path) else {
@@ -195,7 +195,7 @@ pub(crate) fn prior_failed_attempt_owner(
         homeboy_core::worktree_provider::require_linked_worktree_mutation_path(&path, handle)?;
     Ok(Some(PriorAttemptOwner {
         run_id: owner.to_string(),
-        state: owner_record.state,
+        state: owner_record.state(),
         handle: handle.to_string(),
         path,
     }))

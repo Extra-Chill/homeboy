@@ -512,7 +512,7 @@ pub fn candidate_adoption_recovery_outcome(
     task: &AgentTaskRequest,
 ) -> Option<AgentTaskOutcome> {
     let expired_handoff = record.lab_handoff.as_ref().is_some_and(|handoff| {
-        record.state == AgentTaskRunState::Cancelled
+        record.state() == AgentTaskRunState::Cancelled
             && record.aggregate_path.is_none()
             && record.totals.is_none()
             && record.artifact_refs.is_empty()
@@ -539,7 +539,7 @@ pub fn candidate_adoption_recovery_outcome(
             None => false,
         };
     let eligible_failed_preexecution = matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Failed | AgentTaskRunState::Succeeded
     ) && record.metadata["provider_executions_consumed"] == 0
         && record.provider_handles.is_empty()

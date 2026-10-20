@@ -76,7 +76,7 @@ fn detached_admission_preserves_live_launcher_past_deadline_until_supervision() 
         supervised.metadata["detached_cook_handoff"]["admission_state"],
         "supervising"
     );
-    assert!(!supervised.state.is_terminal());
+    assert!(!supervised.state().is_terminal());
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn detached_admission_expires_dead_launcher_even_before_fallback_deadline() {
         expire_detached_cook_admission_in_store(&store, cook_id).expect("reconcile dead admission")
     );
     assert_eq!(
-        store.read_record(cook_id).unwrap().state,
+        store.read_record(cook_id).unwrap().state(),
         AgentTaskRunState::Failed
     );
 }
@@ -284,7 +284,7 @@ fn concurrent_queue_consumers_bind_only_the_winning_preflight_plan() {
 
     assert_eq!(results.into_iter().filter(|claimed| *claimed).count(), 1);
     let record = store.read_record(run_id).expect("claimed record");
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     let bound = store.read_controller_plan(run_id).expect("winning plan");
     assert!(bound == left_plan || bound == right_plan);
     assert_ne!(
@@ -341,7 +341,7 @@ fn caller_ownership_survives_follow_up_submission_and_source_expiry() {
         .unwrap();
     store
         .mutate_record("source", |record| {
-            record.state = AgentTaskRunState::Cancelled;
+            record.set_state_for_test(AgentTaskRunState::Cancelled);
             true
         })
         .unwrap();
@@ -382,7 +382,7 @@ fn queued_lab_admission_projects_its_verified_existing_checkout() {
         )]),
     )
     .unwrap();
-    assert_eq!(record.state, AgentTaskRunState::Queued);
+    assert_eq!(record.state(), AgentTaskRunState::Queued);
     let scope = store
         .open_observation_initialized()
         .unwrap()
@@ -760,7 +760,7 @@ fn concurrent_unmaterialized_retries_from_root_and_descendant_share_the_root_loc
         .expect("read retry records")
         .into_iter()
         .filter(|record| {
-            record.metadata["retry_root"] == source_run_id && !record.state.is_terminal()
+            record.metadata["retry_root"] == source_run_id && !record.state().is_terminal()
         })
         .collect::<Vec<_>>();
     assert_eq!(active.len(), 1);
@@ -795,7 +795,7 @@ fn unmaterialized_cook_admission_refuses_identity_rebinding_and_cancels_without_
         Some("operator cancellation"),
     )
     .expect("cancel admission");
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
     assert_eq!(
         cancelled.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
         "cancelled"
@@ -908,7 +908,7 @@ fn daemon_terminalization_requires_its_projected_supervision_generation() {
         "child exited",
     )
     .expect("an unprojected daemon is a no-op");
-    assert_eq!(pending.state, AgentTaskRunState::Queued);
+    assert_eq!(pending.state(), AgentTaskRunState::Queued);
     assert_eq!(
         pending.metadata["detached_cook_handoff"]["admission_state"],
         "pre_supervisor"
@@ -932,7 +932,7 @@ fn daemon_terminalization_requires_its_projected_supervision_generation() {
         "stale child exited",
     )
     .expect("a stale daemon is a no-op");
-    assert_eq!(stale.state, AgentTaskRunState::Queued);
+    assert_eq!(stale.state(), AgentTaskRunState::Queued);
 
     store
         .mutate_record(cook_id, |record| {
@@ -950,7 +950,7 @@ fn daemon_terminalization_requires_its_projected_supervision_generation() {
         "owned child exited during cancellation",
     )
     .expect("cancellation owns terminalization");
-    assert_eq!(cancelling.state, AgentTaskRunState::Queued);
+    assert_eq!(cancelling.state(), AgentTaskRunState::Queued);
     assert_eq!(
         cancelling.metadata["detached_cook_handoff"]["admission_state"],
         "supervising"
@@ -971,7 +971,7 @@ fn daemon_terminalization_requires_its_projected_supervision_generation() {
         "owned child exited",
     )
     .expect("the projected daemon terminalizes its parent");
-    assert_eq!(failed.state, AgentTaskRunState::Failed);
+    assert_eq!(failed.state(), AgentTaskRunState::Failed);
     assert_eq!(
         failed.metadata["detached_cook_handoff"]["admission_state"],
         "failed"
@@ -1145,7 +1145,7 @@ fn scoped_resume_rearms_backoff_but_preserves_terminal_and_materializing_owners(
             original.metadata["execution_scheduling"]
         );
         let terminal = rearm_unmaterialized_cook_admission("resume-terminal").unwrap();
-        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+        assert_eq!(terminal.state(), AgentTaskRunState::Cancelled);
         assert_eq!(
             terminal.metadata["unmaterialized_cook_admission"]["reason"],
             "waiting"
@@ -1433,17 +1433,17 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
 
     let cancelled = cancel_run_in_store(&lifecycle_store, run_id, Some("fixture cancellation"))
         .expect("cancel run");
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
     let terminal =
         record_cook_progress_in_store(&lifecycle_store, run_id, "terminal", 1, Some("cancelled"))
             .expect("retain terminal progress");
-    assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+    assert_eq!(terminal.state(), AgentTaskRunState::Cancelled);
     assert_eq!(terminal.metadata["cook_progress"]["phase"], "terminal");
     let terminal =
         record_cook_terminal_result_in_store(&lifecycle_store, run_id, "no_candidate", false, 1)
             .expect("record terminal Cook result");
     assert_eq!(
-        terminal.state,
+        terminal.state(),
         AgentTaskRunState::Cancelled,
         "a no-candidate result does not erase the cancellation that caused it"
     );
@@ -1875,7 +1875,7 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
     let quarantined = seeded
         .read_record(queued_run_id)
         .expect("read the scanned queue's record back");
-    assert_eq!(quarantined.state, AgentTaskRunState::Queued);
+    assert_eq!(quarantined.state(), AgentTaskRunState::Queued);
     assert_eq!(
         quarantined.metadata["queue_quarantine"]["category"],
         "queue_admission_preflight_failed"
@@ -1883,7 +1883,7 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
     let expired = seeded
         .read_record(handoff_cook_id)
         .expect("read the detached parent back");
-    assert_eq!(expired.state, AgentTaskRunState::Failed);
+    assert_eq!(expired.state(), AgentTaskRunState::Failed);
     assert_eq!(
         expired.metadata["detached_cook_handoff"]["state"],
         "exited_before_handoff"
@@ -1919,7 +1919,7 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
     let untouched_queue = other
         .read_record(queued_run_id)
         .expect("the second root still has its own queued record");
-    assert_eq!(untouched_queue.state, AgentTaskRunState::Queued);
+    assert_eq!(untouched_queue.state(), AgentTaskRunState::Queued);
     assert!(
         untouched_queue.metadata.get("queue_quarantine").is_none(),
         "second root must not observe a quarantine written through the injected store"
@@ -1927,7 +1927,7 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
     let untouched_parent = other
         .read_record(handoff_cook_id)
         .expect("the second root still has its own detached parent");
-    assert_eq!(untouched_parent.state, AgentTaskRunState::Queued);
+    assert_eq!(untouched_parent.state(), AgentTaskRunState::Queued);
     assert_eq!(
         untouched_parent.metadata["detached_cook_handoff"]["state"],
         "pending"
@@ -2194,7 +2194,7 @@ fn detached_handoff_siblings_advance_only_the_injected_store() {
     let untouched = other
         .read_record(handoff_cook_id)
         .expect("the second root still has its own handoff parent");
-    assert_eq!(untouched.state, AgentTaskRunState::Queued);
+    assert_eq!(untouched.state(), AgentTaskRunState::Queued);
     assert_eq!(
         untouched.metadata["detached_cook_handoff"]["admission_state"],
         "pre_supervisor"
@@ -2802,7 +2802,7 @@ fn run_reentry_siblings_re_enter_only_the_injected_store() {
 
     let resumed = mark_resuming_in_store(&seeded, resume_target)
         .expect("resume the queued run in the injected store");
-    assert_eq!(resumed.state, AgentTaskRunState::Running);
+    assert_eq!(resumed.state(), AgentTaskRunState::Running);
 
     quarantine_queued_run_exact_in_store(&seeded, quarantine_target, "operator halted this run")
         .expect("quarantine the clean queued run in the injected store");
@@ -2824,7 +2824,7 @@ fn run_reentry_siblings_re_enter_only_the_injected_store() {
     let seeded_resume = seeded
         .read_record(resume_target)
         .expect("read the injected store's resumed run back");
-    assert_eq!(seeded_resume.state, AgentTaskRunState::Running);
+    assert_eq!(seeded_resume.state(), AgentTaskRunState::Running);
     assert!(seeded_resume.metadata.get("resume_requested_at").is_some());
     assert_eq!(
         seeded
@@ -2883,12 +2883,12 @@ fn run_reentry_siblings_re_enter_only_the_injected_store() {
     // evidence, it is still in its *original eligible* state. Its retry source
     // is still unreserved, its resumable run is still queued, and its
     // quarantined run is still quarantined with the reason it was seeded with.
-    assert_eq!(untouched_source.state, AgentTaskRunState::Queued);
-    assert_eq!(untouched_resume.state, AgentTaskRunState::Queued);
+    assert_eq!(untouched_source.state(), AgentTaskRunState::Queued);
+    assert_eq!(untouched_resume.state(), AgentTaskRunState::Queued);
     let untouched_rearm = other
         .read_record(rearm_target)
         .expect("the second root still has its own quarantined run");
-    assert_eq!(untouched_rearm.state, AgentTaskRunState::Queued);
+    assert_eq!(untouched_rearm.state(), AgentTaskRunState::Queued);
     assert_eq!(
         untouched_rearm.metadata["queue_quarantine"]["operator_reason"], "seeded quarantine",
         "a re-arm made through the injected store must not clear the second root's quarantine"
@@ -2902,7 +2902,7 @@ fn run_reentry_siblings_re_enter_only_the_injected_store() {
     assert_eq!(
         mark_resuming_in_store(&seeded, rearm_target)
             .expect("the injected store re-armed this run, so it may resume")
-            .state,
+            .state(),
         AgentTaskRunState::Running
     );
     let still_quarantined = mark_resuming_in_store(&other, rearm_target)
@@ -2994,7 +2994,7 @@ fn run_reentry_siblings_re_enter_only_the_injected_store() {
     assert_eq!(
         mark_resuming_in_store(&other, resume_target)
             .expect("the second root's queued run is still resumable")
-            .state,
+            .state(),
         AgentTaskRunState::Running
     );
     assert_eq!(
@@ -3652,7 +3652,7 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
         Some("operator requested cancellation"),
     )
     .expect("canonical cancellation reaches the runner job");
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
     assert_eq!(
         cancelled.metadata["live_cancellation"]["cancellation"],
         "runner_job_cancel"
@@ -4031,7 +4031,7 @@ fn cancelling_queued_runner_proxy_projects_to_accepted_daemon_job() {
         Some("controller aggregate unavailable"),
     )
     .expect("cancellation reaches queued daemon job");
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
     assert_eq!(
         cancelled.metadata["live_cancellation"]["cancellation"],
         "runner_job_cancel"
@@ -4324,7 +4324,7 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
         record, once,
         "repeated terminal reconciliation is idempotent"
     );
-    assert_eq!(record.state, AgentTaskRunState::Succeeded);
+    assert_eq!(record.state(), AgentTaskRunState::Succeeded);
     assert!(is_accepted_runner_handoff(&record));
     assert_eq!(record.artifact_refs[0].uri, "/runner/artifacts/patch.diff");
     assert_eq!(record.metadata["runner_job_status"], "succeeded");
@@ -4372,7 +4372,7 @@ fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
         &terminal_without_aggregate,
     )
     .expect("terminal transport awaits aggregate synchronization");
-    assert_eq!(record.state, AgentTaskRunState::Running);
+    assert_eq!(record.state(), AgentTaskRunState::Running);
     assert!(lifecycle_store.read_aggregate(&record.run_id).is_err());
     let before_delayed_provider_terminal = reconcile_status_in_store(
         &lifecycle_store,
@@ -4383,7 +4383,7 @@ fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
     .expect("continuation reconciliation observes the pending provider aggregate")
     .record;
     assert_eq!(
-        before_delayed_provider_terminal.state,
+        before_delayed_provider_terminal.state(),
         AgentTaskRunState::Running,
         "continuation must keep observing until the runner publishes the provider aggregate"
     );
@@ -4405,7 +4405,7 @@ fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
         .expect("repeated aggregate reconciliation is idempotent");
 
     assert_eq!(record, terminal);
-    assert_eq!(record.state, AgentTaskRunState::Succeeded);
+    assert_eq!(record.state(), AgentTaskRunState::Succeeded);
     assert_eq!(
         lifecycle_store
             .read_aggregate(&record.run_id)
@@ -4421,7 +4421,7 @@ fn terminal_daemon_status_waits_for_delayed_aggregate_then_projects_once() {
     .expect("continuation reconciliation observes the projected terminal aggregate")
     .record;
     assert_eq!(
-        after_delayed_provider_terminal.state,
+        after_delayed_provider_terminal.state(),
         AgentTaskRunState::Succeeded,
         "the same durable attempt becomes terminal exactly once when delayed provider evidence arrives"
     );
@@ -4471,7 +4471,7 @@ fn accepted_handoff_projects_a_remote_timeout_aggregate_even_when_daemon_transpo
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
         .expect("remote timeout aggregate reconciles");
 
-    assert_eq!(record.state, AgentTaskRunState::Failed);
+    assert_eq!(record.state(), AgentTaskRunState::Failed);
     assert_eq!(
         record.totals.as_ref().map(|totals| totals.timed_out),
         Some(1)
@@ -4522,7 +4522,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
         assert_eq!(
             store::read_record("agent-task-disconnected-child")
                 .expect("committed controller projection")
-                .state,
+                .state(),
             AgentTaskRunState::CandidateRecoverable
         );
         assert!(
@@ -4561,7 +4561,10 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
                     .expect("committed artifacts"),
             )
         });
-        assert_eq!(status_record.state, AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(
+            status_record.state(),
+            AgentTaskRunState::CandidateRecoverable
+        );
         assert!(
             log.events
                 .iter()
@@ -4571,7 +4574,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
         assert_eq!(artifacts.artifacts[0].id, "recoverable.patch");
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
-        assert_eq!(record.state, AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
         assert!(store::aggregate_path(&record.run_id)
             .expect("aggregate path")
             .exists());
@@ -4614,7 +4617,7 @@ fn terminal_projection_ignores_a_stale_aggregate_cache_after_commit() {
             Some("stale aggregate cache")
         );
         let durable = durable_local_read(&record.run_id).expect("committed durable pair");
-        assert_eq!(durable.record.state, AgentTaskRunState::Succeeded);
+        assert_eq!(durable.record.state(), AgentTaskRunState::Succeeded);
         let aggregate = durable.aggregate.expect("mirrored aggregate");
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
         assert_eq!(aggregate.outcomes[0].summary.as_deref(), Some("ok"));
@@ -4687,7 +4690,7 @@ fn terminal_proxy_reconciliation_hydrates_persisted_dispatch_terminal_states() {
 
         let artifact_report =
             artifacts_in_store(&lifecycle_store, run_id).expect("controller artifacts");
-        assert_eq!(record.state, expected_state);
+        assert_eq!(record.state(), expected_state);
         assert!(artifact_report
             .evidence_refs
             .iter()
@@ -5130,9 +5133,9 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
         let mirrored_artifacts =
             artifacts("cook-lab-predispatch").expect("mirrored artifacts loaded");
 
-        assert_eq!(record.state, AgentTaskRunState::Failed);
-        assert_eq!(loaded.state, AgentTaskRunState::Failed);
-        assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
+        assert_eq!(record.state(), AgentTaskRunState::Failed);
+        assert_eq!(loaded.state(), AgentTaskRunState::Failed);
+        assert_eq!(loaded.tasks[0].state(), AgentTaskState::Failed);
         assert!(loaded.provider_handles.is_empty());
         assert!(
             log.events
@@ -5236,7 +5239,7 @@ fn record_completed_run_exposes_logs_and_artifacts() {
         let log = logs_in_store(&lifecycle_store, &record.run_id).expect("logs");
         let artifacts = artifacts_in_store(&lifecycle_store, &record.run_id).expect("artifacts");
 
-        assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert_eq!(record.state(), AgentTaskRunState::Succeeded);
         assert!(
             log.events
                 .iter()
@@ -5282,22 +5285,22 @@ fn submitted_run_can_be_loaded_marked_running_and_completed() {
         .record;
 
         assert_eq!(loaded_plan.plan_id, "plan-a");
-        assert_eq!(running.state, AgentTaskRunState::Running);
-        assert_eq!(running.tasks[0].state, AgentTaskState::Running);
+        assert_eq!(running.state(), AgentTaskRunState::Running);
+        assert_eq!(running.tasks[0].state(), AgentTaskState::Running);
         assert_eq!(
             running.lifecycle.execution.state,
             RunExecutionState::Running
         );
         assert!(running.lifecycle.heartbeat.is_some());
-        assert_eq!(completed.state, AgentTaskRunState::Succeeded);
-        assert_eq!(completed.tasks[0].state, AgentTaskState::Succeeded);
+        assert_eq!(completed.state(), AgentTaskRunState::Succeeded);
+        assert_eq!(completed.tasks[0].state(), AgentTaskState::Succeeded);
         assert_eq!(
             completed.lifecycle.execution.state,
             RunExecutionState::Succeeded
         );
         assert_eq!(completed.totals, Some(aggregate.totals.clone()));
-        assert_eq!(durable_status.state, AgentTaskRunState::Succeeded);
-        assert_eq!(durable_status.tasks[0].state, AgentTaskState::Succeeded);
+        assert_eq!(durable_status.state(), AgentTaskRunState::Succeeded);
+        assert_eq!(durable_status.tasks[0].state(), AgentTaskState::Succeeded);
         assert_eq!(durable_status.totals, Some(aggregate.totals.clone()));
         assert!(completed.aggregate_path.is_some());
     }
@@ -5391,11 +5394,11 @@ fn status_recovers_terminal_state_from_durable_aggregate() {
             .read_record("run-stale-status")
             .expect("record persisted");
 
-        assert_eq!(recovered.state, AgentTaskRunState::Succeeded);
-        assert_eq!(recovered.tasks[0].state, AgentTaskState::Succeeded);
+        assert_eq!(recovered.state(), AgentTaskRunState::Succeeded);
+        assert_eq!(recovered.tasks[0].state(), AgentTaskState::Succeeded);
         assert_eq!(recovered.totals, Some(aggregate.totals.clone()));
-        assert_eq!(persisted.state, AgentTaskRunState::Succeeded);
-        assert_eq!(persisted.tasks[0].state, AgentTaskState::Succeeded);
+        assert_eq!(persisted.state(), AgentTaskRunState::Succeeded);
+        assert_eq!(persisted.tasks[0].state(), AgentTaskState::Succeeded);
         assert_eq!(persisted.totals, Some(aggregate.totals.clone()));
     }
 }
@@ -5436,8 +5439,8 @@ fn cancel_run_emits_recovery_commands_for_runner_backed_run() {
     let mut record = lifecycle_store
         .read_record("run-cancel-runner")
         .expect("record");
-    record.state = AgentTaskRunState::Running;
-    record.tasks[0].state = AgentTaskState::Running;
+    record.set_state_for_test(AgentTaskRunState::Running);
+    record.tasks[0].set_state_for_test(AgentTaskState::Running);
     // Runner-backed: owner pid lives on the runner host (not running
     // here), so live cancellation must hand back recovery commands.
     record.metadata = json!({
@@ -5452,8 +5455,8 @@ fn cancel_run_emits_recovery_commands_for_runner_backed_run() {
     let cancelled = cancel_run_in_store(&lifecycle_store, "run-cancel-runner", None)
         .expect("runner run cancelled");
 
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
-    assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
     let unsupported = &cancelled.metadata["live_cancellation_unsupported"];
     assert!(unsupported.is_object());
     assert_eq!(unsupported["runner_id"], json!("lab-a"));

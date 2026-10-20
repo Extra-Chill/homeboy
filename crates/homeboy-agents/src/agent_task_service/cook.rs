@@ -254,7 +254,7 @@ fn await_dispatch_acceptance_receipt(
         }
         let terminal = lifecycle_store
             .read_record(run_id)
-            .is_ok_and(|record| record.state.is_terminal());
+            .is_ok_and(|record| record.state().is_terminal());
         if terminal || std::time::Instant::now() >= deadline {
             // One last read: the receipt and a terminal projection can land
             // in the same window.
@@ -796,7 +796,7 @@ fn admit_cook_runtime_generation(
                 .read_record(&pin_run_id)
                 .ok()
                 .is_some_and(|record| {
-                    record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                    record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
                 })
         },
         |event| {
@@ -1811,17 +1811,31 @@ pub fn cook_observation_in_store(
     Ok(project_cook_observation(store, &record))
 }
 
+/// Read-time Cook observation: the stored record, presented in the state
+/// [`cook_observation_state`] derives for it. The stored record is untouched.
 pub(crate) fn project_cook_observation(
     store: &AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> agent_task_lifecycle::AgentTaskRunRecord {
+    agent_task_lifecycle::observed_with_run_state(record, cook_observation_state(store, record))
+}
+
+/// The state an operator observation surface shows for `record`. Pure: it
+/// derives the state from the stored record and its Cook evidence and never
+/// writes. A provider-`Succeeded` Cook that did not finish end to end reads as
+/// `PartialFailure` (no change) or `CandidateRecoverable` (unverified or
+/// unfinalized candidate).
+pub(crate) fn cook_observation_state(
+    store: &AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> agent_task_lifecycle::AgentTaskRunState {
     use agent_task_lifecycle::AgentTaskRunState;
-    let mut projected = record.clone();
-    if record.state != AgentTaskRunState::Succeeded {
-        return projected;
+    let stored = record.state();
+    if stored != AgentTaskRunState::Succeeded {
+        return stored;
     }
     let Some(cook_id) = record.metadata["cook_id"].as_str() else {
-        return projected;
+        return stored;
     };
     let terminal = &record.metadata["cook_progress"];
     if terminal["phase"] == "terminal"
@@ -1829,7 +1843,7 @@ pub(crate) fn project_cook_observation(
         && terminal["terminal_success"] == true
         && terminal["exit_code"] == 0
     {
-        return projected;
+        return stored;
     }
     // The provider finished, but the Cook ended without a change. There is no
     // candidate to recover, so it must not read as `candidate_recoverable`
@@ -1837,8 +1851,7 @@ pub(crate) fn project_cook_observation(
     if terminal["phase"] == "terminal"
         && terminal["terminal_status"] == CookStatus::NoChanges.as_str()
     {
-        projected.state = AgentTaskRunState::PartialFailure;
-        return projected;
+        return AgentTaskRunState::PartialFailure;
     }
     let recipes = CookRecipeStore::new(store.roots().clone());
     let recipe = recipes.load_recipe(cook_id).ok();
@@ -1864,9 +1877,9 @@ pub(crate) fn project_cook_observation(
     let finalized =
         super::CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published());
     if !cook_success(true, verified, no_finalize, finalized) {
-        projected.state = AgentTaskRunState::CandidateRecoverable;
+        return AgentTaskRunState::CandidateRecoverable;
     }
-    projected
+    stored
 }
 
 fn cook_success(terminal: bool, verified: bool, no_finalize: bool, pr_finalized: bool) -> bool {
@@ -4576,7 +4589,7 @@ fn terminal_review_form_continuation_is_eligible_in_store(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<bool> {
     if !matches!(
-        record.state,
+        record.state(),
         agent_task_lifecycle::AgentTaskRunState::Failed
             | agent_task_lifecycle::AgentTaskRunState::PartialFailure
     ) || !review_form_attempt_is_ready_for_cook_continuation_in_store(
@@ -4603,7 +4616,7 @@ pub fn terminal_review_form_continuation_is_eligible_for_observation_readonly(
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<bool> {
     if !matches!(
-        record.state,
+        record.state(),
         agent_task_lifecycle::AgentTaskRunState::Failed
             | agent_task_lifecycle::AgentTaskRunState::PartialFailure
     ) || !review_form_attempt_is_ready_for_cook_continuation(plan, record)?
@@ -4702,7 +4715,7 @@ pub fn live_owner_continuation_denial(
         .filter(|pid| homeboy_core::process::pid_is_running(*pid));
     let child_owner_pid = child_provider_owner_pid.or(child_gate_owner_pid);
     let generic_owner_is_running = record.owner_process_is_running();
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         if child_owner_pid.is_none() {
             return None;
         }
@@ -5303,7 +5316,7 @@ fn run_cook_reported(
                 lifecycle_store.read_record(&failure_options.identity.initial_run_id)
             {
                 if store.data_root() == lifecycle_store.data_root()
-                    && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+                    && record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
                     && record.plan_id == failure_options.identity.initial_plan.plan_id
                 {
                     let phase = pre_execution_failure_phase(&error, None);
@@ -5323,7 +5336,7 @@ fn run_cook_reported(
                         vec![AgentTaskCookAttemptReport {
                             attempt: 1,
                             run_id: failure_options.identity.initial_run_id.clone(),
-                            run_state: format!("{:?}", record.state),
+                            run_state: format!("{:?}", record.state()),
                             aggregate_path: record.aggregate_path.clone(),
                             promotion: None,
                             feedback: None,
@@ -5498,7 +5511,7 @@ fn durable_cook_error_report_with_store(
                 attempt_record(&attempt.run_id).map(|record| AgentTaskCookAttemptReport {
                     attempt: attempt.attempt,
                     run_id: attempt.run_id,
-                    run_state: format!("{:?}", record.state),
+                    run_state: format!("{:?}", record.state()),
                     aggregate_path: record.aggregate_path,
                     promotion: None,
                     feedback: None,
@@ -6129,7 +6142,7 @@ fn run_cook_spine(
                         .read_record(&lookup_run_id)
                         .ok()
                         .is_some_and(|record| {
-                            record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                            record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
                         })
                     {
                         break;
@@ -6172,7 +6185,7 @@ fn run_cook_spine(
                 .read_record(&options.identity.initial_run_id)
                 .ok()
                 .is_some_and(|record| {
-                    record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                    record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
                 })
             {
                 return Ok(cook_report(CookReportInput {
@@ -6903,7 +6916,7 @@ fn run_cook_spine(
                         let baseline = effective_baseline.map(CookFollowUpBaseline::capability);
                         let harvest_context =
                             Some(cook_attempt_harvest_context(&options.harvest_context));
-                        let result = if lifecycle_store.read_record(&run_id)?.state
+                        let result = if lifecycle_store.read_record(&run_id)?.state()
                             == agent_task_lifecycle::AgentTaskRunState::Running
                         {
                             run_claimed_loaded_plan_with_derived_cook_baseline_in_store(
@@ -6943,8 +6956,8 @@ fn run_cook_spine(
                 }
                 let record = match rooted_status(lifecycle_store, &run_id) {
                     Ok(record)
-                        if record.state.is_terminal()
-                            || (record.state
+                        if record.state().is_terminal()
+                            || (record.state()
                                 == agent_task_lifecycle::AgentTaskRunState::Running
                                 && !super::cook_recipe::has_unambiguous_zero_execution(
                                     &record,
@@ -6979,7 +6992,7 @@ fn run_cook_spine(
                     run_id: run_id.clone(),
                     run_state: record
                         .as_ref()
-                        .map(|record| format!("{:?}", record.state))
+                        .map(|record| format!("{:?}", record.state()))
                         .unwrap_or_else(|| "DispatchFailed".to_string()),
                     aggregate_path: record
                         .as_ref()
@@ -7039,7 +7052,7 @@ fn run_cook_spine(
         // terminal result but before the run projection is terminalized. Repair
         // only this Cook attempt, never the active fleet, before deciding whether
         // an absent aggregate is safe to continue from.
-        if record.state == agent_task_lifecycle::AgentTaskRunState::Running
+        if record.state() == agent_task_lifecycle::AgentTaskRunState::Running
             && record.is_stale_running()
             && record.aggregate_path.is_none()
         {
@@ -7053,11 +7066,11 @@ fn run_cook_spine(
         let controller_owned_staging = record.lab_staging_controller_job_id().is_some();
         // This invocation owns the exact attempt, not its mission's latest
         // retry. Cancellation must end the observer and release its pin.
-        if record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled {
+        if record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled {
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
-                run_state: format!("{:?}", record.state),
+                run_state: format!("{:?}", record.state()),
                 aggregate_path: record.aggregate_path,
                 promotion: None,
                 feedback: None,
@@ -7074,7 +7087,7 @@ fn run_cook_spine(
             }));
         }
         if matches!(
-            record.state,
+            record.state(),
             agent_task_lifecycle::AgentTaskRunState::Queued
                 | agent_task_lifecycle::AgentTaskRunState::Running
         ) && (record.runner_job_id().is_some() || controller_owned_staging)
@@ -7085,7 +7098,7 @@ fn run_cook_spine(
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
-                run_state: format!("{:?}", record.state),
+                run_state: format!("{:?}", record.state()),
                 aggregate_path: record.aggregate_path,
                 promotion: None,
                 feedback: None,
@@ -7130,7 +7143,7 @@ fn run_cook_spine(
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
-                run_state: format!("{:?}", record.state),
+                run_state: format!("{:?}", record.state()),
                 aggregate_path: record.aggregate_path,
                 promotion: None,
                 feedback: None,
@@ -7162,7 +7175,7 @@ fn run_cook_spine(
             // An aggregate path is authoritative evidence that an aggregate was
             // committed. Its read failure must surface for repair rather than be
             // misclassified as an interruption and bypass immutable output.
-            Err(_error) if record.state.is_terminal() && record.aggregate_path.is_none() => {
+            Err(_error) if record.state().is_terminal() && record.aggregate_path.is_none() => {
                 if let Some(promotion) = persisted_terminal_promotion {
                     let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
                         source_request,
@@ -7181,7 +7194,7 @@ fn run_cook_spine(
                     attempts.push(AgentTaskCookAttemptReport {
                         attempt,
                         run_id: run_id.clone(),
-                        run_state: format!("{:?}", record.state),
+                        run_state: format!("{:?}", record.state()),
                         aggregate_path: record.aggregate_path,
                         promotion: Some(promotion),
                         feedback: Some(feedback.clone()),
@@ -7238,7 +7251,7 @@ fn run_cook_spine(
                     attempts.push(AgentTaskCookAttemptReport {
                         attempt,
                         run_id: run_id.clone(),
-                        run_state: format!("{:?}", record.state),
+                        run_state: format!("{:?}", record.state()),
                         aggregate_path: None,
                         promotion: None,
                         feedback: None,
@@ -7263,7 +7276,7 @@ fn run_cook_spine(
                 attempts.push(AgentTaskCookAttemptReport {
                     attempt,
                     run_id: run_id.clone(),
-                    run_state: format!("{:?}", record.state),
+                    run_state: format!("{:?}", record.state()),
                     aggregate_path: record.aggregate_path.clone(),
                     promotion: None,
                     feedback: None,
@@ -7372,7 +7385,7 @@ fn run_cook_spine(
                 attempts.push(AgentTaskCookAttemptReport {
                     attempt,
                     run_id: run_id.clone(),
-                    run_state: format!("{:?}", transitioned.state),
+                    run_state: format!("{:?}", transitioned.state()),
                     aggregate_path: transitioned.aggregate_path,
                     promotion: None,
                     feedback: None,
@@ -7429,7 +7442,7 @@ fn run_cook_spine(
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
-                run_state: format!("{:?}", record.state),
+                run_state: format!("{:?}", record.state()),
                 aggregate_path: record.aggregate_path,
                 promotion: None,
                 feedback: None,
@@ -7458,7 +7471,7 @@ fn run_cook_spine(
         // Only the adopted attempt itself carries adoption authority past a
         // terminal state; a failed form-only continuation of it does not.
         if !matches!(
-            record.state,
+            record.state(),
             agent_task_lifecycle::AgentTaskRunState::Succeeded
                 | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
                 | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
@@ -7468,7 +7481,7 @@ fn run_cook_spine(
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
-                run_state: format!("{:?}", record.state),
+                run_state: format!("{:?}", record.state()),
                 aggregate_path: record.aggregate_path.clone(),
                 promotion: None,
                 feedback: None,
@@ -7476,7 +7489,7 @@ fn run_cook_spine(
             let remaining_budget = budget_limit
                 .as_ref()
                 .and_then(|budget| budget_remaining(budget, budget_used));
-            let status = terminal_fallback_status(record.state);
+            let status = terminal_fallback_status(record.state());
             let cancelled = status == CookStatus::Cancelled;
             let mut report = cook_report(CookReportInput {
                 cook_id,
@@ -7494,7 +7507,7 @@ fn run_cook_spine(
                 } else {
                     Some(format!(
                         "agent-task run {run_id} ended in state {:?}",
-                        record.state
+                        record.state()
                     ))
                 },
                 exit_code: 1,
@@ -7591,7 +7604,7 @@ fn run_cook_spine(
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
-                run_state: format!("{:?}", record.state),
+                run_state: format!("{:?}", record.state()),
                 aggregate_path: record.aggregate_path,
                 promotion: None,
                 feedback: None,
@@ -7707,7 +7720,7 @@ fn run_cook_spine(
         delivery.attempts.push(AgentTaskCookAttemptReport {
             attempt,
             run_id: run_id.clone(),
-            run_state: format!("{:?}", record.state),
+            run_state: format!("{:?}", record.state()),
             aggregate_path: record.aggregate_path,
             promotion: Some(promotion.clone()),
             feedback: Some(feedback.clone()),
@@ -8119,7 +8132,7 @@ fn cook_attempt_needs_execution_with_store(
 
 fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
     (!matches!(
-        record.state,
+        record.state(),
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable

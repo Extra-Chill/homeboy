@@ -99,7 +99,11 @@ pub struct AgentTaskRunRecord {
     pub schema: String,
     pub run_id: String,
     pub plan_id: String,
-    pub state: AgentTaskRunState,
+    /// The run state. Private so no code outside the lifecycle store and the
+    /// transition module can assign it (#15718): read it through
+    /// [`Self::state`], change it through the typed writers in
+    /// `terminal_transition.rs`, which alone can mint a [`StateWriteAuthority`].
+    state: AgentTaskRunState,
     /// Monotonic run-level write revision, owned by the lifecycle store.
     ///
     /// Every committed write sets it to the stored revision plus one, whatever
@@ -500,6 +504,70 @@ impl AgentTaskLatestExecutorEvidence {
 }
 
 impl AgentTaskRunRecord {
+    /// A freshly submitted run: `Queued`, never committed (revision `0`), with
+    /// an empty task list and no evidence. Every run starts here; its state
+    /// moves only through the lifecycle store's transitions afterwards.
+    pub fn new_queued(
+        run_id: impl Into<String>,
+        plan_id: impl Into<String>,
+        plan_path: impl Into<String>,
+        submitted_at: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: schemas::RUN.to_string(),
+            run_id: run_id.into(),
+            plan_id: plan_id.into(),
+            state: AgentTaskRunState::Queued,
+            revision: 0,
+            submitted_at: submitted_at.into(),
+            updated_at: None,
+            plan_path: plan_path.into(),
+            aggregate_path: None,
+            totals: None,
+            tasks: Vec::new(),
+            artifact_refs: Vec::new(),
+            provider_handles: Vec::new(),
+            latest_executor_evidence: None,
+            lifecycle: RunLifecycleRecord::with_execution_state(RunExecutionState::Queued),
+            lab_handoff: None,
+            candidate_adoption: None,
+            adoption_run_id: None,
+            acceptance: None,
+            workspace_identity: None,
+            workspace_lifecycle_revision: 0,
+            workspace_owner_lease: None,
+            workspace_claim: None,
+            metadata: Value::Null,
+        }
+    }
+
+    /// The stored run state.
+    pub fn state(&self) -> AgentTaskRunState {
+        self.state
+    }
+
+    /// Assign the run state. Only the transition module can mint the
+    /// [`StateWriteAuthority`] this demands, so the compiler rejects a direct
+    /// state write anywhere else (#15718).
+    pub(crate) fn write_state(&mut self, state: AgentTaskRunState, _: StateWriteAuthority) {
+        self.state = state;
+    }
+
+    /// Fixture-only state assignment for tests that build records in a given
+    /// state without driving them through the lifecycle. Never compiled into a
+    /// production binary.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_state_for_test(&mut self, state: AgentTaskRunState) {
+        self.state = state;
+    }
+
+    /// Builder form of [`Self::set_state_for_test`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_state_for_test(mut self, state: AgentTaskRunState) -> Self {
+        self.state = state;
+        self
+    }
+
     pub(crate) fn has_accepted_lab_handoff(&self) -> bool {
         self.lab_handoff.as_ref().is_some_and(|handoff| {
             handoff.is_valid() && handoff.state == AgentTaskLabHandoffState::Accepted
@@ -1728,7 +1796,9 @@ mod run_state_lifecycle_projection_tests {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskRunTask {
     pub task_id: String,
-    pub state: AgentTaskState,
+    /// The task state. Private for the same reason as
+    /// [`AgentTaskRunRecord::state`]; read it through [`Self::state`].
+    state: AgentTaskState,
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
@@ -1736,6 +1806,44 @@ pub struct AgentTaskRunTask {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_ref: Option<String>,
+}
+
+impl AgentTaskRunTask {
+    /// A task that has not started: every task enters a run `Queued`.
+    pub fn queued(task_id: impl Into<String>, backend: impl Into<String>) -> Self {
+        Self {
+            task_id: task_id.into(),
+            state: AgentTaskState::Queued,
+            backend: backend.into(),
+            selector: None,
+            model: None,
+            provider_ref: None,
+        }
+    }
+
+    /// The task state.
+    pub fn state(&self) -> AgentTaskState {
+        self.state
+    }
+
+    /// Assign the task state; gated like [`AgentTaskRunRecord::write_state`].
+    pub(crate) fn write_state(&mut self, state: AgentTaskState, _: StateWriteAuthority) {
+        self.state = state;
+    }
+
+    /// Fixture-only state assignment; see
+    /// [`AgentTaskRunRecord::set_state_for_test`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_state_for_test(&mut self, state: AgentTaskState) {
+        self.state = state;
+    }
+
+    /// Builder form of [`Self::set_state_for_test`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_state_for_test(mut self, state: AgentTaskState) -> Self {
+        self.state = state;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

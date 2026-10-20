@@ -231,7 +231,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
             deferred.metadata["cook_delivery"]["delivery"]["blocker"]["code"],
             "gates_deferred"
         );
-        assert_eq!(deferred.state, AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(deferred.state(), AgentTaskRunState::CandidateRecoverable);
         // The Cook loop recorded its deferred result.
         lifecycle_store
             .mutate_record(run_id, |record| {
@@ -252,7 +252,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
         let delivery = persisted_delivery(&verified);
         assert_eq!(delivery.state, state, "{executed}");
         assert_eq!(delivery.blocker_code(), blocker, "{executed}");
-        assert_eq!(verified.state, run_state, "{executed}");
+        assert_eq!(verified.state(), run_state, "{executed}");
         assert_eq!(delivery.lifecycle().cook_status, cook_status, "{executed}");
         let terminal_status = verified.metadata["cook_progress"]["terminal_status"].as_str();
         assert_ne!(terminal_status, Some("gates_deferred"), "{executed}");
@@ -291,5 +291,5 @@ fn a_no_change_gate_failure_is_recoverable_and_canonically_spelled() {
             .map(CookStatus::as_str),
         Some("no_changes_gate_failed")
     );
-    assert_eq!(record.state, AgentTaskRunState::CandidateRecoverable);
+    assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
 }

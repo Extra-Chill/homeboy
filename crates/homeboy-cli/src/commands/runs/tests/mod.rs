@@ -2293,7 +2293,7 @@ fn runs_show_cook_id_follows_latest_attempt_not_admission_pass() {
 
         lifecycle
             .mutate_record(attempt_id, |record| {
-                record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
                 true
             })
             .expect("fail attempt");

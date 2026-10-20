@@ -768,7 +768,7 @@ fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) 
         return;
     };
     let recoverable = matches!(
-        record.state,
+        record.state(),
         agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
     ) || CookDelivery::from_run_metadata(&record.metadata).is_some_and(
@@ -834,7 +834,7 @@ fn compact_cook_candidate_projection(run_id: &str) -> Value {
             json!({
                 "status": "available",
                 "run_id": snapshot.record.run_id,
-                "state": snapshot.record.state,
+                "state": snapshot.record.state(),
                 "task_count": snapshot.record.tasks.len(),
                 "aggregate_path": snapshot.record.aggregate_path,
                 "outcome_count": outcome_count,
@@ -870,7 +870,7 @@ impl WatchPoller for StatusPoller {
             // The admission stays open until its replay materializes the
             // attempt or terminalizes the admission itself.
             return agent_task_lifecycle::exact_record(&self.args.run_id)
-                .map_or(true, |admission| admission.state.is_terminal());
+                .map_or(true, |admission| admission.state().is_terminal());
         }
         status_is_terminal(&item.0) && !cook_driver_still_owns(&item.0)
     }
@@ -2491,7 +2491,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let verdict = homeboy::agents::orchestration::run_exact_from_current_environment(run_id)
         .ok()
         .map(|run| crate::commands::cook_verdict::cook_verdict(&run));
-    let record_state = serde_json::to_value(record.state).unwrap_or(Value::Null);
+    let record_state = serde_json::to_value(record.state()).unwrap_or(Value::Null);
     let state = verdict
         .as_ref()
         .map(|verdict| json!(verdict.state))
@@ -2545,7 +2545,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
                 "task_id": diagnostic.task_id,
                 "surface": "runner",
                 "phase": diagnostic.data["causal_phase"],
-                "status": record.state,
+                "status": record.state(),
                 "failure_classification": "runner_cancellation",
             }));
         }
@@ -4199,7 +4199,7 @@ pub(super) fn validate_runtime(args: RuntimeValidateArgs) -> CmdResult<Value> {
         &args.run_id,
     )?;
     Ok((
-        json!({ "schema": "homeboy/controller-runtime-validation/v1", "run_id": record.run_id, "state": record.state, "executable": true }),
+        json!({ "schema": "homeboy/controller-runtime-validation/v1", "run_id": record.run_id, "state": record.state(), "executable": true }),
         0,
     ))
 }
@@ -5695,7 +5695,7 @@ fn queued_runner_ownership_diagnostic(
     liveness: agent_task_service::AgentTaskLiveness,
     probe: &agent_task_lifecycle::AgentTaskRunnerDiagnosticProbe,
 ) -> Option<CollectedDiagnostic> {
-    (record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+    (record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
         && record.runner_id().is_some()
         && probe.skipped_reason == Some("missing_runner_job_id"))
     .then(|| CollectedDiagnostic {

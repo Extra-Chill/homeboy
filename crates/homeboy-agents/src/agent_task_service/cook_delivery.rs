@@ -840,7 +840,7 @@ impl CookDeliveryContext<'_, '_> {
         self.attempts.push(AgentTaskCookAttemptReport {
             attempt: self.attempt,
             run_id: self.run_id.to_string(),
-            run_state: format!("{:?}", record.state),
+            run_state: format!("{:?}", record.state()),
             aggregate_path: record.aggregate_path.clone(),
             promotion,
             feedback: None,

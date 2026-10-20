@@ -20,7 +20,7 @@ pub fn lifecycle_action_eligibility(
     let resume = resume_availability(record);
     let placement_update = placement_update_availability(record);
     let retry = retry_availability(record, plan);
-    let quarantine = if record.state == AgentTaskRunState::Queued {
+    let quarantine = if record.state() == AgentTaskRunState::Queued {
         available("queued run can be quarantined before admission")
     } else {
         unavailable("quarantine requires an exact queued run")
@@ -31,7 +31,7 @@ pub fn lifecycle_action_eligibility(
         unavailable("run is not quarantined")
     };
     let promotion = if matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Succeeded
             | AgentTaskRunState::CandidateRecoverable
             | AgentTaskRunState::PartialRecoverable
@@ -126,7 +126,7 @@ fn reconcile_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAva
     if dead_candidate_adoption_owner(record) {
         return available("candidate adoption owner is gone");
     }
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         return unavailable("terminal runs have no ownership to reconcile");
     }
     let liveness = crate::agent_task_service::liveness_for_record(record, chrono::Utc::now());
@@ -155,7 +155,7 @@ fn placement_update_availability(
     record: &AgentTaskRunRecord,
 ) -> (ControlPlaneActionAvailability, String) {
     let admission = &record.metadata["unmaterialized_cook_admission"];
-    if record.state != AgentTaskRunState::Queued || !admission.is_object() {
+    if record.state() != AgentTaskRunState::Queued || !admission.is_object() {
         return unavailable("placement updates require a queued unmaterialized Cook admission");
     }
     if record.metadata["provider_executions"]
@@ -202,13 +202,13 @@ fn indeterminate(reason: impl Into<String>) -> (ControlPlaneActionAvailability, 
 
 fn resource_guard_blocks_replay(record: &AgentTaskRunRecord) -> bool {
     matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure
     ) && homeboy_runner_contract::find_resource_guard_stop(&record.metadata).is_some()
 }
 
 fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvailability, String) {
-    if record.state == AgentTaskRunState::CandidateRecoverable
+    if record.state() == AgentTaskRunState::CandidateRecoverable
         && record.runner_id().is_some()
         && record.runner_job_id().is_some()
         && record.metadata["cook_id"].as_str().is_some()
@@ -238,7 +238,7 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
             "pre-supervisor Cook admission has no replayable request; rerun the original Cook invocation to reclaim a dead or expired launcher",
         );
     }
-    if record.state.is_terminal()
+    if record.state().is_terminal()
         && record.runner_id().is_some()
         && record.runner_job_id().is_some()
     {
@@ -246,7 +246,7 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
             "terminal runner evidence may be reprojected idempotently without reopening execution",
         );
     }
-    match record.state {
+    match record.state() {
         AgentTaskRunState::Queued => {
             if record.is_controller_pre_provider_phase()
                 && record.metadata["phase"] == "source_materialization"
@@ -303,7 +303,7 @@ fn retry_availability(
         );
     }
     if !matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Failed
             | AgentTaskRunState::Cancelled
             | AgentTaskRunState::PartialFailure

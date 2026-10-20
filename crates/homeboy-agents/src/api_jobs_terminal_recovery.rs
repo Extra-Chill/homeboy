@@ -27,7 +27,7 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
         };
         store.read_record_bounded(run_id).is_ok_and(|record| {
             record.run_id == run_id
-                && record.state == crate::agent_task_lifecycle::AgentTaskRunState::Cancelled
+                && record.state() == crate::agent_task_lifecycle::AgentTaskRunState::Cancelled
         })
     }
 
@@ -84,7 +84,7 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
         let resolved_run_id =
             crate::agent_task_lifecycle::resolve_run_id_in_store(&lifecycle_store, run_id).ok()?;
         let record = lifecycle_store.read_record_bounded(&resolved_run_id).ok()?;
-        if record.state.is_terminal() {
+        if record.state().is_terminal() {
             Some(DaemonLinkedDurableRunState::Terminal)
         } else {
             Some(DaemonLinkedDurableRunState::Active)
@@ -153,23 +153,16 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
             let run_id = "runner-linked-terminal-recovery";
-            let record = AgentTaskRunRecord {
-                schema: crate::agent_task_lifecycle::schemas::RUN.to_string(),
-                run_id: run_id.to_string(),
-                plan_id: "plan".to_string(),
-                state: AgentTaskRunState::Running,
-                revision: 0,
-                submitted_at: "2026-09-12T00:00:00Z".to_string(),
-                updated_at: None,
-                plan_path: store.controller_plan_path(run_id).display().to_string(),
-                aggregate_path: None,
-                totals: None,
-                tasks: Vec::new(),
-                artifact_refs: Vec::new(),
-                provider_handles: Vec::new(),
-                latest_executor_evidence: None,
-                lifecycle: RunLifecycleRecord::with_execution_state(RunExecutionState::Running),
-                lab_handoff: Some(AgentTaskLabHandoff {
+            let record = {
+                let mut record = AgentTaskRunRecord::new_queued(
+                    run_id.to_string(),
+                    "plan".to_string(),
+                    store.controller_plan_path(run_id).display().to_string(),
+                    "2026-09-12T00:00:00Z".to_string(),
+                );
+                record.lifecycle =
+                    RunLifecycleRecord::with_execution_state(RunExecutionState::Running);
+                record.lab_handoff = Some(AgentTaskLabHandoff {
                     state: AgentTaskLabHandoffState::Accepted,
                     authority: AgentTaskLabHandoffAuthority::RunnerDaemon,
                     runner_id: "homeboy-lab".to_string(),
@@ -184,15 +177,10 @@ mod tests {
                     workspace_lifecycle_revision: 0,
                     workspace_owner_lease: None,
                     workspace_claim: None,
-                }),
-                candidate_adoption: None,
-                adoption_run_id: None,
-                acceptance: None,
-                workspace_identity: None,
-                workspace_lifecycle_revision: 0,
-                workspace_owner_lease: None,
-                workspace_claim: None,
-                metadata: json!({}),
+                });
+                record.metadata = json!({});
+                record.set_state_for_test(AgentTaskRunState::Running);
+                record
             };
             store.write_record(&record).expect("write linked record");
             store
@@ -219,7 +207,7 @@ mod tests {
             assert!(!AgentTaskTerminalRecoveryProviderImpl.durable_run_is_cancelled("missing-run"));
             let mut cancelled = record.clone();
             cancelled.run_id = "cancelled-without-aggregate".to_string();
-            cancelled.state = AgentTaskRunState::Cancelled;
+            cancelled.set_state_for_test(AgentTaskRunState::Cancelled);
             cancelled.lifecycle =
                 RunLifecycleRecord::with_execution_state(RunExecutionState::Cancelled);
             store
@@ -232,7 +220,7 @@ mod tests {
                 .durable_run_is_cancelled("cook-alias-for-terminal-recovery"));
 
             let mut terminal_record = record;
-            terminal_record.state = AgentTaskRunState::Succeeded;
+            terminal_record.set_state_for_test(AgentTaskRunState::Succeeded);
             terminal_record.lifecycle =
                 RunLifecycleRecord::with_execution_state(RunExecutionState::Succeeded);
             store

@@ -395,7 +395,7 @@ fn crash_case(fault: Fault) {
             let Ok(record) = store.read_record(&index.latest_run_id) else {
                 return false;
             };
-            record.state.is_terminal()
+            record.state().is_terminal()
                 && intents(&context)
                     .iter()
                     .all(|row| row["state"] == "submitted")
@@ -408,7 +408,7 @@ fn crash_case(fault: Fault) {
     let index = store.read_cook_index(COOK).unwrap();
     let attempt = store.read_record(&index.latest_run_id).unwrap();
     assert_eq!(
-        serde_json::to_value(attempt.state).unwrap(),
+        serde_json::to_value(attempt.state()).unwrap(),
         "succeeded",
         "{}",
         evidence(&context)
@@ -427,7 +427,7 @@ fn crash_case(fault: Fault) {
     );
     let parent = store.read_record(COOK).unwrap();
     assert_eq!(
-        serde_json::to_value(parent.state).unwrap(),
+        serde_json::to_value(parent.state()).unwrap(),
         "succeeded",
         "{}",
         evidence(&context)

@@ -251,7 +251,7 @@ fn native_private_daemon_cancels_only_the_rooted_staging_owner() {
         assert_eq!(first_ack["disposition"], "cancelled");
         assert_eq!(first_ack["terminal"], true);
         assert_eq!(
-            other_root.read_record(RUN_ID).unwrap().state,
+            other_root.read_record(RUN_ID).unwrap().state(),
             AgentTaskRunState::Queued
         );
 
@@ -284,11 +284,11 @@ fn native_private_daemon_cancels_only_the_rooted_staging_owner() {
         println!("NATIVE_STATUS={}", String::from_utf8_lossy(&status.stdout));
         assert!(status.status.success());
         assert_eq!(
-            store.read_record(RUN_ID).unwrap().state,
+            store.read_record(RUN_ID).unwrap().state(),
             AgentTaskRunState::Cancelled
         );
         assert_eq!(
-            other_root.read_record(RUN_ID).unwrap().state,
+            other_root.read_record(RUN_ID).unwrap().state(),
             AgentTaskRunState::Queued
         );
         let event_kinds = store

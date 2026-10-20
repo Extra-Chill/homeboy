@@ -295,7 +295,7 @@ fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
         Ok(record) => record,
         Err(outcome) => return outcome,
     };
-    if !record.state.is_terminal() {
+    if !record.state().is_terminal() {
         return WorkflowRunOutcome::Pending;
     }
     let continuation = super::CookRecipeStore::from_current_data_root()
@@ -311,7 +311,7 @@ fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
         Ok(super::CookContinuationState::Absent)
             if record.runner_id().is_some()
                 && matches!(
-                    record.state,
+                    record.state(),
                     agent_task_lifecycle::AgentTaskRunState::Succeeded
                         | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
                         | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
@@ -346,13 +346,13 @@ fn workflow_cook_progress(cook_id: &str) -> Option<Value> {
     let record = workflow_cook_record(cook_id).ok()?;
     Some(json!({
         "run_id": record.run_id,
-        "state": record.state,
+        "state": record.state(),
         "phase": record
             .metadata
             .get("phase")
             .or_else(|| record.metadata.get("current_phase"))
             .cloned()
-            .unwrap_or_else(|| json!(record.state)),
+            .unwrap_or_else(|| json!(record.state())),
         "updated_at": record.updated_at,
         "provider": record.provider_handles.last().map(|handle| &handle.backend),
     }))
@@ -384,7 +384,7 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
         }
         return Ok(());
     }
-    if !parent.state.is_terminal()
+    if !parent.state().is_terminal()
         && parent.metadata["detached_cook_handoff"]["state"] != "redirected"
         && agent_task_lifecycle::is_unmaterialized_cook_admission(&parent)
     {
@@ -415,7 +415,7 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
     };
     let attempt = index.latest_run_id;
     let record = store.read_record(&attempt)?;
-    if !record.state.is_terminal() {
+    if !record.state().is_terminal() {
         agent_task_lifecycle::record_interrupted_local_owner_in_store(&store, &attempt)?;
     }
     notify_cook_attempt(cook_id, &attempt)
@@ -433,7 +433,7 @@ fn settle_missing_launch_index(
     let mut read_error = None;
     let mut repaired_index = None;
     store.transition_when(cook_id, |record| {
-        if record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+        if record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
             || record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
             || record.metadata["detached_cook_handoff"]["state"] != "redirected"
         {
@@ -484,14 +484,14 @@ fn settle_missing_launch_index(
 fn notify_cook_attempt(cook_id: &str, attempt_run_id: &str) -> Result<()> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let record = store.read_record(attempt_run_id)?;
-    if !record.state.is_terminal() {
+    if !record.state().is_terminal() {
         return Ok(());
     }
-    let exit_code = i32::from(record.state != agent_task_lifecycle::AgentTaskRunState::Succeeded);
+    let exit_code = i32::from(record.state() != agent_task_lifecycle::AgentTaskRunState::Succeeded);
     crate::agent_task_notify::cook_terminal_for_attempt(
         cook_id,
         attempt_run_id,
-        attempt_status_label(record.state),
+        attempt_status_label(record.state()),
         exit_code,
     );
     Ok(())
@@ -585,7 +585,7 @@ mod tests {
             observe_cook_step_exit(&exit).unwrap();
             let after = store.read_record(cook_id).unwrap();
             assert_eq!(
-                after.state,
+                after.state(),
                 agent_task_lifecycle::AgentTaskRunState::Cancelled
             );
             assert_eq!(after.revision, before.revision);

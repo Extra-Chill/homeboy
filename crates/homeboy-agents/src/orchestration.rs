@@ -1154,7 +1154,7 @@ fn project_task(
         mission,
         run,
         task: task_id,
-        state: task_state(task.state),
+        state: task_state(task.state()),
     })
 }
 
@@ -2020,7 +2020,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
             )
         } else {
             match request.action {
-                ControlPlaneAction::Cancel if record.state.is_terminal() => (
+                ControlPlaneAction::Cancel if record.state().is_terminal() => (
                     ControlPlaneActionOutcome::AlreadySatisfied,
                     project_record(&record, None)?,
                     cancel_result_payload(cancel_result_for_record(
@@ -2347,7 +2347,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         .get("unmaterialized_cook_admission")
                         .is_some_and(serde_json::Value::is_object) =>
                 {
-                    if record.state.is_terminal() {
+                    if record.state().is_terminal() {
                         let terminal_error = record
                             .metadata
                             .get("cancel_reason")
@@ -2369,7 +2369,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                     "run_id": record.run_id,
                                     "idempotent": true,
                                     "terminal": true,
-                                    "terminal_state": record.state,
+                                    "terminal_state": record.state(),
                                     "error": terminal_error,
                                 }),
                             },
@@ -2415,7 +2415,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         crate::agent_task_service::terminal_transport_recovery_required(
                             requested_id.as_str(),
                         );
-                    let terminal_projection_recovery = record.state.is_terminal()
+                    let terminal_projection_recovery = record.state().is_terminal()
                         && record.runner_id().is_some()
                         && record.runner_job_id().is_some();
                     // A terminal runner-backed CandidateRecoverable record
@@ -2424,7 +2424,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     // continuation owns that recovery. Name the cause instead
                     // of exiting 1 silently (#15668).
                     let candidate_recoverable_continuation = terminal_projection_recovery
-                        && record.state == AgentTaskRunState::CandidateRecoverable;
+                        && record.state() == AgentTaskRunState::CandidateRecoverable;
                     let resumed = (|| -> homeboy_core::Result<_> {
                         if terminal_projection_recovery {
                             crate::agent_task_service::reconcile_terminal_artifact_projection(
@@ -2469,7 +2469,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             )),
                         ),
                         Ok((result, current)) => (
-                            if record.state.is_terminal() {
+                            if record.state().is_terminal() {
                                 ControlPlaneActionOutcome::AlreadySatisfied
                             } else {
                                 ControlPlaneActionOutcome::Succeeded
@@ -2608,7 +2608,7 @@ fn action_unavailability(
         return None;
     }
     if action == ControlPlaneAction::Resume
-        && record.state.is_terminal()
+        && record.state().is_terminal()
         && record.runner_id().is_some()
         && record.runner_job_id().is_some()
     {
@@ -2643,8 +2643,8 @@ fn recover_interrupted_action_acknowledgement(
         ))
     };
     let (outcome, resource, result, message) = match request.action {
-        ControlPlaneAction::Cancel if current.state.is_terminal() => (
-            if current.state == AgentTaskRunState::Cancelled {
+        ControlPlaneAction::Cancel if current.state().is_terminal() => (
+            if current.state() == AgentTaskRunState::Cancelled {
                 ControlPlaneActionOutcome::Succeeded
             } else {
                 ControlPlaneActionOutcome::AlreadySatisfied
@@ -2735,7 +2735,7 @@ fn recover_interrupted_action_acknowledgement(
                 .metadata
                 .get("unmaterialized_cook_admission")
                 .is_some_and(Value::is_object)
-                && current.state.is_terminal() =>
+                && current.state().is_terminal() =>
         {
             (
                 ControlPlaneActionOutcome::AlreadySatisfied,
@@ -2748,14 +2748,14 @@ fn recover_interrupted_action_acknowledgement(
                         "run_id": current.run_id,
                         "idempotent": true,
                         "terminal": true,
-                        "terminal_state": current.state,
+                        "terminal_state": current.state(),
                         "recovered": true,
                     }),
                 },
                 Some("recovered from the durable terminal admission state".to_string()),
             )
         }
-                ControlPlaneAction::Resume if current.state.is_terminal() => {
+                ControlPlaneAction::Resume if current.state().is_terminal() => {
             match crate::agent_task_lifecycle::read_aggregate_in_store(store, &current.run_id) {
                 Ok(aggregate) => {
                     let exit_code = crate::agent_task_service::aggregate_exit_code(&aggregate);
@@ -3331,12 +3331,12 @@ fn review_next_actions(
     review: Option<&crate::agent_tasks::AgentTaskAggregateReport>,
     has_target: bool,
 ) -> Vec<String> {
-    if record.state == AgentTaskRunState::Queued {
+    if record.state() == AgentTaskRunState::Queued {
         return vec![
             "run this queued durable task with `homeboy agent-task run <run-id>`".to_string(),
         ];
     }
-    if record.state == AgentTaskRunState::Running {
+    if record.state() == AgentTaskRunState::Running {
         return vec!["inspect progress with `homeboy agent-task status <run-id>` and `homeboy agent-task logs <run-id>`".to_string()];
     }
     let Some(review) = review else {
@@ -3500,7 +3500,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
             ) {
                 Ok(status) => {
                     observed = status.record;
-                    if observed.state.is_terminal()
+                    if observed.state().is_terminal()
                         || observed
                             .metadata
                             .get("cancellation_deferred_for_terminal_provider")
@@ -3542,9 +3542,9 @@ fn cancel_result_for_record(
     poll_count: u64,
     observation_error: Option<String>,
 ) -> ControlPlaneCancelResult {
-    let disposition = if record.state == AgentTaskRunState::Cancelled {
+    let disposition = if record.state() == AgentTaskRunState::Cancelled {
         ControlPlaneCancelDisposition::Cancelled
-    } else if record.state.is_terminal() {
+    } else if record.state().is_terminal() {
         ControlPlaneCancelDisposition::TerminalWithoutCancellation
     } else if record
         .metadata
@@ -3555,7 +3555,7 @@ fn cancel_result_for_record(
     } else {
         ControlPlaneCancelDisposition::Requested
     };
-    let observation_error = if record.state.is_terminal() {
+    let observation_error = if record.state().is_terminal() {
         observation_error
     } else {
         observation_error.or_else(|| {
@@ -3629,7 +3629,7 @@ fn cancel_result_for_record(
     ControlPlaneCancelResult {
         schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
         disposition,
-        terminal: record.state.is_terminal(),
+        terminal: record.state().is_terminal(),
         wait_timeout_seconds: CANCEL_TERMINAL_WAIT.as_secs(),
         waited_seconds: waited.as_secs(),
         poll_count,
@@ -4317,7 +4317,7 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
 }
 
 pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
-    if (record.state == AgentTaskRunState::CandidateRecoverable
+    if (record.state() == AgentTaskRunState::CandidateRecoverable
         && record.owner_process_is_running())
         || record.has_live_execution_step_owner()
     {
@@ -4335,14 +4335,14 @@ pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
     // recovery-shaped status it does not need. Only override non-`Running`
     // states, where "pending verification" is the more accurate read (e.g. a
     // record already marked `Succeeded` whose promotion has not verified).
-    if record.state != AgentTaskRunState::Running
+    if record.state() != AgentTaskRunState::Running
         && CookDelivery::from_run_metadata(&record.metadata)
             .and_then(|delivery| delivery.promotion())
             == Some(AgentTaskPromotionStatus::VerificationPending)
     {
         return ControlPlaneRunState::CandidateRecoverable;
     }
-    match record.state {
+    match record.state() {
         AgentTaskRunState::Queued => ControlPlaneRunState::Queued,
         AgentTaskRunState::Running => ControlPlaneRunState::Running,
         AgentTaskRunState::Succeeded => ControlPlaneRunState::Succeeded,
@@ -4498,7 +4498,7 @@ fn phase(record: &AgentTaskRunRecord) -> Option<String> {
 }
 
 fn has_running_provider_execution(record: &AgentTaskRunRecord) -> bool {
-    record.state == AgentTaskRunState::Running
+    record.state() == AgentTaskRunState::Running
         && record.metadata["provider_executions"]
             .as_array()
             .into_iter()
@@ -4513,7 +4513,7 @@ fn live_provider_liveness(
     plan: Option<&AgentTaskPlan>,
     now: DateTime<Utc>,
 ) -> Option<ControlPlaneLiveness> {
-    if record.state != AgentTaskRunState::Running {
+    if record.state() != AgentTaskRunState::Running {
         return None;
     }
     let executions = record.metadata["provider_executions"].as_array()?;
@@ -4640,7 +4640,7 @@ fn blocker(
             retry: None,
         });
     }
-    if record.state.is_terminal() {
+    if record.state().is_terminal() {
         if let Some(failure) = record.metadata.get("execution_step_failure") {
             if let Some(message) = failure["message"].as_str() {
                 return Some(ControlPlaneBlocker {
@@ -4685,7 +4685,7 @@ fn blocker(
         });
     }
     if matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure
     ) {
         if let Some(stop) = homeboy_runner_contract::find_resource_guard_stop(&record.metadata) {
@@ -4952,7 +4952,7 @@ fn candidate(
         });
     }
     if matches!(
-        record.state,
+        record.state(),
         AgentTaskRunState::CandidateRecoverable | AgentTaskRunState::PartialRecoverable
     ) {
         return record
@@ -6527,7 +6527,7 @@ mod tests {
             observed_file_timestamp(&format!("file://{}", structured_progress.display()))
                 .expect("structured progress timestamp");
         let mut record = record(AGENT_TASK_RUN);
-        record.state = AgentTaskRunState::Running;
+        record.set_state_for_test(AgentTaskRunState::Running);
         record.updated_at = Some("1970-01-01T00:00:01Z".to_string());
         record.metadata["provider_executions"] = json!([{
             "task_id": "review",
@@ -6565,7 +6565,7 @@ mod tests {
     #[test]
     fn silent_provider_becomes_silent_after_its_liveness_window() {
         let mut record = record(AGENT_TASK_RUN);
-        record.state = AgentTaskRunState::Running;
+        record.set_state_for_test(AgentTaskRunState::Running);
         record.metadata["provider_executions"] = json!([{
             "task_id": "review",
             "state": "running",
@@ -6651,7 +6651,7 @@ mod tests {
     #[test]
     fn live_provider_liveness_uses_durable_workspace_activity() {
         let mut record = record(AGENT_TASK_RUN);
-        record.state = AgentTaskRunState::Running;
+        record.set_state_for_test(AgentTaskRunState::Running);
         record.metadata["provider_executions"] = json!([{
             "task_id": "review",
             "state": "running",
@@ -6747,13 +6747,10 @@ mod tests {
     #[test]
     fn appended_event_scope_is_bound_to_the_exact_run_graph() {
         let mut record = record(AGENT_TASK_RUN);
-        record.tasks.push(AgentTaskRunTask {
-            task_id: "review".to_string(),
-            state: AgentTaskState::Succeeded,
-            backend: "claude".to_string(),
-            selector: None,
-            model: None,
-            provider_ref: None,
+        record.tasks.push({
+            let mut task = AgentTaskRunTask::queued("review".to_string(), "claude".to_string());
+            task.set_state_for_test(AgentTaskState::Succeeded);
+            task
         });
         let attempt = format!("{AGENT_TASK_RUN}:review:1");
         let execution = format!("{attempt}:execution");
@@ -7023,13 +7020,10 @@ mod tests {
             ("m-task", AgentTaskState::Blocked),
         ]
         .into_iter()
-        .map(|(task_id, state)| AgentTaskRunTask {
-            task_id: task_id.to_string(),
-            state,
-            backend: "fixture".to_string(),
-            selector: None,
-            model: None,
-            provider_ref: None,
+        .map(|(task_id, state)| {
+            let mut task = AgentTaskRunTask::queued(task_id.to_string(), "fixture".to_string());
+            task.set_state_for_test(state);
+            task
         })
         .collect();
         run_snapshot.record.metadata["provider_executions"] = json!([
@@ -7135,21 +7129,17 @@ mod tests {
 
         let mut duplicate = snapshot("run-with-duplicates", None);
         duplicate.record.tasks = vec![
-            AgentTaskRunTask {
-                task_id: "same-task".to_string(),
-                state: AgentTaskState::Running,
-                backend: "fixture".to_string(),
-                selector: None,
-                model: None,
-                provider_ref: None,
+            {
+                let mut task =
+                    AgentTaskRunTask::queued("same-task".to_string(), "fixture".to_string());
+                task.set_state_for_test(AgentTaskState::Running);
+                task
             },
-            AgentTaskRunTask {
-                task_id: "same-task".to_string(),
-                state: AgentTaskState::Succeeded,
-                backend: "fixture".to_string(),
-                selector: None,
-                model: None,
-                provider_ref: None,
+            {
+                let mut task =
+                    AgentTaskRunTask::queued("same-task".to_string(), "fixture".to_string());
+                task.set_state_for_test(AgentTaskState::Succeeded);
+                task
             },
         ];
         let duplicate_run = RunId::new("run-with-duplicates").expect("run");
@@ -7715,7 +7705,7 @@ mod tests {
             let candidate_id = "preserved-gate-cook-attempt-1";
             let latest_id = "preserved-gate-cook-attempt-2";
             let mut candidate = record(candidate_id);
-            candidate.state = AgentTaskRunState::CandidateRecoverable;
+            candidate.set_state_for_test(AgentTaskRunState::CandidateRecoverable);
             candidate.metadata["cook_id"] = json!(cook_id);
             crate::agent_task_service::set_cook_delivery_artifact_for_test(
                 &mut candidate.metadata,
@@ -8166,7 +8156,7 @@ mod tests {
             .expect("queued record");
             crate::agent_task_lifecycle::install_before_resolved_cancellation_for_test(|| {
                 crate::agent_task_lifecycle::rewrite_record_for_test(AGENT_TASK_RUN, |record| {
-                    record.state = AgentTaskRunState::Succeeded;
+                    record.set_state_for_test(AgentTaskRunState::Succeeded);
                 })
                 .expect("finish after admission");
             });
@@ -8212,7 +8202,7 @@ mod tests {
             .expect("queued record");
             crate::agent_task_lifecycle::install_before_resolved_cancellation_for_test(|| {
                 crate::agent_task_lifecycle::rewrite_record_for_test(AGENT_TASK_RUN, |record| {
-                    record.state = AgentTaskRunState::Succeeded;
+                    record.set_state_for_test(AgentTaskRunState::Succeeded);
                 })
                 .expect("finish after admission");
             });
@@ -8304,11 +8294,11 @@ mod tests {
             assert_eq!(cancelled.outcome, ControlPlaneActionOutcome::Succeeded);
             assert_eq!(cancelled.run.as_str(), first_id);
             assert_eq!(
-                store.read_record(&first_id).expect("first").state,
+                store.read_record(&first_id).expect("first").state(),
                 AgentTaskRunState::Cancelled
             );
             assert_eq!(
-                store.read_record(&second_id).expect("second").state,
+                store.read_record(&second_id).expect("second").state(),
                 AgentTaskRunState::Queued
             );
         });
@@ -8332,7 +8322,7 @@ mod tests {
                 .expect("attempt");
                 store
                     .mutate_record(&attempt_id, |record| {
-                        record.state = AgentTaskRunState::CandidateRecoverable;
+                        record.set_state_for_test(AgentTaskRunState::CandidateRecoverable);
                         record.metadata["cook_id"] = json!(cook_id);
                         true
                     })
@@ -8401,7 +8391,7 @@ mod tests {
             .expect("queued record");
             store
                 .mutate_record(AGENT_TASK_RUN, |record| {
-                    record.state = AgentTaskRunState::Running;
+                    record.set_state_for_test(AgentTaskRunState::Running);
                     true
                 })
                 .expect("advance to ineligible quarantine state");
@@ -8517,7 +8507,7 @@ mod tests {
             .expect("source record");
             store
                 .mutate_record(AGENT_TASK_RUN, |record| {
-                    record.state = AgentTaskRunState::Failed;
+                    record.set_state_for_test(AgentTaskRunState::Failed);
                     true
                 })
                 .expect("retry-eligible record");
@@ -8693,7 +8683,7 @@ mod tests {
                 store
                     .read_record(AGENT_TASK_RUN)
                     .expect("reconciled record")
-                    .state,
+                    .state(),
                 AgentTaskRunState::Cancelled
             );
             assert_eq!(
@@ -8752,7 +8742,7 @@ mod tests {
                 store
                     .read_record(AGENT_TASK_RUN)
                     .expect("reconciled lifecycle")
-                    .state,
+                    .state(),
                 AgentTaskRunState::Cancelled
             );
             assert!(store
@@ -8860,7 +8850,7 @@ mod tests {
         with_isolated_home(|_| {
             let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
             let mut terminal = record(AGENT_TASK_RUN);
-            terminal.state = AgentTaskRunState::Running;
+            terminal.set_state_for_test(AgentTaskRunState::Running);
             terminal.metadata = json!({});
             terminal.artifact_refs.clear();
             terminal.provider_handles.clear();
@@ -8931,7 +8921,7 @@ mod tests {
         with_isolated_home(|_| {
             let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
             let mut stranded = record(AGENT_TASK_RUN);
-            stranded.state = AgentTaskRunState::CandidateRecoverable;
+            stranded.set_state_for_test(AgentTaskRunState::CandidateRecoverable);
             stranded.artifact_refs.clear();
             stranded.provider_handles.clear();
             stranded.metadata = json!({
@@ -9444,7 +9434,9 @@ mod tests {
     #[test]
     fn gate_failed_promotion_projects_a_recoverable_candidate_not_success() {
         let mut record = record(AGENT_TASK_RUN);
-        record.state = crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
+        record.set_state_for_test(
+            crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
+        );
         record.lifecycle.execution.state =
             homeboy_core::run_lifecycle_record::RunExecutionState::CandidateRecoverable;
         crate::agent_task_service::set_cook_delivery_artifact_for_test(
@@ -9487,7 +9479,9 @@ mod tests {
         // #15017: the blocker is the base conflict and its recorded
         // continuation, read without mutating the record.
         let mut record = record(AGENT_TASK_RUN);
-        record.state = crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
+        record.set_state_for_test(
+            crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
+        );
         crate::agent_task_service::set_cook_delivery_artifact_for_test(
             &mut record.metadata,
             "/finalization",
@@ -9522,7 +9516,7 @@ mod tests {
     #[test]
     fn injected_plan_is_used_once_for_retry_eligibility() {
         let mut failed = record(AGENT_TASK_RUN);
-        failed.state = crate::agent_task_lifecycle::AgentTaskRunState::Failed;
+        failed.set_state_for_test(crate::agent_task_lifecycle::AgentTaskRunState::Failed);
         let without_plan = project_record(&failed, None).expect("project");
         assert_eq!(
             eligibility(&without_plan, ControlPlaneAction::Retry),
@@ -9539,7 +9533,7 @@ mod tests {
     #[test]
     fn queued_unmaterialized_admission_projects_reason_retry_and_manual_rearm_presentation() {
         let mut record = record(AGENT_TASK_RUN);
-        record.state = AgentTaskRunState::Queued;
+        record.set_state_for_test(AgentTaskRunState::Queued);
         record.metadata["unmaterialized_cook_admission"] = json!({
             "schema": "homeboy/unmaterialized-cook-admission/v1",
             "state": "queued",
@@ -9589,7 +9583,7 @@ mod tests {
     #[test]
     fn exhausted_unmaterialized_admission_projects_its_bounded_terminal_disposition() {
         let mut record = record(AGENT_TASK_RUN);
-        record.state = AgentTaskRunState::Failed;
+        record.set_state_for_test(AgentTaskRunState::Failed);
         record.metadata["unmaterialized_cook_admission"] = json!({
             "schema": "homeboy/unmaterialized-cook-admission/v1",
             "state": "exhausted",
@@ -9748,7 +9742,7 @@ mod tests {
     #[test]
     fn published_candidate_ignores_a_stale_moving_base_recovery() {
         let mut published = record(AGENT_TASK_RUN);
-        published.state = AgentTaskRunState::Succeeded;
+        published.set_state_for_test(AgentTaskRunState::Succeeded);
         published
             .metadata
             .as_object_mut()
@@ -9781,7 +9775,7 @@ mod tests {
     #[test]
     fn project_record_names_a_runner_resource_guard_stop() {
         let mut failed = record(AGENT_TASK_RUN);
-        failed.state = AgentTaskRunState::Failed;
+        failed.set_state_for_test(AgentTaskRunState::Failed);
         failed
             .metadata
             .as_object_mut()
@@ -9851,7 +9845,7 @@ mod tests {
     #[test]
     fn active_execution_step_owner_projects_running_promotion_gate_state() {
         let mut record = record(AGENT_TASK_RUN);
-        record.state = AgentTaskRunState::Succeeded;
+        record.set_state_for_test(AgentTaskRunState::Succeeded);
         record.metadata.as_object_mut().unwrap().extend(
             crate::agent_task_lifecycle::execution_step_owner_fixture("cook"),
         );
