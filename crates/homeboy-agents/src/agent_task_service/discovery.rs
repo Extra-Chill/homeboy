@@ -965,7 +965,7 @@ pub(crate) fn controller_upgrade_admission_for_records(
                     reason: if locally_reconcilable_after_runner_idle {
                         "ownerless_queued_after_runner_reconciliation".to_string()
                     } else if runner_unverified {
-                        "runner_job_unverified_after_daemon_restart".to_string()
+                        runner_unverified_reason_for_record(record)
                     } else {
                         stale_reason_for_record(record)
                     },
@@ -1411,12 +1411,31 @@ fn stale_reason_for_record(record: &AgentTaskRunRecord) -> String {
         return "owner_process_not_running".to_string();
     }
     if record.runner_job_id().is_some() {
-        return "runner_job_unverified_after_daemon_restart".to_string();
+        return runner_unverified_reason_for_record(record);
     }
     if record.owner_pid().is_none() {
         return "missing_runner_pid".to_string();
     }
     "stale_running_marked".to_string()
+}
+
+/// Name what a pure read observed about a runner-backed record. A read does not
+/// consult the runner's job state, so it can report only the projection's own
+/// evidence: a recorded stale reason, an aged heartbeat, or nothing verified.
+/// A daemon restart is never inferred here; only runner job evidence names it.
+fn runner_unverified_reason_for_record(record: &AgentTaskRunRecord) -> String {
+    if let Some(reason) = record.stale_running_reason() {
+        return reason.to_string();
+    }
+    if record.has_fresh_update() {
+        agent_task_lifecycle::RunnerJobObservation::Unverifiable
+            .reason()
+            .to_string()
+    } else {
+        agent_task_lifecycle::RunnerJobObservation::HeartbeatStale
+            .reason()
+            .to_string()
+    }
 }
 
 fn discovery_counts(tasks: &[agent_task_lifecycle::AgentTaskRunTask]) -> AgentTaskDiscoveryCounts {
