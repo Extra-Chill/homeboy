@@ -695,14 +695,14 @@ mod tests {
             detect_usage_cap, AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS,
         };
 
-        // A real OpenCode terminal error event carrying an explicit,
+        // A real Pi terminal error event carrying an explicit,
         // *permanent* usage-limit rejection: `isRetryable:false` is what
         // distinguishes this from a merely-throttled 429 (which classifies as
         // `provider_rate_limited`, not exhaustion) in
         // `structured_error_failure_classification`.
         let stream = r#"{"type":"error","error":{"name":"APIError","data":{"message":"5-hour usage limit reached. Resets in 3hr 3min.","statusCode":403,"isRetryable":false}}}"#;
         let normalized =
-            normalize_runtime_stream_error(Some("opencode"), stream).expect("adapter normalizes");
+            normalize_runtime_stream_error(Some("pi"), stream).expect("adapter normalizes");
         let failure_classification = normalized_error_failure_classification(&normalized);
 
         let now = chrono::Utc::now();

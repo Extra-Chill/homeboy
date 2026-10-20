@@ -4,7 +4,7 @@ use std::process::{Command, Output};
 #[test]
 fn historical_cook_executor_flags_emit_the_migration_snapshot() {
     for flag in ["--provider", "--provider-id", "--dispatch-selector"] {
-        let output = cook_command([flag, "opencode.agent-task-executor"]);
+        let output = cook_command([flag, "pi.agent-task-executor"]);
 
         assert_eq!(output.status.code(), Some(2), "{flag}");
         assert!(output.stdout.is_empty(), "{flag}");
@@ -13,7 +13,7 @@ fn historical_cook_executor_flags_emit_the_migration_snapshot() {
             format!(
                 "error: historical executor selection flag '{flag}' is not supported\n\
 \nhint: executor selection now uses `--backend <backend>` and optional `--selector <provider-id>`.\n\
-Example: `homeboy agent-task cook --backend opencode --selector opencode.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'homeboy review test homeboy' --no-finalize`\n\
+Example: `homeboy agent-task cook --backend pi --selector pi.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'homeboy review test homeboy' --no-finalize`\n\
 List available executor providers: `homeboy agent-task providers`\n\
 `--provider-argv` is promotion-only: it configures the deprecated promotion apply-provider invocation and cannot select an executor.\n\
 \nFor more information, try 'homeboy agent-task cook --help-full'\n"
@@ -28,9 +28,9 @@ fn cook_accepts_current_executor_selection_flags() {
     for selector_flag in ["--selector", "--dispatch-provider-id"] {
         let output = cook_command([
             "--backend",
-            "opencode",
+            "pi",
             selector_flag,
-            "opencode.agent-task-executor",
+            "pi.agent-task-executor",
             "--help-full",
         ]);
 

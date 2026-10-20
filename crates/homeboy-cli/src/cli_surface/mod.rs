@@ -1267,7 +1267,7 @@ mod tests {
                 "agent-task",
                 "providers",
                 "--backend",
-                "opencode",
+                "pi",
                 "--validate-readiness",
             ]
             .as_slice(),
@@ -1278,7 +1278,7 @@ mod tests {
                 "--runner",
                 "homeboy-lab",
                 "--backend",
-                "opencode",
+                "pi",
                 "--validate-readiness",
             ]
             .as_slice(),

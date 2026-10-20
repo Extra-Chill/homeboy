@@ -2925,8 +2925,8 @@ fn completed_run_exposes_latest_executor_input_output_and_expectations() {
             }, {
                 "attempt": 2,
                 "rotation_index": 1,
-                "backend": "opencode",
-                "selector": "opencode.agent-task-executor",
+                "backend": "pi",
+                "selector": "pi.agent-task-executor",
                 "model": "openai/gpt-5.6-terra",
                 "requested_model": "gpt-fixture",
                 "attempted_model": "openai/gpt-5.6-terra",
@@ -2955,13 +2955,10 @@ fn completed_run_exposes_latest_executor_input_output_and_expectations() {
         artifacts_in_store(&lifecycle_store, "run-evidence").expect("artifacts loaded");
 
     assert_eq!(evidence.task_id, "task-a");
-    assert_eq!(evidence.backend, "opencode");
-    assert_eq!(
-        evidence.selector.as_deref(),
-        Some("opencode.agent-task-executor")
-    );
+    assert_eq!(evidence.backend, "pi");
+    assert_eq!(evidence.selector.as_deref(), Some("pi.agent-task-executor"));
     assert_eq!(evidence.model.as_deref(), Some("openai/gpt-5.6-terra"));
-    assert_eq!(record.tasks[0].backend, "opencode");
+    assert_eq!(record.tasks[0].backend, "pi");
     assert_eq!(
         record.tasks[0].model.as_deref(),
         Some("openai/gpt-5.6-terra")

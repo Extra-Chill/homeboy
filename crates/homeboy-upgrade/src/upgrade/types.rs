@@ -474,13 +474,15 @@ mod tests {
     fn unrefreshed_warning_omits_dirty_fields_when_clean() {
         let warning = UnrefreshedExtensionWarning {
             extension_id: "wordpress".to_string(),
-            invoking_user: "opencode".to_string(),
-            symlink_path: "/home/opencode/.config/homeboy/extensions/wordpress".to_string(),
-            source_path: "/home/opencode/homeboy-extensions/source/wordpress".to_string(),
+            invoking_user: "pi".to_string(),
+            symlink_path: "/home/pi/.config/homeboy/extensions/wordpress".to_string(),
+            source_path: "/home/pi/homeboy-extensions/source/wordpress".to_string(),
             behind: Some(145),
             dirty: false,
             dirty_paths: Vec::new(),
-            recovery_command: "sudo -u opencode git -C /home/opencode/homeboy-extensions/source/wordpress pull --ff-only".to_string(),
+            recovery_command:
+                "sudo -u pi git -C /home/pi/homeboy-extensions/source/wordpress pull --ff-only"
+                    .to_string(),
         };
 
         let json = serde_json::to_value(&warning).expect("warning serializes");
@@ -488,7 +490,7 @@ mod tests {
         assert!(json.get("dirty_paths").is_none(), "{json}");
         assert_eq!(
             json["recovery_command"],
-            "sudo -u opencode git -C /home/opencode/homeboy-extensions/source/wordpress pull --ff-only"
+            "sudo -u pi git -C /home/pi/homeboy-extensions/source/wordpress pull --ff-only"
         );
 
         let dirty = UnrefreshedExtensionWarning {

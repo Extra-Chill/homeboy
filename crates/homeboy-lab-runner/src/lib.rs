@@ -2994,11 +2994,11 @@ mod tests {
     fn runner_create_update_and_bulk_import_reject_printable_secret_env() {
         test_support::with_isolated_home(|_| {
             let create_error = create(
-                r#"{"id":"secret-local","kind":"local","env":{"OPENCODE_API_KEY":"secret-value"}}"#,
+                r#"{"id":"secret-local","kind":"local","env":{"PI_API_KEY":"secret-value"}}"#,
                 false,
             )
             .expect_err("create must reject likely secret env");
-            assert!(create_error.message.contains("secret_env.OPENCODE_API_KEY"));
+            assert!(create_error.message.contains("secret_env.PI_API_KEY"));
             assert!(!create_error.message.contains("secret-value"));
 
             create(r#"{"id":"public-local","kind":"local"}"#, false).expect("create public runner");
@@ -3046,7 +3046,7 @@ mod tests {
                 server_id: None,
                 workspace_root: None,
                 settings: RunnerSettings::default(),
-                env: HashMap::from([("OPENCODE_API_KEY".to_string(), "secret-value".to_string())]),
+                env: HashMap::from([("PI_API_KEY".to_string(), "secret-value".to_string())]),
                 secret_env: HashMap::new(),
                 resources: HashMap::new(),
                 policy: RunnerPolicy::default(),
@@ -3068,7 +3068,7 @@ mod tests {
             workspace_root: None,
             settings: RunnerSettings::default(),
             env: HashMap::from([
-                ("OPENCODE_API_KEY".to_string(), "secret-value".to_string()),
+                ("PI_API_KEY".to_string(), "secret-value".to_string()),
                 ("MONKEY".to_string(), "public-value".to_string()),
             ]),
             secret_env: HashMap::new(),
@@ -3078,8 +3078,8 @@ mod tests {
         let plan = secret_env_migration_plan_for_runner(&runner);
         let rendered = serde_json::to_string(&plan).expect("serialize plan");
         assert_eq!(plan.entries.len(), 1);
-        assert_eq!(plan.entries[0].key, "OPENCODE_API_KEY");
-        assert_eq!(plan.entries[0].secret, "runner/lab/OPENCODE_API_KEY");
+        assert_eq!(plan.entries[0].key, "PI_API_KEY");
+        assert_eq!(plan.entries[0].secret, "runner/lab/PI_API_KEY");
         assert!(!rendered.contains("secret-value"));
         assert!(!rendered.contains("public-value"));
     }

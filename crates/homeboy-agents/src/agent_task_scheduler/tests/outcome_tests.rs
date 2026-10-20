@@ -129,8 +129,8 @@ fn executor_failure_code_overrides_successful_wrapper_and_preserves_terminal_ide
         "provider_run_result": {
             "status": "completed",
             "model": "anthropic/skipped-model",
-            "failure_code": "agent_task.opencode_required_outputs_missing",
-            "opencode_session": { "model": "openai/gpt-6-luna" },
+            "failure_code": "agent_task.pi_required_outputs_missing",
+            "metadata": { "model_identity": { "actual": "openai/gpt-6-luna" } },
             "final_message": "Tests could not be validated; serialization tooling was unavailable."
         }
     });
@@ -142,7 +142,7 @@ fn executor_failure_code_overrides_successful_wrapper_and_preserves_terminal_ide
     assert_eq!(diagnostic.class, "agent_task.nested_executor_failed_status");
     assert_eq!(
         diagnostic.data["failure_code"],
-        "agent_task.opencode_required_outputs_missing"
+        "agent_task.pi_required_outputs_missing"
     );
     assert_eq!(diagnostic.data["executed_model"], "openai/gpt-6-luna");
     assert_eq!(
@@ -263,7 +263,9 @@ fn nested_executor_failure_context_wins_over_missing_required_artifacts() {
         .expect("nested executor failure diagnostic");
     assert_eq!(
         nested_diagnostic.data["provider_run_result"]["metadata"]["provider_error"]["message"],
-        json!("OpenCode completed without producing declared artifact(s): patch, agent_result, transcript")
+        json!(
+            "Pi completed without producing declared artifact(s): patch, agent_result, transcript"
+        )
     );
     assert_eq!(
         nested_diagnostic.data["provider_run_result"]["refs"]["logs"][0],
@@ -630,7 +632,7 @@ fn missing_only_review_form_is_deferred_to_the_cook_loop() {
     let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
     outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
     outcome.summary =
-        Some("OpenCode completed without required structured output(s): review_form.".to_string());
+        Some("Pi completed without required structured output(s): review_form.".to_string());
 
     AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &form_request);
 
@@ -654,8 +656,8 @@ fn other_missing_outputs_stay_provider_failures() {
         .output_declarations
         .push(crate::agent_task_review_dossier::review_form_output_declaration());
     for summary in [
-        "OpenCode completed without required structured output(s): review_form, plan.",
-        "OpenCode completed without required structured output(s): plan.",
+        "Pi completed without required structured output(s): review_form, plan.",
+        "Pi completed without required structured output(s): plan.",
         "provider crashed",
     ] {
         let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
@@ -673,7 +675,7 @@ fn other_missing_outputs_stay_provider_failures() {
     let mut outcome = outcome("plain-task".to_string(), AgentTaskOutcomeStatus::Failed);
     outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
     outcome.summary =
-        Some("OpenCode completed without required structured output(s): review_form.".to_string());
+        Some("Pi completed without required structured output(s): review_form.".to_string());
     AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &undeclared);
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
 }
@@ -690,7 +692,7 @@ fn non_empty_candidate_missing_only_review_form_is_still_deferred() {
     let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
     outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
     outcome.summary =
-        Some("OpenCode completed without required structured output(s): review_form.".to_string());
+        Some("Pi completed without required structured output(s): review_form.".to_string());
     outcome.artifacts.push(AgentTaskArtifact {
         schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
         id: "provider-patch".to_string(),

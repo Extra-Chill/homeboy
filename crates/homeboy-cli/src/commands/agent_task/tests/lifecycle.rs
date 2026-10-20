@@ -41,7 +41,7 @@ fn recover_parses_supplied_review_form_spec_and_authorship() {
             "--review-form",
             spec,
             "--review-form-tool",
-            "OpenCode",
+            "Pi",
             "--review-form-model",
             "openai/gpt-5.6-terra",
             "--review-form-author",
@@ -49,7 +49,7 @@ fn recover_parses_supplied_review_form_spec_and_authorship() {
         ])
         .expect("parse supplied review form");
         assert_eq!(cli.args.review_form.as_deref(), Some(spec));
-        assert_eq!(cli.args.review_form_tool.as_deref(), Some("OpenCode"));
+        assert_eq!(cli.args.review_form_tool.as_deref(), Some("Pi"));
         assert_eq!(
             cli.args.review_form_model.as_deref(),
             Some("openai/gpt-5.6-terra")
@@ -3113,7 +3113,7 @@ fn diagnose_drops_heartbeat_noise_when_the_provider_succeeded_and_no_gate_ran() 
             serde_json::to_string(&json!({
                 "diagnostics": [{
                     "class": "provider",
-                    "message": "OpenCode CLI exited with status 0."
+                    "message": "Pi CLI exited with status 0."
                 }],
                 "stdout_uri": format!("file://{}", stream_path.display()),
             }))
@@ -3212,7 +3212,7 @@ fn diagnose_names_the_gate_not_the_successful_provider_stream_noise() {
             serde_json::to_string(&json!({
                 "diagnostics": [{
                     "class": "provider",
-                    "message": "OpenCode CLI exited with status 0."
+                    "message": "Pi CLI exited with status 0."
                 }],
                 "stdout_uri": format!("file://{}", stream_path.display()),
             }))
@@ -4232,7 +4232,7 @@ fn diagnose_hydrates_and_redacts_structured_provider_runtime_errors() {
         let evidence_dir = tempfile::tempdir().expect("evidence dir");
         let runtime_stdout = evidence_dir
             .path()
-            .join("cook-homeboy-opencode-runtime-stdout.log");
+            .join("cook-homeboy-pi-runtime-stdout.log");
         std::fs::write(
             &runtime_stdout,
             concat!(
@@ -4245,7 +4245,7 @@ fn diagnose_hydrates_and_redacts_structured_provider_runtime_errors() {
         let evidence_path = evidence_dir.path().join("executor-result.json");
         std::fs::write(
             &evidence_path,
-            r#"{"status":"failed","exit_code":1,"diagnostics":[{"class":"provider.process_exit","message":"OpenCode CLI exited with status 1."}]}"#,
+            r#"{"status":"failed","exit_code":1,"diagnostics":[{"class":"provider.process_exit","message":"Pi CLI exited with status 1."}]}"#,
         )
         .expect("write executor result");
 
@@ -4453,7 +4453,7 @@ fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit()
                     },
                     {
                         "class": "provider.process_exit",
-                        "message": "OpenCode CLI exited with status 0"
+                        "message": "Pi CLI exited with status 0"
                     },
                     {
                         "class": "agent_tool.command_denied",
@@ -4620,7 +4620,7 @@ fn diagnose_ranks_structured_provider_rejection_before_missing_required_outputs(
                     "error_name": "APIError",
                 },
                 "diagnostics": [{
-                    "class": "opencode.required_outputs_missing",
+                    "class": "pi.required_outputs_missing",
                     "message": "Required outputs were not produced: review_form",
                     "data": { "stdout": provider_event, "stderr": "" }
                 }]
@@ -4653,7 +4653,7 @@ fn diagnose_ranks_structured_provider_rejection_before_missing_required_outputs(
             .as_array()
             .expect("diagnostic chain")
             .iter()
-            .any(|diagnostic| diagnostic["class"] == "opencode.required_outputs_missing"));
+            .any(|diagnostic| diagnostic["class"] == "pi.required_outputs_missing"));
         assert!(!value
             .to_string()
             .contains("provider.process_stream\",\"message\":null"));
@@ -5291,7 +5291,7 @@ fn failure_reasons_ignore_successful_no_ops_and_surface_provider_failures() {
         None,
         json!({ "diagnostics": [{
             "class": "provider_process",
-            "message": "OpenCode CLI exited with status 0."
+            "message": "Pi CLI exited with status 0."
         }] }),
     );
     assert!(super::super::status::failure_reasons_from_aggregate(&no_op).is_empty());
@@ -5301,12 +5301,12 @@ fn failure_reasons_ignore_successful_no_ops_and_surface_provider_failures() {
         Some(AgentTaskFailureClassification::Provider),
         json!({ "diagnostics": [{
             "class": "provider_process",
-            "message": "OpenCode CLI exited with status 1."
+            "message": "Pi CLI exited with status 1."
         }] }),
     );
     assert_eq!(
         super::super::status::failure_reasons_from_aggregate(&provider_failure)[0]["message"],
-        "OpenCode CLI exited with status 1."
+        "Pi CLI exited with status 1."
     );
 }
 

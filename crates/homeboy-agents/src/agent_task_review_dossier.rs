@@ -619,7 +619,7 @@ fn used_for_is_placeholder(value: &str) -> bool {
 /// The tool string is orchestrator-owned (not AI-authored), which makes it the
 /// honest place to attribute the orchestrator that actually drove the change.
 /// Every PR Homeboy opens names Homeboy as the harness, wrapping the underlying
-/// provider disclosure: `Homeboy (OpenCode / openai/gpt-5.6-terra)`.
+/// provider disclosure: `Homeboy (Pi / openai/gpt-5.6-terra)`.
 ///
 /// If the provider disclosure is already Homeboy-attributed (idempotent) or
 /// empty, it is passed through unchanged.
@@ -1754,7 +1754,7 @@ mod tests {
             public_contract_evidence: None,
             ai_assistance: AgentTaskReviewAiAssistance {
                 used: true,
-                tool: "OpenCode".into(),
+                tool: "Pi".into(),
                 model: "openai/gpt-5.6-terra".into(),
                 used_for: "Isolated the failing path, implemented the guard, and verified with the recorded gate before finalizing.".into(),
             },
@@ -2292,14 +2292,11 @@ mod tests {
     #[test]
     fn homeboy_tool_disclosure_attributes_the_orchestrator() {
         assert_eq!(
-            homeboy_tool_disclosure("OpenCode (openai/gpt-5.6-terra)"),
-            "Homeboy (OpenCode (openai/gpt-5.6-terra))"
+            homeboy_tool_disclosure("Pi (openai/gpt-5.6-terra)"),
+            "Homeboy (Pi (openai/gpt-5.6-terra))"
         );
         // Idempotent and empty-safe.
-        assert_eq!(
-            homeboy_tool_disclosure("Homeboy (OpenCode)"),
-            "Homeboy (OpenCode)"
-        );
+        assert_eq!(homeboy_tool_disclosure("Homeboy (Pi)"), "Homeboy (Pi)");
         assert_eq!(homeboy_tool_disclosure(""), "");
     }
 

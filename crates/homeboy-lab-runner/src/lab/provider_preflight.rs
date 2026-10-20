@@ -933,15 +933,15 @@ mod tests {
             runtime_identity: None,
         };
         let identity = homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
-            runtime_id: "opencode".to_string(),
-            provider_id: "opencode.agent-task-executor".to_string(),
-            source_selector: "extension:opencode".to_string(),
+            runtime_id: "pi".to_string(),
+            provider_id: "pi.agent-task-executor".to_string(),
+            source_selector: "extension:pi".to_string(),
             source_revision: "0123456789abcdef0123456789abcdef01234567".to_string(),
             freshness:
                 homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Unverifiable,
             provider: serde_json::json!({
-                "id": "opencode.agent-task-executor",
-                "backend": "opencode"
+                "id": "pi.agent-task-executor",
+                "backend": "pi"
             }),
             materialization_plan: serde_json::Value::Null,
         };
@@ -1082,8 +1082,8 @@ mod tests {
     #[test]
     fn provider_preflight_error_preserves_full_failed_command_output() {
         let selection = AgentTaskProviderSelection {
-            backend: "opencode".to_string(),
-            selector: Some("opencode.agent-task-executor".to_string()),
+            backend: "pi".to_string(),
+            selector: Some("pi.agent-task-executor".to_string()),
             runtime_identity: None,
         };
         let runner_homeboy = serde_json::json!({

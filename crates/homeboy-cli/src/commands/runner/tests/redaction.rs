@@ -22,10 +22,7 @@ fn registry_entity_output_redacts_runner_env_values() {
     assert_eq!(exit_code, 0);
     let value = serde_json::to_value(output).expect("serialize output");
     assert_eq!(value["variant"], "show");
-    assert_eq!(
-        value["entity"]["env"]["OPENCODE_API_KEY"],
-        REDACTED_ENV_VALUE
-    );
+    assert_eq!(value["entity"]["env"]["PI_API_KEY"], REDACTED_ENV_VALUE);
     assert_eq!(
         value["entity"]["env"]["HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"],
         "https://artifacts.example.test"
@@ -48,7 +45,7 @@ fn registry_list_output_redacts_runner_env_values() {
     let value = serde_json::to_value(output).expect("serialize output");
     assert_eq!(value["variant"], "list");
     assert_eq!(
-        value["entities"][0]["env"]["OPENCODE_API_KEY"],
+        value["entities"][0]["env"]["PI_API_KEY"],
         REDACTED_ENV_VALUE
     );
     assert_eq!(

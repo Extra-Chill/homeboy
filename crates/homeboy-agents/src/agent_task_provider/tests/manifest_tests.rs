@@ -169,16 +169,16 @@ fn runtime_manifest_normalizes_codex_invocation_argv() {
 #[test]
 fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
     let _home = artifact_home();
-    let (mut request, _provider) = request("missing-opencode", "unused".to_string());
-    request.executor.backend = "opencode".to_string();
+    let (mut request, _provider) = request("missing-pi", "unused".to_string());
+    request.executor.backend = "pi".to_string();
     let executor = ExtensionProviderAgentTaskExecutor::from_catalog(AgentTaskProviderCatalog {
         providers: Vec::new(),
         diagnostics: vec![AgentRuntimeDiscoveryDiagnostic {
             class: "agent_runtime_manifest.schema_mismatch".to_string(),
             message: "invalid type: map, expected string at line 12 column 18".to_string(),
-            runtime_id: Some("opencode".to_string()),
+            runtime_id: Some("pi".to_string()),
             extension_id: None,
-            path: Some("/tmp/opencode/opencode.json".to_string()),
+            path: Some("/tmp/pi/pi.json".to_string()),
         }],
         version: None,
     });
@@ -196,7 +196,7 @@ fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
     );
 
     let summary = outcome.summary.as_deref().expect("summary");
-    assert!(summary.contains("no extension agent-task provider found for backend 'opencode'"));
+    assert!(summary.contains("no extension agent-task provider found for backend 'pi'"));
     assert!(summary.contains("agent_runtime_manifest.schema_mismatch"));
     assert!(summary.contains("invalid type: map, expected string at line 12 column 18"));
     assert_eq!(outcome.diagnostics[0].class, "agent_task.provider_missing");
@@ -313,13 +313,13 @@ process.stdin.on('end', () => {
   process.stderr.write('permission denied');
 });"#,
     );
-    let (mut request, mut provider) = request("opencode-boundary", format!("node {script}"));
-    provider.id = "opencode.agent-task-executor".to_string();
-    provider.backend = "opencode".to_string();
+    let (mut request, mut provider) = request("pi-boundary", format!("node {script}"));
+    provider.id = "pi.agent-task-executor".to_string();
+    provider.backend = "pi".to_string();
     provider
         .capabilities
         .push(AGENT_TASK_PROVIDER_CAPABILITY_WORKSPACE_PERMISSION_ROOT_V1.to_string());
-    request.executor.backend = "opencode".to_string();
+    request.executor.backend = "pi".to_string();
     request.workspace.root = Some(candidate.display().to_string());
     request.executor.config = json!({
         "workspace": { "root": candidate.display().to_string() },

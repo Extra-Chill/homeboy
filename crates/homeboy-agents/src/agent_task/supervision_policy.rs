@@ -392,7 +392,7 @@ mod tests {
         let policy = AgentSupervisionPolicy::default();
 
         assert!(policy.is_unconstrained());
-        assert!(policy.is_unconstrained_for(Some("opencode")));
+        assert!(policy.is_unconstrained_for(Some("pi")));
         assert!(policy.evaluate(None, &sample()).is_empty());
     }
 
@@ -551,7 +551,7 @@ mod tests {
         // without the global number still firing underneath it.
         let mut backends = BTreeMap::new();
         backends.insert(
-            "opencode".to_string(),
+            "pi".to_string(),
             vec![AgentSupervisionBudget::new(
                 AgentSupervisionMetric::RssMib,
                 12_288,
@@ -568,10 +568,10 @@ mod tests {
             ..AgentSupervisionPolicy::default()
         };
 
-        assert!(policy.evaluate(Some("opencode"), &sample()).is_empty());
+        assert!(policy.evaluate(Some("pi"), &sample()).is_empty());
         assert_eq!(policy.evaluate(Some("claude"), &sample()).len(), 1);
         assert_eq!(policy.evaluate(None, &sample()).len(), 1);
-        assert!(!policy.is_unconstrained_for(Some("opencode")));
+        assert!(!policy.is_unconstrained_for(Some("pi")));
     }
 
     #[test]
@@ -657,7 +657,7 @@ mod tests {
                 { "metric": "no_progress_seconds", "limit": 900 }
             ],
             "backends": {
-                "opencode": [{ "metric": "child_processes", "limit": 32, "action": "nudge" }]
+                "pi": [{ "metric": "child_processes", "limit": 32, "action": "nudge" }]
             },
             "reason": "shared host"
         });
@@ -669,7 +669,7 @@ mod tests {
         // An omitted action is the gentlest rung, never the most severe one.
         assert_eq!(policy.budgets[1].action, AgentSupervisionAction::Warn);
         assert_eq!(
-            policy.backends["opencode"][0].metric,
+            policy.backends["pi"][0].metric,
             AgentSupervisionMetric::ChildProcesses
         );
 

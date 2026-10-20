@@ -295,7 +295,7 @@ impl AgentTaskExecutorAdapter for NestedFailedStatusMissingArtifactsExecutor {
                 "status": "failed",
                 "metadata": {
                     "provider_error": {
-                        "message": "OpenCode completed without producing declared artifact(s): patch, agent_result, transcript"
+                        "message": "Pi completed without producing declared artifact(s): patch, agent_result, transcript"
                     },
                     "run_id": "run-7367"
                 },

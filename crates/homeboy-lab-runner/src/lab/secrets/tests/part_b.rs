@@ -585,12 +585,12 @@ fn run_plan_codex_route_preserves_provider_source_delivery_for_luna_model() {
         &plan_path,
         serde_json::json!({
             "schema": "homeboy/agent-task-plan/v1",
-            "plan_id": "opencode-luna-codex-route",
+            "plan_id": "pi-luna-codex-route",
             "tasks": [{
                 "schema": "homeboy/agent-task-request/v1",
                 "task_id": "luna",
                 "executor": {
-                    "backend": "opencode",
+                    "backend": "pi",
                     "model": "openai/gpt-5.6-luna",
                     "config": { "provider": "codex" }
                 },
@@ -602,8 +602,8 @@ fn run_plan_codex_route_preserves_provider_source_delivery_for_luna_model() {
     .expect("write plan");
 
     let mut provider = fixture_provider_with_example_defaults();
-    provider.id = "opencode.agent-task-executor".to_string();
-    provider.backend = "opencode".to_string();
+    provider.id = "pi.agent-task-executor".to_string();
+    provider.backend = "pi".to_string();
     let default = provider
         .provider_defaults
         .remove("example-oauth")
@@ -827,7 +827,7 @@ fn preflight_checks_effective_provider_plan_names_not_only_cli_task_names() {
             "tasks": [{
                 "schema": "homeboy/agent-task-request/v1",
                 "task_id": "effective-route",
-                "executor": { "backend": "opencode" },
+                "executor": { "backend": "pi" },
                 "instructions": "Use the effective provider route."
             }]
         })
@@ -869,7 +869,7 @@ fn preflight_accepts_present_effective_provider_plan_name() {
             "tasks": [{
                 "schema": "homeboy/agent-task-request/v1",
                 "task_id": "effective-route",
-                "executor": { "backend": "opencode" },
+                "executor": { "backend": "pi" },
                 "instructions": "Use the effective provider route."
             }]
         })
@@ -907,7 +907,7 @@ fn provider_plan_preflight_uses_effective_provider_names_before_staging() {
         "tasks": [{
             "schema": "homeboy/agent-task-request/v1",
             "task_id": "effective-route",
-            "executor": { "backend": "opencode", "secret_env": [name] },
+            "executor": { "backend": "pi", "secret_env": [name] },
             "instructions": "Use the effective provider route."
         }]
     }))

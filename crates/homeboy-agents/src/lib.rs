@@ -27,6 +27,7 @@ pub mod caller_context;
 pub mod orchestration;
 // Public so the fanout and controller command adapters can emit wave-terminal
 // and controller lifecycle notifications. Cook's own emitters stay internal.
+pub mod agent_task_builtin_backend;
 pub mod agent_task_notify;
 mod agent_task_process_containment;
 pub mod agent_task_promotion;

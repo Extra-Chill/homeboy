@@ -1554,7 +1554,7 @@ fn daemon_exec_request_failed_error_surfaces_io_error_cause_from_details() {
             "message": "IO error",
             "details": {
                 "error": "No such file or directory (os error 2)",
-                "context": "read /home/lab/.config/homeboy/secrets/opencode-openai-access"
+                "context": "read /home/lab/.config/homeboy/secrets/pi-openai-access"
             },
             "hints": []
         })),
@@ -1573,7 +1573,7 @@ fn daemon_exec_request_failed_error_surfaces_io_error_cause_from_details() {
     );
     assert!(
         err.message
-            .contains("read /home/lab/.config/homeboy/secrets/opencode-openai-access"),
+            .contains("read /home/lab/.config/homeboy/secrets/pi-openai-access"),
         "{}",
         err.message
     );

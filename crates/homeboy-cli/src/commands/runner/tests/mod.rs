@@ -17,7 +17,7 @@ pub(super) fn runner_with_env(id: &str) -> Runner {
         workspace_root: None,
         settings: RunnerSettings::default(),
         env: HashMap::from([
-            ("OPENCODE_API_KEY".to_string(), "secret-token".to_string()),
+            ("PI_API_KEY".to_string(), "secret-token".to_string()),
             (
                 "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL".to_string(),
                 "https://artifacts.example.test".to_string(),

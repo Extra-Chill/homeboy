@@ -198,17 +198,17 @@ fn cook_preview_reports_the_readiness_bound_rotation_route() {
 }
 
 /// Exercise the ordinary CLI -> Cook compile -> runtime provider wrapper ->
-/// actual `opencode run` argv boundary. The runtime adapter is the installed
-/// OpenCode adapter; only the final OpenCode executable is replaced by a local
+/// actual `pi run` argv boundary. The runtime adapter is the installed
+/// Pi adapter; only the final Pi executable is replaced by a local
 /// argv recorder, so no inference or provider credentials are used.
 #[cfg(unix)]
 #[test]
-fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
+fn acknowledged_cook_launches_pi_with_the_concrete_cli_model() {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     let context = HermeticTestContext::new();
     let home = context.home();
-    configure_opencode_rotation(home, &[PRIMARY, ALTERNATIVE]);
+    configure_pi_rotation(home, &[PRIMARY, ALTERNATIVE]);
     let capacity = Command::new(homeboy_bin())
         .args([
             "config",
@@ -224,18 +224,18 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
         .expect("configure isolated capacity for tiny test worktree");
     assert_success(&capacity, "configure isolated test capacity");
     let original_home = PathBuf::from(std::env::var_os("HOME").expect("test HOME"));
-    let installed_runtime = original_home.join(".config/homeboy/agent-runtimes/opencode");
-    if !installed_runtime.join("opencode.json").is_file() {
-        eprintln!("skipping live-adapter CLI launch: installed OpenCode runtime unavailable");
+    let installed_runtime = original_home.join(".config/homeboy/agent-runtimes/pi");
+    if !installed_runtime.join("pi.json").is_file() {
+        eprintln!("skipping live-adapter CLI launch: installed Pi runtime unavailable");
         return;
     }
 
     let isolated_config = home.join(".config/homeboy");
     let runtime_root = isolated_config.join("agent-runtimes");
     std::fs::create_dir_all(&runtime_root).expect("runtime catalog directory");
-    symlink(&installed_runtime, runtime_root.join("opencode")).expect("link installed adapter");
+    symlink(&installed_runtime, runtime_root.join("pi")).expect("link installed adapter");
     let mut manifest: Value = serde_json::from_slice(
-        &std::fs::read(installed_runtime.join("opencode.json")).expect("runtime manifest"),
+        &std::fs::read(installed_runtime.join("pi.json")).expect("runtime manifest"),
     )
     .expect("runtime manifest JSON");
     for provider in manifest["agent_task_executors"]
@@ -249,29 +249,29 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
         provider["runner_readiness"] = json!([]);
     }
     std::fs::write(
-        runtime_root.join("opencode.json"),
+        runtime_root.join("pi.json"),
         serde_json::to_vec(&manifest).expect("serialize isolated runtime manifest"),
     )
     .expect("write isolated runtime declaration");
 
     let bin = home.join("bin");
-    std::fs::create_dir_all(&bin).expect("fake OpenCode bin directory");
+    std::fs::create_dir_all(&bin).expect("fake Pi bin directory");
     let capture = std::env::var_os("HOMEBOY_TEST_PROVIDER_ARGV_CAPTURE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join("opencode-argv.jsonl"));
-    let fake_opencode = bin.join("opencode");
+        .unwrap_or_else(|| home.join("pi-argv.jsonl"));
+    let fake_pi = bin.join("pi");
     std::fs::write(
-        &fake_opencode,
+        &fake_pi,
         format!(
-            "#!/usr/bin/env node\nconst fs=require('node:fs');const args=process.argv.slice(2);if(args[0]==='--version'){{process.stdout.write('opencode 1.0.0\\n');process.exit(0);}}if(args[0]==='auth'&&args[1]==='list'){{process.stdout.write('anthropic\\n');process.exit(0);}}if(args[0]==='models'&&args[1]==='anthropic'){{process.stdout.write('anthropic/claude-sonnet-5\\n');process.exit(0);}}if(args[0]==='debug'&&args[1]==='agent'){{const cwd=process.cwd();process.stdout.write(JSON.stringify({{permission:{{external_directory:{{[cwd]:'allow',[cwd+'/**']:'allow'}},read:'allow',glob:'allow',grep:'allow',edit:'allow',bash:'allow'}}}}));process.exit(0);}}if(args[0]==='run'){{fs.appendFileSync({capture:?},JSON.stringify(args)+'\\n');process.exit(0);}}process.exit(0);\n"
+            "#!/usr/bin/env node\nconst fs=require('node:fs');const args=process.argv.slice(2);if(args[0]==='--version'){{process.stdout.write('pi 1.0.0\\n');process.exit(0);}}if(args[0]==='auth'&&args[1]==='list'){{process.stdout.write('anthropic\\n');process.exit(0);}}if(args[0]==='models'&&args[1]==='anthropic'){{process.stdout.write('anthropic/claude-sonnet-5\\n');process.exit(0);}}if(args[0]==='debug'&&args[1]==='agent'){{const cwd=process.cwd();process.stdout.write(JSON.stringify({{permission:{{external_directory:{{[cwd]:'allow',[cwd+'/**']:'allow'}},read:'allow',glob:'allow',grep:'allow',edit:'allow',bash:'allow'}}}}));process.exit(0);}}if(args[0]==='run'){{fs.appendFileSync({capture:?},JSON.stringify(args)+'\\n');process.exit(0);}}process.exit(0);\n"
         ),
     )
-    .expect("write fake OpenCode executable");
-    let mut permissions = std::fs::metadata(&fake_opencode)
+    .expect("write fake Pi executable");
+    let mut permissions = std::fs::metadata(&fake_pi)
         .expect("fake executable metadata")
         .permissions();
     permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_opencode, permissions).expect("make fake executable runnable");
+    std::fs::set_permissions(&fake_pi, permissions).expect("make fake executable runnable");
 
     let source = home.join("source");
     initialize_git_repository(&source);
@@ -311,9 +311,9 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
             "--head",
             "fix/14835-model-route-test",
             "--backend",
-            "opencode",
+            "pi",
             "--selector",
-            "opencode.agent-task-executor",
+            "pi.agent-task-executor",
             "--model",
             ALTERNATIVE,
             "--provider-config",
@@ -348,7 +348,7 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
     let output = bounded_output(command);
     let capture = std::fs::read_to_string(&capture).unwrap_or_else(|error| {
         panic!(
-            "Cook did not spawn fake OpenCode (status={:?}, error={error}): stdout={} stderr={}",
+            "Cook did not spawn fake Pi (status={:?}, error={error}): stdout={} stderr={}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -366,7 +366,7 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
         })
         .unwrap_or_else(|| {
             panic!(
-                "OpenCode run invocation absent; argv={invocations:?}; Cook status={:?}; stdout={} stderr={}",
+                "Pi run invocation absent; argv={invocations:?}; Cook status={:?}; stdout={} stderr={}",
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
@@ -423,13 +423,13 @@ fn configure_rotation_at(home: &Path, models: &[&str]) {
     }
 }
 
-fn configure_opencode_rotation(home: &Path, models: &[&str]) {
+fn configure_pi_rotation(home: &Path, models: &[&str]) {
     let entries = models
         .iter()
         .map(|model| {
             json!({
-                "backend": "opencode",
-                "selector": "opencode.agent-task-executor",
+                "backend": "pi",
+                "selector": "pi.agent-task-executor",
                 "model": model
             })
         })
@@ -446,8 +446,8 @@ fn configure_opencode_rotation(home: &Path, models: &[&str]) {
         .env("XDG_DATA_HOME", home.join("data"))
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .output()
-        .expect("configure isolated OpenCode rotation");
-    assert_success(&output, "configure isolated OpenCode rotation");
+        .expect("configure isolated Pi rotation");
+    assert_success(&output, "configure isolated Pi rotation");
 }
 
 fn run_preview(home: &TempDir, model: &str, acknowledged: bool) -> Output {

@@ -1192,7 +1192,7 @@ mod run_plan_remap_tests {
             "plan_id": "plan-12564",
             "tasks": [{
                 "task_id": "cook",
-                "executor": { "backend": "opencode", "config": {
+                "executor": { "backend": "pi", "config": {
                     "evidence_inputs": [{ "id": "capture", "path": local, "read_only": true }]
                 } },
                 "instructions": format!(
@@ -1232,13 +1232,13 @@ mod run_plan_remap_tests {
     #[test]
     fn remap_agent_task_run_plan_rebinds_symlinked_runtime_identity() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let real_runtime = temp.path().join("extensions/agent-runtimes/opencode");
+        let real_runtime = temp.path().join("extensions/agent-runtimes/pi");
         std::fs::create_dir_all(&real_runtime).expect("runtime");
         let config = temp.path().join("config");
         std::os::unix::fs::symlink(temp.path().join("extensions/agent-runtimes"), &config)
             .expect("symlink");
-        let declared = config.join("opencode").display().to_string();
-        let remote = "/home/runner/_lab_workspaces/opencode-runtime".to_string();
+        let declared = config.join("pi").display().to_string();
+        let remote = "/home/runner/_lab_workspaces/pi-runtime".to_string();
         let mappings = vec![LabPathRemap {
             local: real_runtime.canonicalize().unwrap().display().to_string(),
             remote: remote.clone(),
@@ -1248,7 +1248,7 @@ mod run_plan_remap_tests {
             "plan_id": "plan-15259",
             "tasks": [{
                 "task_id": "cook",
-                "executor": { "backend": "opencode", "config": {} },
+                "executor": { "backend": "pi", "config": {} },
                 "instructions": "test",
                 "metadata": {
                     "resolved_runtime_identity": {
@@ -1694,7 +1694,7 @@ mod materialize_specs_tests {
                     }
                 },
                 "executor": {
-                    "backend": "opencode",
+                    "backend": "pi",
                     "config": {
                         "workspace_root": controller_workspace,
                         "provider_plugin_paths": ["/controller/provider-plugin/plugin.json"],
@@ -2071,7 +2071,7 @@ mod materialize_specs_tests {
             "tasks": [{
                 "task_id": "task-1",
                 "workspace": { "root": controller },
-                "executor": { "backend": "opencode", "model": "openai/gpt-5.6-terra", "config": {
+                "executor": { "backend": "pi", "model": "openai/gpt-5.6-terra", "config": {
                     "workspace": controller,
                     "workspace_root": controller,
                     "provider_plugin_paths": [controller_plugin],
@@ -2112,7 +2112,7 @@ mod materialize_specs_tests {
             staged["tasks"][0]["workspace"]["root"],
             runner.display().to_string()
         );
-        assert_eq!(staged["tasks"][0]["executor"]["backend"], "opencode");
+        assert_eq!(staged["tasks"][0]["executor"]["backend"], "pi");
         assert_eq!(
             staged["tasks"][0]["executor"]["model"],
             "openai/gpt-5.6-terra"
@@ -2580,7 +2580,7 @@ mod lab_args_rewrite_tests {
             "homeboy".to_string(),
             "runtime".to_string(),
             "refresh".to_string(),
-            "opencode".to_string(),
+            "pi".to_string(),
             "--source".to_string(),
             "/controller/homeboy-extensions".to_string(),
         ];
@@ -2595,7 +2595,7 @@ mod lab_args_rewrite_tests {
                 "homeboy".to_string(),
                 "runtime".to_string(),
                 "refresh".to_string(),
-                "opencode".to_string(),
+                "pi".to_string(),
                 "--source".to_string(),
                 "/runner/workspaces/homeboy-extensions".to_string(),
             ]

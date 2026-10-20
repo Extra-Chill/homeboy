@@ -1079,12 +1079,8 @@ exec '{}' "$@"
             let old_source = home.join("old-source");
             let source = home.join("source-repo");
             let boundary_source = home.join("boundary-source");
-            write_extension_fixture(&old_source, "opencode");
-            write_extension_fixture_with_version(
-                &source.join("agent-runtimes"),
-                "opencode",
-                "2.0.0",
-            );
+            write_extension_fixture(&old_source, "pi");
+            write_extension_fixture_with_version(&source.join("agent-runtimes"), "pi", "2.0.0");
             write_declared_runtime_shared_assets(&source);
             if !run_git(&source, &["init", "--quiet"]) || !commit_all(&source, "runtime source") {
                 return;
@@ -1095,8 +1091,8 @@ exec '{}' "$@"
             write_shared_asset_manifest(&boundary_source, &[]);
 
             install(
-                &old_source.join("opencode").to_string_lossy(),
-                Some("opencode"),
+                &old_source.join("pi").to_string_lossy(),
+                Some("pi"),
                 ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install old extension");
@@ -1104,42 +1100,38 @@ exec '{}' "$@"
                 .expect("activate runtime generation boundary");
 
             refresh(
-                &source.join("agent-runtimes/opencode").to_string_lossy(),
-                Some("opencode"),
+                &source.join("agent-runtimes/pi").to_string_lossy(),
+                Some("pi"),
                 None,
                 ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("refresh nested runtime package");
 
             assert_eq!(
-                load_extension("opencode")
-                    .expect("refreshed extension")
-                    .version,
+                load_extension("pi").expect("refreshed extension").version,
                 "2.0.0"
             );
             assert!(home
-                .join(".config/homeboy/extension-sources/opencode/homeboy-extension-root.json")
+                .join(".config/homeboy/extension-sources/pi/homeboy-extension-root.json")
                 .is_file());
             assert!(home
-                .join(".config/homeboy/agent-runtimes/opencode/opencode.json")
+                .join(".config/homeboy/agent-runtimes/pi/pi.json")
                 .is_file());
-            assert!(fs::read_to_string(
-                home.join(".config/homeboy/agent-runtimes/opencode/opencode.json")
-            )
-            .expect("stable runtime manifest")
-            .contains("2.0.0"));
+            assert!(
+                fs::read_to_string(home.join(".config/homeboy/agent-runtimes/pi/pi.json"))
+                    .expect("stable runtime manifest")
+                    .contains("2.0.0")
+            );
             assert_eq!(
-                fs::read_to_string(
-                    home.join(".config/homeboy/agent-runtimes/opencode/.source-revision")
-                )
-                .expect("stable runtime revision")
-                .trim(),
+                fs::read_to_string(home.join(".config/homeboy/agent-runtimes/pi/.source-revision"))
+                    .expect("stable runtime revision")
+                    .trim(),
                 source_revision
             );
             assert_eq!(
-                fs::read_link(home.join(".config/homeboy/extensions/opencode"))
+                fs::read_link(home.join(".config/homeboy/extensions/pi"))
                     .expect("durable extension link"),
-                home.join(".config/homeboy/extension-sources/opencode/agent-runtimes/opencode")
+                home.join(".config/homeboy/extension-sources/pi/agent-runtimes/pi")
             );
         });
     }
@@ -1151,20 +1143,16 @@ exec '{}' "$@"
             let old_source = home.join("old-source");
             let source = home.join("source-repo");
             let boundary_source = home.join("boundary-source");
-            write_extension_fixture(&old_source, "opencode");
-            write_extension_fixture_with_version(
-                &source.join("agent-runtimes"),
-                "opencode",
-                "2.0.0",
-            );
+            write_extension_fixture(&old_source, "pi");
+            write_extension_fixture_with_version(&source.join("agent-runtimes"), "pi", "2.0.0");
             fs::write(source.join("homeboy-extension-root.json"), "not json")
                 .expect("malformed root manifest");
             fs::create_dir_all(&boundary_source).expect("boundary source");
             write_shared_asset_manifest(&boundary_source, &[]);
 
             install(
-                &old_source.join("opencode").to_string_lossy(),
-                Some("opencode"),
+                &old_source.join("pi").to_string_lossy(),
+                Some("pi"),
                 ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install old extension");
@@ -1174,8 +1162,8 @@ exec '{}' "$@"
                 .expect("active generation");
 
             refresh(
-                &source.join("agent-runtimes/opencode").to_string_lossy(),
-                Some("opencode"),
+                &source.join("agent-runtimes/pi").to_string_lossy(),
+                Some("pi"),
                 None,
                 ExtensionLifecycleValidation::declaration_only(),
             )
@@ -1187,9 +1175,9 @@ exec '{}' "$@"
                 current
             );
             assert_eq!(
-                fs::read_link(home.join(".config/homeboy/extensions/opencode"))
+                fs::read_link(home.join(".config/homeboy/extensions/pi"))
                     .expect("preserved extension link"),
-                old_source.join("opencode")
+                old_source.join("pi")
             );
         });
     }

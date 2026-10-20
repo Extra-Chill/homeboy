@@ -285,34 +285,32 @@ mod tests {
 
     #[test]
     fn a_registered_executor_exposes_identity_without_execution_inputs() {
-        let advertised = vec![format!(
-            "{AGENT_TASK_EXECUTOR_CAPABILITY_PREFIX}opencode.exec"
-        )];
+        let advertised = vec![format!("{AGENT_TASK_EXECUTOR_CAPABILITY_PREFIX}pi.exec")];
         let entry = descriptor(
-            "homeboy-opencode",
-            "opencode",
+            "homeboy-pi",
+            "pi",
             declaration(json!({
-                "id": "opencode.exec",
-                "backend": "opencode",
+                "id": "pi.exec",
+                "backend": "pi",
                 "capabilities": ["workspace_permission_root/v1"],
-                "argv": ["opencode-provider", "--secret", "token"],
-                "readiness_invocation": { "argv": ["opencode-provider"], "timeout_ms": 5000 }
+                "argv": ["pi-provider", "--secret", "token"],
+                "readiness_invocation": { "argv": ["pi-provider"], "timeout_ms": 5000 }
             })),
             &advertised,
             None,
         );
 
         assert!(entry.resolvable);
-        assert_eq!(entry.backend, "opencode");
-        assert_eq!(entry.owning_extension, "homeboy-opencode");
-        assert_eq!(entry.runtime_id, "opencode");
+        assert_eq!(entry.backend, "pi");
+        assert_eq!(entry.owning_extension, "homeboy-pi");
+        assert_eq!(entry.runtime_id, "pi");
         assert!(entry.declares_readiness_probe);
         assert_eq!(entry.readiness_timeout_ms, Some(5000));
 
         let encoded = serde_json::to_string(&entry).expect("descriptor JSON");
         assert!(
             !encoded.contains("argv")
-                && !encoded.contains("opencode-provider")
+                && !encoded.contains("pi-provider")
                 && !encoded.contains("token"),
             "registration inventory must not carry execution inputs: {encoded}"
         );

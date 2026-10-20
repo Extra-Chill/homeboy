@@ -3371,7 +3371,7 @@ fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
             "key": "task:1",
             "task_id": "task",
             "attempt": 1,
-            "backend": "opencode",
+            "backend": "pi",
             "model": "openai/gpt-5.6-sol",
             "state": "running",
             "started_at": "2026-07-24T00:00:00Z"
@@ -3393,10 +3393,7 @@ fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
         "logs must surface the running provider execution, got: {messages:?}"
     );
     let record = lifecycle_store.read_record(run_id).expect("record");
-    assert_eq!(
-        record.metadata["provider_executions"][0]["backend"],
-        "opencode"
-    );
+    assert_eq!(record.metadata["provider_executions"][0]["backend"], "pi");
     assert_eq!(
         record.metadata["provider_executions"][0]["model"],
         "openai/gpt-5.6-sol"

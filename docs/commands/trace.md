@@ -326,7 +326,7 @@ Example:
 ```sh
 homeboy trace wp-coding-agents auth-multi-session-race \
   --attach logfile:/root/.kimaki/kimaki.log \
-  --attach fswatch:/home/opencode/.local/share/opencode/auth.json \
+  --attach fswatch:/home/agent/.pi/agent/auth.json \
   --attach pid:3679661 \
   --attach systemd:kimaki.service \
   --attach http://127.0.0.1:46227/health

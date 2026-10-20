@@ -313,7 +313,7 @@ fn homeboy_local_artifact_normalization_measures_empty_nonempty_and_unavailable_
         locality: "runner".to_string(),
         plan_id: "plan".to_string(),
         run_id: None,
-        task_id: "opencode-no-op".to_string(),
+        task_id: "pi-no-op".to_string(),
         attempt: 1,
     };
     let mut empty = fixture_artifact("empty", "patch", &empty_path, Some("text/x-patch"));
@@ -399,7 +399,7 @@ fn empty_patch_with_substantive_evidence_is_flagged_for_review_not_noop() {
         locality: "runner".to_string(),
         plan_id: "plan".to_string(),
         run_id: None,
-        task_id: "opencode-empty-patch-with-evidence".to_string(),
+        task_id: "pi-empty-patch-with-evidence".to_string(),
         attempt: 1,
     };
 
@@ -465,7 +465,7 @@ fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_uncha
         locality: "runner".to_string(),
         plan_id: "plan".to_string(),
         run_id: None,
-        task_id: "opencode-empty-attempt".to_string(),
+        task_id: "pi-empty-attempt".to_string(),
         attempt: 1,
     };
     let parked_outcome = || {
@@ -1107,7 +1107,7 @@ fn typed_provider_quota_normalizes_to_rate_limited_and_preserves_retry_hint() {
         "summary": "quota exceeded",
         "metadata": { "retry_after_ms": 1500 }
     }))
-    .expect("OpenCode quota outcome is accepted");
+    .expect("Pi quota outcome is accepted");
 
     assert_eq!(
         outcome.failure_classification,
@@ -1122,9 +1122,9 @@ fn typed_provider_quota_normalizes_to_rate_limited_and_preserves_retry_hint() {
 }
 
 #[test]
-fn opencode_account_block_maps_to_rotatable_provider_classification() {
+fn pi_account_block_maps_to_rotatable_provider_classification() {
     let (_, mut provider) = request("quota-task", "node provider.js".to_string());
-    provider.backend = "opencode".to_string();
+    provider.backend = "pi".to_string();
     let mut outcome = AgentTaskOutcome {
         task_id: "quota-task".to_string(),
         status: AgentTaskOutcomeStatus::Failed,

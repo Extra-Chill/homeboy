@@ -243,7 +243,7 @@ fn runtime_refresh_source_syncs_local_source_and_records_dirty_identity() {
         "homeboy".to_string(),
         "runtime".to_string(),
         "refresh".to_string(),
-        "opencode".to_string(),
+        "pi".to_string(),
         "--source".to_string(),
         runtime_source.display().to_string(),
     ];
@@ -1364,7 +1364,7 @@ fn runtime_identity_plan(runtime_path: &str) -> String {
         "tasks": [{
             "schema": "homeboy/agent-task-request/v1",
             "task_id": "cook",
-            "executor": { "backend": "opencode" },
+            "executor": { "backend": "pi" },
             "instructions": "test",
             "metadata": {
                 "resolved_runtime_identity": {
@@ -1394,7 +1394,7 @@ fn run_plan_runtime_syncs_extension_shared_assets_and_standalone_runtime_root() 
     // The runtime lives inside a larger Git checkout, reached through a
     // symlinked parent: exactly the controller layout from #15259.
     let extensions = temp.path().join("extensions");
-    let runtime = extensions.join("agent-runtimes/opencode");
+    let runtime = extensions.join("agent-runtimes/pi");
     std::fs::create_dir_all(runtime.join("scripts")).expect("runtime");
     std::fs::write(
         runtime.join("scripts/readiness.cjs"),
@@ -1414,7 +1414,7 @@ fn run_plan_runtime_syncs_extension_shared_assets_and_standalone_runtime_root() 
     git(&extensions, &["commit", "-m", "initial"]);
     let config = temp.path().join("config");
     std::os::unix::fs::symlink(extensions.join("agent-runtimes"), &config).expect("symlink");
-    let declared = config.join("opencode");
+    let declared = config.join("pi");
 
     let args = vec![
         "homeboy".to_string(),

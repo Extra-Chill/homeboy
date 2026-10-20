@@ -4706,7 +4706,7 @@ mod tests {
         let mut raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         raw["attempts"][0]["plan"]["tasks"][0]["executor"]["secret_env"] =
-            serde_json::json!(["AI_PROVIDER_OPENCODE_OPENAI_ACCESS", "TEST_TOKEN"]);
+            serde_json::json!(["AI_PROVIDER_PI_OPENAI_ACCESS", "TEST_TOKEN"]);
         std::fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
 
         let loaded = store
@@ -4714,7 +4714,7 @@ mod tests {
             .expect("stale projection repaired");
         assert_eq!(
             loaded.sensitive_mappings,
-            ["AI_PROVIDER_OPENCODE_OPENAI_ACCESS", "TEST_TOKEN"]
+            ["AI_PROVIDER_PI_OPENAI_ACCESS", "TEST_TOKEN"]
         );
         assert_eq!(
             load_recipe_for_attempt_from(&store.recipe_root(), &loaded.attempts[0].run_id)

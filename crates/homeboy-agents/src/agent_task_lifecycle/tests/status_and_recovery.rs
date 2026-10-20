@@ -1577,7 +1577,7 @@ fn terminal_proxy_reconciliation_hydrates_persisted_nested_result_idempotently()
         label: Some("Provider transcript".to_string()),
     }];
     aggregate.outcomes[0].metadata = json!({
-        "provider": "opencode",
+        "provider": "pi",
         "provider_run_id": "provider-run-1",
     });
     let snapshot = persisted_terminal_result_snapshot(&aggregate);
@@ -2249,7 +2249,7 @@ fn status_preserves_existing_terminal_runtime_evidence() {
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let mut plan = test_plan();
-    plan.tasks[0].executor.backend = "opencode".to_string();
+    plan.tasks[0].executor.backend = "pi".to_string();
     let aggregate = succeeded_aggregate(&plan);
     let record = record_completed_run_in_store(
         &lifecycle_store,

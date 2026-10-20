@@ -113,10 +113,10 @@ mod tests {
 
     fn descriptor() -> ExtensionApiAgentTaskExecutorDescriptor {
         ExtensionApiAgentTaskExecutorDescriptor {
-            id: "opencode.agent-task-executor".to_string(),
-            backend: "opencode".to_string(),
-            owning_extension: "homeboy-opencode".to_string(),
-            runtime_id: "opencode".to_string(),
+            id: "pi.agent-task-executor".to_string(),
+            backend: "pi".to_string(),
+            owning_extension: "homeboy-pi".to_string(),
+            runtime_id: "pi".to_string(),
             capabilities: vec!["workspace_permission_root/v1".to_string()],
             declares_readiness_probe: true,
             readiness_timeout_ms: Some(20_000),
@@ -131,10 +131,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(descriptor()).expect("descriptor JSON"),
             serde_json::json!({
-                "id": "opencode.agent-task-executor",
-                "backend": "opencode",
-                "owning_extension": "homeboy-opencode",
-                "runtime_id": "opencode",
+                "id": "pi.agent-task-executor",
+                "backend": "pi",
+                "owning_extension": "homeboy-pi",
+                "runtime_id": "pi",
                 "capabilities": ["workspace_permission_root/v1"],
                 "declares_readiness_probe": true,
                 "readiness_timeout_ms": 20000,
@@ -158,7 +158,7 @@ mod tests {
 
         // Identity survives so the conflict is reportable, but the entry is not
         // selectable and says which class of problem it is.
-        assert_eq!(encoded["id"], "opencode.agent-task-executor");
+        assert_eq!(encoded["id"], "pi.agent-task-executor");
         assert_eq!(encoded["resolvable"], false);
         assert_eq!(encoded["validation"], "duplicate");
         assert_eq!(encoded["diagnostic"]["kind"], "duplicate_id");
@@ -183,6 +183,6 @@ mod tests {
             .map(|executor| executor.id.as_str())
             .collect();
 
-        assert_eq!(resolvable, ["opencode.agent-task-executor"]);
+        assert_eq!(resolvable, ["pi.agent-task-executor"]);
     }
 }

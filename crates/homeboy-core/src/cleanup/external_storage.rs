@@ -1033,7 +1033,7 @@ mod tests {
 
     /// Runs an inventory-only provider that declares the given `native_contracts`
     /// JSON fragment and no reclaimable items, mirroring the shape an installed
-    /// provider like `opencode.external-storage-retention` returns.
+    /// provider like `pi.external-storage-retention` returns.
     #[cfg(unix)]
     fn native_contract_provider(
         id: &str,
@@ -1082,11 +1082,11 @@ mod tests {
     #[test]
     fn unsatisfied_native_contract_surfaces_a_typed_blocker_with_zero_candidates() {
         let output = run_native_contract_fixture(native_contract_provider(
-            "opencode.external-storage-retention",
+            "pi.external-storage-retention",
             serde_json::json!([{
-                "contract_id": "opencode.db.compact-events.v1",
+                "contract_id": "pi.db.compact-events.v1",
                 "status": "unsatisfied",
-                "invocation": "opencode db event-log-status",
+                "invocation": "pi db event-log-status",
                 // No shell metacharacters (this JSON travels through a
                 // single-quoted `sh -c` argument in the test fixture below).
                 "failure": "SQL syntax error near event-log-status",
@@ -1096,9 +1096,9 @@ mod tests {
         assert_eq!(output.reclaimed_bytes, 0);
         assert_eq!(output.unsatisfied_native_contracts.len(), 1);
         let blocker = &output.unsatisfied_native_contracts[0];
-        assert_eq!(blocker.provider_id, "opencode.external-storage-retention");
-        assert_eq!(blocker.contract_id, "opencode.db.compact-events.v1");
-        assert_eq!(blocker.invocation, "opencode db event-log-status");
+        assert_eq!(blocker.provider_id, "pi.external-storage-retention");
+        assert_eq!(blocker.contract_id, "pi.db.compact-events.v1");
+        assert_eq!(blocker.invocation, "pi db event-log-status");
         assert_eq!(blocker.failure, "SQL syntax error near event-log-status");
         assert_eq!(
             output.providers[0].unsatisfied_native_contracts.len(),
@@ -1115,9 +1115,9 @@ mod tests {
     #[test]
     fn satisfied_native_contract_with_zero_candidates_is_a_clean_result_not_a_blocker() {
         let output = run_native_contract_fixture(native_contract_provider(
-            "opencode.external-storage-retention",
+            "pi.external-storage-retention",
             serde_json::json!([{
-                "contract_id": "opencode.db.compact-events.v1",
+                "contract_id": "pi.db.compact-events.v1",
                 "status": "satisfied",
             }]),
         ));
@@ -1138,10 +1138,10 @@ mod tests {
     fn satisfied_native_contract_with_candidates_still_reports_them() {
         let inventory = serde_json::json!({
             "schema": EXTERNAL_STORAGE_RETENTION_SCHEMA,
-            "provider_id": "opencode.external-storage-retention",
+            "provider_id": "pi.external-storage-retention",
             "generation": "g1",
             "native_contracts": [{
-                "contract_id": "opencode.db.compact-events.v1",
+                "contract_id": "pi.db.compact-events.v1",
                 "status": "satisfied",
             }],
             "items": [{
@@ -1152,7 +1152,7 @@ mod tests {
             }]
         });
         let provider = ExternalStorageRetentionProviderConfig {
-            id: "opencode.external-storage-retention".to_string(),
+            id: "pi.external-storage-retention".to_string(),
             command: vec![
                 "sh".to_string(),
                 "-c".to_string(),

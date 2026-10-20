@@ -6359,7 +6359,7 @@ mod tests {
             "key": "review:1",
             "task_id": "review",
             "attempt": 1,
-            "backend": "opencode",
+            "backend": "pi",
             "model": "openai/gpt-6-luna",
             "state": "failed",
         }]);
@@ -6376,7 +6376,7 @@ mod tests {
             "key": "review:1",
             "task_id": "review",
             "attempt": 1,
-            "backend": "opencode",
+            "backend": "pi",
             "model": "openai/gpt-6-luna",
             "state": "running",
         }]);

@@ -250,7 +250,7 @@ mod tests {
             "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
         ]);
         plan.provider_credentials.insert(
-            "test.opencode-provider".to_string(),
+            "test.pi-provider".to_string(),
             homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping {
                 secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
                 sources: Default::default(),
@@ -297,7 +297,7 @@ mod tests {
             .contains(&"AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()));
         assert!(carried_plan
             .provider_credentials
-            .contains_key("test.opencode-provider"));
+            .contains_key("test.pi-provider"));
         let dispatch = envelope.dispatch.as_ref().expect("envelope dispatch");
         assert!(!dispatch
             .env
@@ -306,7 +306,7 @@ mod tests {
         // any secret value.
         let durable = serde_json::to_string(&envelope).expect("envelope json");
         assert!(!durable.contains("access-secret-value"));
-        assert!(durable.contains("test.opencode-provider"));
+        assert!(durable.contains("test.pi-provider"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ fn runner_readiness_query_dispatches_once_to_selected_runner_without_global_flag
         "agent-task",
         "providers",
         "--backend",
-        "opencode",
+        "pi",
         "--model",
         "model-a",
         "--validate-readiness",
@@ -31,7 +31,7 @@ fn runner_readiness_query_dispatches_once_to_selected_runner_without_global_flag
             "agent-task",
             "providers",
             "--backend",
-            "opencode",
+            "pi",
             "--model",
             "model-a",
             "--validate-readiness"

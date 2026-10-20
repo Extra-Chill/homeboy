@@ -163,7 +163,7 @@ fn default_external_storage_schema() -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalStorageNativeContract {
     /// Stable, versioned capability identity, e.g.
-    /// `opencode.db.compact-events.v1`. Never a path or free-text description.
+    /// `pi.db.compact-events.v1`. Never a path or free-text description.
     pub contract_id: String,
     #[serde(flatten)]
     pub status: ExternalStorageNativeContractStatus,
@@ -271,25 +271,25 @@ mod tests {
     #[test]
     fn unsatisfied_native_contract_round_trips_invocation_and_failure() {
         let inventory: ExternalStorageInventory = serde_json::from_value(serde_json::json!({
-            "provider_id": "opencode.external-storage-retention",
+            "provider_id": "pi.external-storage-retention",
             "generation": "generation-1",
             "native_contracts": [{
-                "contract_id": "opencode.db.compact-events.v1",
+                "contract_id": "pi.db.compact-events.v1",
                 "status": "unsatisfied",
-                "invocation": "opencode db event-log-status",
+                "invocation": "pi db event-log-status",
                 "failure": "SQL syntax error near 'event-log-status'",
             }]
         }))
         .expect("inventory with an unsatisfied native contract parses");
         assert_eq!(inventory.native_contracts.len(), 1);
         let contract = &inventory.native_contracts[0];
-        assert_eq!(contract.contract_id, "opencode.db.compact-events.v1");
+        assert_eq!(contract.contract_id, "pi.db.compact-events.v1");
         match &contract.status {
             ExternalStorageNativeContractStatus::Unsatisfied {
                 invocation,
                 failure,
             } => {
-                assert_eq!(invocation, "opencode db event-log-status");
+                assert_eq!(invocation, "pi db event-log-status");
                 assert_eq!(failure, "SQL syntax error near 'event-log-status'");
             }
             ExternalStorageNativeContractStatus::Satisfied => {
@@ -305,10 +305,10 @@ mod tests {
     #[test]
     fn satisfied_native_contract_carries_no_failure_fields() {
         let inventory: ExternalStorageInventory = serde_json::from_value(serde_json::json!({
-            "provider_id": "opencode.external-storage-retention",
+            "provider_id": "pi.external-storage-retention",
             "generation": "generation-1",
             "native_contracts": [{
-                "contract_id": "opencode.db.compact-events.v1",
+                "contract_id": "pi.db.compact-events.v1",
                 "status": "satisfied",
             }]
         }))

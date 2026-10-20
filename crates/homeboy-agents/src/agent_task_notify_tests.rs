@@ -120,7 +120,7 @@ fn green_no_finalize_is_completed_without_a_pull_request_link() {
 fn terminal_notification_names_skipped_provider_routes() {
     let mut route_note_report = report("no_changes", None);
     route_note_report.provider_route_notes = vec![
-        "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the provider-owned OpenCode credentials, then retry.)"
+        "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie credential pool key, then retry.)"
             .to_string(),
         "xai/grok-4.7 skipped: usage_capped (Wait for the provider usage cap to reset.)"
             .to_string(),
@@ -168,7 +168,7 @@ fn rotation_exhaustion_notification_preserves_the_terminal_cause() {
     report.terminal_phase = Some("provider".to_string());
     report.terminal_failure_classification = Some("provider_rotation_exhausted".to_string());
     report.stop_reason = Some(
-        "provider rotation exhausted without a candidate: xai/grok-4.6: provider_account_blocked; zai-coding-plan/glm-5.3: rate_limited; opencode-go/kimi-k3: stalled".to_string(),
+        "provider rotation exhausted without a candidate: xai/grok-4.6: provider_account_blocked; zai-coding-plan/glm-5.3: rate_limited; pi-go/kimi-k3: stalled".to_string(),
     );
 
     let payload = terminal_payload(&report, None, 1);
@@ -176,7 +176,7 @@ fn rotation_exhaustion_notification_preserves_the_terminal_cause() {
     assert!(body.contains("Failure classification: provider_rotation_exhausted"));
     assert!(body.contains("xai/grok-4.6: provider_account_blocked"));
     assert!(body.contains("zai-coding-plan/glm-5.3: rate_limited"));
-    assert!(body.contains("opencode-go/kimi-k3: stalled"));
+    assert!(body.contains("pi-go/kimi-k3: stalled"));
 }
 
 #[test]

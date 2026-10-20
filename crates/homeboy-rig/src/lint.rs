@@ -19,7 +19,7 @@ const STRUCTURAL_IGNORED_DIRECTORIES: &[&str] = &[
     ".datamachine",
     ".git",
     ".next",
-    ".opencode",
+    ".pi",
     ".sampleplugin",
     ".venv",
     "bower_components",
@@ -1768,7 +1768,7 @@ mod tests {
     fn lint_ignores_shared_rig_package_metadata_directories() {
         let policy = IgnorePolicy::new(&[]);
 
-        for directory in [".claude", ".datamachine", ".opencode", ".sampleplugin"] {
+        for directory in [".claude", ".datamachine", ".pi", ".sampleplugin"] {
             assert!(
                 policy.ignored_directory(OsStr::new(directory)),
                 "{directory} should be ignored by the generic package walk"

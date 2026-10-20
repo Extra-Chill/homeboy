@@ -214,8 +214,8 @@ pub fn evaluate_provider_dispatchability_with_config(
 /// it resolves the route exactly the way dispatchability does, then runs the
 /// provider's declared readiness invocation in capacity mode (`mode:
 /// "capacity"`, a distinct cache identity that can never satisfy a
-/// live-inference probe). Capacity support is a runtime opt-in (OpenCode
-/// implements it via homeboy-extensions): a runtime that ignores the mode still
+/// live-inference probe). Capacity support is a runtime opt-in declared by
+/// the runtime extension: a runtime that ignores the mode still
 /// answers, but this function reports only whatever `capacity` object that
 /// answer carries — never a dispatchability verdict — so an ignoring runtime
 /// cannot pass its normal inference probe off as capacity evidence.

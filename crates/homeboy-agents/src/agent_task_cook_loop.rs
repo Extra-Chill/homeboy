@@ -1503,7 +1503,7 @@ mod tests {
         source.executor.config = json!({
             "client_context": { "conversation_id": "distinct-context" },
             "provider_plugin_paths": ["/provider/plugin"],
-            "runtime_env": { "OPENCODE_CONFIG_CONTENT": "distinct-policy" },
+            "runtime_env": { "PI_CONFIG_CONTENT": "distinct-policy" },
             "runtime_overlays": [{ "source": "/runtime/overlay" }],
             "workspace_root": "/source/workspace",
         });

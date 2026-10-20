@@ -1,7 +1,7 @@
 //! Provider usage caps: a distinct, temporary provider state carrying a known
 //! reset time.
 //!
-//! A flat-rate provider (`opencode-go`, `zai-coding-plan`, ...) that has hit
+//! A flat-rate provider (`zai-coding-plan`, ...) that has hit
 //! its rolling usage window is not unhealthy, misconfigured, or lacking
 //! credentials — its credentials still resolve, so plain readiness reports it
 //! `ready`. Without this module, provider rotation has no way to tell a
@@ -288,21 +288,21 @@ mod tests {
 
     #[test]
     fn registry_key_includes_the_selector_when_present() {
-        assert_eq!(provider_usage_cap_key("opencode-go", None), "opencode-go");
+        assert_eq!(provider_usage_cap_key("pi-go", None), "pi-go");
         assert_eq!(
-            provider_usage_cap_key("opencode-go", Some("secondary")),
-            "opencode-go::secondary"
+            provider_usage_cap_key("pi-go", Some("secondary")),
+            "pi-go::secondary"
         );
         assert_ne!(
-            provider_usage_cap_key_for_model("opencode", None, Some("zai/glm")),
-            provider_usage_cap_key_for_model("opencode", None, Some("openai/gpt"))
+            provider_usage_cap_key_for_model("pi", None, Some("zai/glm")),
+            provider_usage_cap_key_for_model("pi", None, Some("openai/gpt"))
         );
     }
 
     #[test]
     fn registry_keeps_the_later_reset_time_and_does_not_regress_on_a_stale_observation() {
         let mut registry = ProviderUsageCapRegistry::default();
-        let key = provider_usage_cap_key("opencode-go", None);
+        let key = provider_usage_cap_key("pi-go", None);
         let later = now() + chrono::Duration::hours(2);
         registry.record(&key, later);
         registry.record(&key, now() + chrono::Duration::minutes(5));

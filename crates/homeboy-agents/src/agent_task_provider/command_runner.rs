@@ -45,7 +45,7 @@ pub const PROVIDER_READINESS_RESULT_SCHEMA: &str =
 /// Optional `mode` value a readiness request can carry (#15024). `capacity`
 /// asks the runtime for its capacity evidence only — usage/profile reads — and
 /// to skip the bounded model execution a live-inference probe would spend.
-/// Support is a runtime opt-in (OpenCode implements it via homeboy-extensions);
+/// Support is a runtime opt-in declared by the runtime extension;
 /// a runtime that ignores the field still answers, but Homeboy then reports
 /// only whatever `capacity` object that answer happens to contain, so an
 /// ignoring runtime can never pass its normal inference probe off as capacity
@@ -948,8 +948,8 @@ fn run_materialized_provider_command_once_contained(
     };
     let mut provider_request = request.clone();
     // The provider's own timer runs to the cap, not the base. Executors
-    // enforce `timeout_ms` themselves (the OpenCode executor's setTimeout
-    // fired first in the #692 Cook), so handing them the base would kill a
+    // enforce `timeout_ms` themselves (an executor's own timer fired first
+    // in the #692 Cook), so handing them the base would kill a
     // busy agent before Homeboy could decide to extend it. Homeboy owns the
     // earlier, progress-aware decision.
     provider_request.request.limits.timeout_ms = Some(cap_timeout_ms);
@@ -4277,12 +4277,12 @@ mod readiness_failure_stderr_tests {
     #[test]
     fn failed_readiness_reason_carries_the_stderr_cause() {
         let excerpt = readiness_failure_stderr_excerpt(
-            b"\nOpenCode provider readiness request could not be processed.\n",
+            b"\nPi provider readiness request could not be processed.\n",
             &[],
         );
         assert_eq!(
             excerpt.as_deref(),
-            Some("OpenCode provider readiness request could not be processed.")
+            Some("Pi provider readiness request could not be processed.")
         );
     }
 
@@ -4290,11 +4290,11 @@ mod readiness_failure_stderr_tests {
     fn stderr_excerpt_redacts_every_request_credential_value() {
         let credentials = vec![
             (
-                "AI_PROVIDER_OPENCODE_OPENAI_ACCESS".to_string(),
+                "AI_PROVIDER_PI_OPENAI_ACCESS".to_string(),
                 "sk-access-123".to_string(),
             ),
             (
-                "AI_PROVIDER_OPENCODE_OPENAI_REFRESH".to_string(),
+                "AI_PROVIDER_PI_OPENAI_REFRESH".to_string(),
                 "rt-refresh-456".to_string(),
             ),
             ("EMPTY".to_string(), String::new()),

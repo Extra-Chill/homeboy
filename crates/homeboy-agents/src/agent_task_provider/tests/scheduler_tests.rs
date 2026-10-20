@@ -1183,7 +1183,7 @@ fn quiet_active_descendant_still_hits_absolute_execution_deadline() {
 /// contain `progress` is still working, and must not be killed as stalled.
 ///
 /// Regression for #13623: liveness filtered artifacts by file name, so an
-/// OpenCode Cook writing `cook-homeboy-opencode-runtime-stdout.log` was read as
+/// Pi Cook writing `cook-homeboy-pi-runtime-stdout.log` was read as
 /// producing nothing. It was killed at the liveness deadline with
 /// `stdout_bytes: 0` and `runtime_progress_events: 0` while that file already
 /// held 94KB. The script below reproduces that shape: it writes only to a
@@ -2048,16 +2048,16 @@ fn immediate_failure_patterns_preserve_terminal_failure_classifications() {
 }
 
 #[test]
-fn opencode_manifest_shaped_declaration_classifies_the_observed_server_failure() {
+fn pi_manifest_shaped_declaration_classifies_the_observed_server_failure() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
-        "id": "opencode.agent-task-executor",
-        "backend": "opencode",
+        "id": "pi.agent-task-executor",
+        "backend": "pi",
         "immediate_failure_patterns": [{
             "id": "unexpected_server_error",
             "error_contains_any": ["Unexpected server error. Check server logs for details."],
             "retryable": true,
             "error_ref_pattern": "err_[A-Za-z0-9]+",
-            "log_lookup": "opencode logs --error <provider-error-ref>",
+            "log_lookup": "pi logs --error <provider-error-ref>",
             "fallback_action": "Select another configured provider."
         }]
     }))
@@ -2072,10 +2072,7 @@ fn opencode_manifest_shaped_declaration_classifies_the_observed_server_failure()
     let failure = immediate_provider_failure(&provider, &outcome, Duration::from_secs(1))
         .expect("classified failure");
     assert_eq!(failure.error_refs, vec!["err_3a6d31e2"]);
-    assert_eq!(
-        failure.log_lookup,
-        "opencode logs --error <provider-error-ref>"
-    );
+    assert_eq!(failure.log_lookup, "pi logs --error <provider-error-ref>");
 }
 
 fn selected_component_contract(
@@ -2177,7 +2174,7 @@ fn plan_runtime_preflight_skips_provider_without_declared_checks() {
 
 #[test]
 fn a_flat_rate_usage_limit_is_classified_rate_limited_and_carries_its_reset_time() {
-    // #13644: "5-hour usage limit reached. Resets in 3hr 3min." (opencode-go)
+    // #13644: "5-hour usage limit reached. Resets in 3hr 3min." (pi-go)
     // is not a generic rate-limit blip Homeboy should retry blindly — it is a
     // known, temporary cap with a computable reset time rotation can act on.
     let command = format!(

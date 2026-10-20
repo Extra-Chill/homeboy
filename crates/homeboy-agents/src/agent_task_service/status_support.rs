@@ -1433,8 +1433,8 @@ mod tests {
                 "failure_classification": "provider",
                 "diagnostics": [{
                     "class": "agent_task.provider_executable_missing",
-                    "message": "opencode is unavailable",
-                    "data": { "provider": "opencode" }
+                    "message": "pi is unavailable",
+                    "data": { "provider": "pi" }
                 }]
             }]
         }))
@@ -1457,7 +1457,7 @@ mod tests {
         assert_eq!(hydrated.source, "homeboy");
         assert_eq!(
             hydrated.content["diagnostic"]["message"],
-            "opencode is unavailable"
+            "pi is unavailable"
         );
     }
 

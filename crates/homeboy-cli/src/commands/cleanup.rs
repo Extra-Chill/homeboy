@@ -4352,7 +4352,7 @@ const CLEANUP_CATEGORY_OUTCOME_NO_EFFECT: &str = "no_effect";
 /// a genuine clean result, while an unsatisfied contract means the provider
 /// could not even run its own probe, so `candidate_count` proves nothing about
 /// what is actually reclaimable. Reporting that as `completed` is what let a
-/// 107 GB opencode.db with ~99 GB of live payload stay invisible behind
+/// 107 GB runtime database with ~99 GB of live payload stay invisible behind
 /// `candidate_count: 0` (#14955). Takes priority over `no_effect` when both
 /// conditions hold, since the broken probe is the more fundamental problem.
 const CLEANUP_CATEGORY_OUTCOME_CONTRACT_UNSATISFIED: &str = "contract_unsatisfied";
@@ -7305,9 +7305,9 @@ mod tests {
 
     fn unsatisfied_contract_fixture() -> cleanup::ExternalStorageUnsatisfiedContract {
         cleanup::ExternalStorageUnsatisfiedContract {
-            provider_id: "opencode.external-storage-retention".to_string(),
-            contract_id: "opencode.db.compact-events.v1".to_string(),
-            invocation: "opencode db event-log-status".to_string(),
+            provider_id: "pi.external-storage-retention".to_string(),
+            contract_id: "pi.db.compact-events.v1".to_string(),
+            invocation: "pi db event-log-status".to_string(),
             failure: "SQL syntax error".to_string(),
         }
     }

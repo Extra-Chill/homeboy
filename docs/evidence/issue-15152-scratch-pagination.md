@@ -72,9 +72,9 @@ final gates above all passed afterward.
 ## Execution and delivery
 
 Implementation and final verification occurred through the operator-authorized
-direct OpenCode route for the Homeboy simplification program, outside Cook.
+direct coding-agent route for the Homeboy simplification program, outside Cook.
 Runtime session: `ses_ef20fd4ccffehC7kK3VTu9uCQN`.
-Model: OpenAI `gpt-6.1-sol`; tool: OpenCode. AI implemented the scoped change,
+Model: OpenAI `gpt-6.1-sol`; tool: a coding-agent CLI. AI implemented the scoped change,
 authored the regression and real-binary fixture, and ran/reviewed verification.
 
 This candidate is prepared for PR review. The installed runtime has not been

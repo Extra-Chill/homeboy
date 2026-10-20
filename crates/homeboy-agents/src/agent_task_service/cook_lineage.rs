@@ -136,7 +136,7 @@ mod tests {
             "schema": "homeboy/agent-task-request/v1",
             "task_id": "cook-x-gate-fix-2",
             "group_key": "x",
-            "executor": { "backend": "opencode" },
+            "executor": { "backend": "pi" },
             "instructions": "fix",
         }))
         .unwrap();

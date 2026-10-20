@@ -1012,7 +1012,6 @@ fn nonce() -> String {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
-    use std::process::Command;
 
     fn package(root: &Path, id: &str, marker: &str) -> PathBuf {
         let path = root.join("agent-runtimes").join(id);
@@ -1051,60 +1050,6 @@ mod tests {
                 "old"
             );
             assert_eq!(fs::read_to_string(root.join("keep")).unwrap(), "yes");
-        });
-    }
-
-    #[test]
-    #[ignore = "requires HOMEBOY_OPENCODE_RUNTIME_SOURCE with a Homeboy Extensions checkout"]
-    fn installed_opencode_boundary_suite_runs_without_source_siblings() {
-        with_isolated_home(|_| {
-            let source =
-                PathBuf::from(std::env::var_os("HOMEBOY_OPENCODE_RUNTIME_SOURCE").expect(
-                    "set HOMEBOY_OPENCODE_RUNTIME_SOURCE to a Homeboy Extensions source root",
-                ));
-            assert!(source.join(ROOT_MANIFEST).is_file());
-            assert!(source
-                .join("agent-runtimes/opencode/tests/opencode-agent-task-executor-boundary.test.js")
-                .is_file());
-
-            let staged_source = tempfile::tempdir().unwrap();
-            fs::copy(
-                source.join(ROOT_MANIFEST),
-                staged_source.path().join(ROOT_MANIFEST),
-            )
-            .unwrap();
-            let manifest: ExtensionRootManifest =
-                serde_json::from_slice(&fs::read(source.join(ROOT_MANIFEST)).unwrap()).unwrap();
-            for asset in manifest.shared_assets {
-                let asset = asset.path();
-                copy_regular_tree(
-                    &source.join(&asset),
-                    &staged_source.path().join(&asset),
-                    "stage real OpenCode runtime test source",
-                )
-                .unwrap();
-            }
-
-            let result =
-                refresh("opencode", &staged_source.path().to_string_lossy(), None).unwrap();
-            fs::remove_dir_all(staged_source.path()).unwrap();
-            let documented = paths::agent_runtimes().unwrap();
-            assert_eq!(result.path, documented.join("opencode"));
-            assert_eq!(
-                fs::read_link(&documented).unwrap(),
-                Path::new("runtime-generations/current/agent-runtimes")
-            );
-            let output = Command::new("node")
-                .arg(
-                    documented.join("opencode/tests/opencode-agent-task-executor-boundary.test.js"),
-                )
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
         });
     }
 

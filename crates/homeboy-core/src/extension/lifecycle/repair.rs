@@ -855,10 +855,10 @@ mod tests {
     fn relink_replaces_durable_source_provenance_with_git_worktree_provenance() {
         with_isolated_home(|home| {
             let home = home.path();
-            let durable_source = home.join(".config/homeboy/extension-sources/opencode");
-            let worktree = home.join("opencode-worktree");
-            write_extension_fixture(&durable_source, "opencode");
-            write_extension_fixture_with_version(&worktree, "opencode", "2.0.0");
+            let durable_source = home.join(".config/homeboy/extension-sources/pi");
+            let worktree = home.join("pi-worktree");
+            write_extension_fixture(&durable_source, "pi");
+            write_extension_fixture_with_version(&worktree, "pi", "2.0.0");
             assert!(run_git(&worktree, &["init", "--quiet"]));
             assert!(commit_all(&worktree, "initial worktree"));
             let revision =
@@ -867,46 +867,46 @@ mod tests {
                 .expect("short worktree revision");
 
             install(
-                &durable_source.join("opencode").to_string_lossy(),
-                Some("opencode"),
+                &durable_source.join("pi").to_string_lossy(),
+                Some("pi"),
                 ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install durable linked extension");
             let metadata_dir = home.join(".config/homeboy/extensions");
             fs::write(
-                metadata_dir.join(".opencode.source-requested-ref"),
+                metadata_dir.join(".pi.source-requested-ref"),
                 "durable-source-ref\n",
             )
             .expect("durable requested ref");
 
             relink(
-                "opencode",
-                &worktree.join("opencode").to_string_lossy(),
+                "pi",
+                &worktree.join("pi").to_string_lossy(),
                 ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("relink to git worktree");
 
-            let installed = metadata_dir.join("opencode");
+            let installed = metadata_dir.join("pi");
             assert_eq!(
                 fs::read_link(&installed).expect("worktree link"),
-                worktree.join("opencode")
+                worktree.join("pi")
             );
             assert_eq!(
                 read_source_url(&installed).as_deref(),
-                Some(worktree.join("opencode").to_string_lossy().as_ref())
+                Some(worktree.join("pi").to_string_lossy().as_ref())
             );
             assert_eq!(
-                read_source_revision("opencode").as_deref(),
+                read_source_revision("pi").as_deref(),
                 Some(revision.as_str())
             );
             assert_eq!(
-                fs::read_to_string(metadata_dir.join(".opencode.source-revision"))
+                fs::read_to_string(metadata_dir.join(".pi.source-revision"))
                     .expect("worktree source revision")
                     .trim(),
                 short_revision
             );
             assert!(
-                !metadata_dir.join(".opencode.source-requested-ref").exists(),
+                !metadata_dir.join(".pi.source-requested-ref").exists(),
                 "relink must clear the requested ref inherited from the durable source"
             );
         });
@@ -987,19 +987,15 @@ mod tests {
             let old_source = home.join("old-source");
             let new_source = home.join("new-source");
             let boundary_source = home.join("boundary-source");
-            write_extension_fixture(&old_source, "opencode");
-            write_extension_fixture_with_version(
-                &new_source.join("agent-runtimes"),
-                "opencode",
-                "2.0.0",
-            );
+            write_extension_fixture(&old_source, "pi");
+            write_extension_fixture_with_version(&new_source.join("agent-runtimes"), "pi", "2.0.0");
             write_declared_runtime_shared_assets(&new_source);
             fs::create_dir_all(&boundary_source).expect("boundary source");
             write_shared_asset_manifest(&boundary_source, &[]);
 
             install(
-                &old_source.join("opencode").to_string_lossy(),
-                Some("opencode"),
+                &old_source.join("pi").to_string_lossy(),
+                Some("pi"),
                 ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
@@ -1007,8 +1003,8 @@ mod tests {
                 .expect("activate runtime generation boundary");
 
             relink(
-                "opencode",
-                &new_source.join("agent-runtimes/opencode").to_string_lossy(),
+                "pi",
+                &new_source.join("agent-runtimes/pi").to_string_lossy(),
                 ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("relink should publish declared runtime assets");
@@ -1017,9 +1013,9 @@ mod tests {
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
             assert_eq!(
-                fs::read_link(home.join(".config/homeboy/extensions/opencode"))
+                fs::read_link(home.join(".config/homeboy/extensions/pi"))
                     .expect("read replacement link"),
-                new_source.join("agent-runtimes/opencode")
+                new_source.join("agent-runtimes/pi")
             );
         });
     }
@@ -1031,20 +1027,16 @@ mod tests {
             let old_source = home.join("old-source");
             let new_source = home.join("new-source");
             let boundary_source = home.join("boundary-source");
-            write_extension_fixture(&old_source, "opencode");
-            write_extension_fixture_with_version(
-                &new_source.join("agent-runtimes"),
-                "opencode",
-                "2.0.0",
-            );
+            write_extension_fixture(&old_source, "pi");
+            write_extension_fixture_with_version(&new_source.join("agent-runtimes"), "pi", "2.0.0");
             fs::write(new_source.join("homeboy-extension-root.json"), "not json")
                 .expect("malformed root manifest");
             fs::create_dir_all(&boundary_source).expect("boundary source");
             write_shared_asset_manifest(&boundary_source, &[]);
 
             install(
-                &old_source.join("opencode").to_string_lossy(),
-                Some("opencode"),
+                &old_source.join("pi").to_string_lossy(),
+                Some("pi"),
                 ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
@@ -1054,8 +1046,8 @@ mod tests {
                 .expect("active generation");
 
             relink(
-                "opencode",
-                &new_source.join("agent-runtimes/opencode").to_string_lossy(),
+                "pi",
+                &new_source.join("agent-runtimes/pi").to_string_lossy(),
                 ExtensionLifecycleValidation::declaration_only(),
             )
             .expect_err("malformed root manifest should reject relink");
@@ -1066,9 +1058,9 @@ mod tests {
                 current
             );
             assert_eq!(
-                fs::read_link(home.join(".config/homeboy/extensions/opencode"))
+                fs::read_link(home.join(".config/homeboy/extensions/pi"))
                     .expect("preserved extension link"),
-                old_source.join("opencode")
+                old_source.join("pi")
             );
         });
     }

@@ -223,7 +223,7 @@ fn render_capacity_summary(payload: &Value) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-/// Name a capacity route by its account pool (`opencode:anthropic` reads as
+/// Name a capacity route by its account pool (`pi:anthropic` reads as
 /// `anthropic`), else its models, else its backend, so blocks on one backend
 /// stay distinguishable.
 fn capacity_route_label(route: &Value) -> String {
@@ -1264,7 +1264,7 @@ mod tests {
         let payload = json!({
             "providers": [
                 {
-                    "id": "opencode.agent-task-executor",
+                    "id": "pi.agent-task-executor",
                     "dispatchability": { "capacity": {
                         "state": "known", "remaining": 91, "limit": 100, "unit": "percent",
                         "reset_at": "2026-09-24T15:50:00+00:00",
@@ -1289,7 +1289,7 @@ mod tests {
                 "Agent task providers",
                 "Status: ready",
                 "Providers shown: 2",
-                "Capacity opencode.agent-task-executor: 91% remaining, resets 2026-09-24T15:50:00+00:00",
+                "Capacity pi.agent-task-executor: 91% remaining, resets 2026-09-24T15:50:00+00:00",
                 "  plan-a: exhausted, resets 2026-09-25T03:00:00+00:00",
                 "  plan-b: available, 91% remaining, resets 2026-09-24T15:50:00+00:00",
                 "  old-login: credential_expired",
@@ -1334,7 +1334,7 @@ mod tests {
             "state": "succeeded",
             "task_count": 1,
             "provider_route_notes": [
-                "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the provider-owned OpenCode credentials, then retry.)",
+                "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie credential pool key, then retry.)",
                 "xai/grok-4.7 skipped: usage_capped (Wait for the provider usage cap to reset.)"
             ]
         });
@@ -1343,7 +1343,7 @@ mod tests {
 
         let summary = summary.expect("cook summary renders");
         assert!(
-            summary.contains("Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the provider-owned OpenCode credentials, then retry.)\n"),
+            summary.contains("Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie credential pool key, then retry.)\n"),
             "{summary}"
         );
         assert!(

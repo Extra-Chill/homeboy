@@ -115,7 +115,7 @@ fn compact_doctor_projection_retains_all_unverified_provider_readiness() {
     report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
         ready_for: Vec::new(),
         blocked_for: Vec::new(),
-        unverified_for: vec!["opencode.agent-task-executor".to_string()],
+        unverified_for: vec!["pi.agent-task-executor".to_string()],
         unverified_remediation: Some(
             "Provider authentication is unverified because runner doctor cannot select a model."
                 .to_string(),
@@ -126,7 +126,7 @@ fn compact_doctor_projection_retains_all_unverified_provider_readiness() {
 
     assert_eq!(
         compact["provider_readiness"]["unverified_for"],
-        serde_json::json!(["opencode.agent-task-executor"])
+        serde_json::json!(["pi.agent-task-executor"])
     );
     assert_eq!(
         compact["provider_readiness"]["guidance"],
@@ -141,7 +141,7 @@ fn full_doctor_projection_retains_nonsecret_unverified_provider_ids() {
     report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
         ready_for: Vec::new(),
         blocked_for: Vec::new(),
-        unverified_for: vec!["opencode.agent-task-executor".to_string()],
+        unverified_for: vec!["pi.agent-task-executor".to_string()],
         unverified_remediation: None,
     });
 
@@ -149,7 +149,7 @@ fn full_doctor_projection_retains_nonsecret_unverified_provider_ids() {
 
     assert_eq!(
         full["provider_readiness"]["unverified_for"],
-        serde_json::json!(["opencode.agent-task-executor"])
+        serde_json::json!(["pi.agent-task-executor"])
     );
 }
 

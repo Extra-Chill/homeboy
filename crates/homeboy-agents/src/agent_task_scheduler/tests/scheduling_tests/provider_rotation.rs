@@ -72,7 +72,7 @@ mod provider_rotation_tests {
                     capacity_key: Some("account-a".to_string()),
                     diagnostic_data: None,
                 },
-                Some("zai-coding-plan/glm-5.3" | "opencode-go/kimi-k3") => ProviderRouteReadiness {
+                Some("zai-coding-plan/glm-5.3" | "pi-go/kimi-k3") => ProviderRouteReadiness {
                     ready: false,
                     state: "usage_capped".to_string(),
                     reason: "five-hour usage cap is active".to_string(),
@@ -254,8 +254,7 @@ mod provider_rotation_tests {
             let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Failed);
             outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
             outcome.summary = Some(
-                "OpenCode completed without required structured output(s): review_form."
-                    .to_string(),
+                "Pi completed without required structured output(s): review_form.".to_string(),
             );
             outcome.artifacts.push(AgentTaskArtifact {
                 schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
@@ -498,10 +497,10 @@ mod provider_rotation_tests {
         let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
         let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
-        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.backend = "pi".to_string();
         plan.tasks[0].executor.model = Some("openai/gpt-5.6-sol".to_string());
         plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
-            backend: Some("opencode".to_string()),
+            backend: Some("pi".to_string()),
             model: Some("openai/gpt-5.6-terra".to_string()),
             ..Default::default()
         }]));
@@ -514,13 +513,13 @@ mod provider_rotation_tests {
             .pointer("/provider_rotation/attempts")
             .and_then(Value::as_array)
             .expect("rotation attempts evidence");
-        assert_eq!(attempts[1]["backend"], "opencode");
+        assert_eq!(attempts[1]["backend"], "pi");
         assert_eq!(attempts[1]["requested_model"], "openai/gpt-5.6-sol");
         assert_eq!(attempts[1]["attempted_model"], "openai/gpt-5.6-terra");
         assert!(attempts[1].get("candidate_producing_model").is_none());
         assert!(aggregate.events.iter().any(|event| {
             event.message.as_deref()
-                == Some("provider rotation queued: entry 1 of 1; backend=opencode, model=openai/gpt-5.6-terra")
+                == Some("provider rotation queued: entry 1 of 1; backend=pi, model=openai/gpt-5.6-terra")
         }));
     }
 
@@ -532,7 +531,7 @@ mod provider_rotation_tests {
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].executor.model = Some("openai/gpt-5.6-sol".to_string());
         plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
-            backend: Some("opencode".to_string()),
+            backend: Some("pi".to_string()),
             model: Some("openai/gpt-5.6-terra".to_string()),
             ..Default::default()
         }]));
@@ -1142,26 +1141,26 @@ mod provider_rotation_tests {
         let calls = Arc::clone(&executor.calls);
         let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
-        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.backend = "pi".to_string();
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![
                 AgentTaskProviderRotationEntry {
-                    backend: Some("opencode".to_string()),
+                    backend: Some("pi".to_string()),
                     model: Some("xai/grok-4.6".to_string()),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    backend: Some("opencode".to_string()),
+                    backend: Some("pi".to_string()),
                     model: Some("zai-coding-plan/glm-5.3".to_string()),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    backend: Some("opencode".to_string()),
-                    model: Some("opencode-go/kimi-k3".to_string()),
+                    backend: Some("pi".to_string()),
+                    model: Some("pi-go/kimi-k3".to_string()),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    backend: Some("opencode".to_string()),
+                    backend: Some("pi".to_string()),
                     model: Some("anthropic/claude-sonnet-5".to_string()),
                     ..Default::default()
                 },
@@ -1253,26 +1252,26 @@ mod provider_rotation_tests {
             reset_at: chrono::Utc::now() + chrono::Duration::hours(2),
         }));
         let mut plan = plan_with_tasks(1);
-        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.backend = "pi".to_string();
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![
                 AgentTaskProviderRotationEntry {
-                    backend: Some("opencode".to_string()),
+                    backend: Some("pi".to_string()),
                     model: Some("xai/grok-4.6".to_string()),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    backend: Some("opencode".to_string()),
+                    backend: Some("pi".to_string()),
                     model: Some("zai-coding-plan/glm-5.3".to_string()),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    backend: Some("opencode".to_string()),
-                    model: Some("opencode-go/kimi-k3".to_string()),
+                    backend: Some("pi".to_string()),
+                    model: Some("pi-go/kimi-k3".to_string()),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    backend: Some("opencode".to_string()),
+                    backend: Some("pi".to_string()),
                     model: Some("openai/gpt-5.6-terra".to_string()),
                     ..Default::default()
                 },
@@ -1304,7 +1303,7 @@ mod provider_rotation_tests {
         assert_eq!(skipped[0]["model"], "xai/grok-4.6");
         assert_eq!(skipped[0]["state"], "provider_account_blocked");
         assert_eq!(skipped[1]["model"], "zai-coding-plan/glm-5.3");
-        assert_eq!(skipped[2]["model"], "opencode-go/kimi-k3");
+        assert_eq!(skipped[2]["model"], "pi-go/kimi-k3");
         assert_eq!(
             aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],
             1
@@ -1327,7 +1326,7 @@ mod provider_rotation_tests {
             reset_at: chrono::Utc::now() + chrono::Duration::hours(2),
         }));
         let mut plan = plan_with_tasks(1);
-        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.backend = "pi".to_string();
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![
                 AgentTaskProviderRotationEntry {
@@ -1339,7 +1338,7 @@ mod provider_rotation_tests {
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    model: Some("opencode-go/kimi-k3".to_string()),
+                    model: Some("pi-go/kimi-k3".to_string()),
                     ..Default::default()
                 },
             ],
@@ -1580,7 +1579,7 @@ mod provider_rotation_tests {
             reset_at: chrono::Utc::now() + chrono::Duration::hours(1),
         }));
         let mut plan = plan_with_tasks(1);
-        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.backend = "pi".to_string();
         plan.tasks[0].executor.model = Some("xai/grok-4.6".to_string());
         plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
             model: Some("anthropic/claude-sonnet-5".to_string()),

@@ -1227,7 +1227,7 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
     let attempts = serde_json::json!([
         {"attempt": 1, "rotation_index": 0, "backend": "xai", "model": "grok-4.6", "attempted_model": "grok-4.6", "status": "failed", "failure_classification": "provider_account_blocked", "summary": "token=rotation-projection-secret"},
         {"attempt": 2, "rotation_index": 1, "backend": "zai-coding-plan", "model": "glm-5.3", "attempted_model": "glm-5.3", "status": "failed", "failure_classification": "rate_limited"},
-        {"attempt": 3, "rotation_index": 2, "backend": "opencode-go", "model": "kimi-k3", "attempted_model": "kimi-k3", "status": "failed", "failure_classification": "stalled"},
+        {"attempt": 3, "rotation_index": 2, "backend": "pi-go", "model": "kimi-k3", "attempted_model": "kimi-k3", "status": "failed", "failure_classification": "stalled"},
         {"attempt": 4, "rotation_index": 3, "backend": "anthropic", "model": "claude-sonnet-5", "attempted_model": "claude-sonnet-5", "status": "failed", "failure_classification": "stalled"}
     ]);
     let aggregate = AgentTaskAggregate {
@@ -1327,7 +1327,7 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
     for route in [
         "xai/grok-4.6: provider_account_blocked",
         "zai-coding-plan/glm-5.3: rate_limited",
-        "opencode-go/kimi-k3: stalled",
+        "pi-go/kimi-k3: stalled",
         "anthropic/claude-sonnet-5: stalled",
     ] {
         assert!(
@@ -4031,7 +4031,7 @@ fn promotion_resolves_executed_model_from_lab_harvested_candidate_artifact() {
                     role: Some("patch".to_string()),
                     metadata: serde_json::json!({
                         "change_source": "uncommitted_attempt_workspace",
-                        "provider_backend": "opencode",
+                        "provider_backend": "pi",
                         "provider_model": "anthropic/claude-sonnet-5",
                     }),
                     ..Default::default()
@@ -17489,7 +17489,7 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
             },
             provider_runtime: vec![ProviderRuntimeLifecycle {
                 task_id: "task".to_string(),
-                backend: "opencode".to_string(),
+                backend: "pi".to_string(),
                 state: ProviderRuntimeState::Succeeded,
                 stream_uri: None,
                 external_runtime_ids: Vec::new(),
@@ -18124,11 +18124,11 @@ fn cook_report_surfaces_skipped_provider_routes_in_its_status_summary() {
                     "selector": null,
                     "model": "anthropic/claude-sonnet-5-5",
                     "state": "credentials_unusable",
-                    "reason": "OPENCODE_API_KEY is missing",
+                    "reason": "PI_API_KEY is missing",
                     "reset_at": null,
                     "classification": "credentials",
                     "retryable": true,
-                    "remediation": "Refresh the provider-owned OpenCode credentials, then retry.",
+                    "remediation": "Refresh the Roadie credential pool key, then retry.",
                     "cache_identity": null,
                     "provider_identity": null
                 }]
@@ -18175,7 +18175,7 @@ fn cook_report_surfaces_skipped_provider_routes_in_its_status_summary() {
             "{note}"
         );
         assert!(
-            note.contains("Refresh the provider-owned OpenCode credentials"),
+            note.contains("Refresh the Roadie credential pool key"),
             "{note}"
         );
         assert!(note.starts_with("Ran on openai/gpt-6-luna; "), "{note}");
@@ -19668,7 +19668,7 @@ fn with_corrected_gate_candidate(
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             record.lifecycle.provider_runtime = vec![ProviderRuntimeLifecycle {
                 task_id: options.identity.initial_plan.tasks[0].task_id.clone(),
-                backend: "opencode".to_string(), state: ProviderRuntimeState::Failed,
+                backend: "pi".to_string(), state: ProviderRuntimeState::Failed,
                 stream_uri: None, external_runtime_ids: Vec::new(),
                 metadata: serde_json::json!({"model": "openai/gpt-6.1-sol", "evidence_source": "durable_provider_execution"}),
             }];
@@ -22651,7 +22651,7 @@ fn promoted_detached_retry_recovers_cook_finalization_and_updates_existing_pr() 
                 .provider_runtime
                 .push(ProviderRuntimeLifecycle {
                     task_id: options.identity.initial_plan.tasks[0].task_id.clone(),
-                    backend: "opencode".to_string(),
+                    backend: "pi".to_string(),
                     state: ProviderRuntimeState::Succeeded,
                     stream_uri: None,
                     external_runtime_ids: Vec::new(),
@@ -23631,7 +23631,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
             .unwrap();
 
         let mut invalid_provenance = supplied_test_review_form();
-        invalid_provenance.tool = "OpenCode\ninvalid".to_string();
+        invalid_provenance.tool = "Pi\ninvalid".to_string();
         recover_cook_pr_with_backend_and_review_form(
             cook_id,
             Some(invalid_provenance),

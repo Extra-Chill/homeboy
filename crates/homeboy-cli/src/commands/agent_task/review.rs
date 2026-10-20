@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use homeboy::agents::agent_task_builtin_backend::BUILTIN_DEFAULT_BACKEND;
 use homeboy::agents::agent_task_model::normalize_concrete_model_identifier;
 use homeboy::agents::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
@@ -1927,10 +1928,19 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
 /// (#13634). This closes that gap by deriving a working configuration from
 /// what actually authenticates here, rather than only documenting the shape.
 fn write_default_backend_from_readiness(catalog: &AgentTaskProviderCatalog) -> CmdResult<Value> {
-    let ready_backends = dispatchable_backend_choices(catalog, true)
+    // The built-in Pi backend leads the derived chain when it is ready
+    // (#15932).
+    let mut ready_backends = dispatchable_backend_choices(catalog, true)
         .into_iter()
         .map(|choice| choice.backend)
         .collect::<Vec<_>>();
+    if let Some(index) = ready_backends
+        .iter()
+        .position(|backend| backend == BUILTIN_DEFAULT_BACKEND)
+    {
+        let builtin = ready_backends.remove(index);
+        ready_backends.insert(0, builtin);
+    }
 
     let Some((default_backend, rotation_backends)) = ready_backends.split_first() else {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -3448,15 +3458,15 @@ mod tests {
     #[test]
     fn provider_route_replay_preserves_the_selected_model() {
         let route = ProviderRoute::Resolved {
-            backend: "opencode".to_string(),
-            provider_id: "opencode.executor".to_string(),
+            backend: "pi".to_string(),
+            provider_id: "pi.executor".to_string(),
             model: Some("openai/gpt-5.6-sol".to_string()),
             dispatchable: true,
         };
 
         assert_eq!(
             route.next_command(),
-            "homeboy agent-task providers --backend opencode --selector opencode.executor --model openai/gpt-5.6-sol --validate-readiness"
+            "homeboy agent-task providers --backend pi --selector pi.executor --model openai/gpt-5.6-sol --validate-readiness"
         );
     }
 
@@ -3767,7 +3777,7 @@ mod tests {
                 "const fs=require('fs');const request=JSON.parse(fs.readFileSync(0,'utf8'));const model=request.effective_config.model;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model==='openai/gpt-5.6-terra',classification:model,retryable:false,remediation:'',reason:model,cache_key:model,identity:{model}}));",
             )
             .expect("readiness script");
-            let mut provider = provider("opencode.agent-task-executor", "opencode");
+            let mut provider = provider("pi.agent-task-executor", "pi");
             provider.cli.profiles = serde_json::from_value(serde_json::json!([
                 { "name": "terra", "model": "openai/gpt-5.6-terra" }
             ]))
@@ -3780,8 +3790,8 @@ mod tests {
                 .into(),
             );
             let mut args = providers_args();
-            args.backend = Some("opencode".to_string());
-            args.selector = Some("opencode.agent-task-executor".to_string());
+            args.backend = Some("pi".to_string());
+            args.selector = Some("pi.agent-task-executor".to_string());
             args.model = Some("openai/gpt-5.6-terra".to_string());
             args.validate_readiness = true;
             args.refresh = true;
@@ -4095,6 +4105,37 @@ mod tests {
                 persisted.agent_task.rotation,
                 Some(serde_json::json!({ "entries": [ { "backend": "zeta" } ] }))
             );
+        });
+    }
+
+    /// #15932: Pi leads the derived chain when it is live-ready.
+    #[test]
+    fn providers_set_default_leads_with_pi() {
+        crate::test_support::with_isolated_home(|_| {
+            let ready = |id: &str, backend: &str| {
+                let mut provider = provider(id, backend);
+                provider.readiness_invocation = Some(
+                    serde_json::from_value(serde_json::json!({
+                        "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                    }))
+                    .expect("readiness invocation"),
+                );
+                provider
+            };
+            let catalog = provider_catalog(vec![
+                ready("alpha.provider", "alpha"),
+                ready("pi.agent-task-executor", "pi"),
+            ]);
+            let output = write_default_backend_from_readiness(&catalog)
+                .expect("pi is live-ready")
+                .0;
+
+            assert_eq!(output["default_backend"], "pi");
+            assert_eq!(
+                output["rotation"],
+                serde_json::json!({ "entries": [ { "backend": "alpha" } ] })
+            );
+            assert_eq!(output["ready_backends"], serde_json::json!(["pi", "alpha"]));
         });
     }
 
@@ -4872,11 +4913,11 @@ mod tests {
     #[test]
     fn provider_identity_catalog_uses_explicit_runtime_vocabulary() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "opencode.agent-task-executor",
-            "backend": "opencode",
+            "id": "pi.agent-task-executor",
+            "backend": "pi",
             "extension_id": "sample-runtime",
             "runtime_package_source": "sample-runtime",
-            "runtime_id": "opencode-local-runtime",
+            "runtime_id": "pi-local-runtime",
             "provider_defaults": {
                 "openai": {},
                 "anthropic": {}
@@ -4886,12 +4927,9 @@ mod tests {
 
         let catalog = provider_identity_catalog(&[provider]);
 
-        assert_eq!(
-            catalog[0]["executor_provider_id"],
-            "opencode.agent-task-executor"
-        );
-        assert_eq!(catalog[0]["executor_backend"], "opencode");
-        assert_eq!(catalog[0]["runtime_id"], "opencode-local-runtime");
+        assert_eq!(catalog[0]["executor_provider_id"], "pi.agent-task-executor");
+        assert_eq!(catalog[0]["executor_backend"], "pi");
+        assert_eq!(catalog[0]["runtime_id"], "pi-local-runtime");
         assert_eq!(catalog[0]["runtime_package_source"], "sample-runtime");
         assert_eq!(
             catalog[0]["ai_provider_ids"],
@@ -5593,28 +5631,28 @@ esac
     #[test]
     fn providers_scope_filters_to_requested_backend_by_default() {
         let all = vec![
-            provider_fixture("opencode.executor", "opencode"),
+            provider_fixture("pi.executor", "pi"),
             provider_fixture("codex.executor", "codex"),
-            provider_fixture("opencode.executor-2", "opencode"),
+            provider_fixture("pi.executor-2", "pi"),
         ];
 
-        // `--backend opencode` (no `--catalog`) scopes to opencode only.
-        let backend = scoped_provider_backend(Some("opencode"), false);
-        assert_eq!(backend, Some("opencode"));
+        // `--backend pi` (no `--catalog`) scopes to pi only.
+        let backend = scoped_provider_backend(Some("pi"), false);
+        assert_eq!(backend, Some("pi"));
         let scoped = scope_providers(&all, backend);
         assert_eq!(scoped.len(), 2);
-        assert!(scoped.iter().all(|provider| provider.backend == "opencode"));
+        assert!(scoped.iter().all(|provider| provider.backend == "pi"));
     }
 
     #[test]
     fn providers_scope_catalog_flag_returns_full_multi_backend_set() {
         let all = vec![
-            provider_fixture("opencode.executor", "opencode"),
+            provider_fixture("pi.executor", "pi"),
             provider_fixture("codex.executor", "codex"),
         ];
 
         // `--catalog` overrides `--backend` and returns everything.
-        let backend = scoped_provider_backend(Some("opencode"), true);
+        let backend = scoped_provider_backend(Some("pi"), true);
         assert_eq!(backend, None);
         assert_eq!(scope_providers(&all, backend).len(), 2);
 
@@ -5626,7 +5664,7 @@ esac
 
     #[test]
     fn providers_scope_unknown_backend_yields_empty_slice() {
-        let all = vec![provider_fixture("opencode.executor", "opencode")];
+        let all = vec![provider_fixture("pi.executor", "pi")];
         let scoped = scope_providers(&all, scoped_provider_backend(Some("nope"), false));
         assert!(scoped.is_empty());
     }

@@ -189,7 +189,7 @@ to a package-location move without rollback-compatible readers.
 
 ## AI Assistance
 
-OpenAI GPT-5.6 Sol via OpenCode inspected the source graph, Cargo metadata,
+OpenAI GPT-5.6 Sol via a coding-agent CLI inspected the source graph, Cargo metadata,
 runtime registration, persisted schemas, CI evidence, and the available
 Homeboy Extensions consumer checkout, then drafted this architecture report.
 Chris Huber remains responsible for the proposal and all subsequent changes.
