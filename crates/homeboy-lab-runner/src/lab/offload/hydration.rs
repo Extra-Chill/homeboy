@@ -378,8 +378,12 @@ fn prepared_source_view_is_ready(
         return Ok(false);
     };
     let mut checks = vec![format!(
-        "test -f {}/.homeboy/prepared-source-ready",
-        shell::quote_arg(remote_path)
+        "test -f {}",
+        shell::quote_arg(
+            &homeboy_lab_contract::lab::handoff::runner_workspace_prepared_source_marker_path(
+                remote_path
+            )
+        )
     )];
     checks.extend(output_tests);
     remote_checks_succeed(runner_id, remote_path, checks)
@@ -788,6 +792,36 @@ mod tests {
         }
     }
 
+    /// Prepared-source readiness marker in the runner-owned state directory
+    /// beside the workspace; removed again on drop.
+    struct PreparedSourceMarker {
+        state_dir: std::path::PathBuf,
+    }
+
+    impl PreparedSourceMarker {
+        fn write(workspace: &std::path::Path) -> Self {
+            let workspace = workspace.display().to_string();
+            let marker = std::path::PathBuf::from(
+                homeboy_lab_contract::lab::handoff::runner_workspace_prepared_source_marker_path(
+                    &workspace,
+                ),
+            );
+            std::fs::create_dir_all(marker.parent().expect("state dir")).expect("state dir");
+            std::fs::write(&marker, "").expect("prepared marker");
+            Self {
+                state_dir: std::path::PathBuf::from(
+                    homeboy_lab_contract::lab::handoff::runner_workspace_state_dir(&workspace),
+                ),
+            }
+        }
+    }
+
+    impl Drop for PreparedSourceMarker {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.state_dir);
+        }
+    }
+
     fn write_detected_node_adapter(home: &std::path::Path) {
         let root = home.join(".config/homeboy/extensions/dependency-adapters");
         std::fs::create_dir_all(root.join("examples")).expect("adapter directory");
@@ -1128,9 +1162,7 @@ mod tests {
             std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
             let remote = tempfile::tempdir().expect("remote");
             std::fs::write(remote.path().join("homeboy.json"), manifest).expect("remote manifest");
-            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
-            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
-                .expect("marker");
+            let _marker = PreparedSourceMarker::write(remote.path());
 
             let output = hydrate_lab_workspace_dependencies(
                 "lab-local",
@@ -1159,9 +1191,7 @@ mod tests {
             std::fs::write(project.path().join("package.json"), "{}").expect("package manifest");
             std::fs::write(project.path().join("package-lock.json"), "{}").expect("lockfile");
             let remote = tempfile::tempdir().expect("runner workspace");
-            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
-            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
-                .expect("stale marker");
+            let _marker = PreparedSourceMarker::write(remote.path());
 
             let first = hydrate_lab_workspace_dependencies(
                 "lab-detected-npm",
@@ -1209,9 +1239,7 @@ mod tests {
             std::fs::write(project.path().join("package.json"), "{}").expect("package manifest");
             std::fs::write(project.path().join("package-lock.json"), "{}").expect("lockfile");
             let remote = tempfile::tempdir().expect("runner workspace");
-            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
-            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
-                .expect("prepared marker");
+            let _marker = PreparedSourceMarker::write(remote.path());
             std::fs::create_dir(remote.path().join("node_modules"))
                 .expect("empty excluded dependency directory");
 
@@ -1317,9 +1345,7 @@ mod tests {
             std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
             let remote = tempfile::tempdir().expect("remote");
             std::fs::write(remote.path().join("homeboy.json"), manifest).expect("remote manifest");
-            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
-            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
-                .expect("marker");
+            let _marker = PreparedSourceMarker::write(remote.path());
 
             let output = hydrate_lab_workspace_dependencies(
                 "lab-outputless",
@@ -1347,9 +1373,7 @@ mod tests {
             std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
             let remote = tempfile::tempdir().expect("remote");
             std::fs::write(remote.path().join("homeboy.json"), manifest).expect("remote manifest");
-            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
-            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
-                .expect("marker");
+            let _marker = PreparedSourceMarker::write(remote.path());
             std::fs::create_dir(remote.path().join("node_modules")).expect("dependency output");
 
             let output = hydrate_lab_workspace_dependencies(
@@ -1375,9 +1399,7 @@ mod tests {
             std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
             let remote = tempfile::tempdir().expect("remote");
             std::fs::write(remote.path().join("homeboy.json"), manifest).expect("remote manifest");
-            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
-            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
-                .expect("marker");
+            let _marker = PreparedSourceMarker::write(remote.path());
             std::fs::create_dir_all(remote.path().join("node_modules/example"))
                 .expect("dependency output");
             std::fs::write(
@@ -1398,6 +1420,7 @@ mod tests {
             .expect("validated cache avoids install");
 
             assert_eq!(output.status, "reused_prepared_cache");
+            assert!(!remote.path().join(".homeboy").exists());
         });
     }
 

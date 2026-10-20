@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::commands::trace::compare_artifacts::{
     prepare_matrix_cell_dir, prepare_matrix_output_dir, prepare_variant_matrix_output_dir,
@@ -190,13 +190,13 @@ pub(super) fn run_scenario_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutp
     })?;
     let scenario_id = required_trace_scenario(&args)?;
     let cells = expand_trace_matrix(&args.axes);
-    let output_dir = args.output_dir.clone().unwrap_or_else(|| {
-        PathBuf::from(".homeboy").join("experiments").join(format!(
+    let output_dir = super::trace_output_dir(args.output_dir.as_ref(), "experiments", || {
+        format!(
             "{}-matrix-{}",
             scenario_id,
             chrono::Utc::now().format("%Y%m%d%H%M%S")
-        ))
-    });
+        )
+    })?;
     prepare_matrix_output_dir(&output_dir)?;
 
     let mut outputs = Vec::new();
@@ -321,13 +321,13 @@ pub(super) fn run_variant_matrix(args: TraceArgs) -> CmdResult<TraceCommandOutpu
     let scenario_id = trace_scenario(&args)?.to_string();
     let stack = variant_stack_items(&args)?;
     let combinations = expand_variant_matrix(&stack, args.matrix);
-    let output_dir = args.output_dir.clone().unwrap_or_else(|| {
-        PathBuf::from(".homeboy").join("experiments").join(format!(
+    let output_dir = super::trace_output_dir(args.output_dir.as_ref(), "experiments", || {
+        format!(
             "{}-{}",
             scenario_id,
             chrono::Utc::now().format("%Y%m%d%H%M%S")
-        ))
-    });
+        )
+    })?;
     prepare_variant_matrix_output_dir(&output_dir)?;
 
     let baseline = run_variant_aggregate(&args, Vec::new())?;

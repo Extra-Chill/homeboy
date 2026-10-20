@@ -36,8 +36,8 @@
 //! Entries are immutable. A build runs in a staging directory inside the cache
 //! root and is published with an atomic rename only after the full lifecycle
 //! (including output verification) succeeds. A failed build publishes nothing.
-//! Consumers always get a private copy, because callers write evidence files
-//! into the prepared directory.
+//! Consumers always get a private copy, so no consumer can mutate a shared
+//! entry. Homeboy evidence for a prepared dependency never lives inside it.
 //!
 //! Not covered by the key: host toolchain upgrades (interpreters, package
 //! managers) with no source or config change. The generic layer has no

@@ -175,7 +175,7 @@ pub(super) fn run_compare(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
         let after = parse_trace_aggregate_for_path(&after_json, &after_path)?;
         write_trace_experiment_bundle(TraceExperimentBundleRequest {
             name: experiment,
-            bundle_root: None,
+            bundle_root: args.output_dir.as_deref(),
             command: std::env::args().collect::<Vec<_>>().join(" "),
             before_path: &before_path,
             before_json: &before_json,

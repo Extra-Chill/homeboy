@@ -4750,7 +4750,9 @@ fn recovery_preserves_terminal_runner_identity_before_projecting_runner_artifact
         label: None,
         role: None,
         semantic_key: None,
-        path: Some("/home/runner/.homeboy/executor-finalized/patch.diff".to_string()),
+        path: Some(
+            "/home/runner/.local/share/homeboy/artifacts/executor-finalized/patch.diff".to_string(),
+        ),
         url: Some(
             "homeboy://agent-task/run/detached-run/artifacts#task=task-a&artifact=patch"
                 .to_string(),
@@ -4846,7 +4848,7 @@ fn recovery_preserves_terminal_runner_identity_before_projecting_runner_artifact
     );
     assert_ne!(
         artifacts[0].path,
-        "/home/runner/.homeboy/executor-finalized/patch.diff"
+        "/home/runner/.local/share/homeboy/artifacts/executor-finalized/patch.diff"
     );
 }
 

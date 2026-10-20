@@ -508,8 +508,8 @@ fn trace_compare_markdown_and_experiment_bundle_render_artifacts() {
         after_status: Some("pass".to_string()),
         before_exit_code: Some(0),
         after_exit_code: Some(0),
-        output_dir: Some(".homeboy/trace-compare/run".to_string()),
-        summary_path: Some(".homeboy/trace-compare/run/summary.md".to_string()),
+        output_dir: Some("trace/compare/run".to_string()),
+        summary_path: Some("trace/compare/run/summary.md".to_string()),
         before_component: Some("studio".to_string()),
         after_component: Some("studio".to_string()),
         before_scenario_id: Some("create-site".to_string()),
@@ -555,7 +555,7 @@ fn trace_compare_markdown_and_experiment_bundle_render_artifacts() {
     assert!(markdown.contains("- **Targets:** `develop` -> `HEAD`"));
     assert!(markdown.contains("- **Git SHAs:** `abc123` -> `def456`"));
     assert!(markdown.contains("- **Status:** `pass` -> `pass`"));
-    assert!(markdown.contains("- **Output dir:** `.homeboy/trace-compare/run`"));
+    assert!(markdown.contains("- **Output dir:** `trace/compare/run`"));
     assert!(markdown.contains("| Span | before median | after median | median delta | median % | before avg | after avg | avg delta | avg % |"));
     assert!(markdown.contains(
         "| `boot_to_ready` | 100ms | 125ms | **+25ms** | +25.0% | 110.0ms | 121.0ms | **+11.0ms** | +10.0% |"
@@ -676,6 +676,76 @@ fn trace_compare_markdown_and_experiment_bundle_render_artifacts() {
     assert!(report.contains("## Top Average Improvements"));
     assert!(report.contains("## Variant Failures and Outliers"));
     assert!(report.contains("/tmp/variant-1.json"));
+}
+
+#[test]
+fn trace_experiment_bundle_defaults_to_artifact_store_outside_checkout() {
+    crate::test_support::with_isolated_home(|_home| {
+        let checkout = tempfile::TempDir::new().expect("checkout");
+        let json = serde_json::json!({
+            "command": "trace.aggregate.spans",
+            "component": "studio",
+            "scenario_id": "studio-default",
+            "runs": [],
+            "spans": []
+        })
+        .to_string();
+        let before_path = checkout.path().join("before.json");
+        let after_path = checkout.path().join("after.json");
+        let compare = compare_trace_aggregates(
+            &before_path,
+            parse_trace_aggregate_input(&json).expect("before"),
+            &after_path,
+            parse_trace_aggregate_input(&json).expect("after"),
+        );
+        let before = parse_trace_aggregate_input(&json).expect("before bundle");
+        let after = parse_trace_aggregate_input(&json).expect("after bundle");
+
+        let bundle_dir = write_trace_experiment_bundle(TraceExperimentBundleRequest {
+            name: "studio-default",
+            bundle_root: None,
+            command: "homeboy trace compare before.json after.json --experiment studio-default"
+                .to_string(),
+            before_path: &before_path,
+            before_json: &json,
+            before: &before,
+            after_path: &after_path,
+            after_json: &json,
+            after: &after,
+            compare: &compare,
+        })
+        .expect("write default bundle");
+
+        assert_eq!(
+            bundle_dir,
+            homeboy::core::artifact_root()
+                .expect("artifact root")
+                .join("trace/experiments/studio-default")
+        );
+        assert!(bundle_dir.join("manifest.json").is_file());
+        assert!(!checkout.path().join(".homeboy").exists());
+        assert!(!Path::new(".homeboy/experiments/studio-default").exists());
+    });
+}
+
+#[test]
+fn trace_output_dir_prefers_explicit_path_and_defaults_to_artifact_store() {
+    crate::test_support::with_isolated_home(|_home| {
+        let explicit = std::path::PathBuf::from("/tmp/explicit-trace-output");
+        assert_eq!(
+            crate::commands::trace::trace_output_dir(Some(&explicit), "compare", || unreachable!())
+                .expect("explicit"),
+            explicit
+        );
+        let default =
+            crate::commands::trace::trace_output_dir(None, "compare", || "../escape/run".into())
+                .expect("default");
+        let root = homeboy::core::artifact_root().expect("artifact root");
+        assert_eq!(default, root.join("trace/compare/___escape_run"));
+        assert!(!default
+            .components()
+            .any(|part| part.as_os_str() == ".homeboy"));
+    });
 }
 
 #[test]

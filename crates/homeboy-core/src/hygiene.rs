@@ -10,8 +10,34 @@ use crate::deps::provider;
 use crate::error::{Error, ErrorCode, Result, ValidationErrorItem};
 use homeboy_extension_contract::ExtensionCapability;
 
-const LAB_SOURCE_EVIDENCE_FILE: &str = ".homeboy/lab-source-evidence.json";
-const DEPENDENCY_LIFECYCLE_ARTIFACT_DIR: &str = ".homeboy/dependency-lifecycle";
+/// Artifact-store directory holding dependency lifecycle failure artifacts.
+const DEPENDENCY_LIFECYCLE_ARTIFACT_STORE_DIR: &str = "dependency-lifecycle";
+
+/// Homeboy-owned Lab source evidence for a materialized validation dependency
+/// checkout. It lives in the checkout's sibling runner state directory
+/// (`<checkout>-homeboy-state/lab-source-evidence.json`), never inside the
+/// checkout tree.
+pub fn lab_source_evidence_path(checkout: &Path) -> PathBuf {
+    PathBuf::from(
+        homeboy_lab_contract::lab::handoff::runner_workspace_lab_source_evidence_path(
+            &checkout.display().to_string(),
+        ),
+    )
+}
+
+/// Artifact-store directory for dependency lifecycle artifacts of the current
+/// run (`HOMEBOY_RUN_ID`), or of a fresh one-off job when no run owns the
+/// process. Never inside the dependency checkout.
+fn dependency_lifecycle_artifact_dir() -> Result<PathBuf> {
+    let owner = std::env::var("HOMEBOY_RUN_ID")
+        .ok()
+        .map(|run_id| run_id.trim().to_string())
+        .filter(|run_id| !run_id.is_empty())
+        .unwrap_or_else(|| format!("job-{}", uuid::Uuid::new_v4()));
+    Ok(crate::paths::artifact_root()?
+        .join(DEPENDENCY_LIFECYCLE_ARTIFACT_STORE_DIR)
+        .join(crate::paths::sanitize_path_segment(&owner)))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct LabSourceEvidence {
@@ -54,11 +80,9 @@ impl CheckoutHygieneSnapshot {
     }
 }
 
-pub fn write_validation_dependency_source_evidence(
-    id: &str,
-    source_path: &Path,
-    destination_path: &Path,
-) -> Result<()> {
+/// Serialize clean Lab source evidence for the validation dependency checkout
+/// at `source_path`. Fails when the checkout cannot prove a clean git source.
+pub fn validation_dependency_source_evidence(id: &str, source_path: &Path) -> Result<String> {
     let snapshot = checkout_hygiene_snapshot(
         DependencyCheckout {
             id: id.to_string(),
@@ -79,7 +103,21 @@ pub fn write_validation_dependency_source_evidence(
             ]),
         )
     })?;
-    let evidence_path = destination_path.join(LAB_SOURCE_EVIDENCE_FILE);
+    let content = serde_json::to_string_pretty(&evidence).map_err(|err| {
+        Error::internal_unexpected(format!("serialize Lab source evidence: {err}"))
+    })?;
+    Ok(format!("{content}\n"))
+}
+
+/// Write Lab source evidence for `source_path` into the runner state directory
+/// beside the local `destination_path` checkout.
+pub fn write_validation_dependency_source_evidence(
+    id: &str,
+    source_path: &Path,
+    destination_path: &Path,
+) -> Result<()> {
+    let content = validation_dependency_source_evidence(id, source_path)?;
+    let evidence_path = lab_source_evidence_path(destination_path);
     if let Some(parent) = evidence_path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
             Error::internal_io(
@@ -91,10 +129,7 @@ pub fn write_validation_dependency_source_evidence(
             )
         })?;
     }
-    let content = serde_json::to_string_pretty(&evidence).map_err(|err| {
-        Error::internal_unexpected(format!("serialize Lab source evidence: {err}"))
-    })?;
-    fs::write(&evidence_path, format!("{content}\n")).map_err(|err| {
+    fs::write(&evidence_path, content).map_err(|err| {
         Error::internal_io(
             err.to_string(),
             Some(format!(
@@ -558,7 +593,7 @@ fn apply_lab_source_evidence(snapshot: &mut CheckoutHygieneSnapshot) {
     if snapshot.role != "validation_dependency" || !snapshot.missing_required_git_metadata() {
         return;
     }
-    let Ok(content) = fs::read_to_string(Path::new(&snapshot.path).join(LAB_SOURCE_EVIDENCE_FILE))
+    let Ok(content) = fs::read_to_string(lab_source_evidence_path(Path::new(&snapshot.path)))
     else {
         return;
     };
@@ -646,12 +681,10 @@ fn run_validation_dependency_snapshot_lifecycle(snapshot: &CheckoutHygieneSnapsh
 }
 
 pub fn run_validation_dependency_lifecycle(component: &Component, path: &Path) -> Result<()> {
-    run_dependency_install_lifecycle(component, path).map_err(|err| {
-        dependency_step_failed_error(component, path, "dependency.install", err, None)
-    })?;
-    run_dependency_build_lifecycle(component, path).map_err(|err| {
-        dependency_step_failed_error(component, path, "dependency.build", err, None)
-    })?;
+    run_dependency_install_lifecycle(component, path)
+        .map_err(|err| dependency_step_failed_error(component, "dependency.install", err, None))?;
+    run_dependency_build_lifecycle(component, path)
+        .map_err(|err| dependency_step_failed_error(component, "dependency.build", err, None))?;
     verify_validation_dependency_outputs(component, path)
 }
 
@@ -756,7 +789,6 @@ fn run_dependency_build_lifecycle(component: &Component, path: &Path) -> Result<
 
     let cause = serde_json::to_value(&result).ok();
     let artifact = write_dependency_lifecycle_artifact(
-        path,
         "dependency.build",
         &serde_json::json!({
             "error": "dependency_step_failed",
@@ -795,7 +827,6 @@ fn verify_validation_dependency_outputs(component: &Component, path: &Path) -> R
             continue;
         }
         let artifact = write_dependency_lifecycle_artifact(
-            path,
             &output.step_id,
             &serde_json::json!({
                 "error": "dependency_output_missing",
@@ -895,7 +926,6 @@ fn collect_validation_dependency_output_declarations(
 
 fn dependency_step_failed_error(
     component: &Component,
-    path: &Path,
     step_id: &str,
     err: Error,
     status: Option<i32>,
@@ -909,7 +939,6 @@ fn dependency_step_failed_error(
         "details": err.details,
     });
     let artifact = write_dependency_lifecycle_artifact(
-        path,
         step_id,
         &serde_json::json!({
             "error": "dependency_step_failed",
@@ -930,12 +959,8 @@ fn dependency_step_failed_error(
     )
 }
 
-fn write_dependency_lifecycle_artifact(
-    path: &Path,
-    step_id: &str,
-    value: &Value,
-) -> Result<String> {
-    let artifact_dir = path.join(DEPENDENCY_LIFECYCLE_ARTIFACT_DIR);
+fn write_dependency_lifecycle_artifact(step_id: &str, value: &Value) -> Result<String> {
+    let artifact_dir = dependency_lifecycle_artifact_dir()?;
     fs::create_dir_all(&artifact_dir).map_err(|err| {
         Error::internal_io(
             err.to_string(),
@@ -1414,6 +1439,17 @@ mod tests {
         );
         assert_eq!(snapshots[0].upstream.as_deref(), Some("origin/main"));
         assert_eq!(snapshots[0].dirty, Some(false));
+        let evidence_path = lab_source_evidence_path(dependency.path());
+        assert_eq!(
+            evidence_path,
+            PathBuf::from(format!(
+                "{}-homeboy-state/lab-source-evidence.json",
+                dependency.path().display()
+            ))
+        );
+        assert!(evidence_path.is_file());
+        assert!(!dependency.path().join(".homeboy").exists());
+        fs::remove_dir_all(evidence_path.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -1553,89 +1589,109 @@ mod tests {
 
     #[test]
     fn validation_dependency_lifecycle_reports_failed_step_with_artifact_ref() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join(PORTABLE_CONFIG_FILE),
-            serde_json::json!({
-                "id": "dep",
-                "scripts": {
-                    "deps": ["sh -c 'printf install-failed >&2; exit 7'"]
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let mut component = Component::new(
-            "dep".to_string(),
-            dir.path().display().to_string(),
-            String::new(),
-            None,
-        );
-        component.scripts =
-            component::resolve_effective(None, Some(&dir.path().display().to_string()), None)
-                .unwrap()
-                .scripts;
+        crate::test_support::with_isolated_home(|_| {
+            let _run = crate::test_support::EnvVarGuard::set("HOMEBOY_RUN_ID", "run-hygiene");
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(
+                dir.path().join(PORTABLE_CONFIG_FILE),
+                serde_json::json!({
+                    "id": "dep",
+                    "scripts": {
+                        "deps": ["sh -c 'printf install-failed >&2; exit 7'"]
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let mut component = Component::new(
+                "dep".to_string(),
+                dir.path().display().to_string(),
+                String::new(),
+                None,
+            );
+            component.scripts =
+                component::resolve_effective(None, Some(&dir.path().display().to_string()), None)
+                    .unwrap()
+                    .scripts;
 
-        let err = run_validation_dependency_lifecycle(&component, dir.path())
-            .expect_err("failed deps script should be structured");
+            let err = run_validation_dependency_lifecycle(&component, dir.path())
+                .expect_err("failed deps script should be structured");
 
-        assert_eq!(err.code, ErrorCode::DependencyStepFailed);
-        assert_eq!(err.code.as_str(), "dependency_step_failed");
-        assert_eq!(err.details["step_id"], "dependency.install");
-        assert_eq!(err.details["component_id"], "dep");
-        let artifact = err.details["artifact_refs"][0]
-            .as_str()
-            .expect("artifact ref");
-        assert!(artifact.contains(".homeboy/dependency-lifecycle/dependency-install.json"));
-        assert!(Path::new(artifact).exists());
+            assert_eq!(err.code, ErrorCode::DependencyStepFailed);
+            assert_eq!(err.code.as_str(), "dependency_step_failed");
+            assert_eq!(err.details["step_id"], "dependency.install");
+            assert_eq!(err.details["component_id"], "dep");
+            let artifact = err.details["artifact_refs"][0]
+                .as_str()
+                .expect("artifact ref");
+            assert_eq!(
+                Path::new(artifact),
+                crate::paths::artifact_root()
+                    .unwrap()
+                    .join("dependency-lifecycle/run-hygiene/dependency-install.json")
+            );
+            assert!(Path::new(artifact).exists());
+            assert!(!dir.path().join(".homeboy").exists());
+        });
     }
 
     #[test]
     fn validation_dependency_lifecycle_reports_missing_output_with_artifact_ref() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut component = Component::new(
-            "dep".to_string(),
-            dir.path().display().to_string(),
-            String::new(),
-            None,
-        );
-        component.extensions = Some(std::collections::HashMap::from([(
-            "fixture".to_string(),
-            crate::component::ScopedExtensionConfig {
-                settings: std::collections::HashMap::from([(
-                    "validation_dependency_outputs".to_string(),
-                    serde_json::json!([{
-                        "step_id": "dependency.output:generated/report.json",
-                        "path": "generated/report.json",
-                        "next_machine_action": "dependency.lifecycle.retry"
-                    }]),
-                )]),
-                ..Default::default()
-            },
-        )]));
+        crate::test_support::with_isolated_home(|_| {
+            let _run = crate::test_support::EnvVarGuard::unset("HOMEBOY_RUN_ID");
+            let dir = tempfile::tempdir().unwrap();
+            let mut component = Component::new(
+                "dep".to_string(),
+                dir.path().display().to_string(),
+                String::new(),
+                None,
+            );
+            component.extensions = Some(std::collections::HashMap::from([(
+                "fixture".to_string(),
+                crate::component::ScopedExtensionConfig {
+                    settings: std::collections::HashMap::from([(
+                        "validation_dependency_outputs".to_string(),
+                        serde_json::json!([{
+                            "step_id": "dependency.output:generated/report.json",
+                            "path": "generated/report.json",
+                            "next_machine_action": "dependency.lifecycle.retry"
+                        }]),
+                    )]),
+                    ..Default::default()
+                },
+            )]));
 
-        let err = run_validation_dependency_lifecycle(&component, dir.path())
-            .expect_err("declared missing output should be structured");
+            let err = run_validation_dependency_lifecycle(&component, dir.path())
+                .expect_err("declared missing output should be structured");
 
-        assert_eq!(err.code, ErrorCode::DependencyOutputMissing);
-        assert_eq!(err.code.as_str(), "dependency_output_missing");
-        assert_eq!(
-            err.details["step_id"],
-            "dependency.output:generated/report.json"
-        );
-        assert_eq!(err.details["component_id"], "dep");
-        assert_eq!(err.details["output_path_ref"], "generated/report.json");
-        assert_eq!(
-            err.details["next_machine_action"],
-            "dependency.lifecycle.retry"
-        );
-        let artifact = err.details["artifact_refs"][0]
-            .as_str()
-            .expect("artifact ref");
-        assert!(artifact.contains(
-            ".homeboy/dependency-lifecycle/dependency-output-generated-report-json.json"
-        ));
-        assert!(Path::new(artifact).exists());
+            assert_eq!(err.code, ErrorCode::DependencyOutputMissing);
+            assert_eq!(err.code.as_str(), "dependency_output_missing");
+            assert_eq!(
+                err.details["step_id"],
+                "dependency.output:generated/report.json"
+            );
+            assert_eq!(err.details["component_id"], "dep");
+            assert_eq!(err.details["output_path_ref"], "generated/report.json");
+            assert_eq!(
+                err.details["next_machine_action"],
+                "dependency.lifecycle.retry"
+            );
+            let artifact = err.details["artifact_refs"][0]
+                .as_str()
+                .expect("artifact ref");
+            let artifact = Path::new(artifact);
+            assert!(artifact.starts_with(
+                crate::paths::artifact_root()
+                    .unwrap()
+                    .join("dependency-lifecycle")
+            ));
+            assert_eq!(
+                artifact.file_name().and_then(|name| name.to_str()),
+                Some("dependency-output-generated-report-json.json")
+            );
+            assert!(artifact.exists());
+            assert!(!dir.path().join(".homeboy").exists());
+        });
     }
 
     fn write_manifest(dir: &Path, contents: &str) {

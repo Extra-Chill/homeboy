@@ -8466,7 +8466,6 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
                 &options.finalization.base,
                 &options.finalization.base,
                 &prepared_base,
-                &explicit_cook_evidence_paths(options, target),
                 adopted_dirty_candidate,
             )
             .map(|snapshot| snapshot.map(CookWorkspaceBaseValidation::Snapshot));
@@ -8481,13 +8480,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
             .as_deref()
             .unwrap_or(&options.finalization.base)
     };
-    let ignored_evidence = explicit_cook_evidence_paths(options, target);
-    match preflight_cook_workspace_base_ancestry(
-        target,
-        base,
-        &ignored_evidence,
-        adopted_dirty_candidate,
-    ) {
+    match preflight_cook_workspace_base_ancestry(target, base, adopted_dirty_candidate) {
         Ok(snapshot) => Ok(snapshot.map(CookWorkspaceBaseValidation::Snapshot)),
         Err(error)
             if error.details["workspace_base_ancestry"]["direction"] == "behind"
@@ -8506,12 +8499,8 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
                     &["merge", "--ff-only", base],
                     "converge Homeboy task worktree to pinned Cook base",
                 )?;
-                let snapshot = preflight_cook_workspace_base_ancestry(
-                    target,
-                    base,
-                    &ignored_evidence,
-                    adopted_dirty_candidate,
-                )?;
+                let snapshot =
+                    preflight_cook_workspace_base_ancestry(target, base, adopted_dirty_candidate)?;
                 return Ok(Some(match snapshot {
                     Some(snapshot) => CookWorkspaceBaseValidation::Snapshot(snapshot),
                     None => CookWorkspaceBaseValidation::Convergence(serde_json::json!({
@@ -8555,7 +8544,6 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
 fn preflight_cook_workspace_base_ancestry(
     target: &Path,
     base: &str,
-    ignored_evidence: &[String],
     adopted_dirty_candidate: bool,
 ) -> Result<Option<Value>> {
     // A provider-owned Git destination can intentionally have no origin. When
@@ -8589,7 +8577,6 @@ fn preflight_cook_workspace_base_ancestry(
         base,
         &declared_base,
         &resolved_base,
-        ignored_evidence,
         adopted_dirty_candidate,
     )
 }
@@ -8688,7 +8675,6 @@ pub fn prepare_cook_workspace_base(target: &Path, base: &str) -> Result<CookBase
         base,
         &resolved.base,
         &resolved.sha,
-        &[],
         false,
     )?;
     Ok(CookBasePreparation {
@@ -8729,7 +8715,6 @@ fn preflight_cook_workspace_resolved_base_ancestry(
     base: &str,
     declared_base: &str,
     resolved_base: &str,
-    ignored_evidence: &[String],
     adopted_dirty_candidate: bool,
 ) -> Result<Option<Value>> {
     let AgentTaskPromotionCandidate::Git { fingerprint } =
@@ -8766,7 +8751,6 @@ fn preflight_cook_workspace_resolved_base_ancestry(
         .split('\0')
         .filter(|entry| !entry.is_empty())
         .map(|entry| entry.strip_prefix("?? ").unwrap_or(entry))
-        .filter(|path| !ignored_evidence.iter().any(|evidence| evidence == path))
         .collect::<Vec<_>>();
     if !dirty_paths.is_empty() && !adopted_dirty_candidate {
         let mut error = Error::validation_invalid_argument(
@@ -8931,7 +8915,6 @@ fn admit_explicit_cook_workspace_before_provider(
     let source = std::fs::canonicalize(source).map_err(|error| {
         Error::internal_io(error.to_string(), Some(source.display().to_string()))
     })?;
-    let ignored_evidence = explicit_cook_evidence_paths(options, &source);
     let status = homeboy_core::git::run_git(
         &source,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -8941,7 +8924,6 @@ fn admit_explicit_cook_workspace_before_provider(
         .split('\0')
         .filter(|entry| !entry.is_empty())
         .map(|entry| entry.strip_prefix("?? ").unwrap_or(entry))
-        .filter(|path| !ignored_evidence.iter().any(|evidence| evidence == path))
         .collect::<Vec<_>>();
     if !dirty_paths.is_empty() {
         let mut error = Error::validation_invalid_argument(
@@ -8964,7 +8946,6 @@ fn admit_explicit_cook_workspace_before_provider(
             serde_json::json!({
                 "schema": "homeboy/cook-explicit-cwd-cleanliness/v1",
                 "workspace": source,
-                "ignored_projected_evidence": ignored_evidence,
                 "provider_executions_before_admission": 0,
             }),
         )?;
@@ -9004,27 +8985,6 @@ fn cook_has_provider_execution_in_store(
         }
     }
     Ok(false)
-}
-
-/// Evidence is projected by the controller before Cook dispatches. Admit only
-/// the exact durable projection paths, never an entire controller directory.
-fn explicit_cook_evidence_paths(options: &CookRequest, workspace: &Path) -> Vec<String> {
-    options
-        .identity
-        .initial_plan
-        .tasks
-        .iter()
-        .flat_map(|task| {
-            task.executor.config["evidence_inputs"]
-                .as_array()
-                .into_iter()
-                .flatten()
-        })
-        .filter_map(|evidence| evidence["path"].as_str())
-        .filter_map(|path| std::fs::canonicalize(path).ok())
-        .filter_map(|path| path.strip_prefix(workspace).ok().map(Path::to_path_buf))
-        .map(|path| path.to_string_lossy().to_string())
-        .collect()
 }
 
 fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {

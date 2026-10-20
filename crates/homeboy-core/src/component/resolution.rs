@@ -1653,15 +1653,7 @@ fn should_skip_portable_duplicate_scan_dir(path: &Path) -> bool {
         // single component appear declared by multiple manifests and fails
         // discovery ("declared by multiple homeboy.json files"). They are not
         // source declarations, so exclude them from the duplicate scan. (#8210)
-        Some(
-            ".git"
-                | ".homeboy"
-                | ".homeboy-build"
-                | ".homeboy-bin"
-                | "target"
-                | "node_modules"
-                | "vendor"
-        )
+        Some(".git" | ".homeboy-build" | ".homeboy-bin" | "target" | "node_modules" | "vendor")
     )
 }
 

@@ -73,11 +73,10 @@ pub(super) fn write_trace_experiment_bundle(
     request: TraceExperimentBundleRequest<'_>,
 ) -> homeboy::core::Result<PathBuf> {
     let experiment = sanitize_path_component(request.name);
-    let bundle_root = request
-        .bundle_root
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(".homeboy").join("experiments"));
-    let bundle_dir = bundle_root.join(&experiment);
+    let bundle_dir = match request.bundle_root {
+        Some(root) => root.join(&experiment),
+        None => super::trace_artifact_dir("experiments", &experiment)?,
+    };
     trace_experiment::prepare_experiment_bundle_dir(&bundle_dir)?;
 
     let baseline_path = bundle_dir.join("baseline.json");

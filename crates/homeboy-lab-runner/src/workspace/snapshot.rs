@@ -2301,8 +2301,8 @@ fn snapshot_input_manifest_controlled(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    // Git and runner metadata are intentionally outside content identity, but
-    // snapshot-git and generic snapshot copies still transport them explicitly.
+    // Git metadata is intentionally outside content identity, but
+    // snapshot-git and generic snapshot copies still transport it explicitly.
     let mut selected = selection
         .iter()
         .map(|entry| entry.relative.clone())
@@ -2310,7 +2310,7 @@ fn snapshot_input_manifest_controlled(
     for entry in &manifest_entries {
         if matches!(
             entry.source.file_name().and_then(|name| name.to_str()),
-            Some(".git" | ".homeboy")
+            Some(".git")
         ) {
             collect_transport_only_selection(
                 &entry.source,

@@ -151,7 +151,8 @@ pub struct TraceArgs {
     #[arg(long, value_parser = ["markdown"])]
     pub report: Option<String>,
 
-    /// Bundle trace compare inputs, output, report, and overlay metadata under .homeboy/experiments/NAME.
+    /// Bundle trace compare inputs, output, report, and overlay metadata under NAME in the
+    /// Homeboy artifact store (or under `--output-dir` when given).
     #[arg(long, value_name = "NAME")]
     pub experiment: Option<String>,
 
@@ -221,7 +222,8 @@ pub struct TraceArgs {
     #[arg(skip)]
     pub matrix_env: Vec<(String, String)>,
 
-    /// Directory where trace matrix and compare bundle modes write aggregate, compare, cell, and summary artifacts.
+    /// Directory where trace matrix, compare, and experiment bundle modes write artifacts.
+    /// Defaults to a run-named directory in the Homeboy artifact store, never the checkout.
     #[arg(long = "output-dir", value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
 
@@ -319,6 +321,28 @@ impl TraceArgs {
             contract.workspace_mode_policy = LabWorkspaceModePolicy::Git;
         }
         CommandPortabilityContract::lab(contract)
+    }
+}
+
+/// The one resolver for default trace bundle locations. Trace compare,
+/// experiment, and matrix bundles are Homeboy-produced bytes, so they live in
+/// the artifact store keyed by bundle kind and run name, never in the checkout.
+pub(crate) fn trace_artifact_dir(kind: &str, name: &str) -> homeboy::core::Result<PathBuf> {
+    Ok(homeboy::core::artifact_root()?
+        .join("trace")
+        .join(kind)
+        .join(homeboy::core::paths::sanitize_path_segment(name)))
+}
+
+/// Resolve an explicit `--output-dir`, or the artifact-store default.
+pub(crate) fn trace_output_dir(
+    explicit: Option<&PathBuf>,
+    kind: &str,
+    name: impl FnOnce() -> String,
+) -> homeboy::core::Result<PathBuf> {
+    match explicit {
+        Some(path) => Ok(path.clone()),
+        None => trace_artifact_dir(kind, &name()),
     }
 }
 

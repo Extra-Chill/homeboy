@@ -700,7 +700,7 @@ mod content_addressed_evidence_tests {
         let error = private_file_bytes_with_expected_digest(
             temp.path().to_str().expect("path"),
             "5e5d4d3f5d16a48a9d0e8c306cea55f2472d6f6d94393ee9347f0af3545831a6",
-            "/runner/workspace/.homeboy/evidence/fixture/input.bin",
+            "/runner/workspace-homeboy-artifacts/provider-evidence/files/abc/input",
         )
         .expect_err("digest mismatch blocks transfer");
         assert_eq!(error.details["field"], "provider_evidence");

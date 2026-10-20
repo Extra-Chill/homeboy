@@ -2571,17 +2571,17 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_baseline_succeeds_when_the_repository_gitignores_homeboy_metadata() {
-        // A repository that ignores `.homeboy` must remain Cook-able on Lab
-        // (#9399): staging respects repository ignore rules.
+    fn synthetic_baseline_succeeds_when_the_repository_gitignores_local_state() {
+        // A repository with gitignored local state must remain Cook-able on
+        // Lab (#9399): staging respects repository ignore rules.
         let workspace = tempfile::tempdir().expect("runner workspace");
-        std::fs::write(workspace.path().join(".gitignore"), ".homeboy/\n")
-            .expect("repository ignores .homeboy");
+        std::fs::write(workspace.path().join(".gitignore"), ".local-state/\n")
+            .expect("repository ignores .local-state");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("snapshot source");
-        std::fs::create_dir_all(workspace.path().join(".homeboy/cache"))
+        std::fs::create_dir_all(workspace.path().join(".local-state/cache"))
             .expect("repository-ignored directory");
         std::fs::write(
-            workspace.path().join(".homeboy/cache/local.json"),
+            workspace.path().join(".local-state/cache/local.json"),
             "repository-ignored content\n",
         )
         .expect("repository-ignored file");
@@ -2594,19 +2594,21 @@ mod tests {
             snapshot,
             lab,
         )
-        .expect("synthetic baseline succeeds despite gitignored .homeboy");
+        .expect("synthetic baseline succeeds despite gitignored local state");
 
         let tree = git(workspace.path(), &["ls-tree", "-r", "--name-only", "HEAD"])
             .expect("list baseline tree");
-        // Real, non-ignored source is present; ignored Homeboy metadata is not.
+        // Real, non-ignored source is present; ignored local state is not, and
+        // Homeboy wrote nothing into the workspace.
         assert!(
             tree.contains("file.txt"),
             "real source is committed: {tree}"
         );
         assert!(
-            !tree.contains(".homeboy"),
-            "ignored Homeboy metadata is absent from the baseline tree: {tree}"
+            !tree.contains(".local-state"),
+            "ignored local state is absent from the baseline tree: {tree}"
         );
+        assert!(!workspace.path().join(".homeboy").exists());
 
         // A real, non-ignored provider change is still detectable against the
         // baseline.

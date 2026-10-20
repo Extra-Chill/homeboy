@@ -229,7 +229,7 @@ pub(super) fn recovered_runner_aggregate(
                 "schema": AGENT_TASK_ARTIFACT_SCHEMA,
                 "id": artifact_id,
                 "kind": "patch",
-                "path": "/home/runner/.homeboy/executor-finalized/patch.diff",
+                "path": "/home/runner/.local/share/homeboy/artifacts/executor-finalized/patch.diff",
                 "size_bytes": size,
                 "sha256": sha256,
                 "metadata": { "executor_artifact_finalized": true }

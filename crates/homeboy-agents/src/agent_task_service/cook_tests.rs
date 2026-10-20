@@ -6407,7 +6407,7 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         );
 
         std::fs::write(destination.join("uncommitted.txt"), "user drift\n").unwrap();
-        let dirty = preflight_cook_workspace_base_ancestry(&destination, "main", &[], false)
+        let dirty = preflight_cook_workspace_base_ancestry(&destination, "main", false)
             .expect_err("dirty destination remains blocked");
         assert_eq!(
             dirty.details["workspace_base_ancestry"]["direction"],
@@ -6415,38 +6415,24 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         );
         std::fs::remove_file(destination.join("uncommitted.txt")).unwrap();
 
-        let evidence_path = ".homeboy/evidence/issue/context.json";
-        let evidence = destination.join(evidence_path);
-        std::fs::create_dir_all(evidence.parent().expect("evidence parent"))
-            .expect("create evidence directory");
-        std::fs::write(&evidence, "{\"issue\":13276}\n").expect("write projected evidence");
-        preflight_cook_workspace_base_ancestry(
-            &destination,
-            "main",
-            &[evidence_path.to_string()],
-            false,
-        )
-        .expect("declared controller evidence does not block provider preflight");
-        std::fs::write(destination.join("uncommitted.txt"), "user drift\n").unwrap();
-        let dirty = preflight_cook_workspace_base_ancestry(
-            &destination,
-            "main",
-            &[evidence_path.to_string()],
-            false,
-        )
-        .expect_err("only declared evidence is excluded from cleanliness admission");
+        // Homeboy never stages evidence inside the destination, so an
+        // untracked `.homeboy` path is ordinary user drift.
+        let stray = destination.join(".homeboy/evidence/issue/context.json");
+        std::fs::create_dir_all(stray.parent().expect("stray parent")).unwrap();
+        std::fs::write(&stray, "{\"issue\":13276}\n").unwrap();
+        let dirty = preflight_cook_workspace_base_ancestry(&destination, "main", false)
+            .expect_err("no in-tree path is excluded from cleanliness admission");
         assert_eq!(
             dirty.details["workspace_base_ancestry"]["direction"],
             "dirty"
         );
-        std::fs::remove_file(destination.join("uncommitted.txt")).unwrap();
-        std::fs::remove_file(evidence).expect("remove projected evidence");
+        std::fs::remove_dir_all(destination.join(".homeboy")).unwrap();
 
         std::fs::write(destination.join("candidate.txt"), "candidate only\n").unwrap();
         git(&destination, &["add", "candidate.txt"]);
         git(&destination, &["commit", "-m", "candidate"]);
 
-        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", &[], false)
+        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", false)
             .expect_err("diverged destination is rejected before provider execution");
         assert_eq!(
             diverged.details["workspace_base_ancestry"]["direction"],
@@ -6541,7 +6527,7 @@ fn diverged_workspace_base_ancestry_preflight_is_deterministic_not_transport_ret
         git(&destination, &["add", "candidate-only.txt"]);
         git(&destination, &["commit", "-m", "candidate"]);
 
-        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", &[], false)
+        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", false)
             .expect_err("diverged destination is rejected before provider execution");
         assert_eq!(diverged.code.as_str(), "validation.invalid_argument");
         assert_eq!(
@@ -6643,7 +6629,7 @@ fn workspace_base_ancestry_preflight_preserves_provider_owned_non_origin_targets
     git(&["add", "provider.txt"]);
     git(&["commit", "-m", "provider base"]);
 
-    preflight_cook_workspace_base_ancestry(workspace.path(), "main", &[], false)
+    preflight_cook_workspace_base_ancestry(workspace.path(), "main", false)
         .expect("a provider-owned Git workspace without origin has no remote base to converge");
 }
 
@@ -7071,9 +7057,10 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
         .expect_err("a retry after a zero-execution lifecycle failure must reject user drift");
 
         std::fs::remove_file(target.join("candidate.txt")).expect("remove pre-provider drift");
-        let evidence = target.join(".homeboy/evidence/input/context.txt");
-        std::fs::create_dir_all(evidence.parent().expect("evidence parent"))
-            .expect("create projected evidence directory");
+        // Projected evidence lives outside the checkout, so declaring it never
+        // makes the explicit CWD dirty and never excuses in-tree drift.
+        let evidence_store = tempfile::tempdir().expect("evidence store");
+        let evidence = evidence_store.path().join("context.txt");
         std::fs::write(&evidence, "controller evidence\n").expect("write projected evidence");
         options.identity.initial_plan.tasks[0].executor.config = serde_json::json!({
             "evidence_inputs": [{ "path": evidence }]
@@ -7083,7 +7070,8 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
             &options,
             &options.identity.initial_run_id,
         )
-        .expect("the durable projected evidence path is not user drift");
+        .expect("out-of-tree projected evidence leaves the checkout clean");
+        assert!(!target.join(".homeboy").exists());
 
         agent_task_lifecycle::record_metadata_value_in_store(
             &test_lifecycle_store(),

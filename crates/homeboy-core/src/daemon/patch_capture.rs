@@ -21,7 +21,6 @@ struct RunDispatchIdentity<'a> {
 
 const PATCH_CAPTURE_EXCLUDES: &[&str] = &[
     ".git",
-    ".homeboy",
     "node_modules",
     "target",
     "vendor",

@@ -465,7 +465,7 @@ mod normalize_tests {
             "--overlay",
             "overlays/change.patch",
             "--output-dir",
-            ".homeboy/experiments/change",
+            "/tmp/trace-experiments/change",
         ]);
         let expected = input.clone();
         assert_eq!(normalize(input), expected);
@@ -484,7 +484,7 @@ mod normalize_tests {
             "--overlay",
             "overlays/change.patch",
             "--output-dir",
-            ".homeboy/experiments/change",
+            "/tmp/trace-experiments/change",
         ]));
 
         assert!(Cli::try_parse_from(args).is_ok());

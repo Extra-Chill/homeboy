@@ -53,8 +53,6 @@ fn lab_run_output_candidates(args: &[String], source_path: &Path, run_id: &str) 
         source_path.join(run_id),
         source_path.join("runs").join(run_id),
         source_path.join("artifacts").join(run_id),
-        source_path.join(".homeboy").join("runs").join(run_id),
-        source_path.join(".homeboy").join("artifacts").join(run_id),
         source_path.join("bench-runs").join(run_id),
     ]);
     candidates.extend(lab_run_summary_dirs_from_tree(source_path, run_id));

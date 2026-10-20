@@ -446,7 +446,7 @@ fn git_without_lazy_fetch(path: &Path, args: &[&str]) -> std::result::Result<(),
 }
 
 #[test]
-fn git_materialization_ignores_generated_homeboy_output_but_refuses_source_dirty_state() {
+fn git_materialization_keeps_homeboy_state_outside_checkout_and_refuses_dirty_state() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -495,23 +495,15 @@ fn git_materialization_ignores_generated_homeboy_output_but_refuses_source_dirty
         let (output, exit_code) = sync().expect("initial sync workspace");
         assert_eq!(exit_code, 0);
         let remote = Path::new(&output.remote_path);
-        fs::create_dir_all(remote.join(".homeboy/experiments/stripe-ece"))
-            .expect("create generated output dir");
-        fs::write(
-            remote.join(".homeboy/experiments/stripe-ece/compare.json"),
-            "{}\n",
-        )
-        .expect("write generated output");
-
-        let (output, exit_code) = sync().expect("generated .homeboy output is ignored");
-        assert_eq!(exit_code, 0);
-        let remote = Path::new(&output.remote_path);
-        // Re-sync resets generated `.homeboy` *output* (experiments, scratch)
-        // via `git clean -ffdqx`, so the experiment artifact written above is
-        // gone. Runner metadata lives in the sibling state directory, so no
-        // `.homeboy` path is left behind in the checkout.
+        // Homeboy writes nothing into the checkout: runner metadata lives in
+        // the sibling state directory, so no `.homeboy` path exists to ignore.
         assert!(!remote.join(".homeboy").exists());
         assert!(workspace_metadata_file(&remote).is_file());
+
+        let (output, exit_code) = sync().expect("clean re-sync");
+        assert_eq!(exit_code, 0);
+        let remote = Path::new(&output.remote_path);
+        assert!(!remote.join(".homeboy").exists());
 
         fs::write(remote.join("dirty-source.txt"), "dirty\n").expect("write dirty source file");
         let err = sync().expect_err("real dirty runner workspace is refused");
@@ -1165,7 +1157,7 @@ fn git_materialization_refuses_dirty_remote_workspace_by_default() {
     assert!(command.contains("Homeboy Lab refused to overwrite a dirty runner workspace"));
     assert!(command.contains("exit 97"));
     assert!(command.contains("Pass --allow-dirty-lab-workspace"));
-    assert!(command.contains("${path#.homeboy/}"));
+    assert!(!command.contains(".homeboy"));
     assert!(command.contains("git -C \"$dest\" reset --hard"));
 }
 

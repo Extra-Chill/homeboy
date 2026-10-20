@@ -2185,7 +2185,7 @@ mod materialize_specs_tests {
                 "workspace": { "root": format!(r"{controller_workspace}\candidate") },
                 "executor": { "backend": "fixture", "config": {
                     "workspace_root": format!(r"{controller_workspace}\candidate"),
-                    "runtime_overlay": format!(r"{controller_workspace}\.homeboy\runtime")
+                    "runtime_overlay": format!(r"{controller_workspace}\overlay\runtime")
                 }},
                 "metadata": {
                     "cook_continuation_workspace": { "candidate_source_root": controller_workspace }
@@ -2220,7 +2220,7 @@ mod materialize_specs_tests {
         );
         assert_eq!(
             staged["tasks"][0]["executor"]["config"]["runtime_overlay"],
-            format!("{runner_workspace}/.homeboy/runtime")
+            format!("{runner_workspace}/overlay/runtime")
         );
         assert_eq!(
             staged["tasks"][0]["metadata"]["cook_continuation_workspace"]["candidate_source_root"],

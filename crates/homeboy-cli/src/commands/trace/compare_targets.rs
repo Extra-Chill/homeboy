@@ -63,15 +63,13 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         .ok_or_else(|| {
             homeboy::core::Error::validation_missing_argument(vec!["trace scenario".to_string()])
         })?;
-    let output_dir = args.output_dir.clone().unwrap_or_else(|| {
-        PathBuf::from(".homeboy")
-            .join("trace-compare")
-            .join(format!(
-                "{}-{}",
-                scenario_id,
-                chrono::Utc::now().format("%Y%m%d%H%M%S")
-            ))
-    });
+    let output_dir = super::trace_output_dir(args.output_dir.as_ref(), "compare", || {
+        format!(
+            "{}-{}",
+            scenario_id,
+            chrono::Utc::now().format("%Y%m%d%H%M%S")
+        )
+    })?;
     compare_artifacts::prepare_output_dir(&output_dir)?;
 
     let observation = start_compare_observation(&args, &component_id, &scenario_id, &output_dir);

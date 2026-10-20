@@ -1233,11 +1233,13 @@ fn remote_checkout_root_for_lab_stack(
             .expect("Lab stack spec serializes")
             .as_slice(),
     );
+    // Lab stack checkouts are Homeboy-produced, so they live in the primary
+    // workspace's sibling state directory rather than inside its checkout.
     let root = primary_remote_path
-        .map(|primary| format!("{}/.homeboy/lab-stacks", primary.trim_end_matches('/')))
+        .map(homeboy_lab_contract::lab::handoff::runner_workspace_lab_stacks_dir)
         .unwrap_or_else(|| "/tmp/homeboy-lab/lab-stacks".to_string());
     format!(
-        "{root}/lab-stacks/{}-{}-{}",
+        "{root}/{}-{}-{}",
         sanitize_path_segment(rig_id),
         sanitize_path_segment(component_id),
         &digest[..12],
@@ -1663,7 +1665,7 @@ mod tests {
                 &runner.id,
                 &command.display().to_string(),
                 &remote_cwd,
-                &format!("{remote_cwd}/.homeboy/rig-registry"),
+                &crate::lab::offload::remote_lab_rig_registry_root(&remote_cwd),
                 &[
                     "homeboy".to_string(),
                     "bench".to_string(),
@@ -1765,7 +1767,7 @@ mod tests {
                 "local-stack-test",
                 "homeboy",
                 "/runner",
-                "/runner/.homeboy/rig-registry",
+                &crate::lab::offload::remote_lab_rig_registry_root("/runner"),
                 &[
                     "homeboy".to_string(),
                     "bench".to_string(),
@@ -1842,7 +1844,7 @@ mod tests {
     #[test]
     fn materializes_local_bare_stack_and_cleans_failed_attempt_before_retry() {
         let (root, stack, _) = local_bare_stack_fixture();
-        let destination = root.path().join("run/.homeboy/lab-stacks/component");
+        let destination = root.path().join("run-homeboy-state/lab-stacks/component");
         let runner = local_runner();
 
         let provenance = materialize_lab_stack_from_repository(
@@ -1901,7 +1903,7 @@ mod tests {
             std::thread::spawn(move || {
                 let destination = root
                     .path()
-                    .join(format!("{run}/.homeboy/lab-stacks/component"));
+                    .join(format!("{run}-homeboy-state/lab-stacks/component"));
                 materialize_lab_stack_from_repository(
                     &local_runner(),
                     destination.to_str().expect("destination path"),
@@ -2362,7 +2364,8 @@ mod tests {
             assert!(dependencies[0].declared_checkout_root.is_empty());
             assert!(dependencies[0]
                 .remote_checkout_root
-                .starts_with("/runner/work/rigs/.homeboy/lab-stacks/"));
+                .starts_with("/runner/work/rigs-homeboy-state/lab-stacks/"));
+            assert!(!dependencies[0].remote_checkout_root.contains(".homeboy"));
             assert_eq!(
                 selected_rig_component_remote_path(&args, &dependencies)
                     .expect("runner component binding"),

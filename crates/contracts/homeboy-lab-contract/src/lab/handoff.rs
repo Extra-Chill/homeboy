@@ -24,6 +24,15 @@ pub const RUNNER_ARTIFACT_ROOT_DIR_SUFFIX: &str = "-homeboy-artifacts";
 pub const RUNNER_WORKSPACE_STATE_DIR_SUFFIX: &str = "-homeboy-state";
 pub const RUNNER_WORKSPACE_METADATA_FILE_NAME: &str = "runner-workspace.json";
 pub const RUNNER_WORKSPACE_LAB_AT_FILES_DIR_NAME: &str = "lab-at-files";
+/// Marker recording that a runner workspace (or prepared-source cache entry)
+/// is a complete prepared source. Lives in the sibling state directory.
+pub const RUNNER_WORKSPACE_PREPARED_SOURCE_READY_FILE_NAME: &str = "prepared-source-ready";
+/// Clean git source evidence for a materialized validation dependency checkout.
+pub const RUNNER_WORKSPACE_LAB_SOURCE_EVIDENCE_FILE_NAME: &str = "lab-source-evidence.json";
+/// Directory of Lab gate receipts written for the runner workspace.
+pub const RUNNER_WORKSPACE_GATE_RECEIPTS_DIR_NAME: &str = "gate-receipts";
+/// Directory (inside the workspace state dir) holding Lab stack checkouts.
+pub const RUNNER_WORKSPACE_LAB_STACKS_DIR_NAME: &str = "lab-stacks";
 
 /// Homeboy-owned state directory for the runner workspace at `remote_path`.
 pub fn runner_workspace_state_dir(remote_path: &str) -> String {
@@ -45,6 +54,38 @@ pub fn runner_workspace_metadata_path(remote_path: &str) -> String {
 pub fn runner_workspace_lab_at_files_dir(remote_path: &str) -> String {
     format!(
         "{}/{RUNNER_WORKSPACE_LAB_AT_FILES_DIR_NAME}",
+        runner_workspace_state_dir(remote_path)
+    )
+}
+
+/// Prepared-source readiness marker for the workspace at `remote_path`.
+pub fn runner_workspace_prepared_source_marker_path(remote_path: &str) -> String {
+    format!(
+        "{}/{RUNNER_WORKSPACE_PREPARED_SOURCE_READY_FILE_NAME}",
+        runner_workspace_state_dir(remote_path)
+    )
+}
+
+/// Lab source evidence path for the dependency checkout at `remote_path`.
+pub fn runner_workspace_lab_source_evidence_path(remote_path: &str) -> String {
+    format!(
+        "{}/{RUNNER_WORKSPACE_LAB_SOURCE_EVIDENCE_FILE_NAME}",
+        runner_workspace_state_dir(remote_path)
+    )
+}
+
+/// Lab gate receipt path for `receipt_id` in the workspace at `remote_path`.
+pub fn runner_workspace_gate_receipt_path(remote_path: &str, receipt_id: &str) -> String {
+    format!(
+        "{}/{RUNNER_WORKSPACE_GATE_RECEIPTS_DIR_NAME}/{receipt_id}.json",
+        runner_workspace_state_dir(remote_path)
+    )
+}
+
+/// Root for Lab stack checkouts materialized beside the workspace at `remote_path`.
+pub fn runner_workspace_lab_stacks_dir(remote_path: &str) -> String {
+    format!(
+        "{}/{RUNNER_WORKSPACE_LAB_STACKS_DIR_NAME}",
         runner_workspace_state_dir(remote_path)
     )
 }
@@ -513,5 +554,36 @@ mod runner_job_identity_tests {
                 .is_none(),
             "missing runner_job_id / run_id must not project"
         );
+    }
+}
+
+#[cfg(test)]
+mod runner_workspace_state_tests {
+    use super::*;
+
+    #[test]
+    fn homeboy_state_resolvers_live_beside_the_checkout_not_inside_it() {
+        let checkout = "/runner/workspaces/app/";
+        let state = "/runner/workspaces/app-homeboy-state";
+        assert_eq!(runner_workspace_state_dir(checkout), state);
+        let resolved = [
+            runner_workspace_prepared_source_marker_path(checkout),
+            runner_workspace_lab_source_evidence_path(checkout),
+            runner_workspace_gate_receipt_path(checkout, "receipt-1"),
+            runner_workspace_lab_stacks_dir(checkout),
+        ];
+        assert_eq!(
+            resolved,
+            [
+                format!("{state}/prepared-source-ready"),
+                format!("{state}/lab-source-evidence.json"),
+                format!("{state}/gate-receipts/receipt-1.json"),
+                format!("{state}/lab-stacks"),
+            ]
+        );
+        for path in resolved {
+            assert!(!path.starts_with("/runner/workspaces/app/"));
+            assert!(!path.contains(".homeboy"));
+        }
     }
 }

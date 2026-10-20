@@ -921,9 +921,11 @@ fn runner_provider_evidence_path(
             None,
         ));
     }
+    // Staged outside the workspace tree, in the run-owned artifact sibling;
+    // the agent receives this absolute path through the workspace mapping.
     let root = format!(
-        "{}-homeboy-artifacts/provider-evidence",
-        remote_cwd.trim_end_matches('/')
+        "{}/provider-evidence",
+        super::inner::remote_lab_artifact_dir(remote_cwd)
     );
     if transport == homeboy_engine_primitives::content_hash::PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT {
         Ok(format!("{root}/trees/{digest}"))
@@ -1716,7 +1718,7 @@ mod tests {
                     "tasks": [{
                         "task_id": "task",
                         "executor": {"backend": "fixture", "config": {
-                            "evidence_inputs": [{"id":"fixture","path": "/workspace/.homeboy/evidence/one/input.json", "sha256": "sha256:abc", "size_bytes": 4194304, "transport":"content-addressed-blob/v1", "artifact":{"digest":"sha256:abc","size_bytes":4194304}, "visibility":"private", "redaction":"withhold-content"}]
+                            "evidence_inputs": [{"id":"fixture","path": "/controller/provider-evidence/files/abc/input", "sha256": "sha256:abc", "size_bytes": 4194304, "transport":"content-addressed-blob/v1", "artifact":{"digest":"sha256:abc","size_bytes":4194304}, "visibility":"private", "redaction":"withhold-content"}]
                         }}
                     }]
                 })
@@ -1726,7 +1728,7 @@ mod tests {
         assert_eq!(
             declared_agent_task_evidence_inputs(&args),
             std::collections::BTreeMap::from([(
-                "/workspace/.homeboy/evidence/one/input.json".to_string(),
+                "/controller/provider-evidence/files/abc/input".to_string(),
                 DeclaredProviderEvidence {
                     sha256: "sha256:abc".to_string(),
                     size_bytes: 4_194_304,
@@ -1745,13 +1747,13 @@ mod tests {
             "homeboy".to_string(),
             format!(
                 "--plan={}",
-                serde_json::json!({"tasks":[{"executor":{"config":{"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/two/input.json","sha256":"sha256:def","size_bytes":3,"artifact":{"digest":"sha256:def"}}]}}}]})
+                serde_json::json!({"tasks":[{"executor":{"config":{"evidence_inputs":[{"path":"/controller/provider-evidence/files/def/input","sha256":"sha256:def","size_bytes":3,"artifact":{"digest":"sha256:def"}}]}}}]})
             ),
         ];
         assert_eq!(
             declared_agent_task_evidence_inputs(&plan_equals),
             std::collections::BTreeMap::from([(
-                "/workspace/.homeboy/evidence/two/input.json".to_string(),
+                "/controller/provider-evidence/files/def/input".to_string(),
                 DeclaredProviderEvidence {
                     sha256: "sha256:def".to_string(),
                     size_bytes: 3,
