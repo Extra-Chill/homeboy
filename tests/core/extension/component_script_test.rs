@@ -228,26 +228,32 @@ fn homeboy_manifest_seeds_an_isolated_warm_cargo_target_per_checkout() {
 
 #[test]
 fn managed_cargo_target_preserves_explicit_absolute_override_and_reports_local() {
-    let dir = tempfile::tempdir().expect("checkout dir");
-    let mut component = script_component(
-        dir.path(),
-        "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\" > cargo-target",
-    );
-    component.managed_execution.shared_cargo_target = true;
-    let caller_target = PathBuf::from("/shared/homeboy/cargo-target");
-    component.env.insert(
-        "CARGO_TARGET_DIR".to_string(),
-        caller_target.to_string_lossy().to_string(),
-    );
+    // Isolated home: acquiring the explicit-target lifecycle registry must
+    // never write into the operator's real ~/.local/share/homeboy
+    // (Extra-Chill/homeboy#16187).
+    with_isolated_home(|_| {
+        let dir = tempfile::tempdir().expect("checkout dir");
+        let mut component = script_component(
+            dir.path(),
+            "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\" > cargo-target",
+        );
+        component.managed_execution.shared_cargo_target = true;
+        let caller_target = PathBuf::from("/shared/homeboy/cargo-target");
+        component.env.insert(
+            "CARGO_TARGET_DIR".to_string(),
+            caller_target.to_string_lossy().to_string(),
+        );
 
-    let output = run_component_scripts(&component, ExtensionCapability::Test, dir.path(), false)
-        .expect("component script should run");
+        let output =
+            run_component_scripts(&component, ExtensionCapability::Test, dir.path(), false)
+                .expect("component script should run");
 
-    assert!(output.success);
-    assert_eq!(
-        fs::read_to_string(dir.path().join("cargo-target")).expect("resolved target"),
-        format!("local:{}", caller_target.display())
-    );
+        assert!(output.success);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("cargo-target")).expect("resolved target"),
+            format!("local:{}", caller_target.display())
+        );
+    });
 }
 
 #[test]
