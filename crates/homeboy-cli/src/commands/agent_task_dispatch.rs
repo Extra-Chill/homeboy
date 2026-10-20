@@ -9,18 +9,14 @@ use homeboy::agents::agent_tasks::dispatch_service::{
 /// the execution/retry budget shared by every dispatch entrypoint.
 //
 // Implementation note (not shown in `--help`): this group is flattened into
-// `DispatchArgs` so the `--tasks/--provider-config/--client-context/--attempts/
-// --queue-only` flags are declared once and stay identical across carriers
+// `DispatchArgs` so the `--tasks/--client-context/--attempts/--queue-only`
+// flags are declared once and stay identical across carriers
 // (#5187).
 #[derive(Args, Debug, Clone)]
 pub struct DispatchCoreArgs {
     /// Reserved batch input. Use `agent-task fanout cook-batch` for task waves.
     #[arg(long = "tasks", value_name = "JSON", hide = true)]
     pub tasks_json: Option<String>,
-
-    /// Provider config JSON object, @file, or - for stdin. Merged with workspace metadata.
-    #[arg(long = "provider-config", value_name = "JSON")]
-    pub provider_config: Option<String>,
 
     /// Opaque client context JSON object, @file, or - for stdin.
     #[arg(long = "client-context", value_name = "JSON")]
@@ -83,11 +79,6 @@ pub struct DispatchCoreArgs {
     #[arg(long = "command-policy-reason", value_name = "TEXT")]
     pub command_policy_reason: Option<String>,
 
-    /// Confirm an explicit model override that pins the run instead of using
-    /// configured rotation.
-    #[arg(long = "acknowledge-model-override", requires = "model")]
-    pub acknowledge_model_override: bool,
-
     #[arg(
         long = "resolved-provider-policy",
         hide = true,
@@ -109,7 +100,7 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
     fn from(args: DispatchCoreArgs) -> Self {
         DispatchCoreInputs {
             tasks_json: args.tasks_json,
-            provider_config: args.provider_config,
+            provider_config: None,
             client_context: args.client_context,
             generated_fanout_context: false,
             attempts: args.attempts,
@@ -120,7 +111,7 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
             deny_command: args.deny_command,
             allow_command: args.allow_command,
             command_policy_reason: args.command_policy_reason,
-            acknowledge_model_override: args.acknowledge_model_override,
+            acknowledge_model_override: false,
         }
     }
 }
@@ -170,29 +161,12 @@ pub struct DispatchArgs {
     #[arg(long, value_name = "URL")]
     pub task_url: Option<String>,
 
-    /// Executor backend to request. Defaults to the configured coding backend.
-    #[arg(long, value_name = "BACKEND")]
-    pub backend: Option<String>,
-
-    /// Optional provider id when more than one provider exists for the backend.
-    #[arg(
-        long,
-        visible_alias = "dispatch-provider-id",
-        value_name = "PROVIDER_ID"
-    )]
-    pub selector: Option<String>,
-
-    /// Optional model override passed through to the provider.
-    #[arg(long, value_name = "MODEL")]
-    pub model: Option<String>,
+    #[command(flatten)]
+    pub cook: super::agent_task::args::CookOptions,
 
     /// Controller-owned abstract executor capabilities compiled from workflow declarations.
     #[arg(skip)]
     pub required_capabilities: Vec<String>,
-
-    /// Secret environment variable name to hydrate for the provider. Repeatable.
-    #[arg(long = "secret-env", value_name = "ENV")]
-    pub secret_env: Vec<String>,
 
     /// Maximum number of task cells to run at once.
     #[arg(long, default_value_t = 1, value_name = "N")]
@@ -206,8 +180,24 @@ pub struct DispatchArgs {
     pub core: DispatchCoreArgs,
 }
 
+impl std::ops::Deref for DispatchArgs {
+    type Target = super::agent_task::args::CookOptionValues;
+    fn deref(&self) -> &Self::Target {
+        &self.cook.values
+    }
+}
+
+impl std::ops::DerefMut for DispatchArgs {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.cook.values
+    }
+}
+
 impl From<DispatchArgs> for AgentTaskDispatchCommand {
     fn from(args: DispatchArgs) -> Self {
+        let mut core: DispatchCoreInputs = args.core.into();
+        core.provider_config = args.cook.values.provider_config;
+        core.acknowledge_model_override = args.cook.values.acknowledge_model_override;
         AgentTaskDispatchCommand {
             prompt: args.prompt,
             prompt_is_literal: args.prompt_is_literal,
@@ -217,15 +207,15 @@ impl From<DispatchArgs> for AgentTaskDispatchCommand {
             repo: args.repo,
             component: None,
             task_url: args.task_url,
-            backend: args.backend,
-            selector: args.selector,
-            model: args.model,
+            backend: args.cook.values.backend,
+            selector: args.cook.values.selector,
+            model: args.cook.values.model,
             required_capabilities: args.required_capabilities,
-            secret_env: args.secret_env,
+            secret_env: args.cook.values.secret_env,
             concurrency: args.concurrency,
             run_id: args.run_id,
             task_id: None,
-            core: args.core.into(),
+            core,
         }
     }
 }
@@ -328,16 +318,12 @@ mod tests {
                 workspace: None,
                 repo: None,
                 task_url: None,
-                backend: None,
-                selector: None,
-                model: None,
+                cook: Default::default(),
                 required_capabilities: Vec::new(),
-                secret_env: Vec::new(),
                 concurrency: 1,
                 run_id: None,
                 core: DispatchCoreArgs {
                     tasks_json: None,
-                    provider_config: None,
                     client_context: None,
                     attempts: Some(1),
                     same_provider_retries: Some(0),
@@ -347,7 +333,6 @@ mod tests {
                     deny_command: Vec::new(),
                     allow_command: Vec::new(),
                     command_policy_reason: None,
-                    acknowledge_model_override: false,
                 },
             }
             .into(),
@@ -369,16 +354,12 @@ mod tests {
                 workspace: None,
                 repo: None,
                 task_url: None,
-                backend: None,
-                selector: None,
-                model: None,
+                cook: Default::default(),
                 required_capabilities: Vec::new(),
-                secret_env: Vec::new(),
                 concurrency: 1,
                 run_id: None,
                 core: DispatchCoreArgs {
                     tasks_json: None,
-                    provider_config: None,
                     client_context: None,
                     attempts: Some(1),
                     same_provider_retries: Some(0),
@@ -388,7 +369,6 @@ mod tests {
                     deny_command: Vec::new(),
                     allow_command: Vec::new(),
                     command_policy_reason: None,
-                    acknowledge_model_override: false,
                 },
             }
             .into(),
@@ -461,6 +441,11 @@ mod tests {
     }
 
     fn dispatch_args(overrides: DispatchArgOverrides) -> DispatchArgs {
+        let mut cook = super::super::agent_task::args::CookOptions::default();
+        cook.backend = Some(overrides.backend.unwrap_or_else(|| "fixture".to_string()));
+        cook.secret_env = overrides.secret_env;
+        cook.provider_config = overrides.core.provider_config;
+        cook.acknowledge_model_override = overrides.core.acknowledge_model_override;
         DispatchArgs {
             prompt: overrides.prompt,
             prompt_is_literal: false,
@@ -469,11 +454,8 @@ mod tests {
             workspace: overrides.workspace,
             repo: overrides.repo,
             task_url: overrides.task_url,
-            backend: Some(overrides.backend.unwrap_or_else(|| "fixture".to_string())),
-            selector: None,
-            model: None,
+            cook,
             required_capabilities: Vec::new(),
-            secret_env: overrides.secret_env,
             concurrency: if overrides.concurrency == 0 {
                 1
             } else {
@@ -482,7 +464,6 @@ mod tests {
             run_id: overrides.run_id,
             core: DispatchCoreArgs {
                 tasks_json: overrides.core.tasks_json,
-                provider_config: overrides.core.provider_config,
                 client_context: overrides.core.client_context,
                 attempts: overrides.core.attempts,
                 same_provider_retries: overrides.core.same_provider_retries,
@@ -492,7 +473,6 @@ mod tests {
                 deny_command: overrides.core.deny_command,
                 allow_command: overrides.core.allow_command,
                 command_policy_reason: overrides.core.command_policy_reason,
-                acknowledge_model_override: overrides.core.acknowledge_model_override,
             },
         }
     }

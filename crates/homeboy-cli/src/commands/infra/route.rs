@@ -789,20 +789,18 @@ fn runner_resident_execution(cli: &Cli) -> bool {
 /// even though their portability contract is `LocalOnly` — the contract
 /// describes the *coordinator*, not the attempt.
 fn split_placement_coordinator_label(command: &Commands) -> Option<&'static str> {
-    use crate::commands::agent_task::{
-        AgentTaskArgs, AgentTaskCommand, AgentTaskFanoutArgs, AgentTaskFanoutCommand,
-    };
+    use crate::commands::agent_task::{AgentTaskArgs, AgentTaskCommand};
 
     match command {
         Commands::AgentTask(AgentTaskArgs {
             command: AgentTaskCommand::Cook(cook),
         }) if !cook.dispatch.core.queue_only => Some("agent-task cook"),
-        Commands::AgentTask(AgentTaskArgs {
-            command:
-                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
-                    command: AgentTaskFanoutCommand::CookBatch(args),
-                }),
-        }) if args.run_plan => Some("agent-task fanout cook-batch --run-plan"),
+        Commands::AgentTask(args)
+            if matches!(&args.command, AgentTaskCommand::Fanout(_))
+                && args.command.admits_durable_cook_work() =>
+        {
+            Some("agent-task fanout cook-batch --run-plan")
+        }
         _ => None,
     }
 }
@@ -971,7 +969,7 @@ fn admit_unmaterialized_cook(
             "model": resolved.dispatch.model,
             "required_capabilities": resolved.dispatch.required_capabilities,
             "secret_env_names": resolved.dispatch.secret_env,
-            "provider_config_ref": resolved.dispatch.core.provider_config.as_ref().map(|value| admission_digest(value)),
+            "provider_config_ref": resolved.dispatch.provider_config.as_ref().map(|value| admission_digest(value)),
             "runtime_generation": homeboy::core::build_identity::current().display,
         },
         "retry": {

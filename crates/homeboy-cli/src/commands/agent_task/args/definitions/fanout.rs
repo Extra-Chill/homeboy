@@ -1,9 +1,6 @@
 use clap::{Args, Subcommand};
 
-use super::cook::{
-    parse_provider_evidence_input, AgentTaskProviderEvidenceInput, VerifyGateArgs,
-    PROVIDER_EVIDENCE_DECLARATION,
-};
+use super::cook::CookOptions;
 
 #[derive(Args, Debug)]
 pub struct AgentTaskFanoutArgs {
@@ -68,44 +65,8 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// When omitted, each child's prompt is its issue URL.
     #[arg(long = "prompt-template", value_name = "TEXT")]
     pub prompt_template: Option<String>,
-    /// Executor backend serving every child cook.
-    #[arg(long = "backend", value_name = "BACKEND")]
-    pub backend: Option<String>,
-    /// Executor provider ID selecting which installed provider serves the
-    /// backend. Only needed when one backend is served by multiple providers.
-    #[arg(
-        long = "selector",
-        visible_alias = "provider-id",
-        value_name = "PROVIDER_ID"
-    )]
-    pub selector: Option<String>,
-    /// Model name forwarded to the selected provider for every child cook.
-    #[arg(long = "model", value_name = "MODEL")]
-    pub model: Option<String>,
-    /// Explicitly acknowledge that the model may displace configured routes.
-    #[arg(long = "acknowledge-model-override")]
-    pub acknowledge_model_override: bool,
-    /// Named provider profile declared by an installed provider's CLI,
-    /// supplying default backend/selector/model/provider-config values for
-    /// every child. Explicit flags win over the profile.
-    #[arg(long = "provider-profile", value_name = "PROFILE")]
-    pub provider_profile: Option<String>,
-    /// Name of an environment variable that holds a provider credential for
-    /// every child. Repeatable. Values are resolved by the provider at
-    /// execution, never read or recorded here.
-    #[arg(long = "secret-env", value_name = "ENV")]
-    pub secret_env: Vec<String>,
-    /// Provider-specific configuration forwarded to every child's provider
-    /// invocation, as inline JSON.
-    #[arg(long = "provider-config", value_name = "JSON")]
-    pub provider_config: Option<String>,
-    #[arg(long = "provider-evidence", value_name = "JSON", help = PROVIDER_EVIDENCE_DECLARATION, value_parser = parse_provider_evidence_input)]
-    pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
-    /// AI tool disclosure recorded in every child PR's assistance attribution.
-    #[arg(long = "ai-tool", value_name = "TEXT")]
-    pub ai_tool: Option<String>,
     #[command(flatten)]
-    pub gates: VerifyGateArgs,
+    pub cook: CookOptions,
     /// Maximum number of child cooks to run at once. Defaults to the host's
     /// `/agent_task/max_batch_concurrency` config or 4.
     #[arg(
@@ -114,13 +75,6 @@ pub struct AgentTaskFanoutCookBatchArgs {
         value_name = "N"
     )]
     pub max_concurrency: Option<u32>,
-    /// Maximum Cook attempts for every child (each child's own `--max-attempts`).
-    #[arg(
-        long = "max-attempts",
-        value_parser = clap::value_parser!(u32).range(1..),
-        value_name = "N"
-    )]
-    pub max_attempts: Option<u32>,
     /// Wall-clock budget, in seconds, for the whole batch. On expiry the
     /// workflow ends `budget_exhausted` and cancels every running child.
     #[arg(

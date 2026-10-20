@@ -2266,7 +2266,7 @@ fn cook_rejects_an_inactive_managed_destination_before_provider_execution() {
 }
 
 #[test]
-fn cook_dispatch_provider_id_alias_maps_to_selector() {
+fn cook_selector_maps_to_provider() {
     let cli = Cli::try_parse_from([
         "homeboy",
         "agent-task",
@@ -2277,12 +2277,12 @@ fn cook_dispatch_provider_id_alias_maps_to_selector() {
         "true",
         "--backend",
         "sample-backend",
-        "--dispatch-provider-id",
+        "--selector",
         "sample-provider",
         "--prompt",
         "cook",
     ])
-    .expect("dispatch provider id alias parses");
+    .expect("provider selector parses");
 
     let Commands::AgentTask(agent_task) = cli.command else {
         panic!("expected agent-task command");

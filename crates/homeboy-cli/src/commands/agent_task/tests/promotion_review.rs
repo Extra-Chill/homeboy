@@ -161,7 +161,7 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
         let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
             panic!("Cook command");
         };
-        let mut cli_gates = cook.gates;
+        let mut cli_gates = cook.dispatch.cook.values.gates;
 
         let hydrated = review::resolve_promotion_gates(
             &mut cli_gates,
