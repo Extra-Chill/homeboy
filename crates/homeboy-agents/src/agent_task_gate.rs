@@ -1628,55 +1628,227 @@ impl AgentTaskGateReport {
 }
 
 /// Produce a stable failure identity from the exit status, structured diagnostic
-/// identities, and a digest of normalized output records. Output is evidence,
-/// not the sole authority for accepting an inherited failure.
+/// identities, and the failure-identifying output records (failed test names,
+/// compiler errors with their relative locations, panic locations). When no
+/// failure-identifying records exist, a digest of the whole normalized output is
+/// used instead. Output is evidence, not the sole authority for accepting an
+/// inherited failure.
 pub(crate) fn failure_fingerprint(
     exit_code: i32,
     stdout: &str,
     stderr: &str,
     diagnostics: &[AgentTaskGateDiagnosticRecord],
 ) -> String {
-    let mut output_records = [stdout, stderr]
+    let normalized_lines = [stdout, stderr]
         .into_iter()
         .flat_map(str::lines)
-        .map(normalize_failure_record)
-        .filter(|line| !line.is_empty())
+        .filter_map(normalize_failure_record)
         .collect::<Vec<_>>();
-    output_records.sort();
-    output_records.dedup();
     let mut diagnostic_ids = diagnostics
         .iter()
         .map(|diagnostic| format!("{}:{}", diagnostic.producer.id, diagnostic.identity))
         .collect::<Vec<_>>();
     diagnostic_ids.sort();
     diagnostic_ids.dedup();
-    let payload = json!({
-        "exit_code": exit_code,
-        "diagnostic_ids": diagnostic_ids,
-        "output_records": output_records,
-    });
+
+    let mut failure_records = failure_identifying_records(&normalized_lines);
+    failure_records.sort();
+    failure_records.dedup();
+    let payload = if failure_records.is_empty() {
+        let mut output_records = normalized_lines
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        output_records.sort();
+        output_records.dedup();
+        json!({
+            "exit_code": exit_code,
+            "diagnostic_ids": diagnostic_ids,
+            "output_records": output_records,
+        })
+    } else {
+        json!({
+            "exit_code": exit_code,
+            "diagnostic_ids": diagnostic_ids,
+            "failure_records": failure_records,
+        })
+    };
     format!(
         "sha256:{:x}",
         Sha256::digest(payload.to_string().as_bytes())
     )
 }
 
-fn normalize_failure_record(line: &str) -> String {
-    line.split_whitespace()
-        .map(|token| {
-            if token.contains('T')
-                && token.contains(':')
-                && token.chars().any(|c| c.is_ascii_digit())
-            {
-                "<timestamp>"
-            } else if token.starts_with("0x") && token[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-                "<address>"
-            } else {
-                token
+/// Extract the records that identify *which* failure happened from normalized
+/// output lines: failed test names, compiler errors (with their `-->` location),
+/// and panic locations.
+fn failure_identifying_records(lines: &[String]) -> Vec<String> {
+    let patterns = failure_patterns();
+    let mut records = Vec::new();
+    let mut in_failures_list = false;
+    let mut pending_error: Option<String> = None;
+    for line in lines {
+        let trimmed = line.trim();
+        if let Some(error) = pending_error.as_ref() {
+            if let Some(location) = trimmed.strip_prefix("--> ") {
+                let location = patterns
+                    .location_column
+                    .replace(location.trim(), "$1")
+                    .into_owned();
+                records.push(format!("{error} @ {location}"));
+                pending_error = None;
+                continue;
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            if !trimmed.is_empty() {
+                records.push(error.clone());
+                pending_error = None;
+            }
+        }
+        if trimmed == "failures:" {
+            in_failures_list = true;
+            continue;
+        }
+        if in_failures_list {
+            let indented = line.starts_with(char::is_whitespace);
+            if trimmed.is_empty() {
+                continue;
+            }
+            if indented && !trimmed.contains(char::is_whitespace) {
+                records.push(format!("test:{trimmed}"));
+                continue;
+            }
+            in_failures_list = false;
+        }
+        if let Some(captures) = patterns.failed_test.captures(trimmed) {
+            records.push(format!("test:{}", &captures[1]));
+            continue;
+        }
+        if let Some(captures) = patterns.panic_location.captures(trimmed) {
+            records.push(format!("panic:{}:{}", &captures[1], &captures[2]));
+            continue;
+        }
+        if patterns.error_line.is_match(trimmed) {
+            pending_error = Some(trimmed.to_string());
+        }
+    }
+    if let Some(error) = pending_error {
+        records.push(error);
+    }
+    records
+}
+
+struct FailurePatterns {
+    failed_test: regex::Regex,
+    panic_location: regex::Regex,
+    error_line: regex::Regex,
+    location_column: regex::Regex,
+    lab_workspace_root: regex::Regex,
+    homeboy_test_tmp: regex::Regex,
+    absolute_path: regex::Regex,
+    thread_id: regex::Regex,
+    duration: regex::Regex,
+    artifact_hash: regex::Regex,
+    shifting_count: regex::Regex,
+    timestamp: regex::Regex,
+    address: regex::Regex,
+}
+
+fn failure_patterns() -> &'static FailurePatterns {
+    static PATTERNS: std::sync::OnceLock<FailurePatterns> = std::sync::OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        let re = |pattern: &str| regex::Regex::new(pattern).expect("valid failure pattern");
+        FailurePatterns {
+            failed_test: re(r"^test (\S+) \.\.\. FAILED$"),
+            panic_location: re(r"panicked at ([^\s:]+):(\d+)(?::\d+)?"),
+            error_line: re(r"^error(?:\[[A-Za-z0-9]+\])?: \S"),
+            location_column: re(r"^(\S+?:\d+)(?::\d+)?$"),
+            lab_workspace_root: re(r"/(?:[^/\s'`]+/)*_lab_workspaces/[^/\s'`]+/"),
+            homeboy_test_tmp: re(
+                r"/(?:[^/\s'`]+/)*\.homeboy-test-tmp/run\.[^/\s'`]+/(?:\.tmp[^/\s'`]+/)?",
+            ),
+            absolute_path: re(r"(^|[\s('`\x22=\[])(/[^\s'`\x22:)\]]+)"),
+            thread_id: re(r"(thread '[^']*') \(\d+\)"),
+            duration: re(r"\b(?:\d+h\s+)?(?:\d+m\s+)?\d+(?:\.\d+)?(?:ns|µs|us|ms|s)\b|\b\d+m\b"),
+            artifact_hash: re(r"-[0-9a-f]{16}\b"),
+            shifting_count: re(r"\b\d+ (passed|ignored|measured|filtered out)\b"),
+            timestamp: re(
+                r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
+            ),
+            address: re(r"\b0x[0-9a-fA-F]+\b"),
+        }
+    })
+}
+
+/// Anchors that mark the start of a repository-relative path inside an
+/// absolute path whose checkout root is unknown.
+const REPO_PATH_ANCHORS: &[&str] = &[
+    "crates", "src", "tests", "benches", "examples", "target", "lib", "packages", "apps",
+];
+
+fn relativize_absolute_path(path: &str) -> String {
+    let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    if let Some(index) = segments
+        .iter()
+        .position(|segment| REPO_PATH_ANCHORS.contains(segment))
+    {
+        return segments[index..].join("/");
+    }
+    if let Some(index) = segments
+        .iter()
+        .position(|segment| *segment == "workspace" || *segment == "checkout")
+    {
+        if index + 1 < segments.len() {
+            return segments[index + 1..].join("/");
+        }
+    }
+    match segments.last() {
+        Some(last) if !last.is_empty() => format!("<abs>/{last}"),
+        _ => "<abs>".to_string(),
+    }
+}
+
+/// Normalize one output line, masking volatile content (absolute paths,
+/// thread ids, durations, artifact hashes, shifting counts, timestamps,
+/// addresses). Returns `None` for progress lines that never identify a failure.
+fn normalize_failure_record(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let first_word = trimmed.split_whitespace().next().unwrap_or("");
+    if matches!(
+        first_word,
+        "Compiling"
+            | "Downloaded"
+            | "Downloading"
+            | "Running"
+            | "Checking"
+            | "Fresh"
+            | "Updating"
+            | "Locking"
+            | "Blocking"
+            | "Doc-tests"
+    ) {
+        return None;
+    }
+    let patterns = failure_patterns();
+    let line = patterns.timestamp.replace_all(line, "<timestamp>");
+    let line = patterns.lab_workspace_root.replace_all(&line, "");
+    let line = patterns.homeboy_test_tmp.replace_all(&line, "");
+    let line = patterns
+        .absolute_path
+        .replace_all(&line, |captures: &regex::Captures| {
+            format!("{}{}", &captures[1], relativize_absolute_path(&captures[2]))
+        });
+    let line = patterns.thread_id.replace_all(&line, "$1");
+    let line = patterns.artifact_hash.replace_all(&line, "-<hash>");
+    let line = patterns.duration.replace_all(&line, "<duration>");
+    let line = patterns.shifting_count.replace_all(&line, "<n> $1");
+    let line = patterns.address.replace_all(&line, "<address>");
+    let leading = &line[..line.len() - line.trim_start().len()];
+    let body = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(if leading.is_empty() || body.is_empty() {
+        body
+    } else {
+        format!(" {body}")
+    })
 }
 
 #[cfg(test)]
@@ -1727,6 +1899,151 @@ mod baseline_tests {
 
         assert_eq!(baseline, reordered);
         assert_ne!(baseline, divergent_exit);
+    }
+
+    fn cargo_failure_output(
+        root: &str,
+        tmp: &str,
+        thread_id: u32,
+        seconds: &str,
+        filtered: u32,
+        hash: &str,
+        failing: &[&str],
+    ) -> (String, String) {
+        let mut stdout = String::from("\nrunning 724 tests\n");
+        for name in failing {
+            stdout.push_str(&format!("test {name} ... FAILED\n"));
+        }
+        stdout.push_str("test agent_task_gate::ok_one ... ok\n\nfailures:\n\n");
+        for name in failing {
+            stdout.push_str(&format!(
+                "---- {name} stdout ----\n\nthread '{name}' ({thread_id}) panicked at crates/homeboy-agents/src/agent_task_gate.rs:120:9:\nfixture missing at {tmp}/fixture.json\nnote: run with `RUST_BACKTRACE=1`\n\n"
+            ));
+        }
+        stdout.push_str("failures:\n");
+        for name in failing {
+            stdout.push_str(&format!("    {name}\n"));
+        }
+        stdout.push_str(&format!(
+            "\ntest result: FAILED. 720 passed; {} failed; 1 ignored; 0 measured; {filtered} filtered out; finished in {seconds}\n",
+            failing.len()
+        ));
+        let stderr = format!(
+            "   Compiling homeboy-agents v0.1.0 ({root}/crates/homeboy-agents)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 03s\n     Running unittests src/lib.rs ({root}/target/debug/deps/homeboy_agents-{hash})\nerror: test failed, to rerun pass `-p homeboy-agents --lib`\n"
+        );
+        (stdout, stderr)
+    }
+
+    const FOUR_FAILURES: &[&str] = &[
+        "agent_task_gate::tests::alpha",
+        "agent_task_gate::tests::beta",
+        "agent_task_gate::tests::gamma",
+        "agent_task_gate::tests::delta",
+    ];
+
+    #[test]
+    fn same_cargo_failure_from_different_workspaces_has_equal_fingerprints() {
+        let (base_out, base_err) = cargo_failure_output(
+            "/home/chubes/Developer/_lab_workspaces/abc123",
+            "/tmp/.homeboy-test-tmp/run.RdkCCB/.tmpdIljrU",
+            1175443,
+            "113.75s",
+            1889,
+            "0f3a9b2c4d5e6f70",
+            FOUR_FAILURES,
+        );
+        let (cand_out, cand_err) = cargo_failure_output(
+            "/home/other/work/_lab_workspaces/zz-999",
+            "/tmp/.homeboy-test-tmp/run.Xy12ab/.tmpQQ99zz",
+            42,
+            "7.01s",
+            12,
+            "1234567890abcdef",
+            FOUR_FAILURES,
+        );
+        assert_eq!(
+            failure_fingerprint(101, &base_out, &base_err, &[]),
+            failure_fingerprint(101, &cand_out, &cand_err, &[])
+        );
+    }
+
+    #[test]
+    fn extra_failing_test_changes_the_fingerprint() {
+        let (base_out, base_err) = cargo_failure_output(
+            "/home/chubes/Developer/_lab_workspaces/abc123",
+            "/tmp/.homeboy-test-tmp/run.RdkCCB/.tmpdIljrU",
+            1175443,
+            "113.75s",
+            1889,
+            "0f3a9b2c4d5e6f70",
+            FOUR_FAILURES,
+        );
+        let mut five = FOUR_FAILURES.to_vec();
+        five.push("agent_task_gate::tests::epsilon");
+        let (cand_out, cand_err) = cargo_failure_output(
+            "/home/other/work/_lab_workspaces/zz-999",
+            "/tmp/.homeboy-test-tmp/run.Xy12ab/.tmpQQ99zz",
+            42,
+            "7.01s",
+            12,
+            "1234567890abcdef",
+            &five,
+        );
+        assert_ne!(
+            failure_fingerprint(101, &base_out, &base_err, &[]),
+            failure_fingerprint(101, &cand_out, &cand_err, &[])
+        );
+    }
+
+    fn clippy_output(root: &str, seconds: &str, line: u32) -> String {
+        format!(
+            "    Checking homeboy-agents v0.1.0 ({root}/crates/homeboy-agents)\nerror: this `if` has identical blocks\n  --> {root}/crates/homeboy-agents/src/agent_task_gate.rs:{line}:5\n   |\n{line} |     if x {{ a }} else {{ a }}\n   |\nerror[E0425]: cannot find value `foo` in this scope\n  --> crates/homeboy-agents/src/lib.rs:10:1\nerror: could not compile `homeboy-agents` (lib) due to 2 previous errors\n    Finished in {seconds}\n"
+        )
+    }
+
+    #[test]
+    fn same_clippy_error_from_different_workspaces_has_equal_fingerprints() {
+        let base = clippy_output("/home/chubes/Developer/_lab_workspaces/abc123", "3.2s", 77);
+        let candidate = clippy_output("/srv/ci/workspace", "12.9s", 77);
+        let moved = clippy_output("/srv/ci/workspace", "12.9s", 78);
+        assert_eq!(
+            failure_fingerprint(101, "", &base, &[]),
+            failure_fingerprint(101, "", &candidate, &[])
+        );
+        assert_ne!(
+            failure_fingerprint(101, "", &base, &[]),
+            failure_fingerprint(101, "", &moved, &[])
+        );
+    }
+
+    #[test]
+    fn same_failure_with_different_exit_code_has_different_fingerprint() {
+        let (out, err) = cargo_failure_output(
+            "/home/chubes/Developer/_lab_workspaces/abc123",
+            "/tmp/.homeboy-test-tmp/run.RdkCCB/.tmpdIljrU",
+            1175443,
+            "113.75s",
+            1889,
+            "0f3a9b2c4d5e6f70",
+            FOUR_FAILURES,
+        );
+        assert_ne!(
+            failure_fingerprint(101, &out, &err, &[]),
+            failure_fingerprint(1, &out, &err, &[])
+        );
+    }
+
+    #[test]
+    fn normalization_masks_volatile_tokens() {
+        let line = super::normalize_failure_record(
+            "thread 'x' (1175443) panicked at /home/a/_lab_workspaces/id/src/lib.rs:3:1 in 2m 03s (target/debug/deps/foo-0f3a9b2c4d5e6f70)",
+        )
+        .expect("kept");
+        assert_eq!(
+            line,
+            "thread 'x' panicked at src/lib.rs:3:1 in <duration> (target/debug/deps/foo-<hash>)"
+        );
+        assert!(super::normalize_failure_record("   Compiling foo v1.2.3").is_none());
     }
 
     #[test]
