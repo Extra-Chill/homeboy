@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.431.6] - 2026-10-20
+
+### Changed
+- Show failed gate output in gate-fix prompt, status and diagnose
+- Map the runner's installed browser cache into isolated Lab gates
+- Stage only runner-portable content from provider agent dirs on Lab runners
+- Widen a zero-selection changed-scope test run to the full suite when a test-harness config changed
+- fix the missing-backend test, isolate the runner-temp flake, and repair the fake-Pi fixture
+
 ## [0.431.5] - 2026-10-20
 
 ### Changed
