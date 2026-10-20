@@ -470,6 +470,29 @@ pub struct CookRecoveryReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission: Option<Value>,
     pub result: Option<Value>,
+    /// The declared failure cause when recovery exits nonzero because the
+    /// Cook's state admits no recovery step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<Value>,
+}
+
+/// Exit code for a report whose step is [`CookRecoveryStep::None`], declaring
+/// the step's reason as the failure cause when the exit is nonzero.
+fn finish_without_step(mut report: CookRecoveryReport) -> (CookRecoveryReport, i32) {
+    let exit_code = i32::from(!CookStatus::from_status(&report.status).is_success_exit());
+    if exit_code != 0 {
+        if let CookRecoveryStep::None { reason } = &report.step {
+            report.failure = Some(serde_json::json!({
+                "code": "agent_task.recover_no_step",
+                "message": reason,
+                "details": {
+                    "status": report.status,
+                    "run_id": report.run_id,
+                },
+            }));
+        }
+    }
+    (report, exit_code)
 }
 
 /// Status of a Cook attempt whose recipe is durable but whose lifecycle record
@@ -620,6 +643,7 @@ pub fn recover_cook(
         overrides: (!overrides.is_empty()).then(|| overrides.clone()),
         admission: None,
         result: None,
+        failure: None,
     };
     let run_id = report.run_id.clone();
     let run_id = run_id.as_str();
@@ -692,10 +716,7 @@ pub fn recover_cook(
             (result, exit_code)
         }
         CookRecoveryStep::Publish => performer.publish(run_id, &publish, false)?,
-        CookRecoveryStep::None { .. } => {
-            let exit_code = i32::from(!CookStatus::from_status(&report.status).is_success_exit());
-            return Ok((report, exit_code));
-        }
+        CookRecoveryStep::None { .. } => return Ok(finish_without_step(report)),
     };
     report.result = Some(result);
     Ok((report, exit_code))
@@ -1258,5 +1279,43 @@ mod tests {
             .as_deref(),
             Some("a")
         );
+    }
+
+    fn no_step_report(status: &str, reason: &str) -> CookRecoveryReport {
+        CookRecoveryReport {
+            schema: COOK_RECOVERY_SCHEMA,
+            cook_id: "cook-1".to_string(),
+            run_id: "run-1".to_string(),
+            status: status.to_string(),
+            step: CookRecoveryStep::none(reason),
+            preflight: false,
+            overrides: None,
+            admission: None,
+            result: None,
+            failure: None,
+        }
+    }
+
+    #[test]
+    fn no_step_on_a_failing_status_declares_its_reason_as_the_failure() {
+        let reason = "Cook status `gate_failed` admits no recovery step; inspect it with `agent-task status` or `agent-task diagnose`.";
+        let (report, exit_code) = finish_without_step(no_step_report("gate_failed", reason));
+
+        assert_eq!(exit_code, 1);
+        let value = serde_json::to_value(&report).expect("serialize report");
+        assert_eq!(value["failure"]["code"], "agent_task.recover_no_step");
+        assert_eq!(value["failure"]["message"], reason);
+        assert_eq!(value["failure"]["details"]["status"], "gate_failed");
+        assert_eq!(value["failure"]["details"]["run_id"], "run-1");
+    }
+
+    #[test]
+    fn no_step_on_a_successful_status_declares_no_failure() {
+        let (report, exit_code) =
+            finish_without_step(no_step_report("review_ready", "Nothing to recover."));
+
+        assert_eq!(exit_code, 0);
+        let value = serde_json::to_value(&report).expect("serialize report");
+        assert!(value.get("failure").is_none());
     }
 }
