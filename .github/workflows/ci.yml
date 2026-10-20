@@ -41,7 +41,6 @@ jobs:
       # checks/comment sections via the workflow's per-command defaults.
       # Keep --skip-lint test-local; shared args would pass it to review lint.
       commands: review lint,review test --skip-lint
-      expected-commands: review lint,review test
       component: homeboy
       # Scoped differential baseline (homeboy-action#541).
       action-ref: 847f90260889c8d00c3cae7ddf77f68c9529761a
