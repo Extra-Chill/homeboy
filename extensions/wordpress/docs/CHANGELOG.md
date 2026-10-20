@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.0] - 2026-10-20
+
+### Added
+- discover tests/**/*-smoke.php by convention; homeboy.json lists only exceptions
+
 ## [3.52.3] - 2026-10-20
 
 ### Changed
