@@ -26,6 +26,9 @@ mod pipeline_capabilities;
 mod pipeline_summary;
 mod plan_steps;
 mod planner;
+mod dependency_refresh;
+#[cfg(test)]
+mod dependency_refresh_tests;
 mod planning_changelog;
 mod planning_git;
 mod planning_policy;
