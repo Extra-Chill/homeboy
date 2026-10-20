@@ -21,6 +21,7 @@ use super::{
 };
 use crate::rig_materialization::LabStackComponentMaterialization;
 use crate::workspace::git_output;
+use provider_agent_dir_staging::{plan_provider_agent_dir_staging, ProviderAgentDirStagingReceipt};
 
 pub(super) const LAB_EXTRA_WORKSPACES_JSON_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES_JSON";
 pub(super) const LAB_WORKSPACE_MAPPING_SCHEMA: &str = "homeboy/workspace-map/v1";
@@ -47,6 +48,10 @@ pub(super) struct LabWorkspaceMappingEntry {
     dependency_freshness: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_provenance: Option<serde_json::Value>,
+    /// Staging receipt for provider agent dirs: runner-unportable entries
+    /// (platform executables, `bin/`) withheld from the runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staging_receipt: Option<ProviderAgentDirStagingReceipt>,
 }
 
 impl LabWorkspaceMappingEntry {
@@ -198,7 +203,25 @@ pub(crate) fn sync_extra_lab_workspaces_controlled(
             if !seen.insert(local_path.clone()) {
                 continue;
             }
-            let synced = crate::workspace::sync_workspace_controlled(
+            let staging_receipt = if is_provider_agent_dir(&extra, &local_path) {
+                Some(plan_provider_agent_dir_staging(&local_path)?)
+            } else {
+                None
+            };
+            let staging_excludes = staging_receipt
+                .as_ref()
+                .map(ProviderAgentDirStagingReceipt::snapshot_excludes)
+                .unwrap_or_default();
+            if let Some(receipt) = staging_receipt.as_ref().filter(|r| r.omitted_count > 0) {
+                eprintln!(
+                    "[lab] provider agent dir {}: omitted {} runner-unportable entr{} from staging: {}",
+                    local_path.display(),
+                    receipt.omitted_count,
+                    if receipt.omitted_count == 1 { "y" } else { "ies" },
+                    receipt.omitted.join(", ")
+                );
+            }
+            let synced = crate::workspace::sync_workspace_controlled_with_excludes(
                 runner_id,
                 RunnerWorkspaceSyncOptions {
                     path: local_path.display().to_string(),
@@ -217,11 +240,13 @@ pub(crate) fn sync_extra_lab_workspaces_controlled(
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &staging_excludes,
                 control,
             )?
             .0;
             let mut entry = workspace_mapping_entry(&extra.role, &synced);
             entry.source_provenance = extra.source_provenance.clone();
+            entry.staging_receipt = staging_receipt;
             workspace_mapping.push(entry.clone());
             synced_entries.push(synced);
         }
@@ -233,6 +258,15 @@ pub(crate) fn sync_extra_lab_workspaces_controlled(
     })?;
 
     Ok(synced_entries)
+}
+
+/// A provider agent dir is a provider-config path that is plain controller
+/// state rather than a source checkout (e.g. Pi's `PI_CODING_AGENT_DIR`).
+/// Source checkouts keep their tracked executables; agent dirs are staged with
+/// only runner-portable content.
+fn is_provider_agent_dir(extra: &ExtraLabWorkspace, local_path: &Path) -> bool {
+    extra.role == "provider_config"
+        && extra_workspace_sync_mode(local_path) == RunnerWorkspaceSyncMode::Snapshot
 }
 
 fn extra_workspace_sync_mode(path: &Path) -> RunnerWorkspaceSyncMode {
@@ -258,6 +292,7 @@ pub(super) fn workspace_mapping_entry(
         snapshot_identity: synced.snapshot_identity.clone(),
         dependency_freshness: None,
         source_provenance: None,
+        staging_receipt: None,
     }
 }
 
@@ -277,6 +312,7 @@ pub(super) fn workspace_mapping_entry_for_materialized_file(
         snapshot_identity: "runner_resident".to_string(),
         dependency_freshness: None,
         source_provenance: None,
+        staging_receipt: None,
     }
 }
 
@@ -302,6 +338,7 @@ pub(super) fn workspace_mapping_entry_for_validation_dependency(
             "source_provenance": "validation_dependency_sibling",
         })),
         source_provenance: None,
+        staging_receipt: None,
     }
 }
 
@@ -333,6 +370,7 @@ pub(super) fn workspace_mapping_entry_for_git_dependency(
             },
         })),
         source_provenance: None,
+        staging_receipt: None,
     }
 }
 
@@ -364,6 +402,7 @@ pub(super) fn workspace_mapping_entries_for_git_dependency(
             snapshot_identity: dependency.head.clone(),
             dependency_freshness: None,
             source_provenance: None,
+            staging_receipt: None,
         });
     }
     entries
@@ -395,6 +434,7 @@ pub(super) fn workspace_mapping_entry_for_lab_stack(
             serde_json::to_value(&materialization.provenance)
                 .expect("Lab stack provenance serializes"),
         ),
+        staging_receipt: None,
     }
 }
 
@@ -1605,6 +1645,7 @@ pub(super) fn path_setting_values(args: &[String]) -> Vec<String> {
     values
 }
 
+mod provider_agent_dir_staging;
 mod workspace_ref_rewrite;
 use workspace_ref_rewrite::*;
 
