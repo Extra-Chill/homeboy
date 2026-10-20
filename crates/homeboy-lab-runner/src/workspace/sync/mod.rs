@@ -167,6 +167,7 @@ fn sync_workspace_in_roots_with_deadline(
         roots,
         runner_id,
         options,
+        &[],
         &WorkspaceControl::before(deadline),
     )
 }
@@ -176,10 +177,22 @@ pub(crate) fn sync_workspace_controlled(
     options: RunnerWorkspaceSyncOptions,
     control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    sync_workspace_controlled_with_excludes(runner_id, options, &[], control)
+}
+
+/// [`sync_workspace_controlled`] with caller-owned snapshot excludes added to
+/// the runner/default policy (e.g. platform-specific provider agent content).
+pub(crate) fn sync_workspace_controlled_with_excludes(
+    runner_id: &str,
+    options: RunnerWorkspaceSyncOptions,
+    extra_excludes: &[String],
+    control: &WorkspaceControl,
+) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
     sync_workspace_in_roots_controlled(
         &homeboy_core::paths::PathRoots::from_environment()?,
         runner_id,
         options,
+        extra_excludes,
         control,
     )
 }
@@ -188,6 +201,7 @@ fn sync_workspace_in_roots_controlled(
     roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     options: RunnerWorkspaceSyncOptions,
+    extra_excludes: &[String],
     control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
     control.checkpoint()?;
@@ -216,6 +230,11 @@ fn sync_workspace_in_roots_controlled(
     for pattern in homeboy_core::source_snapshot::policy_for_path(&local_path).sync_excludes {
         if !excludes.contains(&pattern) {
             excludes.push(pattern);
+        }
+    }
+    for pattern in extra_excludes {
+        if !excludes.contains(pattern) {
+            excludes.push(pattern.clone());
         }
     }
     let mut includes = runner.policy.snapshot_includes.clone();
