@@ -89,24 +89,21 @@ impl AgentTaskPromotionReport {
     /// only the caller's explicit policy can accept its proven non-regression.
     pub fn finalization_eligible(&self, accept_inherited_failures: bool) -> bool {
         !self.deterministic_gates.is_empty()
-            && self.deterministic_gates.iter().all(|gate| match gate.status {
-                AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
-                AgentTaskGateStatus::AcceptedInheritedFailure => {
-                    accept_inherited_failures
-                        && gate.failure_evidence.as_ref().is_some_and(|evidence| {
-                            evidence.classification
-                                == crate::agent_task_gate::AgentTaskGateFailureClassification::CandidateCode
-                        })
-                        && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
-                            comparison.matches_candidate_failure
-                                && comparison.result
-                                    == crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
-                        })
-                }
-                AgentTaskGateStatus::Failed
-                | AgentTaskGateStatus::Skipped
-                | AgentTaskGateStatus::Deferred | AgentTaskGateStatus::Unavailable => false,
-            })
+            && self
+                .finalization_blocking_gates(accept_inherited_failures)
+                .next()
+                .is_none()
+    }
+
+    /// Gates that keep the report from crossing the finalization boundary,
+    /// using the same per-gate rule as [`Self::finalization_eligible`].
+    pub fn finalization_blocking_gates(
+        &self,
+        accept_inherited_failures: bool,
+    ) -> impl Iterator<Item = &AgentTaskGateReport> {
+        self.deterministic_gates
+            .iter()
+            .filter(move |gate| !gate_finalization_eligible(gate, accept_inherited_failures))
     }
 
     pub fn gate_outcome(&self) -> AgentTaskPromotionGateOutcome {
@@ -396,4 +393,26 @@ impl AgentTaskPromotionTarget {
 
 fn promotion_report_schema() -> String {
     AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string()
+}
+
+fn gate_finalization_eligible(gate: &AgentTaskGateReport, accept_inherited_failures: bool) -> bool {
+    match gate.status {
+        AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
+        AgentTaskGateStatus::AcceptedInheritedFailure => {
+            accept_inherited_failures
+                && gate.failure_evidence.as_ref().is_some_and(|evidence| {
+                    evidence.classification
+                        == crate::agent_task_gate::AgentTaskGateFailureClassification::CandidateCode
+                })
+                && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
+                    comparison.matches_candidate_failure
+                        && comparison.result
+                            == crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
+                })
+        }
+        AgentTaskGateStatus::Failed
+        | AgentTaskGateStatus::Skipped
+        | AgentTaskGateStatus::Deferred
+        | AgentTaskGateStatus::Unavailable => false,
+    }
 }
