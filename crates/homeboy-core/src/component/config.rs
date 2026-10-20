@@ -212,17 +212,50 @@ pub struct DependencyStackEdge {
     /// keep resolving through the local component registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<DependencyStackEdgeSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<DependencyStackLock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<DependencyStackPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DependencyStackLock {
+    pub kind: DependencyStackLockKind,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencyStackLockKind {
+    VersionFile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DependencyStackPolicy {
+    pub max: DependencyStackPolicyMax,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencyStackPolicyMax {
+    SameMajor,
 }
 
 /// Remote release source declared on a [`DependencyStackEdge`].
 ///
-/// `repo` is a remote Git repository and `prefix` a namespaced tag namespace:
-/// the newest `refs/tags/<prefix>-v<semver>` tag names the upstream's newest
-/// release.
+/// Declare exactly one of `repo` (with its existing `prefix` namespace),
+/// `github_release` (`owner/repo`), or `npm` (registry package name).
+/// Git sources retain the `refs/tags/<prefix>-v<semver>` convention.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct DependencyStackEdgeSource {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub repo: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_release: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npm: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
