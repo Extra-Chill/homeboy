@@ -18,19 +18,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
-use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
 use homeboy::core::workflow::definition::Join;
 use homeboy::core::workflow::{WorkflowDefinition, WORKFLOW_SCHEMA};
 use homeboy::core::{Error, Result};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::cli_surface::Placement;
 
 use super::super::CmdResult;
 use super::args::{
     AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand,
-    AgentTaskFanoutCookBatchArgs, CookBatchJoin, VerifyGateArgs,
+    AgentTaskFanoutCookBatchArgs, CookBatchJoin,
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
 
@@ -51,10 +49,9 @@ pub(crate) fn fanout_with_placement(
     }
 }
 
-fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> CmdResult<Value> {
-    apply_provider_profile(&mut args);
+fn cook_batch(args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> CmdResult<Value> {
     let children = parse_issues(&args.issues)?;
-    if !args.gates.has_deterministic_gate() {
+    if !args.cook.gates.has_deterministic_gate() {
         return Err(Error::validation_invalid_argument(
             "verify",
             "every cook-batch child needs a deterministic gate: pass --verify, --verify-file, --private-verify, or --private-verify-file",
@@ -65,7 +62,7 @@ fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> C
     // Every child shares these gates and the Cook spine rejects a reviewer-
     // unsafe one; reject it here, file gates included, before any wave work
     // exists (#15672).
-    let mut visible = args.gates.clone();
+    let mut visible = args.cook.gates.clone();
     visible.snapshot_file_inputs()?;
     homeboy::agents::agent_task_service::validate_reviewer_visible_gates(&visible.verify, None)?;
     if let CookBatchJoin::MinSucceeded(min) = args.join {
@@ -129,7 +126,7 @@ fn lab_runner() -> Result<Option<String>> {
 }
 
 /// Compile a cook-batch invocation into its workflow definition.
-fn compile(
+pub(super) fn compile(
     args: &AgentTaskFanoutCookBatchArgs,
     placement: Placement,
     bundle_runner: Option<&str>,
@@ -156,54 +153,17 @@ fn compile(
     }
     prepare.extend(args.issues.iter().cloned());
 
-    let mut cook = Map::new();
-    let mut set = |key: &str, value: Value| {
-        cook.insert(key.to_string(), value);
-    };
-    set("repo", json!(args.repo));
-    set("task-url", json!("{{item.issue_url}}"));
-    set("prompt", json!("{{item.prompt}}"));
-    set("head", json!("{{item.branch}}"));
-    set("to-worktree", json!("{{item.worktree}}"));
-    set("base", json!("{{steps.prepare.output/base}}"));
-    // No title or commit message: each child Cook takes both from its own
-    // validated agent review form, exactly like a single Cook (#15122,
-    // #16052). A per-item "Fix #N" would override that title (#16061).
-    for (key, value) in [
-        ("backend", &args.backend),
-        ("selector", &args.selector),
-        ("model", &args.model),
-        ("provider-config", &args.provider_config),
-        ("ai-tool", &args.ai_tool),
-    ] {
-        if let Some(value) = value {
-            set(key, json!(value));
-        }
-    }
-    if let Some(max_attempts) = args.max_attempts {
-        set("max-attempts", json!(max_attempts));
-    }
-    if args.acknowledge_model_override {
-        set("acknowledge-model-override", json!(true));
-    }
-    if !args.secret_env.is_empty() {
-        set("secret-env", json!(args.secret_env));
-    }
-    if !args.provider_evidence_inputs.is_empty() {
-        set(
-            "provider-evidence",
-            json!(args
-                .provider_evidence_inputs
-                .iter()
-                .map(serialize)
-                .collect::<Result<Vec<_>>>()?),
-        );
-    }
-    for (key, value) in gate_flags(&args.gates)? {
-        set(&key, value);
-    }
+    let mut cook = args.cook.child_flags()?;
+    cook.extend([
+        ("repo".into(), json!(args.repo)),
+        ("task-url".into(), json!("{{item.issue_url}}")),
+        ("prompt".into(), json!("{{item.prompt}}")),
+        ("head".into(), json!("{{item.branch}}")),
+        ("to-worktree".into(), json!("{{item.worktree}}")),
+        ("base".into(), json!("{{steps.prepare.output/base}}")),
+    ]);
     if placement != Placement::Auto {
-        set("placement", json!(placement_name(placement)));
+        cook.insert("placement".into(), json!(placement_name(placement)));
     }
 
     let max_parallel = args
@@ -219,7 +179,7 @@ fn compile(
         "id": COOK_BATCH_WORKFLOW_ID,
         // Credentials a child's provider reads are secret references the
         // daemon resolves when each step spawns, never inherited values.
-        "env": { "secrets": args.secret_env },
+        "env": { "secrets": args.cook.secret_env },
         "budget": args.max_duration.map(|seconds| json!({ "deadline": format!("{seconds}s") })),
         "steps": [
             { "id": "prepare", "homeboy": prepare },
@@ -244,214 +204,11 @@ fn compile(
     WorkflowDefinition::from_value(definition)
 }
 
-/// The `agent-task cook` gate flags equivalent to `gates`. Defaults are left
-/// to the Cook so one contract owns them.
-fn gate_flags(gates: &VerifyGateArgs) -> Result<Vec<(String, Value)>> {
-    let defaults = default_gates();
-    let mut flags = Vec::new();
-    let absolute = |paths: &[String]| -> Result<Vec<String>> {
-        let cwd = std::env::current_dir().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("resolve the working directory".into()),
-            )
-        })?;
-        Ok(paths
-            .iter()
-            .map(|path| cwd.join(path).display().to_string())
-            .collect())
-    };
-    for (key, values) in [
-        ("verify", gates.verify.clone()),
-        ("verify-file", absolute(&gates.verify_file)?),
-        ("private-verify", gates.private_verify.clone()),
-        ("private-verify-file", absolute(&gates.private_verify_file)?),
-        ("gate-toolchain", gates.gate_toolchains.clone()),
-        (
-            "gate-env",
-            gates
-                .gate_environment
-                .iter()
-                .map(|(name, value)| format!("{name}={value}"))
-                .collect(),
-        ),
-        (
-            "gate-env-from",
-            gates
-                .gate_environment_preserve
-                .iter()
-                .map(|(name, value)| format!("{name}={value}"))
-                .collect(),
-        ),
-        (
-            "gate-input-source",
-            gates
-                .input_sources
-                .iter()
-                .map(serialize)
-                .collect::<Result<_>>()?,
-        ),
-        (
-            "gate-toolchain-spec",
-            gates
-                .gate_toolchain_specs
-                .iter()
-                .map(serialize)
-                .collect::<Result<_>>()?,
-        ),
-        (
-            "gate-package-artifact",
-            gates
-                .gate_package_artifacts
-                .iter()
-                .map(serialize)
-                .collect::<Result<_>>()?,
-        ),
-        (
-            "gate-extension-input",
-            gates
-                .gate_extension_inputs
-                .iter()
-                .map(serialize)
-                .collect::<Result<_>>()?,
-        ),
-    ] {
-        if !values.is_empty() {
-            flags.push((key.to_string(), json!(values)));
-        }
-    }
-    if gates.private_gate_reveal != defaults.private_gate_reveal {
-        flags.push((
-            "private-gate-reveal".to_string(),
-            json!(
-                clap::ValueEnum::to_possible_value(&gates.private_gate_reveal)
-                    .expect("gate reveal policy has a clap value")
-                    .get_name()
-            ),
-        ));
-    }
-    for (key, value, default) in [
-        (
-            "gate-execution-policy",
-            &gates.gate_execution_policy,
-            &defaults.gate_execution_policy,
-        ),
-        (
-            "gate-environment-mode",
-            &gates.gate_environment_mode,
-            &defaults.gate_environment_mode,
-        ),
-    ] {
-        if value != default {
-            flags.push((key.to_string(), json!(value)));
-        }
-    }
-    for (key, value, default) in [
-        (
-            "gate-timeout-seconds",
-            gates.gate_timeout_seconds,
-            defaults.gate_timeout_seconds,
-        ),
-        (
-            "gate-heartbeat-interval-seconds",
-            gates.gate_heartbeat_interval_seconds,
-            defaults.gate_heartbeat_interval_seconds,
-        ),
-        (
-            "gate-no-progress-timeout-seconds",
-            gates.gate_no_progress_timeout_seconds,
-            defaults.gate_no_progress_timeout_seconds,
-        ),
-    ] {
-        if value != default {
-            flags.push((key.to_string(), json!(value)));
-        }
-    }
-    for (key, value, default) in [
-        (
-            "isolate-gate-home",
-            gates.isolate_gate_home,
-            defaults.isolate_gate_home,
-        ),
-        (
-            "isolate-gate-xdg",
-            gates.isolate_gate_xdg,
-            defaults.isolate_gate_xdg,
-        ),
-    ] {
-        if value != default {
-            // `--isolate-gate-home false` takes an explicit value.
-            flags.push((key.to_string(), json!(value.to_string())));
-        }
-    }
-    for (key, enabled) in [
-        ("rerun-completed-gates", gates.rerun_completed_gates),
-        ("accept-inherited-failures", gates.accept_inherited_failures),
-        ("no-component-lint-gate", gates.no_component_lint_gate),
-        ("gate-shared-cargo-target", gates.gate_shared_cargo_target),
-        (
-            "no-gate-shared-cargo-target",
-            gates.no_gate_shared_cargo_target,
-        ),
-    ] {
-        if enabled {
-            flags.push((key.to_string(), json!(true)));
-        }
-    }
-    if let Some(runner) = &gates.gate_runner {
-        flags.push(("gate-runner".to_string(), json!(runner)));
-    }
-    Ok(flags)
-}
-
-/// The gate flags' own defaults, read from the same clap definition.
-fn default_gates() -> VerifyGateArgs {
-    #[derive(clap::Parser)]
-    struct Defaults {
-        #[command(flatten)]
-        gates: VerifyGateArgs,
-    }
-    <Defaults as clap::Parser>::parse_from(["gates"]).gates
-}
-
-fn serialize(value: &impl serde::Serialize) -> Result<String> {
-    serde_json::to_string(value)
-        .map_err(|error| Error::internal_json(error.to_string(), Some("cook-batch flag".into())))
-}
-
 fn placement_name(placement: Placement) -> String {
     clap::ValueEnum::to_possible_value(&placement)
         .expect("placement has a clap value")
         .get_name()
         .to_string()
-}
-
-fn apply_provider_profile(args: &mut AgentTaskFanoutCookBatchArgs) {
-    let Some(profile) = selected_provider_profile(args.provider_profile.as_deref()) else {
-        return;
-    };
-    if args.backend.is_none() {
-        args.backend = profile.backend;
-    }
-    if args.selector.is_none() {
-        args.selector = profile.selector;
-    }
-    if args.model.is_none() {
-        args.model = profile.model;
-    }
-    if args.provider_config.is_none() {
-        args.provider_config = profile.provider_config.map(|value| value.to_string());
-    }
-}
-
-fn selected_provider_profile(name: Option<&str>) -> Option<AgentTaskProviderProfileDeclaration> {
-    let name = name?.trim();
-    AgentTaskProviderCatalog::discover()
-        .providers()
-        .iter()
-        .flat_map(|provider| provider.cli.profiles.iter())
-        .find(|profile| profile.name == name)
-        .cloned()
 }
 
 /// One GitHub issue of a batch.
@@ -776,7 +533,7 @@ mod tests {
         assert!(cook["cook"].get("commit-message").is_none());
         assert_eq!(cook["cook"]["verify"], json!(["test -f DONE"]));
         assert_eq!(cook["cook"]["placement"], "lab");
-        assert_eq!(cook["cook"]["gate-timeout-seconds"], 60);
+        assert_eq!(cook["cook"]["gate-timeout-seconds"], "60");
         assert!(cook["cook"].get("gate-execution-policy").is_none());
         // The same batch names the same instance; a fanout id separates it.
         let instance = definition.instance_id(&BTreeMap::new(), None);
@@ -790,6 +547,30 @@ mod tests {
         assert_ne!(
             instance,
             definition.instance_id(&BTreeMap::new(), Some("again"))
+        );
+    }
+
+    #[test]
+    fn relative_gate_file_paths_are_anchored_at_the_operator_directory() {
+        let args = parse(&[
+            "--repo",
+            "scratch",
+            "--verify-file",
+            "public.sh",
+            "--private-verify-file",
+            "private.sh",
+            ISSUES[0],
+        ]);
+        let definition = compile(&args, Placement::Auto, None).unwrap();
+        let child = definition.steps[1].cook.as_ref().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            child["verify-file"],
+            json!([cwd.join("public.sh").display().to_string()])
+        );
+        assert_eq!(
+            child["private-verify-file"],
+            json!([cwd.join("private.sh").display().to_string()])
         );
     }
 
@@ -834,7 +615,7 @@ mod tests {
         ];
         argv.extend(ISSUES);
         let args = parse(&argv);
-        let mut visible = args.gates.clone();
+        let mut visible = args.cook.gates.clone();
         visible.snapshot_file_inputs().unwrap();
         homeboy::agents::agent_task_service::validate_reviewer_visible_gates(&visible.verify, None)
             .expect("a private gate is never published to reviewers");

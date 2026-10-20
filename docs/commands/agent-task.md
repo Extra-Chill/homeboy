@@ -563,6 +563,14 @@ steps and admits that workflow on the local daemon:
 Every child needs a deterministic gate from `--verify`, `--verify-file`,
 `--private-verify`, or `--private-verify-file`.
 
+Cook and cook-batch share the same provider, model, evidence, attempt and gate
+options. Batch forwards explicitly supplied options unchanged to each child;
+relative verification-file paths are anchored at the operator's working directory.
+`--provider-profile NAME` is also available on a single `agent-task cook`:
+Cook resolves the installed profile's backend, selector, model and provider-config
+defaults, with explicit flags taking precedence. Batch only forwards the profile
+name; each child resolves it. `--max-attempts` defaults to 3 for both commands.
+
 ```bash
 homeboy --placement lab agent-task fanout cook-batch \
   --repo homeboy \
@@ -575,7 +583,8 @@ homeboy --placement lab agent-task fanout cook-batch \
 ```
 
 Without `--run-plan` (or with `--preview`) the command validates the batch and
-prints the compiled workflow and its instance id without admitting anything.
+prints the compiled workflow and its instance id without admitting anything or
+performing ambient notification discovery.
 With `--run-plan` it admits the instance and returns its status plus
 `status_command` and `cancel_command`. The instance id is derived from the
 compiled definition, so re-running the same command reports the same instance;

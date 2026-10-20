@@ -58,21 +58,8 @@ fn scope_cook_help(command: Command) -> Command {
         "max_attempts",
         "placement",
     ];
-    const COMMON_COOK_BATCH_ARGUMENTS: &[&str] = &[
-        "help",
-        "help_full",
-        "issues",
-        "repo",
-        "backend",
-        "model",
-        "verify",
-        "verify_file",
-        "max_concurrency",
-        "join",
-        "preview",
-        "run_plan",
-        "placement",
-    ];
+    const COMMON_COOK_BATCH_OWNED_ARGUMENTS: &[&str] =
+        &["issues", "max_concurrency", "join", "run_plan"];
 
     fn visit(command: Command, path: &[String]) -> Command {
         let is_cook = path.iter().map(String::as_str).eq(["agent-task", "cook"]);
@@ -80,20 +67,15 @@ fn scope_cook_help(command: Command) -> Command {
             path.iter()
                 .map(String::as_str)
                 .eq(["agent-task", "fanout", "cook-batch"]);
-        let common_arguments = if is_cook {
-            Some(COMMON_COOK_ARGUMENTS)
-        } else if is_cook_batch {
-            Some(COMMON_COOK_BATCH_ARGUMENTS)
-        } else {
-            None
-        };
-        let command = if let Some(common_arguments) = common_arguments {
+        let command = if is_cook || is_cook_batch {
             let ids = command
                 .get_arguments()
                 .map(|arg| arg.get_id().to_string())
                 .collect::<Vec<_>>();
             ids.into_iter().fold(command, |command, id| {
-                if common_arguments.contains(&id.as_str()) {
+                if COMMON_COOK_ARGUMENTS.contains(&id.as_str())
+                    || (is_cook_batch && COMMON_COOK_BATCH_OWNED_ARGUMENTS.contains(&id.as_str()))
+                {
                     command
                 } else {
                     command.mut_arg(id, |arg| arg.hide_short_help(true))

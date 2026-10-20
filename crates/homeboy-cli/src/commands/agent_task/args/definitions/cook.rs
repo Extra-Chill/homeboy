@@ -20,6 +20,197 @@ use homeboy::agents::agent_tasks::gate::{
 use super::super::super::super::agent_task_dispatch::DispatchArgs;
 use super::super::super::review;
 
+/// Options inherited by every child of a Cook batch.
+#[derive(Args, Debug, Clone, PartialEq)]
+pub struct CookOptionValues {
+    /// Executor backend to request. Defaults to the configured coding backend.
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
+    /// Provider ID when multiple providers serve the backend.
+    #[arg(
+        long,
+        visible_alias = "dispatch-provider-id",
+        value_name = "PROVIDER_ID"
+    )]
+    pub selector: Option<String>,
+    /// Model override passed through to the provider.
+    #[arg(long, value_name = "MODEL")]
+    pub model: Option<String>,
+    /// Confirm a model override that pins the run instead of configured rotation.
+    #[arg(long = "acknowledge-model-override", requires = "model")]
+    pub acknowledge_model_override: bool,
+    /// Named installed provider profile supplying backend, selector, model and
+    /// provider-config defaults. Explicit flags win over profile defaults.
+    #[arg(long = "provider-profile", value_name = "PROFILE")]
+    pub provider_profile: Option<String>,
+    /// Secret environment variable name to hydrate for the provider. Repeatable.
+    #[arg(long = "secret-env", value_name = "ENV")]
+    pub secret_env: Vec<String>,
+    /// Provider config JSON object, @file, or - for stdin.
+    #[arg(long = "provider-config", value_name = "JSON")]
+    pub provider_config: Option<String>,
+    /// Read-only workspace evidence supplied to the provider. Repeatable.
+    #[arg(long = "provider-evidence", value_name = "JSON", help = PROVIDER_EVIDENCE_DECLARATION, value_parser = parse_provider_evidence_input)]
+    pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
+    /// AI tool disclosure recorded in the PR's assistance attribution.
+    #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
+    pub ai_tool: String,
+    /// Maximum Cook attempts before giving up. Each attempt re-runs the agent
+    /// and gates; a later attempt can recover from a transient failure. This
+    /// derives provider execution and same-provider remediation budgets. An
+    /// explicit --model pins the provider route; use
+    /// --acknowledge-model-override to confirm pinning it (default 3).
+    #[arg(long = "max-attempts", default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..), value_name = "N")]
+    pub max_attempts: u32,
+    #[command(flatten)]
+    pub gates: VerifyGateArgs,
+}
+
+/// Retains the operator's raw, explicitly supplied options alongside typed values.
+/// Forwarding never reconstructs JSON declarations or compares CLI defaults.
+#[derive(Debug, Clone)]
+pub struct CookOptions {
+    pub values: CookOptionValues,
+    explicit: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Default for CookOptions {
+    fn default() -> Self {
+        #[derive(clap::Parser)]
+        struct Defaults {
+            #[command(flatten)]
+            cook: CookOptions,
+        }
+        <Defaults as clap::Parser>::parse_from(["cook"]).cook
+    }
+}
+
+impl clap::Args for CookOptions {
+    fn augment_args(command: clap::Command) -> clap::Command {
+        CookOptionValues::augment_args(command)
+    }
+
+    fn augment_args_for_update(command: clap::Command) -> clap::Command {
+        CookOptionValues::augment_args_for_update(command)
+    }
+}
+
+impl clap::FromArgMatches for CookOptions {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let command = CookOptionValues::augment_args(clap::Command::new("cook-options"));
+        let explicit = command
+            .get_arguments()
+            .filter_map(|arg| {
+                let id = arg.get_id().as_str();
+                if matches.value_source(id) != Some(clap::parser::ValueSource::CommandLine) {
+                    return None;
+                }
+                let long = arg.get_long()?;
+                let raw = matches
+                    .get_raw(id)?
+                    .map(|value| serde_json::Value::String(value.to_string_lossy().into_owned()))
+                    .collect::<Vec<_>>();
+                let value = match arg.get_action() {
+                    clap::ArgAction::SetTrue | clap::ArgAction::SetFalse => {
+                        serde_json::Value::Bool(matches.get_flag(id))
+                    }
+                    clap::ArgAction::Append => serde_json::Value::Array(raw),
+                    _ if raw.len() > 1 => serde_json::Value::Array(raw),
+                    _ => raw.into_iter().next()?,
+                };
+                Some((long.to_string(), value))
+            })
+            .collect();
+        Ok(Self {
+            values: CookOptionValues::from_arg_matches(matches)?,
+            explicit,
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for CookOptions {
+    type Target = CookOptionValues;
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl std::ops::DerefMut for CookOptions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
+    }
+}
+
+impl CookOptions {
+    pub(crate) fn child_flags(
+        &self,
+    ) -> homeboy::core::Result<serde_json::Map<String, serde_json::Value>> {
+        let mut flags = self.explicit.clone();
+        // File-backed gate programs are interpreted at the operator's invocation
+        // directory, not at a later workflow worker's working directory.
+        let command = CookOptionValues::augment_args(clap::Command::new("cook-options"));
+        for arg in command.get_arguments() {
+            if arg.get_value_hint() == clap::ValueHint::FilePath {
+                let Some(value) = arg.get_long().and_then(|long| flags.get_mut(long)) else {
+                    continue;
+                };
+                let cwd = std::env::current_dir().map_err(|error| {
+                    homeboy::core::Error::internal_io(
+                        error.to_string(),
+                        Some("resolve the working directory".into()),
+                    )
+                })?;
+                let paths = match value {
+                    serde_json::Value::Array(paths) => paths.as_mut_slice(),
+                    value => std::slice::from_mut(value),
+                };
+                for path in paths {
+                    *path = serde_json::Value::String(
+                        cwd.join(path.as_str().expect("path")).display().to_string(),
+                    );
+                }
+            }
+        }
+        Ok(flags)
+    }
+
+    pub(crate) fn resolve_provider_profile(&mut self) {
+        use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
+        let Some(name) = self.provider_profile.as_deref() else {
+            return;
+        };
+        let catalog = AgentTaskProviderCatalog::discover();
+        let profile = catalog
+            .providers()
+            .iter()
+            .flat_map(|provider| &provider.cli.profiles)
+            .find(|profile| profile.name == name.trim())
+            .cloned();
+        if let Some(profile) = profile {
+            self.merge_provider_profile(profile);
+        }
+    }
+
+    fn merge_provider_profile(
+        &mut self,
+        profile: homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration,
+    ) {
+        self.values.backend = self.values.backend.take().or(profile.backend);
+        self.values.selector = self.values.selector.take().or(profile.selector);
+        self.values.model = self.values.model.take().or(profile.model);
+        self.values.provider_config = self
+            .values
+            .provider_config
+            .take()
+            .or_else(|| profile.provider_config.map(|value| value.to_string()));
+    }
+}
+
 /// A bounded, controller-projected input available to the provider as read-only
 /// workspace evidence.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -36,7 +227,7 @@ pub struct AgentTaskProviderEvidenceInput {
 
 pub(crate) const PROVIDER_EVIDENCE_DECLARATION: &str = "JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular file or directory): `--provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}'`. Optional `include` and `exclude` are relative globs for directories. Each file is limited to 64 MiB. A directory is one immutable projection that preserves relative paths and a tree digest; media files over 1 MiB are omitted unless included, and the selected tree must stay within 64 MiB.";
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, PartialEq)]
 pub struct VerifyGateArgs {
     /// Deterministic verification command that must pass before the cook
     /// promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless
@@ -53,7 +244,7 @@ pub struct VerifyGateArgs {
     /// program runs under non-login POSIX `sh -c` (dash on Debian/Ubuntu) and a shebang
     /// is ignored, so bash-only syntax such as `set -o pipefail` fails as an
     /// invalid gate declaration; call `bash` explicitly when you need it.
-    #[arg(long = "verify-file", value_name = "PATH")]
+    #[arg(long = "verify-file", value_name = "PATH", value_hint = clap::ValueHint::FilePath)]
     pub verify_file: Vec<String>,
     /// Like `--verify`, but the command's output is treated as private: only a
     /// pass/fail summary is revealed by default (see `--private-gate-reveal`).
@@ -65,7 +256,7 @@ pub struct VerifyGateArgs {
     /// snapshots its bytes before submission; durable provenance records its
     /// digest and redaction policy, not its file path. Relative paths use the
     /// controller's invocation directory.
-    #[arg(long = "private-verify-file", value_name = "PATH")]
+    #[arg(long = "private-verify-file", value_name = "PATH", value_hint = clap::ValueHint::FilePath)]
     pub private_verify_file: Vec<String>,
     /// Durable source metadata emitted by Homeboy-generated promotion commands.
     /// This preserves the immutable provenance of a previously snapshotted gate;
@@ -521,6 +712,284 @@ mod tests {
     }
 
     #[test]
+    fn forwarding_keeps_explicit_defaults_and_raw_repeatable_values() {
+        #[derive(Parser)]
+        struct OptionsCli {
+            #[command(flatten)]
+            cook: CookOptions,
+        }
+
+        let defaults = OptionsCli::try_parse_from(["cook"]).unwrap();
+        assert!(defaults.cook.child_flags().unwrap().is_empty());
+
+        let config = r#"{ "nested": { "enabled": true } }"#;
+        let explicit = OptionsCli::try_parse_from([
+            "cook",
+            "--max-attempts",
+            "3",
+            "--isolate-gate-home",
+            "true",
+            "--isolate-gate-xdg",
+            "false",
+            "--provider-config",
+            config,
+            "--gate-env",
+            "FIRST=with=equals",
+            "--gate-env",
+            "SECOND=two words",
+        ])
+        .unwrap();
+        assert_eq!(
+            explicit.cook.child_flags().unwrap(),
+            serde_json::json!({
+                "max-attempts": "3",
+                "isolate-gate-home": "true",
+                "isolate-gate-xdg": "false",
+                "provider-config": config,
+                "gate-env": ["FIRST=with=equals", "SECOND=two words"],
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+    }
+
+    #[test]
+    fn shared_file_inputs_use_clap_metadata_to_resolve_operator_paths() {
+        #[derive(Parser)]
+        struct OptionsCli {
+            #[command(flatten)]
+            cook: CookOptions,
+        }
+        let command = CookOptionValues::augment_args(clap::Command::new("shared"));
+        let cwd = std::env::current_dir().unwrap();
+        for arg in command.get_arguments() {
+            if arg.get_value_hint() != clap::ValueHint::FilePath {
+                continue;
+            }
+            let long = arg.get_long().unwrap();
+            for path in [
+                "relative.sh".to_string(),
+                cwd.join("absolute.sh").display().to_string(),
+            ] {
+                let options = OptionsCli::try_parse_from([
+                    "cook".to_string(),
+                    format!("--{long}"),
+                    path.clone(),
+                ])
+                .unwrap();
+                let flags = options.cook.child_flags().unwrap();
+                let expected = serde_json::Value::String(cwd.join(&path).display().to_string());
+                if matches!(arg.get_action(), clap::ArgAction::Append) {
+                    assert_eq!(flags[long], serde_json::json!([expected]));
+                } else {
+                    assert_eq!(flags[long], expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_shared_option_round_trips_through_the_child_cook() {
+        use crate::cli_surface::{Cli, Commands, Placement};
+        use crate::commands::agent_task::args::{AgentTaskCommand, AgentTaskFanoutCommand};
+        use crate::commands::agent_task::cook_batch::compile;
+        use clap::Args;
+        use serde_json::Value;
+        fn parse(argv: &[&str]) -> super::super::AgentTaskFanoutCookBatchArgs {
+            let mut full = vec!["homeboy", "agent-task", "fanout", "cook-batch"];
+            full.extend_from_slice(argv);
+            let cli = Cli::try_parse_from(full).unwrap();
+            let Commands::AgentTask(task) = cli.command else {
+                panic!("agent-task")
+            };
+            let AgentTaskCommand::Fanout(fanout) = task.command else {
+                panic!("fanout")
+            };
+            let AgentTaskFanoutCommand::CookBatch(batch) = fanout.command;
+            *batch
+        }
+        let options = [
+            ("backend", "fixture"), ("selector", "provider"), ("model", "model"),
+            ("provider-profile", "profile"), ("secret-env", "TOKEN"),
+            ("provider-config", r#"{ "exact": true }"#),
+            ("provider-evidence", r#"{"id":"evidence","source":"/evidence"}"#),
+            ("ai-tool", "Test tool"), ("max-attempts", "7"),
+            ("verify", "printf '%s' \"$VALUE\""), ("verify-file", "/public.sh"),
+            ("private-verify", "private check"), ("private-verify-file", "/private.sh"),
+            ("gate-input-source", r#"{"visibility":"visible","source_kind":"inline","sha256":"sha256:abc","size_bytes":1,"redaction_policy":"full_evidence"}"#),
+            ("private-gate-reveal", "full-evidence"),
+            ("gate-execution-policy", "continue-all"), ("gate-timeout-seconds", "42"),
+            ("gate-heartbeat-interval-seconds", "7"), ("gate-no-progress-timeout-seconds", "11"),
+            ("gate-environment-mode", "replace"), ("gate-runner", "lab"),
+            ("gate-env", "NAME=with=equals"), ("gate-env-from", "CACHE=HOME/cache"),
+            ("gate-toolchain", "rustc"),
+            ("gate-toolchain-spec", r#"{"command":"custom","probe_arguments":["probe"]}"#),
+            ("gate-package-artifact", r#"{"id":"pkg","environment":{"name":"PKG"},"remediation":{}}"#),
+            ("gate-extension-input", r#"{"id":"extension","source":"/extension"}"#),
+            ("isolate-gate-home", "false"), ("isolate-gate-xdg", "false"),
+        ].into_iter().collect::<BTreeMap<_, _>>();
+        let command = CookOptionValues::augment_args(clap::Command::new("shared"));
+        for cargo_target in ["gate-shared-cargo-target", "no-gate-shared-cargo-target"] {
+            let mut argv = vec!["--repo".to_string(), "scratch".to_string()];
+            for arg in command.get_arguments() {
+                let long = arg.get_long().unwrap();
+                if matches!(
+                    long,
+                    "gate-shared-cargo-target" | "no-gate-shared-cargo-target"
+                ) && long != cargo_target
+                {
+                    continue;
+                }
+                argv.push(format!("--{long}"));
+                if arg.get_action().takes_values() {
+                    argv.push(
+                        options
+                            .get(long)
+                            .expect("fixture for every shared value")
+                            .to_string(),
+                    );
+                    if matches!(long, "verify" | "private-verify" | "gate-toolchain") {
+                        argv.extend([format!("--{long}"), options[long].to_string()]);
+                    }
+                }
+            }
+            argv.push("https://github.com/Extra-Chill/homeboy/issues/16214".into());
+            let args = parse(&argv.iter().map(String::as_str).collect::<Vec<_>>());
+            let definition = compile(&args, Placement::Auto, None).unwrap();
+            crate::commands::workflow::validate(&definition).unwrap();
+            let child = definition.steps[1].cook.as_ref().unwrap();
+            let mut argv = vec!["homeboy".to_string(), "agent-task".into(), "cook".into()];
+            for (key, value) in child {
+                match value {
+                    Value::Bool(true) => argv.push(format!("--{key}")),
+                    Value::String(value) => argv.extend([format!("--{key}"), value.clone()]),
+                    Value::Array(values) => {
+                        for value in values {
+                            argv.extend([format!("--{key}"), value.as_str().unwrap().to_string()]);
+                        }
+                    }
+                    _ => panic!("unexpected child value: {value}"),
+                }
+            }
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Commands::AgentTask(task) = cli.command else {
+                panic!("agent-task")
+            };
+            let AgentTaskCommand::Cook(cook) = task.command else {
+                panic!("Cook")
+            };
+            assert_eq!(cook.dispatch.cook.values, args.cook.values);
+            assert_eq!(
+                cook.dispatch.cook.child_flags().unwrap(),
+                args.cook.child_flags().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn cook_provider_profile_supplies_defaults_and_explicit_flags_win() {
+        use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
+        let profile = AgentTaskProviderProfileDeclaration {
+            name: "test".into(),
+            backend: Some("profile-backend".into()),
+            selector: Some("profile-selector".into()),
+            model: Some("profile-model".into()),
+            provider_config: Some(serde_json::json!({"profile": true})),
+            ..Default::default()
+        };
+        crate::test_support::with_isolated_home(|home| {
+            let root = home
+                .path()
+                .join(".config/homeboy/agent-runtimes/profile-test");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("profile-test.json"),
+                serde_json::json!({
+                    "schema": "homeboy/agent-runtime-manifest/v1",
+                    "id": "profile-test",
+                    "agent_task_executors": [{
+                        "id": "profile-selector", "backend": "profile-backend",
+                        "invocation": {"argv": ["true"]},
+                        "cli": {"profiles": [profile]}
+                    }]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            for explicit in [false, true] {
+                let mut argv = vec![
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--provider-profile",
+                    "test",
+                ];
+                if explicit {
+                    argv.extend([
+                        "--backend",
+                        "explicit",
+                        "--selector",
+                        "explicit",
+                        "--model",
+                        "explicit",
+                        "--provider-config",
+                        "{}",
+                    ]);
+                }
+                let cli = crate::cli_surface::Cli::try_parse_from(argv).unwrap();
+                let crate::cli_surface::Commands::AgentTask(task) = cli.command else {
+                    panic!("agent-task")
+                };
+                let super::super::AgentTaskCommand::Cook(mut cook) = task.command else {
+                    panic!("cook")
+                };
+                cook.dispatch.cook.resolve_provider_profile();
+                let expected = if explicit {
+                    "explicit"
+                } else {
+                    "profile-backend"
+                };
+                assert_eq!(cook.backend.as_deref(), Some(expected));
+                assert_eq!(
+                    cook.selector.as_deref(),
+                    Some(if explicit {
+                        "explicit"
+                    } else {
+                        "profile-selector"
+                    })
+                );
+                assert_eq!(
+                    cook.model.as_deref(),
+                    Some(if explicit {
+                        "explicit"
+                    } else {
+                        "profile-model"
+                    })
+                );
+                assert_eq!(
+                    cook.provider_config.as_deref(),
+                    Some(if explicit {
+                        "{}"
+                    } else {
+                        r#"{"profile":true}"#
+                    })
+                );
+                let dispatch: homeboy::agents::agent_task_dispatch_service::AgentTaskDispatchCommand =
+                cook.dispatch.into();
+                assert_eq!(
+                    dispatch.core.provider_config.as_deref(),
+                    Some(if explicit {
+                        "{}"
+                    } else {
+                        r#"{"profile":true}"#
+                    })
+                );
+            }
+        });
+    }
+
+    #[test]
     fn gate_policy_cli_defaults_and_overrides_round_trip_to_typed_options() {
         let defaults = TestCli::try_parse_from(["homeboy"])
             .expect("parse default gate policy")
@@ -952,7 +1421,7 @@ mod tests {
         let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
             panic!("Cook command");
         };
-        assert!(cook.dispatch.core.acknowledge_model_override);
+        assert!(cook.dispatch.acknowledge_model_override);
     }
 
     #[test]
@@ -980,7 +1449,7 @@ mod tests {
         assert_eq!(cook.dispatch.cwd.as_deref(), Some("/tmp/existing-worktree"));
         assert_eq!(cook.dispatch.prompt.as_deref(), Some("@task.md"));
         assert_eq!(cook.dispatch.model.as_deref(), Some("preferred/model"));
-        assert!(cook.dispatch.core.acknowledge_model_override);
+        assert!(cook.dispatch.acknowledge_model_override);
     }
 
     #[test]
@@ -1186,9 +1655,6 @@ pub struct AgentTaskCookArgs {
     /// --prompt, it supplies the one provider task.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
-    /// Read-only workspace evidence supplied to the provider. Repeatable.
-    #[arg(long = "provider-evidence", value_name = "JSON", help = PROVIDER_EVIDENCE_DECLARATION, value_parser = parse_provider_evidence_input)]
-    pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
     /// Workspace handle the cook edits, verifies, and finalizes into. The handle
     /// is `<repo>@<branch-slug>`, where the slug replaces every character of
     /// --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle
@@ -1214,20 +1680,6 @@ pub struct AgentTaskCookArgs {
         long_help = "Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
     )]
     pub provider_argv: Vec<String>,
-    #[command(flatten)]
-    pub gates: VerifyGateArgs,
-    /// Maximum Cook attempts before giving up. Each attempt re-runs the agent
-    /// and gates; a later attempt can recover from a transient failure. This
-    /// derives provider execution and same-provider remediation budgets. An
-    /// explicit --model pins the provider route; use
-    /// --acknowledge-model-override to confirm pinning it (default 3).
-    #[arg(
-        long = "max-attempts",
-        default_value_t = 3,
-        value_parser = clap::value_parser!(u32).range(1..),
-        value_name = "N"
-    )]
-    pub max_attempts: u32,
     /// Stop after the work is verified but before opening the pull request,
     /// leaving the committed change on the worktree branch for manual review or
     /// a later `agent-task review`/finalize.
@@ -1275,10 +1727,6 @@ pub struct AgentTaskCookArgs {
     /// guard. Repeatable; defaults to the standard protected set.
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
-    /// AI tool disclosure recorded in the PR's assistance attribution
-    /// (default `AI-assisted`).
-    #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
-    pub ai_tool: String,
     /// Legacy AI-usage disclosure. The reviewer-facing "Used for" text is now
     /// authored by the agent's `review_form.used_for` (a self-reflective process
     /// description) and validated by the cook loop's review-form gate; this flag
@@ -1312,6 +1760,20 @@ pub struct AgentTaskCookArgs {
     /// Operator-supplied `--attempt-run-id` captured before preview lifecycle binding.
     #[arg(skip)]
     pub requested_attempt_run_id: Option<String>,
+}
+
+impl std::ops::Deref for AgentTaskCookArgs {
+    type Target = CookOptionValues;
+
+    fn deref(&self) -> &Self::Target {
+        &self.dispatch.cook.values
+    }
+}
+
+impl std::ops::DerefMut for AgentTaskCookArgs {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.dispatch.cook.values
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]

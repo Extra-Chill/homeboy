@@ -1496,6 +1496,7 @@ impl CliRuntime {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) =
                 &mut agent_task.command
             {
+                cook.dispatch.cook.resolve_provider_profile();
                 if let Err(err) = crate::commands::agent_task::run::snapshot_cook_prompt(cook) {
                     output_runtime::emit_json_result_for_identity(
                         Err(err),
@@ -1885,15 +1886,7 @@ impl CliRuntime {
         let Commands::AgentTask(agent_task) = command else {
             return false;
         };
-        match &agent_task.command {
-            crate::commands::agent_task::AgentTaskCommand::Cook(cook) => !cook.preview,
-            crate::commands::agent_task::AgentTaskCommand::Fanout(fanout) => matches!(
-                &fanout.command,
-                crate::commands::agent_task::args::AgentTaskFanoutCommand::CookBatch(cook_batch)
-                    if !cook_batch.preview
-            ),
-            _ => false,
-        }
+        agent_task.command.admits_durable_cook_work()
     }
 
     fn build_augmented_command(&self) -> Command {
@@ -5663,8 +5656,22 @@ mod tests {
         .expect("parse cook-batch preview");
 
         assert!(CliRuntime::admits_ambient_notification_route(&cook.command));
-        assert!(CliRuntime::admits_ambient_notification_route(
+        assert!(!CliRuntime::admits_ambient_notification_route(
             &cook_batch.command
+        ));
+        let cook_batch_run = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "fixture",
+            "--run-plan",
+            "https://github.com/Extra-Chill/homeboy/issues/14195",
+        ])
+        .expect("parse admitted batch");
+        assert!(CliRuntime::admits_ambient_notification_route(
+            &cook_batch_run.command
         ));
         assert!(!CliRuntime::admits_ambient_notification_route(
             &cook_preview.command

@@ -15,6 +15,7 @@ fn cook_batch_uses_cooks_ambient_route_admission_without_affecting_previews() {
             "agent-task",
             "fanout",
             "cook-batch",
+            "--run-plan",
             "--repo",
             "fixture",
             "https://github.com/Extra-Chill/homeboy/issues/14195",
@@ -84,6 +85,14 @@ fn cook_batch_uses_cooks_ambient_route_admission_without_affecting_previews() {
 
     for args in [
         &["agent-task", "cook", "--preview"][..],
+        &[
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "fixture",
+            "https://github.com/Extra-Chill/homeboy/issues/14195",
+        ][..],
         &[
             "agent-task",
             "fanout",

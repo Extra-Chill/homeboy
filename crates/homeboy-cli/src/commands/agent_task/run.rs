@@ -506,6 +506,7 @@ pub(super) fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregat
 }
 
 pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
+    args.dispatch.cook.resolve_provider_profile();
     snapshot_cook_prompt(&mut args)?;
     let retained_gate_contract = args.gates.has_retained_contract();
     args.gates.snapshot_file_inputs()?;
@@ -625,6 +626,7 @@ pub(crate) fn preview_cook(
     mut args: AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
+    args.dispatch.cook.resolve_provider_profile();
     let mut progress = Vec::new();
     record_preview_phase(&mut progress, "prompt_input");
     if args
@@ -7532,7 +7534,7 @@ pub(crate) fn validate_cook_request_with_provenance(
     // Resolve against the same filtered rotation policy that compilation uses,
     // while Cook is still in its no-side-effect validation phase.
     let configured_rotations =
-        if args.dispatch.model.is_some() && args.dispatch.core.acknowledge_model_override {
+        if args.dispatch.model.is_some() && args.dispatch.acknowledge_model_override {
             0
         } else {
             dispatch_service::controller_resolved_execution_policy(&request)
@@ -7711,6 +7713,7 @@ pub(crate) fn preflight_cook_execution_request(
     args: &mut AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<()> {
+    args.dispatch.cook.resolve_provider_profile();
     snapshot_cook_prompt(&mut *args)?;
     args.gates.snapshot_file_inputs()?;
     validate_cook_request_with_provenance(&args, provenance)?;
@@ -7726,7 +7729,7 @@ pub(crate) fn preflight_cook_execution_request(
 pub(crate) fn require_model_override_acknowledgement_for_cook(
     args: &AgentTaskCookArgs,
 ) -> homeboy::core::Result<()> {
-    if args.dispatch.core.acknowledge_model_override {
+    if args.dispatch.acknowledge_model_override {
         return Ok(());
     }
     let dispatch = resolved_dispatch_args_for_cook(args)?;
@@ -7746,7 +7749,7 @@ fn confirm_model_override(args: &mut AgentTaskCookArgs) -> homeboy::core::Result
         if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
             return Err(error);
         }
-        args.dispatch.core.acknowledge_model_override = true;
+        args.dispatch.acknowledge_model_override = true;
     }
     Ok(())
 }
@@ -8159,9 +8162,9 @@ fn run_preflight_cook_execution(
                 }),
                 attempt_dispatcher,
             },
-            gates: args.gates.into(),
+            gates: args.dispatch.cook.values.gates.into(),
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy {
-                max_attempts: args.max_attempts,
+                max_attempts: args.dispatch.cook.values.max_attempts,
             },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: args.no_finalize,
@@ -8174,7 +8177,7 @@ fn run_preflight_cook_execution(
             },
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: resolve_ai_tool_disclosure(
-                    &args.ai_tool,
+                    &args.dispatch.cook.values.ai_tool,
                     selected_identity.as_ref().map(|(backend, _, _)| backend.as_str()),
                     selected_identity
                         .as_ref()
@@ -8251,7 +8254,7 @@ fn resolve_cook_execution_budget(
     plan: &mut AgentTaskPlan,
 ) -> homeboy::core::Result<()> {
     let core = &args.dispatch.core;
-    let pinned_route = args.dispatch.model.is_some() && core.acknowledge_model_override;
+    let pinned_route = args.dispatch.model.is_some() && args.dispatch.acknowledge_model_override;
     let configured_rotations = if pinned_route {
         0
     } else {
@@ -8584,16 +8587,12 @@ mod prompt_input_tests {
             workspace: None,
             repo: None,
             task_url: None,
-            backend: None,
-            selector: None,
-            model: None,
+            cook: Default::default(),
             required_capabilities: Vec::new(),
-            secret_env: Vec::new(),
             concurrency: 1,
             run_id: None,
             core: crate::commands::agent_task_dispatch::DispatchCoreArgs {
                 tasks_json: None,
-                provider_config: None,
                 client_context: None,
                 attempts: Some(1),
                 same_provider_retries: Some(0),
@@ -8603,7 +8602,6 @@ mod prompt_input_tests {
                 deny_command: Vec::new(),
                 allow_command: Vec::new(),
                 command_policy_reason: None,
-                acknowledge_model_override: false,
             },
         }
     }

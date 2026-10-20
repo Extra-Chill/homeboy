@@ -37,6 +37,19 @@ pub struct AgentTaskArgs {
     pub command: AgentTaskCommand,
 }
 
+impl AgentTaskCommand {
+    /// True only when this invocation admits durable Cook-owned work.
+    pub(crate) fn admits_durable_cook_work(&self) -> bool {
+        match self {
+            Self::Cook(cook) => !cook.preview,
+            Self::Fanout(fanout) => match &fanout.command {
+                super::fanout::AgentTaskFanoutCommand::CookBatch(batch) => batch.run_plan,
+            },
+            _ => false,
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct ActiveScopeArgs {
     /// Opaque caller reference whose active checkout ownership should be read.
