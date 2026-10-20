@@ -13,6 +13,7 @@ use serde_json::Value;
 mod queue_ops;
 mod reaping;
 mod reclaim;
+pub mod stale_destination;
 mod store_ops;
 mod types;
 

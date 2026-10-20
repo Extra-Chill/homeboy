@@ -3124,6 +3124,76 @@ fn agent_task_timeout_ms_flags_parse_for_cook_run_and_run_plan() {
     assert_eq!(args.timeout_ms, Some(9012));
 }
 
+/// Regression for #16217: an issue-derived destination whose leftover local
+/// branch holds commits ahead of the base (a closed PR's work) is refused before
+/// any provider work, and the branch is left intact. Naming the same branch
+/// explicitly with `--head` stays authoritative.
+#[test]
+fn derived_destination_refuses_a_stale_leftover_branch_but_explicit_head_is_authoritative() {
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        register_component(
+            "fixture",
+            primary.path(),
+            "https://github.com/example/fixture.git",
+        );
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(primary.path())
+                .output()
+                .expect("git runs");
+            assert!(output.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["switch", "-q", "-c", "fix/issue-78-fixture"]);
+        std::fs::write(primary.path().join("closed.txt"), "closed PR\n").expect("write");
+        git(&["add", "closed.txt"]);
+        git(&["commit", "-q", "-m", "Closed PR work"]);
+        let stale_head = git(&["rev-parse", "HEAD"]);
+        git(&["switch", "-q", "main"]);
+
+        let resolve = |extra: &[&str]| {
+            let mut argv = [
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "retry",
+                "--repo",
+                "fixture",
+                "--task-url",
+                "https://github.com/example/fixture/issues/78",
+                "--base",
+                "main",
+                "--no-finalize",
+            ]
+            .map(str::to_string)
+            .to_vec();
+            argv.extend(extra.iter().map(|arg| arg.to_string()));
+            super::super::run::resolve_cook_destination(cook_args_from_cli(argv))
+        };
+
+        let error = resolve(&[]).expect_err("a stale derived destination is refused");
+        assert!(
+            error.message.contains("Closed PR work"),
+            "names the commits ahead: {}",
+            error.message
+        );
+        assert_eq!(
+            git(&["rev-parse", "fix/issue-78-fixture"]),
+            stale_head,
+            "the leftover branch is left intact"
+        );
+
+        let explicit = resolve(&["--head", "fix/issue-78-fixture"])
+            .expect("an explicit --head stays authoritative");
+        assert_eq!(explicit.head.as_deref(), Some("fix/issue-78-fixture"));
+    });
+}
+
 /// Regression for #15408: once an issue's derived destination is removed, a
 /// follow-up cook on the same issue derives the next generation instead of
 /// failing on the retired record. An explicitly named retired handle still

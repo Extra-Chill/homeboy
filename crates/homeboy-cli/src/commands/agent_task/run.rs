@@ -6141,14 +6141,23 @@ pub(crate) fn resolve_cook_destination(
             next_live_derived_cook_branch(&handle_repository, &derived_cook_branch(&task_url)?)?
         }
     };
-    args.to_worktree = Some(format!(
-        "{handle_repository}@{}",
-        slugify_cook_branch(&head)
-    ));
-    if args.head.is_none() {
-        args.head = Some(head);
+    let handle = format!("{handle_repository}@{}", slugify_cook_branch(&head));
+    args.to_worktree = Some(handle.clone());
+    let derived = args.head.is_none();
+    if derived {
+        args.head = Some(head.clone());
     }
     resolve_cook_base(&mut args)?;
+    if derived {
+        // An issue-derived destination may hold a closed PR's commits or another
+        // branch an operator left there; never build on it (#16217).
+        homeboy::core::worktree::stale_destination::refuse_stale_derived_destination(
+            &handle_repository,
+            &handle,
+            &head,
+            args.base.as_deref().unwrap_or("main"),
+        )?;
+    }
     Ok(args)
 }
 
