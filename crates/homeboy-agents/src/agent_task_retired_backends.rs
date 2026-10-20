@@ -86,7 +86,11 @@ mod tests {
             error.code,
             homeboy_core::ErrorCode::ValidationInvalidArgument
         );
-        assert!(error.message.contains("`opencode` is retired"), "{}", error.message);
+        assert!(
+            error.message.contains("`opencode` is retired"),
+            "{}",
+            error.message
+        );
         assert_eq!(error.details["retired_backend"], "opencode");
         assert!(error.details["tried"][0]
             .as_str()
@@ -110,8 +114,8 @@ mod tests {
             ],
             ..AgentTaskProviderRotationPolicy::default()
         };
-        let error =
-            reject_retired_rotation_backends("agent_task.rotation", &rotation).expect_err("retired");
+        let error = reject_retired_rotation_backends("agent_task.rotation", &rotation)
+            .expect_err("retired");
         assert_eq!(
             error.details["field"].as_str(),
             Some("agent_task.rotation.entries[1].backend")

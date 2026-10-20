@@ -18,6 +18,7 @@ use crate::agent_task_provider::{
     preflight_provider_credentials_for_backend, resolve_provider_for_backend,
     AgentTaskProviderCatalog, ProviderResolution,
 };
+use crate::agent_task_retired_backends::{reject_retired_backend, BUILTIN_DEFAULT_BACKEND};
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
     SharedAgentTaskExecutor,
@@ -26,7 +27,6 @@ use crate::agent_task_service::AgentTaskRunResult;
 use crate::agent_task_submission_service::{
     prepared_submission_request, submit_prepared_plan, PreparedAgentTaskSubmission,
 };
-use crate::agent_task_retired_backends::{reject_retired_backend, BUILTIN_DEFAULT_BACKEND};
 use homeboy_core::{Error, Result};
 
 pub const DISPATCH_RESULT_SCHEMA: &str = "homeboy/agent-task-dispatch/v1";
@@ -911,39 +911,42 @@ fn resolve_dispatch_request_with_sources(
         Some(policy) => (policy.backend.clone(), BackendSelectionSource::Policy),
         None => match command.backend.clone() {
             Some(backend) => (backend, BackendSelectionSource::Cli),
-            None => match default_backend(
-                command.component.as_deref().or(command.repo.as_deref()),
-            )? {
-                Some(resolved) => {
-                    // The policy resolver prefers component/extension defaults over the
-                    // Homeboy config default; if the resolved value matches the config
-                    // default we attribute it to config, otherwise to higher-priority
-                    // component/extension policy.
-                    let source = if config_default.as_deref() == Some(resolved.as_str()) {
-                        BackendSelectionSource::Config
-                    } else {
-                        BackendSelectionSource::Policy
-                    };
-                    (resolved, source)
-                }
-                None => {
-                    // The provider catalog already knows every dispatchable
-                    // backend at this point, so discover it rather than making
-                    // the operator run `agent-task providers` and parse JSON to
-                    // answer a question this command can answer (#11478).
-                    // Discovery only happens when no policy names a backend.
-                    let available = available_backends();
-                    if available.iter().any(|backend| backend == BUILTIN_DEFAULT_BACKEND) {
-                        // Pi is the built-in coding backend (#15932).
-                        (
-                            BUILTIN_DEFAULT_BACKEND.to_string(),
-                            BackendSelectionSource::Builtin,
-                        )
-                    } else {
-                        return Err(missing_default_backend_error(&available));
+            None => {
+                match default_backend(command.component.as_deref().or(command.repo.as_deref()))? {
+                    Some(resolved) => {
+                        // The policy resolver prefers component/extension defaults over the
+                        // Homeboy config default; if the resolved value matches the config
+                        // default we attribute it to config, otherwise to higher-priority
+                        // component/extension policy.
+                        let source = if config_default.as_deref() == Some(resolved.as_str()) {
+                            BackendSelectionSource::Config
+                        } else {
+                            BackendSelectionSource::Policy
+                        };
+                        (resolved, source)
+                    }
+                    None => {
+                        // The provider catalog already knows every dispatchable
+                        // backend at this point, so discover it rather than making
+                        // the operator run `agent-task providers` and parse JSON to
+                        // answer a question this command can answer (#11478).
+                        // Discovery only happens when no policy names a backend.
+                        let available = available_backends();
+                        if available
+                            .iter()
+                            .any(|backend| backend == BUILTIN_DEFAULT_BACKEND)
+                        {
+                            // Pi is the built-in coding backend (#15932).
+                            (
+                                BUILTIN_DEFAULT_BACKEND.to_string(),
+                                BackendSelectionSource::Builtin,
+                            )
+                        } else {
+                            return Err(missing_default_backend_error(&available));
+                        }
                     }
                 }
-            },
+            }
         },
     };
     // A retired backend fails validation from every selection source rather

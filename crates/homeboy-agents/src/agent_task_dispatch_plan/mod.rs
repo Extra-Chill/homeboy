@@ -15,7 +15,9 @@ use crate::agent_task::{
 };
 use crate::agent_task_provider::provider_requires_cwd_git_checkout;
 use crate::agent_task_provider::provider_secret_sources_for_plan;
-use crate::agent_task_retired_backends::{reject_retired_backend, reject_retired_rotation_backends};
+use crate::agent_task_retired_backends::{
+    reject_retired_backend, reject_retired_rotation_backends,
+};
 use crate::agent_task_runtime_dependency_graph;
 use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
@@ -1678,10 +1680,7 @@ mod tests {
             .as_ref()
             .expect("runtime selection");
         assert_eq!(executor.backend, "pi");
-        assert_eq!(
-            executor.selector.as_deref(),
-            Some("pi.agent-task-executor")
-        );
+        assert_eq!(executor.selector.as_deref(), Some("pi.agent-task-executor"));
         assert_eq!(selection.executor_backend.as_deref(), Some("pi"));
         assert_eq!(
             selection.executor_provider_id.as_deref(),
