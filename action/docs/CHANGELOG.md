@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.21.3] - 2026-10-20
+
+### Fixed
+- write the baseline inventory under the workspace
+
 ## [2.21.2] - 2026-10-20
 
 ### Fixed
