@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.21.1] - 2026-10-20
+
+### Fixed
+- call the nested release workflow by repo path, not ./
+
 ## [2.21.0] - 2026-10-20
 
 ### Added
