@@ -1328,7 +1328,8 @@ fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
             list.lab_workspaces_root,
             format!("{}/_lab_workspaces", runner_root.path().display())
         );
-        assert_eq!(list.workspaces.len(), 1);
+        // The checkout's `-homeboy-state` sibling is not a workspace.
+        assert_eq!(list.workspaces.len(), 1, "{:?}", list.workspaces);
         assert_eq!(list.workspaces[0].remote_path, sync.remote_path);
         assert!(list.workspaces[0]
             .exec_command
@@ -2652,6 +2653,14 @@ fn snapshot_archive_fails_for_existing_unreadable_input() {
 
 #[test]
 fn snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_injection() {
+    // Materialization stages under the runtime tempdir; hold the isolated
+    // home so a concurrent test cannot swap or reclaim that root mid-copy.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_injection_body()
+    });
+}
+
+fn snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_injection_body() {
     // This mirrors a Lab snapshot of a repository such as homeboy-extensions:
     // the runner records its metadata beside (never inside) the extracted
     // source, which has no `.homeboy` directory of its own.
