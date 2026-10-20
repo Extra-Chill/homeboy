@@ -10,6 +10,7 @@ use crate::extension::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope,
     normalize_test_passthrough_args, parse_coverage_file, parse_failures_file,
     parse_test_results_file_with_spec, parse_test_results_text, parse_test_results_text_with_spec,
+    TestScopeOutput,
 };
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
@@ -1341,13 +1342,47 @@ pub fn run_main_test_workflow(
     })
 }
 
+/// Decide whether a planned changed scope must be widened to a full-suite run.
+///
+/// Returns `(changed_scope, receipt)`: `changed_scope` is the scope the run
+/// executes as a changed-scope run (`None` once widened, so the run takes the
+/// same path as `--scope full`), and `receipt` is the scope recorded on the
+/// result. Widening happens only when the changed scope selected zero tests
+/// and at least one changed test-harness config file is among the impacted
+/// files; inventory mode never widens (it enumerates the full inventory).
+fn plan_changed_scope_widening(
+    planned: Option<TestScopeOutput>,
+    inventory_mode: bool,
+) -> (Option<TestScopeOutput>, Option<TestScopeOutput>) {
+    let Some(scope) = planned else {
+        return (None, None);
+    };
+    if inventory_mode || !scope.selected_files.is_empty() {
+        return (Some(scope.clone()), Some(scope));
+    }
+    let harness_files: Vec<String> = scope
+        .source_changes_without_tests
+        .iter()
+        .filter(|file| crate::extension::test::drift::is_test_harness_config_path(file))
+        .cloned()
+        .collect();
+    if harness_files.is_empty() {
+        return (Some(scope.clone()), Some(scope));
+    }
+    let widened = scope.widened_to_full(
+        homeboy_extension_contract::test_result::TEST_SCOPE_WIDENING_HARNESS_CHANGED,
+        harness_files,
+    );
+    (None, Some(widened))
+}
+
 fn run_main_test_workflow_inner(
     component: &Component,
     source_path: &Path,
     args: TestRunWorkflowArgs,
     run_dir: &RunDir,
 ) -> homeboy_core::Result<TestRunWorkflowResult> {
-    let changed_scope = if let Some(ref git_ref) = args.changed_since {
+    let planned_changed_scope = if let Some(ref git_ref) = args.changed_since {
         Some(match args.precomputed_changed_files.as_ref() {
             Some(changed_files) => crate::extension::test::compute_changed_test_scope_for_files(
                 component,
@@ -1360,6 +1395,34 @@ fn run_main_test_workflow_inner(
         None
     };
     let inventory_mode = test_inventory_mode(&args.ci_env);
+
+    // A changed scope that selected zero tests while a test-harness config file
+    // changed (e.g. `.github/workflows/ci.yml`, `phpunit.xml.dist`) cannot be
+    // evidenced by a zero-test run: the changed file decides how tests run, so
+    // only executing the suite proves it still works. Rather than refusing the
+    // run, re-plan it as a full-suite run and execute it through the exact
+    // path a `--scope full` run uses (no changed-scope env, no selection). The
+    // receipt records `mode: "full"`, `widened_from: "changed"`,
+    // `widening_reason: "harness_changed"` and the harness files. Zero
+    // selection after a plain source change keeps its refusal below.
+    // (Extra-Chill/homeboy#16237)
+    let (changed_scope, test_scope_receipt) =
+        plan_changed_scope_widening(planned_changed_scope, inventory_mode);
+    if let Some(widened) = test_scope_receipt
+        .as_ref()
+        .filter(|scope| scope.widened_from.is_some())
+    {
+        homeboy_core::log_status!(
+            "test",
+            "changed scope selected zero tests but {} test-harness config file(s) changed since {}; running the full suite: {}",
+            widened.widening_files.len(),
+            widened.changed_since.as_deref().unwrap_or("unknown"),
+            widened.widening_files.join(", ")
+        );
+    }
+    // Changed-scope runner env applies only to a run that still executes the
+    // changed scope; a widened run executes as a full-scope run.
+    let scope_changed_since = changed_scope.as_ref().and(args.changed_since.as_deref());
 
     let coverage_enabled = args.coverage || args.coverage_min.is_some();
     let results_file = run_dir.step_file(run_dir::files::TEST_RESULTS);
@@ -1426,50 +1489,26 @@ fn run_main_test_workflow_inner(
                     preview
                 };
 
-                // A harness-config change cannot be answered by "add a test":
-                // the changed file decides how tests run, so only executing the
-                // suite proves it still works. Say that instead.
-                let harness_only = impacted
-                    .iter()
-                    .all(|file| crate::extension::test::drift::is_test_harness_config_path(file));
-
-                let message = if harness_only {
-                    format!(
-                        "Changed-scope test gate selected zero tests, but {} test-harness config file(s) changed since {changed_ref}: {impacted_summary}. A harness change is the one change a zero-test run cannot evidence, because the harness itself was never exercised.",
-                        impacted.len(),
-                    )
-                } else {
-                    format!(
-                        "Changed-scope test gate selected zero tests, but {} source file(s) changed since {changed_ref}: {impacted_summary}. Zero selection is not valid test evidence for a source change.",
-                        impacted.len(),
-                    )
-                };
+                // Harness-config changes never reach this refusal: a zero
+                // selection next to a changed harness file is widened to a
+                // full-suite run above (#16237). What remains is a source
+                // change the change-to-test mapping missed.
+                let message = format!(
+                    "Changed-scope test gate selected zero tests, but {} source file(s) changed since {changed_ref}: {impacted_summary}. Zero selection is not valid test evidence for a source change.",
+                    impacted.len(),
+                );
                 let findings = Some(vec![HomeboyFinding::builder("test", message.clone())
-                    .rule(if harness_only {
-                        "changed_scope_zero_tests_for_harness_change"
-                    } else {
-                        "changed_scope_zero_tests_for_source_change"
-                    })
+                    .rule("changed_scope_zero_tests_for_source_change")
                     .category("test-scope")
                     .severity("error")
                     .build()]);
-                let hints = Some(if harness_only {
-                    vec![
-                        format!(
-                            "Run the full suite so the harness change is exercised: homeboy review test {}",
-                            args.component_id
-                        ),
-                        "A green changed-scope run here would only mean no source changed, not that the harness still works.".to_string(),
-                    ]
-                } else {
-                    vec![
-                        format!(
-                            "Add or route a test for the changed source, or run the full suite: homeboy review test {}",
-                            args.component_id
-                        ),
-                        "If these changes are intentionally test-exempt, exclude them from the release/test scope so the gate can pass with a typed reason.".to_string(),
-                    ]
-                });
+                let hints = Some(vec![
+                    format!(
+                        "Add or route a test for the changed source, or run the full suite: homeboy review test {}",
+                        args.component_id
+                    ),
+                    "If these changes are intentionally test-exempt, exclude them from the release/test scope so the gate can pass with a typed reason.".to_string(),
+                ]);
 
                 return Ok(TestRunWorkflowResult {
                     status: "failed".to_string(),
@@ -1848,17 +1887,17 @@ fn run_main_test_workflow_inner(
         .env_remove_if(inventory_mode, "HOMEBOY_CHANGED_SINCE")
         .env_remove_if(inventory_mode, "HOMEBOY_CHANGED_TEST_FILES")
         .env_if(
-            !inventory_mode && args.changed_since.is_some(),
+            !inventory_mode && scope_changed_since.is_some(),
             "SCOPE_MODE",
             "changed",
         )
         .env_if(
-            !inventory_mode && args.changed_since.is_some(),
+            !inventory_mode && scope_changed_since.is_some(),
             "HOMEBOY_CHANGED_SINCE",
-            args.changed_since.as_deref().unwrap_or_default(),
+            scope_changed_since.unwrap_or_default(),
         )
         .env_if(
-            !inventory_mode && args.changed_since.is_some(),
+            !inventory_mode && scope_changed_since.is_some(),
             "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
             "1",
         )
@@ -2003,6 +2042,17 @@ fn run_main_test_workflow_inner(
     )?;
 
     let mut hints = Vec::new();
+
+    if let Some(widened) = test_scope_receipt
+        .as_ref()
+        .filter(|scope| scope.widened_from.is_some())
+    {
+        hints.push(format!(
+            "Changed scope selected zero tests but test-harness config changed since {} ({}); ran the full suite instead.",
+            widened.changed_since.as_deref().unwrap_or("unknown"),
+            widened.widening_files.join(", ")
+        ));
+    }
 
     // Surface an ignored malformed failure sidecar as a secondary diagnostic so
     // the degraded classification is visible without masking the primary result.
@@ -2171,7 +2221,7 @@ fn run_main_test_workflow_inner(
         baseline_comparison,
         analysis,
         hints,
-        test_scope: changed_scope,
+        test_scope: test_scope_receipt,
         summary,
         raw_output,
         cargo_target: output.cargo_target,
@@ -4544,42 +4594,55 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
         });
     }
 
+    fn zero_scope_fixture_component(home: &Path, source: &Path, id: &str) -> Component {
+        use std::os::unix::fs::PermissionsExt;
+
+        let extension_id = format!("{id}-fixture");
+        let extension_dir = home.join(".config/homeboy/extensions").join(&extension_id);
+        std::fs::create_dir_all(&extension_dir).expect("extension directory");
+        std::fs::write(
+            extension_dir.join(format!("{extension_id}.json")),
+            r#"{"name":"Zero scope fixture","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
+        )
+        .expect("extension manifest");
+        let script = extension_dir.join("test.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'SCOPE_MODE=%s\\nHOMEBOY_CHANGED_SINCE=%s\\nHOMEBOY_CHANGED_TEST_FILES=%s\\n' \"${SCOPE_MODE-unset}\" \"${HOMEBOY_CHANGED_SINCE-unset}\" \"${HOMEBOY_CHANGED_TEST_FILES-unset}\" > \"$HOMEBOY_COMPONENT_PATH/runner-ran\"\n",
+        )
+        .expect("runner script");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).expect("executable script");
+
+        Component {
+            id: id.to_string(),
+            local_path: source.to_string_lossy().to_string(),
+            extensions: Some(HashMap::from([(
+                extension_id,
+                ScopedExtensionConfig::default(),
+            )])),
+            ..Default::default()
+        }
+    }
+
     /// A `--changed-since` scope that touches only a test-harness config file
-    /// (e.g. `.github/workflows/ci.yml`) still selects zero tests, but
-    /// `source_changes_without_tests` is non-empty for it -- the selector's
-    /// mapping never covers harness files, so this is the `is_broken_instrument`
-    /// case, not the honest-zero case #15022 fixed. It must remain a hard
-    /// failure with the original `invalid_evidence` reason and findings, and
-    /// must not invoke the extension runner.
+    /// (e.g. `.github/workflows/ci.yml`) selects zero tests, but a zero-test
+    /// run cannot evidence a harness change. Instead of refusing, the run is
+    /// re-planned as a full-suite run through the same path `--scope full`
+    /// uses: the runner executes with no changed-scope env, the receipt
+    /// records the widening, and no zero-selection finding is emitted.
+    /// Extra-Chill/homeboy#16237.
     #[cfg(unix)]
     #[test]
-    fn non_inventory_mode_zero_selection_for_a_harness_only_change_still_fails_closed() {
+    fn zero_selection_for_a_harness_only_change_widens_to_the_full_suite() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let source = tempfile::tempdir().expect("source workspace");
             let marker = source.path().join("runner-ran");
-            let extension_dir = home
-                .path()
-                .join(".config/homeboy/extensions/zero-scope-harness-fixture");
-            std::fs::create_dir_all(&extension_dir).expect("extension directory");
-            std::fs::write(
-                extension_dir.join("zero-scope-harness-fixture.json"),
-                r#"{"name":"Zero scope harness fixture","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
-            )
-            .expect("extension manifest");
-            std::fs::write(
-                extension_dir.join("test.sh"),
-                "#!/bin/sh\ntouch \"$HOMEBOY_COMPONENT_PATH/runner-ran\"\n",
-            )
-            .expect("runner script");
-            let component = Component {
-                id: "zero-scope-harness".to_string(),
-                local_path: source.path().to_string_lossy().to_string(),
-                extensions: Some(HashMap::from([(
-                    "zero-scope-harness-fixture".to_string(),
-                    ScopedExtensionConfig::default(),
-                )])),
-                ..Default::default()
-            };
+            let component =
+                zero_scope_fixture_component(home.path(), source.path(), "zero-scope-harness");
             let mut args = fixture_workflow_args(&component);
             args.changed_since = Some("base".to_string());
             args.precomputed_changed_files = Some(vec![".github/workflows/ci.yml".to_string()]);
@@ -4590,7 +4653,62 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 args,
                 &RunDir::create().expect("run directory"),
             )
-            .expect("harness-only zero selection is a decided result, closed by policy");
+            .expect("harness-only zero selection widens to a full-suite run");
+
+            assert!(
+                marker.exists(),
+                "a widened run must invoke the runner for the full suite"
+            );
+            let env = std::fs::read_to_string(&marker).expect("runner env record");
+            assert!(env.contains("SCOPE_MODE=unset"), "{env}");
+            assert!(env.contains("HOMEBOY_CHANGED_SINCE=unset"), "{env}");
+            assert!(env.contains("HOMEBOY_CHANGED_TEST_FILES=unset"), "{env}");
+            assert!(result.runner_exit_code.is_some());
+            assert!(
+                result.findings.iter().flatten().all(|finding| !finding
+                    .rule
+                    .as_deref()
+                    .unwrap_or_default()
+                    .starts_with("changed_scope_zero_tests")),
+                "a widened run must not emit a zero-selection finding: {:?}",
+                result.findings
+            );
+
+            let scope = result.test_scope.expect("widened scope receipt");
+            assert_eq!(scope.mode, "full");
+            assert_eq!(scope.widened_from.as_deref(), Some("changed"));
+            assert_eq!(scope.widening_reason.as_deref(), Some("harness_changed"));
+            assert_eq!(
+                scope.widening_files,
+                vec![".github/workflows/ci.yml".to_string()]
+            );
+            assert_eq!(scope.changed_since.as_deref(), Some("base"));
+            assert_eq!(scope.selected_count, 0);
+        });
+    }
+
+    /// Zero selection after a plain source change (no harness file) keeps its
+    /// refusal: the change-to-test mapping missed the impacted source, so the
+    /// run fails closed without invoking the runner or widening (#8340).
+    #[cfg(unix)]
+    #[test]
+    fn zero_selection_for_a_source_only_change_still_fails_closed() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source workspace");
+            let marker = source.path().join("runner-ran");
+            let component =
+                zero_scope_fixture_component(home.path(), source.path(), "zero-scope-source");
+            let mut args = fixture_workflow_args(&component);
+            args.changed_since = Some("base".to_string());
+            args.precomputed_changed_files = Some(vec!["src/lib.rs".to_string()]);
+
+            let result = run_main_test_workflow(
+                &component,
+                source.path(),
+                args,
+                &RunDir::create().expect("run directory"),
+            )
+            .expect("source-only zero selection is a decided result, closed by policy");
 
             assert_eq!(result.status, "failed");
             assert_eq!(result.exit_code, 1);
@@ -4604,24 +4722,23 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 Some(TestRuntimeEvidence::InvalidEvidence { ref reason })
                     if reason == "test execution stopped before an exact runtime plan was available"
             ));
-            let findings = result.findings.expect("harness finding");
+            let findings = result.findings.expect("source finding");
             assert_eq!(findings.len(), 1);
             assert_eq!(
                 findings[0].rule.as_deref(),
-                Some("changed_scope_zero_tests_for_harness_change")
+                Some("changed_scope_zero_tests_for_source_change")
             );
-            assert_eq!(findings[0].severity.as_deref(), Some("error"));
-            let hints = result.hints.expect("harness hint retained");
-            assert!(
-                hints
-                    .iter()
-                    .any(|hint| hint.contains("harness") || hint.contains("full suite")),
-                "hints still name the harness-config change: {hints:?}"
-            );
+            assert!(findings[0]
+                .message
+                .contains("Zero selection is not valid test evidence for a source change"));
             let scope = result.test_scope.expect("scope preserved");
+            assert_eq!(scope.mode, "changed");
+            assert!(scope.widened_from.is_none());
+            assert!(scope.widening_reason.is_none());
+            assert!(scope.widening_files.is_empty());
             assert_eq!(
                 scope.source_changes_without_tests,
-                vec![".github/workflows/ci.yml".to_string()]
+                vec!["src/lib.rs".to_string()]
             );
         });
     }
