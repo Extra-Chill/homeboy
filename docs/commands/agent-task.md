@@ -312,11 +312,11 @@ explains a stop. `agent-task status` projects both under
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |
 | `fanout cook-batch <issue-url>... --repo <repo>` | Cook independent issues as one workflow instance: one child Cook per issue, a bounded wave, and a join gate. |
 | `batch-prepare <issue-url>... --repo <repo>` | The `prepare` step of a cook-batch: resolve the base once, name each child, and prepare the shared Lab workspace bundle. |
-| `recover <cook-or-attempt-id> [--preflight] [--artifact-id <id>]` | Plan and perform the one recovery step a Cook needs (continue, retry, reconcile, choose an artifact, or fork a replacement). `--preflight` reports the step and its read-only continuation admission without mutation; `--timeout-ms`, `--review-form-timeout-ms`, `--backend`, `--selector`, and `--model` re-dispatch a continuation with an explicit provider override. |
+| `recover <cook-or-attempt-id> [--preflight] [--artifact-id <id>]` | Plan and perform the one recovery step a Cook needs (continue, retry, reconcile, choose an artifact, fork a replacement, replace gates, or publish). `--preflight` reports the step and its read-only admission without mutation; `--timeout-ms`, `--review-form-timeout-ms`, `--backend`, `--selector`, and `--model` re-dispatch a continuation with an explicit provider override. `--authorize-external-proof <TEXT>` with corrected gates (`--verify`/`--verify-file`, optionally `--authorize-interrupted-rerun <TEXT>`) or candidate-bound proof (`--promotion <SPEC>`) replaces the gates of an applied candidate that failed them; `--review-form <SPEC>` with `--review-form-tool`, `--review-form-model`, and `--review-form-author`, plus `--review-override` and `--component`, feed publication. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `adopt <run-or-cook-id> --candidate-ref <sha>` | Adopt an immutable commit candidate through the recorded cook gates and finalization policy. |
-| `finalize-pr` | Finalize a green run, or recover publication from a durable Cook record. |
+| `finalize-pr` | Finalize a green manual-finalization candidate. A stopped Cook publishes through `recover`. |
 | `accept <run-id> --verdict accepted\|rejected --token <token> --evidence-ref <ref>` | Record an independently verified acceptance decision for an applied candidate. |
 | `gate-feedback` | Convert deterministic gate results into a cook retry or stop decision. |
 
@@ -367,17 +367,34 @@ record. A rejection preserves its evidence and permits one repair continuation.
 Finalization reports and persisted Cook finalization evidence project the same
 authoritative acceptance record.
 
-Recovery hydrates the run, worktree, base snapshot, candidate, changed files,
-gates, source references, model/tool disclosure, and accepted review form from
-the durable Cook recipe and applied promotion. It fails closed when either
-record is absent, malformed, belongs to another attempt, or no longer matches
-the candidate. `--preflight` performs the same hydration and complete validation
-without commit, push, or pull-request mutation:
+A stopped Cook publishes through its `publish` recovery step. `recover`
+resolves a Cook ID to the attempt `agent-task status` reports, then hydrates the
+run, worktree, base snapshot, candidate, changed files, gates, source
+references, model/tool disclosure, and accepted review form from the durable
+Cook recipe and applied promotion. It fails closed when either record is absent,
+malformed, belongs to another attempt, or no longer matches the candidate.
+`--preflight` performs the same hydration and complete validation without
+commit, push, or pull-request mutation:
 
 ```bash
-homeboy agent-task finalize-pr --recover cook-9750 --preflight
-homeboy agent-task finalize-pr --recover cook-9750 \
+homeboy agent-task recover cook-9750 --preflight
+homeboy agent-task recover cook-9750 \
   --review-override 'compatibility=No public compatibility impact.@reviewed issue #9750'
+```
+
+An applied candidate that failed its deterministic gates takes the
+`replace_gates` step. Corrected gates run against the already-applied candidate
+and record replacement proof; `--promotion` attaches externally produced
+candidate-bound proof instead. Both require an explicit authorization, and the
+next `recover` publishes:
+
+```bash
+homeboy agent-task recover cook-9750 --preflight \
+  --authorize-external-proof 'approved corrected gate evidence' \
+  --verify 'cargo test exact::replacement'
+homeboy agent-task recover cook-9750 \
+  --authorize-external-proof 'approved corrected gate evidence' \
+  --verify 'cargo test exact::replacement'
 ```
 
 Manual finalization first reuses every authoritative green gate from the same
@@ -389,8 +406,9 @@ requires fresh verification instead of silently accepting it.
 When multiple registered components share the candidate repository, pass
 `--component <component-id>` with `--manual-finalization` to select the component
 whose review profile applies. Homeboy verifies that the explicit component is
-registered and matches the candidate path. Recovery derives component identity
-from its durable record and does not accept this selector.
+registered and matches the candidate path. Cook publication through `recover`
+derives component identity from its durable record; its `--component` is only a
+fallback for a record that names none.
 
 Fresh manual finalization can execute repeated candidate-bound verification
 commands and derive separate gate results plus reviewer evidence from them:

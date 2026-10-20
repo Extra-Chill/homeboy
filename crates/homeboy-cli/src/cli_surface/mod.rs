@@ -1145,7 +1145,14 @@ mod tests {
             ),
             cook_recovery_command(
                 "cook-1-attempt-2",
-                &["finalize-pr", "--recover", "cook-1-attempt-2"],
+                &[
+                    "recover",
+                    "cook-1-attempt-2",
+                    "--authorize-external-proof",
+                    "approved",
+                    "--verify",
+                    "cargo test",
+                ],
             ),
         ] {
             let argv =

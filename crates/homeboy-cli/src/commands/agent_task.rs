@@ -35,10 +35,10 @@ pub use args::{
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
     CancelArgs, ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, EvidenceArgs,
     FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PlacementUpdateArgs,
-    PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs,
-    RecordReplacementGateProofArgs, RecoverArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
-    RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs, VerifyReplacementArgs,
+    PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs, RecoverArgs,
+    ReplayProviderBoundaryArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs,
+    ReviewArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, ValidatePlanArgs,
+    VerifyGateArgs,
 };
 
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
@@ -414,10 +414,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::FinalizePr(finalize_args) => {
             review::finalize_pull_request(*finalize_args)
         }
-        AgentTaskCommand::RecordReplacementGateProof(args) => {
-            review::record_replacement_gate_proof(args)
-        }
-        AgentTaskCommand::VerifyReplacement(args) => review::verify_replacement(args),
         AgentTaskCommand::Accept(args) => {
             let verdict = if args.verdict == "accepted" {
                 homeboy::agents::agent_tasks::lifecycle::AgentTaskAcceptanceVerdict::Accepted

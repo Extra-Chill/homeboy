@@ -68,8 +68,7 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::Prompts(_)
         | agent_task::AgentTaskCommand::Contract(_)
         | agent_task::AgentTaskCommand::Auth(_)
-        | agent_task::AgentTaskCommand::Accept(_)
-        | agent_task::AgentTaskCommand::RecordReplacementGateProof(_) => AgentTaskResourceBehavior::LocalControl,
+        | agent_task::AgentTaskCommand::Accept(_) => AgentTaskResourceBehavior::LocalControl,
         agent_task::AgentTaskCommand::Cook(cook) if cook.dispatch.core.queue_only => {
             AgentTaskResourceBehavior::LocalControl
         }
@@ -88,16 +87,16 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::GateExecute { .. }
         | agent_task::AgentTaskCommand::TerminalContinuationWorker { .. }
         | agent_task::AgentTaskCommand::FinalizePr(_)
-        | agent_task::AgentTaskCommand::VerifyReplacement(_)
         | agent_task::AgentTaskCommand::Tool(_) => AgentTaskResourceBehavior::AdmittedWorkload,
         agent_task::AgentTaskCommand::Retry(retry) if retry.run => {
             AgentTaskResourceBehavior::AdmittedWorkload
         }
         agent_task::AgentTaskCommand::Retry(_) => AgentTaskResourceBehavior::LocalControl,
         // `recover --preflight` only reads durable Cook state to name its step
-        // and validate continuation admission read-only. Every step it
-        // performs (continuation, `retry --run`, `reconcile --apply`) is an
-        // admitted workload, like the handlers it calls.
+        // and validate continuation or publication admission read-only. Every
+        // step it performs (continuation, `retry --run`, `reconcile --apply`,
+        // replacement gates, publication) is an admitted workload, like the
+        // handlers it calls.
         agent_task::AgentTaskCommand::Recover(recover) if recover.preflight => {
             AgentTaskResourceBehavior::BoundedMetadataRead
         }

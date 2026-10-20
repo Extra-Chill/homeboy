@@ -7,8 +7,8 @@ pub(crate) use std::process::Command;
 
 pub(in crate::commands::agent_task) use super::super::args::ReconcileArgs;
 pub(in crate::commands::agent_task) use super::super::args::{
-    AgentTaskCookArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, LogsArgs,
-    ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs, StatusArgs, ValidatePlanArgs,
+    AgentTaskCookArgs, DiagnoseArgs, EvidenceArgs, LogsArgs, ReplayProviderBoundaryArgs,
+    ResumeArgs, ReviewArgs, RunArgs, StatusArgs, ValidatePlanArgs,
 };
 pub(in crate::commands::agent_task) use super::super::run::CookContinueArgs;
 pub(in crate::commands::agent_task) use super::super::run::{

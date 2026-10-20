@@ -21,9 +21,8 @@ use super::fanout::{AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs};
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
     LifecycleReadArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs,
-    RecordReplacementGateProofArgs, RecoverArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs,
-    ReviewArgs, RunArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
-    ValidatePlanArgs, VerifyReplacementArgs,
+    RecoverArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs, RunArgs,
+    RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, ValidatePlanArgs,
 };
 
 pub use super::super::auth::{
@@ -215,14 +214,11 @@ pub enum AgentTaskCommand {
         #[arg(long)]
         receipt_file: Option<String>,
     },
-    /// Finalize a green run, or recover publication from a durable Cook record.
+    /// Finalize a green manual-finalization candidate into a pull request.
     ///
-    /// This is the core-owned publication boundary for external runtimes.
+    /// This is the core-owned publication boundary for external runtimes. A
+    /// stopped Cook publishes through `agent-task recover`.
     FinalizePr(Box<FinalizePrArgs>),
-    /// Attach authorized candidate-bound replacement gate proof after an infrastructure gate failure.
-    RecordReplacementGateProof(RecordReplacementGateProofArgs),
-    /// Run corrected gates against an already-applied failed candidate and record replacement proof.
-    VerifyReplacement(VerifyReplacementArgs),
     /// Record an independent, durable acceptance verdict for a candidate.
     Accept(AcceptArgs),
     /// Convert deterministic gate results into a cook retry or stop decision.

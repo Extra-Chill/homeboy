@@ -185,6 +185,18 @@ pub struct VerifyGateArgs {
     #[arg(long = "no-gate-shared-cargo-target", action = clap::ArgAction::SetTrue)]
     pub no_gate_shared_cargo_target: bool,
 }
+impl Default for VerifyGateArgs {
+    /// The gate contract with no declared gates and every CLI default applied.
+    fn default() -> Self {
+        #[derive(clap::Parser)]
+        struct Defaults {
+            #[command(flatten)]
+            gates: VerifyGateArgs,
+        }
+        <Defaults as clap::Parser>::parse_from(["homeboy"]).gates
+    }
+}
+
 impl VerifyGateArgs {
     pub(crate) fn has_deterministic_gate(&self) -> bool {
         !self.verify.is_empty()

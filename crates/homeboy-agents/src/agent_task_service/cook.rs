@@ -1991,17 +1991,13 @@ fn cook_completion_with_stores(
         .flatten()
         .map(|run_id| {
             let command = stores.map_or_else(
-                || cook_recovery_command(&run_id, &["finalize-pr", "--recover", &run_id]),
+                || cook_recovery_command(&run_id, &["recover", &run_id]),
                 |(_, lifecycle)| {
-                    cook_recovery_command_in_store(
-                        lifecycle,
-                        &run_id,
-                        &["finalize-pr", "--recover", &run_id],
-                    )
+                    cook_recovery_command_in_store(lifecycle, &run_id, &["recover", &run_id])
                 },
             );
             AgentTaskCookRecoveryAction {
-                action: "finalize_pr".to_string(),
+                action: "publish".to_string(),
                 command,
             }
         });

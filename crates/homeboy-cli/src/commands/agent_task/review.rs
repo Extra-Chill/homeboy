@@ -40,8 +40,8 @@ use homeboy_engine_primitives::shell::shell_arg;
 
 use super::super::CmdResult;
 use super::{
-    AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs,
-    RecordReplacementGateProofArgs, ReviewArgs, VerifyGateArgs, VerifyReplacementArgs,
+    AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, ReviewArgs,
+    VerifyGateArgs,
 };
 
 #[derive(Args, Debug)]
@@ -68,14 +68,9 @@ pub struct FinalizePrEvidenceArgs {
 
     /// Actual model identifier for AI disclosure. Use `--model`; `--ai-model`
     /// is a deprecated compatibility alias and will be removed in the next
-    /// minor release. Recovery uses durable provenance and rejects model
-    /// overrides. Finalization requires a recorded model.
-    #[arg(
-        long = "model",
-        alias = "ai-model",
-        value_name = "MODEL",
-        conflicts_with = "recover"
-    )]
+    /// minor release. Finalization requires a recorded model; Cook
+    /// publication through `recover` uses durable provenance instead.
+    #[arg(long = "model", alias = "ai-model", value_name = "MODEL")]
     pub ai_model: Option<String>,
 
     /// Source finding id shared by sibling generated PRs.
@@ -916,77 +911,8 @@ fn adoption_envelope(
 
 pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value> {
     validate_finalize_inputs(&args)?;
-    if let Some(run_or_cook_id) = args.recover.as_deref() {
-        let overrides = args
-            .review_overrides
-            .iter()
-            .map(|raw| parse_override(raw))
-            .collect::<homeboy::core::Result<Vec<_>>>()?;
-        let review_form = args
-            .review_form
-            .as_deref()
-            .map(config::read_json_spec_to_string)
-            .transpose()?
-            .map(|raw| {
-                serde_json::from_str::<AiFilledReviewForm>(&raw).map_err(|error| {
-                    Error::validation_invalid_argument(
-                        "review_form",
-                        format!("review form must be a complete typed JSON object: {error}"),
-                        None,
-                        None,
-                    )
-                })
-            })
-            .transpose()?
-            .map(|form| {
-                Ok::<_, Error>(agent_task_service::AgentTaskSuppliedReviewForm {
-                    form,
-                    tool: args.review_form_tool.clone().ok_or_else(|| {
-                        Error::validation_invalid_argument(
-                            "review_form_tool",
-                            "--review-form-tool is required with --review-form",
-                            None,
-                            None,
-                        )
-                    })?,
-                    model: args.review_form_model.clone().ok_or_else(|| {
-                        Error::validation_invalid_argument(
-                            "review_form_model",
-                            "--review-form-model is required with --review-form",
-                            None,
-                            None,
-                        )
-                    })?,
-                    operator: args.review_form_author.clone().ok_or_else(|| {
-                        Error::validation_invalid_argument(
-                            "review_form_author",
-                            "--review-form-author is required with --review-form",
-                            None,
-                            None,
-                        )
-                    })?,
-                })
-            })
-            .transpose()?;
-        let value = agent_task_service::recover_cook_pr_with_review_form(
-            run_or_cook_id,
-            review_form,
-            args.component.as_deref(),
-            overrides,
-            args.preflight,
-        )?;
-        let success = value
-            .get("status")
-            .and_then(Value::as_str)
-            .is_some_and(|status| {
-                matches!(status, "review_ready" | "draft_published" | "validated")
-            });
-        return Ok((value, i32::from(!success)));
-    }
-    let path = args.path.expect("clap requires --path without --recover");
-    let mut run_id = args
-        .run_id
-        .expect("clap requires --run-id without --recover");
+    let path = args.path;
+    let mut run_id = args.run_id;
     let mut verified_candidate_sha = None;
     let mut dependency_hydration = Vec::new();
     if !args.verify.is_empty() {
@@ -1020,10 +946,8 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
     // Retained for the finalization handoff, which names the exact apply command
     // after a validated preflight (#9867). `run_id` itself moves into the options.
     let handoff_run_id = run_id.clone();
-    let title = args.title.expect("clap requires --title without --recover");
-    let commit_message = args
-        .commit_message
-        .expect("clap requires --commit-message without --recover");
+    let title = args.title;
+    let commit_message = args.commit_message;
     let gate_results = parse_gate_results(&args.gate_results)?;
     let normalized_gate_results: Vec<HomeboyGateResult> = gate_results
         .iter()
@@ -1213,50 +1137,67 @@ fn manual_verification_progress_message(
     };
     let command_list = commands.join(" | ");
     format!(
-        "finalize-pr operation={run_id} phase=manual-verification mode={mode} gates={command_list}; resume: `homeboy agent-task status {run_id}` or `homeboy agent-task finalize-pr --recover {run_id}`"
+        "finalize-pr operation={run_id} phase=manual-verification mode={mode} gates={command_list}; resume: `homeboy agent-task status {run_id}` or `homeboy agent-task recover {run_id}`"
     )
 }
 
-pub(crate) fn record_replacement_gate_proof(
-    args: RecordReplacementGateProofArgs,
-) -> CmdResult<Value> {
-    let replacement = serde_json::from_str(&config::read_json_spec_to_string(&args.promotion)?)
-        .map_err(|error| {
-            homeboy::core::Error::validation_invalid_argument(
-                "promotion",
-                format!("replacement gate proof is not a valid promotion report: {error}"),
+/// Parse the operator-supplied review form `recover` publishes with when the
+/// candidate's provider outcome recorded none.
+pub(crate) fn supplied_review_form(
+    review_form: Option<&str>,
+    tool: Option<&str>,
+    model: Option<&str>,
+    author: Option<&str>,
+) -> homeboy::core::Result<Option<agent_task_service::AgentTaskSuppliedReviewForm>> {
+    let Some(review_form) = review_form else {
+        return Ok(None);
+    };
+    let raw = config::read_json_spec_to_string(review_form)?;
+    let form = serde_json::from_str::<AiFilledReviewForm>(&raw).map_err(|error| {
+        Error::validation_invalid_argument(
+            "review_form",
+            format!("review form must be a complete typed JSON object: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let required = |value: Option<&str>, field: &str, flag: &str| {
+        value.map(str::to_string).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                field,
+                format!("{flag} is required with --review-form"),
                 None,
                 None,
             )
-        })?;
-    let report = agent_task_service::record_replacement_gate_proof(
-        &args.run_id,
-        replacement,
-        args.authorize_external_proof,
-        args.accept_inherited_failures,
-    )?;
-    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
+        })
+    };
+    Ok(Some(agent_task_service::AgentTaskSuppliedReviewForm {
+        form,
+        tool: required(tool, "review_form_tool", "--review-form-tool")?,
+        model: required(model, "review_form_model", "--review-form-model")?,
+        operator: required(author, "review_form_author", "--review-form-author")?,
+    }))
 }
 
-pub(crate) fn verify_replacement(mut args: VerifyReplacementArgs) -> CmdResult<Value> {
-    args.gates.snapshot_file_inputs()?;
-    let report = agent_task_service::verify_replacement_gates(
-        &args.cook_or_attempt_id,
-        args.gates.into(),
-        args.authorize_external_proof,
-        args.authorize_interrupted_rerun,
-    )?;
-    let run_id = report.source.run_id.clone().ok_or_else(|| {
-        homeboy::core::Error::internal_unexpected(
-            "replacement proof report is missing its durable source run id".to_string(),
+/// Parse `TARGET=VALUE@PROVENANCE` reviewer overrides.
+pub(crate) fn parse_review_overrides(
+    raw: &[String],
+) -> homeboy::core::Result<Vec<AgentTaskReviewOverride>> {
+    raw.iter().map(|raw| parse_override(raw)).collect()
+}
+
+/// Parse an externally produced replacement gate proof.
+pub(crate) fn replacement_gate_proof(
+    spec: &str,
+) -> homeboy::core::Result<AgentTaskPromotionReport> {
+    serde_json::from_str(&config::read_json_spec_to_string(spec)?).map_err(|error| {
+        Error::validation_invalid_argument(
+            "promotion",
+            format!("replacement gate proof is not a valid promotion report: {error}"),
+            None,
+            None,
         )
-    })?;
-    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-    value["handoff"] = serde_json::json!({
-        "next_command": format!("homeboy agent-task finalize-pr --recover {run_id}"),
-        "status_command": format!("homeboy agent-task status {run_id}"),
-    });
-    Ok((value, 0))
+    })
 }
 
 fn should_persist_manual_preflight_intent(
@@ -1301,7 +1242,7 @@ fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> 
         }
     }
     if let Err(error) = validate_finalization_base(
-        args.path.as_deref(),
+        Some(args.path.as_str()),
         &args.base,
         args.verified_base_sha.as_deref(),
     ) {
@@ -3176,7 +3117,7 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, _to_worktree: &str) -> V
         },
         "boundary": report.status.handoff_boundary(),
         "finalize_command": report.source.run_id.as_ref().map(|run_id| format!(
-            "homeboy agent-task finalize-pr --recover {run_id}"
+            "homeboy agent-task recover {run_id}"
         )),
         "next_actions": next_actions
     })
@@ -3203,8 +3144,7 @@ fn finalization_handoff(status: &str, pr_url: Option<&str>, run_id: Option<&str>
         "pr_not_opened"
     };
 
-    let finalize_command =
-        run_id.map(|run_id| format!("homeboy agent-task finalize-pr --recover {run_id}"));
+    let finalize_command = run_id.map(|run_id| format!("homeboy agent-task recover {run_id}"));
 
     let next_actions = if pr_opened {
         vec!["PR opened or updated; continue review in GitHub".to_string()]
@@ -3306,7 +3246,7 @@ mod tests {
         assert!(message.contains("validation-only; declared gates WILL execute"));
         assert!(message.contains("gates=npm test | npm run build"));
         assert!(message.contains("homeboy agent-task status manual-run-15181"));
-        assert!(message.contains("homeboy agent-task finalize-pr --recover manual-run-15181"));
+        assert!(message.contains("homeboy agent-task recover manual-run-15181"));
     }
 
     #[test]
@@ -4876,7 +4816,7 @@ mod tests {
         assert_eq!(handoff["boundary"], "patch_promoted_no_pr");
         assert_eq!(
             handoff["finalize_command"],
-            "homeboy agent-task finalize-pr --recover agent-task-run-1"
+            "homeboy agent-task recover agent-task-run-1"
         );
     }
 
@@ -5006,7 +4946,7 @@ mod tests {
         assert_eq!(handoff["states"]["publication_mutated"], false);
         assert_eq!(
             handoff["finalize_command"],
-            "homeboy agent-task finalize-pr --recover agent-task-9867"
+            "homeboy agent-task recover agent-task-9867"
         );
 
         let actions = handoff["next_actions"]
@@ -5021,7 +4961,7 @@ mod tests {
             "must state the suppression was intentional: {actions}"
         );
         assert!(
-            actions.contains("homeboy agent-task finalize-pr --recover agent-task-9867"),
+            actions.contains("homeboy agent-task recover agent-task-9867"),
             "must name the exact apply command: {actions}"
         );
         assert!(
@@ -5454,19 +5394,19 @@ esac
                 .to_string();
             let argv = continuation.split_whitespace().collect::<Vec<_>>();
             let published = dispatch_agent_task(&argv);
-            assert_eq!(published["status"], "review_ready");
+            assert_eq!(published["step"], serde_json::json!({ "kind": "publish" }));
+            assert_eq!(published["result"]["status"], "review_ready");
             let repeated = dispatch_agent_task(&argv);
-            assert_eq!(repeated, published);
+            assert_eq!(repeated["result"], published["result"]);
             let error = dispatch_agent_task_error(&[
                 "homeboy",
                 "agent-task",
-                "finalize-pr",
-                "--recover",
+                "recover",
                 "missing-manual-finalization",
             ]);
             assert!(error
                 .message
-                .contains("no durable Cook recipe or manual finalization record"));
+                .contains("no durable Cook, Cook attempt or batch-child run has this ID"));
             let created = std::fs::read_to_string(&log)
                 .expect("fake gh log")
                 .lines()

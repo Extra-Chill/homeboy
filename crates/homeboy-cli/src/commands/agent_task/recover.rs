@@ -9,7 +9,10 @@
 
 use serde_json::Value;
 
-use homeboy::agents::agent_task_service::{self, CookRecoveryOverrides, CookRecoveryPerformer};
+use homeboy::agents::agent_task_service::{
+    self, CookPublishRequest, CookRecoveryOverrides, CookRecoveryPerformer, CookRecoveryRequest,
+    CookReplaceGatesRequest, CookReplacementProof,
+};
 
 use super::super::CmdResult;
 use super::run::CookContinueArgs;
@@ -24,19 +27,93 @@ pub(super) fn recover_with(
     args: RecoverArgs,
     performer: &dyn CookRecoveryPerformer,
 ) -> CmdResult<Value> {
-    let overrides = args.overrides();
-    let (report, exit_code) = agent_task_service::recover_cook(
-        &args.id,
-        args.preflight,
-        args.artifact_id.as_deref(),
-        &overrides,
-        performer,
-    )?;
+    let id = args.id.clone();
+    let request = recovery_request(args)?;
+    let (report, exit_code) = agent_task_service::recover_cook(&id, request, performer)?;
     Ok((
         serde_json::to_value(report)
             .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?,
         exit_code,
     ))
+}
+
+/// Translate `recover` flags into the typed request the step decision
+/// validates. Replacement-gate and publication inputs are parsed here so a
+/// malformed input fails before any durable state is read.
+fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecoveryRequest> {
+    let overrides = args.overrides();
+    let replace_gates = replace_gates_request(&mut args)?;
+    let publish = CookPublishRequest {
+        review_form: super::review::supplied_review_form(
+            args.review_form.as_deref(),
+            args.review_form_tool.as_deref(),
+            args.review_form_model.as_deref(),
+            args.review_form_author.as_deref(),
+        )?,
+        component: args.component.take(),
+        review_overrides: super::review::parse_review_overrides(&args.review_overrides)?,
+    };
+    Ok(CookRecoveryRequest {
+        preflight: args.preflight,
+        artifact_id: args.artifact_id,
+        overrides,
+        replace_gates,
+        publish,
+    })
+}
+
+/// The replace-gates inputs: an explicit authorization plus either corrected
+/// gates executed against the applied candidate or external candidate-bound
+/// proof. Any one of them without the others is refused, never ignored.
+fn replace_gates_request(
+    args: &mut RecoverArgs,
+) -> homeboy::core::Result<Option<CookReplaceGatesRequest>> {
+    let has_gates = args.gates.has_deterministic_gate();
+    if args.authorize_external_proof.is_none()
+        && args.promotion.is_none()
+        && !has_gates
+        && !args.gates.accept_inherited_failures
+    {
+        return Ok(None);
+    }
+    let invalid = |message: &str| {
+        homeboy::core::Error::validation_invalid_argument(
+            "replace-gates",
+            message.to_string(),
+            Some(args.id.clone()),
+            None,
+        )
+    };
+    let Some(authorization) = args.authorize_external_proof.clone() else {
+        return Err(invalid(
+            "replacement gates and replacement proof require --authorize-external-proof",
+        ));
+    };
+    let proof = match (args.promotion.as_deref(), has_gates) {
+        (Some(_), true) => {
+            return Err(invalid(
+                "--promotion records external proof; it cannot be combined with corrected gates",
+            ))
+        }
+        (Some(spec), false) => CookReplacementProof::External {
+            promotion: Box::new(super::review::replacement_gate_proof(spec)?),
+            accept_inherited_failures: args.gates.accept_inherited_failures,
+        },
+        (None, true) => {
+            args.gates.snapshot_file_inputs()?;
+            CookReplacementProof::Gates(std::mem::take(&mut args.gates).into())
+        }
+        (None, false) => {
+            return Err(invalid(
+                "--authorize-external-proof needs corrected gates (--verify/--verify-file) or candidate-bound proof (--promotion)",
+            ))
+        }
+    };
+    Ok(Some(CookReplaceGatesRequest {
+        proof,
+        authorize_external_proof: authorization,
+        authorize_interrupted_rerun: args.authorize_interrupted_rerun.clone(),
+    }))
 }
 
 /// Cook continuation arguments for the continuation a step names. Recovery
@@ -200,9 +277,9 @@ mod tests {
         }
     }
 
-    /// The remaining recovery-adjacent verbs serve non-Cook runs or an
-    /// explicit operator input `recover` never supplies on its own (#15925),
-    /// so they stay commands. `resume` and `retry` hand a Cook ID with a
+    /// The remaining recovery-adjacent verbs serve non-Cook runs (#15925), so
+    /// they stay commands. Replacement gates and Cook publication are `recover`
+    /// steps. `resume` and `retry` hand a Cook ID with a
     /// recovery step to `recover` instead of deciding one.
     #[test]
     fn recovery_adjacent_verbs_recover_does_not_perform_remain_commands() {
@@ -213,12 +290,16 @@ mod tests {
             vec!["adopt", "cook-1", "--candidate-ref", "abc123"],
             vec!["promote", "run-1", "--to-worktree", "wt"],
             vec!["runtime-recover", "run-1", "--artifact", "/tmp/homeboy"],
-            vec!["finalize-pr", "--recover", "cook-1"],
             vec![
-                "record-replacement-gate-proof",
-                "cook-1-attempt-1",
-                "--promotion",
-                "{}",
+                "finalize-pr",
+                "--run-id",
+                "run-1",
+                "--path",
+                "/tmp/run-1",
+                "--title",
+                "Run 1",
+                "--commit-message",
+                "run 1",
             ],
         ] {
             let mut argv = vec!["homeboy", "agent-task"];
