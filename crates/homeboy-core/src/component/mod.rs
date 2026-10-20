@@ -21,7 +21,8 @@ pub use artifacts::{
 pub use config::{
     ArtifactInput, CleanupArtifactDeclaration, CommandScopeConfig, ComponentDeployConfig,
     ComponentGithubReleaseConfig, ComponentOverrideConfig, ComponentReleaseConfig,
-    ComponentScriptsConfig, DependencyStackEdge, DependencyStackEdgeSource,
+    ComponentScriptsConfig, DependencyStackEdge, DependencyStackEdgeSource, DependencyStackLock,
+    DependencyStackLockKind, DependencyStackPolicy, DependencyStackPolicyMax,
     DeploymentProviderAttachment, GitDeployConfig, GithubConfig, GithubHostConfig,
     GithubReleaseOwner, PackageArtifact, PackageCoverageArtifactMatch, PackageCoverageConfig,
     ReleaseGateArtifactSelector, ReleaseGateConfig, ReleaseOwner, ScopeConfig,

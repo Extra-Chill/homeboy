@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 
 mod dependency_graph;
 mod stack_refresh;
+mod stack_source;
+#[cfg(test)]
+mod stack_source_tests;
 mod submodules;
 mod tool_preflight;
 pub use submodules::{

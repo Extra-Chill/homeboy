@@ -1,3 +1,4 @@
+use super::stack_source::{resolve_stack_source, version_file_path};
 use crate::component::{self, Component, DependencyStackEdge};
 use crate::deps::provider;
 use crate::deps::{update, DependencyUpdateOptions};
@@ -314,6 +315,8 @@ fn stack_edges_from_components(
                 post_update: Vec::new(),
                 test: Vec::new(),
                 source: None,
+                lock: None,
+                policy: None,
             };
             let key = edge_key(&edge);
             if seen.insert(key) {
@@ -342,6 +345,7 @@ pub enum DependencyStackEdgeOutdatedState {
     Behind,
     /// The edge could not be checked; never reported as current.
     Unresolvable,
+    Held,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -412,7 +416,13 @@ impl DependencyStackOutdatedStatus {
         parts.extend(
             self.edges
                 .iter()
-                .filter(|edge| edge.state == DependencyStackEdgeOutdatedState::Unresolvable)
+                .filter(|edge| {
+                    matches!(
+                        edge.state,
+                        DependencyStackEdgeOutdatedState::Unresolvable
+                            | DependencyStackEdgeOutdatedState::Held
+                    )
+                })
                 .map(|edge| {
                     format!(
                         "{} ({})",
@@ -482,7 +492,7 @@ pub fn stack_outdated_for_component(
 
     let statuses: Vec<DependencyStackEdgeOutdatedStatus> = edges
         .iter()
-        .map(|edge| outdated_edge_status(edge, locked_versions.as_ref()))
+        .map(|edge| outdated_edge_status(edge, locked_versions.as_ref(), path))
         .collect();
 
     let status = DependencyStackOutdatedStatus {
@@ -498,7 +508,13 @@ pub fn stack_outdated_for_component(
             .count(),
         unresolvable_count: statuses
             .iter()
-            .filter(|edge| edge.state == DependencyStackEdgeOutdatedState::Unresolvable)
+            .filter(|edge| {
+                matches!(
+                    edge.state,
+                    DependencyStackEdgeOutdatedState::Unresolvable
+                        | DependencyStackEdgeOutdatedState::Held
+                )
+            })
             .count(),
         edge_count: statuses.len(),
         edges: statuses,
@@ -514,7 +530,7 @@ fn locked_versions_for_component(
     path: &Path,
     edges: &[DependencyStackEdge],
 ) -> Result<Option<super::DependencyStatus>> {
-    if edges.is_empty() {
+    if edges.iter().all(|edge| edge.lock.is_some()) {
         return Ok(None);
     }
     super::status(Some(&component.id), Some(&path.display().to_string()), None).map(Some)
@@ -523,6 +539,7 @@ fn locked_versions_for_component(
 fn outdated_edge_status(
     edge: &DependencyStackEdge,
     locked: Option<&super::DependencyStatus>,
+    path: &Path,
 ) -> DependencyStackEdgeOutdatedStatus {
     let mut status = DependencyStackEdgeOutdatedStatus {
         upstream: edge.upstream.clone(),
@@ -549,17 +566,21 @@ fn outdated_edge_status(
 
     // Resolve the release first so an edge with an unreadable lock still
     // reports the newest release it could establish.
-    let coordinate = match crate::git::get_latest_remote_release_with_prefix(
-        &source.repo,
-        Some(&source.prefix),
-        STACK_OUTDATED_RESOLVE_TIMEOUT,
-    ) {
+    if let Some(repo) = &source.github_release {
+        status.source_repo = Some(format!("https://github.com/{repo}.git"));
+    }
+    let coordinate = match resolve_stack_source(source) {
         Ok(Some(coordinate)) => coordinate,
         Ok(None) => {
-            status.unresolvable_reason = Some(format!(
-                "no release tags matching prefix '{}' in {}",
-                source.prefix, source.repo
-            ));
+            status.unresolvable_reason =
+                Some(if source.github_release.is_some() || source.npm.is_some() {
+                    "source reports no stable semver release".to_string()
+                } else {
+                    format!(
+                        "no release tags matching prefix '{}' in {}",
+                        source.prefix, source.repo
+                    )
+                });
             return status;
         }
         Err(error) => {
@@ -576,15 +597,27 @@ fn outdated_edge_status(
             .iter()
             .find(|package| package.name == edge.package)
     });
-    let Some(locked_package) = locked_package else {
+    if edge.lock.is_none() && locked_package.is_none() {
         status.unresolvable_reason = Some(format!(
             "no dependency provider reports locked version for package '{}'",
             edge.package
         ));
         return status;
+    }
+    status.locked_version = if let Some(lock) = &edge.lock {
+        match version_file_path(path, &lock.path)
+            .and_then(|path| std::fs::read_to_string(path).map_err(|error| error.to_string()))
+        {
+            Ok(contents) => Some(contents.trim().to_string()),
+            Err(error) => {
+                status.unresolvable_reason = Some(format!("cannot read version file: {error}"));
+                return status;
+            }
+        }
+    } else {
+        locked_package.and_then(|package| package.locked_version.clone())
     };
-    status.locked_version = locked_package.locked_version.clone();
-    let Some(locked_version) = &locked_package.locked_version else {
+    let Some(locked_version) = &status.locked_version else {
         status.unresolvable_reason = Some(format!(
             "dependency provider reports no locked version for package '{}'",
             edge.package
@@ -607,6 +640,12 @@ fn outdated_edge_status(
         return status;
     };
 
+    if newest > locked && newest.major != locked.major && edge.policy.is_some() {
+        status.state = DependencyStackEdgeOutdatedState::Held;
+        status.unresolvable_reason =
+            Some(format!("newest {newest} is a new major; pinned {locked}"));
+        return status;
+    }
     status.state = if newest > locked {
         DependencyStackEdgeOutdatedState::Behind
     } else {

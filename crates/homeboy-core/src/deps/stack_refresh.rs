@@ -30,6 +30,7 @@ pub enum DependencyStackEdgeRefreshState {
     Current,
     /// The edge could not be checked; never reported as current.
     Unresolvable,
+    Held,
     /// The edge was behind but a step of its update path failed.
     Failed,
 }
@@ -142,7 +143,13 @@ impl DependencyStackRefreshResult {
         parts.extend(
             self.edges
                 .iter()
-                .filter(|edge| edge.state == DependencyStackEdgeRefreshState::Unresolvable)
+                .filter(|edge| {
+                    matches!(
+                        edge.state,
+                        DependencyStackEdgeRefreshState::Unresolvable
+                            | DependencyStackEdgeRefreshState::Held
+                    )
+                })
                 .map(|edge| {
                     format!(
                         "{} unresolvable: {}",
@@ -232,7 +239,8 @@ pub fn stack_refresh_for_component(
         dry_run,
         updated_count: count_state(&edges, DependencyStackEdgeRefreshState::Updated),
         current_count: count_state(&edges, DependencyStackEdgeRefreshState::Current),
-        unresolvable_count: count_state(&edges, DependencyStackEdgeRefreshState::Unresolvable),
+        unresolvable_count: count_state(&edges, DependencyStackEdgeRefreshState::Unresolvable)
+            + count_state(&edges, DependencyStackEdgeRefreshState::Held),
         failed_count: count_state(&edges, DependencyStackEdgeRefreshState::Failed),
         edge_count: edges.len(),
         breaking,
@@ -285,6 +293,10 @@ fn refresh_edge(
             result.breaking = Some(false);
             return result;
         }
+        DependencyStackEdgeOutdatedState::Held => {
+            result.state = DependencyStackEdgeRefreshState::Held;
+            return result;
+        }
         DependencyStackEdgeOutdatedState::Unresolvable => {
             result
                 .breaking_reasons
@@ -309,7 +321,30 @@ fn refresh_edge(
         status.newest_tag.as_deref(),
     ) {
         (Some(locked), Some(newest), Some(repo), Some(newest_tag)) => {
-            release_range_breaking_verdict(repo, &locked, &newest, newest_tag)
+            if let Some(github) = edge
+                .and_then(|edge| edge.source.as_ref())
+                .and_then(|source| source.github_release.as_deref())
+            {
+                github_range_breaking_verdict(github, &locked, &newest, newest_tag)
+            } else if edge
+                .and_then(|edge| edge.source.as_ref())
+                .and_then(|source| source.npm.as_ref())
+                .is_some()
+            {
+                if newest.major != locked.major
+                    || (newest.major == 0 && newest.minor != locked.minor)
+                {
+                    DependencyStackBreakingVerdict::breaking(vec![format!(
+                        "version boundary changes: {locked} -> {newest}"
+                    )])
+                } else {
+                    DependencyStackBreakingVerdict::unknown(
+                        "npm source does not declare an inspectable commit range".into(),
+                    )
+                }
+            } else {
+                release_range_breaking_verdict(repo, &locked, &newest, newest_tag)
+            }
         }
         _ => DependencyStackBreakingVerdict::unknown(
             "behind edge is missing a comparable version range".to_string(),
@@ -328,6 +363,23 @@ fn refresh_edge(
         result.failure = Some("behind edge resolved no newest version".to_string());
         return result;
     };
+
+    if let Some(lock) = &edge.lock {
+        let write = super::stack_source::version_file_path(path, &lock.path).and_then(|target| {
+            if dry_run {
+                return Ok(());
+            }
+            std::fs::write(target, format!("{newest_version}\n")).map_err(|error| error.to_string())
+        });
+        match write {
+            Ok(()) => result.state = DependencyStackEdgeRefreshState::Updated,
+            Err(error) => {
+                result.state = DependencyStackEdgeRefreshState::Failed;
+                result.failure = Some(error);
+            }
+        }
+        return result;
+    }
 
     let downstream_path = path.display().to_string();
     let step = DependencyStackPlanStep {
@@ -444,6 +496,52 @@ pub fn release_range_breaking_verdict(
         Ok(reasons) if reasons.is_empty() => DependencyStackBreakingVerdict::not_breaking(),
         Ok(reasons) => DependencyStackBreakingVerdict::breaking(reasons),
         Err(reason) => DependencyStackBreakingVerdict::unknown(reason),
+    }
+}
+
+fn github_range_breaking_verdict(
+    repo: &str,
+    locked: &semver::Version,
+    newest: &semver::Version,
+    newest_tag: &str,
+) -> DependencyStackBreakingVerdict {
+    let base = newest_tag.strip_suffix(&newest.to_string()).unwrap_or("");
+    let url = format!("https://api.github.com/repos/{repo}/compare/{base}{locked}...{newest_tag}");
+    let value = match super::stack_source::http_json(&url) {
+        Ok(value) => value,
+        Err(error) => return DependencyStackBreakingVerdict::unknown(error.message),
+    };
+    let Some(commits) = value["commits"].as_array() else {
+        return DependencyStackBreakingVerdict::unknown(
+            "invalid GitHub comparison response".into(),
+        );
+    };
+    // GitHub truncates comparison commit lists; never call a partial scan clean.
+    if value["total_commits"].as_u64() != Some(commits.len() as u64) {
+        return DependencyStackBreakingVerdict::unknown(
+            "incomplete GitHub comparison commit range".into(),
+        );
+    }
+    let mut reasons = Vec::new();
+    if newest.major != locked.major || (newest.major == 0 && newest.minor != locked.minor) {
+        reasons.push(format!("version boundary changes: {locked} -> {newest}"));
+    }
+    for commit in commits {
+        let Some(message) = commit["commit"]["message"].as_str() else {
+            return DependencyStackBreakingVerdict::unknown(
+                "comparison commit has no message".into(),
+            );
+        };
+        if subject_has_breaking_marker(message.lines().next().unwrap_or_default())
+            || breaking_footer_line(message).is_some()
+        {
+            reasons.push(format!("commit declares breaking change: {message}"));
+        }
+    }
+    if reasons.is_empty() {
+        DependencyStackBreakingVerdict::not_breaking()
+    } else {
+        DependencyStackBreakingVerdict::breaking(reasons)
     }
 }
 

@@ -86,6 +86,54 @@ exit status gates on the result: `0` when every edge is current, `1` when at
 least one edge is behind, `2` when at least one edge is unresolvable and none
 are behind.
 
+### Plain version pins
+
+Use `lock.kind: "version-file"` on the same edge to track a tool pinned in a
+text file, without a dependency provider or package manager:
+
+```json
+{
+  "dependency_stack": [
+    {
+      "upstream": "roadie",
+      "downstream": "wp-coding-agents",
+      "package": "@extrachill/roadie",
+      "source": { "github_release": "Extra-Chill/roadie" },
+      "lock": { "kind": "version-file", "path": "bridges/roadie/roadie-version" }
+    },
+    {
+      "upstream": "pi",
+      "downstream": "wp-coding-agents",
+      "package": "@earendil-works/pi-coding-agent",
+      "source": { "npm": "@earendil-works/pi-coding-agent" },
+      "lock": { "kind": "version-file", "path": "bridges/roadie/pi-version" },
+      "policy": { "max": "same-major" }
+    }
+  ]
+}
+```
+
+The locked version is the trimmed file contents. Refresh writes the resolved
+version plus a trailing newline, and skips update commands, rebuilds,
+post-update commands, installs, and package-manager steps for these edges.
+Paths must stay inside the downstream checkout. Dry runs do not write.
+
+Declare exactly one source: existing `{ "repo": "...", "prefix": "..." }`
+Git tag sources remain unchanged; `github_release` selects the newest stable
+semver (`v` optional) from non-draft, non-prerelease GitHub releases; `npm`
+reads the package registry's `dist-tags.latest`. Resolution uses the existing
+30-second timeout. HTTP failures or invalid responses are `unresolvable`, not
+`current`.
+
+`policy.max: "same-major"` reports a newer major as `held`, with a reason,
+rather than silently upgrading or hiding it behind an older allowed release.
+Refresh leaves held pins untouched. Held edges count as unresolvable for the
+existing exit-code convention (2 unless a higher-priority behind/failed edge
+sets exit 1). GitHub breaking verdicts inspect the commits between release
+tags; incomplete or unavailable comparisons yield `null` (treated as breaking).
+For npm, major and 0.x minor changes are breaking; otherwise the verdict is
+`null` because a registry version alone does not establish a commit range.
+
 ### Rolling edges forward (`stack refresh`)
 
 `homeboy deps stack refresh` is the verb a scheduled CI job calls from the

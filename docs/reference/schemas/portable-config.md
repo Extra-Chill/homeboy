@@ -58,6 +58,26 @@ The component `id` field is required and must be a non-empty string. All other f
 }
 ```
 
+## Dependency stack edges
+
+`dependency_stack` is an optional array of edges. Each edge requires
+`upstream`, `downstream`, and `package` strings. Optional fields are `update`
+(command string), `rebuild` (boolean), `post_update` and `test` (command arrays),
+and:
+
+| Field | Shape / meaning |
+|-------|-----------------|
+| `source` | Exactly one of `{ "repo": "git-url", "prefix": "tag-namespace" }`, `{ "github_release": "owner/repo" }`, or `{ "npm": "package-name" }` |
+| `lock` | `{ "kind": "version-file", "path": "relative/path" }`; trimmed contents supply the locked semver; refresh writes the version and newline without running providers, installs, or edge commands |
+| `policy` | `{ "max": "same-major" }`; newer majors are `held`, left untouched, and counted as unresolvable for exit status |
+
+Without `lock`, existing provider-backed locked-version lookup and refresh
+behavior are unchanged. GitHub sources accept stable `v?<semver>` release
+tags, excluding drafts and prereleases. npm sources use `dist-tags.latest`.
+Source failures are unresolvable, never current. Version-file paths must
+resolve within the checkout. See [deps commands](../../commands/deps.md#plain-version-pins)
+for complete examples and breaking-verdict behavior.
+
 ## Usage
 
 ### Initialize or refresh repo config

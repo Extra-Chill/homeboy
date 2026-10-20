@@ -190,6 +190,8 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
             "block-format-bridge",
             "/repo/block-format-bridge",
             vec![DependencyStackEdge {
+                lock: None,
+                policy: None,
                 upstream: "example-org/html-to-blocks-converter".to_string(),
                 downstream: "block-format-bridge".to_string(),
                 package: "example-org/html-to-blocks-converter".to_string(),
@@ -204,6 +206,8 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
             "static-site-importer",
             "/repo/static-site-importer",
             vec![DependencyStackEdge {
+                lock: None,
+                policy: None,
                 upstream: "block-format-bridge".to_string(),
                 downstream: "static-site-importer".to_string(),
                 package: "example-org/block-format-bridge".to_string(),
@@ -247,6 +251,8 @@ fn stack_plan_compatibility_fields_are_serialized_from_homeboy_plan() {
             vec![DependencyStackEdge {
                 upstream: "upstream".to_string(),
                 downstream: "downstream".to_string(),
+                lock: None,
+                policy: None,
                 package: "fixture/upstream".to_string(),
                 update: None,
                 rebuild: false,
@@ -343,6 +349,7 @@ fn stack_plan_keeps_explicit_edge_config_when_provider_edge_matches() {
         post_update: vec!["fixture-provider build".to_string()],
         test: vec!["fixture-provider test".to_string()],
         source: None,
+        ..Default::default()
     };
     let components = vec![
         script_stack_component(
@@ -394,6 +401,8 @@ fn stack_plan_dedupes_cycles_by_edge_identity() {
             vec![DependencyStackEdge {
                 upstream: "a".to_string(),
                 downstream: "b".to_string(),
+                lock: None,
+                policy: None,
                 package: "fixture/b".to_string(),
                 update: None,
                 rebuild: false,
@@ -408,6 +417,8 @@ fn stack_plan_dedupes_cycles_by_edge_identity() {
             vec![DependencyStackEdge {
                 upstream: "b".to_string(),
                 downstream: "a".to_string(),
+                lock: None,
+                policy: None,
                 package: "fixture/a".to_string(),
                 update: None,
                 rebuild: false,
@@ -599,6 +610,7 @@ fn outdated_edge(
         post_update: Vec::new(),
         test: Vec::new(),
         source,
+        ..Default::default()
     }
 }
 
@@ -652,6 +664,7 @@ fn stack_outdated_reports_behind_current_v_prefixed_and_unresolvable_against_rea
         Some(homeboy::core::component::DependencyStackEdgeSource {
             repo: repo.clone(),
             prefix: prefix.to_string(),
+            ..Default::default()
         })
     };
     let component = outdated_downstream(
@@ -731,6 +744,7 @@ fn stack_outdated_exit_code_distinguishes_all_current_from_unresolvable() {
             Some(homeboy::core::component::DependencyStackEdgeSource {
                 repo: repo.clone(),
                 prefix: "transformer".to_string(),
+                ..Default::default()
             }),
         )],
     );
@@ -755,6 +769,7 @@ fn stack_outdated_exit_code_distinguishes_all_current_from_unresolvable() {
                 Some(homeboy::core::component::DependencyStackEdgeSource {
                     repo: repo.clone(),
                     prefix: "transformer".to_string(),
+                    ..Default::default()
                 }),
             ),
             outdated_edge("fixture/untracked", None),
@@ -800,6 +815,8 @@ fn stack_outdated_marks_untracked_packages_unresolvable_not_current() {
             outdated_edge(
                 "fixture/unknown",
                 Some(homeboy::core::component::DependencyStackEdgeSource {
+                    github_release: None,
+                    npm: None,
                     repo: upstream.display().to_string(),
                     prefix: "transformer".to_string(),
                 }),
@@ -807,6 +824,8 @@ fn stack_outdated_marks_untracked_packages_unresolvable_not_current() {
             outdated_edge(
                 "fixture/nonsemver",
                 Some(homeboy::core::component::DependencyStackEdgeSource {
+                    github_release: None,
+                    npm: None,
                     repo: upstream.display().to_string(),
                     prefix: "transformer".to_string(),
                 }),
@@ -865,6 +884,7 @@ fn stack_outdated_dedupes_and_skips_edges_declared_for_other_downstreams() {
                 Some(homeboy::core::component::DependencyStackEdgeSource {
                     repo: repo.clone(),
                     prefix: "transformer".to_string(),
+                    ..Default::default()
                 }),
             ),
             outdated_edge(
@@ -872,6 +892,7 @@ fn stack_outdated_dedupes_and_skips_edges_declared_for_other_downstreams() {
                 Some(homeboy::core::component::DependencyStackEdgeSource {
                     repo: repo.clone(),
                     prefix: "transformer".to_string(),
+                    ..Default::default()
                 }),
             ),
         ],
@@ -938,6 +959,7 @@ fn stack_refresh_updates_behind_edge_and_leaves_current_untouched() {
         Some(homeboy::core::component::DependencyStackEdgeSource {
             repo: repo.clone(),
             prefix: prefix.to_string(),
+            ..Default::default()
         })
     };
 
@@ -1016,6 +1038,7 @@ fn stack_refresh_dry_run_mutates_nothing() {
         Some(homeboy::core::component::DependencyStackEdgeSource {
             repo: upstream.display().to_string(),
             prefix: "transformer".to_string(),
+            ..Default::default()
         }),
     );
     behind.update = Some("touch refresh-update-marker".to_string());
@@ -1066,6 +1089,7 @@ fn stack_refresh_reports_failed_edges_and_gates_on_exit_status() {
         Some(homeboy::core::component::DependencyStackEdgeSource {
             repo: repo.clone(),
             prefix: "transformer".to_string(),
+            ..Default::default()
         }),
     );
     failing.update = Some("exit 7".to_string());
@@ -1168,6 +1192,7 @@ fn stack_refresh_default_update_path_targets_the_newest_release() {
             Some(homeboy::core::component::DependencyStackEdgeSource {
                 repo: upstream.display().to_string(),
                 prefix: "transformer".to_string(),
+                ..Default::default()
             }),
         )],
     );
@@ -1209,6 +1234,7 @@ fn stack_refresh_breaking_verdict_covers_major_feat_bang_and_uninspectable_range
         Some(homeboy::core::component::DependencyStackEdgeSource {
             repo: major_upstream.display().to_string(),
             prefix: "transformer".to_string(),
+            ..Default::default()
         }),
     );
     edge.update = Some("true".to_string());
@@ -1238,6 +1264,7 @@ fn stack_refresh_breaking_verdict_covers_major_feat_bang_and_uninspectable_range
     edge.source = Some(homeboy::core::component::DependencyStackEdgeSource {
         repo: bang_upstream.display().to_string(),
         prefix: "transformer".to_string(),
+        ..Default::default()
     });
     let component = outdated_downstream(
         &downstream_path,
@@ -1269,6 +1296,7 @@ fn stack_refresh_breaking_verdict_covers_major_feat_bang_and_uninspectable_range
     edge.source = Some(homeboy::core::component::DependencyStackEdgeSource {
         repo: clean_upstream.display().to_string(),
         prefix: "transformer".to_string(),
+        ..Default::default()
     });
     let component = outdated_downstream(
         &downstream_path,
@@ -1289,6 +1317,7 @@ fn stack_refresh_breaking_verdict_covers_major_feat_bang_and_uninspectable_range
     edge.source = Some(homeboy::core::component::DependencyStackEdgeSource {
         repo: gapped_upstream.display().to_string(),
         prefix: "transformer".to_string(),
+        ..Default::default()
     });
     let component =
         outdated_downstream(&downstream_path, &[("fixture/behind", "1.0.0")], vec![edge]);
