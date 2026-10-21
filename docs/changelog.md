@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.431.20] - 2026-10-21
+
+### Changed
+- Cook PR bodies: one Verification line per gate, markdown prose, single AI disclosure
+- Hydrate Lab gate dependencies on the runner, in the workspace the gate runs in
+
 ## [0.431.19] - 2026-10-21
 
 ### Fixed
