@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.1] - 2026-10-21
+
+### Fixed
+- give standalone-only components complete test evidence
+
 ## [3.53.0] - 2026-10-20
 
 ### Added
