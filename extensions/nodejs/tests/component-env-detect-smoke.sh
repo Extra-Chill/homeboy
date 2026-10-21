@@ -27,20 +27,35 @@ expect() {
   printf 'PASS: %s -> %s\n' "${name}" "${actual}"
 }
 
-case_dir engines-floor '{"engines":{"node":">=20"}}'
-expect engines-floor '{"runtimes":{"node":{"version":"20"}}}'
+case_dir engines-open-floor '{"engines":{"node":">=14.0.0"}}'
+expect engines-open-floor '{"runtimes":{"node":{"version":"24"}}}'
+
+case_dir engines-open-above-lts '{"engines":{"node":">=26"}}'
+expect engines-open-above-lts '{"runtimes":{"node":{"version":"26"}}}'
 
 case_dir engines-caret '{"engines":{"node":"^22.11.0"}}'
 expect engines-caret '{"runtimes":{"node":{"version":"22"}}}'
 
-case_dir engines-alternatives '{"engines":{"node":"^22 || ^20.18"}}'
-expect engines-alternatives '{"runtimes":{"node":{"version":"20"}}}'
+case_dir engines-alternatives '{"engines":{"node":"^20.18 || ^22"}}'
+expect engines-alternatives '{"runtimes":{"node":{"version":"22"}}}'
 
 case_dir engines-bounded '{"engines":{"node":">=18.17 <23"}}'
-expect engines-bounded '{"runtimes":{"node":{"version":"18"}}}'
+expect engines-bounded '{"runtimes":{"node":{"version":"22"}}}'
+
+case_dir engines-bounded-minor '{"engines":{"node":">=18 <22.5"}}'
+expect engines-bounded-minor '{"runtimes":{"node":{"version":"22"}}}'
+
+case_dir engines-hyphen '{"engines":{"node":"16 - 20"}}'
+expect engines-hyphen '{"runtimes":{"node":{"version":"20"}}}'
+
+case_dir engines-x-range '{"engines":{"node":"20.x"}}'
+expect engines-x-range '{"runtimes":{"node":{"version":"20"}}}'
+
+case_dir engines-legacy-alternatives '{"engines":{"node":"^8.16.0 || ^10.6.0 || >=11.0.0"}}'
+expect engines-legacy-alternatives '{"runtimes":{"node":{"version":"24"}}}'
 
 case_dir engines-upper-only '{"engines":{"node":"<21"}}'
-expect engines-upper-only '{}'
+expect engines-upper-only '{"runtimes":{"node":{"version":"20"}}}'
 
 case_dir nvmrc-wins '{"engines":{"node":">=20"}}'
 printf 'v22.23.2\n' > "${WORK}/nvmrc-wins/.nvmrc"
@@ -50,7 +65,7 @@ case_dir node-version-file '{"engines":{"node":">=20"}}'
 printf '24\n' > "${WORK}/node-version-file/.node-version"
 expect node-version-file '{"runtimes":{"node":{"version":"24"}}}'
 
-case_dir alias-ignored '{"engines":{"node":">=20"}}'
+case_dir alias-ignored '{"engines":{"node":"^20"}}'
 printf 'lts/*\n' > "${WORK}/alias-ignored/.nvmrc"
 expect alias-ignored '{"runtimes":{"node":{"version":"20"}}}'
 

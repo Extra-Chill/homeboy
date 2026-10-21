@@ -14,9 +14,14 @@ set -euo pipefail
 #
 # Resolution order for the Node version:
 #   1. `.nvmrc`, then `.node-version`: an explicit pin wins.
-#   2. `engines.node` in package.json, resolved to the lowest major version
-#      the range admits (">=20" and "^20.11" both yield "20"). This is the
-#      component's declared floor, the same way WordPress uses `Requires PHP`.
+#   2. `engines.node` in package.json, resolved to the newest supported Node
+#      LTS major the range admits. A range states what the component runs on,
+#      not what to install: ">=14" admits the current LTS, so it yields
+#      CURRENT_LTS rather than an end-of-life floor whose npm cannot read
+#      today's lockfiles. A range that admits nothing up to CURRENT_LTS yields
+#      its own floor (">=26" yields "26"); one capped below it yields the
+#      newest LTS major under the cap (">=18 <23" yields "22", "^20" yields
+#      "20").
 #
 # A value that is not a plain version or a range with a readable major is
 # ignored rather than guessed. An empty object is emitted when nothing is
@@ -45,7 +50,35 @@ def pinned_version(root):
     return None
 
 
-def engines_floor(root):
+# The newest Node LTS major. Node LTS lines are even majors.
+CURRENT_LTS = 24
+INFINITY = float("inf")
+
+
+def alternative_bounds(alternative):
+    """Inclusive (lowest, highest) major one `||` alternative admits."""
+    lowest, highest = 0, INFINITY
+    # A hyphen range "16 - 20" is ">=16 <=20".
+    hyphen = re.match(r"^\s*(\S+)\s+-\s+(\S+)\s*$", alternative)
+    tokens = [">=" + hyphen.group(1), "<=" + hyphen.group(2)] if hyphen else alternative.split()
+    for token in tokens:
+        match = re.match(r"^(\^|~|>=|>|<=|<|=)?v?(\d+)((?:\.(?:\d+|x|\*))*)$", token)
+        if not match:
+            continue
+        operator, major, rest = match.group(1) or "", int(match.group(2)), match.group(3)
+        exact_major = not re.search(r"[1-9]", rest)
+        if operator in (">=", ">"):
+            lowest = max(lowest, major)
+        elif operator == "<":
+            highest = min(highest, major - 1 if exact_major else major)
+        elif operator == "<=":
+            highest = min(highest, major)
+        else:
+            lowest, highest = max(lowest, major), min(highest, major)
+    return lowest, highest
+
+
+def engines_version(root):
     manifest = root / "package.json"
     if not manifest.is_file():
         return None
@@ -56,23 +89,28 @@ def engines_floor(root):
     spec = engines.get("node") if isinstance(engines, dict) else None
     if not isinstance(spec, str):
         return None
-    # For each "||" alternative, take the first version it names; the lowest
-    # major across alternatives is the floor. Upper bounds such as "<21" are
-    # never floors, so an alternative that only states one is skipped.
-    majors = []
+    candidates = []
     for alternative in spec.split("||"):
-        for comparator in alternative.split():
-            if comparator.startswith("<"):
-                continue
-            match = re.search(r"(\d+)", comparator)
-            if match:
-                majors.append(int(match.group(1)))
-                break
-    return str(min(majors)) if majors else None
+        if not re.search(r"\d", alternative):
+            continue
+        lowest, highest = alternative_bounds(alternative)
+        if lowest == 0 and highest == INFINITY:
+            continue
+        if lowest > highest:
+            continue
+        if lowest >= CURRENT_LTS:
+            candidates.append(lowest)
+            continue
+        newest = int(min(highest, CURRENT_LTS))
+        if newest % 2 and newest - 1 >= lowest:
+            newest -= 1
+        if newest >= lowest:
+            candidates.append(newest)
+    return str(max(candidates)) if candidates else None
 
 
 root = Path.cwd()
-node = pinned_version(root) or engines_floor(root)
+node = pinned_version(root) or engines_version(root)
 
 output = {}
 if node:
