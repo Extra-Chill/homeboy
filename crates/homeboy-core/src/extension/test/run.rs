@@ -4654,7 +4654,10 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
             // CI exports changed-scope env for the whole job; a widened run
             // must scrub it rather than inherit it.
             let _scope = homeboy_core::test_support::EnvVarGuard::set("SCOPE_MODE", "changed");
-            let _since = homeboy_core::test_support::EnvVarGuard::set("HOMEBOY_CHANGED_SINCE", "ambient-base");
+            let _since = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_CHANGED_SINCE",
+                "ambient-base",
+            );
             let _files = homeboy_core::test_support::EnvVarGuard::set(
                 "HOMEBOY_CHANGED_TEST_FILES",
                 "ambient/test.rs",
