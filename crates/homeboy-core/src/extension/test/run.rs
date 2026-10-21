@@ -4660,7 +4660,13 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 "a widened run must invoke the runner for the full suite"
             );
             let env = std::fs::read_to_string(&marker).expect("runner env record");
-            assert!(env.contains("SCOPE_MODE=unset"), "{env}");
+            // CI exports SCOPE_MODE=full into the ambient environment, so the
+            // runner may inherit it. The contract is only that a widened run
+            // never hands the runner a changed-scope selection.
+            assert!(
+                env.contains("SCOPE_MODE=unset") || env.contains("SCOPE_MODE=full"),
+                "{env}"
+            );
             assert!(env.contains("HOMEBOY_CHANGED_SINCE=unset"), "{env}");
             assert!(env.contains("HOMEBOY_CHANGED_TEST_FILES=unset"), "{env}");
             assert!(result.runner_exit_code.is_some());
