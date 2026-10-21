@@ -635,7 +635,7 @@ impl ControllerJobDriver for StepJobDriver {
 fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Result<Value> {
     let job_id = job.job_id();
     match checkpoint.phase {
-        StepPhase::Exited => return finish(checkpoint),
+        StepPhase::Exited => return finish(&job_id, checkpoint),
         StepPhase::Spawning => {
             // The daemon stopped between starting a spawn and recording the
             // child. Its identity is unknowable, so never spawn a second one.
@@ -652,7 +652,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
             checkpoint.exit_code = recorded_step_exit_code(&job_id);
             checkpoint.phase = StepPhase::Exited;
             job.checkpoint(to_value(&checkpoint)?)?;
-            return finish(checkpoint);
+            return finish(&job_id, checkpoint);
         }
         StepPhase::Waiting => {}
     }
@@ -760,19 +760,65 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     write_exit_record(&dir, &checkpoint);
     job.checkpoint(to_value(&checkpoint)?)?;
     job.progress(checkpoint.progress())?;
-    finish(checkpoint)
+    finish(&job_id, checkpoint)
 }
 
-fn finish(checkpoint: StepJobCheckpoint) -> Result<Value> {
+fn finish(job_id: &str, checkpoint: StepJobCheckpoint) -> Result<Value> {
     match checkpoint.exit_code {
         Some(code) if code != 0 => {
-            let mut error =
-                Error::internal_unexpected(format!("step child exited with status {code}"));
+            let cause = step_job_dir(job_id)
+                .ok()
+                .and_then(|dir| std::fs::read_to_string(dir.join(STEP_LOG_FILE)).ok())
+                .and_then(|log| child_failure_cause(&log));
+            let mut error = Error::internal_unexpected(match &cause {
+                Some(cause) => format!("step child exited with status {code}: {cause}"),
+                None => format!("step child exited with status {code}"),
+            });
             error.details["exit_code"] = json!(code);
             Err(error)
         }
         _ => Ok(checkpoint.result()),
     }
+}
+
+/// The cause a failed step child reported (#16273). A Homeboy command child
+/// ends its log with a command-result envelope whose summary names the cause;
+/// any other child is described by the tail of what it wrote.
+fn child_failure_cause(log: &str) -> Option<String> {
+    const TAIL_LINES: usize = 3;
+    const MAX_CHARS: usize = 600;
+    let envelope = log
+        .rfind("\n{\n")
+        .map(|index| index + 1)
+        .or_else(|| log.starts_with("{\n").then_some(0))
+        .and_then(|start| serde_json::from_str::<Value>(&log[start..]).ok());
+    let cause = envelope
+        .as_ref()
+        .and_then(|value| {
+            value["summary"]
+                .as_str()
+                .or_else(|| value["diagnostics"]["message"].as_str())
+        })
+        .map(str::to_string)
+        .or_else(|| {
+            let lines = log
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>();
+            let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
+            (!tail.is_empty()).then(|| tail.join(" | "))
+        })?;
+    let cause = cause.trim();
+    if cause.is_empty() {
+        return None;
+    }
+    Some(if cause.chars().count() > MAX_CHARS {
+        let kept = cause.chars().take(MAX_CHARS).collect::<String>();
+        format!("{kept}…")
+    } else {
+        cause.to_string()
+    })
 }
 
 /// Returns `false` when the job was cancelled while waiting.
@@ -1077,6 +1123,34 @@ mod tests {
         let job_id = harness.job().unwrap().id.to_string();
         std::fs::read_to_string(step_job_dir(&job_id).unwrap().join(STEP_LOG_FILE))
             .unwrap_or_default()
+    }
+
+    /// #16273: a failed step names the child's own cause, not only its status.
+    #[test]
+    fn failed_step_names_the_cause_its_child_reported() {
+        with_isolated_home(|home| {
+            let envelope = r#"printf 'progress line\n{\n  "success": false,\n  "summary": "Invalid argument repo: not registered"\n}\n'; exit 2"#;
+            for (script, expected) in [
+                (
+                    envelope,
+                    "step child exited with status 2: Invalid argument repo: not registered",
+                ),
+                (
+                    "echo first >&2; echo 'fatal: no such checkout' >&2; exit 3",
+                    "step child exited with status 3: first | fatal: no such checkout",
+                ),
+                ("exit 4", "step child exited with status 4"),
+            ] {
+                let harness = step_harness(&request(script, Default::default()), home.path());
+                harness.start_via_controller_boundary().unwrap();
+                let job = harness.wait_until_terminal().unwrap();
+                assert_eq!(job.status, crate::api_jobs::JobStatus::Failed, "{script}");
+                let pending = harness.store().pending_step_terminal_deliveries().unwrap();
+                let error = pending[0].error.as_ref().expect("step error");
+                assert_eq!(error["message"].as_str(), Some(expected), "{script}");
+                assert!(pending[0].log_path.ends_with(STEP_LOG_FILE));
+            }
+        });
     }
 
     #[test]
