@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.431.21] - 2026-10-21
+
+### Changed
+- Read the inner gate config root explicitly in the extension-isolation test
+
 ## [0.431.20] - 2026-10-21
 
 ### Changed
