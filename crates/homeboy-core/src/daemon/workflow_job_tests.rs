@@ -513,6 +513,44 @@ fn fan_out_runs_items_two_at_a_time_and_joins() {
     }
 }
 
+/// A store that retains one terminal job compacts each settled item as soon
+/// as the next one settles, usually before the driver's next poll. The
+/// driver still observes every item from its durable tombstone and finishes.
+#[test]
+fn items_compacted_before_the_driver_observes_them_still_settle() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_with_retention(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+            100,
+            1,
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-test".to_string());
+        let request = request(fan_out(json!("all"), "true"), home.path());
+        let job_id = admit(&store, &request);
+        crate::daemon::start_controller_job(job_id, &store).unwrap();
+        assert_eq!(
+            wait_terminal(&store, job_id, 30).status,
+            JobStatus::Succeeded
+        );
+        let status = workflow_status(&store, &request.instance).unwrap();
+        let items = status["steps"]["work"]["items"].as_array().unwrap();
+        assert!(
+            items.iter().all(|item| item["outcome"] == "succeeded"),
+            "{status}"
+        );
+        let compacted = (0..3)
+            .map(|index| format!("{}/work/1/item-{index}/1", request.instance))
+            .filter(|key| {
+                store
+                    .controller_job_for_key(key)
+                    .is_some_and(|child| store.get(child.id).is_err())
+            })
+            .count();
+        assert!(compacted >= 2, "items were not compacted: {status}");
+    });
+}
+
 /// Cancelling mid-wave stops every running item and admits no further one.
 #[test]
 fn cancelling_mid_wave_stops_every_running_item() {
