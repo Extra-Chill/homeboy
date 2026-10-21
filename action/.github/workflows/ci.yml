@@ -137,6 +137,10 @@ on:
         description: 'Maximum wall-clock time for the Homeboy test child. Must leave cleanup margin below the command phase timeout.'
         type: string
         default: '1500'
+      nextest-profile:
+        description: 'Nextest profile for unsharded candidate, baseline, and retry Test runs (exported as NEXTEST_PROFILE). Empty keeps nextest''s default profile. Shard jobs keep their own ci profile.'
+        type: string
+        default: ''
       test-shards:
         description: 'Optional number of deterministic Test shards. Values above one require the Homeboy test inventory contract.'
         type: string
@@ -486,6 +490,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      # Callers select e.g. a PR profile with a default-filter; unset means
+      # nextest's built-in default profile. Shard steps still pin ci.
+      NEXTEST_PROFILE: ${{ inputs.nextest-profile || 'default' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -612,6 +620,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      # Callers select e.g. a PR profile with a default-filter; unset means
+      # nextest's built-in default profile. Shard steps still pin ci.
+      NEXTEST_PROFILE: ${{ inputs.nextest-profile || 'default' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -1180,6 +1192,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      # Callers select e.g. a PR profile with a default-filter; unset means
+      # nextest's built-in default profile. Shard steps still pin ci.
+      NEXTEST_PROFILE: ${{ inputs.nextest-profile || 'default' }}
     steps:
       - uses: actions/checkout@v6
         with:
