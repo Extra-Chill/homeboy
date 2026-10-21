@@ -56,7 +56,9 @@ with tempfile.TemporaryDirectory() as tmp:
     assert output.read_text() == "runner=nextest\n"
     run("materialize")
     shard = json.loads(selection.read_text())
-    assert shard["tests"] == ["selected-fail", "selected-pass"]
+    # Only the candidate's failures replay; passing identities and the
+    # unrelated inventory never run on the baseline.
+    assert shard["tests"] == ["selected-fail"], shard["tests"]
     assert shard["workspace_fingerprint"] == "e" * 64
     assert shard["runner_fingerprint"] == "d" * 64
     assert shard["inventory_fingerprint"] == "f" * 64
@@ -78,6 +80,11 @@ with tempfile.TemporaryDirectory() as tmp:
     assert verdict() == "baseline_red"
     evidence(results, ["selected-pass", "selected-fail", "new-test"], ["new-test"])
     assert verdict() == "fail", "candidate-only failures must not be pardoned"
+    # A candidate failure that passes at base is introduced, not pardoned.
+    evidence(results, ["selected-pass", "selected-fail"], ["selected-pass"])
+    evidence(base, ["selected-pass"], [])
+    assert verdict() == "fail", "a failure passing at base is introduced"
+    evidence(base, ["selected-fail"], ["selected-fail"])
     write(manifest, {"scope": "full"})
     output.write_text("")
     run("plan")

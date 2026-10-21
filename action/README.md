@@ -43,7 +43,7 @@ reusable workflow; direct composite-action callers keep the combined behavior.
 
 For unsharded changed-scope Rust Test failures with valid per-test sidecars,
 the baseline enumerates the base inventory without executing it, then replays
-only the candidate's selected identities that exist at base via a base-bound
+only the candidate's failed identities that exist at base via a base-bound
 `HOMEBOY_TEST_SHARD_MANIFEST`. Normal runner-owned outcome/inventory sidecars
 still drive reconciliation; candidate-only test failures remain introduced.
 Full-scope candidates, unsupported runners, and missing selection evidence

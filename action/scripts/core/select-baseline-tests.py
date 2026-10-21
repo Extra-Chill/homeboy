@@ -21,7 +21,12 @@ def main():
     manifest = gate.read_json(os.environ["CANDIDATE_MANIFEST"]) or {}
     command = os.environ["COMMAND"]
     directory = str(Path(os.environ["CANDIDATE_MANIFEST"]).parent / "homeboy-ci-results")
-    state, identities, _ = gate.test_outcomes(command, directory)
+    # Replay only the candidate's failures. The candidate inventory sidecar
+    # lists every enumerated test, not just the executed scope (homeboy#16257:
+    # 76 executed, 14,696 inventoried), and the gate verdict is
+    # candidate_failed - base_failed, so base outcomes for passing tests are
+    # never consulted.
+    state, _inventory, identities = gate.test_outcomes(command, directory)
     inventory = gate.read_json(os.path.join(directory, f"{gate.output_stem(command)}.test-inventory.json")) or {}
     runner = inventory.get("runner")
     if sys.argv[1] == "plan":
@@ -52,7 +57,7 @@ def main():
     path.write_text(json.dumps(shard, sort_keys=True) + "\n")
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write(f"selection-file={path}\n")
-    print(f"Baseline selected {len(selected)} candidate identities ({len(identities - known)} candidate-only)")
+    print(f"Baseline selected {len(selected)} candidate failure identities ({len(identities - known)} candidate-only)")
 
 
 if __name__ == "__main__":
