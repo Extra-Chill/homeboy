@@ -319,6 +319,11 @@ pub struct AgentTaskGateEnvironmentPolicy {
     /// Rust cache hydration follows the enclosing dependency-hydration policy.
     #[serde(default = "default_hydrate_dependencies")]
     pub hydrate_rust_cache: bool,
+    /// Runner-side dependency hydration follows the enclosing dependency-
+    /// hydration policy: a Lab gate hydrates the materialized runner workspace
+    /// before its command runs, with setup evidence on the receipt (#16262).
+    #[serde(default = "default_hydrate_dependencies")]
+    pub hydrate_dependencies: bool,
     /// Explicit gate override. When omitted, inherit the component's declared
     /// managed-execution policy for the gate workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -397,6 +402,7 @@ impl Default for AgentTaskGateEnvironmentPolicy {
             isolate_home: true,
             isolate_xdg: true,
             hydrate_rust_cache: true,
+            hydrate_dependencies: true,
             shared_cargo_target: None,
             admitted_component_id: None,
             extension_inputs: Vec::new(),
@@ -751,6 +757,11 @@ pub struct AgentTaskGateReport {
     pub candidate_checkout: Option<AgentTaskGateCandidateCheckout>,
     #[serde(default, skip_serializing_if = "AgentTaskGateEnvironment::is_empty")]
     pub environment: AgentTaskGateEnvironment,
+    /// Runner-side dependency setup a Lab gate performed in the materialized
+    /// runner workspace before its command ran. Local gates carry this
+    /// evidence at the promotion level instead (#16262).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup: Vec<AgentTaskGateSetupEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -987,6 +998,7 @@ impl AgentTaskGateEnvironment {
                 .iter()
                 .any(|variable| XDG_ENV_VARS.contains(&variable.name.as_str())),
             hydrate_rust_cache: true,
+            hydrate_dependencies: true,
             shared_cargo_target: self.cargo_target.as_ref().map(|_| true),
             admitted_component_id: None,
             extension_inputs: self
@@ -1531,6 +1543,7 @@ impl AgentTaskGateReport {
             baseline_comparison: None,
             candidate_checkout: None,
             environment,
+            setup: Vec::new(),
         }
     }
 
@@ -1589,6 +1602,7 @@ impl AgentTaskGateReport {
             baseline_comparison: None,
             candidate_checkout: None,
             environment: AgentTaskGateEnvironment::default(),
+            setup: Vec::new(),
         }
     }
 
@@ -4509,6 +4523,7 @@ pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOption
         let mut environment = gates.gate_environment.clone();
         environment.lab_runner = runner;
         environment.hydrate_rust_cache &= gates.hydrate_dependencies;
+        environment.hydrate_dependencies &= gates.hydrate_dependencies;
         preflight_gate_toolchains(
             cwd,
             &environment,
@@ -6156,6 +6171,19 @@ mod tests {
             (2100, 1500),
             "the Lab request must carry the declared budgets, not defaults"
         );
+    }
+
+    /// #16262: a verified-base (inherited-failure) replay of a Lab gate
+    /// rebuilds its request from the candidate report's environment. That
+    /// replay must still ask the runner to hydrate the baseline workspace, or
+    /// the baseline would replay without the dependencies the candidate had.
+    #[test]
+    fn lab_gate_replay_policy_requests_runner_side_hydration() {
+        let mut environment = AgentTaskGateEnvironment::default();
+        environment.lab_runner = Some("lab".to_string());
+        let policy = environment.replay_policy();
+        assert_eq!(policy.lab_runner.as_deref(), Some("lab"));
+        assert!(policy.hydrate_dependencies);
     }
 
     /// #14731: `homeboy review test` and equivalent portable-Lab-route
@@ -9025,6 +9053,7 @@ mod tests {
             isolate_home: false,
             isolate_xdg: false,
             hydrate_rust_cache: true,
+            hydrate_dependencies: true,
             shared_cargo_target: Some(false),
             admitted_component_id: None,
             extension_inputs: Vec::new(),

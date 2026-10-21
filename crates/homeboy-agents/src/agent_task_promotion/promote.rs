@@ -2506,20 +2506,19 @@ fn run_promotion_gates(
     // executable projection this report describes.
     let candidate_setup = Vec::new();
     let gate_workspace = promotion_gate_workspace(options, worktree_path, gate_workspace);
-    let destination_gate_setup = if gate_workspace.is_dir() {
-        // Local setup runs under the gates' environment (#16024). A Lab
-        // runner resolves its environment on the runner, not here.
-        let gate_hydration = options
-            .gates
-            .gate_environment
-            .lab_runner
-            .is_none()
-            .then(|| {
-                crate::agent_task_gate::GateHydrationEnvironment::prepare(
-                    &options.gates.gate_environment,
-                )
-            })
-            .transpose()?;
+    let lab_placement = options.gates.gate_environment.lab_runner.is_some();
+    let destination_gate_setup = if lab_placement {
+        // A Lab gate runs in the runner's materialized workspace, so the
+        // controller checkout is never hydrated for Lab placement: the runner
+        // hydrates that workspace before the gate command, and its receipts
+        // carry the setup evidence that this report projects (#16262).
+        Vec::new()
+    } else if gate_workspace.is_dir() {
+        // Local setup runs under the gates' environment (#16024).
+        let gate_hydration = Some(crate::agent_task_gate::GateHydrationEnvironment::prepare(
+            &options.gates.gate_environment,
+        ))
+        .transpose()?;
         let hydration_policy = homeboy_core::deps::DependencyHydrationPolicy {
             timeout: options.gates.gate_timeout(),
             no_progress_timeout: options.gates.gate_no_progress_timeout(),
@@ -2707,6 +2706,17 @@ fn run_promotion_gates(
         .cloned()
         .map(HomeboyGateResult::from)
         .collect();
+    // The runner owns dependency setup for Lab placement: project the setup
+    // evidence its gate receipts recorded so the promotion report still names
+    // where dependencies were materialized — the runner workspace (#16262).
+    let destination_gate_setup = if lab_placement {
+        deterministic_gates
+            .iter()
+            .flat_map(|gate| gate.setup.iter().cloned())
+            .collect()
+    } else {
+        destination_gate_setup
+    };
 
     let candidate_checkout = candidate_checkout.map(|checkout| checkout.identity());
     if let Some(candidate_checkout) = &candidate_checkout {
@@ -2836,6 +2846,92 @@ mod lab_gate_binding_tests {
         });
     }
 
+    /// #16262: with Lab placement, the controller checkout is never hydrated
+    /// for gate setup — the runner hydrates its own gate workspace, and this
+    /// report carries the runner's setup evidence instead.
+    #[test]
+    fn lab_placement_performs_no_controller_side_dependency_setup() {
+        with_git_candidate(|repo, store| {
+            std::fs::write(
+                repo.join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}}"#,
+            )
+            .unwrap();
+            homeboy_core::test_support::run_git_fixture_command(repo, &["add", "."]);
+            homeboy_core::test_support::run_git_fixture_command(
+                repo,
+                &["commit", "-qm", "dependency manifest"],
+            );
+            let candidate =
+                crate::agent_task_promotion::candidate_fingerprint(&repo.display().to_string())
+                    .unwrap();
+            let options: AgentTaskPromotionRequest = serde_json::from_value(json!({
+                "source":"{}", "to_worktree":"fixture", "gates":{
+                    "verify":["printf must-not-run"],
+                    "gate_environment":{"lab_runner":"absent-fixture-runner", "hydrate_rust_cache":false}
+                }
+            }))
+            .unwrap();
+
+            let report = run_promotion_gates(&options, repo, Some(&candidate), None, store)
+                .expect("an absent runner defers the gate; it is not a setup error");
+
+            assert_eq!(report.status, AgentTaskPromotionStatus::GateDeferred);
+            assert!(
+                !repo.join("hydration-count").exists(),
+                "controller-side dependency setup must not touch the controller checkout for Lab placement"
+            );
+            assert!(
+                report.destination_gate_setup.is_empty(),
+                "controller setup evidence stays empty; the runner reports its own"
+            );
+            assert_eq!(
+                report.deterministic_gates[0].status,
+                AgentTaskGateStatus::Unavailable
+            );
+        });
+    }
+
+    /// The control for `lab_placement_performs_no_controller_side_dependency_setup`:
+    /// the same manifest under local placement is hydrated in the destination
+    /// gate workspace and recorded as its setup evidence.
+    #[test]
+    fn local_placement_still_hydrates_the_destination_gate_workspace() {
+        with_git_candidate(|repo, store| {
+            std::fs::write(
+                repo.join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}}"#,
+            )
+            .unwrap();
+            homeboy_core::test_support::run_git_fixture_command(repo, &["add", "."]);
+            homeboy_core::test_support::run_git_fixture_command(
+                repo,
+                &["commit", "-qm", "dependency manifest"],
+            );
+            let candidate =
+                crate::agent_task_promotion::candidate_fingerprint(&repo.display().to_string())
+                    .unwrap();
+            let options: AgentTaskPromotionRequest = serde_json::from_value(json!({
+                "source":"{}", "to_worktree":"fixture", "gates":{
+                    "verify":["printf must-not-run"],
+                    "gate_environment":{"hydrate_rust_cache":false}
+                }
+            }))
+            .unwrap();
+
+            let report = run_promotion_gates(&options, repo, Some(&candidate), None, store)
+                .expect("local gates run against the destination workspace");
+
+            assert!(repo.join("hydration-count").is_file());
+            assert!(report
+                .destination_gate_setup
+                .iter()
+                .any(|setup| setup.status
+                    == homeboy_core::deps::DependencyHydrationStatus::Succeeded));
+            assert!(report.dependencies_materialized);
+        });
+    }
+
     #[test]
     fn executed_lab_tree_mismatch_is_rejected_at_real_checkout_binding_boundary() {
         with_git_candidate(|repo, store| {
@@ -2893,6 +2989,7 @@ fn run_declared_promotion_test(
     )?;
     let mut gate_environment = options.gates.gate_environment.clone();
     gate_environment.hydrate_rust_cache &= options.gates.hydrate_dependencies;
+    gate_environment.hydrate_dependencies &= options.gates.hydrate_dependencies;
     let supervision = GATE_SUPERVISION.with(|slot| slot.borrow().clone());
     let timeout = plan.suite_timeout();
     let supervision = supervision.map(|supervision| crate::agent_task_gate::GateSupervision {
@@ -2998,7 +3095,7 @@ fn gate_setup_failure(classification: &str, component: &str, error: Error) -> Er
     failure
 }
 
-fn gate_setup_outcome_failure(
+pub(crate) fn gate_setup_outcome_failure(
     classification: &str,
     outcome: &homeboy_core::deps::DependencyHydrationOutcome,
 ) -> Error {
@@ -3310,8 +3407,10 @@ fn run_promotion_gate(
     let supervision = GATE_SUPERVISION.with(|slot| slot.borrow().clone());
     let mut gate_environment = options.gates.gate_environment.clone();
     // A dependency-hydration opt-out also opts out of controller Rust cache
-    // hydration; verification then runs solely with its isolated gate state.
+    // hydration, and of the runner-side hydration a Lab gate performs; the
+    // verification then runs solely with its isolated gate state.
     gate_environment.hydrate_rust_cache &= options.gates.hydrate_dependencies;
+    gate_environment.hydrate_dependencies &= options.gates.hydrate_dependencies;
     if gate_environment.lab_runner.is_none() {
         gate_environment.lab_runner = crate::agent_task_gate::placement::declared_runner(command)?;
     }
