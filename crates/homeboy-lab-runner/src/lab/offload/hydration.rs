@@ -25,6 +25,21 @@ use super::*;
 
 pub(crate) const HYDRATION_SCHEMA: &str = "homeboy/lab-workspace-dependency-hydration/v1";
 
+pub(crate) const HYDRATED: &str = "hydrated";
+pub(crate) const SKIPPED_NO_PROVIDER: &str = "skipped_no_provider";
+pub(crate) const REUSED_PREPARED_CACHE: &str = "reused_prepared_cache";
+pub(crate) const RESTORED_CONTROLLER_CACHE: &str = "restored_controller_cache";
+pub(crate) const NOT_APPLIED: &str = "not_applied";
+/// Every status a recorded hydration outcome can carry. Durable receipts
+/// accept exactly these, so a new outcome cannot be rejected as tampering.
+pub(crate) const RECORDED_HYDRATION_STATUSES: [&str; 5] = [
+    HYDRATED,
+    SKIPPED_NO_PROVIDER,
+    REUSED_PREPARED_CACHE,
+    RESTORED_CONTROLLER_CACHE,
+    NOT_APPLIED,
+];
+
 /// Per-provider result of hydrating a materialized runner workspace. Mirrors the
 /// shape operators read from `homeboy runner job logs`: the provider that ran,
 /// the install command, how long it took, and its exit status.
@@ -63,7 +78,7 @@ impl LabWorkspaceHydrationOutput {
     pub(crate) fn skipped_no_provider(workspace: &str) -> Self {
         Self {
             schema: HYDRATION_SCHEMA,
-            status: "skipped_no_provider",
+            status: SKIPPED_NO_PROVIDER,
             workspace: workspace.to_string(),
             steps: Vec::new(),
             cache_source: None,
@@ -74,7 +89,7 @@ impl LabWorkspaceHydrationOutput {
     fn reused_prepared_cache(workspace: &str) -> Self {
         Self {
             schema: HYDRATION_SCHEMA,
-            status: "reused_prepared_cache",
+            status: REUSED_PREPARED_CACHE,
             workspace: workspace.to_string(),
             steps: Vec::new(),
             cache_source: Some("runner_prepared_source".to_string()),
@@ -227,7 +242,7 @@ fn hydrate_lab_workspace_dependencies_with_policy(
             restore_controller_dependency_package(runner_id, remote_path, &package, &plan)?;
             return Ok(LabWorkspaceHydrationOutput {
                 schema: HYDRATION_SCHEMA,
-                status: "restored_controller_cache",
+                status: RESTORED_CONTROLLER_CACHE,
                 workspace: remote_path.to_string(),
                 steps: Vec::new(),
                 cache_source: Some("controller_package".to_string()),
@@ -288,7 +303,7 @@ fn hydrate_lab_workspace_dependencies_with_policy(
 
     Ok(LabWorkspaceHydrationOutput {
         schema: HYDRATION_SCHEMA,
-        status: "hydrated",
+        status: HYDRATED,
         workspace: remote_path.to_string(),
         steps,
         cache_source: None,
@@ -695,7 +710,7 @@ pub(crate) fn dependency_hydration_metadata(
     match record {
         LabWorkspaceHydrationRecord::NotApplied { reason } => serde_json::json!({
             "schema": HYDRATION_SCHEMA,
-            "status": "not_applied",
+            "status": NOT_APPLIED,
             "reason": reason,
         }),
         LabWorkspaceHydrationRecord::Applied(output) => serde_json::to_value(output)

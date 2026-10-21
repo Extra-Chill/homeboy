@@ -1964,12 +1964,13 @@ impl DurableLabHydrationStage {
                 .get("schema")
                 .and_then(Value::as_str)
                 != Some(crate::lab::offload::HYDRATION_SCHEMA)
-            || !matches!(
-                self.hydration_metadata
-                    .get("status")
-                    .and_then(Value::as_str),
-                Some("hydrated") | Some("skipped_no_provider") | Some("not_applied")
-            )
+            || !self
+                .hydration_metadata
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| {
+                    crate::lab::offload::RECORDED_HYDRATION_STATUSES.contains(&status)
+                })
             || self.hydration_metadata != hydration_metadata_from_record(&self.hydration_record)
             || self.execution_ids != step_execution_ids
             || self.dispatch_inputs.get("workspace_stage") != Some(&workspace.stage)
@@ -1991,7 +1992,7 @@ fn hydration_metadata_from_record(record: &Value) -> Value {
         Value::Object(value) if value.len() == 1 => match value.iter().next() {
             Some((kind, Value::Object(payload))) if kind == "NotApplied" => json!({
                 "schema": crate::lab::offload::HYDRATION_SCHEMA,
-                "status": "not_applied",
+                "status": crate::lab::offload::NOT_APPLIED,
                 "reason": payload.get("reason").cloned().unwrap_or(Value::Null),
             }),
             Some((kind, payload)) if kind == "Applied" => payload.clone(),
@@ -8134,6 +8135,76 @@ mod tests {
         assert!(receipt
             .validate(&different_runner, &checkpoint, &workspace, &runtime)
             .is_err());
+    }
+
+    #[test]
+    fn durable_hydration_receipt_accepts_every_recorded_cache_outcome() {
+        let request = execution_request();
+        let workspace = durable_workspace_state(&request);
+        let plan = serde_json::to_value(homeboy_core::plan::HomeboyPlan::for_description(
+            homeboy_core::plan::PlanKind::LabOffload,
+            "hydration",
+        ))
+        .expect("plan");
+        let runtime = DurableLabRuntimeStage {
+            schema: "homeboy/durable-lab-runtime-stage/v1".to_string(),
+            run_id: request.recipe.run_id.clone(),
+            runner_id: request.recipe.runner_id.clone(),
+            recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
+            plan_digest: canonical_digest(&request.durable_agent_task_plan).expect("plan digest"),
+            workspace_id: workspace.workspace_id.clone(),
+            runtime_id: "runtime-1".to_string(),
+            output: json!({ "remote_cwd": workspace.workspace_id, "plan": plan }),
+        };
+        // A warm runner reports its prepared cache instead of installing.
+        for (status, cache_source) in [
+            (
+                crate::lab::offload::REUSED_PREPARED_CACHE,
+                "runner_prepared_source",
+            ),
+            (
+                crate::lab::offload::RESTORED_CONTROLLER_CACHE,
+                "controller_package",
+            ),
+        ] {
+            let hydration_record = json!({ "Applied": {
+                "schema": crate::lab::offload::HYDRATION_SCHEMA,
+                "status": status,
+                "workspace": workspace.workspace_id,
+                "steps": [],
+                "cache_source": cache_source,
+            }});
+            let hydration_id = canonical_digest(&hydration_record).expect("hydration digest");
+            let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+            checkpoint.phase = LabStagingPhase::DispatchRunner;
+            checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
+            checkpoint.workspace_id = Some(workspace.workspace_id.clone());
+            checkpoint.runtime_id = Some("runtime-1".to_string());
+            checkpoint.hydration_id = Some(hydration_id.clone());
+            let receipt = DurableLabHydrationStage {
+                schema: "homeboy/durable-lab-hydration-stage/v1".to_string(),
+                run_id: request.recipe.run_id.clone(),
+                runner_id: request.recipe.runner_id.clone(),
+                recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
+                plan_digest: canonical_digest(&request.durable_agent_task_plan)
+                    .expect("plan digest"),
+                workspace_id: workspace.workspace_id.clone(),
+                runtime_id: runtime.runtime_id.clone(),
+                hydration_id,
+                plan: runtime.output["plan"].clone(),
+                hydration_record: hydration_record.clone(),
+                hydration_metadata: hydration_metadata_from_record(&hydration_record),
+                execution_ids: Vec::new(),
+                dispatch_inputs: json!({
+                    "workspace_stage": workspace.stage,
+                    "runtime_output": runtime.output,
+                    "plan": runtime.output["plan"],
+                }),
+            };
+            receipt
+                .validate(&request, &checkpoint, &workspace, &runtime)
+                .unwrap_or_else(|error| panic!("{status} receipt must bind: {error}"));
+        }
     }
 
     #[test]
