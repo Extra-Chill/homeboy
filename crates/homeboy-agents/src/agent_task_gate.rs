@@ -8732,9 +8732,17 @@ mod tests {
         assert!(copied.join("gate-owned").exists());
         assert!(!selected.join("gate-owned").exists());
         let gate_home = worktree.path().join("tmp/gate-home");
-        let _gate_home = EnvVarGuard::set(&[("HOME", gate_home.as_path())]);
+        let gate_config_root = gate_home.join(".config/homeboy");
         assert_eq!(
-            homeboy_core::extension::catalog::available_extension_ids(),
+            homeboy_core::paths::homeboy_root_env_default_under_home(
+                homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+                &gate_home,
+            )
+            .as_deref(),
+            Some(gate_config_root.as_path())
+        );
+        assert_eq!(
+            homeboy_core::extension::catalog::available_extension_ids_in_root(&gate_config_root),
             vec!["selected-fixture"]
         );
         assert_eq!(
