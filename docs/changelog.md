@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.431.14] - 2026-10-21
+
+### Changed
+- Accept cache-served hydration in durable Lab receipts
+
 ## [0.431.13] - 2026-10-21
 
 ### Changed
