@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.8.1] - 2026-10-21
+
+### Fixed
+- resolve engines.node to the newest LTS the range admits
+
 ## [3.8.0] - 2026-10-14
 
 ### Added
