@@ -35,6 +35,10 @@ homeboy_runner_init() {
     PLUGIN_PATH="$COMPONENT_PATH"
     EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:?HOMEBOY_EXTENSION_PATH is required}"
 }
+# Stands in for Homeboy's sidecar writer (loaded by --sidecar-writer).
+homeboy_sidecar_emit() {
+    [ "$1" = test.failure ] && printf '%s\n' "$2" >> "$HOMEBOY_TEST_FAILURES_FILE"
+}
 SH
 export HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude"
 
@@ -369,6 +373,7 @@ run_changed_scope() {
     HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
     HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$results_writer" \
     HOMEBOY_TEST_RESULTS_FILE="${outfile}.results.json" \
+    HOMEBOY_TEST_FAILURES_FILE="${outfile}.failures.jsonl" \
     HOMEBOY_CHANGED_TEST_FILES="$changed" \
     HOMEBOY_SETTINGS_JSON="${CHANGED_SCOPE_SETTINGS:-$component_test_settings}" \
         bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "$outfile" 2>&1
@@ -456,6 +461,8 @@ if [ "$standalone_failure_status" -eq 0 ]; then
 fi
 assert_contains "${TMPDIR}/standalone-failure.out" "PHP_SMOKE_FAIL:tests/failing-smoke.php:exit=3"
 jq -e '.total == 1 and .passed == 0 and .failed == 1 and .skipped == 0 and .source == "changed-scope-host-php"' "${TMPDIR}/standalone-failure.out.results.json" >/dev/null
+# The failure is attributed to its inventory member ID (the relative path).
+jq -se 'length == 1 and .[0].test_id == "tests/failing-smoke.php" and .[0].test_file == "tests/failing-smoke.php" and .[0].message == "standalone PHP smoke exited 3"' "${TMPDIR}/standalone-failure.out.failures.jsonl" >/dev/null
 
 mixed_failure_status=0
 CHANGED_SCOPE_SETTINGS="$failing_test_settings" run_changed_scope "${TMPDIR}/mixed-failure.out" $'tests/Unit/ImportAgentAbilityTest.php\ntests/failing-smoke.php' || mixed_failure_status=$?

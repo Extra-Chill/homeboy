@@ -418,7 +418,6 @@ async function readDiscoveryResult(stdoutPath) {
   if (result?.schema !== 'wp-codebox/phpunit-discovery/v1'
     || result.plugin_slug !== slug
     || !Array.isArray(result.files)
-    || result.files.length === 0
     || result.files.some((file) => typeof file !== 'string' || !file.startsWith('/'))) {
     throw new Error('WP Codebox returned an invalid PHPUnit discovery result.');
   }

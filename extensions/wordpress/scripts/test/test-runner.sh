@@ -16,7 +16,8 @@ SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../../scripts/lib" && p
 
 # shellcheck source=/dev/null
 source "${SHARED_LIB_DIR}/runner-harness.sh"
-homeboy_runner_harness_init --bash 4 --component-alias PLUGIN_PATH
+homeboy_runner_harness_init --bash 4 --sidecar-writer --component-alias PLUGIN_PATH
+homeboy_runner_harness_load_adapter test-failures-adapter
 
 SMOKE_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP:-${SCRIPT_DIR}/test-runner-host-smoke-wp.sh}"
 WP_CODEBOX_RUNNER="${HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX:-${SCRIPT_DIR}/test-runner-wp-codebox.sh}"
@@ -297,6 +298,16 @@ homeboy_wordpress_standalone_core_root() {
     fi
 }
 
+homeboy_wordpress_record_standalone_php_failure() {
+    local rel_path="$1"
+    local exit_code="$2"
+    local failure_json
+
+    homeboy_test_failures_enabled || return 0
+    failure_json="$(homeboy_test_failure_record_json standalone-php "$rel_path" "" "$rel_path" "" "standalone PHP smoke exited ${exit_code}" test_failure)" || return 1
+    homeboy_test_failure_emit_record_json "$failure_json"
+}
+
 homeboy_wordpress_run_standalone_php_smoke_files() {
     local smoke_files_raw="$1"
     local php_bin="${HOMEBOY_PHP_BIN:-php}"
@@ -342,6 +353,11 @@ homeboy_wordpress_run_standalone_php_smoke_files() {
         else
             exit_code=$?
             echo "PHP_SMOKE_FAIL:${rel_path}:exit=${exit_code}"
+            # The test ID is the inventory member ID (the component-relative
+            # path), so core can attribute this failure to its planned test.
+            # A record that cannot be written leaves the failure unattributed;
+            # the failing exit status below still stands.
+            homeboy_wordpress_record_standalone_php_failure "$rel_path" "$exit_code" || true
             failed=$((failed + 1))
             last_failure_exit="$exit_code"
         fi

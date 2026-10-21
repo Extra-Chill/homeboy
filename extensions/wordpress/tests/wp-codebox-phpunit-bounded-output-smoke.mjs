@@ -53,7 +53,7 @@ if (process.env.BOUNDED_OUTPUT_FIXTURE === 'failure') {
 const discovery = {
   schema: 'wp-codebox/phpunit-discovery/v1',
   plugin_slug: options.pluginSlug,
-  files: ['/wordpress/wp-content/plugins/sample-plugin/tests/SampleTest.php'],
+  files: process.env.BOUNDED_OUTPUT_FIXTURE === 'empty' ? [] : ['/wordpress/wp-content/plugins/sample-plugin/tests/SampleTest.php'],
 };
 process.stdout.write(JSON.stringify({
   executions: [{ command: 'wordpress.phpunit', stdout: JSON.stringify(discovery) }],
@@ -89,6 +89,12 @@ try {
     plugin_slug: 'sample-plugin',
     files: ['/wordpress/wp-content/plugins/sample-plugin/tests/SampleTest.php'],
   });
+
+  // A standalone-only component has no PHPUnit files. Empty discovery is a
+  // valid answer; test-inventory.py decides whether the whole suite is empty.
+  const emptyDiscovery = runAdapter('empty');
+  assert.equal(emptyDiscovery.status, 0, emptyDiscovery.stderr);
+  assert.deepEqual(JSON.parse(emptyDiscovery.stdout).files, []);
 
   const failure = runAdapter('failure');
   assert.equal(failure.status, 1, failure.stderr);
