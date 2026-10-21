@@ -765,6 +765,9 @@ fn bounded_exact_record(run_id: &str) -> homeboy::core::Result<AgentTaskRunRecor
 }
 
 fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) {
+    if crate::commands::agent_task_summary::live_gate_verifying(value) {
+        return;
+    }
     let Ok(record) = bounded_exact_record(run_id) else {
         return;
     };

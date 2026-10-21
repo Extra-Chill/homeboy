@@ -4133,12 +4133,69 @@ fn project_summary_fields(
     resource.gates = gates(record, delivery.as_ref());
     resource.publication = delivery.as_ref().and_then(publication);
     resource.recovery = projected_cook_recovery(record);
+    project_live_gate_verification(&mut resource, record);
     if resource.state.is_terminal() {
         resource.finished_at = record.updated_at.clone();
     }
     resource.evidence = evidence_refs(record);
     resource.artifacts = compact_status_artifact_refs(artifact_refs(record));
     Ok(resource)
+}
+
+/// Phase a Cook projects while a live driver verifies its promoted candidate.
+pub const LIVE_GATE_VERIFYING_PHASE: &str = "verifying";
+
+/// A promotion latches its attempt `candidate_recoverable` with a
+/// `verification_pending` delivery before its gates run, so a controller that
+/// dies mid-gate leaves a recoverable run (#16058). While the Cook driver is
+/// still alive that latch is not the Cook's verdict: read surfaces project it
+/// as running in the `verifying` phase, with no recovery step. The durable
+/// run state is unchanged; this is a projection only.
+fn project_live_gate_verification(resource: &mut ControlPlaneRun, record: &AgentTaskRunRecord) {
+    if !awaits_gate_verification(record) {
+        return;
+    }
+    let Ok(store) = crate::agent_task_service::CookRecipeStore::from_current_data_root() else {
+        return;
+    };
+    project_live_gate_verification_in(resource, record, &store);
+}
+
+fn awaits_gate_verification(record: &AgentTaskRunRecord) -> bool {
+    record.state() == AgentTaskRunState::CandidateRecoverable
+        && CookDelivery::from_run_metadata(&record.metadata)
+            .is_some_and(|delivery| delivery.awaits_verification())
+}
+
+fn project_live_gate_verification_in(
+    resource: &mut ControlPlaneRun,
+    record: &AgentTaskRunRecord,
+    store: &crate::agent_task_service::CookRecipeStore,
+) {
+    if !awaits_gate_verification(record) {
+        return;
+    }
+    let Some(cook_id) = resource
+        .mission
+        .as_ref()
+        .map(|mission| mission.as_str().to_string())
+    else {
+        return;
+    };
+    // Only the Cook's latest attempt is what its live driver is verifying.
+    let latest = store.load_recipe(&cook_id).ok().map_or(true, |recipe| {
+        recipe
+            .attempts
+            .iter()
+            .max_by_key(|attempt| attempt.attempt)
+            .map_or(true, |attempt| attempt.run_id == record.run_id)
+    });
+    if !latest || !matches!(store.foreign_cook_driver(&cook_id), Ok(Some(_))) {
+        return;
+    }
+    resource.state = ControlPlaneRunState::Running;
+    resource.phase = Some(LIVE_GATE_VERIFYING_PHASE.to_string());
+    resource.recovery = None;
 }
 
 /// The one recovery step (#15925) projected into status and review when the
@@ -6436,6 +6493,68 @@ mod tests {
         let projected = project_record(&record, None).expect("project run");
         assert_eq!(projected.state, ControlPlaneRunState::CandidateRecoverable);
         assert_ne!(projected.state, ControlPlaneRunState::Succeeded);
+    }
+
+    fn live_gate_driver_candidate() -> AgentTaskRunRecord {
+        let mut value = serde_json::to_value(record(AGENT_TASK_RUN)).unwrap();
+        value["state"] = json!("candidate_recoverable");
+        let mut record: AgentTaskRunRecord = serde_json::from_value(value).unwrap();
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/promotion/status",
+            json!("verification_pending"),
+        );
+        record
+    }
+
+    /// #16058: a gate a live driver is still running is verifying, not
+    /// recoverable.
+    #[test]
+    fn live_gate_driver_projects_a_verifying_cook_with_no_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            crate::agent_task_service::CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let record = live_gate_driver_candidate();
+        let _driver = store
+            .try_acquire_cook_driver(AGENT_TASK_COOK)
+            .unwrap()
+            .expect("driver lock");
+
+        // Observed from another thread, as another controller would.
+        let projected = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut resource = super::project_summary_fields(&record, None).unwrap();
+                    assert_eq!(resource.state, ControlPlaneRunState::CandidateRecoverable);
+                    super::project_live_gate_verification_in(&mut resource, &record, &store);
+                    resource
+                })
+                .join()
+                .unwrap()
+        });
+        assert_eq!(projected.state, ControlPlaneRunState::Running);
+        assert_eq!(
+            projected.phase.as_deref(),
+            Some(super::LIVE_GATE_VERIFYING_PHASE)
+        );
+        assert!(projected.recovery.is_none());
+        // The durable latch is untouched.
+        assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
+    }
+
+    #[test]
+    fn live_gate_driver_absent_keeps_the_candidate_recoverable() {
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            crate::agent_task_service::CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let record = live_gate_driver_candidate();
+        let mut resource = super::project_summary_fields(&record, None).unwrap();
+        super::project_live_gate_verification_in(&mut resource, &record, &store);
+        assert_eq!(resource.state, ControlPlaneRunState::CandidateRecoverable);
+        assert_ne!(
+            resource.phase.as_deref(),
+            Some(super::LIVE_GATE_VERIFYING_PHASE)
+        );
     }
 
     /// Status projection names the model the provider actually dispatched
