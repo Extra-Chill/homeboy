@@ -1,5 +1,6 @@
 use crate::agent_task_prompt_template::{
-    apply_prompt_template, merge_homeboy_facts, PromptPurpose, HOMEBOY_CONTEXT_INPUT_KEY,
+    apply_prompt_template, merge_homeboy_facts, replace_metadata_keeping_prompt_base,
+    PromptPurpose, HOMEBOY_CONTEXT_INPUT_KEY,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -600,29 +601,33 @@ fn build_follow_up_request(
         .clone()
         .or_else(|| worktree_root_hint(&options.promotion_report));
     request.policy.grant_workspace_read_tool();
-    request.metadata = json!({
-        "cook_loop": {
-            "kind": "deterministic-gate-feedback",
-            "attempt": next_attempt,
-            "previous_attempt": options.attempt,
-            "max_attempts": options.max_attempts,
-            "source_task_id": options.source_request.task_id,
-            "source_run_id": options.source_run_id,
-            "failed_gate_count": failed_gates.len(),
-            "private_failed_gate_count": failed_gates.iter().filter(|gate| gate.visibility == AgentTaskGateVisibility::Private).count(),
-            "failure_progression": failure_progression,
-            "retry_policy": retry_policy(failure_progression),
-        }
-    });
+    replace_metadata_keeping_prompt_base(
+        &mut request,
+        json!({
+            "cook_loop": {
+                "kind": "deterministic-gate-feedback",
+                "attempt": next_attempt,
+                "previous_attempt": options.attempt,
+                "max_attempts": options.max_attempts,
+                "source_task_id": options.source_request.task_id,
+                "source_run_id": options.source_run_id,
+                "failed_gate_count": failed_gates.len(),
+                "private_failed_gate_count": failed_gates.iter().filter(|gate| gate.visibility == AgentTaskGateVisibility::Private).count(),
+                "failure_progression": failure_progression,
+                "retry_policy": retry_policy(failure_progression),
+            }
+        }),
+    );
     request
 }
 
 /// Build a follow-up attempt for an attempt that produced no change (#15364).
 ///
 /// Unlike gate remediation, there is no candidate to repair, so the original
-/// task instructions and inputs are preserved and the feedback is appended.
-/// Any gate failures observed on the unchanged workspace are included, because
-/// they describe exactly what the task still has to fix.
+/// task instructions and inputs are preserved. The feedback travels as data in
+/// `inputs.cook_loop` (`no_change_feedback`, attempt counters, and any gate
+/// failures observed on the unchanged workspace), rendered by the operator's
+/// `no_change` template.
 fn build_no_change_follow_up_request(
     options: &AgentTaskCookLoopOptions,
     failed_gates: &[AgentTaskCookLoopGateFailure],
@@ -636,11 +641,6 @@ fn build_no_change_follow_up_request(
         .parent_plan_id
         .clone()
         .or_else(|| options.source_run_id.clone());
-    request.instructions = format!(
-        "{}\n\n{}",
-        options.source_request.instructions.trim_end(),
-        no_change_feedback(options, &agent_visible_failed_gates),
-    );
     if !request.inputs.is_object() {
         request.inputs = json!({});
     }
@@ -678,54 +678,24 @@ fn build_no_change_follow_up_request(
         .clone()
         .or_else(|| worktree_root_hint(&options.promotion_report));
     request.policy.grant_workspace_read_tool();
-    request.metadata = json!({
-        "cook_loop": {
-            "kind": "no-change-feedback",
-            "attempt": next_attempt,
-            "previous_attempt": options.attempt,
-            "max_attempts": options.max_attempts,
-            "source_task_id": options.source_request.task_id,
-            "source_run_id": options.source_run_id,
-            "failed_gate_count": failed_gates.len(),
-        }
-    });
+    replace_metadata_keeping_prompt_base(
+        &mut request,
+        json!({
+            "cook_loop": {
+                "kind": "no-change-feedback",
+                "attempt": next_attempt,
+                "previous_attempt": options.attempt,
+                "max_attempts": options.max_attempts,
+                "source_task_id": options.source_request.task_id,
+                "source_run_id": options.source_run_id,
+                "failed_gate_count": failed_gates.len(),
+            }
+        }),
+    );
+    // The feedback is data in `inputs.cook_loop`; wording is the operator's
+    // `no_change` template.
+    apply_prompt_template(&mut request, PromptPurpose::NoChange);
     request
-}
-
-fn no_change_feedback(
-    options: &AgentTaskCookLoopOptions,
-    failed_gates: &[AgentTaskCookLoopGateFailure],
-) -> String {
-    let next_attempt = options.attempt.saturating_add(1);
-    let gates = if failed_gates.is_empty() {
-        String::new()
-    } else {
-        let list = failed_gates
-            .iter()
-            .map(|failure| {
-                let label = if failure.command.is_empty() {
-                    failure.gate_id.as_str()
-                } else {
-                    failure.command.as_str()
-                };
-                let line = format!(
-                    "- `{}` exited {}: {}",
-                    label, failure.exit_code, failure.summary
-                );
-                if failure.failure_excerpt.is_empty() {
-                    line
-                } else {
-                    format!("{line}\n\n```text\n{}\n```", failure.failure_excerpt)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("\n\nVerification of the unchanged workspace still fails:\n{list}")
-    };
-    format!(
-        "## Homeboy cook loop: attempt {next_attempt} of {max}\n\nThe previous attempt finished without changing any files in the workspace.{gates}\n\nYour deliverable is a committed change in this workspace that completes the task above, with tests. Build on what the previous attempt learned rather than restarting the investigation. If the task genuinely needs no change, declare a verified intentional no-change verdict instead of returning an empty result.",
-        max = options.max_attempts,
-    )
 }
 
 /// Heading of the gate failure section appended to a gate-fix prompt.
@@ -878,17 +848,20 @@ fn build_review_form_follow_up_request(
     // while the explicit secret attachments and runtime authority stay removed.
     request.policy.write = "none".to_string();
     request.policy.apply = "none".to_string();
-    request.metadata = json!({
-        "cook_loop": {
-            "kind": "review_form_only",
-            "attempt": next_attempt,
-            "previous_attempt": options.attempt,
-            "max_attempts": options.max_attempts,
-            "source_task_id": options.source_request.task_id,
-            "source_run_id": options.source_run_id,
-            "review_form_timeout_ms": review_form_timeout_ms,
-        }
-    });
+    replace_metadata_keeping_prompt_base(
+        &mut request,
+        json!({
+            "cook_loop": {
+                "kind": "review_form_only",
+                "attempt": next_attempt,
+                "previous_attempt": options.attempt,
+                "max_attempts": options.max_attempts,
+                "source_task_id": options.source_request.task_id,
+                "source_run_id": options.source_run_id,
+                "review_form_timeout_ms": review_form_timeout_ms,
+            }
+        }),
+    );
     request
 }
 
@@ -1995,12 +1968,11 @@ mod tests {
         assert_eq!(verified.status, AgentTaskCookLoopStatus::RetryRequested);
         let request = verified.follow_up_request.expect("no-change follow-up");
         assert_eq!(request.task_id, "cook-homeboy-no-change-2");
-        assert!(request.instructions.starts_with("Cook the issue"));
-        assert!(request
-            .instructions
-            .contains("finished without changing any files"));
-        assert!(request.instructions.contains("committed change"));
+        // Homeboy authors no feedback prose: the model sees the operator's
+        // prompt, and the feedback is data for the operator's template.
+        assert_eq!(request.instructions, source_request().instructions);
         assert_eq!(request.inputs["cook_loop"]["no_change_feedback"], true);
+        assert_eq!(request.inputs["cook_loop"]["max_attempts"], 3);
         assert_eq!(request.inputs["cook_loop"]["next_attempt"], 2);
         assert_eq!(request.metadata["cook_loop"]["kind"], "no-change-feedback");
         assert_eq!(request.expected_artifacts, vec!["patch".to_string()]);
@@ -2016,15 +1988,69 @@ mod tests {
         ));
         assert_eq!(failed.status, AgentTaskCookLoopStatus::RetryRequested);
         let request = failed.follow_up_request.expect("no-change follow-up");
-        assert!(request
-            .instructions
-            .contains("Verification of the unchanged workspace still fails"));
+        assert_eq!(request.instructions, source_request().instructions);
         assert_eq!(
             request.inputs["cook_loop"]["failed_gates"]
                 .as_array()
                 .map(Vec::len),
             Some(1)
         );
+    }
+
+    /// #16189: each follow-up renders from the operator's base prompt, so a
+    /// template applied to one attempt is replaced, never stacked, on the next.
+    #[test]
+    fn prompt_template_follow_ups_keep_the_operator_base_prompt() {
+        let base = source_request().instructions;
+        let mut templated = source_request();
+        templated.instructions = format!("{base}\n\nattempt template text");
+        templated.metadata = json!({
+            crate::agent_task_prompt_template::BASE_INSTRUCTIONS_METADATA_KEY: base,
+        });
+        let options = |source_request, status, gates: Vec<_>| AgentTaskCookLoopOptions {
+            source_request,
+            promotion_report: promotion_report_with_changed_files(status, gates, Vec::new()),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-template-base".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: None,
+            metadata: Value::Null,
+        };
+
+        let no_change = evaluate_cook_loop(options(
+            templated.clone(),
+            AgentTaskPromotionStatus::VerifiedNoChanges,
+            vec![green_gate()],
+        ))
+        .follow_up_request
+        .expect("no-change follow-up");
+        let gate_fix = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![failed_gate()],
+            ),
+            ..options(templated, AgentTaskPromotionStatus::GateFailed, Vec::new())
+        })
+        .follow_up_request
+        .expect("gate-fix follow-up");
+        for request in [no_change, gate_fix] {
+            assert!(
+                !request.instructions.contains("attempt template text"),
+                "{}: a prior attempt's template stacked: {}",
+                request.task_id,
+                request.instructions
+            );
+            assert!(request.instructions.starts_with(&base));
+            assert_eq!(
+                request.metadata[crate::agent_task_prompt_template::BASE_INSTRUCTIONS_METADATA_KEY],
+                base,
+                "{}: the next attempt must still know the operator base",
+                request.task_id
+            );
+            assert!(request.metadata["cook_loop"]["kind"].is_string());
+        }
     }
 
     /// #15294: an attempt Homeboy proved unchanged promotes as `NoChanges`

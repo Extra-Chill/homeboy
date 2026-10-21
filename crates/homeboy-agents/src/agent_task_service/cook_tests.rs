@@ -18464,11 +18464,14 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
         let routing = &follow_up_task.metadata["provider_readiness_routing"];
         assert_eq!(routing["next_rotation_index"], 2);
         assert_eq!(routing["provider_rotations_used"], 1);
-        assert!(
-            follow_up_task.instructions.contains("attempt 2 of 2"),
-            "the retry is still the same task: {}",
-            follow_up_task.instructions
+        assert_eq!(
+            follow_up_task.instructions, "complete the task",
+            "the retry is still the same task"
         );
+        let cook_loop = &follow_up_task.inputs["cook_loop"];
+        assert_eq!(cook_loop["no_change_feedback"], true);
+        assert_eq!(cook_loop["next_attempt"], 2);
+        assert_eq!(cook_loop["max_attempts"], 2);
     });
 }
 
