@@ -2491,8 +2491,7 @@ fn run_gate_argv_local(
         selected_gate_environment(&gate_environment, execution.runtime_tmpdir)?;
     selected_environment.configure_rust_cache(cwd)?;
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
-    selected_environment.configure_linked_extensions(cwd)?;
-    selected_environment.carry_declared_secret_env(cwd);
+    selected_environment.configure_component_inputs(cwd)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
     if let Some(plan) = declared_plan {
@@ -2859,6 +2858,16 @@ impl SelectedGateEnvironment {
     /// directories under `extensions/` are shared assets (e.g. `scripts/`,
     /// `dependency-adapters/`) referenced by extensions and are linked too.
     /// Ids already materialized from explicit `extension_inputs` are kept.
+    /// Expose the admitted component's linked extensions and declared test
+    /// secrets to the gate. Preflight probes and gate execution both call this,
+    /// so a nested `homeboy review test` resolves identically in each
+    /// (Extra-Chill/homeboy#16268).
+    fn configure_component_inputs(&mut self, cwd: &Path) -> Result<()> {
+        self.configure_linked_extensions(cwd)?;
+        self.carry_declared_secret_env(cwd);
+        Ok(())
+    }
+
     /// Carry the admitted component's declared test secrets into the gate.
     ///
     /// `replace` mode clears the child environment and HOME isolation hides
@@ -4567,6 +4576,7 @@ fn preflight_gate_toolchains_local(
     if prepare_runner_cache && !requirements.is_empty() {
         selected_environment.configure_rust_cache(cwd)?;
     }
+    selected_environment.configure_component_inputs(cwd)?;
     // The deadline covers declared probe execution. Controller scheduling before
     // the first child starts cannot make an otherwise successful probe fail.
     let mut started = None;
@@ -4636,7 +4646,7 @@ fn preflight_gate_toolchains_local(
                 format!(
                     "the probe exited {}: {}",
                     output.status.code().unwrap_or(1),
-                    text_tail(&stderr, 5),
+                    probe_failure_text(&stderr, &String::from_utf8_lossy(&output.stdout)),
                 )
             };
             return Err(toolchain_preflight_error(
@@ -4651,6 +4661,25 @@ fn preflight_gate_toolchains_local(
         }
     }
     Ok(())
+}
+
+/// What a failed probe said. Homeboy writes its error envelope to stdout and
+/// leaves stderr empty, so an empty stderr falls back to the envelope's
+/// `summary`, then to the stdout tail (Extra-Chill/homeboy#16268).
+fn probe_failure_text(stderr: &str, stdout: &str) -> String {
+    if !stderr.trim().is_empty() {
+        return text_tail(stderr, 5);
+    }
+    serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .ok()
+        .and_then(|envelope| {
+            envelope
+                .get("summary")
+                .or_else(|| envelope.pointer("/diagnostics/message"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| text_tail(stdout, 5))
 }
 
 fn validate_package_artifacts(
@@ -9948,6 +9977,89 @@ exit 2
                 && !error.message.contains("toolchain"),
             "{}",
             error.message
+        );
+    }
+
+    /// #16268: a nested `homeboy review test` gate probe runs with the same
+    /// component inputs as the gate itself. Under HOME isolation the probe must
+    /// see the component's host-installed extensions, or it rejects a gate the
+    /// operator's own shell passes; and a failed probe reports what Homeboy
+    /// said on stdout rather than an empty stderr.
+    #[cfg(unix)]
+    #[test]
+    fn gate_probe_sees_the_components_linked_extensions_under_isolated_home() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_mutex();
+        if !rerun_alone_to_replace_path(
+            "gate_probe_sees_the_components_linked_extensions_under_isolated_home",
+        ) {
+            return;
+        }
+        // This runs alone in a child process, so it owns HOME and PATH.
+        let host_home = tempfile::tempdir().expect("host home");
+        for name in homeboy_core::paths::HOMEBOY_ROOT_ENV_VARS {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("HOME", host_home.path());
+        let extension = host_home
+            .path()
+            .join(".config/homeboy/extensions/probe-ext");
+        fs::create_dir_all(&extension).expect("host extension");
+        fs::write(
+            extension.join("probe-ext.json"),
+            r#"{"id":"probe-ext","name":"Probe","version":"1.0.0"}"#,
+        )
+        .expect("extension manifest");
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        fs::write(
+            workspace.path().join("homeboy.json"),
+            r#"{"id":"probe-component","extensions":{"probe-ext":{}}}"#,
+        )
+        .expect("portable component");
+        let bin = tempfile::tempdir().expect("bin");
+        let homeboy = bin.path().join("homeboy");
+        // Stands in for the real CLI: the test capability resolves only when
+        // the component's extension is installed in the HOME it runs under,
+        // and a failure is reported the way Homeboy reports it, on stdout.
+        fs::write(
+            &homeboy,
+            r#"#!/bin/sh
+manifest="${HOMEBOY_CONFIG_ROOT:-$HOME/.config/homeboy}/extensions/probe-ext/probe-ext.json"
+[ -f "$manifest" ] && { echo '{"success":true,"data":{"preflight":"ready"}}'; exit 0; }
+echo '{"success":false,"summary":"no linked extensions provide test support: probe-ext"}'
+exit 2
+"#,
+        )
+        .expect("homeboy");
+        let mut permissions = fs::metadata(&homeboy).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&homeboy, permissions).expect("executable");
+        std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.path().display()));
+
+        let gates = VerifyGateOptions {
+            verify: vec!["homeboy review test probe-component".to_string()],
+            gate_environment: AgentTaskGateEnvironmentPolicy {
+                isolate_home: true,
+                ..AgentTaskGateEnvironmentPolicy::default()
+            },
+            ..VerifyGateOptions::default()
+        };
+        preflight_verify_gate_options(workspace.path(), &gates)
+            .expect("the probe sees the extension the gate will see");
+
+        fs::remove_dir_all(&extension).expect("uninstall host extension");
+        let error = preflight_verify_gate_options(workspace.path(), &gates)
+            .expect_err("without the extension the gate cannot run");
+        assert!(
+            error.details["cause"]["message"]
+                .as_str()
+                .is_some_and(|message| message.ends_with(
+                    "the probe exited 2: no linked extensions provide test support: probe-ext"
+                )),
+            "{}",
+            error.details["cause"]
         );
     }
 
