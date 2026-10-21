@@ -3711,9 +3711,7 @@ fn preflight_review_test_capability(cli: &Cli) -> homeboy::core::Result<()> {
         crate::commands::utils::args::PassthroughCommand::Test,
         &args.args,
     );
-    if args.should_use_self_check_dispatch(&passthrough_args)
-        && source.component.has_script(ExtensionCapability::Test)
-    {
+    if args.uses_component_script(&source.component, &passthrough_args)? {
         return Ok(());
     }
 

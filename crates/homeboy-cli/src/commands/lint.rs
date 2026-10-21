@@ -159,6 +159,32 @@ impl LintArgs {
             && !self.baseline_args.ratchet
     }
 
+    /// Whether the component's own `scripts.lint` runs this lint: either the
+    /// run is the plain self-check shape, or no linked extension provides lint
+    /// and the run asks for nothing only an extension can do. A script owns
+    /// its scope, so a changed-file scope, summary, or baseline selection
+    /// runs the whole script rather than failing for want of an extension
+    /// (#16196).
+    pub(crate) fn uses_component_script(
+        &self,
+        component: &homeboy::core::component::Component,
+    ) -> homeboy::core::Result<bool> {
+        if !component.has_script(ExtensionCapability::Lint) {
+            return Ok(false);
+        }
+        if self.should_use_self_check_dispatch() {
+            return Ok(true);
+        }
+        Ok(!self.fix
+            && self.ci_job.is_none()
+            && self.setting_args.setting.is_empty()
+            && self.setting_args.setting_json.is_empty()
+            && !homeboy::core::extension::resolve::has_linked_extension_for_capability(
+                component,
+                ExtensionCapability::Lint,
+            )?)
+    }
+
     /// Positional component id targeted by this run, if any (the
     /// `homeboy review lint <component>` form). Returns `None` when the component is
     /// auto-detected from the working directory.
@@ -182,9 +208,7 @@ pub fn run(args: LintArgs) -> CmdResult<LintCommandOutput> {
         None,
     )?;
 
-    if args.should_use_self_check_dispatch()
-        && source_ctx.component.has_script(ExtensionCapability::Lint)
-    {
+    if args.uses_component_script(&source_ctx.component)? {
         let runner =
             ObservedWorkflowRunner::create(format!("lint {} self-check", source_ctx.component_id))?;
         let observation = LintObservationAdapter::new(
@@ -577,6 +601,47 @@ mod tests {
             assert!(
                 !args.should_use_self_check_dispatch(),
                 "scoped or behavior-changing args must use main lint workflow: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn script_only_component_lints_with_its_script_on_scoped_review_shapes() {
+        let component: homeboy::core::component::Component = serde_json::from_value(
+            serde_json::json!({"id": "fixture", "scripts": {"lint": ["true"]}}),
+        )
+        .expect("script-only component");
+
+        for argv in [
+            vec!["lint", "fixture"],
+            vec!["lint", "fixture", "--changed-since", "origin/main"],
+            vec!["lint", "fixture", "--summary"],
+            vec!["lint", "fixture", "--baseline"],
+        ] {
+            let args = TestCli::try_parse_from(argv.clone())
+                .expect("lint args should parse")
+                .lint;
+            assert!(
+                args.uses_component_script(&component).expect("probe"),
+                "scripts.lint must own {argv:?}"
+            );
+        }
+        let mut review = TestCli::try_parse_from(["lint", "fixture"])
+            .expect("lint args should parse")
+            .lint;
+        review.force_main_workflow = true;
+        assert!(review.uses_component_script(&component).expect("probe"));
+
+        for argv in [
+            vec!["lint", "fixture", "--fix"],
+            vec!["lint", "fixture", "--setting", "mode=strict"],
+        ] {
+            let args = TestCli::try_parse_from(argv.clone())
+                .expect("lint args should parse")
+                .lint;
+            assert!(
+                !args.uses_component_script(&component).expect("probe"),
+                "extension-only lint behavior must not run the script: {argv:?}"
             );
         }
     }

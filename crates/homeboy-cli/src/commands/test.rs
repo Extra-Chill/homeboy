@@ -192,6 +192,38 @@ impl TestArgs {
     }
 }
 
+impl TestArgs {
+    /// Whether the component's own `scripts.test` runs this test: either the
+    /// run is the plain self-check shape, or no linked extension provides test
+    /// and the run asks for nothing only an extension can do. A script owns
+    /// its scope, so a changed-file scope or baseline selection runs the whole
+    /// script rather than failing for want of an extension (#16196).
+    pub(crate) fn uses_component_script(
+        &self,
+        component: &homeboy::core::component::Component,
+        cli_passthrough_args: &[String],
+    ) -> homeboy::core::Result<bool> {
+        if !component.has_script(ExtensionCapability::Test) {
+            return Ok(false);
+        }
+        if self.should_use_self_check_dispatch(cli_passthrough_args) {
+            return Ok(true);
+        }
+        Ok(!self.skip_lint
+            && !self.coverage
+            && self.coverage_min.is_none()
+            && !self.analyze
+            && !self.differential
+            && self.ci_job.is_none()
+            && cli_passthrough_args.is_empty()
+            && !self.setting_args.has_overrides()
+            && !homeboy::core::extension::resolve::has_linked_extension_for_capability(
+                component,
+                ExtensionCapability::Test,
+            )?)
+    }
+}
+
 /// Filter out homeboy-owned flags from trailing args before passing to extension scripts.
 ///
 /// Clap's `trailing_var_arg = true` + `allow_hyphen_values = true` captures all arguments
@@ -219,9 +251,7 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
     )?;
     let cli_passthrough_args = filter_homeboy_flags(&args.args);
 
-    if args.should_use_self_check_dispatch(&cli_passthrough_args)
-        && source_ctx.component.has_script(ExtensionCapability::Test)
-    {
+    if args.uses_component_script(&source_ctx.component, &cli_passthrough_args)? {
         let runner =
             ObservedWorkflowRunner::create(format!("test {} self-check", source_ctx.component_id))?;
         let observation = start_test_observation(
@@ -1866,6 +1896,46 @@ mod tests {
             assert!(
                 !args.should_use_self_check_dispatch(&filter_homeboy_flags(&args.args)),
                 "scoped or behavior-changing args must use main test workflow: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn script_only_component_tests_with_its_script_on_scoped_review_shapes() {
+        let component: homeboy::core::component::Component = serde_json::from_value(
+            serde_json::json!({"id": "fixture", "scripts": {"test": ["true"]}}),
+        )
+        .expect("script-only component");
+
+        for argv in [
+            vec!["test", "fixture"],
+            vec!["test", "fixture", "--changed-since", "origin/main"],
+            vec!["test", "fixture", "--baseline"],
+        ] {
+            let args = TestCli::try_parse_from(argv.clone())
+                .expect("test args should parse")
+                .test;
+            assert!(
+                args.uses_component_script(&component, &filter_homeboy_flags(&args.args))
+                    .expect("probe"),
+                "scripts.test must own {argv:?}"
+            );
+        }
+        for argv in [
+            vec!["test", "fixture", "--skip-lint"],
+            vec!["test", "fixture", "--coverage"],
+            vec!["test", "fixture", "--analyze"],
+            vec!["test", "fixture", "--setting", "runner=ci"],
+            vec!["test", "fixture", "--", "--filter=SmokeTest"],
+        ] {
+            let args = TestCli::try_parse_from(argv.clone())
+                .expect("test args should parse")
+                .test;
+            assert!(
+                !args
+                    .uses_component_script(&component, &filter_homeboy_flags(&args.args))
+                    .expect("probe"),
+                "extension-only test behavior must not run the script: {argv:?}"
             );
         }
     }
