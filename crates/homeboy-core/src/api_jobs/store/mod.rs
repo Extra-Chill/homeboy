@@ -1929,7 +1929,9 @@ impl JobStore {
         })
     }
 
-    /// The job admitted under a controller submission key, if it is retained.
+    /// The job admitted under a controller submission key. A job compacted
+    /// out of the store is answered from its durable replay tombstone, so a
+    /// parent awaiting it still observes its terminal status.
     pub(crate) fn controller_job_for_key(&self, idempotency_key: &str) -> Option<Job> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         if let Some(submission) = inner.controller_submissions.get(idempotency_key) {
@@ -1938,10 +1940,19 @@ impl JobStore {
             }
             return submission.terminal_job.clone();
         }
-        inner
-            .expired_controller_submissions
-            .get(idempotency_key)
-            .and_then(|submission| submission.terminal_job.clone())
+        if let Some(submission) = inner.expired_controller_submissions.get(idempotency_key) {
+            return submission.terminal_job.clone();
+        }
+        drop(inner);
+        let persistence = self.persistence.as_ref()?;
+        lookup_tombstone(
+            &persistence.path,
+            ReplayTombstoneKind::Controller,
+            idempotency_key,
+        )
+        .ok()
+        .flatten()
+        .and_then(|tombstone| tombstone.terminal_job)
     }
 
     /// Nonterminal controller jobs a parent submitted.
