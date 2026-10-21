@@ -13,8 +13,6 @@ pub enum AgentTaskReviewSectionId {
     WhatChanged,
     Compatibility,
     /// Gate results, reviewer test steps, and the collapsed provenance block.
-    /// Accepts the retired `evidence` id so existing profiles keep resolving.
-    #[serde(alias = "evidence")]
     Verification,
     /// The `Closes #N` / `Relates to …` lines at the top of the body.
     SourceRelationships,
@@ -1755,12 +1753,7 @@ fn unique_sections(field: &str, values: &[AgentTaskReviewSectionId]) -> Result<(
 fn builtin_section_name(id: &str) -> bool {
     matches!(
         id,
-        "summary"
-            | "what_changed"
-            | "compatibility"
-            | "verification"
-            | "evidence"
-            | "source_relationships"
+        "summary" | "what_changed" | "compatibility" | "verification" | "source_relationships"
     )
 }
 fn issue_pattern() -> Regex {
