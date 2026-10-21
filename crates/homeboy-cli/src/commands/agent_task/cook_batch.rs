@@ -352,11 +352,11 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
     ))
 }
 
-/// A registered repository slug, from a slug or an exact registered primary
-/// checkout path.
+/// A registered repository slug, from an exact registered primary checkout
+/// path. Any other value (`slug`, `owner/repo`, a remote URL) is a repository
+/// name, resolved exactly as a single Cook resolves `--repo` (#16273).
 fn registered_repo(repo: &str) -> Result<String> {
-    let path_like = Path::new(repo).is_absolute() || repo.contains(std::path::MAIN_SEPARATOR);
-    if !path_like {
+    if !Path::new(repo).is_absolute() {
         return Ok(repo.to_string());
     }
     match homeboy::core::component::resolve_registered_primary_identity(repo)? {
@@ -492,6 +492,62 @@ mod tests {
         "https://github.com/chubes4/homeboy-cook-scratch/issues/2",
         "https://github.com/chubes4/homeboy-cook-scratch/issues/3",
     ];
+
+    /// #16273: batch-prepare admits the `owner/repo` form a single Cook admits,
+    /// instead of reading it as a checkout path.
+    #[test]
+    fn batch_prepare_resolves_owner_repo_like_a_single_cook() {
+        crate::test_support::with_isolated_home(|home| {
+            let origin = home.path().join("origin.git");
+            let checkout = home.path().join("extrachill-events");
+            let run = |dir: &Path, args: &[&str]| {
+                let status = std::process::Command::new("git")
+                    .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                    .args(args)
+                    .current_dir(dir)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?}");
+            };
+            run(
+                home.path(),
+                &["init", "-q", "--bare", "-b", "main", "origin.git"],
+            );
+            run(
+                home.path(),
+                &["clone", "-q", origin.to_str().unwrap(), "extrachill-events"],
+            );
+            std::fs::write(checkout.join("README"), "x").unwrap();
+            run(&checkout, &["add", "README"]);
+            run(&checkout, &["commit", "-qm", "init"]);
+            run(&checkout, &["push", "-q", "origin", "HEAD:main"]);
+            homeboy::core::component::write_standalone_component_config(
+                &homeboy::core::component::Component {
+                    id: "extrachill-events".to_string(),
+                    local_path: checkout.display().to_string(),
+                    remote_url: Some(
+                        "https://github.com/Extra-Chill/extrachill-events.git".to_string(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            let (value, code) = batch_prepare(AgentTaskBatchPrepareArgs {
+                issues: vec!["https://github.com/Extra-Chill/extrachill-events/issues/12".into()],
+                repo: "Extra-Chill/extrachill-events".to_string(),
+                base: Some("main".to_string()),
+                branch_prefix: "fix".to_string(),
+                prompt_template: None,
+                bundle_runner: None,
+            })
+            .expect("owner/repo is admitted");
+            assert_eq!(code, 0);
+            assert_eq!(value["component"], "extrachill-events");
+            assert_eq!(value["base"], "main");
+            assert_eq!(value["children"].as_array().map(Vec::len), Some(1));
+        });
+    }
 
     #[test]
     fn cook_batch_compiles_to_a_validated_fan_out_workflow() {

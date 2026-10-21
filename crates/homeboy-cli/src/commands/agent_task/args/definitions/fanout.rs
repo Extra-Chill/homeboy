@@ -45,7 +45,8 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// issues; every URL must be unique.
     #[arg(value_name = "ISSUE_URL", required = true)]
     pub issues: Vec<String>,
-    /// Registered repository/component slug or exact registered primary checkout path.
+    /// Registered repository/component slug, `owner/repo`, or exact registered
+    /// primary checkout path, resolved as `agent-task cook --repo` resolves it.
     #[arg(long = "repo", value_name = "REPO_SLUG_OR_PRIMARY_PATH")]
     pub repo: String,
     /// Pull-request base branch every child is cut from and targets. When
@@ -123,7 +124,8 @@ pub struct AgentTaskBatchPrepareArgs {
     /// GitHub issue URL of one child. Repeat for every child of the batch.
     #[arg(value_name = "ISSUE_URL", required = true)]
     pub issues: Vec<String>,
-    /// Registered repository/component slug or exact registered primary checkout path.
+    /// Registered repository/component slug, `owner/repo`, or exact registered
+    /// primary checkout path, resolved as `agent-task cook --repo` resolves it.
     #[arg(long = "repo", value_name = "REPO_SLUG_OR_PRIMARY_PATH")]
     pub repo: String,
     /// Base branch. When omitted, the repository's remote default branch.
