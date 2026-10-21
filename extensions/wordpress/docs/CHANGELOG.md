@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.2] - 2026-10-21
+
+### Changed
+- Drop ESLint's ignored-file notice from lint findings
+
 ## [3.53.1] - 2026-10-21
 
 ### Fixed
