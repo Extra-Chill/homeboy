@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.22.1] - 2026-10-21
+
+### Fixed
+- fall back to any lock with the same compatibility on source builds
+
 ## [2.22.0] - 2026-10-21
 
 ### Added
