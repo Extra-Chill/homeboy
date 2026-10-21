@@ -15324,22 +15324,22 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             "candidate\n"
         );
         assert!(backend.body.contains("## Summary\ncomplete the task"));
-        assert!(backend.body.contains(
-            "1. Run `test \"$(cat lib.rs)\" = candidate`; expect passes as recorded by Cook's deterministic gate."
-        ));
-        assert!(backend.body.contains("**Tool(s):**"), "{}", backend.body);
+        assert!(backend
+            .body
+            .contains("```sh\ntest \"$(cat lib.rs)\" = candidate\n```"));
+        assert!(backend.body.contains("AI disclosure: "), "{}", backend.body);
         assert!(
             backend.body.contains("fixture-provider"),
             "{}",
             backend.body
         );
-        assert!(backend.body.contains("**Model:**"), "{}", backend.body);
+        assert_eq!(backend.body.matches("AI disclosure").count(), 1);
         assert!(
             backend.body.contains("fixture-model-review"),
             "{}",
             backend.body
         );
-        assert!(backend.body.contains("**Used for:** test"));
+        assert!(backend.body.contains("Used for: test"));
         assert!(backend.committed && backend.pushed && backend.created);
     });
 }
@@ -15379,7 +15379,9 @@ fn pre_provider_adoption_retries_only_the_missing_form_binds_model_and_reaches_r
             .unwrap();
         assert_eq!(adoption.ai_model, "openai/gpt-5.6-terra");
         assert_eq!(adoption.candidate_sha, fixture.candidate);
-        assert!(backend.body.contains("- **Model:** openai/gpt-5.6-terra"));
+        assert!(backend
+            .body
+            .contains("AI disclosure: openai/gpt-5.6-terra via "));
         assert!(backend.committed && backend.pushed && backend.created);
     });
 }
@@ -21180,22 +21182,18 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
         };
         finalize_cook_pr_with_backend(&options, run_id, &promotion, &mut backend).unwrap();
         for section in [
-            "## Summary",
+            "Extra-Chill/homeboy#8058\n\n## Summary",
             "## What changed",
-            "## How to test",
             "## Compatibility",
-            "## Evidence",
-            "## AI assistance",
-            "openai/gpt-5.6-terra",
-            "Verified finalization base: main at verified-base",
+            "## Verification",
+            "AI disclosure: openai/gpt-5.6-terra via ",
+            ", base `main` at `verified-base`.",
             // AI-authored prose (from the seeded review form).
             "Close the issue by guarding the reload path.",
             "Add a null guard in the render path.",
             "Internal-only change; no compatibility impact.",
-            // Deterministic evidence (orchestrator-owned).
-            "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes as recorded by Cook's deterministic gate.",
-            "Verified candidate scope: 1 changed file(s): src/lib.rs.",
-            "Cook deterministic verification: 1 gate(s) completed green.",
+            // Deterministic evidence (orchestrator-owned), rendered once.
+            "```sh\ncargo test --locked agent_task_promotion --lib\n```",
         ] {
             assert!(
                 backend.body.contains(section),
@@ -21208,6 +21206,15 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             "homeboy/agent-task",
             "Changed files",
             "Final status",
+            "## How to test",
+            "## AI assistance",
+            "## Evidence",
+            "Task objective",
+            "Verified candidate scope",
+            "completed green",
+            "Candidate adoption provenance",
+            "Durable run execution",
+            "CI expected",
         ] {
             assert!(
                 !backend.body.contains(forbidden),
@@ -23631,7 +23638,7 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
         )
         .expect("recovered preflight");
         assert_eq!(
-            report["review_dossier"]["how_to_test"][0]["command"],
+            report["review_dossier"]["verified_commands"][0]["command"],
             "cargo test resumed-gate-contract"
         );
         assert_eq!(
@@ -24147,7 +24154,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
                 .expect("replacement proof hydrates preflight from retry attempt");
         assert_eq!(preflight["status"], "validated");
         assert_eq!(
-            preflight["review_dossier"]["how_to_test"][0]["command"],
+            preflight["review_dossier"]["verified_commands"][0]["command"],
             "cargo test --locked agent_task_promotion --lib"
         );
 
@@ -26288,11 +26295,8 @@ fn task_issue_relationship_pr_body(origin: &str, task_url: &str) -> String {
     let mut options = finalization_options_for_task("", Some(origin), vec![task_url.to_string()]);
     crate::agent_task_review_dossier::enrich_dossier(
         &mut options.review_dossier,
-        &options.evidence.source_refs,
         &options.evidence.artifact_refs,
         &[],
-        &options.evidence.verification.ci_expected,
-        None,
     );
     options
         .review_dossier
