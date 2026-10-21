@@ -2398,10 +2398,8 @@ pub(super) fn write_record_guarded(
     if !preserve_terminal {
         metadata_json["agent_task_aggregate"] = Value::Null;
     }
-    let handoff = &record.metadata["detached_cook_handoff"];
-    let redirected = handoff["cook_id"] == record.run_id && handoff["state"] == "redirected";
-    let (status, finished_at) = if redirected {
-        (RunStatus::Running.as_str().to_string(), None)
+    let (status, finished_at) = if is_redirected_cook(&record) {
+        redirected_cook_row_status(lifecycle_store, &store, &record.run_id)?
     } else {
         (
             run_status(record.state()).to_string(),
@@ -2523,7 +2521,70 @@ pub(super) fn write_record_guarded(
             }
         }
     }
+    if let Some(cook_id) = record
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .filter(|cook_id| !cook_id.is_empty() && *cook_id != record.run_id)
+    {
+        mirror_cook_row_in_store(lifecycle_store, &store, cook_id)?;
+    }
     snapshot_from_run(&committed).map(GuardedRecordWrite::Committed)
+}
+
+/// A Cook handed off to its attempts: its own record holds the handoff, and
+/// its progress is its latest attempt's.
+fn is_redirected_cook(record: &AgentTaskRunRecord) -> bool {
+    let handoff = &record.metadata["detached_cook_handoff"];
+    handoff["cook_id"] == record.run_id && handoff["state"] == "redirected"
+}
+
+/// The row status a redirected Cook reports: its latest attempt's (#16179).
+/// Until an attempt row exists, the Cook is running.
+fn redirected_cook_row_status(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    store: &homeboy_core::observation::ObservationStore,
+    cook_id: &str,
+) -> Result<(String, Option<String>)> {
+    let latest = projected_cook_index_in_store(lifecycle_store, cook_id)?
+        .map(|index| index.latest_run_id)
+        .filter(|latest| latest != cook_id);
+    Ok(
+        match latest
+            .map(|latest| store.get_run(&latest))
+            .transpose()?
+            .flatten()
+        {
+            Some(attempt) => (attempt.status, attempt.finished_at),
+            None => (RunStatus::Running.as_str().to_string(), None),
+        },
+    )
+}
+
+/// Keep a redirected Cook's row on its latest attempt's status, so a Cook
+/// whose attempt ended stops reading `running`, and one whose recovery starts
+/// a new attempt reads `running` again (#16179). Called whenever an attempt
+/// row is written and when the Cook registers a new latest attempt.
+pub(crate) fn mirror_cook_row_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    store: &homeboy_core::observation::ObservationStore,
+    cook_id: &str,
+) -> Result<()> {
+    let cook_id = sanitize_run_id(cook_id);
+    let Some(cook) = store.get_run(&cook_id)? else {
+        return Ok(());
+    };
+    let handoff = &cook.metadata_json["agent_task_run"]["metadata"]["detached_cook_handoff"];
+    if handoff["cook_id"] != cook_id.as_str() || handoff["state"] != "redirected" {
+        return Ok(());
+    }
+    let Some(index) = projected_cook_index_in_store(lifecycle_store, &cook_id)? else {
+        return Ok(());
+    };
+    if index.latest_run_id != cook_id {
+        store.mirror_run_status(&cook_id, &index.latest_run_id)?;
+    }
+    Ok(())
 }
 
 fn work_intents_for_record(

@@ -7362,6 +7362,11 @@ pub fn record_cook_attempt_in_store(
         // the parent between index publication and this transition.
         complete_detached_cook_handoff_parent_in_store(lifecycle_store, cook_id, run_id)?;
         inherit_cook_notification_route_locked_in_store(lifecycle_store, cook_id, run_id)?;
+        super::lifecycle_store::mirror_cook_row_in_store(
+            lifecycle_store,
+            &lifecycle_store.open_observation_initialized()?,
+            cook_id,
+        )?;
         Ok(registration)
     })?;
     let index = registration.project_terminal_after_unlock_in_store(lifecycle_store)?;

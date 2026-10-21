@@ -109,10 +109,6 @@ pub fn list_runs(
         active_runner_jobs.complete,
     );
 
-    let run_records = run_records
-        .into_iter()
-        .map(|run| project_redirected_cook_status(&store, run))
-        .collect::<homeboy::core::Result<Vec<_>>>()?;
     let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
     for run in &mut runs {
         if let Some(children) = cook_children.get(&run.id) {
@@ -162,38 +158,6 @@ fn group_cook_sub_runs(runs: Vec<RunRecord>) -> (Vec<RunRecord>, HashMap<String,
         }
     }
     (canonical, children)
-}
-
-fn project_redirected_cook_status(
-    store: &ObservationStore,
-    mut run: RunRecord,
-) -> homeboy::core::Result<RunRecord> {
-    let Some(attempt_id) = redirected_cook_attempt_id(&run) else {
-        return Ok(run);
-    };
-    if let Some(attempt) = store.get_run(attempt_id)? {
-        run.status = attempt.status;
-        run.finished_at = attempt.finished_at;
-    } else if run.status == RunStatus::Pass.as_str() {
-        run.status = RunStatus::Running.as_str().to_string();
-        run.finished_at = None;
-    }
-    Ok(run)
-}
-
-fn redirected_cook_attempt_id(run: &RunRecord) -> Option<&str> {
-    let handoff = run
-        .metadata_json
-        .pointer("/agent_task_run/metadata/detached_cook_handoff")?;
-    if handoff.get("cook_id").and_then(Value::as_str) != Some(run.id.as_str())
-        || handoff.get("state").and_then(Value::as_str) != Some("redirected")
-    {
-        return None;
-    }
-    handoff
-        .get("attempt_run_id")
-        .and_then(Value::as_str)
-        .filter(|attempt_id| *attempt_id != run.id)
 }
 
 fn list_active_runs(args: RunsListArgs) -> CmdResult<RunsOutput> {
@@ -1567,7 +1531,6 @@ pub(super) fn run_detail(
     run_id: &str,
 ) -> homeboy::core::Result<RunDetail> {
     let (run, artifacts) = runs_service::load_run_with_artifacts(store, run_id)?;
-    let run = project_redirected_cook_status(store, run)?;
     let cook = crate::commands::cook_verdict::cook_verdict_for_observation_run(&run);
     let mut summary = run_summary(run.clone());
     let observation_status = cook.as_ref().map(|cook| {

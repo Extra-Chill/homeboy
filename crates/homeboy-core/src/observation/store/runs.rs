@@ -1164,6 +1164,29 @@ impl ObservationStore {
         })
     }
 
+    /// Copy `source_id`'s status and `finished_at` onto `target_id`'s row,
+    /// leaving its metadata alone. A row that stands for another run (a Cook
+    /// standing for its latest attempt) reports that run's progress. Returns
+    /// whether the target row changed; a missing source changes nothing.
+    pub fn mirror_run_status(&self, target_id: &str, source_id: &str) -> Result<bool> {
+        validate_required("run_id", target_id)?;
+        validate_required("run_id", source_id)?;
+        let rows = execute_with_retry("mirror run status", || {
+            self.connection.execute(
+                r#"
+                UPDATE runs
+                SET status = source.status, finished_at = source.finished_at
+                FROM (SELECT status, finished_at FROM runs WHERE id = ?2) AS source
+                WHERE runs.id = ?1
+                  AND (runs.status IS NOT source.status
+                       OR runs.finished_at IS NOT source.finished_at)
+                "#,
+                params![target_id, source_id],
+            )
+        })?;
+        Ok(rows > 0)
+    }
+
     /// Replace metadata only while the run remains active. A terminal winner
     /// must never be overwritten by a late heartbeat or progress writer.
     pub fn update_running_run_metadata(

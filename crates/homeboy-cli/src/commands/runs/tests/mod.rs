@@ -2315,6 +2315,85 @@ fn runs_show_cook_id_follows_latest_attempt_not_admission_pass() {
 }
 
 #[test]
+fn cook_row_mirrors_latest_attempt_through_recovery() {
+    with_isolated_home(|_| {
+        use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+        use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+
+        let cook_id = "agent-task-cook-row";
+        let lifecycle = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle");
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&lifecycle, cook_id)
+            .expect("parent");
+        let first = "agent-task-cook-row-attempt-1-abcd1234";
+        agent_task_lifecycle::submit_plan(&AgentTaskPlan::new("row-1", Vec::new()), Some(first))
+            .expect("attempt 1");
+        agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle, cook_id, 1, first)
+            .expect("index attempt 1");
+        let store = test_store();
+        let row = |id: &str| store.get_run(id).expect("read row").expect("row");
+        let running_ids = || {
+            let mut args = list_args();
+            args.status = Some("running".to_string());
+            let (output, _) = list_runs(&test_store(), args, "runs.list").expect("list");
+            let RunsOutput::List(output) = output else {
+                panic!("expected list output");
+            };
+            output
+                .runs
+                .into_iter()
+                .map(|run| run.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(row(cook_id).status, "running");
+        assert!(running_ids().contains(&cook_id.to_string()));
+
+        // The attempt ends: the stored Cook row ends with it, so a status
+        // filter and every other row reader agree with `agent-task status`.
+        lifecycle
+            .mutate_record(first, |record| {
+                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                true
+            })
+            .expect("fail attempt 1");
+        let ended = row(cook_id);
+        assert_eq!(ended.status, "fail");
+        assert_eq!(ended.finished_at, row(first).finished_at);
+        assert!(ended.finished_at.is_some());
+        assert!(!running_ids().contains(&cook_id.to_string()));
+
+        // Recovery registers a new latest attempt: the Cook runs again.
+        let second = "agent-task-cook-row-attempt-2-ef567890";
+        agent_task_lifecycle::submit_plan(&AgentTaskPlan::new("row-2", Vec::new()), Some(second))
+            .expect("attempt 2");
+        agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle, cook_id, 2, second)
+            .expect("index attempt 2");
+        let recovered = row(cook_id);
+        assert_eq!(recovered.status, "running");
+        assert_eq!(recovered.finished_at, None);
+        assert!(running_ids().contains(&cook_id.to_string()));
+
+        // A late write to the superseded attempt does not speak for the Cook.
+        lifecycle
+            .mutate_record(first, |record| {
+                record.metadata["late_annotation"] = Value::Bool(true);
+                true
+            })
+            .expect("annotate attempt 1");
+        assert_eq!(row(cook_id).status, "running");
+
+        lifecycle
+            .mutate_record(second, |record| {
+                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Succeeded);
+                true
+            })
+            .expect("pass attempt 2");
+        assert_eq!(row(cook_id).status, row(second).status);
+        assert!(row(cook_id).finished_at.is_some());
+    });
+}
+
+#[test]
 fn runs_list_groups_cook_sub_runs_under_the_cook() {
     with_isolated_home(|_| {
         use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
