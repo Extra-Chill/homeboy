@@ -752,6 +752,10 @@ Cook accepts one source through `--prompt`: `--prompt @file`, `--prompt -`, inli
 prompt text, and `prompt:<id>` references all use the same resolution behavior.
 Use `agent-task fanout cook-batch` for independent task waves.
 
+Each Cook attempt's framing beyond your prompt (first attempt, gate fix, no-change
+retry, review form) comes from `agent_task.prompt_templates`; see
+[Agent-task prompt templates](../reference/prompt-templates.md).
+
 ### Workflows
 
 Pre-defined multi-step and repeating agent work (a command gate that launches a Cook, then re-checks) is a `homeboy/workflow/v1` definition run by [`homeboy workflow`](workflow.md). `agent-task cook` is one step kind inside it.

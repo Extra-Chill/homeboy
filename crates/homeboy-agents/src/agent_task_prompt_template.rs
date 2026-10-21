@@ -27,6 +27,8 @@ pub(crate) enum PromptPurpose {
     Attempt,
     /// A gate-fix attempt after deterministic gates failed.
     FollowUp,
+    /// A retry after an attempt that changed no files.
+    NoChange,
     /// An attempt whose remaining work is the review form.
     ReviewForm,
 }
@@ -36,6 +38,7 @@ impl PromptPurpose {
         match self {
             Self::Attempt => "attempt",
             Self::FollowUp => "follow_up",
+            Self::NoChange => "no_change",
             Self::ReviewForm => "review_form",
         }
     }
@@ -119,6 +122,26 @@ pub(crate) fn apply_prompt_template_with(
                 request.instructions = base;
             }
         }
+    }
+}
+
+/// Replace `request.metadata` with `metadata`, keeping the recorded operator
+/// base prompt so the next attempt's template replaces, rather than stacks on,
+/// this attempt's template.
+pub(crate) fn replace_metadata_keeping_prompt_base(
+    request: &mut AgentTaskRequest,
+    metadata: Value,
+) {
+    let base = request
+        .metadata
+        .get(BASE_INSTRUCTIONS_METADATA_KEY)
+        .cloned();
+    request.metadata = metadata;
+    if let Some(base) = base {
+        if !request.metadata.is_object() {
+            request.metadata = json!({});
+        }
+        request.metadata[BASE_INSTRUCTIONS_METADATA_KEY] = base;
     }
 }
 
@@ -287,6 +310,8 @@ mod tests {
             concat!("Command policy (declared ", "by the operator"),
             concat!("Do not run or report ", "verification commands"),
             concat!("Do not claim a focused ", "check"),
+            concat!("Your deliverable is a ", "committed change"),
+            concat!("finished without changing ", "any files"),
         ];
         for (path, source) in sources {
             for phrase in banned {

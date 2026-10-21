@@ -16,6 +16,7 @@ Reference pages are intentionally dense. If you are deciding what to run next, s
 
 - [Configuration reference](configuration.md)
 - [Template variables](template-variables.md)
+- [Agent-task prompt templates](prompt-templates.md)
 - [Configuration schemas](schemas/index.md)
 
 ## Output And Contracts

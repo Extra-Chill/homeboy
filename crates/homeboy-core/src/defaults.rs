@@ -609,7 +609,8 @@ pub struct AgentTaskConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_concurrency: Option<usize>,
     /// Operator-owned prompt templates keyed by purpose (`attempt`,
-    /// `follow_up`, `review_form`), settable via
+    /// `follow_up`, `no_change`, `review_form`; see
+    /// `docs/reference/prompt-templates.md`), settable via
     /// `homeboy config set /agent_task/prompt_templates/<purpose> <text>`.
     ///
     /// Homeboy authors no agent-facing prose (#15818). The model sees the
