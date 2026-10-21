@@ -2734,6 +2734,23 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
             "destination differs from the exact promoted candidate; refusing to rebase divergent content",
         );
     }
+    // A follow-up Cook on an existing branch builds on commits it did not
+    // create (#16244). Replaying onto the base would reset that history, so
+    // the branch is not Cook's to rebase; finalization publishes the candidate
+    // on it as it stands, and the forge decides mergeability.
+    let AgentTaskPromotionCandidate::Git {
+        fingerprint: verified,
+    } = &expected
+    else {
+        unreachable!("ownership requires a Git candidate");
+    };
+    if git_changed_files(path, &prior_base, &verified.tree)?
+        != normalized_changed_files(&promotion.changed_files)
+    {
+        return not_owned(
+            "destination branch carries changes beyond this Cook's candidate; it is published on the branch as it stands",
+        );
+    }
     let tree = match apply_immutable_candidate_to_base(
         path,
         &expected,
@@ -2749,12 +2766,6 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
                 paths,
             })
         }
-    };
-    let AgentTaskPromotionCandidate::Git {
-        fingerprint: verified,
-    } = &expected
-    else {
-        unreachable!("ownership requires a Git candidate");
     };
     let regate = tree != verified.tree;
     let json_error = |error: serde_json::Error| Error::internal_json(error.to_string(), None);

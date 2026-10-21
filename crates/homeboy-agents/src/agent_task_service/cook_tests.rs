@@ -4745,6 +4745,110 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
     });
 }
 
+#[test]
+fn moved_base_catch_up_leaves_a_follow_up_cook_pr_branch_to_finalization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repositories");
+        let remote = temp.path().join("origin.git");
+        let destination = temp.path().join("destination");
+        let advance = temp.path().join("advance");
+        let git = |path: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let clone = |path: &std::path::Path| {
+            git(
+                temp.path(),
+                &["clone", remote.to_str().unwrap(), path.to_str().unwrap()],
+            );
+            git(path, &["config", "user.name", "Test"]);
+            git(path, &["config", "user.email", "test@example.com"]);
+        };
+
+        std::fs::create_dir(&remote).unwrap();
+        git(&remote, &["init", "--bare", "--initial-branch=main"]);
+        clone(&advance);
+        std::fs::write(advance.join("lib.rs"), "base\n").unwrap();
+        git(&advance, &["add", "."]);
+        git(&advance, &["commit", "-m", "base"]);
+        git(&advance, &["push", "-u", "origin", "main"]);
+        let verified_base = git_output(&advance, &["rev-parse", "HEAD"]).unwrap();
+
+        // An open PR branch: earlier PR work committed ahead of the base, then
+        // the follow-up Cook's candidate as uncommitted changes on top.
+        clone(&destination);
+        git(&destination, &["switch", "-c", "fix/issue-1-fixture"]);
+        std::fs::write(destination.join("earlier.rs"), "earlier PR work\n").unwrap();
+        git(&destination, &["add", "."]);
+        git(&destination, &["commit", "-m", "Earlier PR work"]);
+        let branch_head = git_output(&destination, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(destination.join("lib.rs"), "follow-up\n").unwrap();
+        let candidate =
+            crate::agent_task_promotion::candidate_fingerprint(destination.to_str().unwrap())
+                .unwrap();
+
+        std::fs::write(advance.join("moved.txt"), "moved\n").unwrap();
+        git(&advance, &["add", "."]);
+        git(&advance, &["commit", "-m", "move base"]);
+        git(&advance, &["push", "origin", "main"]);
+
+        let run_id = "follow-up-pr-branch";
+        let options = batch_cook_options(
+            run_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        let applied: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "applied",
+            "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
+            "to_worktree": destination,
+            "target": {"worktree": destination, "path": destination},
+            "patch_artifact": {"id": "candidate", "kind": "patch", "path": temp.path().join("candidate.patch")},
+            "changed_files": ["lib.rs"],
+            "deterministic_gates": [],
+            "gate_results": [],
+            "verified_base": {"base": "main", "sha": verified_base},
+            "provenance": {"worktree_path": destination, "candidate": candidate},
+            "operator_notification": {"status": "completed", "message": "green"}
+        }))
+        .unwrap();
+
+        let catch_up = catch_up_cook_candidate_to_base_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
+            &options,
+            run_id,
+            &applied,
+        )
+        .unwrap();
+        assert!(
+            matches!(&catch_up, BaseCatchUp::NotOwned(reason) if reason.contains("changes beyond this Cook's candidate")),
+            "{catch_up:?}"
+        );
+        assert_eq!(
+            git_output(&destination, &["rev-parse", "HEAD"]).unwrap(),
+            branch_head,
+            "the PR branch's earlier commits are never reset"
+        );
+        assert_eq!(
+            git_output(&destination, &["status", "--porcelain"]).unwrap(),
+            "M lib.rs",
+            "the follow-up candidate stays in place for finalization"
+        );
+    });
+}
+
 #[derive(Debug)]
 struct AcceptedDetachedAttemptDispatcher;
 
