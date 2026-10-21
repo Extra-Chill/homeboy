@@ -385,19 +385,14 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     changed_files.dedup();
     enrich_dossier(
         &mut options.review_dossier,
-        &options.evidence.source_refs,
         &options.evidence.artifact_refs,
         &options.normalized_gate_results,
-        &options.evidence.verification.ci_expected,
-        options.evidence.lifecycle.as_ref(),
     );
-    options.review_dossier.evidence.push(
-        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
-            summary: format!(
-                "Verified finalization base: {} at {}",
-                options.base, base.sha
-            ),
-            url: None,
+    options.review_dossier.verified_base = Some(
+        crate::agent_task_review_dossier::AgentTaskReviewVerifiedBase {
+            branch: options.base.clone(),
+            sha: base.sha.clone(),
+            publication_sha: None,
         },
     );
     if let Some(behind) = lagging_promoted_parent {
@@ -612,32 +607,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     }
     let publication_base_sha = backend.publication_base_sha(&options.path, &options.base)?;
     intent.target.publication_base_sha = publication_base_sha.clone();
-    let base_observation = match publication_base_sha {
-        Some(publication_base_sha) if publication_base_sha == base.sha => format!(
-            "Base unchanged since verification: {} remains at {}.",
-            options.base, base.sha
-        ),
-        Some(publication_base_sha) => format!(
-            "Base advanced after verification: verified {} at {}; publication observed {}. Candidate ancestry was validated against the verified snapshot.",
-            options.base, base.sha, publication_base_sha
-        ),
-        None => format!(
-            "Base observation unavailable immediately before publication; candidate ancestry was validated against verified {} at {}.",
-            options.base, base.sha
-        ),
-    };
-    options.review_dossier.evidence.push(
-        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
-            summary: base_observation,
-            url: None,
-        },
-    );
-    options.review_dossier.evidence.sort_by(|left, right| {
-        left.summary
-            .cmp(&right.summary)
-            .then(left.url.cmp(&right.url))
-    });
-    options.review_dossier.evidence.dedup();
+    if let Some(verified_base) = options.review_dossier.verified_base.as_mut() {
+        verified_base.publication_sha = publication_base_sha;
+    }
     let body = render_review_dossier(&options.review_dossier, &options.review_profile);
     // The lookup and base observation may take long enough for another writer to
     // replace the branch. Bind the live remote again at the last safe point.
@@ -1101,18 +1073,6 @@ fn inherit_promotion_gates(
         .collect::<Vec<_>>();
     let verified_commands =
         crate::agent_task_review_dossier::verified_commands_from_promotion(&promotion);
-    if options.review_dossier.how_to_test.is_empty() {
-        options.review_dossier.how_to_test = verified_commands
-            .iter()
-            .map(
-                |verified| crate::agent_task_review_dossier::AgentTaskReviewTestStep {
-                    command: verified.command.clone(),
-                    expected: "passes as inherited from the exact green promotion receipt"
-                        .to_string(),
-                },
-            )
-            .collect();
-    }
     options.evidence.verification.targeted_checks_run = verified_commands
         .iter()
         .map(|verified| verified.command.clone())

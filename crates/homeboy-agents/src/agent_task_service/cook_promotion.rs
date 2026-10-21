@@ -38,7 +38,7 @@ use crate::agent_task_promotion::{
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
-    AgentTaskReviewEvidence, AgentTaskReviewOverride, AgentTaskReviewTestStep,
+    AgentTaskReviewEvidence, AgentTaskReviewOverride,
 };
 use crate::agent_task_scheduler::AgentTaskAggregate;
 use homeboy_core::{config, Error, Result};
@@ -3606,9 +3606,9 @@ fn cook_finalization_options_with_stores_and_review_form(
     };
     review_dossier.ai_assistance.used_for = ai_used_for.clone();
     let targeted_checks_run = review_dossier
-        .how_to_test
+        .verified_commands
         .iter()
-        .map(|step| step.command.clone())
+        .map(|verified| verified.command.clone())
         .collect();
     let inherited_failure_count = promotion
         .deterministic_gates
@@ -3712,8 +3712,7 @@ fn cook_finalization_options_with_stores_and_review_form(
     })
 }
 
-/// Source relationships for the Cook PR: the task's source refs (the same refs
-/// that feed `Reviewer-resolvable evidence from source_refs[N]`) mapped against
+/// Source relationships for the Cook PR: the task's source refs mapped against
 /// the GitHub repository the PR is opened against, the worktree's `origin`.
 fn cook_task_issue_relationships(
     source_refs: &[String],
@@ -5121,10 +5120,15 @@ fn receipt_matches_manual_preflight(
     intent_git_identity: &homeboy_core::git::GitIdentityProof,
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
 ) -> bool {
+    // Publication adds only the live-base observation to the preflight dossier.
     let mut receipt_dossier = receipt.review_dossier.clone();
-    receipt_dossier
-        .evidence
-        .retain(|evidence| intent.review_dossier.evidence.contains(evidence));
+    if let Some(base) = receipt_dossier.verified_base.as_mut() {
+        base.publication_sha = intent
+            .review_dossier
+            .verified_base
+            .as_ref()
+            .and_then(|base| base.publication_sha.clone());
+    }
     receipt.path == intent.path
         && receipt.base == intent.base
         && receipt.head == intent.head
@@ -5132,15 +5136,6 @@ fn receipt_matches_manual_preflight(
         && receipt.changed_files == intent.changed_files
         && receipt.proof == intent.proof
         && receipt_dossier == intent.review_dossier
-        && receipt.review_dossier.evidence.iter().all(|evidence| {
-            intent.review_dossier.evidence.contains(evidence)
-                || is_publication_base_observation(evidence, receipt)
-        })
-        && intent
-            .review_dossier
-            .evidence
-            .iter()
-            .all(|evidence| receipt.review_dossier.evidence.contains(evidence))
         && receipt.publication_intent.proof == intent.publication_intent.proof
         && same_preflight_publication_target(
             &receipt.publication_intent.target,
@@ -5225,35 +5220,6 @@ fn require_manual_retry_candidate(
         ));
     }
     Ok(())
-}
-
-fn is_publication_base_observation(
-    evidence: &AgentTaskReviewEvidence,
-    receipt: &AgentTaskPrFinalizationReport,
-) -> bool {
-    if evidence.url.is_some() {
-        return false;
-    }
-    let target = &receipt.publication_intent.target;
-    let verified_base_sha = target.verified_base_sha.as_deref().unwrap_or_default();
-    if verified_base_sha.is_empty() {
-        return false;
-    }
-    let expected = match target.publication_base_sha.as_deref() {
-        Some(publication_base_sha) if publication_base_sha == verified_base_sha => format!(
-            "Base unchanged since verification: {} remains at {}.",
-            receipt.base, verified_base_sha
-        ),
-        Some(publication_base_sha) => format!(
-            "Base advanced after verification: verified {} at {}; publication observed {}. Candidate ancestry was validated against the verified snapshot.",
-            receipt.base, verified_base_sha, publication_base_sha
-        ),
-        None => format!(
-            "Base observation unavailable immediately before publication; candidate ancestry was validated against verified {} at {}.",
-            receipt.base, verified_base_sha
-        ),
-    };
-    evidence.summary == expected
 }
 
 fn same_publication_target(
@@ -5439,7 +5405,9 @@ fn cook_review_dossier_with_stores_and_review_form(
         .provenance
         .pointer("/cook_follow_up/source_run_id")
         .and_then(Value::as_str);
-    let implementation_promotion = source_run_id
+    // The source attempt's persisted promotion must exist; it owns the
+    // candidate scope a form-only continuation carries forward.
+    source_run_id
         .map(|run_id| {
             persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?.ok_or_else(|| {
                 Error::validation_invalid_argument(
@@ -5451,46 +5419,15 @@ fn cook_review_dossier_with_stores_and_review_form(
             })
         })
         .transpose()?;
-    let promotion = implementation_promotion
-        .as_ref()
-        .unwrap_or(terminal_promotion);
     // A form-only continuation carries its source's normalized gate proof.
     // The terminal record is therefore the durable reviewer-proof boundary.
     let verification_promotion = terminal_promotion;
-    let changed_files = promotion.changed_files.join(", ");
-    let changed_file_count = promotion.changed_files.len();
     let gate_count = verification_promotion.gate_results.len();
-    let task_summary = options
-        .identity
-        .initial_plan
-        .tasks
-        .iter()
-        .find_map(|task| {
-            task.instructions
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-        })
-        .unwrap_or("No single-line task objective was retained in durable task evidence.");
-    let adoption = promotion.provenance.get("adoption").is_some();
-    let how_to_test = verification_promotion
-        .deterministic_gates
-        .iter()
-        .filter_map(|gate| {
-            let exact_command = gate.invocation().ok()?.reviewer_command();
-            if !verification_promotion.has_visible_passed_gate_for_command(&exact_command) {
-                return None;
-            }
-            let command = crate::agent_task_review_dossier::reviewer_safe_command(&exact_command)?;
-            crate::agent_task_review_dossier::reviewer_runnable_command(&command).then(|| {
-                AgentTaskReviewTestStep {
-                    command,
-                    expected: "passes as recorded by Cook's deterministic gate".to_string(),
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    if how_to_test.is_empty() {
+    // Every reviewer-visible verification line derives from a passed, visible
+    // gate bound to the promoted candidate; without one there is nothing to show.
+    if crate::agent_task_review_dossier::verified_commands_from_promotion(verification_promotion)
+        .is_empty()
+    {
         return Err(Error::validation_invalid_argument(
             "verification",
             "Cook cannot publish a test command without matching successful visible durable gate evidence bound to the promoted candidate",
@@ -5515,32 +5452,7 @@ fn cook_review_dossier_with_stores_and_review_form(
         successful_run_id,
         &terminal_form,
     )?;
-    let mut evidence = vec![
-        AgentTaskReviewEvidence {
-            summary: format!("Task objective: {task_summary}"),
-            url: None,
-        },
-        AgentTaskReviewEvidence {
-            summary: format!(
-                "Verified candidate scope: {changed_file_count} changed file(s): {changed_files}."
-            ),
-            url: None,
-        },
-        AgentTaskReviewEvidence {
-            summary: format!(
-                "Cook deterministic verification: {gate_count} gate(s) completed green."
-            ),
-            url: None,
-        },
-        AgentTaskReviewEvidence {
-            summary: if adoption {
-                "Candidate adoption provenance: an immutable candidate was adopted through the recorded Cook workflow and passed the recorded gates.".to_string()
-            } else {
-                "Candidate adoption provenance: the candidate was promoted from the recorded Cook task execution.".to_string()
-            },
-            url: None,
-        },
-    ];
+    let mut evidence = Vec::new();
     if let Some(form) = review_form {
         evidence.push(AgentTaskReviewEvidence {
             summary: format!(
@@ -5595,15 +5507,16 @@ fn cook_review_dossier_with_stores_and_review_form(
             schema: "homeboy/agent-task-review-dossier/v1".to_string(),
             summary: lineage.summary,
             what_changed: lineage.what_changed,
-            how_to_test,
+            how_to_test: Vec::new(),
             compatibility: lineage.compatibility,
-            // Deterministic evidence: orchestrator-owned. The task objective, scope,
-            // gate count, and adoption provenance are factual records, not prose the
-            // AI restates.
+            // Deterministic evidence: orchestrator-owned. Each candidate-bound
+            // gate renders once from `verified_commands`; `evidence` carries only
+            // provenance that changes how a reviewer should read the result.
             evidence,
             verified_commands,
             changed_public_contracts: Vec::new(),
             public_contract_evidence: None,
+            verified_base: None,
             ai_assistance: AgentTaskReviewAiAssistance {
                 // Deterministic: the orchestrator knows whether/what tool+model ran,
                 // and attributes Homeboy as the harness that drove the change.

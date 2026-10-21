@@ -1003,6 +1003,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         verified_commands: Vec::new(),
         changed_public_contracts: evidence.changed_public_contracts.clone(),
         public_contract_evidence: evidence.public_contract_evidence.clone(),
+        verified_base: None,
         ai_assistance: AgentTaskReviewAiAssistance {
             used: true,
             tool: homeboy_tool_disclosure(&evidence.ai_tool),

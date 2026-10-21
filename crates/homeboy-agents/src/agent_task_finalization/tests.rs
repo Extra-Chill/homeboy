@@ -520,9 +520,17 @@ fn creates_new_pr_after_green_gates() {
     assert_eq!(backend.commit_calls, 1);
     assert_eq!(backend.push_calls, 1);
     assert_eq!(backend.pushed_commit_sha.as_deref(), Some("candidate-sha"));
-    assert!(backend.last_body.contains("## AI assistance"));
     assert!(backend.last_body.contains("## Summary"));
-    assert!(backend.last_body.contains("## How to test"));
+    assert!(backend.last_body.contains("## Verification"));
+    assert!(backend
+        .last_body
+        .contains("- Run `cargo test agent_task_finalization`; expect passes."));
+    assert_eq!(
+        backend.last_body.matches("AI disclosure: GPT-5.5").count(),
+        1
+    );
+    assert!(!backend.last_body.contains("## How to test"));
+    assert!(!backend.last_body.contains("## AI assistance"));
     assert!(!backend.last_body.contains("Publication intent"));
     assert_eq!(
         report.publication_intent.schema,
@@ -1108,15 +1116,13 @@ fn finalization_pins_verified_base_when_base_advances_before_publication() {
             .as_deref(),
         Some("advanced-base")
     );
-    assert!(backend
-        .last_body
-        .contains("Verified finalization base: main at verified-base"));
-    assert!(backend
-        .last_body
-        .contains("Base advanced after verification"));
-    assert!(backend
-        .last_body
-        .contains("publication observed advanced-base"));
+    assert!(
+        backend.last_body.contains(
+            "Verified against base `main` at `verified-base` (base has since advanced to `advanced-base`)."
+        ),
+        "{}",
+        backend.last_body
+    );
 }
 
 #[test]
@@ -1150,9 +1156,14 @@ fn finalization_records_unchanged_live_base_before_publication() {
             .as_deref(),
         Some("verified-base")
     );
-    assert!(backend
-        .last_body
-        .contains("Base unchanged since verification: main remains at verified-base."));
+    assert!(
+        backend
+            .last_body
+            .contains("Verified against base `main` at `verified-base`."),
+        "{}",
+        backend.last_body
+    );
+    assert!(!backend.last_body.contains("advanced"));
 }
 
 #[test]
@@ -1172,7 +1183,15 @@ fn finalization_reports_unavailable_live_base_observation() {
     assert_eq!(report.publication_intent.target.publication_base_sha, None);
     assert!(backend
         .last_body
-        .contains("Base observation unavailable immediately before publication"));
+        .contains("Verified against base `main` at `verified-base`."));
+    assert_eq!(
+        report
+            .review_dossier
+            .verified_base
+            .as_ref()
+            .and_then(|base| base.publication_sha.as_deref()),
+        None
+    );
 }
 
 #[test]
@@ -1235,7 +1254,8 @@ fn pr_body_labels_ci_equivalent_gates() {
 
     finalize_pr_with_backend(options, &mut backend).expect("finalized");
 
-    assert!(backend.last_body.contains("## Evidence"));
+    assert!(backend.last_body.contains("## Verification"));
+    assert!(backend.last_body.contains("required project gate"));
 }
 
 #[test]
@@ -1267,8 +1287,8 @@ fn pr_body_reports_iterator_evidence_metadata() {
 
     finalize_pr_with_backend(options, &mut backend).expect("finalized");
 
-    assert!(backend.last_body.contains("## AI assistance"));
-    assert!(backend.last_body.contains("GPT-5.5"));
+    assert!(backend.last_body.contains("AI disclosure: GPT-5.5"));
+    assert!(!backend.last_body.contains("CI expected"));
 }
 
 #[test]
@@ -1730,7 +1750,8 @@ fn manual_finalization_inherits_only_exact_green_candidate_bound_promotion_gates
 
     assert_eq!(report.status, "validated");
     assert_eq!(report.normalized_gate_results, promotion.gate_results);
-    assert_eq!(report.review_dossier.how_to_test.len(), 2);
+    assert!(report.review_dossier.how_to_test.is_empty());
+    assert_eq!(report.review_dossier.verified_commands.len(), 2);
     assert_eq!(backend.candidate_validation_calls, 1);
     let inherited = report
         .inherited_gate_evidence
@@ -2108,7 +2129,8 @@ fn finalization_keeps_internal_durable_refs_for_operators_but_not_reviewers() {
     durable_options.manual_finalization = false;
     durable_options.changed_files = vec!["src/lib.rs".to_string()];
     durable_options.evidence.source_refs = vec![reviewer_ref.to_string()];
-    durable_options.evidence.artifact_refs = vec![internal_ref.to_string()];
+    durable_options.evidence.artifact_refs =
+        vec![internal_ref.to_string(), reviewer_ref.to_string()];
     durable_options.review_dossier.evidence.push(
         crate::agent_task_review_dossier::AgentTaskReviewEvidence {
             summary: "Hydrated durable artifact".to_string(),
@@ -2131,6 +2153,12 @@ fn finalization_keeps_internal_durable_refs_for_operators_but_not_reviewers() {
     manual_options.evidence.artifact_refs.clear();
     manual_options.review_dossier.evidence.push(
         crate::agent_task_review_dossier::AgentTaskReviewEvidence {
+            summary: "Operator-supplied reviewer evidence".to_string(),
+            url: Some(reviewer_ref.to_string()),
+        },
+    );
+    manual_options.review_dossier.evidence.push(
+        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
             summary: "Hydrated source-run artifact".to_string(),
             url: Some(internal_ref.to_string()),
         },
@@ -2146,6 +2174,8 @@ fn finalization_keeps_internal_durable_refs_for_operators_but_not_reviewers() {
         .evidence
         .artifact_refs
         .contains(&internal_ref.to_string()));
+    // The task source ref is a PR relationship, not a restated evidence bullet.
+    assert!(!durable_backend.last_body.contains("source_refs"));
     assert!(durable_report
         .publication_intent
         .artifact_refs
@@ -3803,6 +3833,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
             verified_commands: Vec::new(),
             changed_public_contracts: Vec::new(),
             public_contract_evidence: None,
+            verified_base: None,
             ai_assistance: crate::agent_task_review_dossier::AgentTaskReviewAiAssistance {
                 used: true,
                 tool: "Homeboy (Pi (GPT-5.5))".to_string(),

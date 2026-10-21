@@ -11,10 +11,10 @@ pub const AGENT_TASK_REVIEW_DOSSIER_SCHEMA: &str = "homeboy/agent-task-review-do
 pub enum AgentTaskReviewSectionId {
     Summary,
     WhatChanged,
-    HowToTest,
     Compatibility,
-    Evidence,
-    AiAssistance,
+    /// Gate results, reviewer test steps, and the collapsed provenance block.
+    Verification,
+    /// The `Closes #N` / `Relates to …` lines at the top of the body.
     SourceRelationships,
 }
 
@@ -118,6 +118,9 @@ pub struct AgentTaskReviewDossier {
     pub schema: String,
     pub summary: String,
     pub what_changed: Vec<String>,
+    /// Operator-supplied reviewer steps (manual finalization). Cook derives its
+    /// verification from `verified_commands` and leaves this empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub how_to_test: Vec<AgentTaskReviewTestStep>,
     pub compatibility: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -128,11 +131,23 @@ pub struct AgentTaskReviewDossier {
     pub changed_public_contracts: Vec<AgentTaskPublicContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_contract_evidence: Option<AgentTaskPublicContractEvidence>,
+    /// The base the candidate was verified against, and what publication observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_base: Option<AgentTaskReviewVerifiedBase>,
     pub ai_assistance: AgentTaskReviewAiAssistance,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_relationships: Vec<AgentTaskReviewIssueRelationship>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<AgentTaskReviewOverride>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskReviewVerifiedBase {
+    pub branch: String,
+    pub sha: String,
+    /// The live base observed immediately before publication, when observable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -631,14 +646,15 @@ pub fn homeboy_tool_disclosure(provider_disclosure: &str) -> String {
     format!("Homeboy ({provider})")
 }
 
+const VERIFICATION_REQUIRED: &str = "Verification requires a candidate-bound gate, --test-step COMMAND=>EXPECTED, a recorded targeted command, or a manual reviewer instruction";
+
 pub fn default_profile() -> AgentTaskReviewProfile {
     AgentTaskReviewProfile {
         required_sections: vec![
             AgentTaskReviewSectionId::Summary,
             AgentTaskReviewSectionId::WhatChanged,
-            AgentTaskReviewSectionId::HowToTest,
             AgentTaskReviewSectionId::Compatibility,
-            AgentTaskReviewSectionId::AiAssistance,
+            AgentTaskReviewSectionId::Verification,
         ],
         ..Default::default()
     }
@@ -687,11 +703,11 @@ pub fn validate_profile(profile: &AgentTaskReviewProfile) -> Result<()> {
     }
     if profile
         .hidden_sections
-        .contains(&AgentTaskReviewSectionId::HowToTest)
+        .contains(&AgentTaskReviewSectionId::Verification)
     {
         return invalid(
             "review_profile",
-            "How to test cannot be hidden from generated PRs",
+            "Verification cannot be hidden from generated PRs",
         );
     }
     let mut additional = std::collections::BTreeSet::new();
@@ -752,8 +768,8 @@ impl AgentTaskReviewDossier {
         if self.compatibility.trim().is_empty() {
             missing("compatibility", "compatibility is required");
         }
-        if self.how_to_test.is_empty() {
-            missing("how_to_test", "How to test requires --test-step COMMAND=>EXPECTED, a recorded targeted command, or a manual reviewer instruction");
+        if self.how_to_test.is_empty() && self.verified_commands.is_empty() {
+            missing("how_to_test", VERIFICATION_REQUIRED);
         }
         for (index, step) in self.how_to_test.iter().enumerate() {
             if step.command.trim().is_empty() || step.expected.trim().is_empty() {
@@ -868,6 +884,13 @@ impl AgentTaskReviewDossier {
                 );
             }
         }
+        if let Some(base) = &self.verified_base {
+            scalar("verified_base.branch", &base.branch)?;
+            scalar("verified_base.sha", &base.sha)?;
+            if let Some(observed) = &base.publication_sha {
+                scalar("verified_base.publication_sha", observed)?;
+            }
+        }
         for (index, evidence) in self.evidence.iter().enumerate() {
             scalar("evidence.summary", &evidence.summary)?;
             if let Some(url) = &evidence.url {
@@ -943,8 +966,8 @@ impl AgentTaskReviewDossier {
         {
             return invalid("what_changed", "what changed is required");
         }
-        if self.how_to_test.is_empty() {
-            return invalid("how_to_test", "How to test requires --test-step COMMAND=>EXPECTED, a recorded targeted command, or a manual reviewer instruction");
+        if self.how_to_test.is_empty() && self.verified_commands.is_empty() {
+            return invalid("how_to_test", VERIFICATION_REQUIRED);
         }
         if required(profile, AgentTaskReviewSectionId::Compatibility)
             && self.compatibility.is_empty()
@@ -980,21 +1003,16 @@ impl AgentTaskReviewDossier {
     }
 }
 
-/// Reviewer-facing evidence label for a deterministic gate.
-///
-/// Gate `name` is a positional id (`gate-1`, `gate-2`) that is meaningless to a
-/// reviewer. The gate `summary` carries the concrete, reveal-policy-safe
-/// description instead — for a passing command gate it is
-/// `"deterministic gate passed: <command>"`, and for a private/withheld gate it
-/// is already redacted by policy. Prefer that; only fall back to the positional
-/// id when no summary was recorded.
 /// Upper bound on the reviewer-facing gate description, in characters.
 const GATE_EVIDENCE_SUMMARY_MAX_CHARS: usize = 240;
 
-/// Reviewer-facing, single-line projection of a gate. The durable gate record
-/// keeps the exact executable bytes; this label must satisfy the dossier's
-/// scalar contract, so a multi-line `--verify-file` program (or its output) is
-/// flattened and bounded here rather than rejected at finalization. (#15312)
+/// Reviewer-facing, single-line projection of a gate that has no
+/// candidate-bound verified command (manual finalization). Gate `name` is a
+/// positional id (`gate-1`) that is meaningless to a reviewer, so the
+/// reveal-policy-safe `summary` is preferred. The durable gate record keeps the
+/// exact executable bytes; this label must satisfy the dossier's scalar
+/// contract, so a multi-line `--verify-file` program is flattened and bounded
+/// here rather than rejected at finalization. (#15312)
 fn gate_evidence_summary(gate: &HomeboyGateResult) -> String {
     // Shell gates routinely contain `</dev/null`; break markup openers so the
     // label cannot close or open reviewer-body markup, without dropping text.
@@ -1016,51 +1034,30 @@ fn gate_evidence_summary(gate: &HomeboyGateResult) -> String {
     format!("{summary} ({:?})", gate.status)
 }
 
+/// Add the reviewer-resolvable evidence finalization knows about. A gate that
+/// already renders as a candidate-bound verified command is not restated.
 pub fn enrich_dossier(
     dossier: &mut AgentTaskReviewDossier,
-    source_refs: &[String],
     artifact_refs: &[String],
     gates: &[HomeboyGateResult],
-    ci_expected: &[String],
-    lifecycle: Option<&homeboy_core::run_lifecycle_record::RunLifecycleRecord>,
 ) {
     // Durable/operator evidence can be hydrated before finalization. Keep it in
     // the run report, but do not carry operator-only URLs into the reviewer form.
     dossier
         .evidence
         .retain(|evidence| !evidence.url.as_deref().is_some_and(operator_only_reference));
-    for gate in gates {
-        dossier.evidence.push(AgentTaskReviewEvidence {
-            summary: gate_evidence_summary(gate),
-            url: None,
-        });
+    if dossier.verified_commands.is_empty() {
+        for gate in gates {
+            dossier.evidence.push(AgentTaskReviewEvidence {
+                summary: gate_evidence_summary(gate),
+                url: None,
+            });
+        }
     }
-    for check in ci_expected {
-        dossier.evidence.push(AgentTaskReviewEvidence {
-            summary: format!("CI expected: {check}"),
-            url: None,
-        });
-    }
-    if let Some(lifecycle) = lifecycle {
-        dossier.evidence.push(AgentTaskReviewEvidence {
-            summary: format!("Durable run execution: {:?}", lifecycle.execution.state),
-            url: None,
-        });
-    }
-    for (provenance, reference) in source_refs
-        .iter()
-        .enumerate()
-        .map(|(index, reference)| (format!("source_refs[{index}]"), reference))
-        .chain(
-            artifact_refs
-                .iter()
-                .enumerate()
-                .map(|(index, reference)| (format!("artifact_refs[{index}]"), reference)),
-        )
-    {
+    for (index, reference) in artifact_refs.iter().enumerate() {
         if is_reviewer_url(reference) {
             dossier.evidence.push(AgentTaskReviewEvidence {
-                summary: format!("Reviewer-resolvable evidence from {provenance}"),
+                summary: format!("Reviewer-resolvable evidence from artifact_refs[{index}]"),
                 url: Some(reference.clone()),
             });
         }
@@ -1071,54 +1068,237 @@ pub fn enrich_dossier(
     dossier.evidence.dedup();
 }
 
+/// Render the PR body:
+///
+/// ```text
+/// Closes #N
+///
+/// ## Summary / ## What changed / ## Compatibility
+/// ## Verification   (one line per gate, command + provenance in <details>)
+///
+/// ---
+/// AI disclosure: <model> via <tool>. Used for: <used_for>
+/// ```
 pub fn render_review_dossier(
     dossier: &AgentTaskReviewDossier,
     profile: &AgentTaskReviewProfile,
 ) -> String {
-    let mut sections = Vec::new();
+    let hidden = |id: &AgentTaskReviewSectionId| profile.hidden_sections.contains(id);
+    let mut blocks = Vec::new();
+    if !hidden(&AgentTaskReviewSectionId::SourceRelationships)
+        && !dossier.source_relationships.is_empty()
+    {
+        blocks.push(render_source_relationships(&dossier.source_relationships));
+    }
     for id in ordered_sections(profile) {
-        if profile.hidden_sections.contains(&id) {
+        if hidden(&id) {
             continue;
         }
         let section = match id {
-        AgentTaskReviewSectionId::Summary if !dossier.summary.is_empty() => Some(("Summary", prose(&dossier.summary))),
-        AgentTaskReviewSectionId::WhatChanged if !dossier.what_changed.is_empty() => Some(("What changed", bullets(&dossier.what_changed))),
-        AgentTaskReviewSectionId::HowToTest => {
-            let steps = dossier
-                .how_to_test
-                .iter()
-                .filter(|step| reviewer_runnable_command(&step.command))
-                .collect::<Vec<_>>();
-            (!steps.is_empty()).then(|| (
-                "How to test",
-                steps
-                    .iter()
-                    .enumerate()
-                    .map(|(i, step)| format!("{}. Run `{}`; expect {}.", i + 1, code(&step.command), prose(&step.expected)))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ))
-        }
-        AgentTaskReviewSectionId::Compatibility if !dossier.compatibility.is_empty() => Some(("Compatibility", prose(&dossier.compatibility))),
-        AgentTaskReviewSectionId::Evidence if !dossier.changed_public_contracts.is_empty() => Some(("Evidence", format!("{}{}{}", render_public_contract_evidence(dossier), render_verified_commands(&dossier.verified_commands), render_evidence(&dossier.evidence)))),
-        AgentTaskReviewSectionId::Evidence if !dossier.evidence.is_empty() || !dossier.verified_commands.is_empty() => Some(("Evidence", format!("{}{}", render_verified_commands(&dossier.verified_commands), render_evidence(&dossier.evidence)))),
-        AgentTaskReviewSectionId::AiAssistance => Some(("AI assistance", format!("- **AI assistance:** {}\n- **Tool(s):** {}\n- **Model:** {}\n- **Used for:** {}", if dossier.ai_assistance.used { "Yes" } else { "No" }, prose(&dossier.ai_assistance.tool), prose(&dossier.ai_assistance.model), prose(&dossier.ai_assistance.used_for)))),
-        AgentTaskReviewSectionId::SourceRelationships if !dossier.source_relationships.is_empty() => Some(("Source relationships", dossier.source_relationships.iter().map(|item| format!("- {} {}", match item.kind { AgentTaskReviewIssueRelationshipKind::Closes => "Closes", AgentTaskReviewIssueRelationshipKind::RelatesTo => "Relates to" }, relationship_reference(&item.reference))).collect::<Vec<_>>().join("\n"))), _ => None };
+            AgentTaskReviewSectionId::Summary if !dossier.summary.is_empty() => {
+                Some(("Summary", prose(&dossier.summary)))
+            }
+            AgentTaskReviewSectionId::WhatChanged if !dossier.what_changed.is_empty() => {
+                Some(("What changed", bullets(&dossier.what_changed)))
+            }
+            AgentTaskReviewSectionId::Compatibility if !dossier.compatibility.is_empty() => {
+                Some(("Compatibility", prose(&dossier.compatibility)))
+            }
+            AgentTaskReviewSectionId::Verification => {
+                render_verification(dossier).map(|content| ("Verification", content))
+            }
+            _ => None,
+        };
         if let Some((heading, content)) = section {
-            sections.push(format!("## {heading}\n{content}"));
+            blocks.push(format!("## {heading}\n{content}"));
         }
     }
     for section in &profile.additional_sections {
         if !section.content.is_empty() {
-            sections.push(format!(
+            blocks.push(format!(
                 "## {}\n{}",
-                section.heading,
+                prose(&section.heading),
                 prose(&section.content)
             ));
         }
     }
-    sections.join("\n\n") + "\n"
+    blocks.push(format!(
+        "---\n{}",
+        render_ai_disclosure(&dossier.ai_assistance)
+    ));
+    blocks.join("\n\n") + "\n"
 }
+
+fn render_source_relationships(relationships: &[AgentTaskReviewIssueRelationship]) -> String {
+    relationships
+        .iter()
+        .map(|item| {
+            format!(
+                "{} {}",
+                match item.kind {
+                    AgentTaskReviewIssueRelationshipKind::Closes => "Closes",
+                    AgentTaskReviewIssueRelationshipKind::RelatesTo => "Relates to",
+                },
+                relationship_reference(&item.reference)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The one AI disclosure in the body.
+fn render_ai_disclosure(ai: &AgentTaskReviewAiAssistance) -> String {
+    if !ai.used {
+        return "AI disclosure: no AI assistance was used.".to_string();
+    }
+    let via = if ai.tool.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" via {}", prose(&ai.tool))
+    };
+    format!(
+        "AI disclosure: {}{via}. Used for: {}",
+        prose(&ai.model),
+        prose(&ai.used_for)
+    )
+}
+
+/// One visible line per gate, reviewer steps that no gate already covers, and
+/// a collapsed block holding each gate command (newlines preserved, runnable)
+/// and the provenance identifiers.
+fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
+    let mut visible = Vec::new();
+    if !dossier.changed_public_contracts.is_empty() {
+        visible.push(render_public_contract_evidence(dossier));
+    }
+    let base = dossier
+        .verified_base
+        .as_ref()
+        .map(|base| {
+            let advanced = match base.publication_sha.as_deref() {
+                Some(observed) if observed != base.sha => {
+                    format!(" (base has since advanced to `{}`)", short_sha(observed))
+                }
+                _ => String::new(),
+            };
+            format!(
+                ", base `{}` at `{}`{advanced}",
+                code(&base.branch),
+                short_sha(&base.sha)
+            )
+        })
+        .unwrap_or_default();
+    let gate_lines = dossier
+        .verified_commands
+        .iter()
+        .map(|command| {
+            let status = match command.status.as_str() {
+                "succeeded" | "passed" => "passed".to_string(),
+                other => prose(other),
+            };
+            let counts = match (command.passed, command.total) {
+                (Some(passed), Some(total)) => format!(" ({passed}/{total})"),
+                _ => String::new(),
+            };
+            format!(
+                "Gate `{}` {status}{counts} on `{}`{base}.",
+                code(&command.evidence_ref),
+                short_sha(&command.candidate_commit),
+            )
+        })
+        .collect::<Vec<_>>();
+    if !gate_lines.is_empty() {
+        visible.push(gate_lines.join("\n\n"));
+    } else if !base.is_empty() {
+        visible.push(format!("Verified against{}.", base.trim_start_matches(',')));
+    }
+    let steps = dossier
+        .how_to_test
+        .iter()
+        .filter(|step| reviewer_runnable_command(&step.command))
+        .filter(|step| {
+            !dossier
+                .verified_commands
+                .iter()
+                .any(|verified| verified.command.trim() == step.command.trim())
+        })
+        .map(|step| {
+            format!(
+                "- Run `{}`; expect {}.",
+                code(&step.command),
+                prose(&step.expected)
+            )
+        })
+        .collect::<Vec<_>>();
+    if !steps.is_empty() {
+        visible.push(steps.join("\n"));
+    }
+    let evidence = render_evidence(&dossier.evidence);
+    if dossier.verified_commands.is_empty() {
+        if !evidence.is_empty() {
+            visible.push(evidence);
+        }
+    } else {
+        let mut details = Vec::new();
+        for command in &dossier.verified_commands {
+            details.push(fenced_command(&command.command));
+        }
+        let mut provenance = dossier
+            .verified_commands
+            .iter()
+            .map(|command| {
+                let counts = match (command.failed, command.ignored) {
+                    (Some(failed), Some(ignored)) => {
+                        format!("; {failed} failed, {ignored} ignored")
+                    }
+                    _ => String::new(),
+                };
+                format!(
+                    "- `{}`: commit `{}`, tree `{}`, fingerprint `{}`{counts}",
+                    code(&command.evidence_ref),
+                    code(&command.candidate_commit),
+                    code(&command.candidate_tree),
+                    code(&command.candidate_sha256),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !evidence.is_empty() {
+            provenance = format!("{provenance}\n{evidence}");
+        }
+        details.push(provenance);
+        visible.push(format!(
+            "<details><summary>Gate command and provenance</summary>\n\n{}\n\n</details>",
+            details.join("\n\n")
+        ));
+    }
+    (!visible.is_empty()).then(|| visible.join("\n\n"))
+}
+
+/// A gate command as a runnable shell block. Newlines are preserved; local
+/// paths and other operator-only references are redacted in place.
+fn fenced_command(command: &str) -> String {
+    let command = reviewer_text(&redact_inline_environment_paths(command));
+    let command = command.trim_end_matches(['\n', '\r']);
+    let longest_backtick_run = command
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest_backtick_run.max(2) + 1);
+    format!("{fence}sh\n{command}\n{fence}")
+}
+
+/// Abbreviate a full git object id; anything else is shown as recorded.
+fn short_sha(value: &str) -> String {
+    let value = code(value);
+    if value.len() > 12 && value.chars().all(|character| character.is_ascii_hexdigit()) {
+        value[..7].to_string()
+    } else {
+        value
+    }
+}
+
 fn render_public_contract_evidence(dossier: &AgentTaskReviewDossier) -> String {
     let contracts = dossier
         .changed_public_contracts
@@ -1135,7 +1315,7 @@ fn render_public_contract_evidence(dossier: &AgentTaskReviewDossier) -> String {
         AgentTaskExternalUsageStatus::UnavailableManualReview => "unavailable_manual_review",
     };
     format!(
-        "**Declared public contracts**\n{contracts}\n\n**Compatibility impact:** {}\n\n**External-consumer impact:** {}\n\n**External usage:** {status}; source: {}; limitations: {}; evidence: {}\n\n",
+        "**Declared public contracts**\n{contracts}\n\n**Compatibility impact:** {}\n\n**External-consumer impact:** {}\n\n**External usage:** {status}; source: {}; limitations: {}; evidence: {}",
         prose(&evidence.compatibility_impact),
         prose(&evidence.external_consumer_impact),
         prose(&evidence.external_usage.source),
@@ -1153,35 +1333,14 @@ fn render_evidence(evidence: &[AgentTaskReviewEvidence]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-fn render_verified_commands(commands: &[AgentTaskReviewVerifiedCommand]) -> String {
-    commands
-        .iter()
-        .map(|command| {
-            let counts = match (command.total, command.passed, command.failed, command.ignored) {
-                (Some(total), Some(passed), Some(failed), Some(ignored)) => format!(
-                    "; total={total}, passed={passed}, failed={failed}, ignored={ignored}"
-                ),
-                _ => String::new(),
-            };
-            format!(
-                "- Verified command `{}`: status={}; candidate commit `{}`, tree `{}`, fingerprint `{}`; durable gate `{}`{}\n",
-                code(&command.command), prose(&command.status), code(&command.candidate_commit),
-                code(&command.candidate_tree), code(&command.candidate_sha256),
-                code(&command.evidence_ref), counts,
-            )
-        })
-        .collect()
-}
 
 fn ordered_sections(profile: &AgentTaskReviewProfile) -> Vec<AgentTaskReviewSectionId> {
     let mut sections = profile.section_order.clone();
     for id in [
         AgentTaskReviewSectionId::Summary,
         AgentTaskReviewSectionId::WhatChanged,
-        AgentTaskReviewSectionId::HowToTest,
         AgentTaskReviewSectionId::Compatibility,
-        AgentTaskReviewSectionId::Evidence,
-        AgentTaskReviewSectionId::AiAssistance,
+        AgentTaskReviewSectionId::Verification,
         AgentTaskReviewSectionId::SourceRelationships,
     ] {
         if !sections.contains(&id) {
@@ -1206,39 +1365,149 @@ fn scalar(field: &str, value: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// Agent prose is passed through as markdown, so inline code, emphasis and
+/// links render. Only the protections that matter for a PR body remain: HTML
+/// comments are removed, raw HTML outside code spans is neutralized, and no
+/// line may open a heading that could forge a section of the body.
 fn prose(value: &str) -> String {
-    let mut rendered: String = reviewer_text(value)
-        .chars()
-        .flat_map(|character| match character {
-            '*' | '_' | '`' | '[' | ']' | '<' | '>' | '!' => {
-                vec!['\\', character]
+    neutralize_raw_html(&strip_html_comments(&reviewer_text(value)))
+        .lines()
+        .map(|line| {
+            let content = line.trim_start();
+            if content.starts_with('#') {
+                format!("\\{content}")
+            } else {
+                line.to_string()
             }
-            _ => vec![character],
         })
-        .collect();
-    if rendered.starts_with(['#', '>', '-', '+'])
-        || rendered
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_ascii_digit())
-            && rendered.chars().nth(1) == Some('.')
-    {
-        rendered.insert(0, '\\');
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_html_comments(value: &str) -> String {
+    let mut rendered = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("<!--") {
+        rendered.push_str(&rest[..start]);
+        rest = match rest[start + 4..].find("-->") {
+            Some(end) => &rest[start + 4 + end + 3..],
+            None => "",
+        };
+    }
+    rendered.push_str(rest);
+    rendered
+}
+
+/// Escape the `<` of anything outside a code span that GitHub would treat as
+/// raw HTML (a tag, closing tag, declaration or processing instruction).
+/// Autolinks such as `<https://example.com>` are left intact.
+fn neutralize_raw_html(value: &str) -> String {
+    let characters = value.chars().collect::<Vec<_>>();
+    let mut rendered = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < characters.len() {
+        let character = characters[index];
+        if character == '`' {
+            let run = characters[index..]
+                .iter()
+                .take_while(|&&c| c == '`')
+                .count();
+            let fence = "`".repeat(run);
+            let remainder: String = characters[index + run..].iter().collect();
+            if let Some(close) = find_closing_backticks(&remainder, run) {
+                let span: String = characters[index + run..index + run + close]
+                    .iter()
+                    .collect();
+                rendered.push_str(&fence);
+                rendered.push_str(&span);
+                rendered.push_str(&fence);
+                index += run + close + run;
+            } else {
+                rendered.push_str(&fence);
+                index += run;
+            }
+            continue;
+        }
+        if character == '<' {
+            let next = characters.get(index + 1).copied();
+            let autolink = {
+                let tail: String = characters[index + 1..]
+                    .iter()
+                    .take_while(|&&c| c != '>')
+                    .collect();
+                tail.contains("://") && !tail.contains(char::is_whitespace)
+            };
+            if !autolink
+                && next.is_some_and(|next| {
+                    next.is_ascii_alphabetic() || matches!(next, '/' | '!' | '?')
+                })
+            {
+                rendered.push_str("&lt;");
+                index += 1;
+                continue;
+            }
+        }
+        rendered.push(character);
+        index += 1;
     }
     rendered
 }
+
+/// Character offset of a backtick run of exactly `run` length in `value`.
+fn find_closing_backticks(value: &str, run: usize) -> Option<usize> {
+    let characters = value.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < characters.len() {
+        if characters[index] == '`' {
+            let length = characters[index..]
+                .iter()
+                .take_while(|&&c| c == '`')
+                .count();
+            if length == run {
+                return Some(index);
+            }
+            index += length;
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
 fn code(value: &str) -> String {
     reviewer_text(value).replace('`', "'")
 }
 
-/// Reviewer-facing bodies must be independently resolvable. Omit operator-only
-/// references rather than publishing local paths or durable runtime identifiers.
+const OPERATOR_ONLY_PLACEHOLDER: &str = "[operator-only reference]";
+
+/// Reviewer-facing bodies must be independently resolvable. Each operator-only
+/// reference (local path, durable runtime id, credential, private URL) is
+/// redacted in place, so the rest of the field still reaches the reviewer.
+/// Whitespace, including newlines, is preserved.
 fn reviewer_text(value: &str) -> String {
-    if contains_operator_only_reference(value) {
-        "[operator-only reference omitted]".into()
-    } else {
-        value.into()
-    }
+    let mut redact_next = false;
+    Regex::new(r"\S+")
+        .expect("valid word regex")
+        .replace_all(value, |captures: &regex::Captures<'_>| {
+            let word = &captures[0];
+            let normalized = normalize_reviewer_token(word);
+            let unsafe_word = std::mem::take(&mut redact_next)
+                || reviewer_credential_flag(normalized)
+                || operator_only_reference_rule(normalized).is_some();
+            if reviewer_credential_flag(normalized) {
+                // The value after a credential flag is the secret itself.
+                redact_next = true;
+            }
+            if !unsafe_word {
+                word.to_string()
+            } else if normalized.is_empty() {
+                OPERATOR_ONLY_PLACEHOLDER.to_string()
+            } else {
+                word.replacen(normalized, OPERATOR_ONLY_PLACEHOLDER, 1)
+            }
+        })
+        .into_owned()
 }
 
 pub fn reviewer_runnable_command(value: &str) -> bool {
@@ -1284,9 +1553,10 @@ pub fn reviewer_unsafe_tokens(value: &str) -> Vec<ReviewerUnsafeToken> {
 /// Inline `NAME=/absolute/path` assignments become `NAME="${NAME}"`, which a
 /// reviewer can set for their own environment.
 fn redact_inline_environment_paths(value: &str) -> String {
-    value
-        .split_whitespace()
-        .map(|token| {
+    Regex::new(r"\S+")
+        .expect("valid word regex")
+        .replace_all(value, |captures: &regex::Captures<'_>| {
+            let token = &captures[0];
             let Some((name, assigned)) = token.split_once('=') else {
                 return token.to_string();
             };
@@ -1304,8 +1574,7 @@ fn redact_inline_environment_paths(value: &str) -> String {
                 token.to_string()
             }
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .into_owned()
 }
 
 fn contains_operator_only_reference(value: &str) -> bool {
@@ -1484,13 +1753,7 @@ fn unique_sections(field: &str, values: &[AgentTaskReviewSectionId]) -> Result<(
 fn builtin_section_name(id: &str) -> bool {
     matches!(
         id,
-        "summary"
-            | "what_changed"
-            | "how_to_test"
-            | "compatibility"
-            | "evidence"
-            | "ai_assistance"
-            | "source_relationships"
+        "summary" | "what_changed" | "compatibility" | "verification" | "source_relationships"
     )
 }
 fn issue_pattern() -> Regex {
@@ -1794,14 +2057,7 @@ mod tests {
         .into_iter()
         .filter_map(|url| task_issue_relationship(url, Some(&dest)))
         .collect();
-        enrich_dossier(
-            &mut value,
-            &["https://github.com/Extra-Chill/homeboy/issues/16247".into()],
-            &[],
-            &[],
-            &[],
-            None,
-        );
+        enrich_dossier(&mut value, &[], &[]);
         value.validate(&default_profile()).unwrap();
         let body = render_review_dossier(&value, &default_profile());
         assert!(body.contains("Closes #16247"), "{body}");
@@ -1984,6 +2240,7 @@ mod tests {
             verified_commands: Vec::new(),
             changed_public_contracts: Vec::new(),
             public_contract_evidence: None,
+            verified_base: None,
             ai_assistance: AgentTaskReviewAiAssistance {
                 used: true,
                 tool: "Pi".into(),
@@ -2200,16 +2457,14 @@ mod tests {
             .expect("fixture gate evidence");
         let body = render_review_dossier(&value, &default_profile());
         for expected in [
-            "Verified command `cargo test connection`",
-            "status=succeeded",
-            "candidate commit `candidate-commit`",
-            "tree `candidate-tree`",
-            "fingerprint `candidate-fingerprint`",
-            "durable gate `gate-connection`",
-            "total=177, passed=175, failed=2, ignored=0",
+            "Gate `gate-connection` passed (175/177) on `candidate-commit`.",
+            "```sh\ncargo test connection\n```",
+            "- `gate-connection`: commit `candidate-commit`, tree `candidate-tree`, fingerprint `candidate-fingerprint`; 2 failed, 0 ignored",
         ] {
             assert!(body.contains(expected), "missing `{expected}` in {body}");
         }
+        // The verified gate is not restated as a reviewer step.
+        assert!(!body.contains("Run `cargo test connection`"), "{body}");
     }
 
     #[test]
@@ -2455,11 +2710,149 @@ mod tests {
             .expect("gate evidence passes the dossier scalar contract");
     }
 
+    /// #16270: the Cook PR body shape. One relationship line, the agent's
+    /// prose as markdown, one Verification line per gate with the runnable
+    /// command and provenance collapsed, and a single AI disclosure.
+    #[test]
+    fn cook_pr_body_pins_the_compact_verification_shape() {
+        let gate_command = "set -e\ncargo fmt --all -- --check\nout=$(cargo test --workspace --lib task_issue_relationship 2>&1); echo \"$out\" | grep -E \"^test |test result\" | tail -30\necho \"$out\" | grep -qE \"test result: ok\\. [1-9]\" || { echo \"no task_issue_relationship tests ran\"; exit 1; }\n! echo \"$out\" | grep -q \"FAILED\"\ncargo test -p homeboy-agents --lib agent_task_review_dossier\n";
+        let mut value = dossier();
+        value.source_relationships = vec![AgentTaskReviewIssueRelationship {
+            kind: AgentTaskReviewIssueRelationshipKind::Closes,
+            reference: "#16247".into(),
+        }];
+        value.summary = "Cook PR bodies now say `Closes #N` when the task URL is an issue in the destination repository, so GitHub closes it on merge.".into();
+        value.what_changed = vec![
+            "Added `task_issue_relationship` in agent_task_review_dossier.rs, mapping a task URL onto `Closes` or `Relates to`.".into(),
+            "Cook finalization fills `source_relationships` from the task's source refs.".into(),
+            "Added unit and end-to-end tests for same-repo, cross-repo and external-tracker URLs.".into(),
+        ];
+        value.how_to_test.clear();
+        value.compatibility = "Additive. `Closes` validation is unchanged.".into();
+        value.ai_assistance = AgentTaskReviewAiAssistance {
+            used: true,
+            tool: "Homeboy (pi)".into(),
+            model: "anthropic-claude-opus-5-5".into(),
+            used_for:
+                "Implemented the mapping and the tests, then ran the formatting and test gates."
+                    .into(),
+        };
+        value.verified_commands = vec![AgentTaskReviewVerifiedCommand {
+            command: gate_command.into(),
+            status: "succeeded".into(),
+            candidate_commit: "cf5ddd58adabe779d1c9d26b16d90d83be16805b".into(),
+            candidate_tree: "645eaae2998d0612cd2f08c977a31b49c06fec7d".into(),
+            candidate_sha256: "4b49e0e6e704327986856461f073ca59ecd76115d918d95a670b2a76394357b2"
+                .into(),
+            evidence_ref: "gate-1".into(),
+            total: Some(65),
+            passed: Some(65),
+            failed: Some(0),
+            ignored: Some(0),
+        }];
+        value.verified_base = Some(AgentTaskReviewVerifiedBase {
+            branch: "main".into(),
+            sha: "6229120662bb1f753d8e8657c391d4875a31273f".into(),
+            publication_sha: Some("6229120662bb1f753d8e8657c391d4875a31273f".into()),
+        });
+        value
+            .validate(&default_profile())
+            .expect("valid Cook dossier");
+
+        let body = render_review_dossier(&value, &default_profile());
+
+        let expected = format!(
+            "Closes #16247
+
+## Summary
+Cook PR bodies now say `Closes #N` when the task URL is an issue in the destination repository, so GitHub closes it on merge.
+
+## What changed
+- Added `task_issue_relationship` in agent_task_review_dossier.rs, mapping a task URL onto `Closes` or `Relates to`.
+- Cook finalization fills `source_relationships` from the task's source refs.
+- Added unit and end-to-end tests for same-repo, cross-repo and external-tracker URLs.
+
+## Compatibility
+Additive. `Closes` validation is unchanged.
+
+## Verification
+Gate `gate-1` passed (65/65) on `cf5ddd5`, base `main` at `6229120`.
+
+<details><summary>Gate command and provenance</summary>
+
+```sh
+{}
+```
+
+- `gate-1`: commit `cf5ddd58adabe779d1c9d26b16d90d83be16805b`, tree `645eaae2998d0612cd2f08c977a31b49c06fec7d`, fingerprint `4b49e0e6e704327986856461f073ca59ecd76115d918d95a670b2a76394357b2`; 0 failed, 0 ignored
+
+</details>
+
+---
+AI disclosure: anthropic-claude-opus-5-5 via Homeboy (pi). Used for: Implemented the mapping and the tests, then ran the formatting and test gates.
+",
+            gate_command.trim_end()
+        );
+        assert_eq!(body, expected);
+        // The gate command appears once, runnable, and the disclosure once.
+        assert_eq!(body.matches("cargo fmt --all -- --check").count(), 1);
+        assert_eq!(body.matches("AI disclosure").count(), 1);
+        for retired in [
+            "## How to test",
+            "## AI assistance",
+            "## Evidence",
+            "\\`",
+            "\\_",
+        ] {
+            assert!(!body.contains(retired), "retired `{retired}` in {body}");
+        }
+        assert!(
+            body.chars().count() < 1_800,
+            "{} chars: {body}",
+            body.chars().count()
+        );
+    }
+
+    #[test]
+    fn prose_keeps_markdown_but_neutralizes_html_and_headings() {
+        assert_eq!(
+            prose("Use `Vec<String>` and **bold** [docs](https://example.com/a_b)"),
+            "Use `Vec<String>` and **bold** [docs](https://example.com/a_b)"
+        );
+        assert_eq!(
+            prose("Returns Vec<String> <img src=x onerror=y> <https://example.com>"),
+            "Returns Vec&lt;String> &lt;img src=x onerror=y> <https://example.com>"
+        );
+        assert_eq!(prose("keep <!-- hidden --> this"), "keep  this");
+        assert_eq!(prose("## Forged section"), "\\## Forged section");
+        assert_eq!(prose("   # indented"), "\\# indented");
+    }
+
+    #[test]
+    fn verification_reports_an_advanced_base_once() {
+        let mut value = dossier();
+        value.verified_commands = valid_form()
+            .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
+            .expect("fixture gate evidence");
+        value.verified_base = Some(AgentTaskReviewVerifiedBase {
+            branch: "main".into(),
+            sha: "6229120662bb1f753d8e8657c391d4875a31273f".into(),
+            publication_sha: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+        });
+        let body = render_review_dossier(&value, &default_profile());
+        assert!(
+            body.contains("base `main` at `6229120` (base has since advanced to `aaaaaaa`)."),
+            "{body}"
+        );
+        assert_eq!(body.matches("6229120").count(), 1, "{body}");
+    }
+
     #[test]
     fn renderer_is_deterministic_and_safe() {
         let body = render_review_dossier(&dossier(), &default_profile());
-        assert!(body.starts_with("## Summary"));
-        assert!(body.contains("1. Run `cargo test dossier`; expect passes."));
+        assert_eq!(body, render_review_dossier(&dossier(), &default_profile()));
+        assert!(body.starts_with("Closes #8058\n\n## Summary"), "{body}");
+        assert!(body.contains("- Run `cargo test dossier`; expect passes."));
         assert!(!body.contains("Publication intent"));
     }
     #[test]
@@ -2477,7 +2870,13 @@ mod tests {
         assert!(body.contains("Closes #8058"));
         assert!(body.contains("Relates to owner/repo#9"));
         assert!(!body.contains("Closes: #8058"));
-        assert!(body.contains("\\# heading \\> quote - list 1. ordered"));
+        assert!(
+            body.contains(
+                "## Summary\n\\# heading > quote - list 1. ordered ``` fence [link](x) \n"
+            ),
+            "{body}"
+        );
+        assert!(!body.contains("<!--"), "{body}");
     }
     #[test]
     fn overrides_apply_and_keep_provenance() {
@@ -2685,7 +3084,7 @@ mod tests {
         assert!(value.validate(&profile).is_err());
 
         let hidden = AgentTaskReviewProfile {
-            hidden_sections: vec![AgentTaskReviewSectionId::HowToTest],
+            hidden_sections: vec![AgentTaskReviewSectionId::Verification],
             ..Default::default()
         };
         assert!(validate_profile(&hidden).is_err());
@@ -2718,7 +3117,13 @@ mod tests {
         ] {
             assert!(!body.contains(forbidden), "leaked {forbidden}: {body}");
         }
-        assert!(!body.contains("## How to test"));
+        // Only the reference is redacted; the rest of the field still renders.
+        assert!(
+            body.contains("Inspect [operator-only reference] at [operator-only reference] using"),
+            "{body}"
+        );
+        // A reviewer step that cannot run outside the operator's machine is dropped.
+        assert!(!body.contains("Run `cargo test"), "{body}");
     }
 
     #[test]
@@ -2742,10 +3147,13 @@ mod tests {
             "API_KEY=secret cargo test",
         ] {
             assert!(!reviewer_runnable_command(value), "accepted {value}");
-            assert_eq!(
-                reviewer_text(value),
-                "[operator-only reference omitted]",
-                "rendered unsafe reviewer claim: {value}"
+            let rendered = reviewer_text(value);
+            assert!(
+                rendered.contains(OPERATOR_ONLY_PLACEHOLDER)
+                    && !contains_operator_only_reference(&rendered)
+                    && !rendered.contains("secret")
+                    && !rendered.contains("/private/repo"),
+                "rendered unsafe reviewer claim: {value} -> {rendered}"
             );
         }
 
