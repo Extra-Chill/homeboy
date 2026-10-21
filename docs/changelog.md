@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.431.16] - 2026-10-21
+
+### Fixed
+- render the no-change retry from the operator's template
+
 ## [0.431.15] - 2026-10-21
 
 ### Changed
