@@ -35,20 +35,24 @@ jobs:
 
   homeboy:
     name: homeboy
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@33c4e935b4eee4a9ec8a06861cfa048e633e7a7d
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@34e713b8e8308d2f0a83bfeead0edeafb9f70301
     with:
       # Lint and Test share the prepared candidate binary and retain separate
       # checks/comment sections via the workflow's per-command defaults.
       # Keep --skip-lint test-local; shared args would pass it to review lint.
       commands: review lint,review test --skip-lint
       component: homeboy
-      # Scoped differential baseline (homeboy-action#541-#544).
-      action-ref: 33c4e935b4eee4a9ec8a06861cfa048e633e7a7d
+      # Scoped differential baseline (homeboy-action#541-#544); nextest-profile input (#546).
+      action-ref: 34e713b8e8308d2f0a83bfeead0edeafb9f70301
       extension-ref: 7b638cf9bf2ef69e19051e370e91864987e997a2
       source: .
       scope: auto
       differential-gating: 'true'
       baseline-commands: review lint,review test --skip-lint
+      # PR profile: its default-filter moves slow suites to nightly.yml
+      # (#16264). Passthrough `-- --profile` is rejected by the Rust runner
+      # under changed-scope selection, so the reusable workflow exports it.
+      nextest-profile: ci
       test-shards: '1'
       execution-timeout-seconds: '2100'
       test-timeout-seconds: '1800'

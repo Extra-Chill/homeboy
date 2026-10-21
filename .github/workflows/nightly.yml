@@ -1,0 +1,38 @@
+name: Nightly tests
+
+on:
+  schedule:
+    # UTC; scheduled workflows run against the default branch.
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-tests-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  homeboy:
+    name: homeboy / Full suite
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@34e713b8e8308d2f0a83bfeead0edeafb9f70301
+    with:
+      commands: review test --skip-lint
+      nextest-profile: nightly
+      component: homeboy
+      action-ref: 34e713b8e8308d2f0a83bfeead0edeafb9f70301
+      extension-ref: 7b638cf9bf2ef69e19051e370e91864987e997a2
+      source: .
+      scope: full
+      differential-gating: 'false'
+      baseline-commands: none
+      test-shards: '1'
+      pr-comment: 'false'
+      execution-timeout-seconds: '2100'
+      test-timeout-seconds: '1800'
+      setup-timeout-seconds: '2400'
+    secrets: inherit

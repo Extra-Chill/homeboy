@@ -10,7 +10,20 @@ filter = 'test(public_continuation_resumes_terminal_child_while_real_sibling_pro
 threads-required = "num-cpus"
 slow-timeout = { period = "180s", terminate-after = 4 }
 
+# PR exclusions are based on #16264's Candidate Test measurements from #16260:
+# cook handoff (9 tests >=10s; peak 44.6s), execution chaos (4; peak 38.4s),
+# and the daemon lifecycle suite (peak 35.5s) move together to nightly.
+# Also exclude the two individually measured >=30s non-chaos tests. Do not
+# exclude whole unit-test binaries just because a few members were slow.
+# See docs/ci-test-profiles.md for invocation and changed-file coverage policy.
 [profile.ci]
+default-filter = '''
+not (binary(=execution_step_chaos)
+  | binary(=cook_lab_handoff_test)
+  | test(/^daemon_chaos::/)
+  | test(=repository_cleanliness::repository_cleanliness_fixture_cook_leaves_only_the_provider_edit)
+  | test(=git::subtree::tests::split_budget_allows_real_split_to_run_past_previous_thirty_second_limit))
+'''
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 4 }
 
@@ -18,6 +31,13 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 filter = 'test(public_continuation_resumes_terminal_child_while_real_sibling_provider_remains_live)'
 threads-required = "num-cpus"
 slow-timeout = { period = "180s", terminate-after = 4 }
+
+# Full coverage, including every PR exclusion. Custom profiles inherit default's
+# recovery override, not ci's default-filter.
+[profile.nightly]
+default-filter = 'all()'
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 4 }
 
 [profile.quick]
 fail-fast = true
