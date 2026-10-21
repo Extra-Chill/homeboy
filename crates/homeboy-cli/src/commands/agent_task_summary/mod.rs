@@ -682,7 +682,20 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     Some(finish(lines))
 }
 
+/// The control-plane run projects a live driver verifying its candidate.
+pub(crate) fn live_gate_verifying(payload: &Value) -> bool {
+    string_value(payload, &["state"]) == Some("running")
+        && string_value(payload, &["phase"])
+            == Some(homeboy::agents::orchestration::LIVE_GATE_VERIFYING_PHASE)
+}
+
 pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
+    // A live driver is still running this Cook's gates (#16058): the latched
+    // `candidate_recoverable` is not its verdict, so watch it, never recover.
+    if live_gate_verifying(payload) {
+        let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
+        return format!("homeboy agent-task watch {cook_id}");
+    }
     if string_value(payload, &["blocker", "code"])
         .is_some_and(|code| code.starts_with("resource_guard."))
     {

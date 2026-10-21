@@ -199,6 +199,15 @@ fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<St
         .as_ref()
         .map(|publication| publication.state.as_str());
     match run.state {
+        State::Running
+            if run.phase.as_deref()
+                == Some(homeboy::agents::orchestration::LIVE_GATE_VERIFYING_PHASE) =>
+        {
+            Some(
+                "verifying: a live Cook driver is running the candidate's gates; watch it instead of recovering"
+                    .to_string(),
+            )
+        }
         State::Queued | State::Running | State::Blocked => None,
         State::Stale => Some(
             "the run owner stopped reporting progress; the durable record is stale".to_string(),
@@ -273,6 +282,45 @@ mod tests {
             verdict.next_action,
             "homeboy agent-task recover agent-task-verdict"
         );
+    }
+
+    fn live_gate_driver_run(state: ControlPlaneRunState, phase: Option<&str>) -> ControlPlaneRun {
+        let mut run = resource(state);
+        run.mission = Some(homeboy_control_plane_contract::MissionId::new("cook-16058").unwrap());
+        run.phase = phase.map(str::to_string);
+        run.candidate = Some(ControlPlaneStateSummary {
+            id: None,
+            state: "verification_pending".to_string(),
+        });
+        run
+    }
+
+    /// #16058: a Cook whose gates a live driver is running reads as verifying
+    /// and points at watching it, never at recover.
+    #[test]
+    fn live_gate_driver_verdict_reports_verifying_and_watch() {
+        let verdict = cook_verdict(&live_gate_driver_run(
+            ControlPlaneRunState::Running,
+            Some(homeboy::agents::orchestration::LIVE_GATE_VERIFYING_PHASE),
+        ));
+        assert_eq!(verdict.state, "running");
+        assert_eq!(verdict.category(), None);
+        assert!(verdict
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("verifying")));
+        assert_eq!(verdict.next_action, "homeboy agent-task watch cook-16058");
+        assert!(!verdict.next_action.contains("recover"));
+    }
+
+    #[test]
+    fn live_gate_driver_absent_verdict_keeps_recover() {
+        let verdict = cook_verdict(&live_gate_driver_run(
+            ControlPlaneRunState::CandidateRecoverable,
+            None,
+        ));
+        assert_eq!(verdict.state, "candidate_recoverable");
+        assert_eq!(verdict.next_action, "homeboy agent-task recover cook-16058");
     }
 
     /// #15017: a blocked finalization names its step and the continuation that
