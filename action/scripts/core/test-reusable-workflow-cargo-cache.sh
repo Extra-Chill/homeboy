@@ -6,9 +6,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="${ROOT_DIR}/.github/workflows/ci.yml"
 
 if [ "$(grep -c '^        id: cargo-cache$' "${WORKFLOW}")" -ne 1 ] \
-  || [ "$(grep -c '^          path: \${{ steps.cargo-cache.outputs.paths }}$' "${WORKFLOW}")" -ne 1 ] \
-  || [ "$(grep -c '^          key: \${{ steps.cargo-cache.outputs.key }}$' "${WORKFLOW}")" -ne 1 ]; then
-  printf 'FAIL: binary job does not resolve and consume one Cargo build cache contract\n'
+  || [ "$(grep -c '^          path: \${{ steps.cargo-cache.outputs.paths }}$' "${WORKFLOW}")" -ne 2 ] \
+  || [ "$(grep -c '^          key: \${{ steps.cargo-cache.outputs.key }}$' "${WORKFLOW}")" -ne 2 ]; then
+  printf 'FAIL: binary job does not resolve and consume one Cargo build cache contract for restore and save\n'
   exit 1
 fi
 

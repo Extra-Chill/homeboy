@@ -377,8 +377,9 @@ runs:
       run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'resolve source Cargo cache' -- bash ${{ github.action_path }}/scripts/setup/resolve-source-cargo-cache.sh
 
     - name: Cache cargo (source build)
+      id: restore-source-cargo
       if: steps.source-cargo-cache.outputs.enabled == 'true'
-      uses: actions/cache@v5
+      uses: actions/cache/restore@v5
       with:
         path: ${{ steps.source-cargo-cache.outputs.paths }}
         key: ${{ steps.source-cargo-cache.outputs.key }}
@@ -393,6 +394,15 @@ runs:
         SOURCE_BUILD_PROFILE: ${{ inputs.source-build-profile }}
         HOMEBOY_SOURCE_TARGET_DIR: ${{ steps.source-cargo-cache.outputs.target-path }}
       run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'build Homeboy from source' -- bash ${{ github.action_path }}/scripts/setup/build-source-homeboy.sh
+
+    # Skip the redundant save after an exact hit. PR saves are kept: a PR's
+    # later pushes restore its own merge-ref cache (#545).
+    - name: Save cargo (source build)
+      if: steps.source-build.outputs.built == 'true' && steps.source-cargo-cache.outputs.enabled == 'true' && steps.restore-source-cargo.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ steps.source-cargo-cache.outputs.paths }}
+        key: ${{ steps.source-cargo-cache.outputs.key }}
 
     - name: Resolve Homeboy version
       id: resolve-version

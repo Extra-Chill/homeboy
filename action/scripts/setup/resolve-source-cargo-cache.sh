@@ -48,7 +48,8 @@ else:
               for path in sorted(root.rglob('*')) if path.is_file()
               and 'target' not in path.relative_to(root).parts and '.git' not in path.relative_to(root).parts]
     tree = digest(json.dumps(source).encode())
-prefix = f"{os.environ.get('RUNNER_OS', os.uname().sysname)}-cargo-source-v2-{compatibility}-{lock}-"
+compatibility_prefix = f"{os.environ.get('RUNNER_OS', os.uname().sysname)}-cargo-source-v2-{compatibility}-"
+prefix = f'{compatibility_prefix}{lock}-'
 cache_home = pathlib.Path(os.environ.get('XDG_CACHE_HOME', str(pathlib.Path.home() / '.cache')))
 source_target = cache_home / 'homeboy-action/source-targets' / digest(str(root).encode())
 target = pathlib.Path(os.environ.get('SOURCE_TARGET_DIR', str(source_target)))
@@ -56,7 +57,12 @@ if not target.is_absolute():
     target = pathlib.Path.cwd() / target
 print('enabled=true')
 print(f'key={prefix}{tree}')
-print(f'restore-keys={prefix}')
+# The cache action tries the exact key first. Prefer the same lock next,
+# then allow Cargo fingerprints to validate artifacts from another lock.
+print('restore-keys<<HOMEBOY_CACHE_RESTORE_KEYS')
+print(prefix)
+print(compatibility_prefix)
+print('HOMEBOY_CACHE_RESTORE_KEYS')
 print(f'target-path={target}')
 print('paths<<HOMEBOY_CACHE_PATHS')
 print(pathlib.Path.home() / '.cargo/registry')

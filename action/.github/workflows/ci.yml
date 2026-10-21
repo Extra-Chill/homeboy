@@ -267,8 +267,9 @@ jobs:
         run: bash .homeboy-action/scripts/setup/resolve-source-cargo-cache.sh
 
       - name: Cache cargo
+        id: restore-cargo
         if: steps.cargo-cache.outputs.key != ''
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ${{ steps.cargo-cache.outputs.paths }}
           key: ${{ steps.cargo-cache.outputs.key }}
@@ -277,6 +278,15 @@ jobs:
       - name: Build candidate Homeboy binary
         if: inputs.build-command != ''
         run: ${{ inputs.build-command }}
+
+      # Skip the redundant save after an exact hit. PR saves are kept: a
+      # PR's later pushes restore its own merge-ref cache (Extra-Chill/homeboy-action#545).
+      - name: Save cargo
+        if: steps.cargo-cache.outputs.key != '' && steps.restore-cargo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.cargo-cache.outputs.paths }}
+          key: ${{ steps.cargo-cache.outputs.key }}
 
       - name: Reserve action checkout during candidate binary setup
         id: prepare-binary-workspace

@@ -42,7 +42,21 @@ with tempfile.TemporaryDirectory() as temporary:
         env = dict(os.environ, SOURCE_PATH=str(source), SOURCE_BUILD_PROFILE=profile,
                    GITHUB_OUTPUT=str(output), XDG_CACHE_HOME=str(root / 'cache'), **overrides)
         run('bash', str(resolver), cwd=root, env=env)
-        return dict(line.split('=', 1) for line in output.read_text().splitlines() if '=' in line)
+        values = {}
+        lines = iter(output.read_text().splitlines())
+        for line in lines:
+            if '<<' in line:
+                name, delimiter = line.split('<<', 1)
+                content = []
+                for entry in lines:
+                    if entry == delimiter:
+                        break
+                    content.append(entry)
+                values[name] = '\n'.join(content)
+            elif '=' in line:
+                name, value = line.split('=', 1)
+                values[name] = value
+        return values
 
     def build(cache, release=True):
         env = dict(os.environ, CARGO_TARGET_DIR=cache['target-path'])
@@ -58,6 +72,13 @@ with tempfile.TemporaryDirectory() as temporary:
     release = resolve()
     assert dev['key'] != release['key'], 'dev artifacts cannot be an exact release cache hit'
     assert dev['restore-keys'] != release['restore-keys'], 'dev is not a release fallback'
+    same_lock, compatible = release['restore-keys'].splitlines()
+    assert release['key'].startswith(same_lock), 'exact tree key is tried before prefixes'
+    assert same_lock.startswith(compatible), 'same lock is preferred over any compatible lock'
+    assert len(same_lock.removeprefix(compatible)) == 65, 'same-lock prefix includes SHA-256 and dash'
+    assert len(compatible.split('-')[-2]) == 64, 'broad fallback retains compatibility hash'
+    for prefix in dev['restore-keys'].splitlines():
+        assert not release['key'].startswith(prefix), 'no cross-profile fallback'
     assert '/homeboy-action/source-targets/' in release['target-path']
     assert not Path(release['target-path']).is_relative_to(source)
     assert not (source / 'target/release').exists(), 'quality target is not a source build owner'
@@ -88,10 +109,29 @@ with tempfile.TemporaryDirectory() as temporary:
     assert not binary['fresh'], 'changed candidate is compiled rather than using an old executable'
     assert run(str(Path(binary['executable']))).stdout.strip() == 'next: 42'
 
+    # A version-only lock rewrite must miss the exact/same-lock cache but
+    # still restore the compatible dependency target. Cargo decides freshness.
+    lockfile = source / 'Cargo.lock'
+    original_lock = lockfile.read_text()
+    lockfile.write_text(original_lock + '\n# release lock rewrite\n')
+    new_lock = resolve()
+    assert new_lock['key'] != changed['key']
+    new_same_lock, new_compatible = new_lock['restore-keys'].splitlines()
+    assert new_same_lock != same_lock
+    assert new_compatible == compatible
+    assert not changed['key'].startswith(new_same_lock)
+    assert changed['key'].startswith(new_compatible), 'old lock is a compatibility fallback'
+    assert all(artifact['fresh'] for artifact in build(new_lock))
+    lockfile.write_text(original_lock)
+
     flagged = resolve(RUSTFLAGS='-C opt-level=1')
     assert flagged['restore-keys'] != changed['restore-keys'], 'flags partition compatibility'
     configured = resolve(CARGO_PROFILE_RELEASE_OPT_LEVEL='1')
     assert configured['restore-keys'] != changed['restore-keys'], 'profile overrides partition compatibility'
+    targeted = resolve(CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-C opt-level=1')
+    for isolated in (flagged, configured, targeted):
+        assert all(not changed['key'].startswith(prefix)
+                   for prefix in isolated['restore-keys'].splitlines()), 'fallbacks retain configuration isolation'
     toolchains = run('rustup', 'toolchain', 'list').stdout.splitlines()
     current = run('rustc', '-vV').stdout
     for line in toolchains:
