@@ -236,6 +236,28 @@ if [ "$json_exit" -ge 2 ]; then
     exit 2
 fi
 
+# A changed-file scope passes paths explicitly, so ESLint reports a path its
+# ignore patterns exclude as a warning ("File ignored because of a matching
+# ignore pattern"). That notice says the file is not linted; it is not a
+# finding about the file (Extra-Chill/homeboy#16123). Drop it once, here, so
+# the findings sidecar, summary and top violations all agree. "No matching
+# configuration" notices stay visible: they mean a file meant to be linted was
+# not.
+if [ -n "$json_output" ] && command -v node &> /dev/null; then
+    json_output=$(node -e '
+        const data = JSON.parse(process.argv[1]);
+        const ignoredNotice = (msg) => !msg.ruleId
+            && /^File ignored because of a matching ignore pattern\b/.test(msg.message || "");
+        for (const file of data) {
+            const kept = (file.messages || []).filter((msg) => !ignoredNotice(msg));
+            const dropped = (file.messages || []).length - kept.length;
+            file.messages = kept;
+            file.warningCount = Math.max(0, (file.warningCount || 0) - dropped);
+        }
+        process.stdout.write(JSON.stringify(data));
+    ' "$json_output")
+fi
+
 # Write ESLint lint findings sidecar for homeboy baseline and drill-down.
 # The top-level lint runner passes a temp file here, then merges it with PHPCS
 # and PHPStan findings. Direct ESLint runs may write HOMEBOY_LINT_FINDINGS_FILE.
