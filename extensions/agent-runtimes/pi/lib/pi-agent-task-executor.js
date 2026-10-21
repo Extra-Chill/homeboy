@@ -141,7 +141,18 @@ function piRuntimeReadiness(request = {}, options = {}) {
 		Object.assign(result, { ready: false, classification: 'auth_failure', retryable: false, reason: 'no_models_available',
 			message: `No Pi models are available in ${remediationBase}.`,
 			remediation: `Log in to a provider for ${remediationBase}, or point PI_CODING_AGENT_DIR at an agent dir that has one.` });
-	} else if (identity.model.includes('/') && !rows.some(([provider, model]) => `${provider}/${model}` === identity.model)) {
+	} else if (identity.model && !identity.model.includes('/')) {
+		// Pi resolves a bare model name against its whole built-in registry, not
+		// this agent dir's catalog, so it can bind a provider with no login
+		// (Extra-Chill/homeboy#16178). Admit only provider-qualified routes.
+		const candidates = rows.map(([provider, model]) => `${provider}/${model}`)
+			.filter((route) => route.split('/').pop().includes(identity.model)).slice(0, 5);
+		const suggestion = candidates.length ? `, for example ${candidates.join(', ')}` : '';
+		Object.assign(result, { ready: false, classification: 'deterministic_incompatibility', retryable: false, reason: 'model_not_qualified',
+			message: `Pi model ${identity.model} names no provider; Pi routes are provider/model.`,
+			remediation: `Select a provider-qualified model available in ${remediationBase}${suggestion}.`,
+			...(candidates.length ? { candidates } : {}) });
+	} else if (identity.model && !rows.some(([provider, model]) => `${provider}/${model}` === identity.model)) {
 		Object.assign(result, { ready: false, classification: 'deterministic_incompatibility', retryable: false, reason: 'model_not_available',
 			message: `Pi model ${identity.model} is not available in ${remediationBase}.`,
 			remediation: `Select a model available in ${remediationBase}, or point PI_CODING_AGENT_DIR at an agent dir that provides ${identity.model}.` });

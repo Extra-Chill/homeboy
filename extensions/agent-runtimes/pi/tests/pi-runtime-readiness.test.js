@@ -57,6 +57,18 @@ try {
 	const unavailable = piRuntimeReadiness(request(), { env: { PATH: process.env.PATH }, spawnSync: catalogProbe('provider model context\nanthropic other-model 200000\n') });
 	assert.equal(unavailable.classification, 'deterministic_incompatibility');
 	assert.equal(unavailable.reason, 'model_not_available');
+	// A bare model names no provider: Pi would resolve it outside this catalog.
+	const bare = piRuntimeReadiness(request({ model: 'opus-5-5' }), { env: { PATH: process.env.PATH }, spawnSync: catalogProbe('provider model context\nroadie anthropic-claude-opus-5-5 200000\nroadie anthropic-claude-sonnet-5-5 200000\nroadie opus-5-5 200000\n') });
+	assert.equal(bare.ready, false);
+	assert.equal(bare.classification, 'deterministic_incompatibility');
+	assert.equal(bare.reason, 'model_not_qualified');
+	assert.deepEqual(bare.candidates, ['roadie/anthropic-claude-opus-5-5', 'roadie/opus-5-5']);
+	assert.match(bare.remediation, /for example roadie\/anthropic-claude-opus-5-5, roadie\/opus-5-5\.$/);
+	const bareUnknown = piRuntimeReadiness(request({ model: 'nothing-like-it' }), { env: { PATH: process.env.PATH }, spawnSync: catalogProbe('provider model context\nroadie cook-heavy 200000\n') });
+	assert.equal(bareUnknown.reason, 'model_not_qualified');
+	assert.equal(bareUnknown.candidates, undefined);
+	const qualified = piRuntimeReadiness(request({ model: 'roadie/cook-heavy' }), { env: { PATH: process.env.PATH }, spawnSync: catalogProbe('provider model context\nroadie cook-heavy 200000\n') });
+	assert.equal(qualified.ready, true);
 	const timeout = piRuntimeReadiness(request(), { env: { PATH: process.env.PATH }, spawnSync: catalogProbe('', { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) }) });
 	assert.equal(timeout.classification, 'transient_failure');
 	const unspecified = piRuntimeReadiness(request({ model: undefined }), { env: { PATH: process.env.PATH }, spawnSync: catalogProbe('provider model context\nany model 1000\n') });
