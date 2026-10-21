@@ -35,16 +35,15 @@ jobs:
 
   homeboy:
     name: homeboy
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@e598b0f6c53407b2680517ff36802daabdc30947
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@4bb926f084f7c853f0d3ad5b4d28bac4a47f7b06
     with:
       # Lint and Test share the prepared candidate binary and retain separate
       # checks/comment sections via the workflow's per-command defaults.
       # Keep --skip-lint test-local; shared args would pass it to review lint.
       commands: review lint,review test --skip-lint
-      expected-commands: review lint,review test
       component: homeboy
-      # Released cache ownership repair, including native colored-retry coverage.
-      action-ref: e598b0f6c53407b2680517ff36802daabdc30947
+      # Scoped differential baseline (homeboy-action#541, #542, #543).
+      action-ref: 4bb926f084f7c853f0d3ad5b4d28bac4a47f7b06
       extension-ref: 7b638cf9bf2ef69e19051e370e91864987e997a2
       source: .
       scope: auto
