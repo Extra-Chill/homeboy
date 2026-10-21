@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.22.0] - 2026-10-21
+
+### Added
+- add a nextest-profile input for unsharded Test phases
+
 ## [2.21.5] - 2026-10-21
 
 ### Fixed
