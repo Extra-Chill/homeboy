@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.21.5] - 2026-10-21
+
+### Fixed
+- replay only the candidate's failed tests on the baseline
+
 ## [2.21.4] - 2026-10-20
 
 ### Fixed
