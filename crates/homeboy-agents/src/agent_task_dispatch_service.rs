@@ -682,7 +682,15 @@ fn controller_resolved_execution_policy_with_sources(
         }
         rotation
     });
-    let rotation_starts_with_first_entry = !explicit_backend && request.model.is_none();
+    // An explicit backend narrows the rotation to that backend's entries; it
+    // does not discard their model. Without `--model`, the first narrowed
+    // entry supplies it, so Cook never dispatches a model-less runtime that
+    // silently picks its own default (#16195).
+    let rotation_starts_with_first_entry = request.model.is_none()
+        && (!explicit_backend
+            || rotation
+                .as_ref()
+                .is_some_and(|rotation| !rotation.entries.is_empty()));
     let runtime_identity = if rotation_starts_with_first_entry {
         if let Some(entry) = rotation
             .as_ref()
@@ -1937,6 +1945,48 @@ mod tests {
         assert_eq!(identity.runtime_id, "codex");
         assert_eq!(identity.provider_id, "codex.agent-task-executor");
         assert_eq!(identity.provider["backend"], "codex");
+    }
+
+    #[test]
+    fn explicit_backend_without_model_takes_the_model_of_its_first_rotation_entry() {
+        let request = resolve_dispatch_request_with_default_and_config(
+            command_with_backend(Some("pi")),
+            |_| Ok(Some("codex".to_string())),
+            || Some("codex".to_string()),
+        )
+        .expect("explicit Pi request");
+        let route =
+            initial_provider_route_from_policy(controller_resolved_execution_policy_with_sources(
+                &request,
+                &AgentTaskProviderCatalog::default(),
+                Some(AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            backend: Some("codex".to_string()),
+                            model: Some("codex-model".to_string()),
+                            ..Default::default()
+                        },
+                        crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            backend: Some("pi".to_string()),
+                            model: Some("roadie/subagent".to_string()),
+                            ..Default::default()
+                        },
+                        crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            backend: Some("pi".to_string()),
+                            model: Some("roadie/fallback".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }),
+            ));
+
+        assert_eq!(route.backend, "pi");
+        assert_eq!(route.model.as_deref(), Some("roadie/subagent"));
+        assert!(route.rotation_selected_initial);
+        let remaining = route.rotation.expect("rotation").entries;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].model.as_deref(), Some("roadie/fallback"));
     }
 
     #[test]
