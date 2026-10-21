@@ -185,6 +185,14 @@ pub fn get_files_changed_since(path: &str, git_ref: &str) -> Result<Vec<String>>
         .into_iter()
         .collect();
     files.extend(get_working_tree_files_for_changed_since(path)?);
+    // A file the branch added but the working tree deleted is no longer part
+    // of the change set: scoping a gate to it selects a path that cannot run
+    // (#16242). Symlinks count by their own entry, not their target.
+    // Git reports paths from the repository root, which a nested component
+    // path is not.
+    let root = super::get_git_root(path)?;
+    let root = Path::new(&root);
+    files.retain(|file| root.join(file).symlink_metadata().is_ok());
     Ok(files.into_iter().collect())
 }
 
@@ -706,6 +714,25 @@ mod tests {
 
         assert!(files.contains(&"changed.txt".to_string()));
         assert!(files.contains(&"untracked.txt".to_string()));
+    }
+
+    #[test]
+    fn get_files_changed_since_excludes_files_deleted_in_the_working_tree() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().unwrap();
+        init_repo_with_initial_commit(path);
+        git(path, &["checkout", "-qb", "candidate"]);
+        fs::create_dir(dir.path().join("tests")).unwrap();
+        fs::write(dir.path().join("tests/smoke.php"), "<?php\n").unwrap();
+        fs::write(dir.path().join("tests/kept.php"), "<?php\n").unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-qm", "branch tests"]);
+        fs::remove_file(dir.path().join("tests/smoke.php")).unwrap();
+        fs::write(dir.path().join("tests/NewTest.php"), "<?php\n").unwrap();
+
+        let files = get_files_changed_since(path, "main").expect("changed files");
+
+        assert_eq!(files, vec!["tests/NewTest.php", "tests/kept.php"]);
     }
 
     #[test]

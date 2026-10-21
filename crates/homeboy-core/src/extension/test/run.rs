@@ -151,6 +151,14 @@ fn runtime_test_evidence(
         let Some(counts) = counts else {
             return invalid("failed test command did not expose structured TestCounts");
         };
+        if failed_test_ids.is_empty() && counts.total == 0 {
+            // The command failed before running a single test: the selection
+            // named nothing the runner could execute, such as a standalone
+            // script under the test directory (#16242).
+            return invalid(
+                "no runnable tests selected: the test command failed after running 0 tests",
+            );
+        }
         if failed_test_ids.is_empty() {
             return invalid("failed test command did not expose an observed failed test ID");
         }
@@ -3041,6 +3049,21 @@ mod tests {
                     if reason.contains(expected_reason)
             ));
         }
+
+        let ran_nothing = runtime_test_evidence(
+            &ci_env,
+            temp.path(),
+            Some(&profile),
+            false,
+            Some(&TestCounts::new(0, 0, 0, 0)),
+            None,
+            None,
+        );
+        assert!(matches!(
+            ran_nothing,
+            TestRuntimeEvidence::InvalidEvidence { ref reason }
+                if reason.starts_with("no runnable tests selected")
+        ));
 
         let countless = runtime_test_evidence(
             &ci_env,
