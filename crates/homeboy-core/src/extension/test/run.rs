@@ -1882,10 +1882,15 @@ fn run_main_test_workflow_inner(
     // always available — including when the child is killed before it prints a
     // single summary line — so the suite-level duration survives a timeout.
     let child_started = std::time::Instant::now();
+    // A run that does not execute a changed scope (full, widened, or
+    // inventory-only) must not inherit a caller's changed-scope env: CI
+    // exports SCOPE_MODE/HOMEBOY_CHANGED_SINCE for the whole job, and a
+    // widened run that inherits them silently runs scoped again (#16257).
+    let clear_ambient_scope = inventory_mode || changed_scope.is_none();
     let output = runner
-        .env_remove_if(inventory_mode, "SCOPE_MODE")
-        .env_remove_if(inventory_mode, "HOMEBOY_CHANGED_SINCE")
-        .env_remove_if(inventory_mode, "HOMEBOY_CHANGED_TEST_FILES")
+        .env_remove_if(clear_ambient_scope, "SCOPE_MODE")
+        .env_remove_if(clear_ambient_scope, "HOMEBOY_CHANGED_SINCE")
+        .env_remove_if(clear_ambient_scope, "HOMEBOY_CHANGED_TEST_FILES")
         .env_if(
             !inventory_mode && scope_changed_since.is_some(),
             "SCOPE_MODE",
@@ -4646,6 +4651,17 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
             let mut args = fixture_workflow_args(&component);
             args.changed_since = Some("base".to_string());
             args.precomputed_changed_files = Some(vec![".github/workflows/ci.yml".to_string()]);
+            // CI exports changed-scope env for the whole job; a widened run
+            // must scrub it rather than inherit it.
+            let _scope = homeboy_core::test_support::EnvVarGuard::set("SCOPE_MODE", "changed");
+            let _since = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_CHANGED_SINCE",
+                "ambient-base",
+            );
+            let _files = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_CHANGED_TEST_FILES",
+                "ambient/test.rs",
+            );
 
             let result = run_main_test_workflow(
                 &component,
