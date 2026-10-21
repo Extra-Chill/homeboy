@@ -112,6 +112,10 @@ pub struct LabGateReceipt {
     pub candidate: AgentTaskPromotionCandidate,
     pub execution_context: serde_json::Value,
     pub report: AgentTaskGateReport,
+    /// Dependency setup the runner performed in the materialized gate
+    /// workspace before the gate command ran (#16262).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup: Vec<AgentTaskGateSetupEvidence>,
 }
 
 impl LabGateRequest {
@@ -239,6 +243,18 @@ pub(super) fn dispatch(
         return Err(Error::invalid_argument(
             "gate.candidate",
             "controller candidate changed during Lab gate execution",
+        ));
+    }
+    // The runner owns dependency setup for its gates: a failed setup never ran
+    // the gate, so it is retryable gate setup, not candidate code (#16262).
+    if let Some(failed) = receipt
+        .setup
+        .iter()
+        .find(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed)
+    {
+        return Err(crate::agent_task_promotion::gate_setup_outcome_failure(
+            "lab_gate_setup",
+            failed,
         ));
     }
     let mut report = receipt.report;
@@ -535,6 +551,45 @@ fn execute_with_context_and_resources(
     let run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
     let invocation =
         homeboy_core::engine::invocation::InvocationGuard::acquire(&run_dir, &Default::default())?;
+    // Dependency setup runs here, in the exact workspace and environment the
+    // gate is about to execute in, so a gate that needs installed dependencies
+    // finds them (#16262). The controller never hydrates its own checkout for
+    // Lab placement; this receipt carries the setup evidence instead.
+    let setup = if request.preflight_only || !environment.hydrate_dependencies {
+        Vec::new()
+    } else {
+        match hydrate_lab_gate_workspace(cwd, &environment, &supervision, &request) {
+            Ok(setup) => setup,
+            Err(error) => {
+                run_dir.finish(false);
+                return failed_lab_gate_setup_receipt(&request, context, Vec::new(), Some(error));
+            }
+        }
+    };
+    if let Some(failed) = setup
+        .iter()
+        .find(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed)
+    {
+        // A failed setup must not run the gate: the receipt stays non-execution
+        // evidence with the recorded outcome, and the controller surfaces it as
+        // a gate-setup failure rather than candidate blame (#16262).
+        let diagnostic = homeboy_core::redaction::redact_json(&serde_json::json!({
+            "message": format!(
+                "dependency setup failed: provider {} on package root {} ({})",
+                failed.provider_id, failed.package_root, failed.reason,
+            ),
+            "outcome": failed,
+        }));
+        run_dir.finish(false);
+        return failed_lab_gate_setup_receipt(&request, context, setup, None).map(|mut receipt| {
+            receipt
+                .report
+                .lab_receipt
+                .as_mut()
+                .expect("non-execution receipt")["diagnostic"] = diagnostic;
+            receipt
+        });
+    }
     let result = if request.preflight_only {
         preflight_gate_toolchains_local(
             cwd,
@@ -591,6 +646,7 @@ fn execute_with_context_and_resources(
         report.invocation = Some(AgentTaskGateInvocation::DeclaredTest { plan: plan.clone() });
     }
     report.environment.lab_runner = Some(request.runner_id.clone());
+    report.setup = setup.clone();
     if let Some((name, source)) = playwright_provenance {
         report.environment.preserved.insert(name, source);
     }
@@ -604,6 +660,85 @@ fn execute_with_context_and_resources(
         candidate: request.candidate,
         execution_context: context.evidence_record()?,
         report,
+        setup,
+    })
+}
+
+/// Hydrate the provider-declared dependency roots of the materialized Lab gate
+/// workspace, under the runner-resolved gate environment. This is the same
+/// primitive the local promotion path uses; the Lab runner merely executes it
+/// on the workspace the gate will actually run in (#16262).
+fn hydrate_lab_gate_workspace(
+    cwd: &Path,
+    environment: &AgentTaskGateEnvironmentPolicy,
+    supervision: &GateSupervision,
+    request: &LabGateRequest,
+) -> Result<Vec<AgentTaskGateSetupEvidence>> {
+    let hydration = GateHydrationEnvironment::prepare(environment)?;
+    let policy = homeboy_core::deps::DependencyHydrationPolicy {
+        timeout: supervision.timeout,
+        no_progress_timeout: supervision.no_progress_timeout,
+        heartbeat_interval: supervision.heartbeat_interval,
+        is_cancelled: Arc::new(|| false),
+        on_progress: Arc::new(|_| {}),
+        environment: hydration.environment(),
+    };
+    let setup = hydrate_gate_dependency_roots_for_component(
+        cwd,
+        environment.hydrate_dependencies,
+        "lab_gate_workspace",
+        &policy,
+        request.environment.admitted_component_id.as_deref(),
+    );
+    hydration.finish(setup.as_ref().is_ok_and(|setup| {
+        setup
+            .iter()
+            .all(|outcome| outcome.status != homeboy_core::deps::DependencyHydrationStatus::Failed)
+    }));
+    setup
+}
+
+/// Terminal receipt for a gate whose runner-side dependency setup failed
+/// before the gate command could run. The gate never executes, so the receipt
+/// stays non-execution evidence (never candidate blame); the controller maps
+/// the recorded outcome to a promotion gate-setup failure (#16262).
+fn failed_lab_gate_setup_receipt(
+    request: &LabGateRequest,
+    context: &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
+    setup: Vec<AgentTaskGateSetupEvidence>,
+    error: Option<Error>,
+) -> Result<LabGateReceipt> {
+    let mut setup_error = match error {
+        Some(error) => error,
+        None => Error::new(
+            homeboy_core::ErrorCode::DependencyStepFailed,
+            "Lab gate dependency setup failed before the gate command could run",
+            serde_json::Value::Object(serde_json::Map::new()),
+        ),
+    };
+    setup_error.details["gate_disposition"] = serde_json::json!("unavailable");
+    setup_error.details["stage"] = serde_json::json!("dependency_setup");
+    let mut report = non_execution_report(request, &setup_error);
+    report.environment.lab_runner = Some(request.runner_id.clone());
+    report.lab_receipt.as_mut().expect("non-execution receipt")["diagnostic"] =
+        homeboy_core::redaction::redact_json(&serde_json::json!({
+            "code": setup_error.code.as_str(),
+            "message": setup_error.message,
+            "details": setup_error.details,
+        }));
+    report.setup = setup.clone();
+    Ok(LabGateReceipt {
+        readiness: Some(
+            serde_json::json!({"schema":"homeboy/lab-gate-readiness/v1", "status":"unavailable", "executed_gate":false}),
+        ),
+        materialization: None,
+        artifact_ref: None,
+        schema: LAB_GATE_RECEIPT_SCHEMA.to_string(),
+        request_sha256: request.identity()?,
+        candidate: request.candidate.clone(),
+        execution_context: context.evidence_record()?,
+        report,
+        setup,
     })
 }
 
@@ -1043,6 +1178,192 @@ mod tests {
             let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(Some("controller-run"), "lab", "job", "homeboy", "reservation").unwrap();
             let assertion = serde_json::from_value(serde_json::to_value(context).unwrap()).unwrap();
             assert!(execute_with_context(request(temp.path()), temp.path(), &assertion).is_err());
+        });
+    }
+
+    /// A git workspace whose tracked manifest declares a fixture dependency
+    /// provider whose install drops a marker in its package root. The gate
+    /// command only passes when that marker is already there, so a green gate
+    /// proves setup ran in the gate cwd before the argv.
+    fn repository_with_dependency_manifest(root: &Path) {
+        repository(root);
+        fs::write(
+            root.join("homeboy.json"),
+            r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}}"#,
+        )
+        .unwrap();
+        // Dependency outputs are ignored content, exactly like a real
+        // node_modules: the hydrated workspace keeps the candidate fingerprint
+        // it was admitted with.
+        fs::write(root.join(".gitignore"), "/hydration-count\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-qm", "dependency manifest"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    /// #16262: the runner hydrates the materialized Lab gate workspace before
+    /// the gate command, and the receipt (and its report) carry setup evidence
+    /// naming the runner-side workspace the install ran in.
+    #[test]
+    fn lab_gate_hydrates_its_runner_workspace_before_the_gate_command() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            repository_with_dependency_manifest(temp.path());
+            let mut request = request(temp.path());
+            request.argv = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "test -f hydration-count".to_string(),
+            ];
+
+            let receipt = execute_with_context(request, temp.path(), &lab_context()).unwrap();
+
+            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
+            assert!(temp.path().join("hydration-count").is_file());
+            assert_eq!(receipt.setup.len(), 1, "{:?}", receipt.setup);
+            let setup = &receipt.setup[0];
+            assert_eq!(
+                setup.status,
+                homeboy_core::deps::DependencyHydrationStatus::Succeeded
+            );
+            assert_eq!(setup.package_root, ".");
+            assert_eq!(
+                Path::new(&setup.cwd),
+                temp.path(),
+                "setup evidence names the runner-side gate workspace"
+            );
+            assert_eq!(receipt.report.setup, receipt.setup);
+        });
+    }
+
+    /// With the hydration policy disabled, the runner runs no dependency
+    /// setup: no install, no setup evidence, and the gate observes the
+    /// unhydrated workspace.
+    #[test]
+    fn lab_gate_with_hydration_disabled_runs_no_dependency_setup() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            repository_with_dependency_manifest(temp.path());
+            let mut request = request(temp.path());
+            request.environment.hydrate_dependencies = false;
+            request.argv = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "test ! -e hydration-count".to_string(),
+            ];
+
+            let receipt = execute_with_context(request, temp.path(), &lab_context()).unwrap();
+
+            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
+            assert!(!temp.path().join("hydration-count").exists());
+            assert!(receipt.setup.is_empty());
+            assert!(receipt.report.setup.is_empty());
+        });
+    }
+
+    /// #16262: a failed runner-side dependency setup is gate setup, not
+    /// candidate code. The controller maps the receipt's recorded outcome to a
+    /// retryable `promotion.gate_setup` failure that names the runner-side
+    /// workspace, instead of executing (or blaming) the gate.
+    #[test]
+    fn failed_runner_dependency_setup_surfaces_as_gate_setup_failure() {
+        struct FailedSetupTransport {
+            previous: Arc<dyn LabGateTransport>,
+        }
+        impl LabGateTransport for FailedSetupTransport {
+            fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+                self.previous.declared_runner(command)
+            }
+            fn execute(
+                &self,
+                cwd: &Path,
+                request: &LabGateRequest,
+                supervision: Option<&GateSupervision>,
+            ) -> Result<LabGateReceipt> {
+                if request.runner_id != "setup-failure-runner" {
+                    return self.previous.execute(cwd, request, supervision);
+                }
+                let mut report = non_execution_report(
+                    request,
+                    &Error::new(
+                        homeboy_core::ErrorCode::DependencyStepFailed,
+                        "Lab gate dependency setup failed before the gate command could run",
+                        serde_json::json!({"gate_disposition":"unavailable", "stage":"dependency_setup"}),
+                    ),
+                );
+                report.environment.lab_runner = Some(request.runner_id.clone());
+                Ok(LabGateReceipt {
+                    readiness: Some(serde_json::json!({"schema":"homeboy/lab-gate-readiness/v1", "status":"unavailable", "executed_gate":false})),
+                    materialization: None,
+                    artifact_ref: None,
+                    schema: LAB_GATE_RECEIPT_SCHEMA.to_string(),
+                    request_sha256: request.identity().unwrap(),
+                    candidate: request.candidate.clone(),
+                    execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(Some("controller-run"), "setup-failure-runner", "job", "homeboy", "reservation").unwrap().evidence_record().unwrap(),
+                    report,
+                    setup: vec![homeboy_core::deps::DependencyHydrationOutcome {
+                        schema: "homeboy/dependency-hydration-outcome/v1".to_string(),
+                        workspace: "lab_gate_workspace".to_string(),
+                        package_root: ".".to_string(),
+                        provider_id: "fixture".to_string(),
+                        command: vec!["sh".to_string(), "-c".to_string(), "exit 3".to_string()],
+                        cwd: "/runner/workspaces/candidate".to_string(),
+                        reason: "install_failed".to_string(),
+                        duration_ms: 3,
+                        termination: homeboy_core::deps::DependencyHydrationTermination::ExitFailure,
+                        status: homeboy_core::deps::DependencyHydrationStatus::Failed,
+                        exit_code: Some(3),
+                        stdout: String::new(),
+                        stderr: "boom".to_string(),
+                        missing_outputs: Vec::new(),
+                    }],
+                })
+            }
+        }
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let previous = active_transport();
+            register_lab_gate_transport(Arc::new(FailedSetupTransport { previous }));
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let environment = AgentTaskGateEnvironmentPolicy {
+                lab_runner: Some("setup-failure-runner".to_string()),
+                ..Default::default()
+            };
+
+            let error = run_gate_command_with_timeout(
+                temp.path(),
+                1,
+                "true",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                temp.path(),
+                Duration::from_secs(30),
+                &environment,
+                &[],
+            )
+            .expect_err("a failed runner setup is a gate-setup error, not a gate report");
+
+            assert_eq!(error.code, homeboy_core::ErrorCode::DependencyStepFailed);
+            assert_eq!(error.details["step_id"], "promotion.gate_setup");
+            assert_eq!(
+                error.details["cause"]["retry_action"], "retry_dependency_hydration",
+                "an environmental setup failure is retried, never candidate blame"
+            );
+            assert_eq!(error.details["cause"]["classification"], "lab_gate_setup");
+            assert_eq!(error.details["cause"]["outcome"]["status"], "failed");
+            assert_eq!(
+                error.details["cause"]["outcome"]["cwd"], "/runner/workspaces/candidate",
+                "the failure names the runner-side workspace it ran in"
+            );
         });
     }
 }

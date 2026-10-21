@@ -638,6 +638,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                 isolate_home: args.isolate_gate_home,
                 isolate_xdg: args.isolate_gate_xdg,
                 hydrate_rust_cache: true,
+                hydrate_dependencies: true,
                 shared_cargo_target: args
                     .gate_shared_cargo_target
                     .then_some(true)
