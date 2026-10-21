@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.431.13] - 2026-10-21
+
+### Changed
+- Keep the rotation model when a Cook names only its backend
+- Leave working-tree deletions out of changed-since selection
+- bump homeboy-action to 33c4e93 so the baseline replays only candidate failures
+
+### Fixed
+- scrub inherited changed-scope env from widened and full runs
+
 ## [0.431.12] - 2026-10-21
 
 ### Changed
