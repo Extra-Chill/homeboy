@@ -722,6 +722,15 @@ fn create_accepts_an_existing_repository_path_without_component_registration() {
 /// `git worktree add -b` with "a branch named ... already exists".
 #[test]
 fn create_adopts_an_existing_unclaimed_local_branch() {
+    assert_create_adopts_existing_branch(false);
+}
+
+#[test]
+fn create_tracks_an_existing_remote_only_branch() {
+    assert_create_adopts_existing_branch(true);
+}
+
+fn assert_create_adopts_existing_branch(remote_only: bool) {
     crate::test_support::with_isolated_home(|home| {
         let parent = home.path().join("Developer");
         let source = parent.join("adopt-fixture");
@@ -743,6 +752,16 @@ fn create_adopts_an_existing_unclaimed_local_branch() {
             .trim()
             .to_string();
         run_git(&source, &["checkout", "-q", "main"]);
+        if remote_only {
+            let remote = home.path().join("remote.git");
+            run_git(&source, &["init", "--bare", remote.to_str().unwrap()]);
+            run_git(
+                &source,
+                &["remote", "add", "origin", remote.to_str().unwrap()],
+            );
+            run_git(&source, &["push", "origin", "main", "refactor/existing"]);
+            run_git(&source, &["branch", "-D", "refactor/existing"]);
+        }
 
         let created = create(WorktreeCreateOptions {
             component_id: source.to_string_lossy().to_string(),
@@ -766,6 +785,28 @@ fn create_adopts_an_existing_unclaimed_local_branch() {
             "the operator's commits are kept"
         );
         assert!(path.join("work.txt").is_file());
+        if remote_only {
+            assert_eq!(
+                git::run_git(&path, &["rev-parse", "HEAD"], "head").unwrap(),
+                git::run_git(
+                    &source,
+                    &["rev-parse", "origin/refactor/existing"],
+                    "remote head"
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                git::run_git(
+                    &path,
+                    &["rev-parse", "--abbrev-ref", "@{upstream}"],
+                    "upstream"
+                )
+                .unwrap()
+                .trim(),
+                "origin/refactor/existing",
+            );
+            assert_eq!(created.record.base_ref, "main");
+        }
         assert_eq!(
             git::run_git(&path, &["branch", "--show-current"], "branch")
                 .unwrap()
