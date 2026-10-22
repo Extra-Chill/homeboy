@@ -15326,14 +15326,18 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         assert!(backend.body.contains("## Summary\ncomplete the task"));
         assert!(backend
             .body
-            .contains("```sh\ntest \"$(cat lib.rs)\" = candidate\n```"));
-        assert!(backend.body.contains("AI disclosure: "), "{}", backend.body);
+            .contains("`test \"$(cat lib.rs)\" = candidate`"));
+        assert!(
+            backend.body.contains("## AI assistance"),
+            "{}",
+            backend.body
+        );
         assert!(
             backend.body.contains("fixture-provider"),
             "{}",
             backend.body
         );
-        assert_eq!(backend.body.matches("AI disclosure").count(), 1);
+        assert_eq!(backend.body.matches("## AI assistance").count(), 1);
         assert!(
             backend.body.contains("fixture-model-review"),
             "{}",
@@ -15379,9 +15383,7 @@ fn pre_provider_adoption_retries_only_the_missing_form_binds_model_and_reaches_r
             .unwrap();
         assert_eq!(adoption.ai_model, "openai/gpt-5.6-terra");
         assert_eq!(adoption.candidate_sha, fixture.candidate);
-        assert!(backend
-            .body
-            .contains("AI disclosure: openai/gpt-5.6-terra via "));
+        assert!(backend.body.contains("Model: openai/gpt-5.6-terra"));
         assert!(backend.committed && backend.pushed && backend.created);
     });
 }
@@ -21182,18 +21184,17 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
         };
         finalize_cook_pr_with_backend(&options, run_id, &promotion, &mut backend).unwrap();
         for section in [
-            "Extra-Chill/homeboy#8058\n\n## Summary",
+            "Relates to Extra-Chill/homeboy#8058\n",
             "## What changed",
-            "## Compatibility",
             "## Verification",
-            "AI disclosure: openai/gpt-5.6-terra via ",
-            ", base `main` at `verified-base`.",
+            "Model: openai/gpt-5.6-terra",
+            ". Base `main`@`verified-base` (publication state not recorded).",
             // AI-authored prose (from the seeded review form).
             "Close the issue by guarding the reload path.",
             "Add a null guard in the render path.",
             "Internal-only change; no compatibility impact.",
             // Deterministic evidence (orchestrator-owned), rendered once.
-            "```sh\ncargo test --locked agent_task_promotion --lib\n```",
+            "`cargo test --locked agent_task_promotion --lib`",
         ] {
             assert!(
                 backend.body.contains(section),
@@ -21207,7 +21208,7 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             "Changed files",
             "Final status",
             "## How to test",
-            "## AI assistance",
+            "AI disclosure:",
             "## Evidence",
             "Task objective",
             "Verified candidate scope",
@@ -24170,9 +24171,9 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             .body
             .contains("cargo test --locked agent_task_promotion --lib"));
         for evidence in [
-            "Original infrastructure-invalid verification retained",
-            "Replacement candidate-bound verification",
-            "Explicit operator authorization for external replacement proof was recorded.",
+            "Recovery retained",
+            "Replacement proof covers",
+            "External proof authorized by operator.",
         ] {
             assert!(
                 backend.body.contains(evidence),
