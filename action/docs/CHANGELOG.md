@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.22.2] - 2026-10-22
+
+### Changed
+- Retry empty Homeboy release listings before giving up
+
 ## [2.22.1] - 2026-10-21
 
 ### Fixed
