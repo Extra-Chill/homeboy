@@ -11,6 +11,7 @@ A `homeboy.json` file in a repo root defines portable component configuration th
   "build_artifact": "string",
   "deploy_together": ["component-id"],
   "extract_command": "string",
+  "runtimes": { "node": { "version": "24" } },
   "version_targets": [
     {
       "file": "string",
@@ -57,6 +58,10 @@ The component `id` field is required and must be a non-empty string. All other f
   }
 }
 ```
+
+## Runtime requirements
+
+Declare runtime versions at the top level, for example `"runtimes": { "node": { "version": "24" } }`, with or without an extension. `homeboy component env` reports these with source `"component"`, taking precedence over extension settings, detected versions, and extension requirements. CI setup installs those runtimes.
 
 ## Dependency stack edges
 
@@ -112,6 +117,7 @@ homeboy component create --local-path /path/to/repo --changelog-target "CHANGELO
 | `changelog_target` | Path to changelog file |
 | `scripts` | Optional component-owned `lint`, `test`, `build`, `bench`, and `trace` shell commands |
 | `deps` | Declarative dependency manifest (`provider`, `commands`, `outputs`, `packages`); see [deps](../../commands/deps.md) |
+| `runtimes` | Runtime IDs mapped to version requirements, independent of extensions |
 | `extensions` | Extension configuration (e.g., `{"wordpress": {}}`) |
 | `capability_extensions` | Optional explicit extension ownership by capability label (e.g., `{"deps": "nodejs"}`) when more than one linked extension supports the same capability |
 | `deployment_provider` | Repository-owned provider policy: extension, provider ID, and opaque inline `policy` |

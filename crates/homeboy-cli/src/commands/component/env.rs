@@ -128,6 +128,16 @@ pub(super) fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOu
         apply_extension_runtime_requirements(ext_id, &response.extension_runtimes, &mut runtimes);
     }
 
+    // Top-level declarations are authoritative, even over detected versions.
+    apply_component_runtime_requirements(
+        RuntimeRequirementsConfig {
+            runtimes: component.runtimes,
+        },
+        &mut runtimes,
+        "component",
+        true,
+    );
+
     let env_output = ComponentEnvOutput {
         command: "component.env".to_string(),
         id: comp_id.clone(),
@@ -271,6 +281,64 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(output.id.as_deref(), Some("portable-env"));
         assert_eq!(output.command, "component.env");
+    }
+
+    #[test]
+    fn component_env_reports_top_level_runtimes_without_extension() {
+        let component =
+            write_component(r#"{"id":"portable-env","runtimes":{"node":{"version":"24"}}}"#);
+        let (output, code) =
+            env(None, Some(&component.path().to_string_lossy())).expect("component env");
+
+        assert_eq!(code, 0);
+        let entity = output.entity.expect("entity");
+        assert_eq!(entity["extension"], serde_json::Value::Null);
+        assert_eq!(
+            entity["runtimes"],
+            serde_json::json!({"node": {"version": "24", "source": "component"}})
+        );
+    }
+
+    #[test]
+    fn component_env_without_extension_or_declarations_has_no_runtimes() {
+        let component = write_component(r#"{"id":"portable-env"}"#);
+        let (output, code) =
+            env(None, Some(&component.path().to_string_lossy())).expect("component env");
+
+        assert_eq!(code, 0);
+        assert!(runtimes_from(&output).is_empty());
+        assert!(output.entity.expect("entity").get("runtimes").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn component_env_top_level_runtimes_override_detected_and_extension_settings() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            install_detector(
+                home.path(),
+                "demo",
+                r#"{"id":"demo","name":"Demo","version":"1.0.0","component_env":{"detect_script":"scripts/env/detect.sh"},"runtime":{"runtimes":{"node":{"version":"22"},"ruby":{"version":"3.3"}}}}"#,
+                "#!/bin/sh\nprintf '{\"runtimes\":{\"node\":{\"version\":\"20\"},\"php\":{\"version\":\"8.2\"}}}'\n",
+            );
+            let component = write_component(
+                r#"{"id":"portable-env","runtimes":{"node":{"version":"24"}},"extensions":{"demo":{"runtimes":{"node":{"version":"18"},"python":{"version":"3.12"}}}}}"#,
+            );
+            let (output, code) =
+                env(None, Some(&component.path().to_string_lossy())).expect("component env");
+
+            assert_eq!(code, 0);
+            let runtimes = runtimes_from(&output);
+            assert_eq!(
+                runtimes["node"],
+                ComponentRuntimeRequirement {
+                    version: "24".to_string(),
+                    source: "component".to_string(),
+                }
+            );
+            assert_eq!(runtimes["php"].version, "8.2");
+            assert_eq!(runtimes["python"].version, "3.12");
+            assert_eq!(runtimes["ruby"].source, "extension:demo");
+        });
     }
 
     #[test]
