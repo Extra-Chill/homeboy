@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.432.1] - 2026-10-22
+
+### Changed
+- clear explicit root overrides when isolating HOME
+
+### Fixed
+- make repo-artifact continuation passes converge past an oversized artifact subtree
+
 ## [0.432.0] - 2026-10-22
 
 ### Added
