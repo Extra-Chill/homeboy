@@ -8,6 +8,7 @@ use super::config::{
     ScopedExtensionConfig, VersionTarget,
 };
 use homeboy_engine_primitives::canonical_json::canonical_json;
+use homeboy_extension_contract::manifest_capability_config::RuntimeRequirementConfig;
 
 /// Lifecycle state of a component.
 ///
@@ -131,6 +132,9 @@ pub struct Component {
     /// requires the component to choose the owner here instead of guessing.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub capability_extensions: HashMap<String, String>,
+    /// Component-declared runtime versions, independent of linked extensions.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub runtimes: HashMap<String, RuntimeRequirementConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_targets: Option<Vec<VersionTarget>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -293,6 +297,7 @@ impl Component {
             build_command: None,
             extensions: None,
             capability_extensions: HashMap::new(),
+            runtimes: HashMap::new(),
             version_targets: None,
             changelog_target: None,
             harvest_excludes: None,
@@ -612,6 +617,7 @@ mod tests {
             "build_artifact": "dist/plugin.zip",
             "build_command": "npm run build",
             "capability_extensions": { "deploy": "wordpress" },
+            "runtimes": { "node": { "version": "24" } },
             "changelog_target": "CHANGELOG.md",
             "harvest_excludes": ["composer.lock", "vendor/"],
             "changelog_next_section_label": "Unreleased",

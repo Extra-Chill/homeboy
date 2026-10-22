@@ -456,6 +456,30 @@ mod tests {
     }
 
     #[test]
+    fn component_runtimes_survive_portable_load_and_save() {
+        let dir = TempDir::new().expect("temp dir");
+        let declared = serde_json::json!({
+            "id": "runtime-fixture",
+            "runtimes": { "node": { "version": "24" } }
+        });
+        fs::write(
+            dir.path().join("homeboy.json"),
+            serde_json::to_string(&declared).unwrap(),
+        )
+        .unwrap();
+
+        let component = discover_from_portable(dir.path()).expect("discover component");
+        assert_eq!(component.runtimes["node"].version, "24");
+        write_portable_config(dir.path(), &component).expect("save component");
+        let saved: Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("homeboy.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["runtimes"], declared["runtimes"]);
+        let reloaded = discover_from_portable(dir.path()).expect("reload component");
+        assert_eq!(reloaded.runtimes, component.runtimes);
+    }
+
+    #[test]
     fn blank_id_rejected_by_portable_json() {
         let component = Component::new(
             String::new(), // blank id

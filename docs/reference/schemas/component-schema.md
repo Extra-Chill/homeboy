@@ -46,6 +46,7 @@ Component configuration defines buildable and deployable units stored in `compon
   "env": {
     "KEY": "value"
   },
+  "runtimes": { "node": { "version": "24" } },
   "extensions": {},
   "release": {}
 }
@@ -72,6 +73,7 @@ Component configuration defines buildable and deployable units stored in `compon
   - **`file`** (string): Path to file containing version (relative to `local_path`). This is the **source** path that the version bump writes to.
   - **`pattern`** (string): Regex pattern to extract version (first capture group)
 - **`changelog_target`** (string): Path to changelog file (relative to `local_path`)
+- **`runtimes`** (object): Runtime IDs mapped to version requirements, for example `"runtimes": { "node": { "version": "24" } }`. Works without extensions and takes precedence over extension settings and detected or required versions in `homeboy component env`. CI setup installs those runtimes.
 - **`extensions`** (object): Extension-specific settings
   - Keys are extension IDs (e.g., `"wordpress"`, `"rust"`)
   - Values are flat extension setting objects; `version` is reserved for extension version constraints
