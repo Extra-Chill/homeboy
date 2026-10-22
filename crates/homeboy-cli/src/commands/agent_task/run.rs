@@ -9239,7 +9239,9 @@ fn admit_provider_evidence_source(
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     Ok(AdmittedProviderEvidenceSource {
-        approved_root: approved_macos_temporary_root(&supplied_path, &canonical_path),
+        approved_root: cfg!(target_os = "macos")
+            .then(|| approved_macos_temporary_root(&supplied_path, &canonical_path))
+            .flatten(),
         supplied_path,
         canonical_path,
         kind,
@@ -9250,35 +9252,35 @@ fn admit_provider_evidence_source(
     })
 }
 
+// Pure mapping: only these fixed system aliases may bypass the no-follow walk.
+fn macos_system_alias(canonical_path: &Path) -> Option<(&'static Path, PathBuf)> {
+    const ALIASES: &[(&str, &str)] = &[
+        ("/tmp", "/private/tmp"),
+        ("/var", "/private/var"),
+        ("/etc", "/private/etc"),
+    ];
+    let canonical_path = canonical_path.to_str()?;
+    ALIASES.iter().find_map(|(alias, root)| {
+        canonical_path
+            .strip_prefix(&format!("{root}/"))
+            .map(|suffix| (Path::new(root), Path::new(alias).join(suffix)))
+    })
+}
+
 fn approved_macos_temporary_root(supplied_path: &Path, canonical_path: &Path) -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let supplied_path = supplied_path.to_str()?;
-        let canonical_path = canonical_path.to_str()?;
-        let canonical_suffix = canonical_path.strip_prefix("/private/var/")?;
-        if supplied_path == canonical_path {
-            return Some(PathBuf::from("/private/var"));
-        }
-        (supplied_path == format!("/var/{canonical_suffix}")).then(|| PathBuf::from("/private/var"))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (supplied_path, canonical_path);
-        None
-    }
+    let (root, alias) = macos_system_alias(canonical_path)?;
+    // Compare spellings, not normalized Path components (which discard `.`).
+    (supplied_path.as_os_str() == canonical_path.as_os_str()
+        || supplied_path.as_os_str() == alias.as_os_str())
+    .then(|| root.to_path_buf())
 }
 
 fn approved_provider_evidence_spellings(canonical_path: &Path) -> Vec<PathBuf> {
-    #[cfg(target_os = "macos")]
     let mut spellings = vec![canonical_path.to_path_buf()];
-    #[cfg(not(target_os = "macos"))]
-    let spellings = vec![canonical_path.to_path_buf()];
-    #[cfg(target_os = "macos")]
-    if let Some(suffix) = canonical_path
-        .to_str()
-        .and_then(|path| path.strip_prefix("/private/var/"))
-    {
-        spellings.push(Path::new("/var").join(suffix));
+    if cfg!(target_os = "macos") {
+        if let Some((_, alias)) = macos_system_alias(canonical_path) {
+            spellings.push(alias);
+        }
     }
     spellings
 }
@@ -10572,16 +10574,40 @@ let path = "/private/fenced-code.json";
         assert!(!rewritten.contains(&prompt_source));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn accepts_only_the_exact_macos_var_alias_boundary() {
-        assert_eq!(
-            approved_macos_temporary_root(
-                Path::new("/var/folders/example/evidence.json"),
-                Path::new("/private/var/folders/example/evidence.json")
-            ),
-            Some(PathBuf::from("/private/var"))
-        );
+    fn accepts_only_the_exact_macos_system_alias_boundaries() {
+        for (alias, root) in [
+            ("/tmp", "/private/tmp"),
+            ("/var", "/private/var"),
+            ("/etc", "/private/etc"),
+        ] {
+            let canonical = Path::new(root).join("x");
+            let alias = Path::new(alias).join("x");
+            assert_eq!(
+                macos_system_alias(&canonical),
+                Some((Path::new(root), alias.clone()))
+            );
+            for supplied in [&alias, &canonical] {
+                assert_eq!(
+                    approved_macos_temporary_root(supplied, &canonical),
+                    Some(PathBuf::from(root))
+                );
+            }
+            let spellings = approved_provider_evidence_spellings(&canonical);
+            assert!(spellings.contains(&canonical));
+            assert_eq!(spellings.contains(&alias), cfg!(target_os = "macos"));
+        }
+        for (supplied, canonical) in [
+            ("/private/tmpfoo/x", "/private/tmpfoo/x"),
+            ("/tmpx/y", "/private/tmp/y"),
+            ("/Users/a/link", "/private/tmp/x"),
+        ] {
+            assert!(
+                approved_macos_temporary_root(Path::new(supplied), Path::new(canonical)).is_none()
+            );
+        }
+        assert!(macos_system_alias(Path::new("/private/tmpfoo/x")).is_none());
+        assert!(macos_system_alias(Path::new("/tmpx/y")).is_none());
         assert!(approved_macos_temporary_root(
             Path::new("/var/folders/example/evidence.json"),
             Path::new("/private/var/elsewhere/evidence.json")
@@ -10597,6 +10623,53 @@ let path = "/private/fenced-code.json";
             Path::new("/private/var/folders/example/evidence.json")
         )
         .is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn projects_tmp_alias_directory_and_rewrites_both_prompt_spellings() {
+        let temp = tempfile::Builder::new()
+            .prefix("homeboy-provider-evidence-")
+            .tempdir_in("/tmp")
+            .expect("temporary workspace under tmp");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).expect("create source directory");
+        std::fs::write(source.join("evidence.json"), "{}").expect("write evidence");
+        let canonical = source.canonicalize().expect("canonical source");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "source".to_string(),
+            source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+        };
+        let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit tmp source");
+        assert_eq!(admitted[0].copy_path(), canonical);
+        let store = temp
+            .path()
+            .canonicalize()
+            .expect("canonical workspace")
+            .join("store");
+        let projected =
+            project_admitted_provider_evidence_inputs_at(&[input.clone()], &admitted, &store)
+                .expect("copy tmp source through canonical system alias");
+        let destination = Path::new(projected[0]["path"].as_str().expect("projected path"));
+        assert_eq!(
+            std::fs::read_to_string(destination.join("evidence.json")).expect("copied evidence"),
+            "{}"
+        );
+        let projected_paths = projected_provider_evidence_paths(&projected);
+        for spelling in [&source, &canonical] {
+            let mut prompt = Some(format!("Read {}", spelling.display()));
+            rewrite_provider_evidence_prompt(
+                &mut prompt,
+                &[input.clone()],
+                &admitted,
+                &projected,
+                &projected_paths,
+            )
+            .expect("both system alias spellings are approved prompt references");
+            assert!(!prompt.unwrap().contains(&spelling.display().to_string()));
+        }
     }
 
     #[cfg(target_os = "macos")]
