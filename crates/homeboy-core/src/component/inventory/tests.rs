@@ -20,31 +20,27 @@ use tempfile::TempDir;
 //
 /// Serialized guard for tests that override `HOME`.
 ///
-/// Acquires the shared HOME env guard, snapshots the current `HOME`, and
-/// installs the test-supplied override. When the guard is dropped the
-/// previous `HOME` is restored and the lock is released.
+/// Acquires the shared HOME env guard, snapshots `HOME` and the explicit
+/// Homeboy root overrides, installs the test-supplied home and clears those
+/// overrides. When the guard is dropped every snapshotted value is restored
+/// and the lock is released.
 ///
 /// Panics on a poisoned mutex, which can only happen if a previous
 /// test panicked while holding the guard — in that case the test
 /// runner is already reporting a failure, so a follow-up panic here
 /// is fine.
 struct HomeGuard {
-    previous: Option<String>,
-    previous_transient_markers: Option<String>,
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
     _lock: MutexGuard<'static, ()>,
 }
 
 impl Drop for HomeGuard {
     fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => unsafe { std::env::set_var("HOME", value) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        match &self.previous_transient_markers {
-            Some(value) => unsafe {
-                std::env::set_var("HOMEBOY_TRANSIENT_WORKSPACE_MARKERS", value)
-            },
-            None => unsafe { std::env::remove_var("HOMEBOY_TRANSIENT_WORKSPACE_MARKERS") },
+        for (name, value) in &self.previous {
+            match value {
+                Some(value) => unsafe { std::env::set_var(name, value) },
+                None => unsafe { std::env::remove_var(name) },
+            }
         }
     }
 }
@@ -53,9 +49,17 @@ const TEST_TRANSIENT_WORKSPACE_MARKER: &str = "__homeboy_test_transient__";
 
 fn with_home_override(new_home: &std::path::Path) -> HomeGuard {
     let lock = crate::test_support::home_env_guard();
-    let previous = std::env::var("HOME").ok();
-    let previous_transient_markers = std::env::var("HOMEBOY_TRANSIENT_WORKSPACE_MARKERS").ok();
+    let previous = ["HOME", "HOMEBOY_TRANSIENT_WORKSPACE_MARKERS"]
+        .into_iter()
+        .chain(crate::paths::HOMEBOY_ROOT_ENV_VARS.iter().copied())
+        .map(|name| (name, std::env::var_os(name)))
+        .collect();
     unsafe { std::env::set_var("HOME", new_home.to_string_lossy().as_ref()) };
+    // Explicit root overrides outrank HOME. Cook gates export them, so leaving
+    // them set would aim these fixtures at the gate's real config root.
+    for name in crate::paths::HOMEBOY_ROOT_ENV_VARS {
+        unsafe { std::env::remove_var(name) };
+    }
     // macOS tempdirs live under a path segment named `T`, which the production
     // transient policy intentionally treats as temporary. Pin test fixtures to a
     // private marker so stable checkouts under TempDir remain stable.
@@ -67,7 +71,6 @@ fn with_home_override(new_home: &std::path::Path) -> HomeGuard {
     };
     HomeGuard {
         previous,
-        previous_transient_markers,
         _lock: lock,
     }
 }
@@ -623,8 +626,13 @@ fn registered_base_returns_before_a_sleeping_git_enrichment_probe() {
         module_path!(),
         "registered_base_sleeping_git_enrichment_probe_child",
     );
+    let mut child = Command::new(std::env::current_exe().expect("current test executable"));
+    // Explicit root overrides outrank the child's HOME.
+    for name in crate::paths::HOMEBOY_ROOT_ENV_VARS {
+        child.env_remove(name);
+    }
     let output = crate::test_support::run_child_test(
-        Command::new(std::env::current_exe().expect("current test executable"))
+        child
             .arg("--exact")
             .arg(&test_name)
             .arg("--ignored")
