@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.432.2] - 2026-10-22
+
+### Changed
+- bump homeboy-action to d6998a6 for the source-cache lock fallback
+
+### Fixed
+- Fix macOS system aliases for provider evidence
+- Fix Cook PR URL resolution and remote-only branch adoption
+
 ## [0.432.1] - 2026-10-22
 
 ### Changed
