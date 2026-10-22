@@ -6098,6 +6098,7 @@ pub(crate) fn resolve_cook_destination(
             }
         }
     }
+    resolve_cook_pull_request(&mut args)?;
     if args.to_worktree.is_some() {
         resolve_cook_base(&mut args)?;
         return Ok(args);
@@ -6174,32 +6175,6 @@ fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> 
         .flatten()
         .map(|component| PathBuf::from(component.local_path));
     let destination = args.to_worktree.as_deref().map(Path::new);
-    // An existing PR is the durable task identity for linked-worktree Cook.
-    // Resolve its canonical refs before preview/provider admission; branch
-    // upstream metadata on a linked worktree is commonly the feature branch.
-    let existing_pr = workspace
-        .and_then(|_| args.dispatch.task_url.as_deref())
-        .filter(|url| url.contains("/pull/"))
-        .map(|url| cook_pull_request_refs(workspace.expect("workspace checked"), url))
-        .transpose()?;
-    if let Some((base, head)) = existing_pr {
-        if args.base.is_none() {
-            args.base = Some(base);
-        }
-        if args
-            .head
-            .as_deref()
-            .is_some_and(|explicit| explicit != head)
-        {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "head",
-                "explicit Cook --head must match the existing pull request head",
-                args.head.clone(),
-                None,
-            ));
-        }
-        args.head = Some(head);
-    }
     let resolution = resolve_default_branch(DefaultBranchRequest {
         explicit_base: args.base.as_deref(),
         explicit_from: None,
@@ -6222,6 +6197,60 @@ fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> 
             None,
         ));
     }
+    Ok(())
+}
+
+fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    let Some(url) = args
+        .dispatch
+        .task_url
+        .as_deref()
+        .filter(|url| url.contains("/pull/"))
+    else {
+        return Ok(());
+    };
+    let repository = cook_provision_repository(args);
+    let path = args
+        .dispatch
+        .workspace
+        .as_deref()
+        .or(args.dispatch.cwd.as_deref())
+        .or(repository
+            .as_deref()
+            .filter(|path| Path::new(path).is_dir()))
+        .unwrap_or(".");
+    let (base, head) = cook_pull_request_refs(Path::new(path), url)?;
+    for (flag, explicit, canonical) in [("base", &args.base, &base), ("head", &args.head, &head)] {
+        if explicit.as_deref().is_some_and(|value| value != canonical) {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                flag,
+                format!("explicit Cook --{flag} must match the existing pull request {flag}"),
+                explicit.clone(),
+                None,
+            ));
+        }
+    }
+    // Without a supplied checkout, the PR head determines the provider handle.
+    if args.dispatch.workspace.is_none() && args.dispatch.cwd.is_none() {
+        if let Some(repo) = cook_component_id(args).or(args.dispatch.repo.as_deref()) {
+            let handle = format!("{repo}@{}", slugify_cook_branch(&head));
+            if args
+                .to_worktree
+                .as_deref()
+                .is_some_and(|value| value != handle)
+            {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "to_worktree",
+                    "explicit Cook --to-worktree must match the existing pull request head",
+                    args.to_worktree.clone(),
+                    None,
+                ));
+            }
+            args.to_worktree = Some(handle);
+        }
+    }
+    args.base = Some(base);
+    args.head = Some(head);
     Ok(())
 }
 
@@ -6265,12 +6294,16 @@ fn cook_pull_request_refs(path: &Path, url: &str) -> homeboy::core::Result<(Stri
 
 #[cfg(test)]
 mod cook_pull_request_ref_tests {
-    use super::cook_pull_request_refs;
+    use super::{
+        cook_pull_request_refs, resolve_cook_destination, resolve_cook_preview_destination,
+    };
+    use crate::cli_surface::{Cli, Commands};
+    use clap::Parser;
     use std::process::Command;
 
     #[cfg(unix)]
     #[test]
-    fn hydrates_existing_pr_refs_from_linked_git_worktree_with_fake_gh() {
+    fn cook_pr_refs_resolve_for_linked_worktree_and_repo_preview_with_fake_gh() {
         let root = tempfile::tempdir().expect("fixture root");
         let repository = root.path().join("repository");
         std::fs::create_dir(&repository).expect("repository directory");
@@ -6292,6 +6325,7 @@ mod cook_pull_request_ref_tests {
         std::fs::write(repository.join("tracked"), "base\n").expect("tracked file");
         run_git(&["add", "tracked"]);
         run_git(&["commit", "-qm", "base"]);
+        run_git(&["branch", "release"]);
         let linked = root.path().join("linked");
         run_git(&[
             "worktree",
@@ -6325,6 +6359,66 @@ mod cook_pull_request_ref_tests {
                 .expect("canonical PR refs"),
             ("release".to_string(), "feature".to_string())
         );
+        crate::test_support::with_isolated_home(|_| {
+            let parse = |extra: &[&str]| {
+                let mut argv = vec![
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--preview",
+                    "--repo",
+                    repository.to_str().unwrap(),
+                    "--task-url",
+                    "https://github.com/example/repo/pull/1895",
+                    "--prompt",
+                    "fix it",
+                ];
+                argv.extend_from_slice(extra);
+                let cli = Cli::try_parse_from(argv).expect("parse Cook");
+                let Commands::AgentTask(command) = cli.command else {
+                    panic!("agent-task")
+                };
+                let super::super::AgentTaskCommand::Cook(args) = command.command else {
+                    panic!("cook")
+                };
+                *args
+            };
+            for extra in [
+                vec![],
+                vec![
+                    "--head",
+                    "feature",
+                    "--base",
+                    "release",
+                    "--to-worktree",
+                    "repository@feature",
+                ],
+            ] {
+                let (resolved, preview) = resolve_cook_preview_destination(parse(&extra))
+                    .expect("preview PR destination");
+                assert_eq!(preview["action"], "planned_create");
+                assert_eq!(preview["handle"], "repository@feature");
+                assert_eq!(preview["intent"]["base"], "release");
+                assert_eq!(preview["intent"]["head"], "feature");
+                assert_eq!(resolved.to_worktree.as_deref(), Some("repository@feature"));
+                assert_eq!(resolved.base.as_deref(), Some("release"));
+                assert_eq!(resolved.head.as_deref(), Some("feature"));
+            }
+            for extra in [
+                vec!["--head", "other"],
+                vec!["--base", "other"],
+                vec!["--to-worktree", "repo@other"],
+            ] {
+                let error =
+                    resolve_cook_destination(parse(&extra)).expect_err("mismatched PR refs");
+                assert!(
+                    error
+                        .message
+                        .contains("must match the existing pull request"),
+                    "{error:?}"
+                );
+            }
+        });
     }
 }
 

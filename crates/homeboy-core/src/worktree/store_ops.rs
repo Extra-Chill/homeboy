@@ -738,16 +738,27 @@ fn create_with_store_unlocked(
             &hydration_transport,
         )?;
     } else {
+        let remote_branch = format!("refs/remotes/origin/{}", options.branch);
+        let remote_exists = git::run_git(
+            &source_checkout,
+            &["show-ref", "--verify", "--quiet", &remote_branch],
+            "git show-ref remote task branch",
+        )
+        .is_ok();
+        let mut args = vec!["worktree", "add", "-b", &options.branch];
+        if remote_exists {
+            args.push("--track");
+        }
+        let path = worktree_path.to_string_lossy();
+        args.push(&path);
+        args.push(if remote_exists {
+            &remote_branch
+        } else {
+            &base_ref
+        });
         git::run_git_with_env(
             &source_checkout,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &options.branch,
-                &worktree_path.to_string_lossy(),
-                &base_ref,
-            ],
+            &args,
             "git worktree add",
             &hydration_transport,
         )?;
