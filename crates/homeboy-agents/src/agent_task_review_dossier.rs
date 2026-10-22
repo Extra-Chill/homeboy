@@ -1054,10 +1054,10 @@ pub fn enrich_dossier(
             });
         }
     }
-    for (index, reference) in artifact_refs.iter().enumerate() {
+    for reference in artifact_refs {
         if is_reviewer_url(reference) {
             dossier.evidence.push(AgentTaskReviewEvidence {
-                summary: format!("Reviewer-resolvable evidence from artifact_refs[{index}]"),
+                summary: "Supporting evidence".to_string(),
                 url: Some(reference.clone()),
             });
         }
@@ -1070,26 +1070,14 @@ pub fn enrich_dossier(
 
 /// Render the PR body:
 ///
-/// ```text
-/// Closes #N
-///
-/// ## Summary / ## What changed / ## Compatibility
-/// ## Verification   (one line per gate, command + provenance in <details>)
-///
-/// ---
-/// AI disclosure: <model> via <tool>. Used for: <used_for>
-/// ```
+/// Summary, changes, verification, optional additional test steps, AI assistance,
+/// then closing references. Run provenance is collapsed and commands occur once.
 pub fn render_review_dossier(
     dossier: &AgentTaskReviewDossier,
     profile: &AgentTaskReviewProfile,
 ) -> String {
     let hidden = |id: &AgentTaskReviewSectionId| profile.hidden_sections.contains(id);
     let mut blocks = Vec::new();
-    if !hidden(&AgentTaskReviewSectionId::SourceRelationships)
-        && !dossier.source_relationships.is_empty()
-    {
-        blocks.push(render_source_relationships(&dossier.source_relationships));
-    }
     for id in ordered_sections(profile) {
         if hidden(&id) {
             continue;
@@ -1099,18 +1087,24 @@ pub fn render_review_dossier(
                 Some(("Summary", prose(&dossier.summary)))
             }
             AgentTaskReviewSectionId::WhatChanged if !dossier.what_changed.is_empty() => {
-                Some(("What changed", bullets(&dossier.what_changed)))
+                let mut changes = dossier.what_changed.clone();
+                if !dossier.compatibility.is_empty() && !changes.contains(&dossier.compatibility) {
+                    changes.push(dossier.compatibility.clone());
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                changes.retain(|change| seen.insert(change.clone()));
+                Some(("What changed", bullets(&changes)))
             }
-            AgentTaskReviewSectionId::Compatibility if !dossier.compatibility.is_empty() => {
-                Some(("Compatibility", prose(&dossier.compatibility)))
-            }
+
             AgentTaskReviewSectionId::Verification => {
                 render_verification(dossier).map(|content| ("Verification", content))
             }
             _ => None,
         };
         if let Some((heading, content)) = section {
-            blocks.push(format!("## {heading}\n{content}"));
+            if !content.trim().is_empty() {
+                blocks.push(format!("## {heading}\n{content}"));
+            }
         }
     }
     for section in &profile.additional_sections {
@@ -1122,10 +1116,36 @@ pub fn render_review_dossier(
             ));
         }
     }
+    let steps = dossier
+        .how_to_test
+        .iter()
+        .filter(|step| reviewer_runnable_command(&step.command))
+        .filter(|step| {
+            !dossier
+                .verified_commands
+                .iter()
+                .any(|gate| gate.command.trim() == step.command.trim())
+        })
+        .map(|step| {
+            format!(
+                "- {}; expect {}.",
+                render_command(&step.command),
+                prose(&step.expected)
+            )
+        })
+        .collect::<Vec<_>>();
+    if !steps.is_empty() {
+        blocks.push(format!("## How to test\n{}", steps.join("\n")));
+    }
     blocks.push(format!(
-        "---\n{}",
+        "## AI assistance\n{}",
         render_ai_disclosure(&dossier.ai_assistance)
     ));
+    if !hidden(&AgentTaskReviewSectionId::SourceRelationships)
+        && !dossier.source_relationships.is_empty()
+    {
+        blocks.push(render_source_relationships(&dossier.source_relationships));
+    }
     blocks.join("\n\n") + "\n"
 }
 
@@ -1151,21 +1171,22 @@ fn render_ai_disclosure(ai: &AgentTaskReviewAiAssistance) -> String {
     if !ai.used {
         return "AI disclosure: no AI assistance was used.".to_string();
     }
-    let via = if ai.tool.trim().is_empty() {
-        String::new()
-    } else {
-        format!(" via {}", prose(&ai.tool))
-    };
+    let used_for = ai
+        .used_for
+        .trim()
+        .trim_start_matches("AI disclosure:")
+        .trim_start_matches("Used for:")
+        .trim();
     format!(
-        "AI disclosure: {}{via}. Used for: {}",
+        "Tool: {} · Model: {} · Used for: {}",
+        prose(&ai.tool),
         prose(&ai.model),
-        prose(&ai.used_for)
+        prose(used_for)
     )
 }
 
-/// One visible line per gate, reviewer steps that no gate already covers, and
-/// a collapsed block holding each gate command (newlines preserved, runnable)
-/// and the provenance identifiers.
+/// One visible entry per gate with its runnable command and result, followed
+/// by CI and one collapsed block for provenance identifiers.
 fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
     let mut visible = Vec::new();
     if !dossier.changed_public_contracts.is_empty() {
@@ -1177,12 +1198,13 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
         .map(|base| {
             let advanced = match base.publication_sha.as_deref() {
                 Some(observed) if observed != base.sha => {
-                    format!(" (base has since advanced to `{}`)", short_sha(observed))
+                    format!(" advanced to `{}`", short_sha(observed))
                 }
-                _ => String::new(),
+                Some(_) => " unchanged".to_string(),
+                None => " (publication state not recorded)".to_string(),
             };
             format!(
-                ", base `{}` at `{}`{advanced}",
+                ". Base `{}`@`{}`{advanced}",
                 code(&base.branch),
                 short_sha(&base.sha)
             )
@@ -1200,49 +1222,29 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
                 (Some(passed), Some(total)) => format!(" ({passed}/{total})"),
                 _ => String::new(),
             };
-            format!(
-                "Gate `{}` {status}{counts} on `{}`{base}.",
-                code(&command.evidence_ref),
-                short_sha(&command.candidate_commit),
-            )
+            let result = format!(
+                "{status}{counts} on `{}`{base}.",
+                short_sha(&command.candidate_commit)
+            );
+            if command.command.contains('\n') {
+                format!("- {result}\n\n{}", fenced_command(&command.command))
+            } else {
+                format!("- {} {result}", render_command(&command.command))
+            }
         })
         .collect::<Vec<_>>();
     if !gate_lines.is_empty() {
         visible.push(gate_lines.join("\n\n"));
     } else if !base.is_empty() {
-        visible.push(format!("Verified against{}.", base.trim_start_matches(',')));
+        visible.push(format!("{}.", base.trim_start_matches(". ")));
     }
-    let steps = dossier
-        .how_to_test
-        .iter()
-        .filter(|step| reviewer_runnable_command(&step.command))
-        .filter(|step| {
-            !dossier
-                .verified_commands
-                .iter()
-                .any(|verified| verified.command.trim() == step.command.trim())
-        })
-        .map(|step| {
-            format!(
-                "- Run `{}`; expect {}.",
-                code(&step.command),
-                prose(&step.expected)
-            )
-        })
-        .collect::<Vec<_>>();
-    if !steps.is_empty() {
-        visible.push(steps.join("\n"));
-    }
+    visible.push("- CI: pending".to_string());
     let evidence = render_evidence(&dossier.evidence);
     if dossier.verified_commands.is_empty() {
         if !evidence.is_empty() {
             visible.push(evidence);
         }
     } else {
-        let mut details = Vec::new();
-        for command in &dossier.verified_commands {
-            details.push(fenced_command(&command.command));
-        }
         let mut provenance = dossier
             .verified_commands
             .iter()
@@ -1254,9 +1256,8 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
                     _ => String::new(),
                 };
                 format!(
-                    "- `{}`: commit `{}`, tree `{}`, fingerprint `{}`{counts}",
+                    "- `{}`: tree `{}`, fingerprint `{}`{counts}",
                     code(&command.evidence_ref),
-                    code(&command.candidate_commit),
                     code(&command.candidate_tree),
                     code(&command.candidate_sha256),
                 )
@@ -1266,10 +1267,8 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
         if !evidence.is_empty() {
             provenance = format!("{provenance}\n{evidence}");
         }
-        details.push(provenance);
         visible.push(format!(
-            "<details><summary>Gate command and provenance</summary>\n\n{}\n\n</details>",
-            details.join("\n\n")
+            "<details><summary>Cook run</summary>\n\n{provenance}\n\n</details>"
         ));
     }
     (!visible.is_empty()).then(|| visible.join("\n\n"))
@@ -1277,6 +1276,14 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
 
 /// A gate command as a runnable shell block. Newlines are preserved; local
 /// paths and other operator-only references are redacted in place.
+fn render_command(command: &str) -> String {
+    if command.contains('\n') {
+        format!("\n\n{}\n\n", fenced_command(command))
+    } else {
+        format!("`{}`", code(command))
+    }
+}
+
 fn fenced_command(command: &str) -> String {
     let command = reviewer_text(&redact_inline_environment_paths(command));
     let command = command.trim_end_matches(['\n', '\r']);
@@ -1326,6 +1333,7 @@ fn render_public_contract_evidence(dossier: &AgentTaskReviewDossier) -> String {
 fn render_evidence(evidence: &[AgentTaskReviewEvidence]) -> String {
     evidence
         .iter()
+        .filter(|item| !contains_operator_only_reference(&item.summary))
         .map(|item| match &item.url {
             Some(url) => format!("- {}: {url}", prose(&item.summary)),
             None => format!("- {}", prose(&item.summary)),
@@ -1371,7 +1379,10 @@ fn scalar(field: &str, value: &str) -> Result<()> {
 /// comments are removed, raw HTML outside code spans is neutralized, and no
 /// line may open a heading that could forge a section of the body.
 fn prose(value: &str) -> String {
-    neutralize_raw_html(&strip_html_comments(&reviewer_text(value)))
+    if contains_operator_only_reference(value) {
+        return String::new();
+    }
+    neutralize_raw_html(&strip_html_comments(value))
         .lines()
         .map(|line| {
             let content = line.trim_start();
@@ -1479,35 +1490,13 @@ fn code(value: &str) -> String {
     reviewer_text(value).replace('`', "'")
 }
 
-const OPERATOR_ONLY_PLACEHOLDER: &str = "[operator-only reference]";
-
-/// Reviewer-facing bodies must be independently resolvable. Each operator-only
-/// reference (local path, durable runtime id, credential, private URL) is
-/// redacted in place, so the rest of the field still reaches the reviewer.
-/// Whitespace, including newlines, is preserved.
+/// Omit an unsafe value rather than publishing a redaction placeholder.
 fn reviewer_text(value: &str) -> String {
-    let mut redact_next = false;
-    Regex::new(r"\S+")
-        .expect("valid word regex")
-        .replace_all(value, |captures: &regex::Captures<'_>| {
-            let word = &captures[0];
-            let normalized = normalize_reviewer_token(word);
-            let unsafe_word = std::mem::take(&mut redact_next)
-                || reviewer_credential_flag(normalized)
-                || operator_only_reference_rule(normalized).is_some();
-            if reviewer_credential_flag(normalized) {
-                // The value after a credential flag is the secret itself.
-                redact_next = true;
-            }
-            if !unsafe_word {
-                word.to_string()
-            } else if normalized.is_empty() {
-                OPERATOR_ONLY_PLACEHOLDER.to_string()
-            } else {
-                word.replacen(normalized, OPERATOR_ONLY_PLACEHOLDER, 1)
-            }
-        })
-        .into_owned()
+    if contains_operator_only_reference(value) {
+        String::new()
+    } else {
+        value.to_string()
+    }
 }
 
 pub fn reviewer_runnable_command(value: &str) -> bool {
@@ -1739,7 +1728,9 @@ fn placeholder_model(value: &str) -> bool {
 fn bullets(values: &[String]) -> String {
     values
         .iter()
-        .map(|value| format!("- {}", prose(value)))
+        .map(|value| prose(value))
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("- {value}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -2457,9 +2448,9 @@ mod tests {
             .expect("fixture gate evidence");
         let body = render_review_dossier(&value, &default_profile());
         for expected in [
-            "Gate `gate-connection` passed (175/177) on `candidate-commit`.",
-            "```sh\ncargo test connection\n```",
-            "- `gate-connection`: commit `candidate-commit`, tree `candidate-tree`, fingerprint `candidate-fingerprint`; 2 failed, 0 ignored",
+            "`cargo test connection` passed (175/177) on `candidate-commit`.",
+            "<details><summary>Cook run</summary>",
+            "- `gate-connection`: tree `candidate-tree`, fingerprint `candidate-fingerprint`; 2 failed, 0 ignored",
         ] {
             assert!(body.contains(expected), "missing `{expected}` in {body}");
         }
@@ -2761,45 +2752,48 @@ mod tests {
 
         let body = render_review_dossier(&value, &default_profile());
 
-        let expected = format!(
-            "Closes #16247
-
-## Summary
-Cook PR bodies now say `Closes #N` when the task URL is an issue in the destination repository, so GitHub closes it on merge.
-
-## What changed
-- Added `task_issue_relationship` in agent_task_review_dossier.rs, mapping a task URL onto `Closes` or `Relates to`.
-- Cook finalization fills `source_relationships` from the task's source refs.
-- Added unit and end-to-end tests for same-repo, cross-repo and external-tracker URLs.
-
-## Compatibility
-Additive. `Closes` validation is unchanged.
-
-## Verification
-Gate `gate-1` passed (65/65) on `cf5ddd5`, base `main` at `6229120`.
-
-<details><summary>Gate command and provenance</summary>
-
-```sh
-{}
-```
-
-- `gate-1`: commit `cf5ddd58adabe779d1c9d26b16d90d83be16805b`, tree `645eaae2998d0612cd2f08c977a31b49c06fec7d`, fingerprint `4b49e0e6e704327986856461f073ca59ecd76115d918d95a670b2a76394357b2`; 0 failed, 0 ignored
-
-</details>
-
----
-AI disclosure: anthropic-claude-opus-5-5 via Homeboy (pi). Used for: Implemented the mapping and the tests, then ran the formatting and test gates.
-",
-            gate_command.trim_end()
-        );
-        assert_eq!(body, expected);
+        for recovered in [false, true] {
+            let mut run = value.clone();
+            if recovered {
+                run.evidence.push(AgentTaskReviewEvidence {
+                    summary: "Replacement proof authorized by operator".into(),
+                    url: None,
+                });
+            }
+            let rendered = render_review_dossier(&run, &default_profile());
+            for fact in [
+                gate_command.trim_end(),
+                "65/65",
+                "cf5ddd5",
+                "6229120",
+                "Closes #16247",
+                "Tool:",
+                "Model:",
+                "Used for:",
+                "CI:",
+                "<details><summary>Cook run</summary>",
+            ] {
+                assert_eq!(rendered.matches(fact).count(), 1, "{fact}: {rendered}");
+            }
+            for forbidden in [
+                "source_refs[",
+                "artifact_refs[",
+                "Task objective:",
+                "Verified candidate scope",
+                "operator-only reference",
+                "\\`",
+                "\\_",
+                "Used for: AI disclosure:",
+            ] {
+                assert!(!rendered.contains(forbidden), "{forbidden}: {rendered}");
+            }
+        }
         // The gate command appears once, runnable, and the disclosure once.
         assert_eq!(body.matches("cargo fmt --all -- --check").count(), 1);
-        assert_eq!(body.matches("AI disclosure").count(), 1);
+        assert_eq!(body.matches("## AI assistance").count(), 1);
         for retired in [
             "## How to test",
-            "## AI assistance",
+            "AI disclosure:",
             "## Evidence",
             "\\`",
             "\\_",
@@ -2811,6 +2805,21 @@ AI disclosure: anthropic-claude-opus-5-5 via Homeboy (pi). Used for: Implemented
             "{} chars: {body}",
             body.chars().count()
         );
+    }
+
+    #[test]
+    fn disclosure_has_one_process_label_and_records_model_identity() {
+        let mut value = dossier();
+        value.ai_assistance.model = "anthropic/claude-sonnet-5 (tier cook-heavy)".into();
+        value.ai_assistance.used_for =
+            "AI disclosure: Implemented `StyleResolver` and tested `<html>`.".into();
+        let body = render_review_dossier(&value, &default_profile());
+        assert!(body.contains("Model: anthropic/claude-sonnet-5 (tier cook-heavy)"));
+        assert_eq!(body.matches("Used for:").count(), 1);
+        assert!(!body.contains("AI disclosure:"));
+        assert!(body.contains("`StyleResolver`"));
+        assert!(body.contains("`<html>`"));
+        assert!(!body.contains("\\`"));
     }
 
     #[test]
@@ -2841,7 +2850,7 @@ AI disclosure: anthropic-claude-opus-5-5 via Homeboy (pi). Used for: Implemented
         });
         let body = render_review_dossier(&value, &default_profile());
         assert!(
-            body.contains("base `main` at `6229120` (base has since advanced to `aaaaaaa`)."),
+            body.contains("Base `main`@`6229120` advanced to `aaaaaaa`."),
             "{body}"
         );
         assert_eq!(body.matches("6229120").count(), 1, "{body}");
@@ -2851,8 +2860,9 @@ AI disclosure: anthropic-claude-opus-5-5 via Homeboy (pi). Used for: Implemented
     fn renderer_is_deterministic_and_safe() {
         let body = render_review_dossier(&dossier(), &default_profile());
         assert_eq!(body, render_review_dossier(&dossier(), &default_profile()));
-        assert!(body.starts_with("Closes #8058\n\n## Summary"), "{body}");
-        assert!(body.contains("- Run `cargo test dossier`; expect passes."));
+        assert!(body.starts_with("## Summary"), "{body}");
+        assert!(body.ends_with("Closes #8058\n"));
+        assert!(body.contains("- `cargo test dossier`; expect passes."));
         assert!(!body.contains("Publication intent"));
     }
     #[test]
@@ -3117,11 +3127,8 @@ AI disclosure: anthropic-claude-opus-5-5 via Homeboy (pi). Used for: Implemented
         ] {
             assert!(!body.contains(forbidden), "leaked {forbidden}: {body}");
         }
-        // Only the reference is redacted; the rest of the field still renders.
-        assert!(
-            body.contains("Inspect [operator-only reference] at [operator-only reference] using"),
-            "{body}"
-        );
+        assert!(!body.contains("Inspect"), "{body}");
+        assert!(!body.contains("operator-only reference"), "{body}");
         // A reviewer step that cannot run outside the operator's machine is dropped.
         assert!(!body.contains("Run `cargo test"), "{body}");
     }
@@ -3149,10 +3156,7 @@ AI disclosure: anthropic-claude-opus-5-5 via Homeboy (pi). Used for: Implemented
             assert!(!reviewer_runnable_command(value), "accepted {value}");
             let rendered = reviewer_text(value);
             assert!(
-                rendered.contains(OPERATOR_ONLY_PLACEHOLDER)
-                    && !contains_operator_only_reference(&rendered)
-                    && !rendered.contains("secret")
-                    && !rendered.contains("/private/repo"),
+                rendered.is_empty(),
                 "rendered unsafe reviewer claim: {value} -> {rendered}"
             );
         }

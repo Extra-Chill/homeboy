@@ -5483,21 +5483,18 @@ fn cook_review_dossier_with_stores_and_review_form(
         evidence.extend([
             AgentTaskReviewEvidence {
                 summary: format!(
-                    "Original infrastructure-invalid verification retained: {original_gates} failed gate record(s); inspect durable gate details."
+                    "Recovery retained {original_gates} infrastructure-invalid gate record(s)."
                 ),
                 // The durable record is operator-only. Keep this reviewer-facing
                 // provenance as text so `enrich_dossier` does not remove it.
                 url: None,
             },
             AgentTaskReviewEvidence {
-                summary: format!(
-                    "Replacement candidate-bound verification: {gate_count} gate(s) completed green with matching command evidence."
-                ),
+                summary: format!("Replacement proof covers {gate_count} gate(s)."),
                 url: None,
             },
             AgentTaskReviewEvidence {
-                summary: "Explicit operator authorization for external replacement proof was recorded."
-                    .to_string(),
+                summary: "External proof authorized by operator.".to_string(),
                 url: None,
             },
         ]);
@@ -5657,6 +5654,9 @@ pub(crate) fn promotion_executed_model_in_store(
     run_id: &str,
     outcome: &crate::agent_task::AgentTaskOutcome,
 ) -> Result<String> {
+    if let Some(model) = outcome_model_identity_evidence(outcome) {
+        return Ok(model);
+    }
     if let Some(model) = concrete_provider_model(outcome.selected_model()) {
         return Ok(model);
     }
@@ -5838,13 +5838,19 @@ fn authoritative_execution_identity(
     // identity evidence and the harvested candidate's model binding are the
     // remaining durable authorities; disclosure uses the same chain promotion
     // admits so an attempt that promotes also finalizes.
-    let model = match model {
+    let model = match outcome_model_identity_evidence(outcome).or(model) {
         Some(model) => Some(model),
-        None => outcome_model_identity_evidence(outcome)
-            .map(Ok)
-            .or_else(|| candidate_artifact_model_evidence(outcome, run_id).transpose())
-            .transpose()?,
+        None => candidate_artifact_model_evidence(outcome, run_id)?,
     };
+    let model = model.map(
+        |served| match outcome.selected_model().filter(|tier| *tier != served) {
+            Some(tier) => format!("{served} (tier {tier})"),
+            None if matches!(served.as_str(), "cook-heavy" | "cook" | "subagent") => {
+                format!("tier {served}; served model not recorded")
+            }
+            None => served,
+        },
+    );
     Ok((
         terminal
             .map(|identity| identity.backend)
@@ -8392,6 +8398,7 @@ mod provider_model_tests {
         let provider_reported = crate::agent_task::AgentTaskOutcome {
             task_id: "selected".to_string(),
             metadata: serde_json::json!({
+                "model": "cook-heavy",
                 "model_identity": { "provider_reported": "anthropic/claude-sonnet-5" }
             }),
             ..Default::default()

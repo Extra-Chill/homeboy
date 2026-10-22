@@ -524,13 +524,10 @@ fn creates_new_pr_after_green_gates() {
     assert!(backend.last_body.contains("## Verification"));
     assert!(backend
         .last_body
-        .contains("- Run `cargo test agent_task_finalization`; expect passes."));
-    assert_eq!(
-        backend.last_body.matches("AI disclosure: GPT-5.5").count(),
-        1
-    );
-    assert!(!backend.last_body.contains("## How to test"));
-    assert!(!backend.last_body.contains("## AI assistance"));
+        .contains("- `cargo test agent_task_finalization`; expect passes."));
+    assert_eq!(backend.last_body.matches("Model: GPT-5.5").count(), 1);
+    assert!(backend.last_body.contains("## How to test"));
+    assert!(backend.last_body.contains("## AI assistance"));
     assert!(!backend.last_body.contains("Publication intent"));
     assert_eq!(
         report.publication_intent.schema,
@@ -1117,9 +1114,9 @@ fn finalization_pins_verified_base_when_base_advances_before_publication() {
         Some("advanced-base")
     );
     assert!(
-        backend.last_body.contains(
-            "Verified against base `main` at `verified-base` (base has since advanced to `advanced-base`)."
-        ),
+        backend
+            .last_body
+            .contains("Base `main`@`verified-base` advanced to `advanced-base`."),
         "{}",
         backend.last_body
     );
@@ -1159,7 +1156,7 @@ fn finalization_records_unchanged_live_base_before_publication() {
     assert!(
         backend
             .last_body
-            .contains("Verified against base `main` at `verified-base`."),
+            .contains("Base `main`@`verified-base` unchanged."),
         "{}",
         backend.last_body
     );
@@ -1183,7 +1180,7 @@ fn finalization_reports_unavailable_live_base_observation() {
     assert_eq!(report.publication_intent.target.publication_base_sha, None);
     assert!(backend
         .last_body
-        .contains("Verified against base `main` at `verified-base`."));
+        .contains("Base `main`@`verified-base` (publication state not recorded)."));
     assert_eq!(
         report
             .review_dossier
@@ -1287,7 +1284,7 @@ fn pr_body_reports_iterator_evidence_metadata() {
 
     finalize_pr_with_backend(options, &mut backend).expect("finalized");
 
-    assert!(backend.last_body.contains("AI disclosure: GPT-5.5"));
+    assert!(backend.last_body.contains("Model: GPT-5.5"));
     assert!(!backend.last_body.contains("CI expected"));
 }
 
