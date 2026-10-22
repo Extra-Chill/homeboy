@@ -1260,8 +1260,6 @@ fn collect_worktree_candidates_bounded(
     let mut skipped = Vec::new();
     let mut inspected_count = 0;
 
-    let safety = git_safety(&worktree.path)?;
-    let liveness = active.liveness(&worktree.path);
     let declarations = artifact_declarations(&worktree.path)?;
     let start = next_relative_path.map_or(Ok(0), |next_relative_path| {
         declarations
@@ -1299,6 +1297,49 @@ fn collect_worktree_candidates_bounded(
             measurement: None,
         });
     }
+    // Resume the interrupted measurement before any other work in the pass
+    // can spend its budget (#16293). The walk advances the persisted frontier
+    // one entry at a time, so a pass that reaches it always makes progress;
+    // the Git safety scan and the remaining eligibility gates only run once
+    // this pass's slice of the measurement is either complete or yielded.
+    let mut resumed_usage: Option<(String, PathUsage)> = None;
+    if let Some(measurement) = measurement {
+        let declaration = declarations.first().ok_or_else(|| {
+            Error::internal_unexpected(
+                "artifact cleanup measurement checkpoint has no declaration to resume",
+            )
+        })?;
+        if next_relative_path != Some(declaration.relative_path.as_str()) {
+            return Err(Error::internal_unexpected(
+                "artifact cleanup measurement checkpoint does not match the resumed declaration",
+            ));
+        }
+        let artifact_path = worktree.path.join(&declaration.relative_path);
+        if artifact_path.exists() {
+            match path_usage_resumable(
+                &artifact_path,
+                Some(measurement),
+                deadline,
+                measurement_step_limit,
+            )? {
+                PathUsageMeasurement::Complete(usage) => {
+                    resumed_usage = Some((declaration.relative_path.clone(), usage));
+                }
+                PathUsageMeasurement::Interrupted(partial) => {
+                    return Ok(WorktreeCandidateScan {
+                        candidates,
+                        skipped,
+                        inspected_count,
+                        scan_complete: false,
+                        next_relative_path: Some(declaration.relative_path.clone()),
+                        measurement: Some(partial),
+                    });
+                }
+            }
+        }
+    }
+    let safety = git_safety(&worktree.path)?;
+    let liveness = active.liveness(&worktree.path);
     for declaration in declarations {
         let artifact_path = worktree.path.join(&declaration.relative_path);
         let display_path = artifact_path.to_string_lossy().to_string();
@@ -1412,20 +1453,20 @@ fn collect_worktree_candidates_bounded(
         // not safety gates. Walking a multi-gigabyte Cargo target before deleting
         // it can consume the entire retention budget, so leave those estimates
         // unknown and measure the filesystem delta after removal instead.
+        let resumed = resumed_usage
+            .as_ref()
+            .filter(|(relative_path, _)| relative_path == &declaration.relative_path)
+            .map(|(_, usage)| *usage);
         let usage = if pressure_eligible {
             PathUsage {
                 logical_bytes: 0,
                 allocated_bytes: 0,
                 newest_modified: None,
             }
+        } else if let Some(usage) = resumed {
+            usage
         } else {
-            match path_usage_resumable(
-                &artifact_path,
-                measurement
-                    .filter(|_| next_relative_path == Some(declaration.relative_path.as_str())),
-                deadline,
-                measurement_step_limit,
-            )? {
+            match path_usage_resumable(&artifact_path, None, deadline, measurement_step_limit)? {
                 PathUsageMeasurement::Complete(usage) => usage,
                 PathUsageMeasurement::Interrupted(measurement) => {
                     return Ok(WorktreeCandidateScan {
@@ -1654,23 +1695,17 @@ fn cleanup_artifacts_in_worktrees(
 
     let mut next_cursor = None;
     for (index, worktree) in worktrees.iter().enumerate() {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        // The first worktree of a pass is scanned even when the budget is
+        // already spent: its measurement walk honors the deadline per step
+        // and still takes one persisted step, so the pass yields an advanced
+        // frontier instead of an unchanged cursor (#16293). Later worktrees
+        // are only entered with budget left; entering them on an expired
+        // budget would emit a cursor that restarts their scan from scratch.
+        let enters_on_expired_budget = index == 0;
+        if !enters_on_expired_budget && deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
             scan_complete = false;
-            next_cursor = repository_artifact_cursor(
-                &root,
-                worktree,
-                (index == 0)
-                    .then(|| resumed_relative_path.clone())
-                    .flatten(),
-                (index == 0)
-                    .then(|| {
-                        measurement_checkpoint
-                            .as_ref()
-                            .map(|checkpoint| checkpoint.measurement.clone())
-                    })
-                    .flatten(),
-                options,
-            )?;
+            next_cursor = repository_artifact_cursor(&root, worktree, None, None, options)?;
             break;
         }
         let remaining_inspections =
@@ -2984,7 +3019,14 @@ fn path_usage_resumable(
         });
     let mut steps = 0usize;
     while let Some(relative_path) = cursor.pending_paths.pop() {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        // A walk always takes its first step before honoring the wall-clock
+        // budget. One step is a single stat plus one directory read, and
+        // guaranteeing it is what lets every continuation pass advance the
+        // persisted measurement frontier even when earlier work in the pass
+        // spent the entire budget (#16293). Without it, a budget exhausted
+        // before the walk began re-emitted the same checkpoint forever and
+        // reclaimed nothing on every pass.
+        if (steps > 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline))
             || step_limit.is_some_and(|limit| steps >= limit)
         {
             cursor.pending_paths.push(relative_path);
@@ -5920,6 +5962,142 @@ mod tests {
                 !checkpoint_path.exists(),
                 "a consumed checkpoint must not remain reachable after completion"
             );
+        });
+    }
+
+    /// #16293: a worktree whose artifact subtree cannot be measured within a
+    /// single pass's scan budget must still converge. Each continuation pass
+    /// persists its measurement frontier and applies the candidate as soon as
+    /// its walk completes, so the position staying on `target` while the
+    /// frontier advances is expected; what must never happen is a pass that
+    /// re-emits the same frontier and reclaims nothing forever.
+    #[test]
+    fn oversized_subtree_converges_under_a_one_step_scan_budget_and_reclaims() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            const PACKAGES: usize = 6;
+            let mut expected_bytes = 0u64;
+            for index in 0..PACKAGES {
+                let content = format!("artifact-{index}");
+                write_file(
+                    &repo.path().join(format!("target/pkg-{index}/artifact")),
+                    &content,
+                );
+                expected_bytes += content.len() as u64;
+            }
+            let worktrees = vec![WorktreeInfo {
+                path: repo.path().to_path_buf(),
+            }];
+            let options = ArtifactCleanupOptions {
+                scope: ArtifactCleanupScope::RepositoryWorktrees,
+                apply: true,
+                ..ArtifactCleanupOptions::default()
+            };
+
+            // One filesystem entry is measured per pass, so the subtree's
+            // walk can never finish inside a single pass's budget.
+            let mut cursor = None;
+            let mut passes = 0usize;
+            let completed = loop {
+                let page = cleanup_artifacts_in_worktrees(
+                    repo.path().to_path_buf(),
+                    worktrees.clone(),
+                    &ArtifactCleanupOptions {
+                        cursor: cursor.clone(),
+                        ..options.clone()
+                    },
+                    false,
+                    Vec::new(),
+                    ArtifactInventoryBounds {
+                        measurement_step_limit: Some(1),
+                        ..ArtifactInventoryBounds::default()
+                    },
+                )
+                .expect("bounded apply pass");
+                passes += 1;
+                assert!(
+                    passes <= 2 * PACKAGES + 3,
+                    "continuation passes did not converge in a bounded number"
+                );
+                if page.scan_complete {
+                    break page;
+                }
+                let next = page.next_cursor.expect("measurement continuation");
+                assert_eq!(next.worktree, worktrees[0].path.to_string_lossy());
+                assert_eq!(next.next_relative_path.as_deref(), Some("target"));
+                cursor = Some(
+                    parse_artifact_cleanup_cursor(
+                        &serde_json::to_string(&next).expect("serialize continuation cursor"),
+                    )
+                    .expect("parse continuation cursor"),
+                );
+            };
+
+            assert_eq!(completed.candidate_count, 1);
+            assert_eq!(completed.candidates[0].relative_path, "target");
+            assert_eq!(completed.applied_count, 1);
+            assert_eq!(completed.reclaimed_bytes, expected_bytes);
+            assert!(completed.next_cursor.is_none());
+            assert!(
+                !repo.path().join("target").exists(),
+                "the oversized subtree must be reclaimed once measured"
+            );
+        });
+    }
+
+    /// #16293: a pass whose entire budget is spent before its scan begins —
+    /// the Git safety work ahead of a huge subtree — must still advance the
+    /// persisted measurement frontier instead of re-emitting an unchanged
+    /// cursor, so repeated continuations converge instead of looping.
+    #[test]
+    fn expired_pass_budget_still_advances_the_measurement_frontier() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = git_repo();
+            const PACKAGES: usize = 4;
+            for index in 0..PACKAGES {
+                write_file(
+                    &repo.path().join(format!("target/pkg-{index}/artifact")),
+                    "artifact",
+                );
+            }
+            let options = ArtifactCleanupOptions {
+                scope: ArtifactCleanupScope::RepositoryWorktrees,
+                path: Some(repo.path().to_path_buf()),
+                max_scan_duration: Some(Duration::ZERO),
+                ..ArtifactCleanupOptions::default()
+            };
+
+            let mut cursor = None;
+            let mut completed = None;
+            for pass in 0..=(2 * PACKAGES + 3) {
+                let page = cleanup_artifacts(ArtifactCleanupOptions {
+                    cursor: cursor.clone(),
+                    ..options.clone()
+                })
+                .expect("expired-budget pass");
+                if page.scan_complete {
+                    completed = Some(page);
+                    break;
+                }
+                assert!(
+                    pass < 2 * PACKAGES + 3,
+                    "an expired budget must still converge across continuation passes"
+                );
+                let next = page.next_cursor.expect("continuation cursor");
+                assert!(
+                    next.measurement_ref.is_some(),
+                    "each continuation pass must persist its measurement frontier"
+                );
+                cursor = Some(next);
+            }
+            let completed = completed.expect("expired-budget continuations must converge");
+            assert_eq!(completed.candidate_count, 1);
+            assert_eq!(completed.candidates[0].relative_path, "target");
+            assert_eq!(
+                completed.candidates[0].size_bytes,
+                "artifact".len() as u64 * PACKAGES as u64
+            );
+            assert!(completed.next_cursor.is_none());
         });
     }
 
