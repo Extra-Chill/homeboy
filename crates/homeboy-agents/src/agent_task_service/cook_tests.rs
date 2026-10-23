@@ -19700,6 +19700,13 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
 fn with_corrected_gate_candidate(
     test: impl FnOnce(CookRequest, PathBuf, AgentTaskPromotionReport),
 ) {
+    with_corrected_gate_candidate_placement(false, test);
+}
+
+fn with_corrected_gate_candidate_placement(
+    lab: bool,
+    test: impl FnOnce(CookRequest, PathBuf, AgentTaskPromotionReport),
+) {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("candidate");
@@ -19800,10 +19807,25 @@ fn with_corrected_gate_candidate(
         store
             .record_promotion(run_id, serde_json::to_value(&failed).unwrap())
             .unwrap();
+        if lab {
+            let recipe_store = CookRecipeStore::from_current_data_root().unwrap();
+            let mut recipe = recipe_store.load_recipe(&options.identity.cook_id).unwrap();
+            recipe.promotion_transport["attempt_dispatch"] = serde_json::json!({
+                "kind": "lab", "runner_id": "replacement-placement-runner"
+            });
+            recipe_store.persist_recipe(&recipe).unwrap();
+            let mut config = homeboy_core::defaults::load_config();
+            config.retention.shared_store_reserve_bytes = u64::MAX;
+            homeboy_core::defaults::save_config(&config).unwrap();
+        }
         let replacement = verify_replacement_gates(
             run_id,
             VerifyGateOptions {
                 verify: vec!["test \"$(cat tracked.txt)\" = promoted".to_string()],
+                gate_environment: crate::agent_task_gate::AgentTaskGateEnvironmentPolicy {
+                    shared_cargo_target: Some(lab),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             "operator authorized corrected candidate-bound gates".to_string(),
@@ -19812,6 +19834,94 @@ fn with_corrected_gate_candidate(
         .unwrap();
         assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
         test(options, target, replacement);
+    });
+}
+
+#[test]
+fn replacement_gates_follow_lab_placement_without_controller_reserve_preflight() {
+    use crate::agent_task_gate::placement;
+    struct RunnerTransport {
+        previous: Arc<dyn placement::LabGateTransport>,
+        requests: Arc<std::sync::Mutex<Vec<placement::LabGateRequest>>>,
+    }
+    impl placement::LabGateTransport for RunnerTransport {
+        fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+            self.previous.declared_runner(command)
+        }
+        fn execute(
+            &self,
+            cwd: &std::path::Path,
+            request: &placement::LabGateRequest,
+            supervision: Option<&crate::agent_task_gate::GateSupervision>,
+        ) -> Result<placement::LabGateReceipt> {
+            if request.runner_id != "replacement-placement-runner" {
+                return self.previous.execute(cwd, request, supervision);
+            }
+            self.requests.lock().unwrap().push(request.clone());
+            // Simulate the runner's independent environment. The controller's
+            // deliberately impossible reserve must never be admitted locally.
+            let mut environment = request.environment.clone();
+            environment.lab_runner = None;
+            environment.shared_cargo_target = Some(false);
+            let mut report = crate::agent_task_gate::run_gate_command_with_supervision(
+                cwd,
+                request.index,
+                if request.preflight_only {
+                    "true"
+                } else {
+                    &request.label
+                },
+                request.visibility,
+                request.reveal_policy,
+                None,
+                supervision,
+                &environment,
+                &[],
+            )?;
+            report.environment.lab_runner = Some(request.runner_id.clone());
+            if request.preflight_only {
+                report.status = crate::agent_task_gate::AgentTaskGateStatus::Skipped;
+            }
+            Ok(placement::LabGateReceipt {
+                schema: placement::LAB_GATE_RECEIPT_SCHEMA.to_string(),
+                request_sha256: request.identity()?,
+                candidate: request.candidate.clone(),
+                execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+                    Some("controller-run"), &request.runner_id, "job", "homeboy", "reservation",
+                )?.evidence_record()?,
+                report, setup: vec![], readiness: request.preflight_only.then(|| serde_json::json!({"status":"ready"})), materialization: None, artifact_ref: None,
+            })
+        }
+    }
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    placement::register_lab_gate_transport(Arc::new(RunnerTransport {
+        previous: placement::active_transport(),
+        requests: requests.clone(),
+    }));
+    with_corrected_gate_candidate_placement(true, |_, _, replacement| {
+        let requests = requests.lock().unwrap();
+        assert!(!requests.is_empty());
+        assert!(requests
+            .iter()
+            .all(|request| request.runner_id == "replacement-placement-runner"));
+        let proof = &replacement.provenance["replacement_gate_proof"]["environment_policy"][0];
+        assert_eq!(proof["runner_id"], "replacement-placement-runner");
+        assert_eq!(
+            proof["lab_receipt"]["execution_context"]["context"]["runner_id"],
+            "replacement-placement-runner"
+        );
+        assert!(replacement.deterministic_gates[0].lab_receipt.is_some());
+    });
+}
+
+#[test]
+fn replacement_gates_for_local_cooks_remain_local() {
+    with_corrected_gate_candidate(|_, _, replacement| {
+        assert!(replacement.deterministic_gates[0]
+            .environment
+            .lab_runner
+            .is_none());
+        assert!(replacement.deterministic_gates[0].lab_receipt.is_none());
     });
 }
 

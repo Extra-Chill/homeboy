@@ -929,7 +929,7 @@ pub fn validate_initial_recipe_compatibility_in_store(
 /// attempts are dispatched to. An explicit `--gate-runner` (or a declared
 /// gate command that pins its own runner) always wins, and local placement
 /// is unchanged.
-fn default_gate_lab_runner_from_attempt_dispatch(
+pub(super) fn default_gate_lab_runner_from_attempt_dispatch(
     gates: &mut crate::agent_task_gate::VerifyGateOptions,
     attempt_dispatch: &Value,
 ) {
