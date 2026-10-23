@@ -31,7 +31,9 @@ controller upgrade.
 
 - `status [ID]`: Inspect a persisted upgrade operation. Reports whether binary promotion and optional extension/runner refresh completed. Omit `ID` to read the latest upgrade run. Also available as `homeboy runs show <id>`.
 - `--check`: Check for updates without installing. Returns version information without making changes.
-- `--force`: Force upgrade even if already at the latest version.
+- `--force`: Force upgrade even if already at the latest version; does not cancel active work.
+- `--drain-timeout <SECONDS>`: Bound the shared controller/runner drain (default 1800). Progress identifies outstanding jobs and Cooks.
+- `--cancel-active`: Explicitly cancel outstanding jobs and durable Cooks instead of waiting for natural completion. Exact cancelled identities are printed and retained on the upgrade operation.
 - `--skip-extensions`: Skip automatic extension updates.
 - `--skip-runners`: Upgrade the controller only; cannot be combined with `--upgrade-runner`.
 - `--upgrade-runner`: Select configured runners to converge with the controller upgrade. Repeat to target multiple runners.
@@ -147,20 +149,16 @@ a non-success interrupted terminal state, projecting any pending binary
 replacement from its durable checkpoint. A proven controller replacement
 remains visible independently from incomplete extension or runner refresh.
 Controller replacement admission still waits for live runtime-generation pins.
-For a controller-only published binary upgrade (`--skip-extensions --skip-runners`),
-the selected release is frozen before admitting a detached worker. The command
-returns `status: queued` with an `operation_id`; this acknowledges durable worker
-ownership, **not** completed installation. The worker runs in its own process
-group rather than occupying a job on the daemon it may need to replace. Inspect
-the same operation with `homeboy upgrade status <id>` until it is terminal. A
-dead worker is marked interrupted on status read, retaining any binary
-replacement checkpoint; it is never silently retried after an ambiguous swap.
+Upgrades run in the foreground through drain, promotion, reconnect and admission
+resumption. A queued worker is not reported as successful completion. Admission
+is fenced on the controller and selected connected SSH runners while existing
+Cooks finish. Unsupported or unreachable runner drain endpoints fail closed
+before binaries are replaced.
 
 `homeboy upgrade` data payload:
 
 - `command`: `upgrade`
 - `operation_id`: Durable observation-run id persisted before mutation. Inspect later with `homeboy upgrade status <id>`
-- `status: queued` and `selected_release_tag`: For detached controller-only binary upgrades, the exact release accepted by the worker. This is admission, not upgrade completion.
 - `install_method`: Installation method used for upgrade
 - `previous_version`: Version before upgrade
 - `new_version`: Version after upgrade (may be null)
@@ -178,8 +176,8 @@ Runner upgrade entries include the configured `homeboy_path`, observed configure
 
 ## Exit code
 
-- `0`: Successful admission of a detached controller-only binary upgrade, or successful completion of a foreground upgrade. Check the queued operation's terminal status separately.
-- Non-zero: Error during upgrade process
+- `0`: Completed upgrade with selected targets converged and runner admission restored.
+- Non-zero: Drain timeout, cancellation failure, preflight refusal, partial upgrade, failed component, interrupted operation, pending service restart, or admission-readiness failure.
 
 ## Notes
 

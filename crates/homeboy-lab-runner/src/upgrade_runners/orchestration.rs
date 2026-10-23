@@ -31,13 +31,12 @@ pub fn preflight_configured_runners_for_upgrade(
             .clone()
             .unwrap_or_else(|| "homeboy".to_string());
         if let Some(detail) = runner_live_jobs_preflight(&runner.id, candidate_version) {
-            failures.push(runner_upgrade_failure_entry(
-                &runner.id,
-                homeboy_path,
-                None,
-                1,
-                detail,
-            ));
+            let mut entry = runner_upgrade_failure_entry(&runner.id, homeboy_path, None, 1, detail);
+            entry.recovery_commands = vec![format!(
+                "homeboy upgrade --cancel-active --upgrade-runner {}",
+                runner.id
+            )];
+            failures.push(entry);
             continue;
         }
         if let Some(detail) = runner_manifest_preflight(runner, &homeboy_path, candidate_version) {

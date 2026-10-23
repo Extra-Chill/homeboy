@@ -53,6 +53,96 @@ impl homeboy_upgrade::upgrade::RunnerDirectActiveJobsProvider for RunnerDirectAc
 }
 
 impl RunnerUpgradeProvider for RunnerUpgrade {
+    fn drain_targets(&self, targets: &[String]) -> Result<Vec<String>> {
+        Ok(runner_upgrade_targets(targets)?
+            .into_iter()
+            .filter(|runner| runner.kind == homeboy_runner_contract::RunnerKind::Ssh)
+            .map(|runner| runner.id)
+            .collect())
+    }
+
+    fn set_upgrade_drain(
+        &self,
+        targets: &[String],
+        operation: &str,
+        runs: &[String],
+        resume: bool,
+    ) -> Result<()> {
+        for runner in targets {
+            let session = crate::status(runner)?.session.ok_or_else(|| {
+                homeboy_core::Error::internal_unexpected(format!(
+                    "runner {runner} has no connected drain endpoint"
+                ))
+            })?;
+            crate::execution::daemon_api_post_json_for_session_with_timeout(
+                &session,
+                "/upgrade/drain",
+                &serde_json::json!({"operation_id": operation, "runs": runs, "resume": resume, "timeout_ms": 86_400_000}),
+                None,
+                std::time::Duration::from_secs(10),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn verify_upgrade_admission(&self, targets: &[String]) -> Result<()> {
+        for runner in targets {
+            crate::homeboy_refresh::probe_reconnected_admission_readiness(
+                runner,
+                "upgraded runner",
+            )?;
+            let report = crate::status(runner)?;
+            if !report.admission_summary(0).accepting_jobs {
+                return Err(homeboy_core::Error::internal_unexpected(format!(
+                    "runner {runner} is not accepting jobs after upgrade"
+                ))
+                .with_hint(format!(
+                    "homeboy runner refresh-homeboy {runner} --reconnect"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn drain_jobs(&self, targets: &[String]) -> Result<Vec<(String, String)>> {
+        let mut jobs = Vec::new();
+        for runner in targets {
+            let response = crate::daemon_api_get(runner, "/jobs")?;
+            let body = crate::execution::canonical_daemon_body(&response, "upgrade drain jobs")?;
+            let entries = body["jobs"].as_array().ok_or_else(|| {
+                homeboy_core::Error::internal_unexpected(format!(
+                    "runner {runner} returned no authoritative job inventory"
+                ))
+            })?;
+            for job in entries {
+                if matches!(job["status"].as_str(), Some("queued" | "running")) {
+                    let id = job["id"].as_str().ok_or_else(|| {
+                        homeboy_core::Error::internal_unexpected("runner job identity missing")
+                    })?;
+                    jobs.push((runner.clone(), id.to_string()));
+                }
+            }
+            // Older generations remain owners until settlement. Do not upgrade
+            // while a retained generation still owns any job identity.
+            for owner in crate::generation_store::status_job_owners(runner)? {
+                for job in owner.job_ids {
+                    if !jobs
+                        .iter()
+                        .any(|(id, existing)| id == runner && existing == &job)
+                    {
+                        jobs.push((runner.clone(), job));
+                    }
+                }
+            }
+        }
+        Ok(jobs)
+    }
+
+    fn cancel_drain_job(&self, runner: &str, job: &str) -> Result<()> {
+        crate::execution::daemon_api_post(runner, &format!("/jobs/{job}/cancel"))?;
+        Ok(())
+    }
+
     fn preflight_configured_runners_for_upgrade(
         &self,
         method_override: Option<InstallMethod>,

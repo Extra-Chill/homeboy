@@ -1018,6 +1018,11 @@ fn is_unmaterialized_runtime_convergence_blocker(record: &AgentTaskRunRecord) ->
 struct AgentTaskControllerUpgradeAdmissionProvider;
 
 impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionProvider {
+    fn cancel_for_upgrade(&self, run_id: &str) -> Result<()> {
+        agent_task_lifecycle::cancel_run(run_id, Some("explicit upgrade --cancel-active"))?;
+        Ok(())
+    }
+
     fn controller_upgrade_admission(&self) -> Result<ControllerUpgradeAdmission> {
         let (records, health) = agent_task_lifecycle::read_records_with_health()?;
         let admission =

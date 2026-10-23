@@ -15,6 +15,14 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Cancel live Cooks and runner jobs instead of waiting (each cancellation is reported).
+    #[arg(long, conflicts_with = "check")]
+    pub cancel_active: bool,
+
+    /// Maximum drain wait in seconds. New admissions remain paused during this wait.
+    #[arg(long, default_value_t = 1800)]
+    pub drain_timeout: u64,
+
     /// Skip extension updates (only upgrade the binary)
     #[arg(long)]
     pub skip_extensions: bool,
@@ -77,11 +85,8 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
     }
 
     if let Some(UpgradeCommand::Continue { id }) = args.command.as_ref() {
-        upgrade::continue_detached_upgrade(&id)?;
-        return Ok((
-            serde_json::json!({ "operation_id": id, "status": "completed" }),
-            0,
-        ));
+        let result = upgrade::continue_detached_upgrade(id)?;
+        return upgrade_response(&result);
     }
 
     if args.check {
@@ -114,27 +119,7 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         })
         .transpose()?;
 
-    if !args.runner_only && args.skip_extensions && args.skip_runners && args.source_path.is_none()
-    {
-        let method = method_override.unwrap_or_else(|| {
-            if args.pin_version.is_some() {
-                upgrade::InstallMethod::Binary
-            } else {
-                upgrade::detect_install_method()
-            }
-        });
-        if method == upgrade::InstallMethod::Binary {
-            let admission = upgrade::start_detached_upgrade(
-                args.force,
-                method,
-                args.pin_version.as_deref(),
-                args.no_restart_services,
-            )?;
-            return Ok((admission, 0));
-        }
-    }
-
-    let result = upgrade::run_upgrade_with_method(
+    let result = upgrade::run_upgrade_with_drain(
         args.force,
         method_override,
         args.skip_extensions,
@@ -144,17 +129,26 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         &args.runners,
         args.source_path.as_deref(),
         args.pin_version.as_deref(),
+        upgrade::UpgradeDrainOptions {
+            timeout: std::time::Duration::from_secs(args.drain_timeout),
+            cancel_active: args.cancel_active,
+        },
     )?;
-    let json = serde_json::to_value(&result)
-        .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
-
     // Surface any runner left version-degraded by the upgrade with a prominent
     // warning and its exact remediation command, instead of burying the drift in
     // the JSON payload (only ever rediscovered via `homeboy self status`).
     warn_degraded_runners(&result);
     warn_dangling_extensions(&result);
 
-    Ok((json, upgrade_exit_code(&result, args.runner_only)))
+    upgrade_response(&result)
+}
+
+/// Detached workers must preserve the same terminal envelope and exit status
+/// as the foreground command, including partial convergence (#16284).
+fn upgrade_response(result: &upgrade::UpgradeResult) -> CmdResult<Value> {
+    let json = serde_json::to_value(result)
+        .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
+    Ok((json, upgrade_exit_code(result, false)))
 }
 
 /// Configured runners that the upgrade left version-degraded (PATH/version drift
@@ -241,19 +235,28 @@ fn warn_dangling_extensions(result: &upgrade::UpgradeResult) {
     }
 }
 
-fn upgrade_exit_code(result: &upgrade::UpgradeResult, targeted_runner_upgrade: bool) -> i32 {
-    if result.partial
-        || (targeted_runner_upgrade && result.runners_skipped.iter().any(|runner| !runner.success))
-    {
-        return 1;
-    }
-
-    0
+fn upgrade_exit_code(result: &upgrade::UpgradeResult, _targeted_runner_upgrade: bool) -> i32 {
+    result.exit_code()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_response_preserves_failure_and_specific_cause() {
+        let mut result = base_upgrade_result();
+        result.partial = true;
+        result.outcome = Some("runner_preflight_failed".into());
+        result.message = "runner homeboy-lab has live jobs; controller was not updated".into();
+        let (body, exit) = upgrade_response(&result).unwrap();
+        assert_ne!(exit, 0);
+        assert_eq!(body["outcome"], "runner_preflight_failed");
+        assert_eq!(body["message"], result.message);
+        result.partial = false;
+        result.outcome = None;
+        assert_eq!(upgrade_response(&result).unwrap().1, 0);
+    }
 
     #[test]
     fn targeted_runner_failures_return_non_zero_status() {
@@ -316,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn non_targeted_runner_failures_keep_best_effort_upgrade_status() {
+    fn non_targeted_runner_failures_return_nonzero_upgrade_status() {
         let mut result = base_upgrade_result();
         result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
             runner_id: "homeboy-lab".to_string(),
@@ -341,7 +344,7 @@ mod tests {
             detail: "runner unavailable".to_string(),
         });
 
-        assert_eq!(upgrade_exit_code(&result, false), 0);
+        assert_eq!(upgrade_exit_code(&result, false), 1);
     }
 
     #[test]

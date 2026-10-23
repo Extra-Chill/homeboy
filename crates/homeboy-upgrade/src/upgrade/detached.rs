@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use super::helpers::{run_upgrade_with_operation, select_durable_release_tag};
 use super::operation::UpgradeOperation;
-use super::types::InstallMethod;
+use super::types::{InstallMethod, UpgradeResult};
 
 const REQUEST_SCHEMA: &str = "homeboy/detached-upgrade-request/v1";
 
@@ -79,7 +79,7 @@ pub fn start_detached_upgrade(
 /// Run only from the worker whose PID and start identity own this operation.
 /// A hard worker crash becomes an interrupted observation on status read; no
 /// second process may claim the same operation and replay a binary mutation.
-pub fn continue_detached_upgrade(id: &str) -> Result<()> {
+pub fn continue_detached_upgrade(id: &str) -> Result<UpgradeResult> {
     // The parent records the child identity immediately after spawn. A short
     // wait is needed only for that handoff, not for release pins to drain.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -122,8 +122,8 @@ pub fn continue_detached_upgrade(id: &str) -> Result<()> {
         None,
         Some(&request.release_tag),
         operation,
-    )?;
-    Ok(())
+        super::UpgradeDrainOptions::default(),
+    )
 }
 
 #[cfg(test)]
