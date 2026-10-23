@@ -337,15 +337,12 @@ mod tests {
 
     #[cfg(unix)]
     fn inactive_process_tools(root: &std::path::Path) -> String {
-        use std::os::unix::fs::PermissionsExt;
-
         let tools = root.join("tools");
         fs::create_dir_all(&tools).expect("create process tools");
         for name in ["ps", "lsof"] {
             let path = tools.join(name);
-            fs::write(&path, "#!/bin/sh\nexit 1\n").expect("write process tool");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-                .expect("make process tool executable");
+            homeboy_test_support::write_executable(&path, "#!/bin/sh\nexit 1\n", 0o755)
+                .expect("write process tool");
         }
         format!(
             "{}:{}",
@@ -356,14 +353,12 @@ mod tests {
 
     #[cfg(unix)]
     fn active_process_tools(root: &std::path::Path) -> String {
-        use std::os::unix::fs::PermissionsExt;
-
         let tools = root.join("active-tools");
         fs::create_dir_all(&tools).expect("create process tools");
         let lsof = tools.join("lsof");
-        fs::write(&lsof, "#!/bin/sh\nprintf 'n%s\\n' \"$5\"\n").expect("write lsof tool");
-        fs::set_permissions(&lsof, fs::Permissions::from_mode(0o755))
-            .expect("make lsof tool executable");
+        homeboy_test_support::write_executable(&lsof, "#!/bin/sh\nprintf 'n%s\\n' \"$5\"\n", 0o755)
+            .expect("write lsof tool");
+
         format!(
             "{}:{}",
             tools.display(),

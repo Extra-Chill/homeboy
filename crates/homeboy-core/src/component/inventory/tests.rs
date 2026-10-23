@@ -601,8 +601,6 @@ fn registered_by_id_inspects_only_the_selected_workspace_in_a_large_registry() {
 #[cfg(unix)]
 #[test]
 fn registered_base_returns_before_a_sleeping_git_enrichment_probe() {
-    use std::os::unix::fs::PermissionsExt;
-
     let home = temp_home_dir();
     let repo = home.path().join("repo");
     fs::create_dir_all(&repo).expect("repo directory");
@@ -617,10 +615,8 @@ fn registered_base_returns_before_a_sleeping_git_enrichment_probe() {
 
     let bin = tempfile::tempdir().expect("fake git bin");
     let git = bin.path().join("git");
-    fs::write(&git, "#!/bin/sh\nsleep 30\n").expect("fake git");
-    let mut permissions = fs::metadata(&git).expect("git metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&git, permissions).expect("make fake git executable");
+    homeboy_test_support::write_executable(&git, "#!/bin/sh\nsleep 30\n", 0o755).expect("fake git");
+
     let started = Instant::now();
     let test_name = crate::test_support::harness_test_name(
         module_path!(),

@@ -5,10 +5,7 @@ use types::RunnerDoctorStatus;
 
 #[cfg(unix)]
 fn write_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::write(path, "#!/bin/sh\nexit 0\n").expect("write tool");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod tool");
+    homeboy_test_support::write_executable(path, "#!/bin/sh\nexit 0\n", 0o755).expect("write tool");
 }
 
 /// The probe must answer from the filesystem and `PATH`, never from a shell.

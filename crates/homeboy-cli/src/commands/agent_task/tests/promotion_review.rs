@@ -2,8 +2,6 @@
 
 use super::support::*;
 use clap::Parser;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 /// The tests below drive the store-rooted entry points. Resolving the store
 /// once here keeps the ambient lookup in one place and lets the ambient
@@ -1006,19 +1004,11 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
         .expect("record retry provenance");
 
         let provider = temp.path().join("promotion-provider.sh");
-        std::fs::write(
-            &provider,
-            format!(
+        homeboy_test_support::write_executable(&provider, format!(
                 "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
                 target.display(),
-            ),
-        )
+            ), 0o755)
         .expect("write promotion provider");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
 
         agent_task_lifecycle::materialize_recovered_patch_artifact(
             candidate_run_id,

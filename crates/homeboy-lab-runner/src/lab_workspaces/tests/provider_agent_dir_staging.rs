@@ -52,13 +52,10 @@ fn provider_agent_dir_staging_plan_omits_bin_and_native_binaries() {
 #[cfg(unix)]
 #[test]
 fn provider_agent_dir_staging_plan_keeps_portable_executable_scripts() {
-    use std::os::unix::fs::PermissionsExt;
-
     let controller = tempfile::tempdir().expect("controller");
     let agent = agent_dir_fixture(controller.path());
     let script = agent.join("prompts/tool.sh");
-    std::fs::write(&script, "#!/bin/sh\n").expect("script");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    homeboy_test_support::write_executable(&script, "#!/bin/sh\n", 0o755).expect("script");
 
     let receipt = plan_provider_agent_dir_staging(&agent).expect("staging plan");
 

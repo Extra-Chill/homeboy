@@ -1451,7 +1451,6 @@ impl PromisorTransportFixture {
         use homeboy_core::defaults::{save_config, HomeboyConfig};
         use homeboy_core::engine::shell::quote_arg;
         use std::collections::HashMap;
-        use std::os::unix::fs::PermissionsExt;
 
         let script = self.transport.path().join("ssh");
         let log = self.transport.path().join("calls");
@@ -1461,11 +1460,11 @@ impl PromisorTransportFixture {
             quote_arg(&self.transport.path().join("descendant.pid").display().to_string()),
             quote_arg(&self.origin.path().display().to_string()),
         );
-        fs::write(&script, format!(
+        homeboy_test_support::write_executable(&script, format!(
             "#!/bin/sh\n[ \"$HOMEBOY_PROMISOR_CONTROLLER\" = required ] || exit 91\n[ \"$HTTPS_PROXY\" = http://controller-proxy.example.test:8123 ] || exit 92\n[ \"$PWD\" = {} ] || exit 93\ncase \"$*\" in *promisor.example.test*) ;; *) exit 94 ;; esac\nprintf '%s\\n' \"$PWD $*\" >> {}\n{}",
             quote_arg(&self.source.path().display().to_string()), quote_arg(&log.display().to_string()), body
-        )).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        ), 0o755).unwrap();
+
         save_config(&HomeboyConfig {
             github_hosts: HashMap::from([
                 (

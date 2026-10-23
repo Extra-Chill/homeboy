@@ -95,25 +95,12 @@ fn write_bench_extension(home: &Path) {
     )
     .expect("write extension manifest");
     let script = extension_dir.join("bench-runner.sh");
-    fs::write(
-        &script,
-        r#"#!/bin/sh
+    homeboy_test_support::write_executable(&script, r#"#!/bin/sh
 cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
 {"component_id":"$HOMEBOY_COMPONENT_ID","iterations":${HOMEBOY_BENCH_ITERATIONS:-0},"scenarios":[{"id":"recovery","iterations":${HOMEBOY_BENCH_ITERATIONS:-0},"metrics":{"p95_ms":1.0}}],"metric_policies":{"p95_ms":{"direction":"lower_is_better"}}}
 JSON
-"#,
-    )
+"#, 0o755)
     .expect("write bench runner");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(&script)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions).expect("make bench runner executable");
-    }
 }
 
 fn write_package_rig(package: &Path, id: &str) {

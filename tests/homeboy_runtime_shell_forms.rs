@@ -61,8 +61,6 @@ fn checked(output: Output, invocation: &str) {
 #[cfg(unix)]
 #[test]
 fn actual_homeboy_runtime_keeps_script_and_login_shell_worktrees_on_registered_repo() {
-    use std::os::unix::fs::PermissionsExt;
-
     let context = HermeticTestContext::new();
     let (_checkout_guard, checkout) = shared_committed_git_repo_fixture("runtime-shell-component");
     let repository = checkout.as_path();
@@ -91,10 +89,9 @@ fn actual_homeboy_runtime_keeps_script_and_login_shell_worktrees_on_registered_r
     let tools = context.root().join("competing-bin");
     std::fs::create_dir_all(&tools).expect("competing bin");
     let decoy = tools.join("homeboy");
-    std::fs::write(&decoy, "#!/bin/sh\nprintf decoy >&2\nexit 91\n")
+    homeboy_test_support::write_executable(&decoy, "#!/bin/sh\nprintf decoy >&2\nexit 91\n", 0o755)
         .expect("write competing executable");
-    std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755))
-        .expect("make competing executable");
+
     std::fs::write(
         context.home().join(".bash_profile"),
         format!("export PATH='{}:/usr/bin:/bin'\n", tools.display()),

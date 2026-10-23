@@ -442,12 +442,8 @@ fn install_fixture(home: &Path) -> std::path::PathBuf {
     )
     .unwrap();
     let script = extension_dir.join("demo.sh");
-    std::fs::write(&script, RUNNER).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    homeboy_test_support::write_executable(&script, RUNNER, 0o755).unwrap();
+
     let component = home.join("component");
     std::fs::create_dir_all(&component).unwrap();
     std::fs::write(
@@ -695,12 +691,8 @@ fn install_rig_fixture(home: &Path, safety_class: &str) -> std::path::PathBuf {
     )
     .unwrap();
     let script = extension_dir.join("demo.sh");
-    std::fs::write(&script, PATH_RUNNER).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    homeboy_test_support::write_executable(&script, PATH_RUNNER, 0o755).unwrap();
+
     let component = home.join("rigsite");
     std::fs::create_dir_all(&component).unwrap();
     std::fs::write(

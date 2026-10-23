@@ -16,9 +16,10 @@ path = "src/lib.rs"
 # Exposes the shared hermetic test-support fixtures (test_support module and the
 # cache-reset helpers it needs) to other crates' test builds. Enabled as a
 # dev-dependency feature by the CLI and feature crates; never in production.
-test-support = []
+test-support = ["dep:homeboy-test-support"]
 
 [dependencies]
+homeboy-test-support = { path = "../homeboy-test-support", optional = true }
 homeboy-control-plane-contract = { version = "0.1.0", path = "../contracts/homeboy-control-plane-contract" }
 homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
@@ -63,3 +64,4 @@ sha2 = "0.10.9"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
+homeboy-test-support = { path = "../homeboy-test-support" }

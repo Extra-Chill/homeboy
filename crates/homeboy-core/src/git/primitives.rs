@@ -1009,19 +1009,16 @@ mod tests {
         );
         let fetches = tmp.path().join("fetches");
         let upload_pack = tmp.path().join("count-upload-pack");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &upload_pack,
             format!(
                 "#!/bin/sh\nprintf fetch >> {}\nexec git upload-pack \"$@\"\n",
                 fetches.display()
             ),
+            0o755,
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&upload_pack, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+
         git(
             &checkout,
             &[
@@ -1183,19 +1180,16 @@ mod tests {
         );
         let fetches = tmp.path().join("fetches");
         let upload_pack = tmp.path().join("count-upload-pack");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &upload_pack,
             format!(
                 "#!/bin/sh\nprintf fetch >> {}\nexec git upload-pack \"$@\"\n",
                 fetches.display()
             ),
+            0o755,
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&upload_pack, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+
         git(
             &checkout,
             &[
@@ -1276,19 +1270,16 @@ mod tests {
         );
         let fetches = tmp.path().join("fetches");
         let upload_pack = tmp.path().join("count-upload-pack");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &upload_pack,
             format!(
                 "#!/bin/sh\nprintf fetch >> {}\nexec git upload-pack \"$@\"\n",
                 fetches.display()
             ),
+            0o755,
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&upload_pack, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+
         git(
             &checkout,
             &[

@@ -184,12 +184,8 @@ fn install(home: &Path) -> std::path::PathBuf {
     )
     .unwrap();
     let script = extension_dir.join("db.sh");
-    std::fs::write(&script, RUNNER).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    homeboy_test_support::write_executable(&script, RUNNER, 0o755).unwrap();
+
     let component = home.join("site");
     std::fs::create_dir_all(&component).unwrap();
     std::fs::write(

@@ -1349,11 +1349,7 @@ mod tests {
 
     #[cfg(unix)]
     fn write_fake_binary(path: &Path, script: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, script).expect("write fake binary");
-        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("chmod fake binary");
+        homeboy_test_support::write_executable(path, script, 0o755).expect("write fake binary");
     }
 
     /// A checkout-less component's "local" version for `--outdated` planning

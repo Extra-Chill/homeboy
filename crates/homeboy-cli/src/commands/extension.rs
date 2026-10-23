@@ -2427,11 +2427,12 @@ mod tests {
             )
             .expect("manifest");
             let script = extension_dir.join("run.sh");
-            fs::write(&script, "#!/bin/sh\nprintf captured-output\nexit 7\n").expect("script");
-            let mut permissions = fs::metadata(&script).expect("metadata").permissions();
-            use std::os::unix::fs::PermissionsExt;
-            permissions.set_mode(0o755);
-            fs::set_permissions(&script, permissions).expect("chmod");
+            homeboy_test_support::write_executable(
+                &script,
+                "#!/bin/sh\nprintf captured-output\nexit 7\n",
+                0o755,
+            )
+            .expect("script");
 
             let (output, exit_code) = run_extension(
                 extension_id,

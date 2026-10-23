@@ -1267,13 +1267,8 @@ fn invocation_temp_base_fits(base: &Path) -> bool {
 /// the caller falls through to the next candidate.
 #[cfg(unix)]
 fn dir_allows_exec(dir: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
     let probe = dir.join(".hb-exec-probe.sh");
-    if fs::write(&probe, "#!/bin/sh\nexit 0\n").is_err() {
-        return false;
-    }
-    if fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).is_err() {
+    if homeboy_test_support::write_executable(&probe, "#!/bin/sh\nexit 0\n", 0o755).is_err() {
         let _ = fs::remove_file(&probe);
         return false;
     }
@@ -1635,16 +1630,11 @@ fn test_controller_fixture_source(binary: TestBinary) -> PathBuf {
                         let identity_json = serde_json::json!({
                             "data": { "display": identity }
                         });
-                        fs::write(
-                            &source,
-                            format!(
+                        homeboy_test_support::write_executable(&source, format!(
                                 "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then\n  printf '%s\\n' '{identity}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = self ] && [ \"${{2:-}}\" = identity ]; then\n  printf '%s\\n' '{identity_json}'\n  exit 0\nfi\nexit 64\n"
-                            ),
-                        )
+                            ), 0o500)
                         .expect("write controller version fixture");
-                        use std::os::unix::fs::PermissionsExt;
-                        fs::set_permissions(&source, fs::Permissions::from_mode(0o500))
-                            .expect("seal controller version fixture");
+
                         source
                     })
                     .clone()

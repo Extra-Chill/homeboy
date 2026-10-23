@@ -8249,22 +8249,11 @@ impl CandidateAdoptionFixture {
         git(&source, &["commit", "-am", "candidate"]);
         let candidate = git_output(&source, &["rev-parse", "HEAD"]);
         let provider = temp.path().join("promotion-provider.sh");
-        std::fs::write(
-            &provider,
-            format!(
+        homeboy_test_support::write_executable(&provider, format!(
                 "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} reset --hard --quiet FETCH_HEAD\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
                 target = target.display(),
-            ),
-        )
+            ), 0o755)
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&provider, permissions).unwrap();
-        }
 
         let run_id = format!("{cook_id}-attempt-1");
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
@@ -13653,8 +13642,6 @@ fn run_cook_persists_recipe_in_explicit_store_only() {
 #[test]
 fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().expect("temp source root");
         // Cook refuses provider execution against a primary checkout, so the
         // candidate workspace has to be a linked worktree of a primary.
@@ -13719,21 +13706,14 @@ fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
         // wrapper while it is installed. Only block `git status` in this
         // fixture's own worktree; everything else passes straight through.
         let source_root = source.canonicalize().expect("canonical source root");
-        std::fs::write(
-                &wrapper,
-                format!(
+        homeboy_test_support::write_executable(&wrapper, format!(
                     "#!/bin/sh\nif test \"$1\" = status && test \"$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null)\" = \"{}\"; then touch \"{}\"; while ! test -f \"{}\"; do sleep 0.01; done; fi\nexec /usr/bin/git \"$@\"\n",
                     source_root.display(),
                     entered.display(),
                     release.display(),
-                ),
-            )
+                ), 0o755)
             .expect("write slow git wrapper");
-        let mut permissions = std::fs::metadata(&wrapper)
-            .expect("wrapper metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+
         let previous_path = std::env::var_os("PATH");
         std::env::set_var(
             "PATH",
@@ -15074,21 +15054,11 @@ fn adopt_green_candidate_missing_review_form(
     git(&target, &["commit", "-am", "candidate"]);
     let candidate = git_output(&target, &["rev-parse", "HEAD"]);
     let provider = temp.join("promotion-provider.sh");
-    std::fs::write(
-        &provider,
-        format!(
+    homeboy_test_support::write_executable(&provider, format!(
             "#!/bin/sh\ncat >/dev/null\ngit -C {target} reset --hard --quiet {candidate}\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
             target = target.display(),
-        ),
-    )
+        ), 0o755)
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).unwrap();
-    }
 
     let run_id = format!("{cook_id}-attempt-1");
     let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
@@ -21892,17 +21862,12 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
             "retry recovery retains the preflight candidate scope even after commit"
         );
         let hook = target.path().join(".git/hooks/pre-commit");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &hook,
             "#!/bin/sh\ngit add .\necho hook rejected >&2\nexit 1\n",
+            0o755,
         )
         .expect("write rejecting hook");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-                .expect("make hook executable");
-        }
 
         recover_cook_pr_with_backend(
             cook_id,
@@ -24442,12 +24407,9 @@ fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate
         .success());
     let target_head = git_output(root, &["rev-parse", "HEAD"]).unwrap();
     std::fs::write(root.join("candidate.bin"), [0_u8, 1, 2, 255]).unwrap();
-    std::fs::write(root.join("candidate.sh"), "#!/bin/sh\nexit 0\n").unwrap();
-    let mut permissions = std::fs::metadata(root.join("candidate.sh"))
-        .unwrap()
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(root.join("candidate.sh"), permissions).unwrap();
+    homeboy_test_support::write_executable(root.join("candidate.sh"), "#!/bin/sh\nexit 0\n", 0o755)
+        .unwrap();
+
     assert!(Command::new("git")
         .args(["add", "--all"])
         .current_dir(root)

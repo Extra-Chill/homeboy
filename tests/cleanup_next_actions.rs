@@ -635,11 +635,7 @@ fn wait_for_cleanup_job(
 
 #[cfg(unix)]
 fn write_executable(path: &Path, contents: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::write(path, contents).expect("write executable");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .expect("set executable permissions");
+    homeboy_test_support::write_executable(path, contents, 0o755).expect("write executable");
 }
 
 fn run_git(path: &Path, args: &[&str]) {

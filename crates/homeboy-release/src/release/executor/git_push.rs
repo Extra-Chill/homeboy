@@ -664,17 +664,8 @@ mod tests {
         // A `pre-receive` hook would reject the whole push and prove nothing;
         // `update` runs per ref, which is the condition that strands the tag.
         let hook = remote.path().join("hooks").join("update");
-        std::fs::write(
-            &hook,
-            "#!/bin/sh\ncase \"$1\" in refs/heads/*) echo \"remote: - Changes must be made through a pull request.\" >&2; exit 1;; esac\nexit 0\n",
-        )
+        homeboy_test_support::write_executable(&hook, "#!/bin/sh\ncase \"$1\" in refs/heads/*) echo \"remote: - Changes must be made through a pull request.\" >&2; exit 1;; esac\nexit 0\n", 0o755)
         .expect("write update hook");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod hook");
-        }
 
         std::fs::write(local.path().join("release.txt"), "release").expect("write release");
         git(local.path(), &["add", "."]);
@@ -1057,16 +1048,8 @@ mod tests {
         // A receive hook advances main during the recovery re-push, after its
         // fetch/rebase boundary. Git rejects that stale re-push deterministically.
         let hook = remote.path().join("hooks/pre-receive");
-        std::fs::write(
-            &hook,
-            "#!/bin/sh\nwhile read old new ref; do\n  if [ \"$ref\" = refs/heads/main ]; then\n    tree=$(git rev-parse \"$old^{tree}\")\n    raced=$(printf 'second advance\\n' | git commit-tree \"$tree\" -p \"$old\")\n    git update-ref \"$ref\" \"$raced\" \"$old\"\n  fi\ndone\n",
-        )
+        homeboy_test_support::write_executable(&hook, "#!/bin/sh\nwhile read old new ref; do\n  if [ \"$ref\" = refs/heads/main ]; then\n    tree=$(git rev-parse \"$old^{tree}\")\n    raced=$(printf 'second advance\\n' | git commit-tree \"$tree\" -p \"$old\")\n    git update-ref \"$ref\" \"$raced\" \"$old\"\n  fi\ndone\n", 0o755)
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
 
         let component = Component {
             id: "fixture".to_string(),

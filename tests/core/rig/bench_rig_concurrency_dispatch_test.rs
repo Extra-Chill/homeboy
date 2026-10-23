@@ -1,8 +1,6 @@
 use super::*;
 use crate::test_support::with_isolated_home;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 fn write_ordering_bench_extension(home: &TempDir) {
@@ -20,9 +18,7 @@ fn write_ordering_bench_extension(home: &TempDir) {
     .expect("write extension manifest");
 
     let script_path = extension_dir.join("bench-runner.sh");
-    fs::write(
-        &script_path,
-        r#"#!/bin/sh
+    homeboy_test_support::write_executable(&script_path, r#"#!/bin/sh
 id="$(basename "$HOMEBOY_COMPONENT_PATH")"
 log="$HOMEBOY_BENCH_SHARED_STATE/order.log"
 mkdir -p "$(dirname "$log")"
@@ -32,18 +28,8 @@ printf '%s end\n' "$id" >> "$log"
 cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
 {"component_id":"$HOMEBOY_COMPONENT_ID","iterations":${HOMEBOY_BENCH_ITERATIONS:-0},"scenarios":[{"id":"ordered","iterations":${HOMEBOY_BENCH_ITERATIONS:-0},"metrics":{"p95_ms":1.0}}],"metric_policies":{"p95_ms":{"direction":"lower_is_better"}}}
 JSON
-"#,
-    )
+"#, 0o755)
     .expect("write bench script");
-
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod script");
-    }
 }
 
 fn bench_order_events(shared_state: &TempDir) -> Vec<String> {

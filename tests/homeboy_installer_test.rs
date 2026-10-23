@@ -17,10 +17,7 @@ enum ArchiveFixture {
 }
 
 fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write executable");
-    let mut permissions = fs::metadata(path).expect("metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("set executable permissions");
+    homeboy_test_support::write_executable(path, contents, 0o755).expect("write executable");
 }
 
 fn archive(root: &Path, destination: &Path, fixture: ArchiveFixture) {

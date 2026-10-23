@@ -813,10 +813,9 @@ mod tests {
         stdout_line: &str,
         exit_code: i32,
     ) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let record = home.join("notify-observed.txt");
         let script = home.join("notify-transport.sh");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &script,
             format!(
                 "#!/bin/sh\n\
@@ -829,9 +828,10 @@ mod tests {
                  exit {exit_code}\n",
                 record = record.display(),
             ),
+            0o755,
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
         install_transport(id, vec![script.to_str().unwrap()]);
         record
     }

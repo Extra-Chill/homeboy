@@ -902,8 +902,7 @@ fn ssh_shell_args(client: &SshClient) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+
     use std::process::Command;
     use std::time::Duration;
 
@@ -1195,29 +1194,27 @@ mod tests {
             let remote_destination = fixture.path().join("remote destination");
             std::fs::create_dir(&remote_destination).expect("remote destination");
             let scp_transport = fixture.path().join("scp-transport");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &scp_transport,
                 format!(
                     "#!/bin/sh\nexec scp -t {}\n",
                     crate::engine::shell::quote_arg(&remote_destination.to_string_lossy())
                 ),
+                0o755,
             )
             .expect("scp transport");
-            std::fs::set_permissions(&scp_transport, std::fs::Permissions::from_mode(0o755))
-                .expect("executable scp transport");
 
             let ssh_log = fixture.path().join("ssh-args");
             let ssh = fixture.path().join("ssh-double");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &ssh,
                 format!(
                     "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
                     ssh_log.display()
                 ),
+                0o755,
             )
             .expect("ssh double");
-            std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
-                .expect("executable ssh double");
 
             let config = TransferConfig {
                 source: source.to_string_lossy().into_owned(),

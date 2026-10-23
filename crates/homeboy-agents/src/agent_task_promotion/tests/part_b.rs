@@ -1859,21 +1859,9 @@ fn promotion_rejects_a_cargo_gate_that_selected_zero_tests() {
     #[cfg(unix)]
     std::os::unix::fs::symlink("/bin/sh", cargo_bin.join("sh"))
         .expect("shell available to the isolated gate environment");
-    std::fs::write(
-        cargo_bin.join("cargo"),
-        "#!/bin/sh\nprintf 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1675 filtered out; finished in 0.00s\\n'\n",
-    )
+    homeboy_test_support::write_executable(cargo_bin.join("cargo"), "#!/bin/sh\nprintf 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1675 filtered out; finished in 0.00s\\n'\n", 0o755)
     .expect("fake cargo executable");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(cargo_bin.join("cargo"))
-            .expect("fake cargo metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(cargo_bin.join("cargo"), permissions)
-            .expect("make fake cargo executable");
-    }
+
     let (source_path, source) = write_patch_source(&temp);
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(workspace),
@@ -2015,7 +2003,6 @@ fn continue_all_gate_policy_runs_downstream_command_after_failure() {
 #[test]
 fn typed_plan_and_legacy_gate_keep_contiguous_gate_ids() {
     let _home = gate_home();
-    use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
@@ -2031,14 +2018,13 @@ fn typed_plan_and_legacy_gate_keep_contiguous_gate_ids() {
     let bin = temp.path().join("bin");
     std::fs::create_dir(&bin).expect("bin");
     let homeboy = bin.join("homeboy");
-    std::fs::write(
+    homeboy_test_support::write_executable(
         &homeboy,
         "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test\n",
+        0o755,
     )
     .expect("homeboy adapter");
-    let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&homeboy, permissions).unwrap();
+
     let mut environment = AgentTaskGateEnvironmentPolicy::default();
     environment
         .variables

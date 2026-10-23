@@ -1711,8 +1711,6 @@ mod tests {
     // exercise the restore-on-failure path.
     #[cfg(unix)]
     fn build_fallback_stub_bin(dir: &Path, fail_install_rename: bool) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
         let bin = dir.join("bin");
         fs::create_dir_all(&bin).expect("stub bin dir");
         for tool in ["unzip", "awk", "mktemp", "rm", "mkdir", "basename"] {
@@ -1731,8 +1729,8 @@ mod tests {
         } else {
             "#!/bin/sh\ncase $1 in --exchange*) exit 64;; esac\nexec /bin/mv \"$@\"\n"
         };
-        fs::write(bin.join("mv"), mv_stub).expect("mv stub");
-        fs::set_permissions(bin.join("mv"), fs::Permissions::from_mode(0o755)).expect("mv mode");
+        homeboy_test_support::write_executable(bin.join("mv"), mv_stub, 0o755).expect("mv stub");
+
         bin
     }
 

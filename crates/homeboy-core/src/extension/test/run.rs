@@ -3187,21 +3187,8 @@ mod tests {
             }"#,
         )
         .expect("extension manifest");
-        std::fs::write(
-            extension_dir.join("test.sh"),
-            "#!/bin/sh\nprintf 'first=%s second=%s settings=%s\\n' \"${FIRST_PROJECTED_SECRET-unset}\" \"${SECOND_PROJECTED_SECRET-unset}\" \"$HOMEBOY_SETTINGS_JSON\"\nexit 1\n",
-        )
+        homeboy_test_support::write_executable(extension_dir.join("test.sh"), "#!/bin/sh\nprintf 'first=%s second=%s settings=%s\\n' \"${FIRST_PROJECTED_SECRET-unset}\" \"${SECOND_PROJECTED_SECRET-unset}\" \"$HOMEBOY_SETTINGS_JSON\"\nexit 1\n", 0o755)
         .expect("extension script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let script = extension_dir.join("test.sh");
-            let mut permissions = std::fs::metadata(&script)
-                .expect("script metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(script, permissions).expect("executable script");
-        }
 
         Component {
             id: "conditional-secret-consumer".to_string(),
@@ -3458,21 +3445,12 @@ mod tests {
                 }"#,
             )
             .expect("extension manifest");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 extension_dir.join("test.sh"),
                 "#!/bin/sh\nprintf 'received=%s\\n' \"$DECLARED_TEST_SECRET\"\nexit 1\n",
+                0o755,
             )
             .expect("extension script");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let script = extension_dir.join("test.sh");
-                let mut permissions = std::fs::metadata(&script)
-                    .expect("script metadata")
-                    .permissions();
-                permissions.set_mode(0o755);
-                std::fs::set_permissions(script, permissions).expect("executable script");
-            }
 
             let component = Component {
                 id: "secret-consumer".to_string(),
@@ -4345,8 +4323,6 @@ mod tests {
     #[test]
     fn inventory_mode_runs_the_producer_for_an_empty_changed_scope_and_fails_without_evidence() {
         homeboy_core::test_support::with_isolated_home(|home| {
-            use std::os::unix::fs::PermissionsExt;
-
             let source = tempfile::tempdir().expect("source workspace");
             std::fs::write(
                 source.path().join("Cargo.toml"),
@@ -4367,16 +4343,8 @@ mod tests {
             )
             .expect("extension manifest");
             let script = extension_dir.join("test.sh");
-            std::fs::write(
-                &script,
-                "#!/bin/sh\nset -e\n[ \"$HOMEBOY_TEST_INVENTORY_ONLY\" = 1 ]\n[ -n \"$HOMEBOY_TEST_INVENTORY_FILE\" ]\n[ -z \"${SCOPE_MODE+x}\" ]\n[ -z \"${HOMEBOY_CHANGED_SINCE+x}\" ]\n[ -z \"${HOMEBOY_CHANGED_TEST_FILES+x}\" ]\n[ ! -e \"$HOMEBOY_COMPONENT_PATH/homeboy-test-inventory.json\" ]\ntouch \"$HOMEBOY_COMPONENT_PATH/inventory-producer-ran\"\n",
-            )
+            homeboy_test_support::write_executable(&script, "#!/bin/sh\nset -e\n[ \"$HOMEBOY_TEST_INVENTORY_ONLY\" = 1 ]\n[ -n \"$HOMEBOY_TEST_INVENTORY_FILE\" ]\n[ -z \"${SCOPE_MODE+x}\" ]\n[ -z \"${HOMEBOY_CHANGED_SINCE+x}\" ]\n[ -z \"${HOMEBOY_CHANGED_TEST_FILES+x}\" ]\n[ ! -e \"$HOMEBOY_COMPONENT_PATH/homeboy-test-inventory.json\" ]\ntouch \"$HOMEBOY_COMPONENT_PATH/inventory-producer-ran\"\n", 0o755)
             .expect("producer script");
-            let mut permissions = std::fs::metadata(&script)
-                .expect("script metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&script, permissions).expect("executable script");
 
             let component = Component {
                 id: "inventory-zero-scope".to_string(),
@@ -4425,8 +4393,6 @@ mod tests {
     #[test]
     fn inventory_mode_publishes_valid_producer_output_for_an_empty_changed_scope() {
         homeboy_core::test_support::with_isolated_home(|home| {
-            use std::os::unix::fs::PermissionsExt;
-
             let source = tempfile::tempdir().expect("source workspace");
             std::fs::write(
                 source.path().join("Cargo.toml"),
@@ -4446,7 +4412,7 @@ mod tests {
             )
             .expect("extension manifest");
             let script = extension_dir.join("test.py");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &script,
                 r##"#!/usr/bin/env python3
 import hashlib
@@ -4491,13 +4457,9 @@ inventory["inventory_fingerprint"] = hashlib.sha256(
 ).hexdigest()
 Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory))
 "##,
+                0o755,
             )
             .expect("producer script");
-            let mut permissions = std::fs::metadata(&script)
-                .expect("script metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&script, permissions).expect("executable script");
 
             let component = Component {
                 id: "inventory-valid".to_string(),
@@ -4623,8 +4585,6 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
     }
 
     fn zero_scope_fixture_component(home: &Path, source: &Path, id: &str) -> Component {
-        use std::os::unix::fs::PermissionsExt;
-
         let extension_id = format!("{id}-fixture");
         let extension_dir = home.join(".config/homeboy/extensions").join(&extension_id);
         std::fs::create_dir_all(&extension_dir).expect("extension directory");
@@ -4634,16 +4594,8 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
         )
         .expect("extension manifest");
         let script = extension_dir.join("test.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nprintf 'SCOPE_MODE=%s\\nHOMEBOY_CHANGED_SINCE=%s\\nHOMEBOY_CHANGED_TEST_FILES=%s\\n' \"${SCOPE_MODE-unset}\" \"${HOMEBOY_CHANGED_SINCE-unset}\" \"${HOMEBOY_CHANGED_TEST_FILES-unset}\" > \"$HOMEBOY_COMPONENT_PATH/runner-ran\"\n",
-        )
+        homeboy_test_support::write_executable(&script, "#!/bin/sh\nprintf 'SCOPE_MODE=%s\\nHOMEBOY_CHANGED_SINCE=%s\\nHOMEBOY_CHANGED_TEST_FILES=%s\\n' \"${SCOPE_MODE-unset}\" \"${HOMEBOY_CHANGED_SINCE-unset}\" \"${HOMEBOY_CHANGED_TEST_FILES-unset}\" > \"$HOMEBOY_COMPONENT_PATH/runner-ran\"\n", 0o755)
         .expect("runner script");
-        let mut permissions = std::fs::metadata(&script)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(script, permissions).expect("executable script");
 
         Component {
             id: id.to_string(),
@@ -4833,8 +4785,6 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
     /// the component its own repo root, where the prefix is correctly `None`.
     #[cfg(unix)]
     fn changed_scope_cap_component(home: &Path, source: &Path) -> Component {
-        use std::os::unix::fs::PermissionsExt;
-
         run_git(source, &["init", "-q", "--initial-branch", "main"]);
         run_git(source, &["config", "user.email", "homeboy@example.com"]);
         run_git(source, &["config", "user.name", "Homeboy Test"]);
@@ -4847,16 +4797,12 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
         )
         .expect("extension manifest");
         let script = extension_dir.join("test.sh");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &script,
             "#!/bin/sh\ntouch \"$HOMEBOY_COMPONENT_PATH/runner-ran\"\n",
+            0o755,
         )
         .expect("runner script");
-        let mut permissions = std::fs::metadata(&script)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(script, permissions).expect("executable script");
 
         Component {
             id: "changed-scope-cap".to_string(),
@@ -5088,8 +5034,6 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
     #[test]
     fn inventory_mode_ignores_the_changed_scope_cap() {
         homeboy_core::test_support::with_isolated_home(|home| {
-            use std::os::unix::fs::PermissionsExt;
-
             let source = tempfile::tempdir().expect("source workspace");
             std::fs::write(
                 source.path().join("Cargo.toml"),
@@ -5110,16 +5054,8 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
             )
             .expect("extension manifest");
             let script = extension_dir.join("test.sh");
-            std::fs::write(
-                &script,
-                "#!/bin/sh\nset -e\n[ \"$HOMEBOY_TEST_INVENTORY_ONLY\" = 1 ]\n[ -z \"${HOMEBOY_CHANGED_TEST_FILES+x}\" ]\ntouch \"$HOMEBOY_COMPONENT_PATH/inventory-producer-ran\"\n",
-            )
+            homeboy_test_support::write_executable(&script, "#!/bin/sh\nset -e\n[ \"$HOMEBOY_TEST_INVENTORY_ONLY\" = 1 ]\n[ -z \"${HOMEBOY_CHANGED_TEST_FILES+x}\" ]\ntouch \"$HOMEBOY_COMPONENT_PATH/inventory-producer-ran\"\n", 0o755)
             .expect("producer script");
-            let mut permissions = std::fs::metadata(&script)
-                .expect("script metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&script, permissions).expect("executable script");
 
             let component = Component {
                 id: "inventory-cap-ignored".to_string(),
@@ -5185,8 +5121,6 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
     #[test]
     fn internal_runtime_inventory_rejection_names_the_failing_check() {
         homeboy_core::test_support::with_isolated_home(|home| {
-            use std::os::unix::fs::PermissionsExt;
-
             let source = tempfile::tempdir().expect("source workspace");
             std::fs::write(
                 source.path().join("Cargo.toml"),
@@ -5209,7 +5143,7 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
             // A producer whose workspace fingerprint disagrees with the parent's
             // is exactly the shape of the reported defect: the document is
             // well-formed, and only the provenance check can tell you so.
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &script,
                 r##"#!/usr/bin/env python3
 import hashlib
@@ -5242,13 +5176,9 @@ inventory["inventory_fingerprint"] = hashlib.sha256(
 ).hexdigest()
 Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory))
 "##,
+                0o755,
             )
             .expect("producer script");
-            let mut permissions = std::fs::metadata(&script)
-                .expect("script metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&script, permissions).expect("executable script");
 
             let component = Component {
                 id: "inventory-rejection".to_string(),
@@ -5946,7 +5876,7 @@ print(hashlib.sha256(content.encode()).hexdigest())
             let extension_dir = temp_dir.path().join("extension");
             std::fs::create_dir_all(&extension_dir).expect("extension dir");
             let parser_script = extension_dir.join("parse-results.sh");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &parser_script,
                 r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -5993,14 +5923,9 @@ EOF
 homeboy_write_test_results "$total" "$passed" "$failed" "$skipped"
 printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" "$failed" "$skipped"
 "#,
+                0o755,
             )
             .expect("parser script");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
-                    .expect("parser script permissions");
-            }
 
             let component = Component::new(
                 "fixture".to_string(),
@@ -6122,21 +6047,16 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
             let extension_dir = temp_dir.path().join("extension");
             std::fs::create_dir_all(&extension_dir).expect("extension dir");
             let parser_script = extension_dir.join("parse-results.sh");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &parser_script,
                 r#"#!/usr/bin/env bash
 printf 'parser stdout detail\n'
 printf 'parser stderr detail\n' >&2
 exit 23
 "#,
+                0o755,
             )
             .expect("parser script");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
-                    .expect("parser script permissions");
-            }
 
             let component = Component::new(
                 "fixture".to_string(),
@@ -6195,20 +6115,15 @@ exit 23
             let extension_dir = temp_dir.path().join("extension");
             std::fs::create_dir_all(&extension_dir).expect("extension dir");
             let parser_script = extension_dir.join("parse-results.sh");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &parser_script,
                 r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
 "#,
+                0o755,
             )
             .expect("parser script");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
-                    .expect("parser script permissions");
-            }
 
             let component = Component::new(
                 "fixture".to_string(),
@@ -6262,20 +6177,15 @@ printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
         let extension_dir = temp_dir.path().join("extension");
         std::fs::create_dir_all(&extension_dir).expect("extension dir");
         let parser_script = extension_dir.join("parse-results.sh");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &parser_script,
             r#"#!/usr/bin/env bash
 set -euo pipefail
 printf 'not json\n'
 "#,
+            0o755,
         )
         .expect("parser script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&parser_script, std::fs::Permissions::from_mode(0o755))
-                .expect("parser script permissions");
-        }
 
         let component = Component::new(
             "fixture".to_string(),

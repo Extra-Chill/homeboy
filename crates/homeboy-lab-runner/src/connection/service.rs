@@ -818,7 +818,6 @@ pub(crate) fn detach_service_runner(runner_id: &str) -> Result<RunnerDisconnectR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn unit_runs_serve_from_the_stable_link_in_the_runner_state_dir() {
@@ -1015,13 +1014,12 @@ mod tests {
         let bin_dir = home.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let systemctl = bin_dir.join("systemctl");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &systemctl,
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/systemctl.log\"\n",
+            0o755,
         )
         .unwrap();
-        let permissions = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&systemctl, permissions).unwrap();
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(install_script_for(
@@ -1256,8 +1254,13 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let shell = scratch.path().join("fake-login-shell");
         let run = |login_path: &str| -> String {
-            std::fs::write(&shell, format!("#!/bin/sh\nprintf %s '{login_path}'\n")).unwrap();
-            std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+            homeboy_test_support::write_executable(
+                &shell,
+                format!("#!/bin/sh\nprintf %s '{login_path}'\n"),
+                0o755,
+            )
+            .unwrap();
+
             let out = std::process::Command::new("/bin/sh")
                 .arg("-c")
                 .arg(format!(
@@ -1318,8 +1321,13 @@ mod tests {
         std::fs::create_dir_all(&unit_dir).unwrap();
         let fake_binary = |name: &str, version: &str| {
             let path = home.path().join(name);
-            std::fs::write(&path, format!("#!/bin/sh\necho 'homeboy {version}'\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            homeboy_test_support::write_executable(
+                &path,
+                format!("#!/bin/sh\necho 'homeboy {version}'\n"),
+                0o755,
+            )
+            .unwrap();
+
             path
         };
         let unscoped_slot = fake_binary("slot-unscoped", "0.395.1+5171701906f7");
@@ -1352,12 +1360,8 @@ mod tests {
         let bin_dir = home.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let systemctl = bin_dir.join("systemctl");
-        std::fs::write(
-            &systemctl,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/systemctl.log\"\ncase \"$*\" in\n  *is-active*) echo active ;;\n  *MainPID*) echo 0 ;;\nesac\n",
-        )
+        homeboy_test_support::write_executable(&systemctl, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/systemctl.log\"\ncase \"$*\" in\n  *is-active*) echo active ;;\n  *MainPID*) echo 0 ;;\nesac\n", 0o755)
         .unwrap();
-        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let output = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -1475,12 +1479,12 @@ mod tests {
         let bin_dir = home.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let systemctl = bin_dir.join("systemctl");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &systemctl,
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/systemctl.log\"\n",
+            0o755,
         )
         .unwrap();
-        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let binary = home.path().join("homeboy-new");
         std::fs::write(&binary, "new binary").unwrap();

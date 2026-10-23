@@ -83,9 +83,7 @@ fn write_trace_experiment_extension(home: &tempfile::TempDir, fail: bool) {
     let exit_line = if fail { "exit 9" } else { "exit 0" };
     let trace_status = if fail { "error" } else { "pass" };
     let script_path = extension_dir.join("trace-runner.sh");
-    fs::write(
-        &script_path,
-        format!(
+    homeboy_test_support::write_executable(&script_path, format!(
             r#"#!/bin/sh
 set -eu
 if [ "$HOMEBOY_TRACE_LIST_ONLY" = "1" ]; then
@@ -104,19 +102,8 @@ cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
 JSON
 {exit_line}
 "#
-        ),
-    )
+        ), 0o755)
     .expect("write trace script");
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod script");
-    }
 }
 
 fn write_trace_experiment_rig(home: &tempfile::TempDir, component_path: &std::path::Path) {

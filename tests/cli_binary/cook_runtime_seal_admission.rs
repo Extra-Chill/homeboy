@@ -157,13 +157,9 @@ fn local_cook_hash_deadline_returns_named_failure_and_terminalizes_identity() {
     let context = HermeticTestContext::new();
     let cook_id = "cook-runtime-seal-hash-deadline";
     let source = context.data_dir().join("small-controller-fixture");
-    std::fs::write(&source, b"#!/bin/sh\nexit 0\n").expect("write small controller fixture");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o700))
-            .expect("make controller fixture executable");
-    }
+    homeboy_test_support::write_executable(&source, b"#!/bin/sh\nexit 0\n", 0o700)
+        .expect("write small controller fixture");
+
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     command
         .args([

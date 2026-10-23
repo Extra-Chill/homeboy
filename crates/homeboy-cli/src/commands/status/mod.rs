@@ -1502,17 +1502,9 @@ mod tests {
             .expect("git path")
             .trim()
             .to_string();
-        fs::write(
-            &fake_git,
-            "#!/bin/sh\ncase \"$*\" in *\"$HOMEBOY_STATUS_HANG_GIT\"*) sleep 10 & echo $! > \"$HOMEBOY_STATUS_HANG_PID\"; wait ;; esac\nexec \"$HOMEBOY_STATUS_REAL_GIT\" \"$@\"\n",
-        )
+        homeboy_test_support::write_executable(&fake_git, "#!/bin/sh\ncase \"$*\" in *\"$HOMEBOY_STATUS_HANG_GIT\"*) sleep 10 & echo $! > \"$HOMEBOY_STATUS_HANG_PID\"; wait ;; esac\nexec \"$HOMEBOY_STATUS_REAL_GIT\" \"$@\"\n", 0o755)
         .expect("write fake git");
         #[cfg(unix)]
-        fs::set_permissions(
-            &fake_git,
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
-        )
-        .expect("make fake git executable");
         let old_path = env::var("PATH").unwrap_or_default();
         env::set_var("PATH", format!("{}:{old_path}", fixture.path().display()));
         env::set_var("HOMEBOY_STATUS_REAL_GIT", real_git);

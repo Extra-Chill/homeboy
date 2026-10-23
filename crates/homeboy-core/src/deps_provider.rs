@@ -1915,18 +1915,14 @@ mod tests {
             }"#,
         )
         .unwrap();
-        fs::write(
-            extension_path.join("deps.sh"),
-            r#"#!/bin/sh
+        homeboy_test_support::write_executable(extension_path.join("deps.sh"), r#"#!/bin/sh
 case "$1" in
   status) printf '{"package_manager":"fixture","packages":[]}\n' ;;
   install-command) printf '{"command":["fixture-pm","install","--locked"],"outputs":[{"path":"deps","kind":"directory"}]}\n' ;;
   *) exit 64 ;;
 esac
-"#,
-        )
+"#, 0o755)
         .unwrap();
-        make_executable(&extension_path.join("deps.sh"));
 
         let component = Component::new(
             "fixture".to_string(),
@@ -2250,12 +2246,12 @@ esac
                 r#"{"name":"fixture/project","dependencies":{"fixture/package":"^1.0"}}"#,
             )
             .unwrap();
-            fs::write(
+            homeboy_test_support::write_executable(
                 project.join("adapter.sh"),
                 "#!/bin/sh\nprintf '%s\\n' \"$1\" >> adapter.log\n",
+                0o755,
             )
             .unwrap();
-            make_executable(&project.join("adapter.sh"));
 
             let adapter_dir = paths::extensions()
                 .unwrap()
@@ -2342,15 +2338,5 @@ esac
                 "status\ninstall\nstatus\nupdate\nstatus\n"
             );
         });
-    }
-
-    fn make_executable(path: &Path) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut mode = fs::metadata(path).unwrap().permissions();
-            mode.set_mode(0o755);
-            fs::set_permissions(path, mode).unwrap();
-        }
     }
 }

@@ -431,8 +431,6 @@ fn agent_task_run_plan_file_path_syncs_containing_checkout() {
 #[test]
 fn agent_task_plan_config_linked_worktree_remains_git_backed_for_provider_start() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        use std::os::unix::fs::PermissionsExt;
-
         let controller = tempfile::tempdir().expect("controller");
         let runner_root = tempfile::tempdir().expect("runner root");
         let primary = controller.path().join("primary");
@@ -441,13 +439,13 @@ fn agent_task_plan_config_linked_worktree_remains_git_backed_for_provider_start(
         init_task_worktree(&provider_source, &provider_worktree, "issue-worktree");
         let provider = provider_worktree.join("bin/provider");
         std::fs::create_dir_all(provider.parent().expect("provider parent")).expect("provider dir");
-        std::fs::write(&provider, "#!/bin/sh\nprintf started > \"$1\"\n")
-            .expect("provider executable");
-        let mut permissions = std::fs::metadata(&provider)
-            .expect("provider metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&provider, permissions).expect("executable provider");
+        homeboy_test_support::write_executable(
+            &provider,
+            "#!/bin/sh\nprintf started > \"$1\"\n",
+            0o755,
+        )
+        .expect("provider executable");
+
         git(&provider_worktree, &["add", "."]);
         git(&provider_worktree, &["commit", "-m", "provider executable"]);
         assert!(

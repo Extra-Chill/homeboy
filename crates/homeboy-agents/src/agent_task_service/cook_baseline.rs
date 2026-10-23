@@ -1182,8 +1182,6 @@ mod tests {
 
     #[test]
     fn differential_gate_comparison_replays_a_declared_plan_without_shell_projection() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().expect("repository");
         git_output(temp.path(), &["init", "-b", "main"]).expect("init");
         git_output(temp.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
@@ -1197,14 +1195,8 @@ mod tests {
         let bin = temp.path().join("bin");
         std::fs::create_dir(&bin).expect("bin");
         let homeboy = bin.join("homeboy");
-        std::fs::write(
-            &homeboy,
-            "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\n/bin/cat marker >&2\nexit 1\n",
-        )
+        homeboy_test_support::write_executable(&homeboy, "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\n/bin/cat marker >&2\nexit 1\n", 0o755)
         .expect("homeboy adapter");
-        let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&homeboy, permissions).unwrap();
 
         let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
             vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],

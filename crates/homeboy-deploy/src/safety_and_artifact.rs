@@ -691,9 +691,12 @@ mod tests {
         let fake_find = fake_bin.join("find");
         fs::create_dir_all(&fake_bin).expect("fake bin");
         fs::write(&artifact, "artifact bytes").expect("artifact");
-        fs::write(&fake_find, "#!/bin/sh\necho cleanup denied >&2\nexit 42\n").expect("fake find");
-        fs::set_permissions(&fake_find, fs::Permissions::from_mode(0o755))
-            .expect("chmod fake find");
+        homeboy_test_support::write_executable(
+            &fake_find,
+            "#!/bin/sh\necho cleanup denied >&2\nexit 42\n",
+            0o755,
+        )
+        .expect("fake find");
 
         let mut env = HashMap::new();
         env.insert(

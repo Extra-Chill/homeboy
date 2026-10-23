@@ -1,8 +1,6 @@
 use super::*;
 use crate::test_support::with_isolated_home;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 fn write_logging_bench_extension(home: &TempDir, log_path: &std::path::Path) {
@@ -20,9 +18,7 @@ fn write_logging_bench_extension(home: &TempDir, log_path: &std::path::Path) {
     .expect("write extension manifest");
 
     let script_path = extension_dir.join("bench-runner.sh");
-    fs::write(
-        &script_path,
-        format!(
+    homeboy_test_support::write_executable(&script_path, format!(
             r#"#!/bin/sh
 if [ "$HOMEBOY_BENCH_LIST_ONLY" != "1" ]; then
   printf 'workload
@@ -33,18 +29,8 @@ cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
 JSON
 "#,
             log_path.display()
-        ),
-    )
+        ), 0o755)
     .expect("write bench script");
-
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod script");
-    }
 }
 
 fn write_pipeline_rig(

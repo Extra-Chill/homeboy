@@ -757,13 +757,8 @@ mod tests {
     fn executes_generic_helper_and_records_manifest_artifact() {
         with_isolated_home(|home| {
             let helper = home.path().join("fixture-helper");
-            std::fs::write(&helper, "#!/bin/sh\nmkdir -p \"$(dirname \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\")\"\ncp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"\n").expect("helper");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-                    .expect("helper permissions");
-            }
+            homeboy_test_support::write_executable(&helper, "#!/bin/sh\nmkdir -p \"$(dirname \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\")\"\ncp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"\n", 0o755).expect("helper");
+
             let registry = home.path().join("helpers.json");
             std::fs::write(&registry, serde_json::json!({
                 "schema": ARTIFACT_POSTPROCESS_HELPER_REGISTRY_SCHEMA,

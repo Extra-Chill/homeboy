@@ -1333,17 +1333,9 @@ mod tests {
 
     fn install_test_helper(home: &tempfile::TempDir) {
         let helper = home.path().join("postprocess-helper");
-        std::fs::write(
-            &helper,
-            "#!/bin/sh\nset -e\ncase \"$1\" in\n  copy) cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"; printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\" ;;\n  report) printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\"; printf report > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;;\n  fail) exit 3 ;;\nesac\n",
-        )
+        homeboy_test_support::write_executable(&helper, "#!/bin/sh\nset -e\ncase \"$1\" in\n  copy) cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\"; printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\" ;;\n  report) printf x >> \"$HOMEBOY_ARTIFACT_POSTPROCESS_ARTIFACT_ROOT/count\"; printf report > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;;\n  fail) exit 3 ;;\nesac\n", 0o755)
         .expect("helper");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-                .expect("helper permissions");
-        }
+
         let registry = home.path().join("postprocess-helpers.json");
         std::fs::write(
             &registry,

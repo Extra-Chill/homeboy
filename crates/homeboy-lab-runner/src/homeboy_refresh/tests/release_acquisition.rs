@@ -8,7 +8,6 @@
 
 use super::*;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -66,8 +65,7 @@ fn run(command: &mut Command) -> String {
 }
 
 fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write executable");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make executable");
+    homeboy_test_support::write_executable(path, contents, 0o755).expect("write executable");
 }
 
 fn fake_binary(commit: &str) -> String {

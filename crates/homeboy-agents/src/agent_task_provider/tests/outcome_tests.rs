@@ -158,14 +158,9 @@ fn provider_command_env_includes_runtime_identity() {
 fn provider_command_env_injects_declared_executable_candidate() {
     let temp = tempfile::tempdir().expect("tempdir");
     let tool = temp.path().join("provider-tool");
-    fs::write(&tool, "#!/bin/sh\nexit 0\n").expect("write tool");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&tool, permissions).expect("chmod tool");
-    }
+    homeboy_test_support::write_executable(&tool, "#!/bin/sh\nexit 0\n", 0o755)
+        .expect("write tool");
+
     let (request, mut provider) = request("task-a", "node provider.js".to_string());
     provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
         id: "provider.tool".to_string(),

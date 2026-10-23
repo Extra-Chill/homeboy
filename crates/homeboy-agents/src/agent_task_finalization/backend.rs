@@ -1464,20 +1464,12 @@ mod remote_base_tests {
         let commit_sha = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
         // A rejecting pre-receive hook fails the push with non-transport
         // evidence, so the generic `git push failed` path is exercised.
-        std::fs::write(
+        homeboy_test_support::write_executable(
             origin.path().join("hooks/pre-receive"),
             "#!/bin/sh\nexit 1\n",
+            0o755,
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                origin.path().join("hooks/pre-receive"),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
-        }
 
         let error = RealAgentTaskPrFinalizationBackend
             .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
@@ -1518,16 +1510,9 @@ mod remote_base_tests {
 
         let fixture = tempfile::tempdir().unwrap();
         let ssh_fixture = fixture.path().join("refusing-ssh");
-        std::fs::write(
-            &ssh_fixture,
-            "#!/bin/sh\nprintf '%s\\n' 'sign_and_send_pubkey: signing failed for ECDSA \"~/.ssh/example.pub\" from agent: agent refused operation' >&2\nprintf '%s\\n' 'git@git.example.test: Permission denied (publickey).' >&2\nexit 255\n",
-        )
+        homeboy_test_support::write_executable(&ssh_fixture, "#!/bin/sh\nprintf '%s\\n' 'sign_and_send_pubkey: signing failed for ECDSA \"~/.ssh/example.pub\" from agent: agent refused operation' >&2\nprintf '%s\\n' 'git@git.example.test: Permission denied (publickey).' >&2\nexit 255\n", 0o755)
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&ssh_fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+
         let _fixture_ssh = homeboy_core::test_support::EnvVarGuard::set(
             "GIT_SSH_COMMAND",
             ssh_fixture.to_str().unwrap(),
@@ -1659,16 +1644,9 @@ mod remote_base_tests {
 
         let fixture = tempfile::tempdir().unwrap();
         let ssh_fixture = fixture.path().join("unreachable-ssh");
-        std::fs::write(
-            &ssh_fixture,
-            "#!/bin/sh\nprintf '%s\\n' 'ssh: connect to host git.example.test port 22: Connection refused' >&2\nexit 255\n",
-        )
+        homeboy_test_support::write_executable(&ssh_fixture, "#!/bin/sh\nprintf '%s\\n' 'ssh: connect to host git.example.test port 22: Connection refused' >&2\nexit 255\n", 0o755)
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&ssh_fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+
         let _fixture_ssh = homeboy_core::test_support::EnvVarGuard::set(
             "GIT_SSH_COMMAND",
             ssh_fixture.to_str().unwrap(),

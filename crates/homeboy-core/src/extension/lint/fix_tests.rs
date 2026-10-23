@@ -57,16 +57,6 @@ fn request(component: Component, root: &Path) -> LintFixRequest {
     }
 }
 
-fn make_executable(script: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(script, permissions).unwrap();
-    }
-}
-
 fn write_routed_lint_extension(home: &Path, id: &str, mutates: bool) {
     let extension = home.join(".config/homeboy/extensions").join(id);
     fs::create_dir_all(&extension).unwrap();
@@ -86,15 +76,11 @@ fn write_routed_lint_extension(home: &Path, id: &str, mutates: bool) {
         .to_string(),
     )
     .unwrap();
-    fs::write(
-        extension.join("lint.sh"),
-        format!(
+    homeboy_test_support::write_executable(extension.join("lint.sh"), format!(
             "#!/bin/sh\nset -eu\nfile=\"$HOMEBOY_COMPONENT_PATH/src/example.fixture\"\necho \"${{HOMEBOY_FIX_ONLY:-diagnose}}:${{HOMEBOY_STEP:-all}}:${{HOMEBOY_SUMMARY_MODE:-0}}\" >> \"$HOMEBOY_COMPONENT_PATH/runner.log\"\nif [ \"${{HOMEBOY_FIX_ONLY:-}}\" = 1 ]; then\n  [ \"${{HOMEBOY_STEP:-}}\" = fixture-fixer ] || exit 91\n  {}\n  exit 0\nfi\nif grep -q unresolved \"$file\"; then\n  printf '%s\\n' \"[{{\\\"tool\\\":\\\"fixture\\\",\\\"file\\\":\\\"$file\\\",\\\"message\\\":\\\"unresolved fixture finding\\\",\\\"rule\\\":\\\"fixture.rule\\\",\\\"fixable\\\":true}}]\" > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nelse\n  printf '%s\\n' '[]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nfi\n",
             if mutates { "printf 'resolved\\n' > \"$file\"" } else { ":" }
-        ),
-    )
+        ), 0o755)
     .unwrap();
-    make_executable(&extension.join("lint.sh"));
 }
 
 fn write_multi_producer_lint_extension(home: &Path, id: &str) {
@@ -116,12 +102,8 @@ fn write_multi_producer_lint_extension(home: &Path, id: &str) {
         .to_string(),
     )
     .unwrap();
-    fs::write(
-        extension.join("lint.sh"),
-        "#!/bin/sh\nset -eu\nfixture=\"$HOMEBOY_COMPONENT_PATH/src/example.fixture\"\nother=\"$HOMEBOY_COMPONENT_PATH/src/example.other\"\necho \"${HOMEBOY_FIX_ONLY:-diagnose}:${HOMEBOY_STEP:-all}\" >> \"$HOMEBOY_COMPONENT_PATH/runner.log\"\nif [ \"${HOMEBOY_FIX_ONLY:-}\" = 1 ]; then\n  case \"$HOMEBOY_STEP\" in\n    fixture-fixer) printf 'resolved\\n' > \"$fixture\" ;;\n    other-fixer) printf 'resolved\\n' > \"$other\" ;;\n    *) exit 91 ;;\n  esac\n  exit 0\nfi\nif grep -q unresolved \"$fixture\" || grep -q unresolved \"$other\"; then\n  printf '%s\\n' '[{\"tool\":\"fixture\",\"file\":\"src/example.fixture\",\"message\":\"fixture finding\",\"rule\":\"fixture.rule\",\"fixable\":true},{\"tool\":\"other\",\"file\":\"src/example.other\",\"message\":\"other finding\",\"rule\":\"other.rule\",\"fixable\":true}]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nelse\n  printf '%s\\n' '[]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nfi\n",
-    )
+    homeboy_test_support::write_executable(extension.join("lint.sh"), "#!/bin/sh\nset -eu\nfixture=\"$HOMEBOY_COMPONENT_PATH/src/example.fixture\"\nother=\"$HOMEBOY_COMPONENT_PATH/src/example.other\"\necho \"${HOMEBOY_FIX_ONLY:-diagnose}:${HOMEBOY_STEP:-all}\" >> \"$HOMEBOY_COMPONENT_PATH/runner.log\"\nif [ \"${HOMEBOY_FIX_ONLY:-}\" = 1 ]; then\n  case \"$HOMEBOY_STEP\" in\n    fixture-fixer) printf 'resolved\\n' > \"$fixture\" ;;\n    other-fixer) printf 'resolved\\n' > \"$other\" ;;\n    *) exit 91 ;;\n  esac\n  exit 0\nfi\nif grep -q unresolved \"$fixture\" || grep -q unresolved \"$other\"; then\n  printf '%s\\n' '[{\"tool\":\"fixture\",\"file\":\"src/example.fixture\",\"message\":\"fixture finding\",\"rule\":\"fixture.rule\",\"fixable\":true},{\"tool\":\"other\",\"file\":\"src/example.other\",\"message\":\"other finding\",\"rule\":\"other.rule\",\"fixable\":true}]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nelse\n  printf '%s\\n' '[]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nfi\n", 0o755)
     .unwrap();
-    make_executable(&extension.join("lint.sh"));
 }
 
 /// Commit the fixture source plus an ignore rule for the runner log, so the

@@ -34,18 +34,12 @@ pub(super) fn fake_controller_artifact(
     identity: &str,
     marker: &str,
 ) -> String {
-    use std::os::unix::fs::PermissionsExt;
-
     let identity = serde_json::to_string(identity).expect("serialize fake controller identity");
-    std::fs::write(
-        path,
-        format!(
+    homeboy_test_support::write_executable(path, format!(
             "#!/bin/sh\n# {marker}\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":{identity}}}}}'\n  exit 0\nfi\nif [ \"$1\" = self ] && [ \"$2\" = status ]; then\n  printf '%s\\n' '{{\"data\":{{\"active_build_identity\":{{\"display\":{identity}}}}}}}'\n  exit 0\nfi\nexit 1\n"
-        ),
-    )
+        ), 0o700)
     .expect("write fake controller artifact");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .expect("make fake controller artifact executable");
+
     format!(
         "{:x}",
         Sha256::digest(std::fs::read(path).expect("read fake controller artifact"))

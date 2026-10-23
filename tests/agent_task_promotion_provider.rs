@@ -61,8 +61,6 @@ fn promotion_provider_applies_a_typed_patch_request() {
 #[cfg(unix)]
 #[test]
 fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_id() {
-    use std::os::unix::fs::PermissionsExt;
-
     const SOCKET_HELPER_ENV: &str = "HOMEBOY_TEST_PROMOTION_SOCKET_HELPER";
     if std::env::var_os(SOCKET_HELPER_ENV).is_some() {
         let path = PathBuf::from(std::env::var_os("TMPDIR").expect("TMPDIR")).join("gate.sock");
@@ -95,18 +93,11 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
             .display()
             .to_string(),
     );
-    std::fs::write(
-        &helper,
-        format!(
+    homeboy_test_support::write_executable(&helper, format!(
             "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then\n  printf '%s\\n' 'bind_socket 1.0'\n  exit 0\nfi\n{SOCKET_HELPER_ENV}=1 exec {current_exe} promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_id --exact --nocapture\n"
-        ),
-    )
+        ), 0o755)
     .expect("socket helper script");
-    let mut permissions = std::fs::metadata(&helper)
-        .expect("helper metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&helper, permissions).expect("helper executable");
+
     let run_id = format!("promotion-run-{}", "semantic-id-".repeat(16));
     let source = serde_json::json!({
         "schema": "homeboy/agent-task-outcome/v1",

@@ -4,8 +4,6 @@ use clap::error::ErrorKind;
 use clap::Parser;
 use homeboy_core::extension::bench::aggregate_comparison;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
@@ -35,9 +33,7 @@ fn write_bench_extension(home: &TempDir) {
     .expect("write extension manifest");
 
     let script_path = extension_dir.join("bench-runner.sh");
-    fs::write(
-            &script_path,
-            r#"#!/bin/sh
+    homeboy_test_support::write_executable(&script_path, r#"#!/bin/sh
 if [ -n "$HOMEBOY_BENCH_EXTRA_WORKLOADS" ]; then
   all_scenarios=""
   old_ifs="$IFS"
@@ -96,18 +92,8 @@ cat >> "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
   "metric_policies": { "p95_ms": { "direction": "lower_is_better" } }
 }
 JSON
-"#,
-        )
+"#, 0o755)
         .expect("write bench script");
-
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod script");
-    }
 }
 
 fn write_failing_bench_extension(home: &TempDir) {
@@ -129,9 +115,7 @@ fn write_failing_bench_extension(home: &TempDir) {
     .expect("write extension manifest");
 
     let script_path = extension_dir.join("bench-runner.sh");
-    fs::write(
-        &script_path,
-        r#"#!/bin/sh
+    homeboy_test_support::write_executable(&script_path, r#"#!/bin/sh
 if [ "$HOMEBOY_BENCH_LIST_ONLY" = "1" ]; then
   if [ "${HOMEBOY_BENCH_ITERATIONS:-0}" != "0" ]; then
     printf 'DISCOVERY_MUST_NOT_EXECUTE_WORKLOAD\n' >&2
@@ -158,18 +142,8 @@ cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
 JSON
 printf 'WORKLOAD_ERROR: studio-agent-site-build - warmup iteration 1/1 returned artifact "visual_comparison_dir" with empty path\n' >&2
 exit 7
-"#,
-    )
+"#, 0o755)
     .expect("write bench script");
-
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod script");
-    }
 }
 
 fn write_registered_component(home: &TempDir, component_id: &str, path: &std::path::Path) {
@@ -331,7 +305,7 @@ fn write_rig_with_component_script(
     path: &std::path::Path,
 ) {
     let script_path = path.join("native-bench.sh");
-    fs::write(
+    homeboy_test_support::write_executable(
         &script_path,
         r#"#!/bin/sh
 cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
@@ -344,17 +318,9 @@ cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
 }
 JSON
 "#,
+        0o755,
     )
     .expect("write native bench script");
-
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod script");
-    }
 
     let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
     fs::create_dir_all(&rig_dir).expect("mkdir rigs");

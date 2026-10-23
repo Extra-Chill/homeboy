@@ -753,7 +753,7 @@ pub(crate) fn cleanup_persisted(args: RunsArtifactCleanupPersistedArgs) -> CmdRe
 mod tests {
     use std::env;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+
     use std::process::Command;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::thread;
@@ -1401,16 +1401,13 @@ mod tests {
             let bin = home.path().join("bin");
             fs::create_dir_all(&bin).expect("bin");
             let fake_provider = bin.join("capture-provider");
-            fs::write(
+            homeboy_test_support::write_executable(
                 &fake_provider,
                 b"#!/bin/sh\nprintf fake-screenshot > \"$HOMEBOY_ARTIFACT_CAPTURE_OUTPUT\"\n",
+                0o755,
             )
             .expect("fake provider");
-            let mut perms = fs::metadata(&fake_provider)
-                .expect("metadata")
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&fake_provider, perms).expect("chmod");
+
             let old_provider = env::var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND").ok();
             env::set_var(
                 "HOMEBOY_ARTIFACT_CAPTURE_COMMAND",

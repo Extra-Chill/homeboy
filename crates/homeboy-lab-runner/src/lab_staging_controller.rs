@@ -5110,7 +5110,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn deferred_source_cancellation_reaps_a_blocked_git_index_and_fences_handoff() {
-        use std::os::unix::fs::PermissionsExt;
         homeboy_core::test_support::with_isolated_home(|home| {
             let run_id = "blocked-source-index";
             submit_recipe_run(run_id);
@@ -5125,16 +5124,12 @@ mod tests {
             std::fs::create_dir_all(&bin).expect("bin directory");
             std::fs::write(source.join("input.txt"), "source input").expect("source file");
             let git = bin.join("git");
-            std::fs::write(
-                &git,
-                format!(
+            homeboy_test_support::write_executable(&git, format!(
                     "#!/bin/sh\npid_file={}\nprintf '%s' \"$$\" > \"$pid_file.tmp\"\n/bin/mv \"$pid_file.tmp\" \"$pid_file\"\nexec /bin/sleep 30\n",
                     homeboy_engine_primitives::shell::quote_arg(&started.to_string_lossy())
-                ),
-            )
+                ), 0o755)
             .expect("blocked Git fixture");
-            std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))
-                .expect("fixture permissions");
+
             let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", &bin);
             let worker_store = store.clone();
             let worker_source = source.clone();

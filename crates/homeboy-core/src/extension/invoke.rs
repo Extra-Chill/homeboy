@@ -611,25 +611,12 @@ mod tests {
         assert!(resolve_setup_timeout(&runtime_with_setup_timeout(None), Some("slow")).is_err());
     }
 
-    fn make_executable(path: &Path) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(path)
-                .expect("script metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(path, permissions).expect("make script executable");
-        }
-    }
-
     fn write_extension(home: &Path, id: &str, manifest: serde_json::Value, script: &str) {
         let dir = home.join(".config/homeboy/extensions").join(id);
         std::fs::create_dir_all(&dir).expect("extension dir");
         std::fs::write(dir.join(format!("{id}.json")), manifest.to_string()).expect("manifest");
         let script_path = dir.join("run.sh");
-        std::fs::write(&script_path, script).expect("script");
-        make_executable(&script_path);
+        homeboy_test_support::write_executable(&script_path, script, 0o755).expect("script");
     }
 
     #[test]
@@ -882,21 +869,12 @@ mod tests {
             }"#,
         )
         .expect("manifest");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             extension.path().join("env.sh"),
             "#!/bin/sh\nprintf '{\"FIXTURE_ENV\":\"%s\"}' \"$HOMEBOY_COMPONENT_ID\"\n",
+            0o755,
         )
         .expect("env provider");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(extension.path().join("env.sh"))
-                .expect("env provider metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(extension.path().join("env.sh"), permissions)
-                .expect("env provider executable");
-        }
 
         let env = build_capability_env(
             &extension_id,
@@ -978,21 +956,12 @@ mod tests {
                 }"#,
             )
             .expect("manifest");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 extension.path().join("env.sh"),
                 "#!/bin/sh\nprintf '{\"SHARED_KEY\":\"live\"}'\n",
+                0o755,
             )
             .expect("env provider");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut permissions = std::fs::metadata(extension.path().join("env.sh"))
-                    .expect("env provider metadata")
-                    .permissions();
-                permissions.set_mode(0o755);
-                std::fs::set_permissions(extension.path().join("env.sh"), permissions)
-                    .expect("env provider executable");
-            }
 
             super::super::setup_env::persist(
                 &extension_id,

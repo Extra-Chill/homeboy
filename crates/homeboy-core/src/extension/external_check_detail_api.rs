@@ -450,21 +450,16 @@ fn hydrate_diagnostic(
 
 #[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
 pub fn test_inherited_pipe_holder_cleanup() {
-    use std::os::unix::fs::PermissionsExt;
-
     let extension = tempfile::tempdir().unwrap();
     let pid_file = extension.path().join("descendant.pid");
     let script = extension.path().join("resolve");
-    std::fs::write(
-        &script,
-        format!(
+    homeboy_test_support::write_executable(&script, format!(
             "#!/bin/sh\nsetsid sh -c 'echo $$ > \"$1\"; sleep 30' sh {} &\nwhile [ ! -s {} ]; do :; done\nexit 0\n",
             homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
             homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
-        ),
-    )
+        ), 0o755)
     .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
     let mut command = Command::new(&script);
     command.current_dir(extension.path()).env_clear();
 
@@ -653,8 +648,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn hydration_redacts_secrets_and_expired_deadlines_prevent_spawn() {
-        use std::os::unix::fs::PermissionsExt;
-
         crate::test_support::with_isolated_home(|_| {
             let extension = install_manifest(
                 "fixture",
@@ -666,15 +659,12 @@ mod tests {
             );
             let marker = extension.join("spawned");
             let script = extension.join("resolve");
-            std::fs::write(
-                &script,
-                format!(
+            homeboy_test_support::write_executable(&script, format!(
                     "#!/bin/sh\nIFS= read -r request || exit 3\n: > {}\nprintf '{{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"%s\",\"actions\":[\"%s\"]}}\\n' \"$FIXTURE_SECRET\" \"$FIXTURE_SECRET\"\n",
                     homeboy_engine_primitives::shell::quote_path(&marker.to_string_lossy())
-                ),
-            )
+                ), 0o755)
             .unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
             let api = ExternalCheckDetailResolverApi::discover(&inventory_request());
             let request = ExtensionApiExternalCheckDetailHydrateRequest {
                 schema: EXTENSION_API_EXTERNAL_CHECK_DETAIL_HYDRATE_REQUEST_SCHEMA.to_string(),

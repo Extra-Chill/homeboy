@@ -689,14 +689,14 @@ mod tests {
 
     #[cfg(unix)]
     fn script(body: &str) -> tempfile::TempPath {
-        use std::os::unix::fs::PermissionsExt;
         // NamedTempFile holds its own write handle open for as long as it
         // lives, and Linux refuses to exec a file that is open for writing
         // (ETXTBSY). Convert to a TempPath so the script is closed before the
         // verifier runs it while the file still outlives the test body.
         let path = NamedTempFile::new().unwrap().into_temp_path();
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        homeboy_test_support::write_executable(&path, format!("#!/bin/sh\n{body}\n"), 0o700)
+            .unwrap();
+
         path
     }
 

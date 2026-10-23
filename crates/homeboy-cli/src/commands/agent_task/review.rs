@@ -5318,7 +5318,7 @@ mod tests {
             let bin = root.path().join("bin");
             std::fs::create_dir(&bin).expect("fake gh bin");
             let ssh = bin.join("ssh");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &ssh,
                 r#"#!/bin/sh
 for arg in "$@"; do
@@ -5329,12 +5329,11 @@ for arg in "$@"; do
 done
 exit 2
 "#,
+                0o755,
             )
             .expect("write fake SSH transport");
             let gh = bin.join("gh");
-            std::fs::write(
-                &gh,
-                r#"#!/bin/sh
+            homeboy_test_support::write_executable(&gh, r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
 case "$1 $2" in
   "auth status"|"repo view") printf '%s\n' '{"nameWithOwner":"example/manual-finalization"}' ;;
@@ -5343,17 +5342,9 @@ case "$1 $2" in
   "pr view") sha=$(git rev-parse HEAD); printf '{"baseRefName":"main","headRefName":"feature","headRefOid":"%s","headRepository":{"name":"manual-finalization"},"headRepositoryOwner":{"login":"example"}}\n' "$sha" ;;
   *) [ "$1" = "--version" ] || exit 2 ;;
 esac
-"#,
-            )
+"#, 0o755)
             .expect("write fake gh");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
-                    .expect("make fake SSH transport executable");
-                std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
-                    .expect("make fake gh executable");
-            }
+
             let log = root.path().join("gh.log");
             let old_path = std::env::var_os("PATH");
             let old_ssh_command = std::env::var_os("GIT_SSH_COMMAND");

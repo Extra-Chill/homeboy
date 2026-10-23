@@ -84,17 +84,8 @@ fn routed_lint_component(home: &Path, source: &Path, script: &str) -> Component 
         }"#,
     )
     .expect("extension manifest");
-    std::fs::write(extension_dir.join("lint.sh"), script).expect("lint script");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let script_path = extension_dir.join("lint.sh");
-        let mut permissions = std::fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(script_path, permissions).expect("executable script");
-    }
+    homeboy_test_support::write_executable(extension_dir.join("lint.sh"), script, 0o755)
+        .expect("lint script");
 
     Component {
         id: "fixture".to_string(),

@@ -1410,8 +1410,6 @@ pub fn detect_remote_url_within(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     // Hashed independently of the shared primitive so this stays a real
     // cross-check on the digest the downloader records.
@@ -1455,10 +1453,9 @@ mod tests {
         let repo = tempfile::tempdir().expect("repo directory");
         let bin = tempfile::tempdir().expect("fake git bin");
         let git = bin.path().join("git");
-        std::fs::write(&git, "#!/bin/sh\nsleep 30\n").expect("write fake git");
-        let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+        homeboy_test_support::write_executable(&git, "#!/bin/sh\nsleep 30\n", 0o755)
+            .expect("write fake git");
+
         let _path = crate::test_support::EnvVarGuard::set(
             "PATH",
             format!(
@@ -2338,11 +2335,7 @@ mod tests {
 
     #[cfg(unix)]
     fn write_executable(path: &Path, script: &str) {
-        std::fs::write(path, script).expect("write fake binary");
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("make fake binary executable");
+        homeboy_test_support::write_executable(path, script, 0o755).expect("write fake binary");
     }
 
     #[cfg(unix)]

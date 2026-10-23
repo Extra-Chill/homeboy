@@ -3818,18 +3818,12 @@ mod tests {
 
     #[cfg(unix)]
     fn fake_controller(path: &Path, identity: &str, marker: &str) -> String {
-        use std::os::unix::fs::PermissionsExt;
-
         let identity = serde_json::to_string(identity).expect("serialize fake identity");
-        fs::write(
-            path,
-            format!(
+        homeboy_test_support::write_executable(path, format!(
                 "#!/bin/sh\n# {marker}\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":{identity}}}}}'\n  exit 0\nfi\nif [ \"$1\" = self ] && [ \"$2\" = status ]; then\n  printf '%s\\n' '{{\"data\":{{\"active_build_identity\":{{\"display\":{identity}}}}}}}'\n  exit 0\nfi\nexit 1\n"
-            ),
-        )
+            ), 0o700)
         .expect("write fake controller");
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .expect("make fake controller executable");
+
         executable_digest(path).expect("hash fake controller")
     }
 
@@ -4905,8 +4899,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn installed_generation_switch_publishes_b_and_retains_a_pin() {
-        use std::os::unix::fs::PermissionsExt;
-
         crate::test_support::with_isolated_home(|_| {
             let temporary = tempfile::tempdir().expect("temporary executable directory");
             let generation_a = temporary.path().join("homeboy-a");
@@ -4916,15 +4908,10 @@ mod tests {
                 (&generation_b, "homeboy 0.1.0+generation-b"),
             ] {
                 let identity = serde_json::to_string(identity).expect("serialize identity");
-                fs::write(
-                    path,
-                    format!(
+                homeboy_test_support::write_executable(path, format!(
                         "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":{identity}}}}}'\n  exit 0\nfi\nexit 1\n"
-                    ),
-                )
+                    ), 0o755)
                 .expect("write generation executable");
-                fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-                    .expect("make generation executable");
             }
 
             let runtime_a = activate_installed_generation(&generation_a)
@@ -5222,8 +5209,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn executable_digests_are_memoized_per_observed_file_identity() {
-        use std::os::unix::fs::PermissionsExt;
-
         crate::test_support::with_isolated_home(|_| {
             EXECUTABLE_DIGESTS
                 .get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -5239,9 +5224,8 @@ mod tests {
 
             let temporary = tempfile::tempdir().expect("temporary executable directory");
             let executable = temporary.path().join("homeboy");
-            fs::write(&executable, b"controller bytes").expect("write controller");
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-                .expect("make controller executable");
+            homeboy_test_support::write_executable(&executable, b"controller bytes", 0o755)
+                .expect("write controller");
 
             let first = executable_digest(&executable).expect("hash controller");
             let second = executable_digest(&executable).expect("rehash controller");
@@ -5308,13 +5292,8 @@ mod tests {
 
             let temporary = tempfile::tempdir().expect("temporary executable directory");
             let source = temporary.path().join("homeboy");
-            fs::write(
-                &source,
-                "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{\"data\":{\"display\":\"homeboy 0.0.0+fixture\"}}'\n  exit 0\nfi\nexit 1\n",
-            )
+            homeboy_test_support::write_executable(&source, "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{\"data\":{\"display\":\"homeboy 0.0.0+fixture\"}}'\n  exit 0\nfi\nexit 1\n", 0o755)
             .expect("write controller");
-            fs::set_permissions(&source, fs::Permissions::from_mode(0o755))
-                .expect("make controller executable");
 
             let runtime = pin_executable(&source, "homeboy 0.0.0+fixture").expect("pin executable");
             assert_eq!(
@@ -5350,22 +5329,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pinned_runtime_executes_original_controller_after_global_binary_replacement() {
-        use std::os::unix::fs::PermissionsExt;
-
         crate::test_support::with_isolated_home(|_| {
             let temporary = tempfile::tempdir().expect("temporary executable directory");
             let global = temporary.path().join("homeboy");
             let write_controller = |identity: &str| {
                 let identity = serde_json::to_string(identity).expect("serialize identity");
-                fs::write(
-                    &global,
-                    format!(
+                homeboy_test_support::write_executable(&global, format!(
                         "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":{identity}}}}}'\n  exit 0\nfi\nif [ \"$1\" = controller ] && [ \"$2\" = admission ]; then\n  printf '%s\\n' {identity}\n  exit 0\nfi\nexit 1\n"
-                    ),
-                )
+                    ), 0o755)
                 .expect("write global controller");
-                fs::set_permissions(&global, fs::Permissions::from_mode(0o755))
-                    .expect("make global controller executable");
             };
 
             write_controller("homeboy 0.288.13+original");

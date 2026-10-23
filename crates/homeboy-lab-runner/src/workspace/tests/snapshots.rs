@@ -65,20 +65,16 @@ fn workspace_snapshot_scan_skips_a_child_removed_during_atomic_promotion() {
     .expect("temporary metadata");
     let shim_root = tempfile::tempdir().expect("base64 shim root");
     let shim = shim_root.path().join("base64");
-    fs::write(
+    homeboy_test_support::write_executable(
         &shim,
         format!(
             "#!/bin/sh\nrm -rf -- {}\nexit 1\n",
             shell_quote(temporary.as_path())
         ),
+        0o755,
     )
     .expect("base64 shim");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
-            .expect("make shim executable");
-    }
+
     let original_path = std::env::var_os("PATH").expect("PATH");
     let mut paths = vec![shim_root.path().to_path_buf()];
     paths.extend(std::env::split_paths(&original_path));
@@ -121,20 +117,16 @@ fn workspace_snapshot_scan_fails_when_its_root_disappears() {
     fs::write(workspace_metadata_file(&workspace), "{}").expect("workspace metadata");
     let shim_root = tempfile::tempdir().expect("base64 shim root");
     let shim = shim_root.path().join("base64");
-    fs::write(
+    homeboy_test_support::write_executable(
         &shim,
         format!(
             "#!/bin/sh\nrm -rf -- {}\nexit 1\n",
             shell_quote(root.path())
         ),
+        0o755,
     )
     .expect("base64 shim");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
-            .expect("make shim executable");
-    }
+
     let original_path = std::env::var_os("PATH").expect("PATH");
     let mut paths = vec![shim_root.path().to_path_buf()];
     paths.extend(std::env::split_paths(&original_path));
@@ -699,8 +691,6 @@ fn prepared_source_cache_retains_a_bounded_completed_working_set() {
 #[test]
 #[cfg(unix)]
 fn prepared_source_cache_uses_one_lock_for_views_and_pruning() {
-    use std::os::unix::fs::PermissionsExt;
-
     let _path_guard = PATH_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -720,8 +710,8 @@ fn prepared_source_cache_uses_one_lock_for_views_and_pruning() {
     let started = root.path().join("copy-started");
     let release = root.path().join("copy-release");
     let cp = tools.path().join("cp");
-    fs::write(&cp, "#!/bin/sh\n: > \"$HOMEBOY_COPY_STARTED\"\nwhile [ ! -f \"$HOMEBOY_COPY_RELEASE\" ]; do sleep 0.01; done\nexec /bin/cp \"$@\"\n").expect("cp shim");
-    fs::set_permissions(&cp, fs::Permissions::from_mode(0o755)).expect("cp shim permissions");
+    homeboy_test_support::write_executable(&cp, "#!/bin/sh\n: > \"$HOMEBOY_COPY_STARTED\"\nwhile [ ! -f \"$HOMEBOY_COPY_RELEASE\" ]; do sleep 0.01; done\nexec /bin/cp \"$@\"\n", 0o755).expect("cp shim");
+
     let destination = root.path().join("view");
     let mut view = Command::new("sh")
         .args([
@@ -780,8 +770,6 @@ fn write_prepared_source_marker(tree: &Path) {
 #[test]
 #[cfg(unix)]
 fn prepared_source_cache_rechecks_for_a_concurrent_publisher_after_locking() {
-    use std::os::unix::fs::PermissionsExt;
-
     let _path_guard = PATH_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -795,12 +783,8 @@ fn prepared_source_cache_rechecks_for_a_concurrent_publisher_after_locking() {
 
     let tools = tempfile::tempdir().expect("tool shims");
     let mkdir = tools.path().join("mkdir");
-    fs::write(
-        &mkdir,
-        "#!/bin/sh\ncase \"$1\" in\n  *.lock)\n    /bin/mkdir -p \"$HOMEBOY_RACE_CACHE\" \"$HOMEBOY_RACE_CACHE-homeboy-state\"\n    printf 'winner\\n' > \"$HOMEBOY_RACE_CACHE/marker\"\n    /bin/chmod -R a-w \"$HOMEBOY_RACE_CACHE\"\n    : > \"$HOMEBOY_RACE_CACHE-homeboy-state/prepared-source-ready\"\n    ;;\nesac\nexec /bin/mkdir \"$@\"\n",
-    )
+    homeboy_test_support::write_executable(&mkdir, "#!/bin/sh\ncase \"$1\" in\n  *.lock)\n    /bin/mkdir -p \"$HOMEBOY_RACE_CACHE\" \"$HOMEBOY_RACE_CACHE-homeboy-state\"\n    printf 'winner\\n' > \"$HOMEBOY_RACE_CACHE/marker\"\n    /bin/chmod -R a-w \"$HOMEBOY_RACE_CACHE\"\n    : > \"$HOMEBOY_RACE_CACHE-homeboy-state/prepared-source-ready\"\n    ;;\nesac\nexec /bin/mkdir \"$@\"\n", 0o755)
     .expect("mkdir shim");
-    fs::set_permissions(&mkdir, fs::Permissions::from_mode(0o755)).expect("mkdir shim permissions");
 
     let output = Command::new("sh")
         .args([

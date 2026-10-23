@@ -81,20 +81,13 @@ fn synced_node_workload_receives_runner_extension_environment() {
             r#"{"id":"fixture","name":"Fixture","version":"1.2.3","env_provider":{"script":"env.sh"}}"#,
         )
         .expect("manifest");
-        fs::write(
+        homeboy_test_support::write_executable(
             extension.path().join("env.sh"),
             "#!/bin/sh\nprintf '%s\\n' '{\"FIXTURE_RUNTIME\":\"runner-local\"}'\n",
+            0o755,
         )
         .expect("provider");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(
-                extension.path().join("env.sh"),
-                fs::Permissions::from_mode(0o755),
-            )
-            .expect("provider executable");
-        }
+
         homeboy_core::extension::lifecycle::install(
             &extension.path().display().to_string(),
             Some("fixture"),
@@ -148,20 +141,16 @@ fn workspace_ref_inspects_hydrates_and_executes_one_physical_snapshot() {
         let shim_root = tempfile::tempdir().expect("shim root");
         let hydration_log = shim_root.path().join("hydration.log");
         let sh_shim = shim_root.path().join("sh");
-        fs::write(
+        homeboy_test_support::write_executable(
             &sh_shim,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec /bin/sh \"$@\"\n",
                 hydration_log.display()
             ),
+            0o755,
         )
         .expect("write sh shim");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&sh_shim, fs::Permissions::from_mode(0o755))
-                .expect("make sh shim executable");
-        }
+
         fs::write(
             project.path().join("homeboy.json"),
             r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["false"]}},"outputs":[{"path":"node_modules","kind":"directory"}]}}"#,

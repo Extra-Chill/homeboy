@@ -101,17 +101,9 @@ mod tests {
         let started = temp.path().join("first-fetch-started");
         let release = temp.path().join("release-first-fetch");
         let upload_pack = wrapper_dir.join("git-upload-pack");
-        std::fs::write(
-            &upload_pack,
-            "#!/bin/sh\nif [ -n \"$HOMEB0Y_REMOTE_TRACKING_FETCH_REACHED\" ]; then\n  touch \"$HOMEB0Y_REMOTE_TRACKING_FETCH_REACHED\"\nfi\nif [ -n \"$HOMEB0Y_REMOTE_TRACKING_FETCH_STARTED\" ]; then\n  touch \"$HOMEB0Y_REMOTE_TRACKING_FETCH_STARTED\"\n  while ! test -e \"$HOMEB0Y_REMOTE_TRACKING_FETCH_RELEASE\"; do sleep 0.01; done\nfi\nexec \"$HOMEB0Y_REMOTE_TRACKING_REAL_GIT\" upload-pack \"$@\"\n",
-        )
+        homeboy_test_support::write_executable(&upload_pack, "#!/bin/sh\nif [ -n \"$HOMEB0Y_REMOTE_TRACKING_FETCH_REACHED\" ]; then\n  touch \"$HOMEB0Y_REMOTE_TRACKING_FETCH_REACHED\"\nfi\nif [ -n \"$HOMEB0Y_REMOTE_TRACKING_FETCH_STARTED\" ]; then\n  touch \"$HOMEB0Y_REMOTE_TRACKING_FETCH_STARTED\"\n  while ! test -e \"$HOMEB0Y_REMOTE_TRACKING_FETCH_RELEASE\"; do sleep 0.01; done\nfi\nexec \"$HOMEB0Y_REMOTE_TRACKING_REAL_GIT\" upload-pack \"$@\"\n", 0o755)
         .expect("write upload-pack wrapper");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&upload_pack, std::fs::Permissions::from_mode(0o755))
-                .expect("make upload-pack wrapper executable");
-        }
+
         git(
             &source,
             &[

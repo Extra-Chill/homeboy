@@ -1648,13 +1648,13 @@ fn dependency_materialization_cache_key_includes_resolved_tool_version() {
         std::fs::create_dir_all(&workspace).expect("workspace");
         std::fs::write(workspace.join("lock"), "same input\n").expect("lock");
         let tool = bin.join("cache-tool");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &tool,
             "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tool-v1; fi\n",
+            0o755,
         )
         .expect("tool");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("tool mode");
+
         let rig = RigSpec {
             workloads: Default::default(),
             id: "dependency-cache-tool-version".to_string(),
@@ -1721,13 +1721,13 @@ fn dependency_materialization_cache_key_ignores_irrelevant_toolchain_path_entrie
         std::fs::create_dir_all(&workspace).expect("workspace");
         std::fs::write(workspace.join("lock"), "same input\n").expect("lock");
         let tool = bin.join("cache-tool");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &tool,
             "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tool-v1; fi\n",
+            0o755,
         )
         .expect("tool");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("tool mode");
+
         let rig = RigSpec {
             workloads: Default::default(),
             id: "dependency-cache-path-noise".to_string(),

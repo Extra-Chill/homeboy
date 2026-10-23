@@ -1605,7 +1605,6 @@ fn command_accepts_extension_override(arg: &str) -> bool {
 mod tests {
     use super::*;
     use std::cell::Cell;
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
     /// A test is the entry point for its own unit of work, so resolving once
@@ -3320,13 +3319,9 @@ mod tests {
             );
             let bin = tempfile::tempdir().expect("git wrapper dir");
             let wrapper = bin.path().join("git");
-            std::fs::write(
-                &wrapper,
-                "#!/bin/sh\nif [ \"$1\" = \"ls-remote\" ]; then printf '%s\\trefs/heads/base\\n' \"$HOMEBOY_TEST_LS_REMOTE_BASE\"; exit 0; fi\nexec \"$HOMEBOY_TEST_REAL_GIT\" \"$@\"\n",
-            )
+            homeboy_test_support::write_executable(&wrapper, "#!/bin/sh\nif [ \"$1\" = \"ls-remote\" ]; then printf '%s\\trefs/heads/base\\n' \"$HOMEBOY_TEST_LS_REMOTE_BASE\"; exit 0; fi\nexec \"$HOMEBOY_TEST_REAL_GIT\" \"$@\"\n", 0o755)
             .expect("write git wrapper");
-            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
-                .expect("make git wrapper executable");
+
             let prior_path = std::env::var("PATH").expect("PATH");
             let prior_real_git = std::env::var("HOMEBOY_TEST_REAL_GIT").ok();
             let prior_base = std::env::var("HOMEBOY_TEST_LS_REMOTE_BASE").ok();
@@ -3450,13 +3445,9 @@ mod tests {
 
             let bin = tempfile::tempdir().expect("git wrapper dir");
             let wrapper = bin.path().join("git");
-            std::fs::write(
-                &wrapper,
-                "#!/bin/sh\ncase \" $* \" in\n  *\" rev-list \"*\" --missing=print \"*) printf '%s\\n' '?0000000000000000000000000000000000000000'; exit 0 ;;\n  *\" fetch --no-tags --filter=blob:none \"*) exit 1 ;;\nesac\nexec \"$HOMEBOY_TEST_REAL_GIT\" \"$@\"\n",
-            )
+            homeboy_test_support::write_executable(&wrapper, "#!/bin/sh\ncase \" $* \" in\n  *\" rev-list \"*\" --missing=print \"*) printf '%s\\n' '?0000000000000000000000000000000000000000'; exit 0 ;;\n  *\" fetch --no-tags --filter=blob:none \"*) exit 1 ;;\nesac\nexec \"$HOMEBOY_TEST_REAL_GIT\" \"$@\"\n", 0o755)
             .expect("write git wrapper");
-            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
-                .expect("make git wrapper executable");
+
             let prior_path = std::env::var("PATH").expect("PATH");
             let prior_real_git = std::env::var("HOMEBOY_TEST_REAL_GIT").ok();
             std::env::set_var("HOMEBOY_TEST_REAL_GIT", "/usr/bin/git");

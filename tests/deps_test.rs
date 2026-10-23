@@ -24,16 +24,6 @@ fn write_file(path: &std::path::Path, contents: &str) {
     fs::write(path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
-fn make_executable(path: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut mode = fs::metadata(path).unwrap().permissions();
-        mode.set_mode(0o755);
-        fs::set_permissions(path, mode).unwrap();
-    }
-}
-
 fn stack_component(id: &str, path: &str, edges: Vec<DependencyStackEdge>) -> Component {
     let mut component = Component::new(id.to_string(), path.to_string(), String::new(), None);
     component.dependency_stack = edges;
@@ -110,13 +100,15 @@ fn neutral_adapter_manifest_discovers_install_command_and_runs_update_install() 
     let root = dir.path();
     let root_path = root.display().to_string();
     let adapter = root.join("fixture-adapter.sh");
-    write_file(
+    homeboy_test_support::write_executable(
         &adapter,
         r#"#!/bin/sh
 printf '%s\n' "$@" >> adapter-args.txt
 "#,
-    );
-    make_executable(&adapter);
+        0o755,
+    )
+    .expect("write executable fixture");
+
     write_file(
         &root.join("homeboy.json"),
         &format!(
@@ -1158,11 +1150,13 @@ fn stack_refresh_default_update_path_targets_the_newest_release() {
     fs::create_dir_all(&downstream_path).unwrap();
 
     let adapter = downstream_path.join("fixture-adapter.sh");
-    write_file(
+    homeboy_test_support::write_executable(
         &adapter,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" >> adapter-args.txt\n",
-    );
-    make_executable(&adapter);
+        0o755,
+    )
+    .expect("write executable fixture");
+
     write_file(
         &downstream_path.join("homeboy.json"),
         &format!(

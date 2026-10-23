@@ -873,8 +873,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn installed_provider_inventory_executes_rendered_program_with_literal_argv() {
-        use std::os::unix::fs::PermissionsExt;
-
         crate::test_support::with_isolated_home(|_| {
             let extension = crate::paths::extensions().unwrap().join("fixture");
             std::fs::create_dir_all(&extension).unwrap();
@@ -897,12 +895,8 @@ mod tests {
             )
             .unwrap();
             let provider = extension.join("provider with spaces;no-shell.sh");
-            std::fs::write(
-                &provider,
-                "#!/bin/sh\n[ \"$1\" = \"fixed argument;not a shell command\" ] || exit 1\ncat >/dev/null\nprintf '%s' '{\"schema\":\"homeboy/external-storage-retention/v1\",\"provider_id\":\"fixture.external-storage\",\"generation\":\"g1\",\"items\":[]}'\n",
-            )
+            homeboy_test_support::write_executable(&provider, "#!/bin/sh\n[ \"$1\" = \"fixed argument;not a shell command\" ] || exit 1\ncat >/dev/null\nprintf '%s' '{\"schema\":\"homeboy/external-storage-retention/v1\",\"provider_id\":\"fixture.external-storage\",\"generation\":\"g1\",\"items\":[]}'\n", 0o755)
             .unwrap();
-            std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
 
             let output = cleanup_external_storage_from_extensions(ExternalStorageCleanupOptions {
                 apply: false,

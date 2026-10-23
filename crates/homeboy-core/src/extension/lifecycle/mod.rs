@@ -443,9 +443,6 @@ mod tests {
     use std::process::Command;
     use tempfile::TempDir;
 
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
     fn write_extension_fixture_with_setup(root: &Path, id: &str) {
         let dir = root.join(id);
         fs::create_dir_all(&dir).expect("extension dir");
@@ -750,8 +747,7 @@ exec '{}' "$@"
             real_git
         );
         let wrapper = bin_dir.join("git");
-        fs::write(&wrapper, script).expect("git wrapper");
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("wrapper perms");
+        homeboy_test_support::write_executable(&wrapper, script, 0o755).expect("git wrapper");
     }
 
     #[test]

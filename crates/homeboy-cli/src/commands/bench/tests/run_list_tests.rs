@@ -333,7 +333,7 @@ fn write_empty_bench_extension(home: &TempDir) {
     .expect("write extension manifest");
 
     let script_path = extension_dir.join("bench-runner.sh");
-    fs::write(
+    homeboy_test_support::write_executable(
         &script_path,
         r#"#!/bin/sh
 cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
@@ -344,15 +344,7 @@ cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
 }
 JSON
 "#,
+        0o755,
     )
     .expect("write bench script");
-
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod script");
-    }
 }

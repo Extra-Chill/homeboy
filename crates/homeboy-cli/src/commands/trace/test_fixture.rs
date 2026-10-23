@@ -22,9 +22,7 @@ pub(super) fn write_trace_extension(home: &tempfile::TempDir) {
     .expect("write extension manifest");
 
     let script_path = extension_dir.join("trace-runner.sh");
-    fs::write(
-        &script_path,
-        r#"#!/bin/sh
+    homeboy_test_support::write_executable(&script_path, r#"#!/bin/sh
 set -eu
 scenario_ids=""
 old_ifs="$IFS"
@@ -68,19 +66,8 @@ cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
 JSON
 mkdir -p "$HOMEBOY_TRACE_ARTIFACT_DIR"
 printf 'trace log\n' > "$HOMEBOY_TRACE_ARTIFACT_DIR/trace-log.txt"
-"#,
-    )
+"#, 0o755)
     .expect("write trace script");
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod script");
-    }
 }
 
 pub(super) fn write_trace_port_env_extension(home: &tempfile::TempDir) {
@@ -166,17 +153,8 @@ fn write_custom_trace_extension(home: &tempfile::TempDir, script: &str) {
     .expect("write extension manifest");
 
     let script_path = extension_dir.join("trace-runner.sh");
-    fs::write(&script_path, script).expect("write trace script");
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod script");
-    }
+    homeboy_test_support::write_executable(&script_path, script, 0o755)
+        .expect("write trace script");
 }
 
 pub(super) fn init_overlay_component(path: &std::path::Path) {

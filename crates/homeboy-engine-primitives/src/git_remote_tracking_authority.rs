@@ -225,8 +225,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn common_directory_probe_deadline_reaps_stalled_git_process_group() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::TempDir::new().expect("tempdir");
         let ready_file = dir.path().join("helper-ready");
         let release_file = dir.path().join("start-stall");
@@ -238,9 +236,7 @@ mod tests {
             crate::shell::quote_path(&release_file.display().to_string()),
             crate::shell::quote_path(&pid_file.display().to_string()),
         );
-        fs::write(&git, script).expect("write stalled git");
-        fs::set_permissions(&git, fs::Permissions::from_mode(0o755))
-            .expect("make stalled git executable");
+        homeboy_test_support::write_executable(&git, script, 0o755).expect("write stalled git");
 
         let mut deadline_started = None;
         let error = git_common_dir_with_program(dir.path(), &git, || {

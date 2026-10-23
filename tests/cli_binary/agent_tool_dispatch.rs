@@ -261,7 +261,7 @@ fn agent_tool_github_issue_create_uses_body_file_for_shell_sensitive_markdown() 
     let dir = tempfile::tempdir().expect("tempdir");
     let gh_path = dir.path().join("gh");
     let capture_prefix = dir.path().join("gh-capture");
-    std::fs::write(
+    homeboy_test_support::write_executable(
         &gh_path,
         r#"#!/bin/sh
 set -eu
@@ -278,14 +278,9 @@ done
 printf '%s
 ' 'https://github.com/Extra-Chill/homeboy/issues/1'
 "#,
+        0o755,
     )
     .expect("write fake gh");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&gh_path, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod fake gh");
-    }
 
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{}", dir.path().display(), old_path);

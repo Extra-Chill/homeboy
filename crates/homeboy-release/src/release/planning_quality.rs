@@ -627,17 +627,8 @@ mod tests {
             r#"{"name":"Release lint fixture","version":"1.0.0","lint":{"extension_script":"lint.sh"}}"#,
         )
         .expect("extension manifest");
-        fs::write(extension_dir.join("lint.sh"), script).expect("extension script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(extension_dir.join("lint.sh"))
-                .expect("script metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(extension_dir.join("lint.sh"), permissions)
-                .expect("executable script");
-        }
+        homeboy_test_support::write_executable(extension_dir.join("lint.sh"), script, 0o755)
+            .expect("extension script");
 
         Component {
             id: "fixture".to_string(),
@@ -665,17 +656,8 @@ mod tests {
             }"#,
         )
         .expect("extension manifest");
-        fs::write(extension_dir.join("test.sh"), script).expect("extension script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let script_path = extension_dir.join("test.sh");
-            let mut permissions = fs::metadata(&script_path)
-                .expect("script metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(script_path, permissions).expect("executable script");
-        }
+        homeboy_test_support::write_executable(extension_dir.join("test.sh"), script, 0o755)
+            .expect("extension script");
 
         Component {
             id: "fixture".to_string(),
@@ -1477,22 +1459,12 @@ exit 1
                 r#"{"name":"Release lint fixture","version":"1.0.0","lint":{"extension_script":"lint.sh"}}"#,
             )
             .expect("extension manifest");
-            fs::write(
-                extension_dir.join("lint.sh"),
-                r#"#!/bin/sh
+            homeboy_test_support::write_executable(extension_dir.join("lint.sh"), r#"#!/bin/sh
 printf '[{"tool":"phpstan","message":"legacy","fingerprint":"legacy","file":"packages/fixture/legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
 exit 1
-"#,
-            )
+"#, 0o755)
             .expect("lint script");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let script = extension_dir.join("lint.sh");
-                let mut permissions = fs::metadata(&script).expect("metadata").permissions();
-                permissions.set_mode(0o755);
-                fs::set_permissions(script, permissions).expect("executable script");
-            }
+
             let component = Component {
                 id: "fixture".to_string(),
                 local_path: component_path.to_string_lossy().to_string(),

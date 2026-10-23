@@ -1,5 +1,4 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -433,10 +432,7 @@ fn run_homeboy<const N: usize>(home: &Path, args: [&str; N]) -> Output {
 }
 
 fn write_executable(path: &Path, body: &str) {
-    fs::write(path, body).expect("extension script");
-    let mut permissions = fs::metadata(path).expect("script metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("script executable");
+    homeboy_test_support::write_executable(path, body, 0o755).expect("extension script");
 }
 
 fn json_output(output: &Output, command: &str) -> Value {
