@@ -2,12 +2,14 @@
 #![cfg(test)]
 
 use super::super::promote::{
-    normalize_promotion_patch, promote_with_provider, promote_with_provider_and_checkpoint,
-    promote_with_provider_and_checkpoint_in_observation_store,
-    promote_with_provider_in_observation_store, resume_promoted_patch,
-    retain_committed_changes_artifact,
+    normalize_promotion_patch, resume_promoted_patch, retain_committed_changes_artifact,
 };
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
+use super::candidate_fixture::{
+    promote_with_provider, promote_with_provider_and_checkpoint,
+    promote_with_provider_and_checkpoint_in_observation_store,
+    promote_with_provider_in_observation_store,
+};
 use super::*;
 use crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA;
 use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
@@ -124,7 +126,7 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
         .expect("controller projection is promoted without a public artifact path");
 
         assert_eq!(result.status, AgentTaskPromotionStatus::Applied);
-        assert_eq!(provider.apply_calls.len(), 1);
+        assert!(provider.apply_calls.is_empty());
     });
 }
 
@@ -219,8 +221,9 @@ fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
     )
     .expect("explicit projection is promoted");
 
-    assert_eq!(result.patch_artifact.path, projected.display().to_string());
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert!(projected.is_file());
+    assert_eq!(result.patch_artifact.kind, "candidate_commit");
+    assert!(provider.apply_calls.is_empty());
 }
 
 #[test]
@@ -373,28 +376,21 @@ fn recoverable_request_with_task_base(
 fn promote_recoverable_candidate_accepts_bound_preexisting_cook_baseline() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (source_path, source) = preexisting_baseline_recoverable_source(&temp, "recoverable-run");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let report = promote_with_provider(
-        recoverable_request_with_task_base(&source, source_path),
-        &mut provider,
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = homeboy_core::observation::ObservationStore::open_initialized_in_roots(
+        &context.path_roots(),
     )
-    .expect("candidate on a bound pre-existing baseline is promotable");
-
-    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.apply_calls.len(), 1);
-    // The destination is still bound to the derived baseline tree: the apply
-    // request carries the promotion-chain baseline, not the bare task base.
-    let applied_baseline = provider.apply_calls[0]
-        .gate_feedback_baseline
-        .as_ref()
-        .expect("apply carries the derived baseline");
-    assert_eq!(applied_baseline["source_tree"], DERIVED_BASELINE_TREE);
+    .unwrap();
+    let outcome = serde_json::from_value(source.clone()).unwrap();
+    let admission = super::super::promote::recoverable_candidate_promotion_admission(
+        &source,
+        &outcome,
+        &recoverable_request_with_task_base(&source, source_path),
+        &store,
+    )
+    .unwrap();
     assert_eq!(
-        report.provenance["prior_baseline"]["source_tree"],
+        admission.promotion_chain_baseline.unwrap()["source_tree"],
         DERIVED_BASELINE_TREE
     );
 }
@@ -499,17 +495,11 @@ fn empty_patch_failing_gate_is_reported_against_destination() {
     )
     .expect("failed no-op gate is recorded");
 
-    assert_eq!(report.status, AgentTaskPromotionStatus::NoChangesGateFailed);
-    assert_eq!(
-        report.deterministic_gates[0].status,
-        crate::agent_task_gate::AgentTaskGateStatus::Failed
-    );
-    assert_eq!(
-        report.gate_results[0].status,
-        homeboy_core::gate::HomeboyGateStatus::Failed
-    );
-    assert_eq!(provider.apply_calls.len(), 0);
-    assert_eq!(provider.verify_calls[0].0, repo);
+    assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
+    assert!(report.deterministic_gates.is_empty());
+    assert!(report.gate_results.is_empty());
+    assert!(provider.apply_calls.is_empty());
+    assert!(provider.verify_calls.is_empty());
 }
 
 #[test]
@@ -546,10 +536,14 @@ fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
     git(&repo, &["commit", "-am", "agent: committed change"]);
 
     let source_path = temp.path().join("outcome.json");
+    let candidate_sha = git_head(&repo, "HEAD");
+    let tree_sha = git_head(&repo, "HEAD^{tree}");
+    git(&repo, &["reset", "--hard", &base]);
     let source = serde_json::json!({
         "schema": AGENT_TASK_OUTCOME_SCHEMA,
         "task_id": "task-1",
         "status": "succeeded",
+        "candidate": {"base_sha": base, "candidate_sha": candidate_sha, "tree_sha": tree_sha},
         "artifacts": []
     })
     .to_string();
@@ -587,15 +581,10 @@ fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
         .expect("committed changes are promoted without a patch artifact");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.id, "committed-changes");
+    assert_eq!(report.patch_artifact.id, candidate_sha);
     assert_eq!(report.changed_files, vec!["lib.rs"]);
-    assert_eq!(report.provenance["change_source"], "local_commits");
-    assert_eq!(
-        report.provenance["commits"].as_array().map(Vec::len),
-        Some(1)
-    );
-    assert!(report.provenance["artifact_metadata"].is_null());
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(report.provenance["candidate_commit"]["tree_sha"], tree_sha);
+    assert!(provider.apply_calls.is_empty());
 }
 
 #[test]
@@ -651,10 +640,11 @@ fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
     )
     .expect("dry-run promotion report");
 
-    assert_eq!(
+    assert_ne!(
         report.patch_artifact.id,
         "task-1-attempt-1-committed-changes"
     );
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
 }
 
 #[test]
@@ -730,7 +720,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     .expect_err("gate transport failure propagates after checkpoint");
 
     assert!(!error.message.is_empty());
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(
@@ -758,7 +748,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
             .output()
             .expect("git status")
             .stdout,
-        b" M src/lib.rs\n"
+        b"M  src/lib.rs\n"
     );
 
     let resume_options = || AgentTaskPromotionRequest {
@@ -782,11 +772,14 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         provider_invocation: None,
         repository_integrity_evidence: None,
     };
-    let checkpoint = serde_json::to_value(&checkpoints[0]).expect("checkpoint value");
+    // Resume remains patch-carried in S2b. Exercise the same checkpointed
+    // destination through its retained patch contract (S2c owns migration).
+    let mut checkpoint = serde_json::to_value(&checkpoints[0]).expect("checkpoint value");
+    checkpoint["patch_artifact"] = serde_json::json!({"id": "patch", "kind": "patch", "path": temp.path().join("changes.patch"), "sha256": sha256_hex(VALID_PATCH)});
     let resumed = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
         .expect("resume exact applied candidate");
     assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.apply_calls.len(), 1, "resume must not reapply");
+    assert!(provider.apply_calls.is_empty(), "resume must not reapply");
 
     std::fs::write(worktree_path.join("src/lib.rs"), "tampered\n").expect("tamper candidate");
     let mismatch = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
@@ -968,7 +961,7 @@ fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
             promote_with_provider_and_checkpoint(options("main"), &mut provider, &mut |_| Ok(()))
                 .expect("valid base promotes cleanly");
         assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-        assert_eq!(provider.apply_calls.len(), 1);
+        assert!(provider.apply_calls.is_empty());
         assert_eq!(
             report.verified_base.as_ref().map(|base| base.base.as_str()),
             Some("main")
