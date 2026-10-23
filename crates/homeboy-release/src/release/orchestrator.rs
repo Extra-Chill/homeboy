@@ -4,7 +4,6 @@
 //! the accumulated step results into the public release run shape.
 
 use homeboy_core::error::{Error, Result};
-use homeboy_core::phase_timing::PhaseTimer;
 use std::collections::HashSet;
 
 use super::execution_plan::{build_initial_preflight_plan, initial_executable_preflight_ids};
@@ -124,8 +123,17 @@ fn run_with_plan_inner(
     ensure_readiness_passed(options)?;
 
     let initial_plan = build_initial_preflight_plan(component_id, options);
-    let mut timer = PhaseTimer::new();
-    let initial_stop = timer.time("package_preflight", || {
+    let time_phase = |phase: &str, operation: &mut dyn FnMut() -> Result<bool>| {
+        if let Some(context) = &options.control_plane {
+            homeboy_core::observation::ObservationStore::open_initialized_in_roots(roots)?
+                .time_run_phase_with_outcome(&context.release_run_id, phase, operation, |stopped| {
+                    *stopped
+                })
+        } else {
+            operation()
+        }
+    };
+    let initial_stop = time_phase("package_preflight", &mut || {
         super::execution_plan::execute_plan_steps_at_source(
             roots,
             &initial_plan.plan.steps,
@@ -138,7 +146,7 @@ fn run_with_plan_inner(
     })?;
 
     if initial_stop {
-        let mut run = finalize(component_id, results, timer.into_report());
+        let mut run = finalize(component_id, results);
         restore_checkout_after_failed_run(checkout_guard, &mut run)?;
         return Ok((initial_plan, run));
     }
@@ -187,7 +195,7 @@ fn run_with_plan_inner(
         initial_executable_preflight_ids().iter().copied().collect();
 
     super::preflight_identity::revalidate(&preflight_component, &preflight_source)?;
-    timer.time("package", || {
+    time_phase("package", &mut || {
         super::execution_plan::execute_plan_steps_at_source(
             roots,
             &release_plan.plan.steps,
@@ -199,7 +207,7 @@ fn run_with_plan_inner(
         )
     })?;
 
-    let mut run = finalize(component_id, results, timer.into_report());
+    let mut run = finalize(component_id, results);
     restore_checkout_after_failed_run(checkout_guard, &mut run)?;
 
     Ok((release_plan, run))
@@ -228,11 +236,7 @@ fn ensure_readiness_passed(options: &ReleaseOptions) -> Result<()> {
 
 /// Wrap the accumulated step results into a `ReleaseRun` with an overall
 /// status and a human-friendly summary.
-fn finalize(
-    component_id: &str,
-    results: Vec<ReleaseStepResult>,
-    phase_timings: homeboy_core::phase_timing::PhaseTimingReport,
-) -> ReleaseRun {
+fn finalize(component_id: &str, results: Vec<ReleaseStepResult>) -> ReleaseRun {
     let status = derive_overall_status(&results);
     let summary = build_summary(component_id, &results, &status);
 
@@ -244,7 +248,6 @@ fn finalize(
             status,
             warnings: Vec::new(),
             summary: Some(summary),
-            phase_timings: Some(phase_timings),
             rollback: None,
         },
     }
@@ -403,7 +406,6 @@ mod tests {
                 status: ReleaseStepStatus::Failed,
                 warnings: Vec::new(),
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         }

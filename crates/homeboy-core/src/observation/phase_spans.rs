@@ -64,6 +64,55 @@ impl ObservationStore {
         result
     }
 
+    /// Finish a phase whose start must survive process restarts. The owner keeps
+    /// only the start timestamp in recovery state and calls this at completion.
+    pub fn finish_run_phase(
+        &self,
+        run_id: &str,
+        phase: &str,
+        started_at: &str,
+        failed: bool,
+    ) -> Result<()> {
+        let Some(run) = self.get_run(run_id)? else {
+            return Ok(());
+        };
+        let parse = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map_err(|error| Error::internal_unexpected(error.to_string()))
+        };
+        let started = parse(started_at)?;
+        let origin = parse(&run.started_at)?;
+        let offset = started
+            .signed_duration_since(origin)
+            .num_microseconds()
+            .unwrap_or(0)
+            .max(0) as f64
+            / 1000.0;
+        if self
+            .phase_spans(run_id)?
+            .spans
+            .iter()
+            .any(|span| span.id == phase && span.start_offset_ms == offset)
+        {
+            return Ok(());
+        }
+        let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::with_version(
+            crate::build_identity::current().version,
+        );
+        let duration = chrono::Utc::now()
+            .signed_duration_since(started)
+            .to_std()
+            .unwrap_or_default();
+        if failed {
+            timer.record_failed(phase, duration);
+        } else {
+            timer.record_ok(phase, duration);
+        }
+        let mut report = timer.into_report();
+        report.spans[0].start_offset_ms = offset;
+        self.record_phase_spans(run_id, &format!("{phase}:{started_at}"), &report)
+    }
+
     /// Record a whole-run phase for workflows whose lifecycle spans processes.
     /// Unlike a scoped monotonic timer this uses the durable run origin. It is
     /// explicitly an inclusive owner span, not an additional sequential phase.

@@ -1016,15 +1016,17 @@ fn controller_proxy_records_pre_execution_phase_progress() {
     .record;
     assert_eq!(loaded.metadata["phase"], "hydrating");
     assert_eq!(loaded.metadata["provider_state"], "pending");
-    let phases = loaded.metadata["phase_history"]
-        .as_array()
-        .expect("phase history");
-    assert_eq!(phases.len(), 2);
-    assert_eq!(phases[0]["phase"], "materializing");
-    assert!(phases[0].get("started_at").is_some());
-    assert!(phases[0].get("ended_at").is_some());
-    assert_eq!(phases[1]["phase"], "hydrating");
-    assert!(phases[1].get("started_at").is_some());
+    let report = lifecycle_store
+        .open_observation_initialized()
+        .unwrap()
+        .phase_spans(&loaded.run_id)
+        .unwrap();
+    assert!(report
+        .spans
+        .iter()
+        .any(|span| span.id == "stage.lab.materializing"));
+    assert!(loaded.metadata.get("phase_history").is_none());
+    assert!(loaded.metadata["phase_started_at"].is_string());
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
