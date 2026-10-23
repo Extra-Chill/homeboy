@@ -1852,6 +1852,10 @@ mod committed_harvest_tests {
 
     #[test]
     fn runner_harvest_bundles_the_dirty_attempt_for_a_base_only_controller() {
+        let _lab_env = LAB_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Lab environment lock");
         let _home = homeboy_core::test_support::home_env_guard();
         let runner_env = homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
         let _runner = homeboy_core::test_support::EnvVarGuard::set(runner_env, "lab-1");
