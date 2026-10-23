@@ -68,6 +68,9 @@ impl CookVerdict {
     /// Dossier category for this verdict. Agent-task runs are categorized by
     /// their canonical state, never by the observation row's status.
     pub(crate) fn category(&self) -> Option<String> {
+        if self.state == "succeeded" {
+            return None;
+        }
         if self.has_failed_gate() || self.candidate.as_deref().is_some_and(candidate_gate_failed) {
             return Some("gate_failure".to_string());
         }
@@ -171,6 +174,13 @@ fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<St
         if let Some(reason) = delivery_blocker_reason(blocker) {
             return Some(reason);
         }
+        if blocker
+            .code
+            .as_deref()
+            .is_some_and(|code| code.starts_with("outcome."))
+        {
+            return Some(blocker.message.clone());
+        }
         let message = blocker
             .reason
             .as_deref()
@@ -221,7 +231,7 @@ fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<St
                 "candidate promotion reported `{candidate}`; the candidate was not published"
             ),
             Some(candidate) => format!(
-                "candidate is `{candidate}` but was not applied, verified and published (publication: {})",
+                "candidate is `{candidate}`; publication has not completed (publication: {})",
                 publication.unwrap_or("not attempted")
             ),
             None => format!(
@@ -230,8 +240,8 @@ fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<St
             ),
         }),
         _ => Some(match run.phase.as_deref() {
-            Some(phase) => format!("the Cook ended `{}` during `{phase}`", state_label(run.state)),
-            None => format!("the Cook ended `{}`", state_label(run.state)),
+            Some(phase) => format!("no failure diagnostic was recorded for `{}` during `{phase}`; inspect execution evidence", state_label(run.state)),
+            None => format!("no failure diagnostic was recorded for `{}`; inspect execution evidence", state_label(run.state)),
         }),
     }
 }
@@ -374,6 +384,35 @@ mod tests {
         assert_eq!(verdict.reason, None);
         assert_eq!(verdict.category(), None);
         assert!(!verdict.is_stale());
+    }
+
+    #[test]
+    fn agent_task_published_success_is_not_categorized_by_historical_gate_failure() {
+        let mut run = resource(ControlPlaneRunState::Succeeded);
+        run.gates.push(ControlPlaneStateSummary {
+            id: Some("old-check".to_string()),
+            state: "failed".to_string(),
+        });
+        let verdict = cook_verdict(&run);
+        assert!(verdict.category().is_none());
+        assert!(verdict.reason.is_none());
+    }
+
+    #[test]
+    fn agent_task_missing_diagnostics_is_explicit_and_applied_is_not_denied() {
+        let verdict = cook_verdict(&resource(ControlPlaneRunState::Failed));
+        assert!(verdict
+            .reason
+            .unwrap()
+            .contains("no failure diagnostic was recorded"));
+        let mut run = resource(ControlPlaneRunState::CandidateRecoverable);
+        run.candidate = Some(ControlPlaneStateSummary {
+            id: None,
+            state: "applied".to_string(),
+        });
+        let reason = cook_verdict(&run).reason.unwrap();
+        assert!(reason.contains("candidate is `applied`; publication has not completed"));
+        assert!(!reason.contains("was not applied"));
     }
 
     #[test]

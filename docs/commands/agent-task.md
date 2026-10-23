@@ -44,6 +44,10 @@ Paged `agent-task list` and `agent-task active` inspect at most 100 physical lif
 
 `agent-task status <run-id>` returns the canonical `ControlPlaneRun` resource (`homeboy/control-plane-run/v1`). Human summaries read that resource directly; they do not reconstruct `homeboy/agent-task-status-scope/v1` or wrap the run under `control_plane_run`. It is a bounded, non-reconciling read; use `agent-task logs <run-id> [--cursor <cursor>]` for canonical `ControlPlaneEventPage`s, `agent-task diagnose <run-id> --full` for detailed failure evidence, and `agent-task reconcile <run-id> --apply` for explicit state repair.
 
+Terminal non-success status uses the current delivery/controller blocker, or, when none exists, the first non-success aggregate outcome's recorded `failure_classification` and first diagnostic. The existing `blocker.message` carries that cause and `blocker.reason` carries its matching next action (timeout/route retry, credential repair, or candidate recovery); no parallel reason record is written. Missing diagnostics are reported explicitly rather than presented as a failure cause. Status reads the record and mirrored aggregate from one authoritative SQLite observation, never from an independently updated `aggregate.json` cache.
+
+A controller publication receipt proving `review_ready` or `draft_published` takes precedence over older terminal or promotion snapshots. Status reports success, the publication state and PR URL (number when no URL was recorded), with no stale failure blocker. Atomic Lab staging completion receipts and resolved-route credential admission are tracked separately in [#16326](https://github.com/Extra-Chill/homeboy/issues/16326).
+
 Each status `artifacts` entry has a control-plane reference `id`, distinct from an
 artifact-store byte ID. A producer-artifact `uri` retains the exact task and artifact,
 for example `homeboy://agent-task/run/<run-id>/artifacts#task=<task-id>&artifact=<artifact-id>`.

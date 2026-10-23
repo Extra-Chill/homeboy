@@ -18583,7 +18583,16 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
         let mut launcher_ids = std::collections::BTreeSet::new();
         for (name, gate_status, no_finalize, receipt, success, live_owner) in [
             ("pending", "deferred", false, false, false, false),
-            ("failed", "failed", false, true, false, false),
+            // A completed publication wins over an older failed-gate snapshot.
+            (
+                "published-after-failed-gate",
+                "failed",
+                false,
+                true,
+                true,
+                false,
+            ),
+            ("failed", "failed", false, false, false, false),
             (
                 "missing-finalization",
                 "succeeded",

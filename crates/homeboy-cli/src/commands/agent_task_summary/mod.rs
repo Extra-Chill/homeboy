@@ -615,6 +615,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     }
     if let Some(publication) = string_value(payload, &["publication", "state"]) {
         lines.push(format!("Publication: {publication}"));
+        if let Some(identity) = string_value(payload, &["publication", "id"]) {
+            lines.push(format!("PR: {identity}"));
+        }
     }
     if let Some(blocker) = string_value(payload, &["blocker", "message"]) {
         if let Some(code) = string_value(payload, &["blocker", "code"])
@@ -682,6 +685,9 @@ pub(crate) fn live_gate_verifying(payload: &Value) -> bool {
             == Some(homeboy::agents::orchestration::LIVE_GATE_VERIFYING_PHASE)
 }
 
+#[cfg(test)]
+mod status_run_fixtures;
+
 pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
     // A live driver is still running this Cook's gates (#16058): the latched
     // `candidate_recoverable` is not its verdict, so watch it, never recover.
@@ -689,8 +695,16 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
         let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
         return format!("homeboy agent-task watch {cook_id}");
     }
+    if string_value(payload, &["publication", "state"])
+        .is_some_and(|state| matches!(state, "review_ready" | "draft_published"))
+        && string_value(payload, &["state"]) == Some("succeeded")
+    {
+        return string_value(payload, &["publication", "id"])
+            .map(|identity| format!("review the published PR: {identity}"))
+            .unwrap_or_else(|| format!("homeboy agent-task evidence {run_id}"));
+    }
     if string_value(payload, &["blocker", "code"])
-        .is_some_and(|code| code.starts_with("resource_guard."))
+        .is_some_and(|code| code.starts_with("resource_guard.") || code.starts_with("outcome."))
     {
         if let Some(remedy) = string_value(payload, &["blocker", "reason"]) {
             return remedy.to_string();

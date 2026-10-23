@@ -1,0 +1,20 @@
+{
+  "schema": "homeboy/agent-task-aggregate/v1",
+  "plan_id": "cook-status-fixture",
+  "status": "failed",
+  "outcomes": [{
+    "schema": "homeboy/agent-task-outcome/v1",
+    "task_id": "cook-blocks-engine-gate-fix-2",
+    "status": "timeout",
+    "summary": "Pi execution timed out.",
+    "failure_classification": "timeout",
+    "diagnostics": [
+      {"class": "provider", "message": "spawnSync pi ETIMEDOUT", "data": {}},
+      {"class": "timeout", "message": "task exceeded timeout_ms=3600000"},
+      {"class": "provider_timeout", "message": "no completed runtime artifacts were discovered before timeout finalization"}
+    ]
+  }],
+  "totals": {"queued":0,"running":0,"blocked":0,"skipped":0,"succeeded":0,"failed":1,"cancelled":0,"timed_out":1},
+  "queue": {"max_concurrency":1,"queued":0,"running":0,"blocked":0,"completed":1},
+  "events": []
+}

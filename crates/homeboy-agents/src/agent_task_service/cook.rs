@@ -1842,6 +1842,11 @@ pub(crate) fn cook_observation_state(
 ) -> agent_task_lifecycle::AgentTaskRunState {
     use agent_task_lifecycle::AgentTaskRunState;
     let stored = record.state();
+    // Publication is the end-to-end receipt, not a second verdict derived
+    // from a possibly older promotion or terminal-progress snapshot.
+    if super::CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published()) {
+        return AgentTaskRunState::Succeeded;
+    }
     if stored != AgentTaskRunState::Succeeded {
         return stored;
     }

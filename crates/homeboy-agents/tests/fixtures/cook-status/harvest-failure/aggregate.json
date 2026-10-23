@@ -1,0 +1,18 @@
+{
+  "schema": "homeboy/agent-task-aggregate/v1",
+  "plan_id": "cook-status-fixture",
+  "status": "failed",
+  "outcomes": [{
+    "schema": "homeboy/agent-task-outcome/v1",
+    "task_id": "cook-blocks-engine-gate-fix-2-no-change-3",
+    "status": "failed",
+    "diagnostics": [{
+      "class": "agent_task.committed_harvest_git_failed",
+      "message": "committed-change harvest failed while running verify Lab snapshot harvest provenance: records a dirty source checkout at dispatch (source workspace `/source/blocks-engine`; materialized workspace `/lab/blocks-engine`; changed paths: M php-transformer/src/ArtifactCompiler/ArtifactCompiler.php)",
+      "data": {"command": "verify Lab snapshot harvest provenance", "cwd": "/lab/blocks-engine"}
+    }]
+  }],
+  "totals": {"queued":0,"running":0,"blocked":0,"skipped":0,"succeeded":0,"failed":1,"cancelled":0,"timed_out":0},
+  "queue": {"max_concurrency":1,"queued":0,"running":0,"blocked":0,"completed":1},
+  "events": []
+}
