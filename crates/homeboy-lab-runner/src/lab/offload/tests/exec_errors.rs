@@ -375,7 +375,7 @@ fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
     };
     let status = connected_status("homeboy-lab");
 
-    let overhead = LabOffloadOverhead::start();
+    let observation = OffloadObservation::start();
     let request = LabOffloadRequest::for_test(&[]);
     let result = automatic_capability_fallback_or_error(
         &request,
@@ -389,7 +389,7 @@ fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
             homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
             Some("homeboy-lab"),
         ),
-        &overhead,
+        &observation,
     );
 
     let Err(err) = result else {
@@ -415,13 +415,12 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
     };
     let status = connected_status("homeboy-lab");
 
-    let mut overhead = LabOffloadOverhead::start();
-    overhead.set_attempted("homeboy-lab", "default", Some("direct_ssh"));
-    overhead.record(
-        LabOffloadPhase::Preflight,
-        std::time::Duration::from_millis(8),
-    );
-    overhead
+    let mut observation = OffloadObservation::start();
+    observation.set_attempted("homeboy-lab", "default", Some("direct_ssh"));
+    observation
+        .timer
+        .record_ok("stage.lab.preflight", std::time::Duration::from_millis(8));
+    observation
         .set_fallback_reason("missing required capability parity for `trace`: tools: playwright");
     let request = LabOffloadRequest::for_test(&[]);
     let outcome = automatic_capability_fallback_or_error(
@@ -458,7 +457,7 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
                 authority: None,
             },
         ),
-        &overhead,
+        &observation,
     )
     .expect("explicit fallback opt-in should allow local run");
 
@@ -471,23 +470,11 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
     assert!(messages[0].contains("running locally"));
     let metadata = metadata.expect("metadata");
     assert_eq!(metadata["status"], "fallback");
-    // The fallback-to-local outcome records the runner-agnostic overhead:
-    // the attempted selection/preflight cost plus the fallback reason (#3001).
-    let overhead_meta = &metadata["lab_offload_overhead"];
-    assert_eq!(overhead_meta["schema"], "homeboy/lab-offload-overhead/v1");
-    assert_eq!(
-        overhead_meta["attempted_selection"]["runner_id"],
-        "homeboy-lab"
-    );
-    assert_eq!(overhead_meta["attempted_selection"]["source"], "default");
-    assert!(overhead_meta["fallback_reason"]
+    assert_eq!(metadata["attempted_selection"]["runner_id"], "homeboy-lab");
+    assert_eq!(metadata["attempted_selection"]["source"], "default");
+    assert!(metadata["fallback_reason"]
         .as_str()
         .is_some_and(|reason| reason.contains("capability parity")));
-    assert!(overhead_meta["phase_durations_ms"]["preflight"]
-        .as_u64()
-        .is_some());
-    // Workload duration stays separable: no remote exec happened on fallback.
-    assert!(overhead_meta["workload_ms"].is_null());
 }
 
 #[test]
@@ -540,7 +527,7 @@ fn capability_fallback_persists_the_verified_local_outcome() {
             "homeboy-lab",
             &connected_status("homeboy-lab"),
             "runner capability preflight failed".to_string(),
-            &LabOffloadOverhead::start(),
+            &OffloadObservation::start(),
         )
         .expect("verified local fallback");
 

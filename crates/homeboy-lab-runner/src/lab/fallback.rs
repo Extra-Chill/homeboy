@@ -4,7 +4,7 @@ use crate::lab_offload_metadata;
 use homeboy_core::plan::HomeboyPlan;
 use homeboy_core::Error;
 
-use super::offload::{attach_lab_offload_overhead, LabOffloadOutcome, LabOffloadOverhead};
+use super::offload::{attach_offload_selection, LabOffloadOutcome, OffloadObservation};
 
 /// Build the `RunLocal` outcome used whenever automatic Lab offload is skipped
 /// for a portability/default-runner reason. Centralizes the repeated
@@ -25,13 +25,11 @@ pub(super) fn skipped_automatic_run_local(plan: HomeboyPlan, reason: &str) -> La
     }
 }
 
-/// Same as [`skipped_automatic_run_local`], but also attaches the runner-agnostic
-/// Lab offload overhead (#3001) so a skipped/fallback-to-local run still records
-/// the per-phase setup timings and fallback reason gathered so far.
-pub(super) fn skipped_automatic_run_local_with_overhead(
+/// Preserve the attempted selection and fallback reason as plain metadata.
+pub(super) fn skipped_automatic_run_local_with_selection(
     plan: HomeboyPlan,
     reason: &str,
-    overhead: &LabOffloadOverhead,
+    observation: &OffloadObservation,
 ) -> LabOffloadOutcome {
     let mut metadata = lab_offload_metadata(
         &plan,
@@ -42,7 +40,7 @@ pub(super) fn skipped_automatic_run_local_with_overhead(
         None,
         Some(reason),
     );
-    attach_lab_offload_overhead(&mut metadata, overhead);
+    attach_offload_selection(&mut metadata, observation);
     LabOffloadOutcome::RunLocal {
         metadata: Some(metadata),
         plan,

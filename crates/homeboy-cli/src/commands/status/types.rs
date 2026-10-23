@@ -61,10 +61,6 @@ pub struct StatusArgs {
     #[arg(long)]
     pub outdated: bool,
 
-    /// Include completed status phase timings in JSON.
-    #[arg(long)]
-    pub timings: bool,
-
     /// Refresh remote Git refs before calculating drift and release state.
     #[arg(long)]
     pub refresh: bool,
@@ -116,12 +112,6 @@ pub struct UnreleasedMerge {
     /// Count of commits on `origin/<default-branch>` past `latest_tag`
     /// (merge commits excluded, matching release-state counting).
     pub commits_since_tag: u32,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct StatusTiming {
-    pub phase: &'static str,
-    pub elapsed_ms: u128,
 }
 
 /// Clarifying note emitted alongside the git-state-only `ready_to_deploy` list.
@@ -180,8 +170,6 @@ pub struct StatusOutput {
     /// Clarifying note, emitted only when `unreleased_merges` is non-empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreleased_merges_note: Option<&'static str>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub timings: Vec<StatusTiming>,
     pub clean: usize,
     /// Present when the bounded default status view omitted work rather than
     /// making callers wait past its interactive latency contract.
@@ -435,8 +423,6 @@ pub struct ProjectDashboardOutput {
     pub total: usize,
     pub components: Vec<ProjectStatusRow>,
     pub summary: ProjectDashboardSummary,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub timings: Vec<StatusTiming>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial: Option<StatusPartial>,
     /// Freshness of the `homeboy` binary that produced this dashboard. See
@@ -444,46 +430,25 @@ pub struct ProjectDashboardOutput {
     pub controller: ControllerStaleness,
 }
 
-pub(super) struct StatusTimer {
-    include_timings: bool,
-    phase_started: Instant,
-    timings: Vec<StatusTiming>,
+pub(super) struct StatusBudget {
     deadline: Instant,
 }
 
-impl StatusTimer {
-    pub(super) fn new(include_timings: bool) -> Self {
+impl StatusBudget {
+    pub(super) fn new() -> Self {
         let budget = Duration::from_secs(30);
         Self {
-            include_timings,
-            phase_started: Instant::now(),
-            timings: Vec::new(),
             deadline: Instant::now() + budget,
         }
     }
 
     pub(super) fn begin(&mut self, phase: &'static str) {
         // Status is often the first diagnostic command an operator runs. Name
-        // every phase so a blocked probe is observable without JSON timings.
+        // every phase so a blocked probe is observable without timing output.
         eprintln!("[status] {phase}...");
         if std::env::var_os("HOMEBOY_STATUS_PROBE_CHILD").is_some() {
             eprintln!("HOMEBOY_PROGRESS {{\"phase\":\"{phase}\"}}");
         }
-        self.phase_started = Instant::now();
-    }
-
-    pub(super) fn finish(&mut self, phase: &'static str) {
-        if !self.include_timings {
-            return;
-        }
-
-        let elapsed_ms = self.phase_started.elapsed().as_millis();
-        eprintln!("[status] {phase} completed in {elapsed_ms}ms");
-        self.timings.push(StatusTiming { phase, elapsed_ms });
-    }
-
-    pub(super) fn into_timings(self) -> Vec<StatusTiming> {
-        self.timings
     }
 
     pub(super) fn expired(&self) -> bool {
@@ -499,11 +464,8 @@ impl StatusTimer {
     }
 
     #[cfg(test)]
-    pub(super) fn with_budget(include_timings: bool, budget: Duration) -> Self {
+    pub(super) fn with_budget(budget: Duration) -> Self {
         Self {
-            include_timings,
-            phase_started: Instant::now(),
-            timings: Vec::new(),
             deadline: Instant::now() + budget,
         }
     }

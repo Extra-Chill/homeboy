@@ -24,6 +24,8 @@ pub(crate) struct DeployObservation {
     run_id: String,
     metadata: serde_json::Value,
     finished: bool,
+    phase_started: std::time::Instant,
+    phase_started_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl DeployObservation {
@@ -136,6 +138,8 @@ impl DeployObservation {
                 run_id: run_id.to_string(),
                 metadata,
                 finished: false,
+                phase_started: std::time::Instant::now(),
+                phase_started_at: chrono::Utc::now(),
             },
             checkpoint,
         ))
@@ -191,7 +195,6 @@ impl DeployObservation {
             "schema": "homeboy/deploy-lifecycle/v1",
             "source": source,
             "phase": "admitted",
-            "phase_history": [{ "phase": "admitted", "at": chrono::Utc::now().to_rfc3339() }],
             "remote_mutation_started": false,
             "targets": {},
             "homeboy_run_owner": { "pid": std::process::id() },
@@ -238,6 +241,8 @@ impl DeployObservation {
             run_id: run.id,
             metadata,
             finished: false,
+            phase_started: std::time::Instant::now(),
+            phase_started_at: chrono::Utc::now(),
         })
     }
 
@@ -246,7 +251,6 @@ impl DeployObservation {
     }
 
     pub(crate) fn phase(&mut self, phase: &str, remote_mutation_started: bool) -> Result<()> {
-        let at = chrono::Utc::now().to_rfc3339();
         let object = self
             .metadata
             .as_object_mut()
@@ -259,17 +263,62 @@ impl DeployObservation {
                 .update_run_metadata(&self.run_id, self.metadata.clone())?;
             return Ok(());
         }
+        // Telemetry must never prevent the mutation safety checkpoint.
+        if let Err(error) = self.record_current_phase(phase == "failed") {
+            homeboy_core::log_status!(
+                "observe",
+                "deploy phase timing persistence failed: {}",
+                error
+            );
+        }
+        let object = self
+            .metadata
+            .as_object_mut()
+            .expect("deploy metadata object");
         object.insert("phase".to_string(), json!(phase));
         if remote_mutation_started {
             object.insert("remote_mutation_started".to_string(), json!(true));
         }
-        object
-            .get_mut("phase_history")
-            .and_then(serde_json::Value::as_array_mut)
-            .expect("deploy phase history")
-            .push(json!({ "phase": phase, "at": at }));
         self.store
             .update_run_metadata(&self.run_id, self.metadata.clone())?;
+        Ok(())
+    }
+
+    fn record_current_phase(&mut self, failed: bool) -> Result<()> {
+        let phase = self.metadata["phase"].as_str().expect("deploy phase");
+        let mut timer = homeboy_core::phase_timing::PhaseTimer::with_version(
+            homeboy_core::build_identity::current().version,
+        );
+        if failed {
+            timer.record_failed(
+                format!("stage.deploy.{phase}"),
+                self.phase_started.elapsed(),
+            );
+        } else {
+            timer.record_ok(
+                format!("stage.deploy.{phase}"),
+                self.phase_started.elapsed(),
+            );
+        }
+        let mut report = timer.into_report();
+        if let Some(run) = self.store.get_run(&self.run_id)? {
+            if let Ok(origin) = chrono::DateTime::parse_from_rfc3339(&run.started_at) {
+                report.spans[0].start_offset_ms = self
+                    .phase_started_at
+                    .signed_duration_since(origin)
+                    .num_microseconds()
+                    .unwrap_or(0)
+                    .max(0) as f64
+                    / 1000.0;
+            }
+        }
+        self.store.record_phase_spans(
+            &self.run_id,
+            &format!("deploy:{phase}:{}", self.phase_started_at.to_rfc3339()),
+            &report,
+        )?;
+        self.phase_started = std::time::Instant::now();
+        self.phase_started_at = chrono::Utc::now();
         Ok(())
     }
 
@@ -765,10 +814,12 @@ mod tests {
             assert_eq!(run.status, RunStatus::Pass.as_str());
             assert_eq!(run.metadata_json["phase"], "completed");
             assert_eq!(run.metadata_json["remote_mutation_started"], true);
-            assert_eq!(
-                run.metadata_json["phase_history"].as_array().map(Vec::len),
-                Some(7)
-            );
+            let report = ObservationStore::open_initialized()
+                .expect("store")
+                .phase_spans(&run_id)
+                .expect("phase spans");
+            assert!(report.span("stage.deploy.transfer").is_some());
+            assert!(report.span("stage.deploy.verify").is_some());
         });
     }
 

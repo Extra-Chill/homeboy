@@ -278,7 +278,7 @@ pub(crate) fn automatic_capability_fallback(
     runner_id: &str,
     runner_status: &RunnerStatusReport,
     reason: String,
-    overhead: &LabOffloadOverhead,
+    observation: &OffloadObservation,
 ) -> Result<LabOffloadOutcome> {
     let mut metadata = lab_offload_metadata(
         &plan,
@@ -289,7 +289,7 @@ pub(crate) fn automatic_capability_fallback(
         None,
         Some(&reason),
     );
-    attach_lab_offload_overhead(&mut metadata, overhead);
+    attach_offload_selection(&mut metadata, observation);
     record_local_outcome(request)?;
     Ok(LabOffloadOutcome::RunLocal {
         metadata: Some(metadata),
@@ -310,7 +310,7 @@ pub(crate) fn automatic_capability_fallback_or_error(
     reason: String,
     remediation: Vec<String>,
     placement_decision: &homeboy_lab_contract::ExecutionPlacementDecision,
-    overhead: &LabOffloadOverhead,
+    observation: &OffloadObservation,
 ) -> Result<LabOffloadOutcome> {
     if !placement_decision
         .verifies_outcome(homeboy_lab_contract::EffectiveExecutionPlacement::Local)
@@ -329,7 +329,7 @@ pub(crate) fn automatic_capability_fallback_or_error(
         &selection.runner_id,
         runner_status,
         reason,
-        overhead,
+        observation,
     )
 }
 
