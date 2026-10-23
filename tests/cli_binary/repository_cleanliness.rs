@@ -53,6 +53,13 @@ fn review_verbs() -> Vec<Verb> {
 fn repository_cleanliness_review_verbs_leave_checkout_pristine() {
     let context = HermeticTestContext::new();
     let fixture = Fixture::new();
+    // Like the Cook gate below: the subject is checkout cleanliness, not how
+    // much free space the host's temp filesystem has.
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for the fixture checkout");
     let mut failures = Vec::new();
 
     for verb in review_verbs() {

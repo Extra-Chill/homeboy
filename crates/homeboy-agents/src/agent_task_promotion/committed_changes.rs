@@ -30,6 +30,7 @@ pub(crate) struct AdoptionMergeProof {
     pub(crate) resolved_base_tree: String,
 }
 
+/// The committed delta of an explicitly adopted candidate (`candidate_ref`).
 pub(crate) fn committed_changes_patch(
     options: &AgentTaskPromotionRequest,
 ) -> Result<Option<CommittedChangesPatch>> {
@@ -39,47 +40,24 @@ pub(crate) fn committed_changes_patch(
     if !worktree_path.is_dir() {
         return Ok(None);
     }
-    if options.candidate_ref.is_some() {
-        ensure_clean_source(worktree_path)?;
-    }
+    ensure_clean_source(worktree_path)?;
     let candidate = resolve_candidate(worktree_path, options.candidate_ref.as_deref())?;
-    if options.candidate_ref.is_some() {
-        let head = git_stdout(worktree_path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-        if candidate != head.trim() {
-            return Err(Error::validation_invalid_argument(
-                "candidate_ref",
-                "candidate revision must equal the recorded source worktree HEAD",
-                Some(candidate),
-                None,
-            ));
-        }
+    let head = git_stdout(worktree_path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    if candidate != head.trim() {
+        return Err(Error::validation_invalid_argument(
+            "candidate_ref",
+            "candidate revision must equal the recorded source worktree HEAD",
+            Some(candidate),
+            None,
+        ));
     }
-
-    let (base_ref, historical_task_base, adoption_merge) = if options.candidate_ref.is_some() {
-        resolve_adoption_candidate_base(
-            worktree_path,
-            &candidate,
-            options.task_base_sha.as_deref(),
-            options.base_ref.as_deref(),
-        )?
-    } else {
-        let Some(base_ref) = resolve_committed_changes_base(
-            worktree_path,
-            options.task_base_sha.as_deref(),
-            options.base_ref.as_deref(),
-        )?
-        else {
-            return Ok(None);
-        };
-        (base_ref, None, None)
-    };
-    let is_ancestor = Command::new("git")
-        .args(["merge-base", "--is-ancestor", &base_ref, &candidate])
-        .current_dir(worktree_path)
-        .status()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?
-        .success();
-    if !is_ancestor {
+    let (base_ref, historical_task_base, adoption_merge) = resolve_adoption_candidate_base(
+        worktree_path,
+        &candidate,
+        options.task_base_sha.as_deref(),
+        options.base_ref.as_deref(),
+    )?;
+    if !is_ancestor(worktree_path, &base_ref, &candidate)? {
         return Err(Error::validation_invalid_argument(
             "candidate_ref",
             "candidate revision is not descended from the recorded task base",
@@ -294,7 +272,7 @@ fn validate_adoption_parent_lineage(
     Ok(())
 }
 
-fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+pub(super) fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
     Command::new("git")
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(cwd)
@@ -361,54 +339,6 @@ fn committed_changes_patch_path(
     Ok(dir.join(format!("committed-changes-{sha256}.patch")))
 }
 
-fn resolve_committed_changes_base(
-    cwd: &Path,
-    task_base_sha: Option<&str>,
-    requested: Option<&str>,
-) -> Result<Option<String>> {
-    if let Some(base) = task_base_sha.filter(|value| !value.trim().is_empty()) {
-        let base = git_stdout(
-            cwd,
-            &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-        )?;
-        let is_ancestor = Command::new("git")
-            .args(["merge-base", "--is-ancestor", base.trim(), "HEAD"])
-            .current_dir(cwd)
-            .status()
-            .map_err(|error| Error::git_command_failed(error.to_string()))?
-            .success();
-        if !is_ancestor {
-            return Err(Error::validation_invalid_argument(
-                "task_base_sha",
-                "recorded task base is not an ancestor of the source workspace HEAD; refusing to promote unrelated or pre-existing commits",
-                Some(base.trim().to_string()),
-                None,
-            ));
-        }
-        return Ok(Some(base.trim().to_string()));
-    }
-    let mut candidates = Vec::new();
-    if let Some(requested) = requested.filter(|value| !value.trim().is_empty()) {
-        candidates.push(requested.to_string());
-        if !requested.contains('/') {
-            candidates.push(format!("origin/{requested}"));
-        }
-    }
-    candidates.push("@{upstream}".to_string());
-    for candidate in candidates {
-        if git_stdout(
-            cwd,
-            &["rev-parse", "--verify", &format!("{candidate}^{{commit}}")],
-        )
-        .is_ok()
-        {
-            let merge_base = git_stdout(cwd, &["merge-base", &candidate, "HEAD"])?;
-            return Ok(Some(merge_base.trim().to_string()));
-        }
-    }
-    Ok(None)
-}
-
 fn committed_change_evidence(cwd: &Path, range: &str) -> Result<Vec<Value>> {
     let output = git_stdout(
         cwd,
@@ -428,7 +358,7 @@ fn committed_change_evidence(cwd: &Path, range: &str) -> Result<Vec<Value>> {
         .collect())
 }
 
-fn git_lines(cwd: &Path, args: &[&str]) -> Result<Vec<String>> {
+pub(super) fn git_lines(cwd: &Path, args: &[&str]) -> Result<Vec<String>> {
     Ok(git_stdout(cwd, args)?
         .lines()
         .map(str::trim)

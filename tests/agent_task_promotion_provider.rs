@@ -80,6 +80,19 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
     git(&workspace, &["commit", "-m", "initial"]);
     let patch = temp.path().join("changes.patch");
     std::fs::write(&patch, PATCH).expect("patch");
+    // Fresh promotion admits a harvested candidate commit (#16303), so the
+    // input is a real `{base, candidate}` pair: the patch committed on a side
+    // branch while the destination stays at the base.
+    let base_sha = git_output(&workspace, &["rev-parse", "HEAD"]);
+    git(&workspace, &["checkout", "-q", "-b", "candidate"]);
+    git(
+        &workspace,
+        &["apply", "--index", patch.to_str().expect("patch path")],
+    );
+    git(&workspace, &["commit", "-q", "-m", "candidate"]);
+    let candidate_sha = git_output(&workspace, &["rev-parse", "HEAD"]);
+    let tree_sha = git_output(&workspace, &["rev-parse", "HEAD^{tree}"]);
+    git(&workspace, &["checkout", "-q", "-"]);
 
     let helper = temp.path().join("bind_socket");
     // Gate toolchain preflight probes this command with `--version` in the same
@@ -103,7 +116,8 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
         "schema": "homeboy/agent-task-outcome/v1",
         "task_id": "socket-gate",
         "status": "succeeded",
-        "artifacts": [{ "schema": "homeboy/agent-task-artifact/v1", "id": "patch", "kind": "patch", "path": patch }]
+        "artifacts": [{ "schema": "homeboy/agent-task-artifact/v1", "id": "patch", "kind": "patch", "path": patch }],
+        "candidate": { "base_sha": base_sha, "candidate_sha": candidate_sha, "tree_sha": tree_sha }
     })
     .to_string();
 
