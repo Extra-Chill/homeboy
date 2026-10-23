@@ -1234,21 +1234,29 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
         })
         .collect::<Vec<_>>();
     if !gate_lines.is_empty() {
-        visible.push(gate_lines.join("\n\n"));
-    } else if !base.is_empty() {
-        visible.push(format!("{}.", base.trim_start_matches(". ")));
+        // The CI entry continues the gate entries with no blank line so the
+        // whole Verification section renders as one list. (#16316)
+        visible.push(format!("{}\n- CI: pending", gate_lines.join("\n\n")));
+    } else {
+        if !base.is_empty() {
+            visible.push(format!("{}.", base.trim_start_matches(". ")));
+        }
+        visible.push("- CI: pending".to_string());
     }
-    visible.push("- CI: pending".to_string());
     let evidence = render_evidence(&dossier.evidence);
     if dossier.verified_commands.is_empty() {
         if !evidence.is_empty() {
             visible.push(evidence);
         }
     } else {
+        // Reviewer-resolvable labels only: `gate.id` is an internal positional
+        // id (`gate-1`) a reviewer cannot use, so each entry is labeled by its
+        // 1-based position among the visible gate lines above. (#16316)
         let mut provenance = dossier
             .verified_commands
             .iter()
-            .map(|command| {
+            .enumerate()
+            .map(|(position, command)| {
                 let counts = match (command.failed, command.ignored) {
                     (Some(failed), Some(ignored)) => {
                         format!("; {failed} failed, {ignored} ignored")
@@ -1256,8 +1264,8 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
                     _ => String::new(),
                 };
                 format!(
-                    "- `{}`: tree `{}`, fingerprint `{}`{counts}",
-                    code(&command.evidence_ref),
+                    "- Gate {}: tree `{}`, fingerprint `{}`{counts}",
+                    position + 1,
                     code(&command.candidate_tree),
                     code(&command.candidate_sha256),
                 )
@@ -2450,7 +2458,7 @@ mod tests {
         for expected in [
             "`cargo test connection` passed (175/177) on `candidate-commit`.",
             "<details><summary>Cook run</summary>",
-            "- `gate-connection`: tree `candidate-tree`, fingerprint `candidate-fingerprint`; 2 failed, 0 ignored",
+            "- Gate 1: tree `candidate-tree`, fingerprint `candidate-fingerprint`; 2 failed, 0 ignored",
         ] {
             assert!(body.contains(expected), "missing `{expected}` in {body}");
         }
@@ -2772,6 +2780,8 @@ mod tests {
                 "Used for:",
                 "CI:",
                 "<details><summary>Cook run</summary>",
+                // #16316: the collapsed block labels the entry by position.
+                "- Gate 1: tree `645eaae2998d0612cd2f08c977a31b49c06fec7d`",
             ] {
                 assert_eq!(rendered.matches(fact).count(), 1, "{fact}: {rendered}");
             }
@@ -2784,9 +2794,17 @@ mod tests {
                 "\\`",
                 "\\_",
                 "Used for: AI disclosure:",
+                // #16316: internal gate ids are not reviewer-resolvable labels.
+                "gate-1",
             ] {
                 assert!(!rendered.contains(forbidden), "{forbidden}: {rendered}");
             }
+            // #16316: the CI entry directly follows the gate entries, so the
+            // whole Verification section renders as one list, not two.
+            assert!(
+                rendered.contains("\n- CI: pending") && !rendered.contains("\n\n- CI: pending"),
+                "CI must continue the verification list without a blank line: {rendered}"
+            );
         }
         // The gate command appears once, runnable, and the disclosure once.
         assert_eq!(body.matches("cargo fmt --all -- --check").count(), 1);
