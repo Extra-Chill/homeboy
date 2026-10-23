@@ -186,7 +186,7 @@
       "state": {
         "failing": true,
         "iteration": 1,
-        "reason": "step `cook` did not succeed",
+        "reason": "step `cook` did not succeed: `foreach` resolved to `abc123`, not an array",
         "status": "running",
         "step_runs": 2,
         "steps": {
@@ -223,7 +223,7 @@
       "commands": [
         {
           "command": "complete",
-          "reason": "step `cook` did not succeed",
+          "reason": "step `cook` did not succeed: `foreach` resolved to `abc123`, not an array",
           "status": "failed"
         }
       ],
@@ -236,7 +236,7 @@
       "state": {
         "failing": true,
         "iteration": 1,
-        "reason": "step `cook` did not succeed",
+        "reason": "step `cook` did not succeed: `foreach` resolved to `abc123`, not an array",
         "status": "failed",
         "step_runs": 2,
         "steps": {

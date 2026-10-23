@@ -16,6 +16,49 @@ use super::*;
 
 const INSTANCE: &str = "wf-golden";
 
+#[test]
+fn foreach_failure_keeps_item_error_and_first_failure_reason() {
+    let definition = parse_definition(&json!({
+        "schema": "homeboy/workflow/v1",
+        "id": "fan-error",
+        "steps": [{
+            "id": "work", "foreach": ["a", "b"], "max_parallel": 2,
+            "exec": {"program": "sh", "args": ["-c", "false"]}
+        }]
+    }));
+    let initial = InstanceState::new(&definition, INSTANCE, BTreeMap::new());
+    let (mut state, _) = advance(&definition, &initial, &Event::Start, 0);
+    let keys: Vec<_> = state.steps["work"]
+        .items
+        .iter()
+        .map(|item| item.key.clone().unwrap())
+        .collect();
+    for (index, key) in keys.into_iter().enumerate() {
+        let error = format!("failure {index}");
+        (state, _) = advance(
+            &definition,
+            &state,
+            &Event::StepFinished(StepResult {
+                key,
+                status: FinishedStatus::Failed,
+                error: Some(error.clone()),
+                outcome: None,
+                output: None,
+                run_id: None,
+            }),
+            1,
+        );
+        assert_eq!(
+            state.steps["work"].items[index].error.as_deref(),
+            Some(error.as_str())
+        );
+    }
+    assert_eq!(
+        state.reason.as_deref(),
+        Some("step `work` did not succeed: failure 0")
+    );
+}
+
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workflow/golden")
 }
@@ -233,6 +276,7 @@ fn world(submission: &StepSubmission) -> StepResult {
         _ => None,
     };
     StepResult {
+        error: None,
         key: submission.key.clone(),
         status,
         outcome,
@@ -308,6 +352,7 @@ fn fan_out_scenario() -> Scenario {
             _ => None,
         };
         StepResult {
+            error: None,
             key: submission.key.clone(),
             status: if failed {
                 FinishedStatus::Failed
@@ -442,6 +487,7 @@ fn drive(scenario: &Scenario, crash: Option<(usize, Crash)>) -> Ledger {
             }
             if row.cancel_requested {
                 row.result = Some(StepResult {
+                    error: None,
                     key: key.clone(),
                     status: FinishedStatus::Cancelled,
                     outcome: None,
@@ -630,6 +676,7 @@ fn terminal_instances_ignore_every_event() {
             iteration: 2,
         },
         Event::StepFinished(StepResult {
+            error: None,
             key: "wf-golden/fix/1/2".into(),
             status: FinishedStatus::Succeeded,
             outcome: None,

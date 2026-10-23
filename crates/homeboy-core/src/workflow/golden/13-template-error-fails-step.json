@@ -91,7 +91,7 @@
       "commands": [
         {
           "command": "complete",
-          "reason": "step `b` did not succeed",
+          "reason": "step `b` did not succeed: step `a` output has no value at `/missing`",
           "status": "failed"
         }
       ],
@@ -107,7 +107,7 @@
       "state": {
         "failing": true,
         "iteration": 1,
-        "reason": "step `b` did not succeed",
+        "reason": "step `b` did not succeed: step `a` output has no value at `/missing`",
         "status": "failed",
         "step_runs": 1,
         "steps": {
