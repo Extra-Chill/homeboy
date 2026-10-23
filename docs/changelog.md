@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.0] - 2026-10-23
+
+### Added
+- record phase spans on the run ledger and aggregate them in runs hotspots
+
+### Changed
+- Let focused cargo gates pass on substring selections; keep NoTests failing closed
+- Run replacement gates at the Cook’s resolved placement
+- Cook PR body: one Verification list and Gate N labels in the Cook run block
+
 ## [0.432.5] - 2026-10-23
 
 ### Changed
