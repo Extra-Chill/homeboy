@@ -17,6 +17,13 @@ use crate::build_identity;
 use crate::error::{Error, ErrorCode, Result};
 use crate::paths;
 
+mod upgrade_drain;
+pub use upgrade_drain::{
+    begin_upgrade_drain, ensure_runner_upgrade_drain_admission, ensure_upgrade_drain_admission,
+    ensure_upgrade_drain_request, remote_upgrade_drain, runner_is_draining,
+    upgrade_drain_operation, UpgradeDrainGuard,
+};
+
 const LEASE_DIR: &str = "promotion.lock";
 const LEASE_FILE: &str = "lease.json";
 const ADMISSION_LOCK_FILE: &str = "admission.lock";
@@ -1152,6 +1159,7 @@ fn pin_cook_runtime_waiting(
     mut is_cancelled: impl FnMut() -> bool,
     mut progress: impl FnMut(RuntimePromotionWaitEvent),
 ) -> Result<RuntimeGenerationPinGuard> {
+    ensure_upgrade_drain_admission(Some(cook_id), None)?;
     let promotion_root = paths::runtime_promotion_dir()?;
     fs::create_dir_all(&promotion_root).map_err(io("create runtime promotion directory"))?;
     let transaction = validated_pin_transaction(&promotion_root);

@@ -217,6 +217,33 @@ pub fn run_upgrade_with_method(
     source_path: Option<&Path>,
     pinned_version: Option<&str>,
 ) -> Result<UpgradeResult> {
+    run_upgrade_with_drain(
+        force,
+        method_override,
+        skip_extensions,
+        skip_runners,
+        skip_services,
+        runner_only,
+        runner_targets,
+        source_path,
+        pinned_version,
+        super::UpgradeDrainOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_upgrade_with_drain(
+    force: bool,
+    method_override: Option<InstallMethod>,
+    skip_extensions: bool,
+    skip_runners: bool,
+    skip_services: bool,
+    runner_only: bool,
+    runner_targets: &[String],
+    source_path: Option<&Path>,
+    pinned_version: Option<&str>,
+    drain_options: super::UpgradeDrainOptions,
+) -> Result<UpgradeResult> {
     if runner_only {
         if pinned_version.is_some() {
             return Err(pinned_version_scope_error(
@@ -236,6 +263,7 @@ pub fn run_upgrade_with_method(
         source_path,
         pinned_version,
         UpgradeOperation::start_durable("homeboy upgrade")?,
+        drain_options,
     )
 }
 
@@ -250,18 +278,31 @@ pub(super) fn run_upgrade_with_operation(
     source_path: Option<&Path>,
     pinned_version: Option<&str>,
     mut operation: UpgradeOperation,
+    drain_options: super::UpgradeDrainOptions,
 ) -> Result<UpgradeResult> {
-    let upgrade_result = run_controller_upgrade_with_operation(
-        force,
-        method_override,
-        skip_extensions,
-        skip_runners,
-        skip_services,
-        runner_targets,
-        source_path,
-        pinned_version,
-        &mut operation,
-    );
+    let mut drain_guard =
+        super::drain::drain(&mut operation, runner_targets, skip_runners, drain_options);
+    let upgrade_result = drain_guard
+        .as_mut()
+        .map_err(|error| error.clone())
+        .and_then(|guard| {
+            run_controller_upgrade_with_operation(
+                force,
+                method_override,
+                skip_extensions,
+                skip_runners,
+                skip_services,
+                runner_targets,
+                source_path,
+                pinned_version,
+                &mut operation,
+            )
+            .and_then(|result| {
+                operation.set_phase_durable("resuming_admission")?;
+                guard.resume()?;
+                Ok(result)
+            })
+        });
     match upgrade_result {
         Ok(result) => complete_upgrade_operation(operation, result),
         Err(mut error) => {
@@ -2231,14 +2272,13 @@ fn converge_resident_daemon_after_controller_reconciliation(
     ) {
         PromotedDaemonStart::InProcess => converge_invoking_daemon(),
         PromotedDaemonStart::AlreadyInstalled => Ok(false),
-        PromotedDaemonStart::PendingRestart => {
-            warn_pending_daemon_restart(if status.freshness.active_jobs > 0 {
+        PromotedDaemonStart::PendingRestart => Err(upgrade_daemon_start_required(
+            if status.freshness.active_jobs > 0 {
                 "the stale resident daemon has jobs in flight"
             } else {
                 "the stale resident daemon has no exact lease identity to stop safely"
-            });
-            Ok(false)
-        }
+            },
+        )),
         PromotedDaemonStart::StopForLease => {
             // Homeboy did not launch this daemon (for example a systemd unit
             // running `daemon serve`), so it cannot restart it, but stopping an
@@ -2252,13 +2292,11 @@ fn converge_resident_daemon_after_controller_reconciliation(
                 .lease_id
                 .as_deref()
                 .expect("StopForLease requires a lease");
-            if let Err(error) = homeboy_core::daemon::stop_for_lease(lease_id) {
-                warn_pending_daemon_restart(&format!(
-                    "the idle stale daemon could not be stopped: {}",
-                    error.message
-                ));
-            }
-            Ok(false)
+            homeboy_core::daemon::stop_for_lease(lease_id)
+                .map_err(|error| upgrade_daemon_start_required(&error.message))?;
+            // A supervisor may restart it itself. Starting via the installed
+            // binary is idempotent and verifies the new lease either way (#15967).
+            start_installed_daemon(installed_identity, None)
         }
         PromotedDaemonStart::InstalledBinary => start_installed_daemon(installed_identity, None),
         PromotedDaemonStart::RestartInstalledBinary => {
@@ -2309,15 +2347,6 @@ fn promoted_daemon_start(
     }
 }
 
-/// The upgrade itself succeeded; only the resident daemon still runs the old
-/// build. Say so on stderr, which stays visible when a controller captures
-/// output, with the command that converges it once the daemon is idle.
-fn warn_pending_daemon_restart(reason: &str) {
-    eprintln!(
-        "[upgrade] daemon restart pending: {reason}; once it is idle run `homeboy daemon recover --yes` (or restart its service)"
-    );
-}
-
 fn converge_invoking_daemon() -> Result<bool> {
     match homeboy_core::daemon::converge_current_build_idle_daemon() {
         // The binary swap already succeeded. A resident daemon Homeboy may not
@@ -2326,8 +2355,7 @@ fn converge_invoking_daemon() -> Result<bool> {
         Err(error)
             if error.details.get("restart_required") == Some(&serde_json::Value::Bool(true)) =>
         {
-            warn_pending_daemon_restart(&error.message);
-            Ok(false)
+            Err(upgrade_daemon_start_required(&error.message))
         }
         result => result.map_err(upgrade_daemon_startup_error),
     }
@@ -2368,11 +2396,7 @@ fn start_installed_daemon(installed_identity: &str, stop_lease_id: Option<&str>)
         // A refused stop leaves the old daemon serving; starting a second one
         // would only contend for its owner lock. Report it pending (#15436).
         if let Err(error) = homeboy_core::daemon::stop_for_lease(lease_id) {
-            warn_pending_daemon_restart(&format!(
-                "the stale daemon could not be stopped: {}",
-                error.message
-            ));
-            return Ok(false);
+            return Err(upgrade_daemon_start_required(&error.message));
         }
     }
     let binary = active_binary_path()?;

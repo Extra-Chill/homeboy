@@ -983,7 +983,13 @@ fn upgrade_runner_convergence_diagnostics(
     exit_code: i32,
     data: &Value,
 ) -> Option<CommandDiagnostics> {
-    if !is_partial_upgrade_outcome(data) {
+    if !is_partial_upgrade_outcome(data)
+        && !(data["command"] == "upgrade"
+            && matches!(
+                data["outcome"].as_str(),
+                Some("runner_preflight_failed" | "extension_preflight_failed")
+            ))
+    {
         return None;
     }
 
@@ -991,8 +997,20 @@ fn upgrade_runner_convergence_diagnostics(
         .get("message")
         .and_then(Value::as_str)
         .filter(|message| !message.trim().is_empty())
-        .unwrap_or("Controller installation succeeded, but configured runners did not converge")
+        .unwrap_or("Upgrade did not converge")
         .to_string();
+    let causes = data["runners_skipped"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|runner| runner["detail"].as_str())
+        .take(4)
+        .collect::<Vec<_>>();
+    let message = if causes.is_empty() {
+        message
+    } else {
+        format!("{message}: {}", causes.join("; "))
+    };
     let runners = data
         .get("runners_updated")
         .and_then(Value::as_array)

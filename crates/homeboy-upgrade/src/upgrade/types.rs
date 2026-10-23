@@ -239,6 +239,35 @@ pub struct UpgradeResult {
     pub operation_id: Option<String>,
 }
 
+impl UpgradeResult {
+    /// One terminal contract for durable status, the result envelope and CLI.
+    pub fn exit_code(&self) -> i32 {
+        i32::from(
+            self.partial
+                || self.runner_convergence == Some(RunnerConvergenceDisposition::Partial)
+                || self
+                    .runners_updated
+                    .iter()
+                    .chain(&self.runners_skipped)
+                    .any(|runner| !runner.success)
+                || !self.services_pending_restart.is_empty()
+                || [&self.controller, &self.extensions, &self.runners]
+                    .into_iter()
+                    .flatten()
+                    .any(|component| {
+                        matches!(
+                            component.status.as_str(),
+                            "failed"
+                                | "partial"
+                                | "runner_preflight_failed"
+                                | "extension_preflight_failed"
+                                | "interrupted"
+                        )
+                    }),
+        )
+    }
+}
+
 /// Compact named outcome for one upgrade dimension. Detailed build output stays
 /// in the existing per-runner evidence fields rather than obscuring the result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -400,6 +429,39 @@ pub struct RunnerDaemonDriftEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_code_rejects_every_reported_failure() {
+        let baseline: UpgradeResult = serde_json::from_str(r#"{"command":"upgrade","install_method":"binary","previous_version":"1","new_version":"2","upgraded":true,"message":"ok","restart_required":false}"#).unwrap();
+        assert_eq!(baseline.exit_code(), 0);
+        for status in [
+            "failed",
+            "partial",
+            "runner_preflight_failed",
+            "extension_preflight_failed",
+            "interrupted",
+        ] {
+            for dimension in 0..3 {
+                let mut result = baseline.clone();
+                let component = Some(UpgradeComponentStatus {
+                    status: status.into(),
+                    summary: "failure".into(),
+                });
+                match dimension {
+                    0 => result.controller = component,
+                    1 => result.extensions = component,
+                    _ => result.runners = component,
+                }
+                assert_ne!(result.exit_code(), 0, "{dimension}: {status}");
+            }
+        }
+        let mut partial = baseline.clone();
+        partial.partial = true;
+        assert_ne!(partial.exit_code(), 0);
+        let mut convergence = baseline;
+        convergence.runner_convergence = Some(RunnerConvergenceDisposition::Partial);
+        assert_ne!(convergence.exit_code(), 0);
+    }
 
     #[test]
     fn upgrade_response_without_new_fields_remains_deserializable() {

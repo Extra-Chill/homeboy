@@ -16,6 +16,30 @@ use homeboy_core::error::Result;
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
 /// the runner layer and registered at startup.
 pub trait RunnerUpgradeProvider: Send + Sync {
+    fn drain_targets(&self, _targets: &[String]) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+    fn set_upgrade_drain(
+        &self,
+        _targets: &[String],
+        _operation: &str,
+        _runs: &[String],
+        _resume: bool,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn verify_upgrade_admission(&self, _targets: &[String]) -> Result<()> {
+        Ok(())
+    }
+    /// Authoritative live jobs; an unavailable inventory must fail closed.
+    fn drain_jobs(&self, _targets: &[String]) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+    fn cancel_drain_job(&self, _runner: &str, _job: &str) -> Result<()> {
+        Err(homeboy_core::Error::internal_unexpected(
+            "runner cancellation unavailable",
+        ))
+    }
     /// Read-only admission for selected runners before any controller,
     /// extension, or runner mutation. Implementations validate source inputs
     /// when relevant and runner extension manifests against `candidate_version`.

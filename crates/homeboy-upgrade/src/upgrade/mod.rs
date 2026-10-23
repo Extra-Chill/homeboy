@@ -1,6 +1,8 @@
 mod admission;
 mod constants;
 mod detached;
+mod drain;
+pub use drain::UpgradeDrainOptions;
 mod execution;
 pub mod extension_update_check;
 mod helpers;
@@ -26,7 +28,7 @@ pub use execution::{
 };
 pub use helpers::{
     current_build_version, current_version, detect_install_method, fetch_latest_version,
-    run_upgrade_with_method, version_is_newer,
+    run_upgrade_with_drain, run_upgrade_with_method, version_is_newer,
 };
 pub use operation::{
     load_upgrade_operation_status, UpgradeOperationFailure, UpgradeOperationStatus,

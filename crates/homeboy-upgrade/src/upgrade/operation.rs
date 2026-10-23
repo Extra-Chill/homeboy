@@ -18,7 +18,9 @@ use homeboy_core::observation::{
     RunListFilter, RunRecord, RunStatus,
 };
 
-use super::types::{RunnerConvergenceDisposition, UpgradeComponentStatus, UpgradeResult};
+#[cfg(test)]
+use super::types::RunnerConvergenceDisposition;
+use super::types::{UpgradeComponentStatus, UpgradeResult};
 
 pub const UPGRADE_OPERATION_KIND: &str = "upgrade";
 pub const UPGRADE_OPERATION_SCHEMA: &str = "homeboy/upgrade-operation/v1";
@@ -260,6 +262,18 @@ impl UpgradeOperation {
         &self.metadata["detached_request"]
     }
 
+    pub(super) fn record_cancelled_durable(&mut self, identity: &str) -> Result<()> {
+        emit_upgrade_phase(&format!("cancelled {identity}"));
+        if !self.metadata["cancelled"].is_array() {
+            self.metadata["cancelled"] = json!([]);
+        }
+        self.metadata["cancelled"]
+            .as_array_mut()
+            .expect("array")
+            .push(json!(identity));
+        self.persist_durable()
+    }
+
     pub fn set_phase_durable(&mut self, phase: &str) -> Result<()> {
         emit_upgrade_phase(phase);
         self.metadata["phase"] = json!(phase);
@@ -403,13 +417,7 @@ impl UpgradeOperation {
         }
         self.metadata["phase"] = json!("completed");
         self.metadata["elapsed_seconds"] = json!(self.started.elapsed().as_secs());
-        let status = if result.runner_convergence == Some(RunnerConvergenceDisposition::Partial)
-            || result.controller.as_ref().is_some_and(|controller| {
-                matches!(
-                    controller.status.as_str(),
-                    "failed" | "runner_preflight_failed" | "extension_preflight_failed"
-                )
-            }) {
+        let status = if result.exit_code() != 0 {
             RunStatus::Fail
         } else {
             RunStatus::Pass
@@ -670,7 +678,7 @@ impl Drop for UpgradeOperation {
                     "runner refresh did not finish after controller promotion",
                 );
             }
-            self.finish(RunStatus::Pass);
+            self.finish(RunStatus::Error);
             return;
         }
         self.metadata["phase"] = json!("interrupted");
@@ -1697,7 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupting_after_controller_promotion_is_not_a_failed_install() {
+    fn interrupting_after_controller_promotion_preserves_install_but_fails_operation() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let id = {
                 let mut operation = UpgradeOperation::start("homeboy upgrade");
@@ -1711,7 +1719,8 @@ mod tests {
             };
 
             let status = load_upgrade_operation_status(Some(&id)).expect("load status");
-            assert_eq!(status.status, RunStatus::Pass.as_str());
+            assert_eq!(status.status, RunStatus::Error.as_str());
+            assert!(status.failed);
             assert_eq!(status.phase, "interrupted_after_controller");
             assert_eq!(
                 status

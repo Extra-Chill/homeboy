@@ -116,6 +116,12 @@ impl ControllerUpgradeAdmission {
 pub trait ControllerUpgradeAdmissionProvider: Send + Sync {
     fn controller_upgrade_admission(&self) -> Result<ControllerUpgradeAdmission>;
 
+    fn cancel_for_upgrade(&self, run_id: &str) -> Result<()> {
+        Err(Error::internal_unexpected(format!(
+            "cannot cancel durable Cook {run_id}: lifecycle provider unavailable"
+        )))
+    }
+
     /// Repair only ownership that the target controller can prove is stale
     /// fixture provenance, then re-evaluate admission. This is invoked only by
     /// a checksum- and version-verified staged release candidate.
