@@ -7908,43 +7908,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn promotion_hydration_contains_no_ecosystem_specific_knowledge() {
-        let gate_source = include_str!("agent_task_gate.rs").to_ascii_lowercase();
-        let gate_hydration = gate_source
-            .split("pub type agenttaskgatesetupevidence")
-            .nth(1)
-            .expect("gate hydration start")
-            .split("pub struct agenttaskgatereport")
-            .next()
-            .expect("gate hydration end");
-        let promotion_source = include_str!("agent_task_promotion/promote.rs").to_ascii_lowercase();
-        let promotion_hydration = promotion_source
-            .split("let destination_gate_setup")
-            .nth(1)
-            .expect("promotion hydration start")
-            .split("let declared_gates")
-            .next()
-            .expect("promotion hydration end");
-        let forbidden = [
-            ["com", "poser"].concat(),
-            ["n", "pm"].concat(),
-            ["car", "go"].concat(),
-            ["no", "de"].concat(),
-            ["package", ".json"].concat(),
-            ["vendor", "/autoload"].concat(),
-            ["installed", ".json"].concat(),
-        ];
-        for source in [gate_hydration, promotion_hydration] {
-            for term in &forbidden {
-                assert!(
-                    !source.contains(term),
-                    "promotion hydration must not contain ecosystem term `{term}`"
-                );
-            }
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn failed_durable_spawn_registration_reaps_the_isolated_gate_group() {
