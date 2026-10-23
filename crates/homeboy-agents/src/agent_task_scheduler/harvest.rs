@@ -134,14 +134,23 @@ pub(super) fn harvest_candidate_commit(
     outcome
         .artifacts
         .retain(|artifact| artifact.kind != CANDIDATE_BUNDLE_ARTIFACT_KIND);
-    let Some(base) = running.task_base_sha.as_deref() else {
-        return Ok(());
-    };
     let Some(root) = running.request.workspace.root.as_deref().map(Path::new) else {
         return Ok(());
     };
-    if !git_is_repository(root)? || !git_is_ancestor(root, base, "HEAD")? {
-        return Ok(());
+    // A workspace attempt that reports a change must yield a candidate.
+    let patches: Vec<String> = (outcome.artifacts.iter())
+        .filter(|artifact| is_actionable_patch_artifact(artifact))
+        .filter_map(|artifact| artifact.path.clone())
+        .collect();
+    let missing = |missing| Err(HarvestError::CandidateUnavailable { missing });
+    let base = match running.task_base_sha.as_deref() {
+        Some(base) if git_is_repository(root)? => base,
+        _ if patches.is_empty() => return Ok(()),
+        None => return missing("task base sha"),
+        Some(_) => return missing("Git repository at the attempt workspace root"),
+    };
+    if !git_is_ancestor(root, base, "HEAD")? {
+        return missing("task base as an ancestor of the attempt HEAD");
     }
     let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
         command: "create candidate harvest Git index".to_string(),
@@ -152,8 +161,16 @@ pub(super) fn harvest_candidate_commit(
     let index_env: &[(&str, &str)] = &[("GIT_INDEX_FILE", index_path.as_str())];
     git_output_with_env(root, &["read-tree", "HEAD"], index_env)?;
     git_output_with_env(root, &["add", "--all", "--", "."], index_env)?;
-    let tree = git_output_with_env(root, &["write-tree"], index_env)?;
-    if tree == git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])? {
+    let mut tree = git_output_with_env(root, &["write-tree"], index_env)?;
+    let base_tree = git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])?;
+    if tree == base_tree && !patches.is_empty() {
+        // The provider returned its change as a patch file; commit it here.
+        for path in &patches {
+            git_output_with_env(root, &["apply", "--cached", "--binary", path], index_env)?;
+        }
+        tree = git_output_with_env(root, &["write-tree"], index_env)?;
+    }
+    if tree == base_tree {
         return Ok(());
     }
     let head = git_output(root, &["rev-parse", "HEAD^{commit}"])?;
@@ -728,6 +745,9 @@ pub(crate) enum HarvestError {
     SnapshotInvalidated {
         message: String,
     },
+    CandidateUnavailable {
+        missing: &'static str,
+    },
 }
 
 pub(super) fn committed_harvest_preflight_outcome(task_id: String) -> AgentTaskOutcome {
@@ -810,6 +830,11 @@ pub(super) fn committed_harvest_failure(
             "agent_task.workspace_snapshot_invalidated",
             format!("Cook workspace snapshot was invalidated before provider execution: {message}"),
             serde_json::json!({ "error": message, "pre_provider": true }),
+        ),
+        HarvestError::CandidateUnavailable { missing } => (
+            "agent_task.candidate_harvest_unavailable",
+            format!("attempt reported a change but no candidate commit can be harvested: missing {missing}"),
+            serde_json::json!({ "missing": missing }),
         ),
     };
     if preserve_execution_failure {
@@ -1970,5 +1995,81 @@ mod committed_harvest_tests {
 
         assert_eq!(outcome.candidate, None);
         assert!(git(&workspace, &["for-each-ref", "refs/homeboy/candidates"]).is_empty());
+    }
+    fn patch_outcome(running: &RunningTask, patch: &Path) -> AgentTaskOutcome {
+        let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        outcome.artifacts.push(AgentTaskArtifact {
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
+            path: Some(patch.display().to_string()),
+            size_bytes: std::fs::metadata(patch).ok().map(|metadata| metadata.len()),
+            ..AgentTaskArtifact::default()
+        });
+        outcome
+    }
+
+    /// The fixture provider and test executors hand their change back as a
+    /// patch file outside an unchanged attempt workspace. That Cook path used
+    /// to record no candidate, so fresh promotion refused it (#16303).
+    #[test]
+    fn patch_only_provider_attempt_harvests_a_candidate_commit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        let patch = temp.path().join("changes.patch");
+        std::fs::write(
+            &patch,
+            "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-base\n+after\n",
+        )
+        .expect("provider patch");
+        let index_before = std::fs::read(workspace.join(".git/index")).expect("index");
+        let running = committed_harvest_running_task(temp.path(), &workspace, None, base.clone());
+        let mut outcome = patch_outcome(&running, &patch);
+
+        harvest_uncommitted_patch(&mut outcome, &running)
+            .and_then(|_| harvest_committed_patch(&mut outcome, &running))
+            .and_then(|_| harvest_candidate_commit(&mut outcome, &running))
+            .expect("harvest");
+
+        let candidate = outcome
+            .candidate
+            .expect("patch-only attempt has a candidate");
+        assert_eq!(candidate.base_sha, base);
+        let show = format!("{}:file.txt", candidate.candidate_sha);
+        assert_eq!(git(&workspace, &["show", &show]), "after");
+        assert_eq!(git(&workspace, &["status", "--porcelain"]), "");
+        assert_eq!(
+            std::fs::read(workspace.join(".git/index")).expect("index"),
+            index_before
+        );
+    }
+
+    #[test]
+    fn reported_change_without_a_candidate_input_is_a_typed_harvest_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        let patch = temp.path().join("changes.patch");
+        std::fs::write(&patch, "diff --git a/file.txt b/file.txt\n").expect("provider patch");
+        let mut running = committed_harvest_running_task(temp.path(), &workspace, None, base);
+        running.task_base_sha = None;
+        let mut outcome = patch_outcome(&running, &patch);
+
+        let error = harvest_candidate_commit(&mut outcome, &running).expect_err("refused");
+
+        assert!(
+            matches!(
+                error,
+                HarvestError::CandidateUnavailable {
+                    missing: "task base sha"
+                }
+            ),
+            "{error:?}"
+        );
+        let failed = committed_harvest_failure(outcome, error);
+        assert_eq!(failed.status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            failed.diagnostics.last().expect("diagnostic").data["missing"],
+            "task base sha"
+        );
     }
 }

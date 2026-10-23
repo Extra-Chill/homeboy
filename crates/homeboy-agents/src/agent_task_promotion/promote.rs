@@ -1885,14 +1885,14 @@ pub(crate) fn promotable_candidate(
 ) -> Option<&crate::agent_task::AgentTaskCandidate> {
     outcome.candidate.as_ref().filter(|_| {
         outcome.status != AgentTaskOutcomeStatus::CandidateRecoverable
-            || !outcome_has_actionable_patch_artifacts(outcome)
+            || !outcome.artifacts.iter().any(is_actionable_patch_artifact)
     })
 }
 
 /// An outcome whose change exists only as a patch artifact predates candidate
 /// commits (#16303). There is no compatibility reader: it is not promotable.
 pub(crate) fn patch_only_outcome_error(outcome: &AgentTaskOutcome) -> Option<Error> {
-    if outcome.candidate.is_some() || !outcome_has_actionable_patch_artifacts(outcome) {
+    if outcome.candidate.is_some() || !outcome.artifacts.iter().any(is_actionable_patch_artifact) {
         return None;
     }
     let mut error = Error::validation_invalid_argument(
@@ -1903,16 +1903,6 @@ pub(crate) fn patch_only_outcome_error(outcome: &AgentTaskOutcome) -> Option<Err
     );
     error.details["recoverable"] = json!(false);
     Some(error)
-}
-
-/// Whether the outcome carries a patch artifact that could actually be applied.
-///
-/// An empty patch artifact is a claim that the provider changed nothing, not
-/// evidence of promotable work. Promotion fallbacks must therefore key on
-/// actionable artifacts: a provider that committed its work and emitted an
-/// empty patch still has a real candidate to harvest from the worktree.
-fn outcome_has_actionable_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
-    outcome.artifacts.iter().any(is_actionable_patch_artifact)
 }
 
 fn has_recoverable_candidate_provenance(
