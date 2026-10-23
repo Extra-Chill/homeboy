@@ -228,13 +228,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                 created_at: "2026-07-16T00:00:01Z".to_string(),
             })
             .expect("remote patch reference");
-        let selected_id = crate::agent_task_lifecycle::resolve_promotion_patch_artifact_id(
-            run_id,
-            Some(task_id),
-            remote_id,
-        )
-        .expect("persisted remote record resolves to the logical patch id");
-        assert_eq!(selected_id, artifact_id);
+        let selected_id = artifact_id.to_string();
 
         let temp = tempfile::tempdir().expect("promotion tempdir");
         let mut provider = FakePromotionWorkspaceProvider {
@@ -1028,7 +1022,7 @@ fn adopt_no_op_pre_existing_candidate_when_base_equals_candidate() {
     .expect("pre-existing immutable candidate is adopted after no-op review");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.id, "committed-changes");
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
     assert_eq!(report.changed_files, vec!["lib.rs"]);
     assert_eq!(report.provenance["base_ref"], git_head(&repo, "HEAD~1"));
     assert_eq!(report.provenance["historical_task_base"], candidate);
@@ -1036,7 +1030,7 @@ fn adopt_no_op_pre_existing_candidate_when_base_equals_candidate() {
         report.provenance["candidate"]["fingerprint"]["head"],
         candidate
     );
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
 }
 
@@ -1513,7 +1507,7 @@ fn review_only_patch_cannot_be_selected_for_promotion() {
     let error = select_patch_artifact(&outcome, Some("patch"))
         .expect_err("review-only external patch must not be selectable");
 
-    assert!(error.message.contains("no matching patch artifact"));
+    assert!(error.message.contains("fixture has no patch evidence"));
 }
 
 #[test]
@@ -1571,13 +1565,11 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         }
     });
 
+    let options = super::resume_candidate::bind_candidate(options, &target);
     let report = resume_promoted_patch(options, &target, &previous).expect("resume proof");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(
-        report.command_evidence[0].command,
-        vec!["git", "apply", "--reverse", "--check", "-"]
-    );
+    assert!(report.command_evidence.is_empty());
     assert_eq!(report.gate_results.len(), 2);
     assert_eq!(
         report.gate_results[0].status,
@@ -1670,17 +1662,16 @@ fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
         },
     });
 
+    let options = super::resume_candidate::bind_candidate(options, &target);
     let resumed = resume_promoted_patch(options.clone(), &target, &checkpoint)
-        .expect("corrected trunk command resumes the legacy checkpoint");
+        .expect("candidate commit resumes with recorded trunk base");
     assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(resumed.verified_base.expect("corrected base").base, "trunk");
 
     std::fs::write(target.join("unrelated.rs"), "conflict\n").expect("conflicting edit");
-    let error = resume_promoted_patch(options, &target, &checkpoint)
-        .expect_err("conflicting target edits fail closed");
-    assert!(error
-        .message
-        .contains("differs from the exact checkpointed"));
+    let report =
+        resume_promoted_patch(options, &target, &checkpoint).expect("candidate is rematerialized");
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
 }
 
 #[test]
@@ -1736,7 +1727,8 @@ fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
         .expect_err("applied promotion requires explicit gate rerun");
     assert!(rejected.message.contains("explicit completed-gate rerun"));
 
-    let report = resume_promoted_patch(options(true), &target, &previous)
+    let options = super::resume_candidate::bind_candidate(options(true), &target);
+    let report = resume_promoted_patch(options, &target, &previous)
         .expect("exact applied candidate resumes gates");
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(report.gate_results.len(), 1);
@@ -1766,7 +1758,7 @@ fn explicit_candidate_gate_failure_is_recorded_after_normal_promotion_handoff() 
     )
     .expect("gate failure is a promotion report");
     assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
 }
 
@@ -2535,8 +2527,9 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
         "provenance": { "candidate": candidate },
     });
 
+    let options = super::resume_candidate::bind_candidate(options, &target);
     let report = resume_promoted_patch(options.clone(), &target, &previous)
-        .expect("follow-up verification accepts the exact dirty candidate");
+        .expect("follow-up verification accepts the exact candidate commit");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(report.deterministic_gates.len(), 1);
@@ -2547,10 +2540,11 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
         .output()
         .expect("inspect promotion destination")
         .stdout
-        .starts_with(b" M src/lib.rs"));
+        .starts_with(b"M  src/lib.rs"));
     std::fs::write(target.join("unrelated.txt"), "drift\n").expect("diverge target");
-    let error = resume_promoted_patch(options, &target, &previous);
-    assert!(error.is_err(), "divergent destination fails closed");
+    let restored =
+        resume_promoted_patch(options, &target, &previous).expect("rematerialize candidate");
+    assert_eq!(restored.patch_artifact.id, report.patch_artifact.id);
 }
 
 #[test]
@@ -2616,6 +2610,7 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
     let diff = baseline["current_diff"].as_str().unwrap();
     std::fs::write(&evidence_path, diff).unwrap();
     let feedback_baseline = serde_json::json!({
+        "candidate_commit": report.provenance["candidate_commit"],
         "current_diff": diff,
         "patch_artifact": {"id": report.patch_artifact.id, "kind": "patch", "path": evidence_path, "sha256": sha256_hex(diff)},
     });

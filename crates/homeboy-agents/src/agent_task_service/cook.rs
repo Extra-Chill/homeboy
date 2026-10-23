@@ -137,11 +137,8 @@ fn cook_recover_command_with_prefix(
     cook_or_attempt_id: &str,
     artifact_id: Option<&str>,
 ) -> String {
-    let mut args = vec!["recover", cook_or_attempt_id];
-    if let Some(artifact_id) = artifact_id {
-        args.extend(["--artifact-id", artifact_id]);
-    }
-    cook_recovery_command_with_prefix(executable, &args)
+    let _ = artifact_id;
+    cook_recovery_command_with_prefix(executable, &["recover", cook_or_attempt_id])
 }
 
 /// Render recovery on the Cook's controller. Provider placement is retained in
@@ -2452,7 +2449,7 @@ mod run_lifecycle_projection_tests {
                 "cook-attempt-1",
                 Some("patch"),
             ),
-            "homeboy agent-task recover cook-attempt-1 --artifact-id patch"
+            "homeboy agent-task recover cook-attempt-1"
         );
         assert_eq!(
             lab.runner

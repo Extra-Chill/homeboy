@@ -4706,7 +4706,7 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
         .unwrap();
-        assert_eq!(report.value.status, "review_ready");
+        assert_eq!(report.value.status, "review_ready", "{:#?}", report.value);
         assert_eq!(finalization_calls.load(Ordering::SeqCst), 1);
         let caught_up = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
         assert_eq!(
@@ -8503,10 +8503,9 @@ fn adoption_accepts_an_identical_immutable_baseline_failure_when_explicitly_auth
             crate::agent_task_gate::AgentTaskGateStatus::Succeeded
         );
         assert_eq!(
-            promotion.provenance["candidate"]["fingerprint"]["head"],
-            git_output(&fixture.target, &["rev-parse", "HEAD"])
-                .expect("native direct target head"),
-            "native direct promotion retains the target commit and authenticates the candidate as a patch"
+            promotion.provenance["candidate_checkout"]["commit"],
+            promotion.provenance["candidate_commit"]["candidate_sha"],
+            "gates authenticate the adopted immutable commit"
         );
         assert!(
             promotion.deterministic_gates[0]
@@ -8843,7 +8842,7 @@ fn adoption_rejects_a_baseline_component_symlink_escape_before_external_gate_exe
         let error = fixture
             .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
             .expect_err("baseline symlink escape must reject adoption");
-        assert_eq!(error.details["field"], "promotion_provider.patch");
+        assert_eq!(error.details["field"], "gate_workspace");
         assert!(
             !external.join("gate-ran").exists(),
             "external gate must not execute"
@@ -18926,6 +18925,42 @@ fn record_tracked_promotion_continuation_in_stores(
     else {
         panic!("fixture target is a Git worktree");
     };
+    let index = tempfile::NamedTempFile::new().unwrap();
+    let index_path = index.path().display().to_string();
+    let run_git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .env("GIT_INDEX_FILE", &index_path)
+            .current_dir(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    run_git(&["read-tree", "HEAD"]);
+    run_git(&["add", "-A"]);
+    let tree_sha = run_git(&["write-tree"]);
+    let candidate_sha = run_git(&[
+        "commit-tree",
+        &tree_sha,
+        "-p",
+        &fingerprint.head,
+        "-m",
+        "candidate",
+    ]);
+    run_git(&[
+        "update-ref",
+        &format!(
+            "refs/homeboy/candidates/{}",
+            options.identity.initial_run_id
+        ),
+        &candidate_sha,
+    ]);
+    let immutable = serde_json::json!({"base_sha":fingerprint.head,"candidate_sha":candidate_sha,"tree_sha":tree_sha});
     checkpoint["to_worktree"] = serde_json::json!(options.workspace.to_worktree);
     checkpoint["target"] = serde_json::json!({
         "worktree": options.workspace.to_worktree,
@@ -18942,6 +18977,7 @@ fn record_tracked_promotion_continuation_in_stores(
     checkpoint["changed_files"] = serde_json::json!(fingerprint.changed_files);
     checkpoint["provenance"] = serde_json::json!({
         "post_apply": true,
+        "candidate_commit": immutable,
         "candidate": candidate,
         "worktree_path": target,
         "gate_feedback_baseline": {
@@ -19481,8 +19517,9 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             gate_log.display()
         );
         let reviewer_gate = "test \"$(cat \"$(git rev-parse --show-toplevel)/figma-transformer/tracked.txt\")\" = promoted".to_string();
-        let unavailable_patch = patch_path.with_extension("unavailable");
-        std::fs::rename(&patch_path, &unavailable_patch).expect("hide promotion artifact");
+        let candidate_ref = "refs/homeboy/candidates/run-verify-replacement";
+        let candidate_sha = git_output(&target, &["rev-parse", candidate_ref]).unwrap();
+        git_output(&target, &["update-ref", "-d", candidate_ref]).unwrap();
         verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
@@ -19493,13 +19530,14 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             "Chris approved corrected gate evidence".to_string(),
             None,
         )
-        .expect_err("artifact preflight fails before shell execution");
+        .expect_err("missing candidate ref fails before shell execution");
         assert!(!replacement_gate_execution_started(
             &test_lifecycle_store(),
             "run-verify-replacement"
         )
         .expect("read replacement gate fence"));
-        std::fs::rename(&unavailable_patch, &patch_path).expect("restore promotion artifact");
+        git_output(&target, &["update-ref", candidate_ref, &candidate_sha]).unwrap();
+        std::fs::remove_file(&patch_path).expect("patch evidence is not a continuation input");
         mark_replacement_gate_execution_started(&test_lifecycle_store(), "run-verify-replacement")
             .expect("persist interrupted replacement execution");
         agent_task_lifecycle::rewrite_record_for_test("run-verify-replacement", |record| {
@@ -19582,7 +19620,11 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             serde_json::from_value(result).expect("typed replacement proof");
 
         assert_eq!(replacement.status, AgentTaskPromotionStatus::GateFailed);
-        assert_eq!(replacement.patch_artifact.id, "committed-changes");
+        assert_eq!(replacement.patch_artifact.id, candidate_sha);
+        assert!(replacement.deterministic_gates.iter().all(|gate| gate
+            .candidate_checkout
+            .as_ref()
+            .is_none_or(|checkout| checkout.commit == candidate_sha)));
         assert_eq!(
             replacement.provenance["candidate"]["fingerprint"]["target_path"],
             serde_json::json!(std::fs::canonicalize(&target)

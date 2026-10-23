@@ -694,44 +694,25 @@ fn materialize_follow_up_baseline_at(
         ));
     }
     let parent_snapshot = parent_snapshot_from_current_process()?;
-    let artifact_bytes = if promotion.patch_artifact.path.is_empty() {
-        Vec::new()
-    } else {
-        std::fs::read(&promotion.patch_artifact.path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("read promoted patch artifact".to_string()),
-            )
-        })?
-    };
-    let artifact_sha256 = content_hash::sha256_hex(&artifact_bytes);
-    if let Some(expected) = promotion.patch_artifact.sha256.as_deref() {
-        if expected != artifact_sha256 {
-            return Err(Error::validation_invalid_argument(
-                "promotion.patch_artifact.sha256",
-                "promoted artifact bytes no longer match durable sha256",
-                None,
-                None,
-            ));
-        }
-    }
-    let artifact = std::str::from_utf8(&artifact_bytes).map_err(|error| {
-        Error::validation_invalid_argument(
-            "promotion.patch_artifact",
-            format!("patch bytes are not UTF-8: {error}"),
-            None,
-            None,
-        )
-    })?;
-    // A provider patch is relative to an adopted dirty candidate, while the
-    // retry checkout starts at the clean target HEAD. Reconstruct from the
-    // controller-recorded complete candidate diff when available.
-    let complete_candidate = promotion
+    let immutable: Option<crate::agent_task::AgentTaskCandidate> = promotion
         .provenance
-        .pointer("/gate_feedback_baseline/current_diff")
-        .and_then(Value::as_str)
-        .filter(|diff| !diff.trim().is_empty())
-        .unwrap_or(artifact);
+        .get("candidate_commit")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "promotion.candidate_commit",
+                "invalid candidate identity",
+                None,
+                None,
+            )
+        })?;
+    let immutable = immutable.ok_or_else(|| Error::validation_invalid_argument(
+        "promotion.candidate_commit", "non-recoverable: baseline has no immutable candidate; run a new Cook", None, None).with_retryable(false))?;
+    crate::agent_task_promotion::validate_candidate_commit(&source_root, &immutable)?;
+    let artifact_sha256 = immutable.candidate_sha.clone();
     let index = tempfile::NamedTempFile::new().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -777,7 +758,13 @@ fn materialize_follow_up_baseline_at(
     let path_string = path.display().to_string();
     git_output(
         &source_root,
-        &["worktree", "add", "--detach", &path_string, expected_head],
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &path_string,
+            &immutable.candidate_sha,
+        ],
     )?;
     let baseline = CookFollowUpBaseline {
         source_root,
@@ -796,58 +783,7 @@ fn materialize_follow_up_baseline_at(
             preexisting_candidate: false,
         },
     };
-    let head_tree = git_output(&baseline.path, &["rev-parse", "HEAD^{tree}"])?;
-    let (commit, tree) = if head_tree == target_tree {
-        (expected_head.to_string(), head_tree)
-    } else {
-        // Normalized only when the candidate differs from the target HEAD: an
-        // attempt that produced no change has nothing to replay, and its empty
-        // artifact is not a promotable patch (#15364).
-        let normalized = normalize_promotion_patch(complete_candidate, &promotion.to_worktree)?;
-        let patch_path = baseline.path.join(".homeboy-cook-baseline.patch");
-        std::fs::write(&patch_path, normalized.content.as_bytes()).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("write cook baseline patch".to_string()),
-            )
-        })?;
-        git_output(
-            &baseline.path,
-            &[
-                "apply",
-                "--whitespace=nowarn",
-                &patch_path.display().to_string(),
-            ],
-        )?;
-        std::fs::remove_file(&patch_path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("remove cook baseline patch".to_string()),
-            )
-        })?;
-        git_output(&baseline.path, &["add", "--all"])?;
-        git_output_with_env(
-            &baseline.path,
-            &[
-                "-c",
-                "user.name=Homeboy",
-                "-c",
-                "user.email=homeboy@localhost",
-                "commit",
-                "--no-verify",
-                "-m",
-                "homeboy: cook promoted baseline",
-            ],
-            &[
-                ("GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z"),
-                ("GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z"),
-            ],
-        )?;
-        (
-            git_output(&baseline.path, &["rev-parse", "HEAD"])?,
-            git_output(&baseline.path, &["rev-parse", "HEAD^{tree}"])?,
-        )
-    };
+    let (commit, tree) = (immutable.candidate_sha, immutable.tree_sha);
     if tree != target_tree {
         return Err(Error::validation_invalid_argument(
             "promotion",

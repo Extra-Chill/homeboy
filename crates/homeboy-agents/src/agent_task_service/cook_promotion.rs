@@ -31,7 +31,6 @@ use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
     candidate_fingerprint, canonical_recoverable_patch_artifacts,
     canonical_recoverable_patch_artifacts_in_observation_store,
-    preflight_recoverable_candidate_promotion_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
     resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionCandidate,
     AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionStatus,
@@ -643,10 +642,7 @@ pub(crate) fn promote_attempt_in_store(
 ) -> Result<AgentTaskPromotionReport> {
     let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
     let selected_task_id = selected_candidate_task_id_in_store(lifecycle_store, run_id)?;
-    let artifact_id = match continuation_artifact_id_in_store(lifecycle_store, run_id)? {
-        Some(artifact_id) => Some(artifact_id),
-        None => canonical_cook_patch_artifact_id_in_store(lifecycle_store, options, run_id)?,
-    };
+    let artifact_id = None;
     let repository_integrity_evidence =
         admitted_repository_integrity_evidence(lifecycle_store, run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
@@ -875,9 +871,6 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         provider_invocation: options.provider_transport.provider_invocation.clone(),
         repository_integrity_evidence: None,
     };
-    let observation_store = lifecycle_store.open_observation_readonly()?;
-    if outcome.candidate.is_some()
-        || outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable
     {
         if outcome.candidate.is_none()
             && (outcome.is_verified_unchanged_attempt()
@@ -905,29 +898,6 @@ pub fn preflight_cook_promotion_for_observation_in_store(
             "execution_only_checks": ["promotion_target_resolution", "candidate_materialization", "verification_gates"],
         }));
     }
-    let artifact = preflight_recoverable_candidate_promotion_in_observation_store(
-        &promotion_options,
-        &observation_store,
-    )?;
-    Ok(json!({
-        "behavior": "promote_new",
-        "artifact_id": artifact.id,
-        "execution_only_checks": ["promotion_target_resolution", "patch_apply", "verification_gates"],
-        "candidate_fingerprint": {
-            "schema": "homeboy/agent-task-recoverable-candidate-fingerprint/v1",
-            "kind": "recoverable_patch",
-            "artifact_id": artifact.id,
-            "sha256": artifact.sha256,
-            "size_bytes": artifact.size_bytes,
-            "run_id": artifact.metadata.get("run_id"),
-            "task_id": artifact.metadata.get("task_id"),
-            "producer_attempt": artifact.metadata.get("producer_attempt"),
-            "base_ref": artifact.metadata.get("base_ref"),
-            "provider_backend": artifact.metadata.get("provider_backend"),
-            "repository_identity": artifact.metadata.get("repository_identity"),
-            "workspace_identity": artifact.metadata.get("workspace_identity"),
-        }
-    }))
 }
 
 fn persisted_promotion_execution_only_checks(
@@ -985,6 +955,7 @@ mod preflight_report_tests {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn canonical_cook_patch_artifact_id_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &CookRequest,
@@ -1004,52 +975,21 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
         return Ok(None);
     }
     let promotion_options = AgentTaskPromotionRequest {
-        source,
-        source_run_id: Some(run_id.to_string()),
-        source_path,
-        source_worktree_path: component_workspace_path(options)?
-            .or_else(|| options.workspace.source_worktree_path.clone()),
-        base_ref: Some(options.finalization.base.clone()),
-        task_base_sha: cook_candidate_base_sha(options),
-        candidate_ref: None,
-        to_worktree: options.workspace.to_worktree.clone(),
-        task_id,
-        artifact_id: None,
-        dry_run: false,
-        gates: options.gates.clone(),
-        provider_invocation: options.provider_transport.provider_invocation.clone(),
-        repository_integrity_evidence: None,
+        source, source_run_id: Some(run_id.to_string()), source_path,
+        source_worktree_path: component_workspace_path(options)?.or_else(|| options.workspace.source_worktree_path.clone()),
+        base_ref: Some(options.finalization.base.clone()), task_base_sha: cook_candidate_base_sha(options), candidate_ref: None,
+        to_worktree: options.workspace.to_worktree.clone(), task_id, artifact_id: None, dry_run: false,
+        gates: options.gates.clone(), provider_invocation: options.provider_transport.provider_invocation.clone(), repository_integrity_evidence: None,
     };
     let observation_store = lifecycle_store.open_observation_initialized()?;
-    let canonical = canonical_recoverable_patch_artifacts_in_observation_store(
-        outcome,
-        &promotion_options,
-        &observation_store,
-    )?;
+    let canonical = canonical_recoverable_patch_artifacts_in_observation_store(outcome, &promotion_options, &observation_store)?;
     match canonical.artifacts.as_slice() {
-        [] => Ok(None),
-        [artifact] => Ok(Some(artifact.id.clone())),
+        [] => Ok(None), [artifact] => Ok(Some(artifact.id.clone())),
         artifacts => {
-            let (choices, comparison) = cook_candidate_comparison(
-                outcome,
-                artifacts,
-                &canonical.patch_contents,
-                canonical.omitted_candidate_count,
-                canonical.omitted_patch_bytes,
-                options,
-                run_id,
-            );
-            Err(Error::new(
-                homeboy_core::ErrorCode::ValidationInvalidArgument,
+            let (choices, comparison) = cook_candidate_comparison(outcome, artifacts, &canonical.patch_contents, canonical.omitted_candidate_count, canonical.omitted_patch_bytes, options, run_id);
+            Err(Error::new(homeboy_core::ErrorCode::ValidationInvalidArgument,
                 "Cook found distinct canonical patch candidates; select one before promotion",
-                json!({
-                    "field": "artifact_id",
-                    "state": "selection_required",
-                    "selection_required": true,
-                    "choices": choices,
-                    "comparison": comparison,
-                }),
-            ))
+                json!({"field":"artifact_id","state":"selection_required","selection_required":true,"choices":choices,"comparison":comparison})))
         }
     }
 }
@@ -1426,6 +1366,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                 )
             })?;
             let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
+            let source = bind_persisted_promotion_artifact(source, &promotion)?;
             let observation_store = lifecycle_store.open_observation_initialized()?;
             let resumed = resume_promoted_patch_in_observation_store(
                 AgentTaskPromotionRequest {
@@ -1663,15 +1604,13 @@ pub fn record_replacement_gate_proof(
         accept_inherited_failures,
     )?;
     validate_legacy_replacement_candidate_checkout(run_id, &original, &replacement)?;
-    let expected_candidate = canonical_candidate_fingerprint(original.provenance.get("candidate"));
-    let observed_candidate =
-        canonical_candidate_fingerprint(replacement.provenance.get("candidate"));
+    let expected_candidate = original.provenance.get("candidate_commit").cloned();
+    let observed_candidate = replacement.provenance.get("candidate_commit").cloned();
     let same_candidate = observed_candidate == expected_candidate;
     let drifted = serde_json::json!({
         "run_id": replacement.source.run_id.as_deref() != Some(run_id),
         "target": replacement.target.worktree != original.target.worktree || replacement.target.path != original.target.path,
         "worktree": replacement.to_worktree != original.to_worktree,
-        "artifact": replacement.patch_artifact.id != original.patch_artifact.id || replacement.patch_artifact.kind != original.patch_artifact.kind || replacement.patch_artifact.sha256 != original.patch_artifact.sha256,
         "changed_files": replacement.changed_files != original.changed_files,
         "verified_base": replacement.verified_base != original.verified_base,
         "candidate": !same_candidate,
@@ -1792,15 +1731,11 @@ pub(super) fn validate_replacement_promotion_in_store(
                         && original.target.worktree == promotion.target.worktree
                         && original.target.path == promotion.target.path
                         && original.to_worktree == promotion.to_worktree
-                        && original.patch_artifact.id == promotion.patch_artifact.id
-                        && original.patch_artifact.kind == promotion.patch_artifact.kind
-                        && original.patch_artifact.sha256 == promotion.patch_artifact.sha256
                         && original.changed_files == promotion.changed_files
                         && original.verified_base == promotion.verified_base
-                        && canonical_candidate_fingerprint(original.provenance.get("candidate"))
-                            == canonical_candidate_fingerprint(
-                                promotion.provenance.get("candidate"),
-                            )
+                        && original.provenance.get("candidate_commit").is_some()
+                        && original.provenance.get("candidate_commit")
+                            == promotion.provenance.get("candidate_commit")
                 },
             )
     });
@@ -2419,32 +2354,20 @@ fn bind_persisted_promotion_artifact(
     } else {
         &mut source_value
     };
-    let artifacts = outcome
-        .get_mut("artifacts")
-        .and_then(Value::as_array_mut)
+    let candidate = promotion
+        .provenance
+        .get("candidate_commit")
+        .filter(|candidate| !candidate.is_null())
         .ok_or_else(|| {
             Error::validation_invalid_argument(
-                "promotion.source.artifacts",
-                "replacement gate source outcome has no artifact inventory",
-                Some(promotion.source.task_id.clone()),
+                "promotion.candidate_commit",
+                "non-recoverable: checkpoint has no immutable candidate; run a new Cook",
+                None,
                 None,
             )
+            .with_retryable(false)
         })?;
-    if !artifacts.iter().any(|artifact| {
-        artifact.get("id").and_then(Value::as_str) == Some(promotion.patch_artifact.id.as_str())
-    }) {
-        artifacts.push(json!({
-            "id": promotion.patch_artifact.id,
-            "kind": promotion.patch_artifact.kind,
-            "path": promotion.patch_artifact.path,
-            "sha256": promotion.patch_artifact.sha256,
-            "metadata": {
-                "actionable": true,
-                "role": "patch",
-                "source": "persisted_promotion",
-            },
-        }));
-    }
+    outcome["candidate"] = candidate.clone();
     serde_json::to_string(&source_value)
         .map_err(|error| Error::internal_json(error.to_string(), None))
 }
@@ -2789,6 +2712,9 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
     let regate = tree != verified.tree;
     let json_error = |error: serde_json::Error| Error::internal_json(error.to_string(), None);
     let mut caught_up = serde_json::to_value(promotion).map_err(json_error)?;
+    let candidate_sha = git_output(path, &["-c", "user.name=Homeboy", "-c", "user.email=homeboy@localhost", "commit-tree", &tree, "-p", &fresh_base, "-m", "homeboy: rebased candidate"])?;
+    git_output(path, &["update-ref", &format!("refs/homeboy/candidates/{run_id}"), &candidate_sha])?;
+    caught_up["provenance"]["candidate_commit"] = json!({"base_sha":fresh_base,"candidate_sha":candidate_sha,"tree_sha":tree});
     caught_up["verified_base"] = json!({ "base": options.finalization.base, "sha": fresh_base });
     caught_up["provenance"]["candidate"] =
         serde_json::to_value(candidate_fingerprint(path)?).map_err(json_error)?;
@@ -5938,7 +5864,7 @@ fn cook_attempt_execution_in_store(
         .filter(|form| form.validate().is_ok()),
         tool,
         model,
-        review_form_only: task.inputs["cook_loop"]["review_form_required"] == true,
+        review_form_only: crate::agent_task_cook_loop::request_is_review_form_only(task),
     })
 }
 
@@ -7190,12 +7116,7 @@ pub(crate) fn cook_failure_context_with_stores(
                 blocking_claim.is_some(),
                 continuation_admitted,
                 exact_checkpoint_candidate_mismatch(&diagnostic),
-                ambiguous_promotion_artifact_ids(
-                    lifecycle_store,
-                    record_run_id,
-                    promotion_diagnostic.as_ref(),
-                    &recipe,
-                ),
+                Vec::new(),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Completed),
                 agent_incomplete_reason(lifecycle_store, record_run_id).as_deref(),
@@ -7600,101 +7521,6 @@ fn timeout_worktree_path(
         })
 }
 
-/// Artifact IDs are durable controller metadata. Expose them only when the
-/// promotion claim proves selection was the blocker, so a recovery command is
-/// executable rather than a replay of the known-invalid promotion.
-fn ambiguous_promotion_artifact_ids(
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
-    run_id: &str,
-    diagnostic: Option<&Value>,
-    recipe: &super::AgentTaskCookRecipe,
-) -> Vec<String> {
-    let is_ambiguous_selection = diagnostic.is_some_and(|diagnostic| {
-        diagnostic.pointer("/details/field").and_then(Value::as_str) == Some("artifact_id")
-            && diagnostic
-                .get("message")
-                .and_then(Value::as_str)
-                .is_some_and(|message| {
-                    message.contains("multiple patch artifacts")
-                        || message.contains("distinct actionable patches")
-                        || message.contains("distinct canonical patch candidates")
-                })
-    });
-    if !is_ambiguous_selection {
-        return Vec::new();
-    }
-    let aggregate = lifecycle_store
-        .map(|store| store.read_aggregate(run_id))
-        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(run_id));
-    let Ok(aggregate) = aggregate else {
-        return Vec::new();
-    };
-    let Some(outcome) = aggregate.selected_outcome().or_else(|| {
-        (aggregate.outcomes.len() == 1)
-            .then(|| aggregate.outcomes.first())
-            .flatten()
-    }) else {
-        return Vec::new();
-    };
-    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
-        return outcome
-            .artifacts
-            .iter()
-            .filter(|artifact| {
-                crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
-            })
-            .map(|artifact| artifact.id.clone())
-            .collect();
-    }
-    if !recipe
-        .attempts
-        .iter()
-        .any(|attempt| attempt.run_id == run_id)
-    {
-        return Vec::new();
-    }
-    let Ok(recipe_options) = super::reconstruct_options(recipe) else {
-        return Vec::new();
-    };
-    let source = lifecycle_store
-        .map(|store| promotion_source_in_store(store, run_id))
-        .unwrap_or_else(|| promotion_source(run_id));
-    let Ok((source, source_path)) = source else {
-        return Vec::new();
-    };
-    canonical_recoverable_patch_artifacts(
-        outcome,
-        &AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some(run_id.to_string()),
-            source_path,
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: recipe_options.workspace.to_worktree,
-            task_id: lifecycle_store
-                .map(|store| selected_candidate_task_id_in_store(store, run_id))
-                .unwrap_or_else(|| selected_candidate_task_id(run_id))
-                .ok()
-                .flatten(),
-            artifact_id: None,
-            dry_run: false,
-            gates: crate::agent_task_gate::VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-    )
-    .map(|canonical| {
-        canonical
-            .artifacts
-            .into_iter()
-            .map(|artifact| artifact.id)
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
 /// The `incomplete_reason` of the attempt's recorded review form when the agent
 /// declared the task incomplete. Unreadable evidence yields `None`, leaving the
 /// step to the remaining recovery facts.
@@ -7940,7 +7766,6 @@ fn cook_recovery_actions_with_prefix(
             blocking_claim,
             retry_admitted,
             exact_checkpoint_candidate_mismatch,
-            ambiguous_artifact_ids: &ambiguous_artifact_ids,
             continuation_rearm_required,
             continuation_completed,
             run_id,
@@ -8215,7 +8040,7 @@ mod recovery_action_tests {
     }
 
     #[test]
-    fn ambiguous_artifact_selection_advertises_only_selector_continuations() {
+    fn patch_evidence_does_not_select_a_recovery_candidate() {
         let recovery = cook_recovery_actions(
             "promotion_failed",
             "ambiguous-attempt-1",
@@ -8236,8 +8061,7 @@ mod recovery_action_tests {
             vec![
                 "homeboy agent-task status ambiguous-attempt-1",
                 "homeboy agent-task diagnose ambiguous-attempt-1",
-                "homeboy agent-task recover ambiguous-attempt-1 --artifact-id first-patch",
-                "homeboy agent-task recover ambiguous-attempt-1 --artifact-id second-patch",
+                "homeboy agent-task recover ambiguous-attempt-1",
             ]
         );
     }

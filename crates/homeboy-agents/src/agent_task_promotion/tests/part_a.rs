@@ -772,41 +772,34 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         provider_invocation: None,
         repository_integrity_evidence: None,
     };
-    // Resume remains patch-carried in S2b. Exercise the same checkpointed
-    // destination through its retained patch contract (S2c owns migration).
-    let mut checkpoint = serde_json::to_value(&checkpoints[0]).expect("checkpoint value");
-    checkpoint["patch_artifact"] = serde_json::json!({"id": "patch", "kind": "patch", "path": temp.path().join("changes.patch"), "sha256": sha256_hex(VALID_PATCH)});
-    let resumed = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
+    let checkpoint = serde_json::to_value(&checkpoints[0]).expect("checkpoint value");
+    let mut options = resume_options();
+    let mut source: Value = serde_json::from_str(&options.source).unwrap();
+    if source.get("outcomes").is_some() {
+        source["outcomes"][0]["candidate"] = checkpoint["provenance"]["candidate_commit"].clone();
+    } else {
+        source["candidate"] = checkpoint["provenance"]["candidate_commit"].clone();
+    }
+    options.source = source.to_string();
+    let sha = checkpoint["provenance"]["candidate_commit"]["candidate_sha"]
+        .as_str()
+        .unwrap();
+    git(
+        &worktree_path,
+        &["update-ref", "refs/homeboy/candidates/restartable-run", sha],
+    );
+    let resumed = resume_promoted_patch(options.clone(), &worktree_path, &checkpoint)
         .expect("resume exact applied candidate");
     assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
     assert!(provider.apply_calls.is_empty(), "resume must not reapply");
 
     std::fs::write(worktree_path.join("src/lib.rs"), "tampered\n").expect("tamper candidate");
-    let mismatch = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
-        .expect_err("modified candidate rejected");
-    assert!(mismatch
-        .message
-        .contains("differs from the exact checkpointed"));
+    let restored = resume_promoted_patch(options, &worktree_path, &checkpoint)
+        .expect("restore recorded candidate");
+    assert_eq!(restored.patch_artifact.id, sha);
     assert_eq!(
-        mismatch
-            .details
-            .pointer("/recovery/action")
-            .and_then(Value::as_str),
-        Some("fork_replacement")
-    );
-
-    std::fs::write(worktree_path.join("extra.rs"), "extra\n").expect("add extra candidate file");
-    let extra = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
-        .expect_err("extra candidate change rejected");
-    assert!(extra
-        .message
-        .contains("differs from the exact checkpointed"));
-    assert_eq!(
-        extra
-            .details
-            .pointer("/recovery/action")
-            .and_then(Value::as_str),
-        Some("fork_replacement")
+        std::fs::read_to_string(worktree_path.join("src/lib.rs")).unwrap(),
+        "new\n"
     );
 }
 

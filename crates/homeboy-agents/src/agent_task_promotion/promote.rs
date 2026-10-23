@@ -291,10 +291,7 @@ fn resume_promoted_patch_internal<'a>(
     let ResumePromotedPatchAdmission {
         source_kind,
         outcome,
-        artifact,
-        patch_path,
-        normalized_patch,
-        command_evidence,
+        changed_files,
     } = resume_promoted_patch_admission(
         &options,
         target_path,
@@ -322,28 +319,15 @@ fn resume_promoted_patch_internal<'a>(
         Some(verified_base) => Some(verified_base),
         None => capture_gate_verified_base(target_path, options.base_ref.as_deref())?,
     };
-    let expected_candidate = previous
-        .pointer("/provenance/candidate")
-        .filter(|candidate| !candidate.is_null())
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| {
-            Error::validation_invalid_argument(
-                "promotion.provenance.candidate",
-                "promotion resume durable candidate fingerprint is invalid",
-                None,
-                None,
-            )
-        })?;
+    let commit = outcome.candidate.as_ref().expect("admitted candidate");
     if let Some(before_gates) = before_gates {
         before_gates()?;
     }
     let gates = run_promotion_gates(
         &options,
         target_path,
-        expected_candidate.as_ref(),
-        outcome.candidate.as_ref(),
+        None,
+        Some(commit),
         gate_workspace,
         observation_store,
     )?;
@@ -365,20 +349,20 @@ fn resume_promoted_patch_internal<'a>(
         to_worktree: options.to_worktree,
         target: target.clone(),
         patch_artifact: AgentTaskPromotionArtifactRef {
-            id: artifact.id,
-            kind: artifact.kind,
-            path: patch_path.display().to_string(),
-            sha256: artifact.sha256,
+            id: commit.candidate_sha.clone(),
+            kind: "candidate_commit".to_string(),
+            path: String::new(),
+            sha256: Some(commit.tree_sha.clone()),
         },
-        changed_files: persisted_changed_files(normalized_patch.changed_files, candidate.as_ref()),
-        command_evidence,
+        changed_files,
+        command_evidence: Vec::new(),
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
         verified_base,
         repository_integrity_evidence: options.repository_integrity_evidence.clone(),
         provenance: json!({
             "source_schema": outcome.schema,
-            "artifact_metadata": artifact.metadata,
+            "candidate_commit": commit,
             "worktree_path": target_path,
             "dependencies_materialized": gates.dependencies_materialized,
             "candidate_checkout_setup": gates.candidate_setup,
@@ -396,13 +380,10 @@ fn resume_promoted_patch_internal<'a>(
 struct ResumePromotedPatchAdmission {
     source_kind: String,
     outcome: AgentTaskOutcome,
-    artifact: AgentTaskArtifact,
-    patch_path: PathBuf,
-    normalized_patch: super::patch::NormalizedPromotionPatch,
-    command_evidence: Vec<AgentTaskPromotionCommandReport>,
+    changed_files: Vec<String>,
 }
 
-// Retained for resume_promoted_patch_admission; fresh promotion never reads patches.
+#[cfg(test)]
 pub(super) struct PatchArtifactAdmission {
     pub(super) path: PathBuf,
     #[cfg(test)]
@@ -410,6 +391,7 @@ pub(super) struct PatchArtifactAdmission {
     pub(super) normalized_patch: Option<super::patch::NormalizedPromotionPatch>,
 }
 
+#[cfg(test)]
 pub(super) fn patch_artifact_admission(
     artifact: &AgentTaskArtifact,
     outcome: &AgentTaskOutcome,
@@ -550,32 +532,72 @@ fn resume_promoted_patch_admission(
         )
     })?;
     let (source_kind, outcome) = select_outcome(source_value, options.task_id.as_deref())?;
-    let artifact = select_patch_artifact(&outcome, options.artifact_id.as_deref())?;
-    let PatchArtifactAdmission {
-        path: patch_path,
-        normalized_patch,
-        ..
-    } = patch_artifact_admission(&artifact, &outcome, &options, observation_store)?;
-    validate_resume_candidate(
-        options,
+    let _ = observation_store;
+    if !replacement_gates {
+        if let Some(recorded) = previous.pointer("/provenance/resume_contract/gates") {
+            if *recorded
+                != serde_json::to_value(&options.gates)
+                    .map_err(|e| Error::internal_json(e.to_string(), None))?
+            {
+                return Err(Error::validation_invalid_argument(
+                    "promotion",
+                    "promotion resume deterministic gate contract does not match checkpoint",
+                    None,
+                    None,
+                ));
+            }
+        }
+    }
+    let commit = outcome.candidate.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "source.candidate",
+            "non-recoverable: checkpoint has no immutable candidate; run a new Cook",
+            None,
+            None,
+        )
+        .with_retryable(false)
+    })?;
+    if let Some(recorded) = previous.pointer("/provenance/candidate_commit") {
+        if recorded != &serde_json::to_value(commit).map_err(|e| Error::internal_json(e.to_string(), None))? {
+            return Err(Error::validation_invalid_argument("source.candidate", "resume candidate differs from the recorded candidate commit", None, None));
+        }
+    }
+    let run_id = options.source_run_id.as_deref().unwrap_or(&outcome.task_id);
+    let reference = format!("refs/homeboy/candidates/{run_id}");
+    if git_output(target_path, &["rev-parse", "--verify", &reference])
+        .ok()
+        .as_deref()
+        != Some(commit.candidate_sha.as_str())
+    {
+        return Err(Error::new(homeboy_core::ErrorCode::ValidationInvalidArgument,
+            format!("candidate ref missing or changed for run {run_id}: {}", commit.candidate_sha),
+            json!({"field":"source.candidate", "kind":"missing_candidate_ref", "run_id":run_id, "candidate_sha":commit.candidate_sha}))
+            .with_retryable(false));
+    }
+    validate_candidate_commit(target_path, commit)?;
+    if crate::agent_task_candidate_baseline::workspace_tree(target_path)? != commit.tree_sha {
+        git_output(
+            target_path,
+            &["read-tree", "--reset", "-u", &commit.candidate_sha],
+        )?;
+        git_output(target_path, &["clean", "-fd"])?;
+    }
+    let changed_files = git_output(
         target_path,
-        previous,
-        &outcome,
-        &artifact,
-        replacement_gates,
-    )?;
-    let normalized_patch = normalized_patch.expect("non-empty admitted patches are normalized");
-    let command_evidence = vec![verify_patch_is_present(
-        target_path,
-        &normalized_patch.content,
-    )?];
+        &[
+            "diff",
+            "--name-only",
+            &commit.base_sha,
+            &commit.candidate_sha,
+        ],
+    )?
+    .lines()
+    .map(str::to_string)
+    .collect();
     Ok(ResumePromotedPatchAdmission {
         source_kind,
         outcome,
-        artifact,
-        patch_path,
-        normalized_patch,
-        command_evidence,
+        changed_files,
     })
 }
 
@@ -623,205 +645,6 @@ fn validate_resume_provenance(
         ));
     }
     Ok(())
-}
-
-fn validate_resume_candidate(
-    options: &AgentTaskPromotionRequest,
-    target_path: &Path,
-    previous: &Value,
-    outcome: &AgentTaskOutcome,
-    artifact: &AgentTaskArtifact,
-    replacement_gates: bool,
-) -> Result<()> {
-    if previous.pointer("/source/task_id").and_then(Value::as_str) != Some(&outcome.task_id)
-        || previous
-            .pointer("/patch_artifact/id")
-            .and_then(Value::as_str)
-            != Some(&artifact.id)
-        || previous
-            .pointer("/patch_artifact/kind")
-            .and_then(Value::as_str)
-            != Some(&artifact.kind)
-        || previous
-            .pointer("/patch_artifact/sha256")
-            .and_then(Value::as_str)
-            != artifact.sha256.as_deref()
-    {
-        return Err(Error::validation_invalid_argument(
-            "promotion",
-            "promotion resume source task or patch artifact does not match the durable post-apply promotion",
-            None,
-            None,
-        ));
-    }
-    let expected_inputs = json!({
-        "base_ref": options.base_ref,
-        "task_base_sha": options.task_base_sha,
-        "candidate_ref": options.candidate_ref,
-    });
-    let recorded_inputs = previous
-        .pointer("/provenance/resume_contract/inputs")
-        .or_else(|| previous.pointer("/provenance/resume_inputs"));
-    if recorded_inputs.is_some_and(|recorded| {
-        recorded != &expected_inputs
-            && !legacy_base_correction_matches(previous, recorded, &expected_inputs)
-    }) {
-        return Err(Error::validation_invalid_argument(
-            "promotion",
-            "promotion resume base or candidate input does not match the durable post-apply promotion",
-            None,
-            None,
-        ));
-    }
-    if !replacement_gates {
-        if let Some(recorded_gates) = previous.pointer("/provenance/resume_contract/gates") {
-            let actual_gates = serde_json::to_value(&options.gates)
-                .map_err(|error| Error::internal_json(error.to_string(), None))?;
-            if recorded_gates != &actual_gates {
-                return Err(Error::validation_invalid_argument(
-                    "promotion",
-                    "promotion resume deterministic gate contract does not match the durable post-apply promotion",
-                    None,
-                    None,
-                ));
-            }
-        }
-    }
-    let status = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(target_path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if !status.status.success() {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "promotion resume target is not an accessible Git worktree",
-            Some(target_path.display().to_string()),
-            None,
-        ));
-    }
-    let expected = previous
-        .pointer("/provenance/candidate")
-        .filter(|candidate| !candidate.is_null())
-        .cloned();
-    if !status.stdout.is_empty() && expected.is_none() {
-        return Err(Error::validation_invalid_argument(
-            "promotion",
-            "promotion resume found a dirty target without an exact post-apply candidate fingerprint; rerun from a clean target",
-            None,
-            None,
-        ));
-    }
-    if let Some(expected) = expected {
-        let expected = serde_json::from_value(expected).map_err(|_| {
-            Error::validation_invalid_argument(
-                "promotion",
-                "promotion resume durable candidate fingerprint is invalid",
-                None,
-                None,
-            )
-        })?;
-        let actual = crate::agent_task_promotion::candidate_fingerprint(
-            target_path.to_string_lossy().as_ref(),
-        )?;
-        if actual != expected {
-            let mut error = Error::validation_invalid_argument(
-                "promotion",
-                "promotion resume target differs from the exact checkpointed applied candidate",
-                Some(target_path.display().to_string()),
-                None,
-            );
-            // Continuing would authenticate a different candidate. Tell the
-            // Cook recovery projection to preserve this checkpoint and fork.
-            error.details["recovery"] = serde_json::json!({
-                "action": "fork_replacement",
-            });
-            return Err(error);
-        }
-    }
-    if let Some(recorded_base) = previous.get("verified_base") {
-        if recorded_base.is_null()
-            || recorded_base.get("base").and_then(Value::as_str) != options.base_ref.as_deref()
-        {
-            return Err(Error::validation_invalid_argument(
-                "base_ref",
-                "promotion resume declared base does not match the durable post-apply promotion",
-                None,
-                None,
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// #9400 checkpoints persisted after applying a patch but before the declared
-/// base was validated. Permit exactly that historical base correction only;
-/// artifact, target, and candidate authentication remain mandatory below.
-fn legacy_base_correction_matches(previous: &Value, recorded: &Value, requested: &Value) -> bool {
-    if previous.get("status").and_then(Value::as_str) != Some("verification_pending")
-        || previous.pointer("/provenance/post_apply") != Some(&Value::Bool(true))
-        || previous
-            .get("verified_base")
-            .is_some_and(|base| !base.is_null())
-    {
-        return false;
-    }
-    let mut recorded = recorded.clone();
-    let Some(recorded_inputs) = recorded.as_object_mut() else {
-        return false;
-    };
-    recorded_inputs.insert(
-        "base_ref".to_string(),
-        requested.get("base_ref").cloned().unwrap_or(Value::Null),
-    );
-    &recorded == requested
-}
-
-fn verify_patch_is_present(
-    target_path: &Path,
-    patch: &str,
-) -> Result<AgentTaskPromotionCommandReport> {
-    use std::io::Write;
-
-    let mut child = std::process::Command::new("git")
-        .args(["apply", "--reverse", "--check", "-"])
-        .current_dir(target_path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    child
-        .stdin
-        .as_mut()
-        .expect("piped stdin")
-        .write_all(patch.as_bytes())
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    let report = AgentTaskPromotionCommandReport {
-        command: vec![
-            "git".to_string(),
-            "apply".to_string(),
-            "--reverse".to_string(),
-            "--check".to_string(),
-            "-".to_string(),
-        ],
-        exit_code: output.status.code().unwrap_or(1),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        capture: Default::default(),
-    };
-    if !output.status.success() {
-        return Err(Error::validation_invalid_argument(
-            "promotion",
-            "promotion resume could not prove the recorded patch is present in the clean target",
-            None,
-            None,
-        ));
-    }
-    Ok(report)
 }
 
 #[cfg(test)]
@@ -884,22 +707,6 @@ fn with_test_promotion_operations<T>(
         *provider = slot.borrow_mut().take().expect("promotion test provider");
         result
     })
-}
-
-fn apply_promotion_patch(
-    request: AgentTaskPromotionApplyRequest,
-    materialized_workspace: Option<&Path>,
-) -> Result<AgentTaskPromotionWorkspace> {
-    #[cfg(test)]
-    if TEST_PROMOTION_OPERATIONS.with(|slot| slot.borrow().is_some()) {
-        return TEST_PROMOTION_OPERATIONS.with(|slot| {
-            slot.borrow_mut()
-                .as_mut()
-                .expect("promotion test provider")
-                .apply_patch(request)
-        });
-    }
-    apply_patch(request, materialized_workspace)
 }
 
 fn materialized_promotion_workspace() -> Result<Option<PathBuf>> {
@@ -2106,36 +1913,28 @@ fn promote_committed_changes(
     artifact: Option<&AgentTaskArtifact>,
     committed_patch: CommittedChangesPatch,
 ) -> Result<AgentTaskPromotionReport> {
-    let patch = std::fs::read_to_string(&committed_patch.patch_path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!(
-                "read committed changes promotion patch {}",
-                committed_patch.patch_path.display()
-            )),
-        )
-    })?;
-    let actual_sha256 = content_hash::sha256_hex(patch.as_bytes());
-    if actual_sha256 != committed_patch.sha256 {
-        return Err(Error::validation_invalid_argument(
-            "committed_changes.sha256",
-            format!(
-                "committed changes patch sha256 mismatch: expected {}, read {actual_sha256}",
-                committed_patch.sha256
-            ),
-            Some(committed_patch.patch_path.display().to_string()),
-            None,
-        ));
-    }
-    let retained_patch_path = retain_committed_changes_artifact(
-        options,
-        outcome,
-        &patch,
-        &committed_patch.sha256,
-        observation_store,
+    let mut outcome = outcome.clone();
+    outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
+        base_sha: committed_patch.base_ref.clone(),
+        candidate_sha: committed_patch.candidate.clone(),
+        tree_sha: committed_patch.tree_sha.clone(),
+    });
+    let _ = artifact;
+    let changed_files: Vec<String> = git_output(
+        options
+            .source_worktree_path
+            .as_deref()
+            .expect("validated source"),
+        &[
+            "diff",
+            "--name-only",
+            &committed_patch.base_ref,
+            &committed_patch.candidate,
+        ],
     )?
-    .unwrap_or_else(|| committed_patch.patch_path.clone());
-    let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    .lines()
+    .map(str::to_string)
+    .collect();
     let materialized_workspace = materialized_promotion_workspace()?;
     // The committed delta was read from the source workspace at its candidate
     // HEAD. When that workspace is also the promotion destination (adoption,
@@ -2183,29 +1982,42 @@ fn promote_committed_changes(
             .as_deref()
             .map(str::trim)
             .is_none_or(str::is_empty);
-    let provider_patch = write_normalized_patch(&normalized_patch.content)?;
-    let gate_feedback_baseline = bind_gate_feedback_baseline_internal(
-        artifact
-            .and_then(|artifact| artifact.metadata.get("gate_feedback_baseline"))
-            .cloned(),
-        observation_store,
-    )?;
-    let mut command_evidence = Vec::new();
-    let target = apply_promotion_patch(
-        AgentTaskPromotionApplyRequest {
-            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-            to_workspace: options.to_worktree.clone(),
-            patch: Some(normalized_patch.content.clone()),
-            patch_path: provider_patch.path().display().to_string(),
-            changed_files: normalized_patch.changed_files.clone(),
-            gate_feedback_baseline,
-            dry_run: options.dry_run,
-            trusted_unpushed_candidate_destination,
-        },
+    let path = resolve_promotion_target_path(
+        &options.to_worktree,
         materialized_workspace.as_deref(),
+        trusted_unpushed_candidate_destination.as_ref(),
+        None,
+    )?
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            "candidate destination unavailable",
+            None,
+            None,
+        )
+    })?;
+    validate_candidate_commit(
+        &path,
+        outcome.candidate.as_ref().expect("adopted candidate"),
     )?;
-    command_evidence.extend(target.command_evidence);
-    let applied_worktree_path = (!options.dry_run).then_some(target.path);
+    if !options.dry_run {
+        git_output(
+            &path,
+            &["read-tree", "--reset", "-u", &committed_patch.candidate],
+        )?;
+        if let Some(run_id) = options.source_run_id.as_deref() {
+            git_output(
+                &path,
+                &[
+                    "update-ref",
+                    &format!("refs/homeboy/candidates/{run_id}"),
+                    &committed_patch.candidate,
+                ],
+            )?;
+        }
+    }
+    let command_evidence = Vec::new();
+    let applied_worktree_path = (!options.dry_run).then_some(path);
     let target = AgentTaskPromotionTarget::from_worktree(
         options.to_worktree.clone(),
         applied_worktree_path.as_deref(),
@@ -2214,14 +2026,14 @@ fn promote_committed_changes(
         let report = post_apply_report(
             options,
             source_kind,
-            outcome,
+            &outcome,
             AgentTaskPromotionArtifactRef {
-                id: "committed-changes".to_string(),
-                kind: "patch".to_string(),
-                path: retained_patch_path.display().to_string(),
-                sha256: Some(committed_patch.sha256.clone()),
+                id: committed_patch.candidate.clone(),
+                kind: "candidate_commit".to_string(),
+                path: String::new(),
+                sha256: Some(committed_patch.tree_sha.clone()),
             },
-            normalized_patch.changed_files.clone(),
+            changed_files.clone(),
             command_evidence.clone(),
             target.clone(),
             path,
@@ -2274,7 +2086,7 @@ fn promote_committed_changes(
     let (gates, verified_base) = verified_base;
     let operator_notification =
         promotion_notification_with_gate_summary(gates.status, &target, &gates.deterministic_gates);
-    let candidate = post_apply
+    let candidate: Option<super::AgentTaskPromotionCandidate> = post_apply
         .as_ref()
         .and_then(|report| report.provenance.get("candidate").cloned())
         .and_then(|value| serde_json::from_value(value).ok());
@@ -2288,24 +2100,24 @@ fn promote_committed_changes(
             "candidate_tree": &proof.candidate_tree,
             "resolved_base_tree": &proof.resolved_base_tree,
             "candidate": &committed_patch.candidate,
-            "changed_files": &normalized_patch.changed_files,
-            "patch_sha256": &committed_patch.sha256,
+            "changed_files": &changed_files,
+            "tree_sha": &committed_patch.tree_sha,
         })
     });
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
-        source: promotion_source(source_kind, outcome, options),
+        source: promotion_source(source_kind, &outcome, options),
         to_worktree: options.to_worktree.clone(),
         target,
         patch_artifact: AgentTaskPromotionArtifactRef {
-            id: "committed-changes".to_string(),
-            kind: "patch".to_string(),
-            path: retained_patch_path.display().to_string(),
-            sha256: Some(committed_patch.sha256),
+            id: committed_patch.candidate.clone(),
+            kind: "candidate_commit".to_string(),
+            path: String::new(),
+            sha256: Some(committed_patch.tree_sha.clone()),
         },
-        changed_files: persisted_changed_files(normalized_patch.changed_files, candidate.as_ref()),
+        changed_files,
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
@@ -2319,6 +2131,7 @@ fn promote_committed_changes(
             "candidate_checkout_setup": gates.candidate_setup,
             "destination_gate_setup": gates.destination_gate_setup,
             "candidate_checkout": gates.candidate_checkout,
+            "candidate_commit": outcome.candidate,
             "change_source": "local_commits",
             "base_ref": committed_patch.base_ref,
             "commit_range": committed_patch.commit_range,
@@ -2333,8 +2146,8 @@ fn promote_committed_changes(
     })
 }
 
-/// Retain the controller-generated committed delta before its producer path can
-/// be cleaned up. Only an existing controller run may own this projection.
+/// Test evidence fixture; candidate publication never retains or reads patches.
+#[cfg(test)]
 pub(super) fn retain_committed_changes_artifact(
     options: &AgentTaskPromotionRequest,
     outcome: &AgentTaskOutcome,
@@ -4313,6 +4126,7 @@ fn post_apply_report(
     let gate_feedback_baseline = match candidate.as_ref() {
         Some(crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { .. }) => Some(json!({
             "schema": "homeboy/agent-task-gate-feedback-baseline/v1",
+            "candidate_commit": outcome.candidate,
             "current_diff": candidate_current_diff(worktree_path)?,
         })),
         _ => None,
@@ -4343,6 +4157,7 @@ fn post_apply_report(
             "worktree_path": worktree_path,
             "dependencies_materialized": false,
             "post_apply": true,
+            "candidate_commit": outcome.candidate,
             "candidate": candidate,
             "destination_baseline": candidate,
             "gate_feedback_baseline": gate_feedback_baseline,
@@ -4476,6 +4291,7 @@ fn select_outcome(source: Value, task_id: Option<&str>) -> Result<(String, Agent
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn select_patch_artifact(
     outcome: &AgentTaskOutcome,
     artifact_id: Option<&str>,
@@ -4511,7 +4327,7 @@ pub(crate) fn select_patch_artifact(
         1 => Ok(artifacts.into_iter().next().unwrap()),
         0 => Err(Error::validation_invalid_argument(
             "artifact_id",
-            "no matching patch artifact was found; inspect the agent result or transcript for diagnosis",
+            "fixture has no patch evidence",
             None,
             None,
         )),

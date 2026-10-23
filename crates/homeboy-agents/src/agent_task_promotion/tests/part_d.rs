@@ -433,30 +433,19 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
             report.patch_artifact.path,
             original_path.display().to_string()
         );
-        std::fs::remove_file(&original_path).expect("clean original promotion artifact");
-        crate::agent_task_lifecycle::verified_controller_artifact_projection(
-            "baseline-run",
-            "task-1",
-            "committed-changes",
-            "patch",
-            report.patch_artifact.sha256.as_deref().expect("patch sha"),
-            None,
-        )
-        .expect("retained projection lookup")
-        .expect("committed changes retained before cleanup");
-        let baseline = serde_json::json!({
-            "source_run_id": "baseline-run",
-            "source_task_id": "task-1",
-            "patch_artifact": report.patch_artifact,
-        });
-        let bound = super::super::promote::bind_gate_feedback_baseline(Some(baseline))
-            .expect("continuation resolves controller mirror")
-            .expect("bound baseline");
-        assert!(bound["patch_artifact"].get("path").is_none());
-        assert_eq!(
-            bound["patch_artifact"]["controller_artifact"]["logical_artifact_id"],
-            "committed-changes"
+        assert!(
+            !original_path.exists(),
+            "adoption must not create a patch carrier"
         );
+        assert_eq!(report.patch_artifact.kind, "candidate_commit");
+        assert!(report.patch_artifact.path.is_empty());
+        let candidate: crate::agent_task::AgentTaskCandidate =
+            serde_json::from_value(report.provenance["candidate_commit"].clone()).unwrap();
+        super::super::promote::validate_candidate_commit(
+            provider.workspace_path.as_deref().unwrap(),
+            &candidate,
+        )
+        .expect("candidate survives without patch evidence");
         let forged = serde_json::json!({
             "source_run_id": "baseline-run",
             "source_task_id": "forged-task",

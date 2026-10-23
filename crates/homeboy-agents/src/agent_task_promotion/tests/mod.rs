@@ -9,6 +9,7 @@ use super::apply::{AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace};
 
 mod candidate_fixture;
 mod immutable_candidate;
+mod resume_candidate;
 use super::types::{
     AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionReport,
     AgentTaskPromotionRequest,

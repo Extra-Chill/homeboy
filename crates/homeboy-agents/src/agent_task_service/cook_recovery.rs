@@ -32,12 +32,6 @@ pub enum CookRecoveryStep {
     /// Continue the Cook from its durable recipe. This also
     /// materializes a recipe-only attempt whose lifecycle record is absent.
     Continue,
-    /// Continue promotion with the one canonical patch artifact the failed
-    /// selection named.
-    ContinueWithArtifact { artifact_id: String },
-    /// Several distinct patch artifacts remain; the operator must name one
-    /// (`recover --artifact-id <id>`).
-    ChooseArtifact { artifact_ids: Vec<String> },
     /// Rearm the attempt's failed terminal continuation.
     Rearm,
     /// Reserve and run a fresh successor attempt (`retry --run`).
@@ -73,9 +67,6 @@ impl CookRecoveryStep {
     pub fn action_name(&self) -> Option<&'static str> {
         Some(match self {
             Self::Continue => "resume",
-            Self::ContinueWithArtifact { .. } | Self::ChooseArtifact { .. } => {
-                "resume_with_artifact"
-            }
             Self::Rearm => "rearm",
             Self::Retry => "retry",
             Self::ForkReplacement => "fork_replacement",
@@ -110,13 +101,6 @@ impl CookRecoveryStep {
         };
         let command = |args: &[&str]| super::cook_recovery_command_with_prefix(prefix, args);
         match self {
-            Self::ChooseArtifact { artifact_ids } => artifact_ids
-                .iter()
-                .map(|artifact_id| super::AgentTaskCookRecoveryAction {
-                    action: action.to_string(),
-                    command: command(&["recover", run_id, "--artifact-id", artifact_id]),
-                })
-                .collect(),
             Self::Adopt { candidate_ref } => vec![super::AgentTaskCookRecoveryAction {
                 action: action.to_string(),
                 command: command(&["adopt", run_id, "--candidate-ref", candidate_ref]),
@@ -142,8 +126,6 @@ pub(crate) struct CookRecoveryInputs<'a> {
     pub retry_admitted: bool,
     /// The checkpoint's typed recovery action is `fork_replacement`.
     pub exact_checkpoint_candidate_mismatch: bool,
-    /// Canonical patch artifacts when promotion failed on selection.
-    pub ambiguous_artifact_ids: &'a [String],
     /// The attempt's terminal continuation failed and must be rearmed.
     pub continuation_rearm_required: bool,
     /// A completed terminal continuation cannot be claimed again.
@@ -188,19 +170,6 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
     }
     if inputs.exact_checkpoint_candidate_mismatch && inputs.retry_admitted {
         return CookRecoveryStep::ForkReplacement;
-    }
-    match inputs.ambiguous_artifact_ids {
-        [] => {}
-        [artifact_id] => {
-            return CookRecoveryStep::ContinueWithArtifact {
-                artifact_id: artifact_id.clone(),
-            }
-        }
-        artifact_ids => {
-            return CookRecoveryStep::ChooseArtifact {
-                artifact_ids: artifact_ids.to_vec(),
-            }
-        }
     }
     if status == CookStatus::CandidateRecoverable {
         if let Some(reason) = inputs.agent_incomplete_reason {
@@ -375,8 +344,6 @@ impl CookPublishRequest {
 pub struct CookRecoveryRequest {
     /// Report (and validate read-only) the step instead of performing it.
     pub preflight: bool,
-    /// Resolves a [`CookRecoveryStep::ChooseArtifact`] decision.
-    pub artifact_id: Option<String>,
     /// Explicit successor-attempt overrides.
     pub overrides: CookRecoveryOverrides,
     /// Inputs for [`CookRecoveryStep::ReplaceGates`]. Supplying them selects
@@ -608,7 +575,7 @@ pub fn cook_recovery_delegation(id: &str) -> Option<CookRecoveryPlan> {
 
 /// Perform (or, with `preflight`, only report) the one next recovery step.
 ///
-/// `request.artifact_id` resolves a [`CookRecoveryStep::ChooseArtifact`]
+/// Operator inputs select a replacement gate or publication
 /// decision; it is refused for every other step so it can never redirect
 /// recovery. `request.overrides` are explicit operator inputs that reserve a
 /// successor attempt with a changed parameter; they are refused where the
@@ -628,12 +595,11 @@ pub fn recover_cook(
 ) -> Result<(CookRecoveryReport, i32)> {
     let CookRecoveryRequest {
         preflight,
-        artifact_id,
         overrides,
         replace_gates,
         publish,
     } = request;
-    let artifact_id = artifact_id.as_deref();
+    let artifact_id = None;
     let mut plan = plan_cook_recovery(id)?;
     validate_step_inputs(
         &mut plan,
@@ -645,11 +611,6 @@ pub fn recover_cook(
     if !overrides.is_empty() {
         validate_overrides(&plan, preflight, artifact_id)?;
     }
-    let selected_artifact = match (&plan.step, artifact_id, preflight) {
-        // Preflight reports an unresolved artifact choice instead of failing.
-        (CookRecoveryStep::ChooseArtifact { .. }, None, true) => None,
-        _ => selected_artifact(&plan, artifact_id)?,
-    };
     let report = CookRecoveryReport {
         schema: COOK_RECOVERY_SCHEMA,
         cook_id: plan.cook_id,
@@ -684,12 +645,6 @@ pub fn recover_cook(
         }
         let continuation = match &report.step {
             CookRecoveryStep::Continue => Some((false, None)),
-            CookRecoveryStep::ContinueWithArtifact { .. } => {
-                Some((true, selected_artifact.as_deref()))
-            }
-            CookRecoveryStep::ChooseArtifact { .. } => selected_artifact
-                .as_deref()
-                .map(|artifact_id| (true, Some(artifact_id))),
             CookRecoveryStep::Rearm => Some((true, None)),
             _ => None,
         };
@@ -709,10 +664,6 @@ pub fn recover_cook(
     let result = (|| {
         Ok(match &report.step {
             CookRecoveryStep::Continue => performer.continue_cook(run_id, false, None, &none)?,
-            CookRecoveryStep::ContinueWithArtifact { .. }
-            | CookRecoveryStep::ChooseArtifact { .. } => {
-                performer.continue_cook(run_id, true, selected_artifact.as_deref(), &none)?
-            }
             CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, None, &none)?,
             CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => {
                 performer.retry(run_id)?
@@ -874,11 +825,6 @@ fn validate_overrides(
         CookRecoveryStep::Reconcile => refuse(
             "a promotion claim is still held; run `agent-task recover` without overrides to reconcile it first",
         ),
-        CookRecoveryStep::ContinueWithArtifact { .. } | CookRecoveryStep::ChooseArtifact { .. } => {
-            refuse(
-                "the recovery step promotes an existing patch artifact; it reserves no provider attempt to override",
-            )
-        }
         CookRecoveryStep::Adopt { .. } => refuse(
             "the recovery step adopts the worktree's committed candidate; it reserves no provider attempt to override",
         ),
@@ -886,50 +832,6 @@ fn validate_overrides(
             "the recovery step forks a replacement attempt that preserves the checkpoint; it accepts no overrides",
         ),
         _ => Ok(()),
-    }
-}
-
-fn selected_artifact(plan: &CookRecoveryPlan, artifact_id: Option<&str>) -> Result<Option<String>> {
-    let refuse = |message: String| {
-        Err(Error::validation_invalid_argument(
-            "artifact-id",
-            message,
-            Some(plan.run_id.clone()),
-            None,
-        ))
-    };
-    match (&plan.step, artifact_id) {
-        (CookRecoveryStep::ContinueWithArtifact { artifact_id: only }, None) => {
-            Ok(Some(only.clone()))
-        }
-        (CookRecoveryStep::ContinueWithArtifact { artifact_id: only }, Some(requested)) => {
-            if requested == only {
-                Ok(Some(only.clone()))
-            } else {
-                refuse(format!(
-                    "artifact `{requested}` is not the canonical patch candidate `{only}`"
-                ))
-            }
-        }
-        (CookRecoveryStep::ChooseArtifact { artifact_ids }, Some(requested)) => {
-            if artifact_ids.iter().any(|id| id == requested) {
-                Ok(Some(requested.to_string()))
-            } else {
-                refuse(format!(
-                    "artifact `{requested}` is not one of the canonical patch candidates: {}",
-                    artifact_ids.join(", ")
-                ))
-            }
-        }
-        (CookRecoveryStep::ChooseArtifact { artifact_ids }, None) => refuse(format!(
-            "several distinct patch candidates remain; rerun with --artifact-id <one of: {}>",
-            artifact_ids.join(", ")
-        )),
-        (_, Some(_)) => refuse(
-            "--artifact-id only selects among patch candidates when the recovery step requires a choice"
-                .to_string(),
-        ),
-        (_, None) => Ok(None),
     }
 }
 
@@ -1183,22 +1085,6 @@ mod tests {
             step("gate_failed", |inputs| inputs.retry_admitted = true),
             CookRecoveryStep::Continue
         );
-        let one = vec!["canonical-patch".to_string()];
-        assert_eq!(
-            step("promotion_failed", |inputs| inputs.ambiguous_artifact_ids =
-                &one),
-            CookRecoveryStep::ContinueWithArtifact {
-                artifact_id: "canonical-patch".to_string()
-            }
-        );
-        let many = vec!["first-patch".to_string(), "second-patch".to_string()];
-        assert_eq!(
-            step("promotion_failed", |inputs| inputs.ambiguous_artifact_ids =
-                &many),
-            CookRecoveryStep::ChooseArtifact {
-                artifact_ids: many.clone()
-            }
-        );
         assert_eq!(
             step("verification_pending", |inputs| {
                 inputs.continuation_rearm_required = true
@@ -1322,21 +1208,6 @@ mod tests {
                 "homeboy agent-task recover cook-attempt-1".to_string()
             )]
         );
-        assert_eq!(
-            actions(CookRecoveryStep::ChooseArtifact {
-                artifact_ids: vec!["a".to_string(), "b".to_string()]
-            }),
-            vec![
-                (
-                    "resume_with_artifact".to_string(),
-                    "homeboy agent-task recover cook-attempt-1 --artifact-id a".to_string()
-                ),
-                (
-                    "resume_with_artifact".to_string(),
-                    "homeboy agent-task recover cook-attempt-1 --artifact-id b".to_string()
-                ),
-            ]
-        );
         for (step, action) in [
             (CookRecoveryStep::ReplaceGates, "replace_gates"),
             (CookRecoveryStep::Publish, "publish"),
@@ -1350,37 +1221,6 @@ mod tests {
             );
         }
         assert!(actions(CookRecoveryStep::none("done")).is_empty());
-    }
-
-    #[test]
-    fn artifact_selection_is_refused_outside_an_artifact_choice() {
-        let plan = |step| CookRecoveryPlan {
-            cook_id: "cook".to_string(),
-            run_id: "cook-attempt-1".to_string(),
-            status: "promotion_failed".to_string(),
-            step,
-        };
-        let choose = plan(CookRecoveryStep::ChooseArtifact {
-            artifact_ids: vec!["a".to_string(), "b".to_string()],
-        });
-        assert_eq!(
-            selected_artifact(&choose, Some("b")).unwrap().as_deref(),
-            Some("b")
-        );
-        assert!(selected_artifact(&choose, None).is_err());
-        assert!(selected_artifact(&choose, Some("c")).is_err());
-        assert!(selected_artifact(&plan(CookRecoveryStep::Continue), Some("a")).is_err());
-        assert_eq!(
-            selected_artifact(
-                &plan(CookRecoveryStep::ContinueWithArtifact {
-                    artifact_id: "a".to_string()
-                }),
-                None
-            )
-            .unwrap()
-            .as_deref(),
-            Some("a")
-        );
     }
 
     fn no_step_report(status: &str, reason: &str) -> CookRecoveryReport {

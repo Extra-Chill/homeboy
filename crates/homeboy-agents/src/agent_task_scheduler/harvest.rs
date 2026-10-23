@@ -1074,6 +1074,12 @@ mod committed_harvest_tests {
         let current_diff = std::fs::read_to_string(&patch_artifact).expect("complete current diff");
         let mut request =
             gate_feedback_request(&workspace, current_diff, &patch_artifact, &patch_sha256);
+        let base = git(&workspace, &["rev-parse", "HEAD"]);
+        git(&workspace, &["add", "-A"]);
+        let tree = git(&workspace, &["write-tree"]);
+        let candidate = git(&workspace, &["commit-tree", &tree, "-p", &base, "-m", "candidate"]);
+        git(&workspace, &["reset", "--mixed", &base]);
+        request.inputs["cook_loop"]["candidate_commit"] = serde_json::json!({"base_sha":base,"candidate_sha":candidate,"tree_sha":tree});
 
         let preflight =
             prepare_committed_harvest(&request, None, &HarvestExecutionContext::default())

@@ -55,7 +55,6 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
     };
     Ok(CookRecoveryRequest {
         preflight: args.preflight,
-        artifact_id: args.artifact_id,
         overrides,
         replace_gates,
         publish,
@@ -215,15 +214,13 @@ mod tests {
     use crate::commands::agent_task::AgentTaskCommand;
 
     #[test]
-    fn recover_parses_its_id_preflight_and_artifact_selection() {
+    fn recover_parses_its_id_and_preflight() {
         let cli = Cli::try_parse_from([
             "homeboy",
             "agent-task",
             "recover",
             "cook-attempt-1",
             "--preflight",
-            "--artifact-id",
-            "patch-a",
         ])
         .expect("recover parses");
         let Commands::AgentTask(agent_task) = cli.command else {
@@ -234,7 +231,15 @@ mod tests {
         };
         assert_eq!(args.id, "cook-attempt-1");
         assert!(args.preflight);
-        assert_eq!(args.artifact_id.as_deref(), Some("patch-a"));
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "recover",
+            "cook-attempt-1",
+            "--artifact-id",
+            "patch-a"
+        ])
+        .is_err());
         assert!(args.overrides().is_empty());
     }
 

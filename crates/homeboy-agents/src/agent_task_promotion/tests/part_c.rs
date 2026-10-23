@@ -716,7 +716,7 @@ fn explicit_candidate_adoption_ignores_recoverable_provider_patch_selection() {
             candidate
         )
     );
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
     assert_eq!(
         report.deterministic_gates[0].status,
@@ -760,7 +760,7 @@ fn explicit_candidate_adopts_only_durable_pre_provider_transport_failures() {
     let report = promote_with_provider(options.clone(), &mut provider)
         .expect("eligible transport failure adopts immutable candidate through gates");
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
 
     for recovery in [
