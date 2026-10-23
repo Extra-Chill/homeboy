@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.2] - 2026-10-23
+
+### Changed
+- Converge Cook destinations before provider execution
+
 ## [0.433.1] - 2026-10-23
 
 ### Fixed
