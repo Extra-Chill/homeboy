@@ -8842,8 +8842,8 @@ fn preflight_cook_workspace_resolved_base_ancestry(
         ),
         Some(target.display().to_string()),
         Some(vec![
-            format!("Merge the prepared base with `git merge {resolved_base}` and rerun Cook."),
-            format!("Or rebase the candidate with `git rebase {resolved_base}` and rerun Cook."),
+            format!("For PR rework, rerun with --task-url https://github.com/<owner>/<repo>/pull/<n> after merging the prepared base with `git merge {resolved_base}` (or rebasing with `git rebase {resolved_base}`)."),
+            "Otherwise keep this branch and rerun Cook with --head <new-branch> to create a fresh destination from the resolved base.".to_string(),
         ]),
     );
     error.details["workspace_base_ancestry"] = serde_json::json!({

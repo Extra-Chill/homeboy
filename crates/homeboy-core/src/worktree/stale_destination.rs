@@ -136,15 +136,22 @@ pub fn classify_worktree_destination(
     Ok(DestinationFreshness::Fresh)
 }
 
-/// Classify a local branch that exists without a destination worktree. A
-/// missing branch is unclassified: creation starts it from the base.
+/// Classify the branch creation would adopt without a destination worktree:
+/// local first, then origin. Only a branch absent from both starts from base.
 pub fn classify_local_branch(
     source: &Path,
     handle: &str,
     branch: &str,
     base: &str,
 ) -> Result<DestinationFreshness> {
-    let reference = format!("refs/heads/{branch}");
+    let local = format!("refs/heads/{branch}");
+    let remote = format!("refs/remotes/origin/{branch}");
+    let reference =
+        if git::output_optional(source, &["rev-parse", "--verify", "--quiet", &local]).is_some() {
+            local
+        } else {
+            remote
+        };
     if git::output_optional(
         source,
         &[
@@ -584,6 +591,35 @@ mod tests {
             classify_local_branch(&fixture.clone, HANDLE, "fix/absent", "main")
                 .expect("classify absent"),
             DestinationFreshness::Unclassified
+        );
+    }
+
+    #[test]
+    fn stale_destination_origin_only_closed_pr_branch_is_refused() {
+        let fixture = fixture();
+        commit(&fixture.worktree, "a.txt", "a\n", "closed PR work");
+        let head = git(&fixture.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &fixture.clone,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{BRANCH}"),
+                &head,
+            ],
+        );
+        git(
+            &fixture.clone,
+            &["worktree", "remove", fixture.worktree.to_str().unwrap()],
+        );
+        git(&fixture.clone, &["branch", "-D", BRANCH]);
+        let classification = classify_local_branch(&fixture.clone, HANDLE, BRANCH, "main").unwrap();
+        assert!(refuse_foreign_history(classification).is_err());
+        assert_eq!(
+            git(
+                &fixture.clone,
+                &["rev-parse", &format!("refs/remotes/origin/{BRANCH}")]
+            ),
+            head
         );
     }
 

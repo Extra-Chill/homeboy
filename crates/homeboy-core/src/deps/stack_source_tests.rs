@@ -13,7 +13,8 @@ fn fixture(responses: Vec<(&'static str, &'static str)>) -> std::thread::JoinHan
         for (status, body) in responses {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 4096];
-            stream.read(&mut request).unwrap();
+            let received = stream.read(&mut request).unwrap();
+            assert!(received > 0, "expected an HTTP request");
             write!(
                 stream,
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

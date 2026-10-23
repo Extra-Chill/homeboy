@@ -1331,6 +1331,56 @@ fn create_restores_missing_active_record_from_an_unclaimed_existing_branch() {
 }
 
 #[test]
+fn create_restores_active_record_from_origin_only_branch() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "origin-restore-fixture");
+        let created = create(options.clone()).expect("create");
+        let path = PathBuf::from(&created.record.worktree_path);
+        run_git(&path, &["commit", "--allow-empty", "-m", "PR work"]);
+        let head = git::run_git(&path, &["rev-parse", "HEAD"], "head").unwrap();
+        run_git(
+            &source,
+            &["update-ref", "refs/remotes/origin/fix/restore", head.trim()],
+        );
+        run_git(&source, &["worktree", "remove", &path.to_string_lossy()]);
+        run_git(&source, &["branch", "-D", "fix/restore"]);
+        // Tracking configuration requires an origin fetch refspec.
+        run_git(
+            &source,
+            &["config", "remote.origin.url", source.to_str().unwrap()],
+        );
+        run_git(
+            &source,
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+        );
+        let restored = create(options).expect("restore origin-only record");
+        assert_eq!(
+            restored.reconciliation.unwrap().action,
+            WorktreeCreateAction::Restored
+        );
+        assert_eq!(
+            git::run_git(&path, &["rev-parse", "HEAD"], "head").unwrap(),
+            head
+        );
+        assert_eq!(
+            git::run_git(
+                &path,
+                &["rev-parse", "--abbrev-ref", "@{upstream}"],
+                "tracking"
+            )
+            .unwrap()
+            .trim(),
+            "origin/fix/restore"
+        );
+        assert_eq!(restored.record.base_ref, created.record.base_ref);
+    });
+}
+
+#[test]
 fn create_returns_existing_matching_task_worktree_idempotently() {
     crate::test_support::with_isolated_home(|home| {
         let (_, options) = registered_create_fixture(home.path(), "existing-fixture");

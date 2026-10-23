@@ -672,7 +672,9 @@ fn create_with_store_unlocked(
                 ));
             }
         }
-        if !branch_exists(&source_checkout, &options.branch)? {
+        if !branch_exists(&source_checkout, &options.branch)?
+            && !remote_task_branch_exists(&source_checkout, &options.branch)
+        {
             return Err(Error::validation_invalid_argument(
                 "branch",
                 "The declared branch is missing for the active task worktree record",
@@ -682,15 +684,11 @@ fn create_with_store_unlocked(
         }
         let previous = create_evidence(&record, "missing".to_string())?;
         let worktree_owner = ownership::owner_for_path_or_ancestor(parent)?;
-        git::run_git_with_env(
+        add_task_branch_worktree(
             &source_checkout,
-            &[
-                "worktree",
-                "add",
-                &worktree_path.to_string_lossy(),
-                &options.branch,
-            ],
-            "git worktree add restore",
+            &worktree_path,
+            &options.branch,
+            &record.base_ref,
             &hydration_transport,
         )?;
         ownership::normalize_created_path(
@@ -719,50 +717,13 @@ fn create_with_store_unlocked(
         &source_checkout,
         &options.from.unwrap_or_else(|| "HEAD".to_string()),
     )?;
-    if branch_exists(&source_checkout, &options.branch)? {
-        // The branch already exists locally (e.g. an operator's branch for this
-        // task) and, per the ownership check above, is not checked out
-        // anywhere else. Adopt it instead of failing `worktree add -b` with
-        // "a branch named ... already exists" (#15364). Its history is kept;
-        // the recorded base stays the declared start point, which promotion
-        // diffs against.
-        git::run_git_with_env(
-            &source_checkout,
-            &[
-                "worktree",
-                "add",
-                &worktree_path.to_string_lossy(),
-                &options.branch,
-            ],
-            "git worktree add existing branch",
-            &hydration_transport,
-        )?;
-    } else {
-        let remote_branch = format!("refs/remotes/origin/{}", options.branch);
-        let remote_exists = git::run_git(
-            &source_checkout,
-            &["show-ref", "--verify", "--quiet", &remote_branch],
-            "git show-ref remote task branch",
-        )
-        .is_ok();
-        let mut args = vec!["worktree", "add", "-b", &options.branch];
-        if remote_exists {
-            args.push("--track");
-        }
-        let path = worktree_path.to_string_lossy();
-        args.push(&path);
-        args.push(if remote_exists {
-            &remote_branch
-        } else {
-            &base_ref
-        });
-        git::run_git_with_env(
-            &source_checkout,
-            &args,
-            "git worktree add",
-            &hydration_transport,
-        )?;
-    }
+    add_task_branch_worktree(
+        &source_checkout,
+        &worktree_path,
+        &options.branch,
+        &base_ref,
+        &hydration_transport,
+    )?;
     ownership::normalize_created_path(&worktree_path, worktree_owner, true, "git worktree add")?;
     pin_worktree_identity(&worktree_path)?;
 
@@ -1003,6 +964,51 @@ fn shared_start_point(source: &Path, declared: &str) -> Result<String> {
         return Ok(declared.to_string());
     }
     Ok(upstream.to_string())
+}
+
+fn remote_task_branch_exists(source: &Path, branch: &str) -> bool {
+    git::output_optional(
+        source,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/origin/{branch}^{{commit}}"),
+        ],
+    )
+    .is_some()
+}
+
+/// Creation and active-record restoration adopt the same branch authority:
+/// local first, then origin with tracking, and only a new branch uses base.
+fn add_task_branch_worktree(
+    source: &Path,
+    worktree: &Path,
+    branch: &str,
+    base: &str,
+    env: &[(String, String)],
+) -> Result<()> {
+    let path = worktree.to_string_lossy();
+    let remote = format!("refs/remotes/origin/{branch}");
+    let local_exists = branch_exists(source, branch)?;
+    let remote_exists = !local_exists && remote_task_branch_exists(source, branch);
+    let mut args = vec!["worktree", "add"];
+    if !local_exists {
+        args.extend(["-b", branch]);
+        if remote_exists {
+            args.push("--track");
+        }
+    }
+    args.push(&path);
+    args.push(if local_exists {
+        branch
+    } else if remote_exists {
+        &remote
+    } else {
+        base
+    });
+    git::run_git_with_env(source, &args, "git worktree add task branch", env)?;
+    Ok(())
 }
 
 fn branch_exists(source: &Path, branch: &str) -> Result<bool> {

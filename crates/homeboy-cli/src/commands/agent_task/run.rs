@@ -6142,6 +6142,24 @@ pub(crate) fn resolve_cook_destination(
             next_live_derived_cook_branch(&handle_repository, &derived_cook_branch(&task_url)?)?
         }
     };
+    if args.head.is_none() {
+        if let Some(url) = cook_derived_open_pull_request(&args, &task_url, &head)? {
+            // Use the same canonical refs, flag validation and destination as a
+            // PR-URL Cook. In particular, these commits are intentional rework,
+            // not foreign history from a closed PR (#16317).
+            args.dispatch.task_url = Some(url.clone());
+            resolve_cook_pull_request(&mut args).map_err(|error| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "task_url",
+                    format!("Could not resolve the derived destination's open PR: {}; rerun with --task-url {url} and GitHub access before provider execution", error.message),
+                    Some(url),
+                    None,
+                )
+            })?;
+            resolve_cook_base(&mut args)?;
+            return Ok(args);
+        }
+    }
     let handle = format!("{handle_repository}@{}", slugify_cook_branch(&head));
     args.to_worktree = Some(handle.clone());
     let derived = args.head.is_none();
@@ -6254,6 +6272,68 @@ fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Res
     Ok(())
 }
 
+/// Only existing derived branches need remote PR classification. A failed
+/// lookup must not silently classify an open PR's work as stale or discard it.
+fn cook_derived_open_pull_request(
+    args: &AgentTaskCookArgs,
+    issue_url: &str,
+    head: &str,
+) -> homeboy::core::Result<Option<String>> {
+    let repository = cook_provision_repository(args);
+    let Some(path) = repository.as_deref().map(Path::new).filter(|p| p.is_dir()) else {
+        return Ok(None);
+    };
+    if ![
+        format!("refs/heads/{head}"),
+        format!("refs/remotes/origin/{head}"),
+    ]
+    .iter()
+    .any(|reference| {
+        homeboy::core::git::output_optional(path, &["rev-parse", "--verify", "--quiet", reference])
+            .is_some()
+    }) {
+        return Ok(None);
+    }
+    let repository_url = issue_url.split("/issues/").next().unwrap_or(issue_url);
+    let repository_slug = repository_url.trim_start_matches("https://github.com/");
+    let unavailable = || {
+        homeboy::core::Error::validation_invalid_argument(
+        "task_url",
+        format!("Could not check whether derived destination `{head}` heads an open PR; retry with GitHub access, or use --task-url {repository_url}/pull/<n> for the open pull request before provider execution"),
+        Some(issue_url.to_string()),
+        None,
+    )
+    };
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repository_slug,
+            "--head",
+            head,
+            "--state",
+            "open",
+            "--json",
+            "url",
+        ])
+        .current_dir(path)
+        .output()
+        .map_err(|_| unavailable())?;
+    if !output.status.success() {
+        return Err(unavailable());
+    }
+    let prs: Vec<Value> = serde_json::from_slice(&output.stdout).map_err(|_| unavailable())?;
+    match prs.as_slice() {
+        [] => Ok(None),
+        [pr] => pr["url"]
+            .as_str()
+            .map(|url| Some(url.to_string()))
+            .ok_or_else(unavailable),
+        _ => Err(unavailable()),
+    }
+}
+
 fn cook_pull_request_refs(path: &Path, url: &str) -> homeboy::core::Result<(String, String)> {
     let output = std::process::Command::new("gh")
         .args(["pr", "view", url, "--json", "baseRefName,headRefName"])
@@ -6326,6 +6406,11 @@ mod cook_pull_request_ref_tests {
         run_git(&["add", "tracked"]);
         run_git(&["commit", "-qm", "base"]);
         run_git(&["branch", "release"]);
+        run_git(&["branch", "fix/issue-7-repo"]);
+        run_git(&["checkout", "-q", "fix/issue-7-repo"]);
+        run_git(&["commit", "--allow-empty", "-qm", "PR commits ahead of base"]);
+        run_git(&["checkout", "-q", "main"]);
+        run_git(&["update-ref", "refs/remotes/origin/main", "main"]);
         let linked = root.path().join("linked");
         run_git(&[
             "worktree",
@@ -6333,13 +6418,14 @@ mod cook_pull_request_ref_tests {
             "-qb",
             "feature",
             linked.to_str().unwrap(),
+            "fix/issue-7-repo",
         ]);
 
         let bin = tempfile::tempdir().expect("fake gh bin");
         let gh = bin.path().join("gh");
         std::fs::write(
             &gh,
-            "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
+            "#!/bin/sh\nif [ \"$2\" = list ]; then printf '[{\"url\":\"https://github.com/example/repo/pull/1895\"}]'; else printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'; fi\n",
         )
         .expect("fake gh");
         use std::os::unix::fs::PermissionsExt;
@@ -6404,6 +6490,55 @@ mod cook_pull_request_ref_tests {
                 assert_eq!(resolved.base.as_deref(), Some("release"));
                 assert_eq!(resolved.head.as_deref(), Some("feature"));
             }
+            std::fs::write(&gh, "#!/bin/sh\nif [ \"$2\" = list ]; then printf '[{\"url\":\"https://github.com/example/repo/pull/1895\"}]'; else printf '{\"baseRefName\":\"release\",\"headRefName\":\"fix/issue-7-repo\"}'; fi\n").unwrap();
+            let mut issue = parse(&[]);
+            issue.dispatch.task_url = Some("https://github.com/example/repo/issues/7".into());
+            let resolved = resolve_cook_destination(issue.clone()).expect("issue adopts open PR");
+            assert_eq!(
+                resolved.dispatch.task_url.as_deref(),
+                Some("https://github.com/example/repo/pull/1895")
+            );
+            assert_eq!(resolved.base.as_deref(), Some("release"));
+            assert_eq!(resolved.head.as_deref(), Some("fix/issue-7-repo"));
+            assert_eq!(
+                resolved.to_worktree.as_deref(),
+                Some("repository@fix-issue-7-repo")
+            );
+
+            std::fs::write(&gh, "#!/bin/sh\nexit 1\n").unwrap();
+            let error = resolve_cook_destination(issue.clone()).expect_err("lookup unavailable");
+            assert!(
+                error
+                    .message
+                    .contains("--task-url https://github.com/example/repo/pull/<n>"),
+                "{error:?}"
+            );
+            // A closed/merged PR is not an exemption from stale-history checks.
+            std::fs::write(&gh, "#!/bin/sh\nprintf '[]'\n").unwrap();
+            assert_eq!(
+                super::cook_derived_open_pull_request(
+                    &issue,
+                    issue.dispatch.task_url.as_deref().unwrap(),
+                    "fix/issue-7-repo"
+                )
+                .unwrap(),
+                None
+            );
+            assert!(matches!(
+                homeboy::core::worktree::stale_destination::classify_local_branch(
+                    &repository,
+                    "repository@fix-issue-7-repo",
+                    "fix/issue-7-repo",
+                    "main"
+                )
+                .unwrap(),
+                homeboy::core::worktree::stale_destination::DestinationFreshness::Stale(_)
+            ));
+            std::fs::write(
+                &gh,
+                "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
+            )
+            .unwrap();
             for extra in [
                 vec!["--head", "other"],
                 vec!["--base", "other"],
