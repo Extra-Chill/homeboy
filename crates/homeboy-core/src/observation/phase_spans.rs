@@ -1,0 +1,177 @@
+//! The shared write/read path for durable phase telemetry. No metadata copies
+//! or artifact scans are needed; reads never reconcile or contact a runner.
+use homeboy_control_plane_contract::{
+    ControlPlaneEventAppendRequest, ControlPlaneEventSource, RunId,
+    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+};
+use homeboy_engine_primitives::phase_timing::{
+    PhaseTimingReport, MAX_PHASE_SPANS_PER_EVENT, PHASE_SPANS_EVENT_KIND,
+};
+
+use super::ObservationStore;
+use crate::{Error, Result};
+
+impl ObservationStore {
+    /// Time an operation and append its outcome even when the operation fails.
+    /// Persistence failure is reported separately and never masks a workflow
+    /// error. Offsets are relative to the durable run origin, including time
+    /// spent in other processes (Cook controller, Lab and provider workers).
+    pub fn time_run_phase<T>(
+        &self,
+        run_id: &str,
+        phase: &str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.time_run_phase_with_outcome(run_id, phase, operation, |_| false)
+    }
+
+    /// As `time_run_phase`, for domain results that encode failure in `Ok`.
+    pub fn time_run_phase_with_outcome<T>(
+        &self,
+        run_id: &str,
+        phase: &str,
+        operation: impl FnOnce() -> Result<T>,
+        failed: impl FnOnce(&T) -> bool,
+    ) -> Result<T> {
+        let started = chrono::Utc::now();
+        let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::with_version(
+            crate::build_identity::current().version,
+        );
+        let result = timer.time(phase, operation);
+        let mut report = timer.into_report();
+        if result.as_ref().is_ok_and(failed) {
+            report.spans[0].status = homeboy_engine_primitives::phase_timing::PhaseStatus::Failed;
+        }
+        if let Ok(Some(run)) = self.get_run(run_id) {
+            if let Ok(origin) = chrono::DateTime::parse_from_rfc3339(&run.started_at) {
+                let offset = started
+                    .signed_duration_since(origin)
+                    .num_microseconds()
+                    .unwrap_or(0)
+                    .max(0) as f64
+                    / 1000.0;
+                for span in &mut report.spans {
+                    span.start_offset_ms = offset;
+                }
+            }
+        }
+        // Distinct executions are distinct samples; exactly-once delivery uses
+        // the stable report identity below rather than a phase name alone.
+        let identity = format!("{phase}:{}:{}", std::process::id(), started.to_rfc3339());
+        if let Err(error) = self.record_phase_spans(run_id, &identity, &report) {
+            crate::log_status!("observe", "phase timing persistence failed: {}", error);
+        }
+        result
+    }
+
+    /// Record a whole-run phase for workflows whose lifecycle spans processes.
+    /// Unlike a scoped monotonic timer this uses the durable run origin. It is
+    /// explicitly an inclusive owner span, not an additional sequential phase.
+    pub fn record_run_phase(&self, run_id: &str, phase: &str, failed: bool) -> Result<()> {
+        if self
+            .phase_spans(run_id)?
+            .spans
+            .iter()
+            .any(|span| span.id == phase && span.start_offset_ms == 0.0)
+        {
+            return Ok(());
+        }
+        let Some(run) = self.get_run(run_id)? else {
+            return Ok(());
+        };
+        let origin = chrono::DateTime::parse_from_rfc3339(&run.started_at)
+            .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+        let duration = chrono::Utc::now()
+            .signed_duration_since(origin)
+            .to_std()
+            .unwrap_or_default();
+        let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::with_version(
+            crate::build_identity::current().version,
+        );
+        if failed {
+            timer.record_failed(phase, duration);
+        } else {
+            timer.record_ok(phase, duration);
+        }
+        let mut report = timer.into_report();
+        report.spans[0].start_offset_ms = 0.0;
+        self.record_phase_spans(run_id, &format!("whole-run:{phase}"), &report)
+    }
+
+    /// Append one completed timing report. The caller supplies a stable identity
+    /// for this operation/attempt, so delivery retries cannot double-count it.
+    /// Reports are capped per run as well as per event; progress heartbeats do
+    /// not evict phase evidence or grow its durable footprint without bound.
+    pub fn record_phase_spans(
+        &self,
+        run_id: &str,
+        operation_id: &str,
+        report: &PhaseTimingReport,
+    ) -> Result<()> {
+        if report.is_empty() {
+            return Ok(());
+        }
+        if report.spans.len() > MAX_PHASE_SPANS_PER_EVENT
+            || report.spans.iter().any(|span| {
+                span.id.is_empty()
+                    || span.id.len() > 128
+                    || span.homeboy_version.len() > 128
+                    || !span.start_offset_ms.is_finite()
+                    || span.start_offset_ms < 0.0
+                    || span
+                        .duration_ms
+                        .is_some_and(|ms| !ms.is_finite() || ms < 0.0)
+            })
+        {
+            return Err(Error::validation_invalid_argument(
+                "phase_spans",
+                "invalid or oversized phase timing report",
+                None,
+                None,
+            ));
+        }
+        let run =
+            RunId::new(run_id).map_err(|error| Error::internal_unexpected(error.to_string()))?;
+        let identity = homeboy_engine_primitives::content_hash::sha256_hex(
+            format!("phase-spans\0{run_id}\0{operation_id}").as_bytes(),
+        );
+        let request = ControlPlaneEventAppendRequest {
+            schema: CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA.to_string(),
+            idempotency_key: format!("phase-spans:{identity}"),
+            actor: "homeboy:phase-timer".to_string(),
+            kind: PHASE_SPANS_EVENT_KIND.to_string(),
+            source: ControlPlaneEventSource {
+                component: "phase-timer".to_string(),
+                instance: None,
+            },
+            occurred_at: None,
+            task: None,
+            attempt: None,
+            execution: None,
+            data: serde_json::to_value(report)
+                .map_err(|error| Error::internal_unexpected(error.to_string()))?,
+            artifacts: vec![],
+            evidence: vec![],
+        };
+        let digest = homeboy_engine_primitives::content_hash::sha256_hex(
+            &serde_json::to_vec(&request)
+                .map_err(|error| Error::internal_unexpected(error.to_string()))?,
+        );
+        self.append_control_plane_event(&run, &request, &identity, &digest)?;
+        Ok(())
+    }
+
+    /// Read locally persisted timing reports, including reports older than the
+    /// progress retention cursor. This is a projection of the run's ledger.
+    pub fn phase_spans(&self, run_id: &str) -> Result<PhaseTimingReport> {
+        let run =
+            RunId::new(run_id).map_err(|error| Error::internal_unexpected(error.to_string()))?;
+        let mut report = PhaseTimingReport::default();
+        for event in self.durable_control_plane_events(&run, PHASE_SPANS_EVENT_KIND)? {
+            let recorded: PhaseTimingReport = serde_json::from_value(event.data)
+                .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+            report.spans.extend(recorded.spans);
+        }
+        Ok(report)
+    }
+}

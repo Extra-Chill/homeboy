@@ -909,6 +909,7 @@ dependencies = [
  "fs4",
  "homeboy-error",
  "homeboy-paths",
+ "homeboy-product-identity",
  "inventory",
  "libc",
  "regex",

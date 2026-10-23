@@ -1922,6 +1922,11 @@ fn cleanup_artifacts_in_worktrees(
         cleanup_run_ref,
     };
     if let Some((store, run_id)) = cleanup_run {
+        if let Err(error) =
+            store.record_run_phase(&run_id, "publish.cleanup", output.failure_count > 0)
+        {
+            crate::log_status!("observe", "phase timing persistence failed: {}", error);
+        }
         store.finish_run(
             &run_id,
             artifact_cleanup_run_status(output.failure_count),

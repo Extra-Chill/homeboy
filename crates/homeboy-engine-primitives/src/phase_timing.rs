@@ -8,8 +8,8 @@
 //! Boundary: core owns the *contract* (a `PhaseTimer` that captures named
 //! phases with durations and finalizes on success or failure), not the phase
 //! vocabulary. Callers supply their own phase labels; the recommended generic
-//! labels at the core boundary are `resolve`, `prepare`, `execute`, `parse`,
-//! `report`, and `persist`, and extensions/command modules may add more
+//! labels at the core boundary are `admit`, `resolve`, `stage`, `provider`,
+//! `gate`, `promote`, and `publish`, and extensions/command modules may add more
 //! specific labels under their own namespace (e.g. `detector.structural`).
 //!
 //! The report serializes into run-dir artifacts / observation metadata without
@@ -19,6 +19,41 @@
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+/// Generic run phase vocabulary. Domain sub-phases are namespaced under their
+/// owner, e.g. `stage.transfer` or `gate.cargo-test`.
+pub const PHASE_ADMIT: &str = "admit";
+pub const PHASE_RESOLVE: &str = "resolve";
+pub const PHASE_STAGE: &str = "stage";
+pub const PHASE_PROVIDER: &str = "provider";
+pub const PHASE_GATE: &str = "gate";
+pub const PHASE_PROMOTE: &str = "promote";
+pub const PHASE_PUBLISH: &str = "publish";
+pub const GENERIC_PHASES: [&str; 7] = [
+    PHASE_ADMIT,
+    PHASE_RESOLVE,
+    PHASE_STAGE,
+    PHASE_PROVIDER,
+    PHASE_GATE,
+    PHASE_PROMOTE,
+    PHASE_PUBLISH,
+];
+
+/// Run event kind carrying a [`PhaseTimingReport`] in a run's durable ledger.
+pub const PHASE_SPANS_EVENT_KIND: &str = "run.phase_spans";
+/// Maximum spans one ledger event may carry, keeping the event within the
+/// run event payload bound.
+pub const MAX_PHASE_SPANS_PER_EVENT: usize = 64;
+
+/// Join an owner phase and a domain sub-phase (`stage` + `transfer`).
+pub fn sub_phase(owner: &str, name: &str) -> String {
+    format!("{owner}.{name}")
+}
+
+/// The generic phase that owns `id` (`stage.transfer` -> `stage`).
+pub fn owner_phase(id: &str) -> &str {
+    id.split('.').next().unwrap_or(id)
+}
 
 /// Outcome of a timed phase.
 ///
@@ -50,6 +85,12 @@ pub struct PhaseSpan {
     pub status: PhaseStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<f64>,
+    /// Milliseconds from the workflow's origin. Old reports default to zero.
+    #[serde(default)]
+    pub start_offset_ms: f64,
+    /// Version of the executable recording the span (not the primitive crate).
+    #[serde(default)]
+    pub homeboy_version: String,
 }
 
 impl PhaseSpan {
@@ -58,6 +99,8 @@ impl PhaseSpan {
             id: id.into(),
             status,
             duration_ms: duration.map(duration_to_millis),
+            start_offset_ms: 0.0,
+            homeboy_version: String::new(),
         }
     }
 
@@ -94,9 +137,21 @@ impl PhaseTimingReport {
 /// return or a hard failure mid-workflow — call `record_failed` so timing is
 /// still finalized on the error path, or use a [`PhaseGuard`] to finalize an
 /// `ok` span automatically on scope exit.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PhaseTimer {
     spans: Vec<PhaseSpan>,
+    origin: Instant,
+    homeboy_version: String,
+}
+
+impl Default for PhaseTimer {
+    fn default() -> Self {
+        Self {
+            spans: Vec::new(),
+            origin: Instant::now(),
+            homeboy_version: homeboy_product_identity::product_version().to_string(),
+        }
+    }
 }
 
 impl PhaseTimer {
@@ -104,23 +159,39 @@ impl PhaseTimer {
         Self::default()
     }
 
+    /// Create a timer attributed to the recording executable's version.
+    pub fn with_version(version: impl Into<String>) -> Self {
+        Self {
+            homeboy_version: version.into(),
+            ..Self::default()
+        }
+    }
+
+    fn record(&mut self, id: impl Into<String>, status: PhaseStatus, duration: Option<Duration>) {
+        let mut span = PhaseSpan::new(id, status, duration);
+        span.start_offset_ms = duration_to_millis(
+            self.origin
+                .elapsed()
+                .saturating_sub(duration.unwrap_or_default()),
+        );
+        span.homeboy_version = self.homeboy_version.clone();
+        self.spans.push(span);
+    }
+
     /// Record a completed phase that ran successfully.
     pub fn record_ok(&mut self, id: impl Into<String>, duration: Duration) {
-        self.spans
-            .push(PhaseSpan::new(id, PhaseStatus::Ok, Some(duration)));
+        self.record(id, PhaseStatus::Ok, Some(duration));
     }
 
     /// Record a phase that ran but failed. The duration is still captured so a
     /// regression on the error path is attributable.
     pub fn record_failed(&mut self, id: impl Into<String>, duration: Duration) {
-        self.spans
-            .push(PhaseSpan::new(id, PhaseStatus::Failed, Some(duration)));
+        self.record(id, PhaseStatus::Failed, Some(duration));
     }
 
     /// Record a phase that was intentionally not run (no work, no duration).
     pub fn record_skipped(&mut self, id: impl Into<String>) {
-        self.spans
-            .push(PhaseSpan::new(id, PhaseStatus::Skipped, None));
+        self.record(id, PhaseStatus::Skipped, None);
     }
 
     /// Time a closure as a single phase. The duration is recorded whether the
@@ -322,6 +393,25 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let restored: PhaseTimingReport = serde_json::from_str(&json).unwrap();
         assert_eq!(report, restored);
+    }
+
+    #[test]
+    fn spans_carry_start_offset_and_version() {
+        let mut timer = PhaseTimer::with_version("9.9.9");
+        timer.time_ok(PHASE_ADMIT, || std::thread::sleep(Duration::from_millis(2)));
+        timer.time_ok(sub_phase(PHASE_STAGE, "transfer"), || ());
+        let report = timer.into_report();
+        assert_eq!(report.spans[0].homeboy_version, "9.9.9");
+        assert!(report.spans[1].start_offset_ms >= report.spans[0].duration_ms.unwrap());
+        assert_eq!(owner_phase(&report.spans[1].id), PHASE_STAGE);
+    }
+
+    #[test]
+    fn legacy_spans_without_offset_still_parse() {
+        let span: PhaseSpan =
+            serde_json::from_str(r#"{"id":"execute","status":"ok","duration_ms":1.0}"#).unwrap();
+        assert_eq!(span.start_offset_ms, 0.0);
+        assert!(span.homeboy_version.is_empty());
     }
 
     #[test]

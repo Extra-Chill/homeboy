@@ -296,6 +296,11 @@ fn finish_if_running(
     status: RunStatus,
     metadata: Option<serde_json::Value>,
 ) {
+    let _ = observation.store().record_run_phase(
+        observation.run_id(),
+        "gate.review",
+        matches!(status, RunStatus::Error | RunStatus::Fail),
+    );
     let Some(metadata) = metadata else {
         let _ = observation
             .store()
