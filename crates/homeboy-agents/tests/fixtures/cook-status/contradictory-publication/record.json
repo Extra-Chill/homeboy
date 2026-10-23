@@ -1,0 +1,24 @@
+{
+  "schema":"homeboy/agent-task-run/v1",
+  "run_id":"agent-task-1806e43a-7e32-417a-8de7-59b59c560e7a-attempt-1-dda76f6c",
+  "plan_id":"cook-status-fixture",
+  "state":"failed",
+  "submitted_at":"2026-10-19T13:18:00Z",
+  "updated_at":"2026-10-19T14:18:01Z",
+  "plan_path":"plan.json",
+  "aggregate_path":"aggregate.json",
+  "metadata":{
+    "cook_id":"cook-publication-fixture",
+    "cook_progress":{"phase":"terminal", "terminal_status":"failed", "terminal_success":false, "exit_code":1},
+    "cook_delivery":{
+      "schema":"homeboy/cook-delivery/v2",
+      "delivery":{
+        "state":"published",
+        "candidate":{"task_id":"cook-data-liberation-agent", "promotion":"applied", "target_applied":true},
+        "gates":[{"id":"verify", "state":"succeeded"}],
+        "publication":{"status":"review_ready", "published":true, "draft":false, "pr_number":938, "pr_url":"https://github.com/Extra-Chill/data-liberation-agent/pull/938"}
+      },
+      "artifacts":{}
+    }
+  }
+}

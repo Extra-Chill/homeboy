@@ -1,0 +1,16 @@
+{
+  "schema": "homeboy/agent-task-aggregate/v1",
+  "plan_id": "cook-status-fixture",
+  "status": "succeeded",
+  "outcomes": [{
+    "schema": "homeboy/agent-task-outcome/v1",
+    "task_id": "cook-data-liberation-agent",
+    "status": "succeeded",
+    "summary": "Everything is in place. Final verification of the acceptance criteria:",
+    "diagnostics": [{"class":"provider", "message":"Pi finished after 20 turn(s) and 25 tool call(s).", "data":{}}],
+    "metadata": {"publication":{"owner":"controller", "status":"not_attempted"}}
+  }],
+  "totals": {"queued":0,"running":0,"blocked":0,"skipped":0,"succeeded":1,"failed":0,"cancelled":0,"timed_out":0},
+  "queue": {"max_concurrency":1,"queued":0,"running":0,"blocked":0,"completed":1},
+  "events": []
+}

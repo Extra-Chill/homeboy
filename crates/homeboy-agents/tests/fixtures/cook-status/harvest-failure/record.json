@@ -1,0 +1,11 @@
+{
+  "schema":"homeboy/agent-task-run/v1",
+  "run_id":"agent-task-599ec50a-8071-43f2-bb98-e1742b08bd8f-attempt-3-ddd8c7a8",
+  "plan_id":"cook-status-fixture",
+  "state":"failed",
+  "submitted_at":"2026-10-19T13:18:00Z",
+  "updated_at":"2026-10-19T14:18:01Z",
+  "plan_path":"plan.json",
+  "aggregate_path":"aggregate.json",
+  "metadata":{"cook_progress":{"phase":"terminal"}}
+}

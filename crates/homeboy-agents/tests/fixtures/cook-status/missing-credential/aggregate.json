@@ -1,0 +1,17 @@
+{
+  "schema": "homeboy/agent-task-aggregate/v1",
+  "plan_id": "cook-status-fixture",
+  "status": "failed",
+  "outcomes": [{
+    "schema": "homeboy/agent-task-outcome/v1",
+    "task_id": "cook-homeboy",
+    "status": "failed",
+    "summary": "Pi execution failed: No API key found for amazon-bedrock.",
+    "failure_classification": "execution_failed",
+    "diagnostics": [{"class": "provider", "message": "Pi exited with status 1. No API key found for amazon-bedrock.", "data": {}}],
+    "metadata": {"model": "opus-5-5", "provider": "pi.agent-task-executor", "turns": 0, "publication": {"owner":"controller", "status":"not_attempted"}}
+  }],
+  "totals": {"queued":0,"running":0,"blocked":0,"skipped":0,"succeeded":0,"failed":1,"cancelled":0,"timed_out":0},
+  "queue": {"max_concurrency":1,"queued":0,"running":0,"blocked":0,"completed":1},
+  "events": []
+}

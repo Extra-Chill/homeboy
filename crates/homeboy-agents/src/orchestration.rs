@@ -97,6 +97,8 @@ const RUN_CURSOR_BOUND: usize = 1024;
 pub struct RunSnapshot {
     pub record: AgentTaskRunRecord,
     pub plan: Option<AgentTaskPlan>,
+    /// The aggregate paired atomically with this record, never a JSON cache.
+    pub aggregate: Option<crate::agent_tasks::AgentTaskAggregate>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,9 +206,25 @@ impl LifecycleStoreLookup {
 
     /// Construct an observation for this exact row, without resolving Cook aliases.
     fn snapshot(&self, record: AgentTaskRunRecord) -> Result<RunSnapshot, ControlPlaneError> {
+        let (record, aggregate) = self
+            .store
+            .read_record_with_aggregate_bounded(&record.run_id)
+            .map_err(map_lifecycle_error)?;
+        self.snapshot_from_pair(record, aggregate)
+    }
+
+    fn snapshot_from_pair(
+        &self,
+        record: AgentTaskRunRecord,
+        aggregate: Option<crate::agent_tasks::AgentTaskAggregate>,
+    ) -> Result<RunSnapshot, ControlPlaneError> {
         let record = crate::agent_task_service::project_cook_observation(&self.store, &record);
         let plan = self.plan(&record.run_id)?;
-        Ok(RunSnapshot { record, plan })
+        Ok(RunSnapshot {
+            record,
+            plan,
+            aggregate,
+        })
     }
 
     fn exact(&self, run_id: &str) -> Result<RunSnapshot, ControlPlaneError> {
@@ -396,7 +414,7 @@ impl<L: RunLookup> OrchestrationService<L> {
         let snapshot = self.lookup.get(requested_id)?.ok_or_else(|| {
             ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
         })?;
-        project_record(&snapshot.record, snapshot.plan.as_ref())
+        project_snapshot(&snapshot, false)
     }
 
     pub fn task(&self, run: &RunId, task: &TaskId) -> Result<ControlPlaneTask, ControlPlaneError> {
@@ -1330,7 +1348,7 @@ impl<L: RunLookup + RunListLookup> OrchestrationService<L> {
         let runs = page
             .snapshots
             .into_iter()
-            .map(|snapshot| project_run_summary(&snapshot.record, snapshot.plan.as_ref()))
+            .map(|snapshot| project_snapshot(&snapshot, true))
             .collect::<Result<Vec<_>, _>>()?;
         let has_more = page.next_position.is_some();
         let next_cursor = page
@@ -1585,10 +1603,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
             &target.run_id,
         )
         .map_err(map_lifecycle_error)?;
-        let snapshot = self.lookup.snapshot(durable_read.record.clone())?;
+        let snapshot = self
+            .lookup
+            .snapshot_from_pair(durable_read.record.clone(), durable_read.aggregate.clone())?;
         let record = &snapshot.record;
         let run_id = record.run_id.as_str();
-        let resource = project_record(record, snapshot.plan.as_ref())?;
+        let resource = project_snapshot(&snapshot, false)?;
         let aggregate = durable_read.aggregate;
         let aggregate_review = aggregate.as_ref().map(|aggregate| {
             crate::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
@@ -3875,7 +3895,7 @@ pub fn run_exact_from_current_environment(run_id: &str) -> homeboy_core::Result<
     let snapshot = LifecycleStoreLookup::new(store)
         .snapshot(record)
         .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))?;
-    project_record(&snapshot.record, snapshot.plan.as_ref())
+    project_snapshot(&snapshot, false)
         .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))
 }
 
@@ -4084,6 +4104,31 @@ pub fn project_record(
     Ok(resource)
 }
 
+/// Include recorded execution evidence in the existing blocker contract.
+fn project_snapshot(
+    snapshot: &RunSnapshot,
+    summary: bool,
+) -> Result<ControlPlaneRun, ControlPlaneError> {
+    let mut resource = if summary {
+        project_run_summary(&snapshot.record, snapshot.plan.as_ref())?
+    } else {
+        project_record(&snapshot.record, snapshot.plan.as_ref())?
+    };
+    if resource.blocker.is_none()
+        && resource.state.is_terminal()
+        && !matches!(
+            resource.state,
+            ControlPlaneRunState::Succeeded | ControlPlaneRunState::Skipped
+        )
+    {
+        resource.blocker = snapshot
+            .aggregate
+            .as_ref()
+            .and_then(recorded_failure_blocker);
+    }
+    Ok(resource)
+}
+
 /// Project a run-list row. List rows are summaries: they never compute or
 /// carry `action_eligibility`; clients read the single run for its actions.
 fn project_run_summary(
@@ -4112,7 +4157,11 @@ fn project_summary_fields(
     resource.location = location(record);
     resource.placement = placement(record);
     resource.phase = phase(record);
-    resource.blocker = blocker(record, delivery.as_ref());
+    resource.blocker = if resource.state == ControlPlaneRunState::Succeeded {
+        None
+    } else {
+        blocker(record, delivery.as_ref())
+    };
     resource.owner = Some(owner(record));
     resource.runtime = runtime(record);
     resource.provider = assigned_provider(record);
@@ -4164,7 +4213,7 @@ fn project_live_gate_verification(resource: &mut ControlPlaneRun, record: &Agent
 fn awaits_gate_verification(record: &AgentTaskRunRecord) -> bool {
     record.state() == AgentTaskRunState::CandidateRecoverable
         && CookDelivery::from_run_metadata(&record.metadata)
-            .is_some_and(|delivery| delivery.awaits_verification())
+            .is_some_and(|delivery| !delivery.published() && delivery.awaits_verification())
 }
 
 fn project_live_gate_verification_in(
@@ -4434,6 +4483,9 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
 }
 
 pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
+    if CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published()) {
+        return ControlPlaneRunState::Succeeded;
+    }
     if (record.state() == AgentTaskRunState::CandidateRecoverable
         && record.owner_process_is_running())
         || record.has_live_execution_step_owner()
@@ -4866,6 +4918,66 @@ fn blocker(
         })
 }
 
+/// Preserve the first non-success outcome's own classification and first
+/// diagnostic. No second reason is stored: this fills the shared blocker.
+fn recorded_failure_blocker(
+    aggregate: &crate::agent_tasks::AgentTaskAggregate,
+) -> Option<ControlPlaneBlocker> {
+    use crate::agent_tasks::{
+        AgentTaskFailureClassification as Class, AgentTaskOutcomeStatus as Status,
+    };
+    let outcome = aggregate
+        .outcomes
+        .iter()
+        .find(|outcome| !matches!(outcome.status, Status::Succeeded | Status::NoOp))?;
+    let diagnostic = outcome.diagnostics.first();
+    let class = outcome
+        .failure_classification
+        .and_then(|class| serde_json::to_value(class).ok())
+        .and_then(|value| value.as_str().map(str::to_string))
+        .or_else(|| diagnostic.map(|diagnostic| diagnostic.class.clone()))
+        .unwrap_or_else(|| outcome.status.as_str().to_string());
+    let detail = diagnostic
+        .map(|diagnostic| diagnostic.message.as_str())
+        .or(outcome.summary.as_deref())
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("no diagnostic was recorded");
+    let timeout = outcome
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.class == "timeout")
+        .map(|diagnostic| diagnostic.message.as_str());
+    let message = match timeout {
+        Some(timeout) if timeout != detail => format!("{class}: {detail} ({timeout})"),
+        _ => format!("{class}: {detail}"),
+    };
+    let action = if outcome.status == Status::CandidateRecoverable {
+        "recover the harvested candidate through controller gates; do not rerun the provider"
+    } else if detail.contains("No API key found")
+        || outcome.failure_classification == Some(Class::ProviderCredentialsExhausted)
+    {
+        "configure credentials for the resolved provider or select a credentialed route before retrying"
+    } else if diagnostic.is_some_and(|diagnostic| diagnostic.class.contains("harvest")) {
+        "inspect and recover the harvested candidate and its Lab snapshot provenance before retrying; do not rerun the provider blindly"
+    } else {
+        match outcome.failure_classification {
+            Some(Class::Timeout) => "raise the provider timeout or retry with a different route",
+            Some(Class::Stalled) => "retry with a different provider route; inspect the provider process for missing progress",
+            Some(Class::Provider | Class::Transient | Class::RateLimited | Class::ProviderAccountBlocked | Class::ProviderQuotaExhausted | Class::ProviderBillingBlocked) => "inspect the provider diagnostic and retry with a different available route",
+            _ => "inspect the recorded diagnostic and execution evidence before retrying",
+        }
+    };
+    Some(ControlPlaneBlocker {
+        code: Some(bounded(&format!("outcome.{class}"), STATE_BOUND)),
+        message: redacted_bounded(&message, MESSAGE_BOUND),
+        state: Some(outcome.status.as_str().to_string()),
+        reason: Some(action.to_string()),
+        retry: None,
+        daemon: None,
+        output: None,
+    })
+}
+
 fn unmaterialized_admission_blocker(
     record: &AgentTaskRunRecord,
     admission: &Value,
@@ -5181,7 +5293,9 @@ fn publication(delivery: &CookDelivery) -> Option<ControlPlaneStateSummary> {
     }
     Some(ControlPlaneStateSummary {
         id: publication
-            .pr_identity()
+            .pr_url
+            .clone()
+            .or_else(|| publication.pr_identity())
             .and_then(|identity| nonempty_redacted_bounded(&identity, MESSAGE_BOUND)),
         state: bounded(&publication.status, STATE_BOUND),
     })
@@ -5661,7 +5775,7 @@ impl ControlPlaneProvider for RegisteredProvider {
             .map(|record| {
                 if record.kind == "agent-task" {
                     let snapshot = lookup.exact(&record.id)?;
-                    project_run_summary(&snapshot.record, snapshot.plan.as_ref())
+                    project_snapshot(&snapshot, true)
                 } else {
                     generic_observation_run_summary(&observation, record)
                 }
@@ -6113,11 +6227,15 @@ pub fn register() {
 }
 
 #[cfg(test)]
+#[path = "orchestration_status_tests.rs"]
+mod status_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         bounded_review_evidence, decode_event_cursor, decode_mission_cursor, encode_event_cursor,
         encode_mission_cursor, event_page, live_provider_liveness, normalize_event_references,
-        observed_file_timestamp, phase, project_record, references_for_record,
+        observed_file_timestamp, phase, project_record, project_snapshot, references_for_record,
         register_reference_in_store, review_failure_reasons, run_state, validate_event_scope,
         validate_external_event_append_request, LifecycleStoreLookup, OrchestrationService,
         RegisteredProvider, RunListLookup, RunLookup, RunPagePosition, RunSnapshot,
@@ -6383,7 +6501,7 @@ mod tests {
                 snapshots = snapshots
                     .into_iter()
                     .map(|snapshot| {
-                        let projected = project_record(&snapshot.record, snapshot.plan.as_ref())?;
+                        let projected = project_snapshot(&snapshot, false)?;
                         Ok((snapshot, projected.mission))
                     })
                     .collect::<Result<Vec<_>, homeboy_control_plane_contract::ControlPlaneError>>()?
@@ -7081,6 +7199,7 @@ mod tests {
         RunSnapshot {
             record: record(run_id),
             plan,
+            aggregate: None,
         }
     }
 
@@ -7835,7 +7954,8 @@ mod tests {
                     "/finalization",
                     receipt.clone(),
                 );
-                // A publication receipt cannot prove pending gates completed.
+                // The publication receipt is the completion authority even
+                // when a promotion snapshot still says verification_pending.
                 crate::agent_task_service::set_cook_delivery_artifact_for_test(
                     &mut persisted.metadata,
                     "/promotion/status",
@@ -7898,7 +8018,14 @@ mod tests {
                 );
                 assert_eq!(listed.publication, detail.publication);
                 assert_eq!(review.resource.publication, detail.publication);
-                assert_eq!(detail.state, ControlPlaneRunState::CandidateRecoverable);
+                assert_eq!(
+                    detail.state,
+                    if finalized {
+                        ControlPlaneRunState::Succeeded
+                    } else {
+                        ControlPlaneRunState::CandidateRecoverable
+                    }
+                );
                 assert_eq!(
                     review.evidence["execution_states"]["gate"]["state"],
                     "not_run"
@@ -9405,13 +9532,8 @@ mod tests {
         );
         assert_eq!(resource.state, ControlPlaneRunState::Succeeded);
         assert_eq!(resource.phase.as_deref(), Some("terminal"));
-        assert_eq!(
-            resource
-                .blocker
-                .as_ref()
-                .map(|blocker| blocker.message.as_str()),
-            Some("provider failed token=[REDACTED]")
-        );
+        // Historical controller failures cannot block a successful verdict.
+        assert!(resource.blocker.is_none());
         assert_eq!(
             resource.owner.as_ref().map(|owner| owner.kind.as_str()),
             Some("runner")
