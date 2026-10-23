@@ -121,13 +121,12 @@ fn replace_gates_request(
 pub(super) fn continuation_args(
     run_id: &str,
     rearm: bool,
-    artifact_id: Option<&str>,
     overrides: &CookRecoveryOverrides,
 ) -> CookContinueArgs {
     CookContinueArgs {
         cook_or_attempt_id: run_id.to_string(),
         rearm,
-        artifact_id: artifact_id.map(str::to_string),
+        artifact_id: None,
         timeout_ms: overrides.timeout_ms,
         review_form_timeout_ms: overrides.review_form_timeout_ms,
         backend: overrides.backend.clone(),
@@ -147,10 +146,9 @@ impl CookRecoveryPerformer for CliCookRecoveryPerformer {
         &self,
         run_id: &str,
         rearm: bool,
-        artifact_id: Option<&str>,
         overrides: &CookRecoveryOverrides,
     ) -> homeboy::core::Result<(Value, i32)> {
-        let mut args = continuation_args(run_id, rearm, artifact_id, overrides);
+        let mut args = continuation_args(run_id, rearm, overrides);
         args.full = self.full;
         super::run::continue_cook(args)
     }
@@ -159,12 +157,10 @@ impl CookRecoveryPerformer for CliCookRecoveryPerformer {
         &self,
         run_id: &str,
         rearm: bool,
-        artifact_id: Option<&str>,
     ) -> homeboy::core::Result<(Value, i32)> {
         super::run::preflight_continue_cook(continuation_args(
             run_id,
             rearm,
-            artifact_id,
             &CookRecoveryOverrides::default(),
         ))
     }

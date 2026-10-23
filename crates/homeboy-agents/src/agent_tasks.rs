@@ -221,10 +221,10 @@ pub mod lifecycle {
 /// Promotion reports and entry point.
 pub mod promotion {
     pub use super::super::agent_task_promotion::{
-        canonical_recoverable_patch_artifacts, promote, AgentTaskPromotionArtifactRef,
-        AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionReport,
-        AgentTaskPromotionRequest, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-        AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase, PromotionProgressCallback,
+        promote, AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
+        AgentTaskPromotionNotification, AgentTaskPromotionReport, AgentTaskPromotionRequest,
+        AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
+        AgentTaskPromotionVerifiedBase, PromotionProgressCallback,
     };
 }
 

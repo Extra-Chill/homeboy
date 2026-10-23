@@ -1720,31 +1720,33 @@ mod pull_tests {
 
     #[test]
     fn artifacts_from_args_pull_with_runner_is_rejected() {
-        let result = artifacts_from_args(
-            &test_store(),
-            RunsArtifactsArgs {
-                run_id: "run-1".to_string(),
-                runner: Some("lab".to_string()),
-                pull: true,
-                pull_dir: None,
-                token: None,
-                kind: None,
-                mime: None,
-                original_path: None,
-                path_suffix: None,
-                fixture: None,
-                surface: None,
-                scenario: None,
-                name_glob: None,
-                limit: 50,
-                offset: 0,
-                full: false,
-            },
-        );
-        let Err(err) = result else {
-            panic!("--pull with --runner should fail");
-        };
-        assert!(err.to_string().contains("local mirrored observation store"));
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let result = artifacts_from_args(
+                &test_store(),
+                RunsArtifactsArgs {
+                    run_id: "run-1".to_string(),
+                    runner: Some("lab".to_string()),
+                    pull: true,
+                    pull_dir: None,
+                    token: None,
+                    kind: None,
+                    mime: None,
+                    original_path: None,
+                    path_suffix: None,
+                    fixture: None,
+                    surface: None,
+                    scenario: None,
+                    name_glob: None,
+                    limit: 50,
+                    offset: 0,
+                    full: false,
+                },
+            );
+            let Err(err) = result else {
+                panic!("--pull with --runner should fail");
+            };
+            assert!(err.to_string().contains("local mirrored observation store"));
+        });
     }
 
     #[test]

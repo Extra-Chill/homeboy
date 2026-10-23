@@ -324,7 +324,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             .as_ref()
             .map(|reference| reference.artifact_id.clone()),
     )?;
-    let (mut raw, mut source_path) = read_promotion_source(source_spec)?;
+    let (raw, source_path) = read_promotion_source(source_spec)?;
     let source_run_id = match source_path.as_deref() {
         Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
         None => None,

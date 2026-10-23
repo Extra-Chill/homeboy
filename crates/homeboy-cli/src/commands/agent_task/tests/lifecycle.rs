@@ -1274,6 +1274,19 @@ impl AgentTaskExecutorAdapter for CountingCookExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         self.executions.fetch_add(1, Ordering::SeqCst);
+        if let Some(patch) = &self.patch_path {
+            let root = request
+                .workspace
+                .root
+                .as_deref()
+                .expect("candidate workspace");
+            assert!(Command::new("git")
+                .args(["apply", patch])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success());
+        }
         AgentTaskOutcome {
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
@@ -2071,7 +2084,7 @@ fn persist_recipe_only_cook(cook_id: &str, run_id: &str) {
 
 /// Same Cook continuation arguments `recover` builds for a continuation step.
 fn cook_continue_args(id: &str) -> CookContinueArgs {
-    let mut args = super::super::recover::continuation_args(id, false, None, &Default::default());
+    let mut args = super::super::recover::continuation_args(id, false, &Default::default());
     args.full = true;
     args
 }
@@ -2087,11 +2100,9 @@ impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookR
         &self,
         run_id: &str,
         rearm: bool,
-        artifact_id: Option<&str>,
         overrides: &homeboy::agents::agent_task_service::CookRecoveryOverrides,
     ) -> homeboy::core::Result<(Value, i32)> {
-        let mut args =
-            super::super::recover::continuation_args(run_id, rearm, artifact_id, overrides);
+        let mut args = super::super::recover::continuation_args(run_id, rearm, overrides);
         args.full = true;
         continue_cook_with(args, self.executor.clone(), |_| Ok(None))
     }
@@ -2100,12 +2111,10 @@ impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookR
         &self,
         run_id: &str,
         rearm: bool,
-        artifact_id: Option<&str>,
     ) -> homeboy::core::Result<(Value, i32)> {
         super::super::run::preflight_continue_cook(super::super::recover::continuation_args(
             run_id,
             rearm,
-            artifact_id,
             &Default::default(),
         ))
     }
@@ -2342,7 +2351,7 @@ fn status_and_continuation_materialize_recipe_only_attempt_without_provider_work
 }
 
 #[test]
-fn continuation_preflight_rejects_legacy_terminal_candidate_without_model_provenance() {
+fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
     with_temp_home(|| {
         let cook_id = "cook-legacy-null-model";
         let run_id = "cook-legacy-null-model-attempt-1";
@@ -2465,16 +2474,19 @@ fn continuation_preflight_rejects_legacy_terminal_candidate_without_model_proven
         assert_eq!(report["selected_artifact"]["artifact_id"], "retained-patch");
         assert_eq!(
             report["continuation_command"],
-            format!("homeboy --placement local agent-task recover {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task recover {run_id}")
         );
         assert_eq!(
             report["failure_context"]["next_action"]["command"],
-            format!("homeboy --placement local agent-task recover {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task recover {run_id}")
         );
-        assert!(report["failure_context"]["diagnostic"]["message"]
-            .as_str()
-            .expect("concrete blocker")
-            .contains("no concrete executed model"));
+        assert!(
+            report["failure_context"]["diagnostic"]["message"]
+                .as_str()
+                .expect("concrete blocker")
+                .contains("non-recoverable: outcome has no immutable candidate"),
+            "{report:#}"
+        );
         assert_eq!(report["evidence_refs"][0]["run_id"], run_id);
         assert!(!report.to_string().contains("<run-id>"));
         assert_eq!(
@@ -2494,7 +2506,7 @@ fn continuation_preflight_rejects_legacy_terminal_candidate_without_model_proven
         );
         assert!(probe["admission"]["phases"]
             .to_string()
-            .contains("no concrete executed model"));
+            .contains("non-recoverable: outcome has no immutable candidate"));
         assert_eq!(
             filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
             before
@@ -2555,7 +2567,7 @@ fn continuation_preflight_rejects_legacy_terminal_candidate_without_model_proven
         assert_eq!(bounded["run_id"], run_id);
         assert_eq!(
             bounded["actionable"]["next_action"]["command"],
-            format!("homeboy --placement local agent-task recover {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task recover {run_id}")
         );
         assert!(bounded["actionable"]["blocker"]
             .as_str()

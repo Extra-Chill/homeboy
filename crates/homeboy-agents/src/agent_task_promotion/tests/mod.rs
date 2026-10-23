@@ -5,9 +5,10 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use super::apply::{AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace};
+use super::apply::AgentTaskPromotionApplyRequest;
 
 mod candidate_fixture;
+pub(crate) mod candidate_snapshot;
 mod immutable_candidate;
 mod resume_candidate;
 use super::types::{
@@ -39,53 +40,9 @@ pub(super) struct FakePromotionWorkspaceProvider {
     run_verify_command: bool,
     verify_worktrees_clean: Vec<bool>,
     force_add_ignored_file: bool,
-    apply_to_git: bool,
-    replace_source_on_apply: Option<(PathBuf, String)>,
 }
 
 impl FakePromotionWorkspaceProvider {
-    pub(super) fn apply_patch(
-        &mut self,
-        request: AgentTaskPromotionApplyRequest,
-    ) -> Result<AgentTaskPromotionWorkspace> {
-        if let Some((path, contents)) = self.replace_source_on_apply.take() {
-            std::fs::write(path, contents).expect("replace source during provider handoff");
-        }
-        self.applied_patch_contents
-            .push(std::fs::read_to_string(&request.patch_path).unwrap_or_else(|_| String::new()));
-        self.apply_calls.push(request.clone());
-        let path = self.workspace_path.clone().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "to_worktree",
-                "fake workspace provider could not resolve the requested workspace",
-                None,
-                None,
-            )
-        })?;
-        if self.apply_to_git {
-            git(&path, &["apply", &request.patch_path]);
-        }
-        if self.force_add_ignored_file {
-            git(&path, &["apply", &request.patch_path]);
-            std::fs::write(path.join(".git/info/exclude"), "ignored/\n")
-                .expect("ignore nested candidate file");
-            let ignored = path.join("ignored/nested/force-added.rs");
-            std::fs::create_dir_all(ignored.parent().expect("ignored parent"))
-                .expect("create ignored nested directory");
-            std::fs::write(&ignored, "pub const FORCED: bool = true;\n")
-                .expect("write ignored nested candidate file");
-            git(&path, &["add", "-f", "ignored/nested/force-added.rs"]);
-        }
-        Ok(AgentTaskPromotionWorkspace {
-            path,
-            command_evidence: vec![command_report(vec![
-                "fake-workspace-provider",
-                "apply-patch",
-                request.to_workspace.as_str(),
-            ])],
-        })
-    }
-
     #[expect(
         clippy::too_many_arguments,
         reason = "test gate injection mirrors the native verifier inputs"

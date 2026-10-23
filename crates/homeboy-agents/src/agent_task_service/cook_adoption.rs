@@ -1083,11 +1083,11 @@ fn applied_adoption_promotion_candidate_sha(promotion: &AgentTaskPromotionReport
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
     })?;
-    let fingerprint_head = promotion
+    let recorded_sha = promotion
         .provenance
-        .pointer("/candidate/fingerprint/head")
+        .pointer("/candidate_commit/candidate_sha")
         .and_then(Value::as_str)?;
-    (candidate_ref == fingerprint_head).then_some(candidate_ref)
+    (candidate_ref == recorded_sha).then_some(candidate_ref)
 }
 
 fn reusable_applied_adoption_promotion(
@@ -1111,7 +1111,7 @@ fn reusable_applied_adoption_promotion(
         // not it has ever passed through the adoption adapter.
         if promotion
             .provenance
-            .pointer("/candidate/fingerprint/head")
+            .pointer("/candidate_commit/candidate_sha")
             .and_then(Value::as_str)
             != Some(candidate_sha)
         {
@@ -1141,41 +1141,10 @@ fn reusable_applied_adoption_promotion(
             None,
         )));
     };
-    let Some(mut baseline) = promotion.provenance.get("gate_feedback_baseline").cloned() else {
-        return Some(Err(Error::validation_invalid_argument(
-            "cook_delivery.artifacts.promotion",
-            "applied candidate adoption has no authenticated gate-feedback baseline",
-            Some(record.run_id.clone()),
-            None,
-        )));
-    };
-    if baseline
-        .get("current_diff")
-        .and_then(Value::as_str)
-        .is_some_and(|diff| diff.trim().is_empty())
-    {
-        return Some(
-            crate::agent_task_candidate_baseline::validate_immutable_candidate_tree(
-                std::path::Path::new(worktree_path),
-                candidate_sha,
-            )
-            .map(|_| promotion),
-        );
-    }
-    // Bind the checkpoint's complete candidate diff to its promoted artifact.
-    baseline["patch_artifact"] = match serde_json::to_value(&promotion.patch_artifact) {
-        Ok(artifact) => artifact,
-        Err(error) => {
-            return Some(Err(Error::internal_json(
-                error.to_string(),
-                Some("serialize persisted promotion artifact baseline".to_string()),
-            )));
-        }
-    };
     Some(
-        crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
+        crate::agent_task_candidate_baseline::validate_immutable_candidate_tree(
             std::path::Path::new(worktree_path),
-            &baseline,
+            candidate_sha,
         )
         .map(|_| promotion),
     )
@@ -1774,7 +1743,7 @@ mod reuse_tests {
             },
             "operator_notification": {"status": "completed", "message": "complete"},
             "provenance": {
-                "gate_feedback_baseline": {"current_diff": ""},
+                "candidate_commit": {"base_sha": candidate_sha, "candidate_sha": candidate_sha, "tree_sha": candidate_sha},
                 "adoption": {"candidate_ref": candidate_sha},
                 "resume_contract": {"inputs": {"candidate_ref": candidate_sha}},
                 "resume_inputs": {"candidate_ref": candidate_sha},

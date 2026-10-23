@@ -400,27 +400,29 @@ fn test_source_path() {
 
 #[test]
 fn command_dispatch_runs_component_script_before_extension_resolution() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    fs::write(
-        dir.path().join("homeboy.json"),
-        r#"{
+    with_isolated_home(|_| {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{
   "id": "fixture",
   "scripts": { "test": ["sh scripts/test.sh"] }
 }"#,
-    )
-    .expect("homeboy.json should be written");
-    write_component_script(
-        dir.path(),
-        "test.sh",
-        "printf 'component script ran\n' > component-script-marker\n",
-    );
+        )
+        .expect("homeboy.json should be written");
+        write_component_script(
+            dir.path(),
+            "test.sh",
+            "printf 'component script ran\n' > component-script-marker\n",
+        );
 
-    let (output, exit_code) =
-        run_test(test_command_args(dir.path())).expect("test script should run");
+        let (output, exit_code) =
+            run_test(test_command_args(dir.path())).expect("test script should run");
 
-    assert_eq!(exit_code, 0);
-    assert!(output.passed);
-    assert!(dir.path().join("component-script-marker").exists());
+        assert_eq!(exit_code, 0);
+        assert!(output.passed);
+        assert!(dir.path().join("component-script-marker").exists());
+    });
 }
 
 #[test]

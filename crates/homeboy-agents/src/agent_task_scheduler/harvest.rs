@@ -1077,9 +1077,13 @@ mod committed_harvest_tests {
         let base = git(&workspace, &["rev-parse", "HEAD"]);
         git(&workspace, &["add", "-A"]);
         let tree = git(&workspace, &["write-tree"]);
-        let candidate = git(&workspace, &["commit-tree", &tree, "-p", &base, "-m", "candidate"]);
+        let candidate = git(
+            &workspace,
+            &["commit-tree", &tree, "-p", &base, "-m", "candidate"],
+        );
         git(&workspace, &["reset", "--mixed", &base]);
-        request.inputs["cook_loop"]["candidate_commit"] = serde_json::json!({"base_sha":base,"candidate_sha":candidate,"tree_sha":tree});
+        request.inputs["cook_loop"]["candidate_commit"] =
+            serde_json::json!({"base_sha":base,"candidate_sha":candidate,"tree_sha":tree});
 
         let preflight =
             prepare_committed_harvest(&request, None, &HarvestExecutionContext::default())

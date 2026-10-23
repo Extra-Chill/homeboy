@@ -18,7 +18,7 @@ use crate::agent_task_gate::{
     AgentTaskGateBaselineComparison, AgentTaskGateDifferentialResult, AgentTaskGateInvocation,
     AgentTaskGateStatus,
 };
-use crate::agent_task_promotion::{normalize_promotion_patch, AgentTaskPromotionReport};
+use crate::agent_task_promotion::AgentTaskPromotionReport;
 use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{Error, Result};
 
@@ -709,8 +709,15 @@ fn materialize_follow_up_baseline_at(
                 None,
             )
         })?;
-    let immutable = immutable.ok_or_else(|| Error::validation_invalid_argument(
-        "promotion.candidate_commit", "non-recoverable: baseline has no immutable candidate; run a new Cook", None, None).with_retryable(false))?;
+    let immutable = immutable.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "promotion.candidate_commit",
+            "non-recoverable: baseline has no immutable candidate; run a new Cook",
+            None,
+            None,
+        )
+        .with_retryable(false)
+    })?;
     crate::agent_task_promotion::validate_candidate_commit(&source_root, &immutable)?;
     let artifact_sha256 = immutable.candidate_sha.clone();
     let index = tempfile::NamedTempFile::new().map_err(|error| {

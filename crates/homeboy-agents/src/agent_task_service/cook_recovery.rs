@@ -367,17 +367,11 @@ pub trait CookRecoveryPerformer {
         &self,
         run_id: &str,
         rearm: bool,
-        artifact_id: Option<&str>,
         overrides: &CookRecoveryOverrides,
     ) -> Result<(Value, i32)>;
     /// Validate continuation admission for `run_id` without dispatching a
     /// provider or mutating lifecycle state.
-    fn preflight_continue_cook(
-        &self,
-        run_id: &str,
-        rearm: bool,
-        artifact_id: Option<&str>,
-    ) -> Result<(Value, i32)>;
+    fn preflight_continue_cook(&self, run_id: &str, rearm: bool) -> Result<(Value, i32)>;
     /// `retry <run_id> --run`.
     fn retry(&self, run_id: &str) -> Result<(Value, i32)>;
     /// `reconcile <run_id> --apply`.
@@ -599,17 +593,10 @@ pub fn recover_cook(
         replace_gates,
         publish,
     } = request;
-    let artifact_id = None;
     let mut plan = plan_cook_recovery(id)?;
-    validate_step_inputs(
-        &mut plan,
-        artifact_id,
-        &overrides,
-        replace_gates.is_some(),
-        &publish,
-    )?;
+    validate_step_inputs(&mut plan, &overrides, replace_gates.is_some(), &publish)?;
     if !overrides.is_empty() {
-        validate_overrides(&plan, preflight, artifact_id)?;
+        validate_overrides(&plan, preflight)?;
     }
     let report = CookRecoveryReport {
         schema: COOK_RECOVERY_SCHEMA,
@@ -626,8 +613,7 @@ pub fn recover_cook(
     let run_id = report.run_id.clone();
     let run_id = run_id.as_str();
     if !overrides.is_empty() {
-        let result =
-            performer.continue_cook(run_id, overrides.has_route_override(), None, &overrides);
+        let result = performer.continue_cook(run_id, overrides.has_route_override(), &overrides);
         return Ok(finish_performed_step(report, result));
     }
     if preflight {
@@ -644,17 +630,17 @@ pub fn recover_cook(
             return Ok((report, 0));
         }
         let continuation = match &report.step {
-            CookRecoveryStep::Continue => Some((false, None)),
-            CookRecoveryStep::Rearm => Some((true, None)),
+            CookRecoveryStep::Continue => Some(false),
+            CookRecoveryStep::Rearm => Some(true),
             _ => None,
         };
         // A recipe-only attempt has no lifecycle record to admit yet: the
         // continuation materializes it, which the plan already states.
         let continuation = continuation.filter(|_| report.status != RECIPE_ONLY_STATUS);
-        let Some((rearm, artifact_id)) = continuation else {
+        let Some(rearm) = continuation else {
             return Ok((report, 0));
         };
-        let result = performer.preflight_continue_cook(run_id, rearm, artifact_id);
+        let result = performer.preflight_continue_cook(run_id, rearm);
         return Ok(finish_performed_step(report, result));
     }
     if report.step.is_none() {
@@ -663,8 +649,8 @@ pub fn recover_cook(
     let none = CookRecoveryOverrides::default();
     let result = (|| {
         Ok(match &report.step {
-            CookRecoveryStep::Continue => performer.continue_cook(run_id, false, None, &none)?,
-            CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, None, &none)?,
+            CookRecoveryStep::Continue => performer.continue_cook(run_id, false, &none)?,
+            CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, &none)?,
             CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => {
                 performer.retry(run_id)?
             }
@@ -739,7 +725,6 @@ fn replace_gates_inputs_required(run_id: &str) -> Error {
 /// and they never combine with each other or with continuation inputs.
 fn validate_step_inputs(
     plan: &mut CookRecoveryPlan,
-    artifact_id: Option<&str>,
     overrides: &CookRecoveryOverrides,
     replace_gates: bool,
     publish: &CookPublishRequest,
@@ -763,10 +748,10 @@ fn validate_step_inputs(
                 .to_string(),
         );
     }
-    if artifact_id.is_some() || !overrides.is_empty() {
+    if !overrides.is_empty() {
         return refuse(
             "recovery-step",
-            "replacement-gate and publication inputs cannot be combined with --artifact-id or continuation overrides".to_string(),
+            "replacement-gate and publication inputs cannot be combined with continuation overrides".to_string(),
         );
     }
     let (field, selected) = if replace_gates {
@@ -800,11 +785,7 @@ fn validate_step_inputs(
 /// Overrides reserve a fresh provider attempt. They never combine with a
 /// preflight or an artifact selection, and a step that forbids a fresh attempt
 /// refuses them rather than silently ignoring them.
-fn validate_overrides(
-    plan: &CookRecoveryPlan,
-    preflight: bool,
-    artifact_id: Option<&str>,
-) -> Result<()> {
+fn validate_overrides(plan: &CookRecoveryPlan, preflight: bool) -> Result<()> {
     let refuse = |message: &str| {
         Err(Error::validation_invalid_argument(
             "recovery-override",
@@ -815,11 +796,6 @@ fn validate_overrides(
     };
     if preflight {
         return refuse("timeout and provider-route overrides cannot be combined with --preflight");
-    }
-    if artifact_id.is_some() {
-        return refuse(
-            "timeout and provider-route overrides cannot be combined with --artifact-id",
-        );
     }
     match &plan.step {
         CookRecoveryStep::Reconcile => refuse(
@@ -986,7 +962,6 @@ mod tests {
         };
         validate_step_inputs(
             &mut plan,
-            None,
             &CookRecoveryOverrides::default(),
             false,
             &CookPublishRequest {

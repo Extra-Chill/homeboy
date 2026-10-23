@@ -2,7 +2,7 @@
 //! Patch admission tests use the retained resume/recover admission helpers.
 use super::super::promote;
 use super::*;
-use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+use crate::agent_task::AgentTaskOutcome;
 use serde_json::{json, Value};
 
 fn candidate_options(
@@ -23,30 +23,36 @@ fn candidate_options(
     if outcome.candidate.is_some() {
         return Ok(options);
     }
-    let patch = if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
-        && (outcome.artifacts.is_empty()
-            || !outcome.artifacts.iter().all(|a| a.size_bytes == Some(0)))
-    {
-        let admission = promote::recoverable_candidate_promotion_admission(
-            &serde_json::from_str(&options.source).unwrap(),
-            &outcome,
-            &options,
-            store,
-        )?;
-        Some(promote::patch_artifact_admission(
-            &admission.artifact,
-            &outcome,
-            &options,
-            store,
-        )?)
-    } else if !outcome.artifacts.is_empty() {
-        let artifact = promote::select_patch_artifact(&outcome, options.artifact_id.as_deref())?;
-        Some(promote::patch_artifact_admission(
-            &artifact, &outcome, &options, store,
-        )?)
-    } else {
-        None
-    };
+    // Historical gate fixtures describe their candidate bytes as evidence.
+    // Build the commit in the fixture; production admission never reads them.
+    let patch = outcome.artifacts.iter().find_map(|artifact| {
+        let projected = options.source_run_id.as_deref().and_then(|run| {
+            crate::agent_task_lifecycle::verified_controller_artifact_projection_path_in_store(
+                store,
+                run,
+                &outcome.task_id,
+                artifact,
+            )
+            .ok()
+            .flatten()
+        });
+        let path = projected.or_else(|| {
+            artifact.path.as_ref().map(|path| {
+                let path = std::path::PathBuf::from(path);
+                if path.is_absolute() {
+                    path
+                } else {
+                    options
+                        .source_path
+                        .as_deref()
+                        .and_then(std::path::Path::parent)
+                        .map(|parent| parent.join(&path))
+                        .unwrap_or(path)
+                }
+            })
+        })?;
+        std::fs::read_to_string(path).ok()
+    });
     let path = provider
         .workspace_path
         .as_ref()
@@ -71,8 +77,9 @@ fn candidate_options(
         .task_base_sha
         .clone()
         .unwrap_or_else(|| git_head(path, "HEAD"));
-    if let Some(admission) = patch.as_ref().filter(|p| !p.patch.trim().is_empty()) {
-        let normalized = admission.normalized_patch.as_ref().unwrap();
+    if let Some(patch) = patch.as_ref().filter(|p| !p.trim().is_empty()) {
+        let normalized =
+            super::super::patch::normalize_promotion_patch(patch, &options.to_worktree)?;
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), &normalized.content).unwrap();
         git(path, &["apply", file.path().to_str().unwrap()]);

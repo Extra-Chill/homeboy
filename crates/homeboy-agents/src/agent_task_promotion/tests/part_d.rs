@@ -78,7 +78,6 @@ fn promotion_applies_verified_snapshot_when_source_artifact_is_replaced() {
     let artifact_path = temp.path().join("changes.patch");
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(temp.path().join("target")),
-        replace_source_on_apply: Some((artifact_path, VALID_PATCH.replace("+new", "+replaced"))),
         ..Default::default()
     };
 
@@ -446,21 +445,6 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
             &candidate,
         )
         .expect("candidate survives without patch evidence");
-        let forged = serde_json::json!({
-            "source_run_id": "baseline-run",
-            "source_task_id": "forged-task",
-            "patch_artifact": {
-                "id": "forged",
-                "kind": "patch",
-                "path": temp.path().join("unbounded.patch"),
-                "sha256": sha256_hex(VALID_PATCH),
-            }
-        });
-        let error = super::super::promote::bind_gate_feedback_baseline(Some(forged))
-            .expect_err("unindexed baseline path cannot be imported");
-        assert!(error
-            .message
-            .contains("controller artifact mirror is missing"));
         assert!(
             crate::agent_task_lifecycle::verified_controller_artifact_projection(
                 "baseline-run",

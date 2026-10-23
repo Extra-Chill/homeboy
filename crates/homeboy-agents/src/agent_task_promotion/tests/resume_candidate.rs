@@ -51,4 +51,3 @@ pub(super) fn bind_candidate(
     }
     options
 }
-

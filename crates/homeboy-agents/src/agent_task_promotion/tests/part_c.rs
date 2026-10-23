@@ -1,7 +1,7 @@
 //! Split partition of tests (see mod.rs for shared setup).
 #![cfg(test)]
 
-use super::super::promote::{normalize_promotion_patch, promote, select_patch_artifact};
+use super::super::promote::{normalize_promotion_patch, promote};
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::{
@@ -77,25 +77,6 @@ fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
 }
 
 #[test]
-fn promote_recoverable_candidate_rejects_zero_actionable_patches() {
-    let (result, apply_calls) = promote_recoverable_patch_count(0);
-    let error = result.expect_err("missing candidate rejected");
-    assert!(error.message.contains("no readable actionable patch"));
-    assert!(error.details["next_action"]
-        .as_str()
-        .expect("recoverable next action")
-        .contains("agent-task review"));
-    assert_eq!(apply_calls, 0);
-}
-
-/// A provider that commits its work and reports an empty patch still leaves a
-/// real candidate behind. Promotion must harvest it from the worktree instead
-/// of rejecting the run for having no readable actionable patch.
-///
-/// This is the state Cook's own dirty-checkout recovery produces: it directs
-/// the operator to commit the candidate and adopt HEAD, after which the
-/// provider has nothing left to emit as a patch.
-#[test]
 fn promote_recoverable_candidate_harvests_committed_changes_behind_an_empty_patch_artifact() {
     let _home = gate_home();
     let (temp, repo, base, candidate) = adopted_commit_repo();
@@ -151,44 +132,6 @@ fn promote_recoverable_candidate_harvests_committed_changes_behind_an_empty_patc
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(report.patch_artifact.id, candidate);
     assert_eq!(report.provenance["candidate_commit"]["base_sha"], base);
-}
-
-#[test]
-fn promote_recoverable_candidate_reports_unreadable_patch_evidence() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = recoverable_patch_source(&temp, 1);
-    std::fs::remove_file(temp.path().join("candidate-0.patch")).expect("remove patch");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-    let error = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some("recoverable-run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@recoverable".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-    )
-    .expect_err("unreadable artifact requires recovery");
-
-    assert_eq!(
-        error.details["unavailable_artifacts"][0]["id"],
-        "candidate-0"
-    );
-    assert_eq!(provider.apply_calls.len(), 0);
 }
 
 #[test]
@@ -429,53 +372,6 @@ fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
     )
     .expect_err("unrelated base rejected");
     assert!(error.message.contains("not an ancestor"));
-}
-
-#[test]
-fn select_patch_artifact_requires_unambiguous_patch() {
-    let outcome = AgentTaskOutcome {
-        task_id: "task-1".to_string(),
-        status: AgentTaskOutcomeStatus::Succeeded,
-        artifacts: vec![
-            AgentTaskArtifact {
-                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                id: "patch-a".to_string(),
-                kind: "patch".to_string(),
-                name: None,
-                label: None,
-                role: None,
-                semantic_key: None,
-                path: Some("a.patch".to_string()),
-                url: None,
-                mime: None,
-                size_bytes: None,
-                sha256: None,
-                metadata: Value::Null,
-            },
-            AgentTaskArtifact {
-                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                id: "patch-b".to_string(),
-                kind: "diff".to_string(),
-                name: None,
-                label: None,
-                role: None,
-                semantic_key: None,
-                path: Some("b.patch".to_string()),
-                url: None,
-                mime: None,
-                size_bytes: None,
-                sha256: None,
-                metadata: Value::Null,
-            },
-        ],
-        ..Default::default()
-    };
-
-    let err = select_patch_artifact(&outcome, None).expect_err("ambiguous patch rejected");
-    assert!(err.message.contains("multiple patch artifacts"));
-
-    let artifact = select_patch_artifact(&outcome, Some("patch-b")).expect("selected patch");
-    assert_eq!(artifact.id, "patch-b");
 }
 
 #[test]

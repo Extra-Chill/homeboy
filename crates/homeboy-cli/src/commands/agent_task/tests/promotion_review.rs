@@ -1017,21 +1017,49 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
         )
         .expect("recover retained patch into the canonical aggregate");
         let git_value = |args: &[&str]| {
-            let output = Command::new("git").args(args).current_dir(&target).output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&target)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
         let base = git_value(&["rev-parse", "HEAD"]);
-        std::fs::write(target.join("large.txt"), format!("{}\n", "x".repeat(300 * 1024))).unwrap();
+        std::fs::write(
+            target.join("large.txt"),
+            format!("{}\n", "x".repeat(300 * 1024)),
+        )
+        .unwrap();
         git_value(&["add", "large.txt"]);
-        git_value(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "candidate"]);
+        git_value(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-m",
+            "candidate",
+        ]);
         let candidate_sha = git_value(&["rev-parse", "HEAD"]);
         let tree_sha = git_value(&["rev-parse", "HEAD^{tree}"]);
-        git_value(&["update-ref", &format!("refs/homeboy/candidates/{candidate_run_id}"), &candidate_sha]);
+        git_value(&[
+            "update-ref",
+            &format!("refs/homeboy/candidates/{candidate_run_id}"),
+            &candidate_sha,
+        ]);
         git_value(&["reset", "--hard", &base]);
         let store = test_lifecycle_store();
         let mut aggregate = store.read_aggregate(candidate_run_id).unwrap();
-        aggregate.outcomes[0].candidate = Some(homeboy::agents::agent_task::AgentTaskCandidate { base_sha:base, candidate_sha:candidate_sha.clone(), tree_sha });
+        aggregate.outcomes[0].candidate = Some(homeboy::agents::agent_task::AgentTaskCandidate {
+            base_sha: base,
+            candidate_sha: candidate_sha.clone(),
+            tree_sha,
+        });
         agent_task_lifecycle::record_run_aggregate(candidate_run_id, &plan, &aggregate).unwrap();
         let (run_source, aggregate_path) =
             review::read_promotion_source(candidate_run_id).expect("read run source");

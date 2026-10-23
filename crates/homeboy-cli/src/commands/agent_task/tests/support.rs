@@ -302,7 +302,10 @@ impl AgentTaskExecutorAdapter for ApplyArtifactExecutor {
 }
 
 pub(crate) fn with_temp_home(run: impl FnOnce()) {
-    with_isolated_home(|_| run());
+    with_isolated_home(|_| {
+        homeboy::agents::agent_task_lifecycle::clear_runner_continuation_provider_for_test();
+        run();
+    });
 }
 
 pub(crate) fn test_plan() -> AgentTaskPlan {

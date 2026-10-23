@@ -302,45 +302,6 @@ pub(crate) struct AgentTaskPromotionApplyResponse {
     command_evidence: Vec<AgentTaskPromotionCommandReport>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AgentTaskPromotionWorkspace {
-    pub(crate) path: PathBuf,
-    pub(crate) command_evidence: Vec<AgentTaskPromotionCommandReport>,
-}
-
-pub(crate) fn apply_patch(
-    request: AgentTaskPromotionApplyRequest,
-    materialized_workspace: Option<&Path>,
-) -> Result<AgentTaskPromotionWorkspace> {
-    let path = if let Some(path) = materialized_workspace {
-        path.to_path_buf()
-    } else if Path::new(&request.to_workspace).is_dir() {
-        PathBuf::from(&request.to_workspace)
-    } else {
-        worktree_provider::resolve_native_worktree_mutation_target(&request.to_workspace)?
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "to_worktree",
-                    "promotion requires an active native Homeboy worktree",
-                    Some(request.to_workspace.clone()),
-                    None,
-                )
-            })?
-            .path
-    };
-    let response = apply_materialized_workspace_patch(
-        &path,
-        &serde_json::to_string(&request)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
-    )?;
-    let response: AgentTaskPromotionApplyResponse = serde_json::from_str(&response)
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    Ok(AgentTaskPromotionWorkspace {
-        path,
-        command_evidence: response.command_evidence,
-    })
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "gate execution requires explicit runtime isolation inputs"

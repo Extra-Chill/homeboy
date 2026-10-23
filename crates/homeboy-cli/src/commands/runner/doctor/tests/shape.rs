@@ -2,6 +2,16 @@ use super::super::*;
 use std::collections::BTreeMap;
 use types::{RunnerDoctorStatus, RunnerRepairAction};
 
+// Shape tests must not probe another test's process-global HOME or retain its
+// readiness failure while replacing checks with synthetic evidence.
+fn run(id: &str) -> homeboy::core::Result<(types::RunnerDoctorOutput, i32)> {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let (mut report, exit) = super::super::run(id)?;
+        report.failure = None;
+        Ok((report, exit))
+    })
+}
+
 #[test]
 fn local_alias_report_has_stable_top_level_shape() {
     let (report, exit_code) = run("local").expect("local doctor report");
