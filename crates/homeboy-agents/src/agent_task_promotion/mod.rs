@@ -10,6 +10,11 @@
 //! - [`apply`]: native workspace mutation and the serialized Lab adapter.
 
 mod apply;
+pub(crate) mod candidate_bundle;
+pub use candidate_bundle::{
+    fetch_candidate_bundle, materialize_candidate_tree, verify_candidate_ref, CandidateBundleError,
+    CANDIDATE_BUNDLE_ARTIFACT_KIND,
+};
 mod committed_changes;
 pub(crate) use committed_changes::resolve_candidate_revision;
 mod fingerprint;

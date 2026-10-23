@@ -19,6 +19,21 @@ pub(crate) fn apply_aggregate_transition_in_store(
         plan,
         aggregate,
     } = transition;
+    if aggregate
+        .outcomes
+        .iter()
+        .any(|outcome| outcome.candidate.is_some())
+        && record
+            .runner_id()
+            .is_some_and(|runner| execution_runner_id().as_deref() != Some(runner))
+    {
+        let controller_plan = lifecycle_store.read_controller_plan(&record.run_id)?;
+        crate::agent_task_promotion::candidate_bundle::fetch_run_candidates(
+            record,
+            &controller_plan,
+            aggregate,
+        )?;
+    }
     let aggregate_path = lifecycle_store
         .aggregate_path(&record.run_id)
         .display()

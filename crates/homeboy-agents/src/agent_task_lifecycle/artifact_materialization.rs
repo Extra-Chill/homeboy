@@ -97,7 +97,7 @@ fn is_recovered_artifact(
             .is_some_and(|path| path.starts_with("runner-artifact://"))
 }
 
-fn materialize_artifact(
+pub(crate) fn materialize_artifact(
     artifact: &mut AgentTaskArtifact,
     run_id: &str,
     task_id: &str,
