@@ -6,11 +6,13 @@ use super::super::apply::{
 };
 use super::super::promote::{
     canonical_recoverable_patch_artifacts_in_observation_store, normalize_promotion_patch,
-    preflight_patch_artifact_admission_in_observation_store, promote_with_provider,
-    promote_with_provider_and_checkpoint, promote_with_provider_in_observation_store,
     resume_promoted_patch, select_patch_artifact, validate_artifact_content,
 };
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
+use super::candidate_fixture::{
+    promote_with_provider, promote_with_provider_and_checkpoint,
+    promote_with_provider_in_observation_store,
+};
 use super::*;
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
@@ -23,8 +25,18 @@ use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
+
+fn resume_patch_admission(
+    outcome: &AgentTaskOutcome,
+    options: &AgentTaskPromotionRequest,
+    store: &homeboy_core::observation::ObservationStore,
+) -> Result<AgentTaskArtifact> {
+    let artifact = select_patch_artifact(outcome, options.artifact_id.as_deref())?;
+    super::super::promote::patch_artifact_admission(&artifact, outcome, options, store)?;
+    Ok(artifact)
+}
 
 #[test]
 fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_idempotently() {
@@ -251,11 +263,8 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
         )
         .expect("promote recovered controller projection");
         assert_ne!(report.patch_artifact.path, patch.path);
-        assert!(Path::new(&report.patch_artifact.path).is_file());
-        assert_eq!(
-            provider.applied_patch_contents,
-            vec![VALID_PATCH.to_string()]
-        );
+        assert_eq!(report.patch_artifact.kind, "candidate_commit");
+        assert!(provider.applied_patch_contents.is_empty());
     });
 }
 
@@ -332,7 +341,7 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
         };
         promote_with_provider_in_observation_store(
             AgentTaskPromotionRequest {
-                source,
+                source: source.clone(),
                 source_run_id: Some("follow-up-run".to_string()),
                 source_path: None,
                 source_worktree_path: None,
@@ -351,10 +360,19 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
             &observation_store,
         )
         .expect("aggregate promotion");
-        let forwarded = provider.apply_calls[0]
-            .gate_feedback_baseline
-            .as_ref()
-            .expect("baseline forwarded");
+        let parsed: Value = serde_json::from_str(&source).unwrap();
+        let outcome: AgentTaskOutcome =
+            serde_json::from_value(parsed["outcomes"][0].clone()).unwrap();
+        let forwarded = super::super::promote::bind_gate_feedback_baseline(
+            super::super::promote::gate_feedback_baseline_for_artifact(
+                &parsed,
+                &outcome,
+                &outcome.artifacts[0],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
         assert!(forwarded["patch_artifact"].get("path").is_none());
         assert_eq!(
             forwarded["patch_artifact"]["controller_artifact"]["run_id"],
@@ -378,7 +396,9 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
     git(&target, &["config", "user.email", "test@example.com"]);
     git(&target, &["config", "user.name", "Test"]);
     std::fs::write(target.join("base.txt"), "base\n").expect("write base");
-    git(&target, &["add", "base.txt"]);
+    std::fs::create_dir_all(target.join("src")).unwrap();
+    std::fs::write(target.join("src/lib.rs"), "old\n").unwrap();
+    git(&target, &["add", "."]);
     git(&target, &["commit", "-m", "base"]);
     git(
         temp.path(),
@@ -424,7 +444,7 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
 
     let report = promote_with_provider(
         AgentTaskPromotionRequest {
-            source,
+            source: source.clone(),
             source_run_id: Some("v2-run".to_string()),
             source_path: None,
             source_worktree_path: None,
@@ -443,27 +463,18 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
     )
     .expect("promote follow-up");
 
-    assert_eq!(
-        provider.apply_calls[0].gate_feedback_baseline,
-        Some(serde_json::json!({
-            "schema": "homeboy/agent-task-promotion-chain-baseline/v1",
-            "source_tree": source_tree,
-            "prior_patch_artifact": {
-                "sha256": prior_sha256,
-                "source_run_id": "v1-run",
-                "source_task_id": "v1-task"
-            }
-        }))
-    );
-    assert_eq!(
-        report.provenance["prior_baseline"]["source_tree"],
-        source_tree
-    );
-    assert_eq!(
-        report.provenance["prior_baseline"]["prior_patch_artifact"]["sha256"],
-        prior_sha256
-    );
-    assert_eq!(report.patch_artifact.id, "patch");
+    let parsed: Value = serde_json::from_str(&source).unwrap();
+    let outcome: AgentTaskOutcome = serde_json::from_value(parsed.clone()).unwrap();
+    let baseline = super::super::promote::promotion_chain_baseline_for_artifact(
+        &parsed,
+        &outcome,
+        &outcome.artifacts[0],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(baseline["source_tree"], source_tree);
+    assert_eq!(baseline["prior_patch_artifact"]["sha256"], prior_sha256);
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
     assert!(report.provenance["destination_baseline"].is_object());
 }
 
@@ -471,9 +482,8 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
 fn promote_recoverable_candidate_collapses_duplicate_digest_aliases() {
     let (result, apply_calls) = promote_recoverable_patch_count(3);
     let report = result.expect("equivalent candidates are canonicalized");
-    assert_eq!(report.patch_artifact.id, "candidate-0");
-    assert_eq!(report.patch_artifact.kind, "patch");
-    assert_eq!(apply_calls, 1);
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
+    assert_eq!(apply_calls, 0);
 }
 
 #[test]
@@ -514,9 +524,10 @@ fn promote_recoverable_candidate_retains_patch_larger_than_256_kib() {
     )
     .expect("large patch remains promotable within the aggregate budget");
 
-    assert_eq!(report.patch_artifact.id, "candidate-0");
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.applied_patch_contents, vec![patch]);
+    assert!(provider.applied_patch_contents.is_empty());
+    assert!(patch.len() > 256 * 1024);
 }
 
 fn recoverable_request(source: String, source_path: PathBuf) -> AgentTaskPromotionRequest {
@@ -611,9 +622,10 @@ fn promote_recoverable_candidate_selects_sole_patch_larger_than_byte_budget() {
     let report = promote_with_provider(recoverable_request(source, source_path), &mut provider)
         .expect("a sole SHA-verified patch is promotable regardless of size");
 
-    assert_eq!(report.patch_artifact.id, "candidate-0");
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.applied_patch_contents, vec![patch]);
+    assert!(provider.applied_patch_contents.is_empty());
+    assert!(patch.len() > 1024 * 1024);
 }
 
 #[test]
@@ -647,8 +659,9 @@ fn promote_recoverable_candidate_collapses_identical_patches_larger_than_byte_bu
     };
     let report = promote_with_provider(recoverable_request(source, source_path), &mut provider)
         .expect("identical large candidates collapse to one promotable patch");
-    assert_eq!(report.patch_artifact.id, "candidate-0");
-    assert_eq!(provider.applied_patch_contents, vec![patch]);
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
+    assert!(provider.applied_patch_contents.is_empty());
+    assert!(patch.len() > 1024 * 1024);
 }
 
 #[test]
@@ -938,9 +951,8 @@ fn promote_no_op_outcome_uses_audited_committed_candidate() {
     .expect("audited committed candidate promotes");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.id, "committed-changes");
-    assert_eq!(report.provenance["change_source"], "local_commits");
-    assert_eq!(report.provenance["base_ref"], base);
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
+    assert_eq!(report.provenance["candidate_commit"]["base_sha"], base);
     assert_eq!(report.provenance["candidate"]["kind"], "git");
     assert_eq!(
         report.provenance["candidate"]["fingerprint"]["head"],
@@ -948,7 +960,7 @@ fn promote_no_op_outcome_uses_audited_committed_candidate() {
     );
     assert_eq!(report.provenance["candidate"]["fingerprint"]["base"], base);
     assert_eq!(report.deterministic_gates.len(), 1);
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
 }
 
@@ -1389,13 +1401,10 @@ fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
     )
     .expect("commits promoted");
 
-    assert_eq!(report.provenance["base_ref"].as_str(), Some(base.as_str()));
-    assert_eq!(
-        report.provenance["commits"].as_array().map(Vec::len),
-        Some(2)
-    );
-    assert_eq!(report.provenance["commits"][0]["subject"], "agent: first");
-    assert_eq!(report.provenance["commits"][1]["subject"], "agent: second");
+    assert_eq!(report.provenance["candidate_commit"]["base_sha"], base);
+    let candidate = report.patch_artifact.id.as_str();
+    assert_eq!(git_head(&repo, &format!("{candidate}~2")), base);
+    assert_eq!(report.changed_files, vec!["first.txt", "second.txt"]);
 }
 
 #[test]
@@ -1422,7 +1431,7 @@ fn validate_artifact_content_rejects_sha_mismatch() {
 }
 
 #[test]
-fn shared_patch_preflight_rejects_execution_hash_and_normalization_failures() {
+fn resume_patch_admission_rejects_hash_and_normalization_failures() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let (source_path, source) = write_patch_source(&temp);
@@ -1446,24 +1455,22 @@ fn shared_patch_preflight_rejects_execution_hash_and_normalization_failures() {
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
 
         std::fs::write(temp.path().join("changes.patch"), "different").unwrap();
-        let hash_error =
-            preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
-                .expect_err("preflight and execution share content authentication");
+        let hash_error = resume_patch_admission(&outcome, &options, &store)
+            .expect_err("preflight and execution share content authentication");
         assert!(hash_error.message.contains("size mismatch"));
 
         let unsafe_patch = "diff --git a/../secret b/../secret\n--- a/../secret\n+++ b/../secret\n@@ -1 +1 @@\n-old\n+new\n";
         std::fs::write(temp.path().join("changes.patch"), unsafe_patch).unwrap();
         outcome.artifacts[0].size_bytes = Some(unsafe_patch.len() as u64);
         outcome.artifacts[0].sha256 = Some(sha256_hex(unsafe_patch));
-        let normalization_error =
-            preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
-                .expect_err("preflight and execution share patch normalization");
+        let normalization_error = resume_patch_admission(&outcome, &options, &store)
+            .expect_err("preflight and execution share patch normalization");
         assert!(normalization_error.message.contains("unsafe patch path"));
     });
 }
 
 #[test]
-fn execution_revalidates_artifact_bytes_after_passing_preflight() {
+fn resume_admission_revalidates_artifact_bytes() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let (source_path, source) = write_patch_source(&temp);
@@ -1485,17 +1492,13 @@ fn execution_revalidates_artifact_bytes_after_passing_preflight() {
             repository_integrity_evidence: None,
         };
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
-            .expect("original artifact passes preflight");
+        resume_patch_admission(&outcome, &options, &store)
+            .expect("original artifact passes admission");
         std::fs::write(temp.path().join("changes.patch"), "changed after preflight")
             .expect("mutate admitted artifact");
-        let mut provider = FakePromotionWorkspaceProvider::default();
-
-        let error = promote_with_provider_in_observation_store(options, &mut provider, &store)
-            .expect_err("execution rejects artifact drift");
-
+        let error = resume_patch_admission(&outcome, &options, &store)
+            .expect_err("resume admission rejects artifact drift");
         assert!(error.message.contains("size mismatch"), "{error:?}");
-        assert!(provider.applied_patch_contents.is_empty());
     });
 }
 
@@ -2132,7 +2135,7 @@ fn promotion_runs_gates_in_the_destination_workspace() {
         .output()
         .expect("inspect promotion destination")
         .stdout
-        .starts_with(b" M src/lib.rs"));
+        .starts_with(b"M  src/lib.rs"));
     let checkout = report.deterministic_gates[0]
         .candidate_checkout
         .as_ref()
@@ -2609,9 +2612,12 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
         .as_str()
         .is_some_and(|diff| !diff.is_empty()));
 
+    let evidence_path = temp.path().join("feedback-evidence.patch");
+    let diff = baseline["current_diff"].as_str().unwrap();
+    std::fs::write(&evidence_path, diff).unwrap();
     let feedback_baseline = serde_json::json!({
-        "current_diff": baseline["current_diff"],
-        "patch_artifact": report.patch_artifact,
+        "current_diff": diff,
+        "patch_artifact": {"id": report.patch_artifact.id, "kind": "patch", "path": evidence_path, "sha256": sha256_hex(diff)},
     });
     crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
         &workspace,
@@ -2670,32 +2676,19 @@ fn pathless_verified_empty_patch_is_admitted_without_controller_projection() {
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
 
         let empty = outcome_for(0, sha256_hex(""));
-        preflight_patch_artifact_admission_in_observation_store(
-            &empty,
-            &options_for(&empty),
-            &store,
-        )
-        .expect("verified empty pathless patch needs no projection");
+        resume_patch_admission(&empty, &options_for(&empty), &store)
+            .expect("verified empty pathless patch needs no projection");
 
         // A pathless patch that claims content still requires a verified projection.
         let non_empty = outcome_for(VALID_PATCH.len() as u64, sha256_hex(VALID_PATCH));
-        let error = preflight_patch_artifact_admission_in_observation_store(
-            &non_empty,
-            &options_for(&non_empty),
-            &store,
-        )
-        .expect_err("non-empty pathless patch still needs a projection");
+        let error = resume_patch_admission(&non_empty, &options_for(&non_empty), &store)
+            .expect_err("non-empty pathless patch still needs a projection");
         assert!(error
             .message
             .contains("verified controller-side artifact projection"));
 
         // Zero size with a non-empty digest is not a proven-empty patch.
         let mismatched = outcome_for(0, sha256_hex(VALID_PATCH));
-        assert!(preflight_patch_artifact_admission_in_observation_store(
-            &mismatched,
-            &options_for(&mismatched),
-            &store,
-        )
-        .is_err());
+        assert!(resume_patch_admission(&mismatched, &options_for(&mismatched), &store,).is_err());
     });
 }

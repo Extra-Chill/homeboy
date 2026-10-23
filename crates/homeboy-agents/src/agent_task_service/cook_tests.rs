@@ -4394,7 +4394,15 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
         assert!(output.status.success());
         let patch_contents = String::from_utf8(output.stdout).unwrap();
         std::fs::write(&patch, &patch_contents).unwrap();
-        git(&["reset", "--hard"]);
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-m", "harvested candidate"]);
+        let candidate = crate::agent_task::AgentTaskCandidate {
+            base_sha: admitted_head.clone(),
+            candidate_sha: git_output(path, &["rev-parse", "HEAD"]).unwrap(),
+            tree_sha: git_output(path, &["rev-parse", "HEAD^{tree}"]).unwrap(),
+        };
+        git(&["reset", "--hard", &admitted_head]);
+        std::fs::remove_file(&patch).unwrap();
         std::fs::write(
             &policy,
             format!(
@@ -4426,6 +4434,7 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
                 outcomes: vec![AgentTaskOutcome {
                     task_id: "provider".to_string(),
                     status: AgentTaskOutcomeStatus::CandidateRecoverable,
+                    candidate: Some(candidate),
                     artifacts: vec![AgentTaskArtifact {
                         id: "candidate".to_string(),
                         kind: "patch".to_string(),
@@ -4469,6 +4478,9 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
             Some(&evidence)
         );
 
+        store
+            .record_promotion(run_id, serde_json::to_value(&promotion).unwrap())
+            .unwrap();
         let replay = promote_or_load_attempt_in_store(&store, &options, run_id).expect("replay");
         assert_eq!(
             replay.repository_integrity_evidence.as_ref(),

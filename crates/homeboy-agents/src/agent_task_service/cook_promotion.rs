@@ -876,28 +876,33 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         repository_integrity_evidence: None,
     };
     let observation_store = lifecycle_store.open_observation_readonly()?;
-    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
-        if artifact_id.is_none()
-            && !crate::agent_task_promotion::outcome_has_patch_artifacts(outcome)
+    if outcome.candidate.is_some()
+        || outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable
+    {
+        if outcome.candidate.is_none()
+            && (outcome.is_verified_unchanged_attempt()
+                || outcome.status == crate::agent_task::AgentTaskOutcomeStatus::NoOp)
         {
-            return Ok(json!({
-                "behavior": "promote_committed_candidate",
-                "artifact_id": Value::Null,
-                "candidate_fingerprint": Value::Null,
-                "execution_only_checks": ["committed_candidate_resolution", "promotion_target_resolution", "patch_apply", "verification_gates"],
-            }));
+            return Ok(
+                json!({"behavior": "no_changes", "artifact_id": Value::Null, "candidate_fingerprint": Value::Null, "execution_only_checks": []}),
+            );
         }
-        let artifact =
-            crate::agent_task_promotion::preflight_patch_artifact_admission_in_observation_store(
-                outcome,
-                &promotion_options,
-                &observation_store,
-            )?;
+        let candidate = outcome.candidate.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "source.candidate",
+                "non-recoverable: outcome has no immutable candidate; run a new Cook",
+                None,
+                None,
+            )
+        })?;
+        if let Some(path) = promotion_options.source_worktree_path.as_deref() {
+            crate::agent_task_promotion::validate_candidate_commit(path, candidate)?;
+        }
         return Ok(json!({
             "behavior": "promote_new",
-            "artifact_id": artifact.id,
-            "candidate_fingerprint": Value::Null,
-            "execution_only_checks": ["promotion_target_resolution", "patch_apply", "verification_gates"],
+            "artifact_id": Value::Null,
+            "candidate_fingerprint": candidate,
+            "execution_only_checks": ["promotion_target_resolution", "candidate_materialization", "verification_gates"],
         }));
     }
     let artifact = preflight_recoverable_candidate_promotion_in_observation_store(
@@ -995,6 +1000,9 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
     else {
         return Ok(None);
     };
+    if outcome.candidate.is_some() {
+        return Ok(None);
+    }
     let promotion_options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some(run_id.to_string()),

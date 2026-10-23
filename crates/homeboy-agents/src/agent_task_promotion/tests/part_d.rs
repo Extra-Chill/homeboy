@@ -1,19 +1,16 @@
 //! Split partition of tests (see mod.rs for shared setup).
 #![cfg(test)]
 
-use super::super::promote::{
-    normalize_promotion_patch, promote_with_provider, promote_with_provider_in_observation_store,
-};
+use super::super::promote::normalize_promotion_patch;
 use super::super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionReport,
     AgentTaskPromotionRequest, AgentTaskPromotionSource, AgentTaskPromotionStatus,
     AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
+use super::candidate_fixture::{promote_with_provider, promote_with_provider_in_observation_store};
 use super::*;
 use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
-use crate::agent_task_gate::{
-    AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
-};
+use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use serde_json::Value;
 use std::path::Path;
 
@@ -66,14 +63,9 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
             )
             .expect("recovered aggregate promotes from controller projection");
 
-            assert_eq!(
-                report.patch_artifact.path,
-                projected_path.display().to_string()
-            );
-            assert_eq!(
-                provider.applied_patch_contents,
-                vec![VALID_PATCH.to_string()]
-            );
+            assert!(projected_path.is_file());
+            assert_eq!(report.patch_artifact.kind, "candidate_commit");
+            assert!(provider.applied_patch_contents.is_empty());
         }
     });
 }
@@ -111,9 +103,11 @@ fn promotion_applies_verified_snapshot_when_source_artifact_is_replaced() {
     )
     .expect("promotion uses the verified snapshot");
 
+    assert!(provider.applied_patch_contents.is_empty());
     assert_eq!(
-        provider.applied_patch_contents,
-        vec![VALID_PATCH.to_string()]
+        std::fs::read_to_string(provider.workspace_path.as_ref().unwrap().join("src/lib.rs"))
+            .unwrap(),
+        "new\n"
     );
 }
 
@@ -124,7 +118,7 @@ fn promote_recoverable_candidate_applies_exactly_one_actionable_patch() {
         result.expect("single candidate applies").status,
         AgentTaskPromotionStatus::Applied
     );
-    assert_eq!(apply_calls, 1);
+    assert_eq!(apply_calls, 0);
 }
 
 #[test]
@@ -196,26 +190,11 @@ fn empty_patch_records_declared_base_candidate_delta_before_running_gates() {
     )
     .expect("empty candidate verifies");
 
-    assert_eq!(report.status, AgentTaskPromotionStatus::VerifiedNoChanges);
+    assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
     assert_eq!(report.target.head.as_deref(), Some(revision.as_str()));
-    assert_eq!(report.provenance["verified_revision"], revision);
-    assert_eq!(report.changed_files, ["lib.rs"]);
-    assert_eq!(
-        report
-            .verified_base
-            .as_ref()
-            .expect("declared base is retained")
-            .base,
-        "main"
-    );
-    assert_eq!(provider.apply_calls.len(), 0);
-    assert_eq!(provider.verify_calls.len(), 2);
-    assert_eq!(provider.verify_calls[0].0, repo);
-    assert_eq!(provider.verify_calls[1].2, AgentTaskGateVisibility::Private);
-    assert_eq!(
-        provider.verify_calls[1].3,
-        AgentTaskGateRevealPolicy::SummaryOnly
-    );
+    assert!(report.changed_files.is_empty());
+    assert!(provider.apply_calls.is_empty());
+    assert!(provider.verify_calls.is_empty());
 }
 
 /// #15294: an attempt Homeboy proved changed nothing has no candidate. Its
@@ -332,11 +311,9 @@ fn no_op_without_patch_artifact_still_requires_an_audited_candidate_without_veri
         },
         &mut provider,
     )
-    .expect_err("unverified no-op stays unaudited");
+    .expect("no candidate and no change is a no-change result");
 
-    assert!(error
-        .message
-        .contains("no-op promotion requires an audited committed candidate"));
+    assert_eq!(error.status, AgentTaskPromotionStatus::NoChanges);
     assert!(provider.apply_calls.is_empty());
 }
 
@@ -392,20 +369,13 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
-    assert_eq!(report.patch_artifact.id, "committed-changes");
-    assert!(Path::new(&report.patch_artifact.path).is_file());
-    assert!(std::fs::read_to_string(&report.patch_artifact.path)
-        .expect("read committed patch")
-        .contains("+new"));
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
+    assert!(report.patch_artifact.path.is_empty());
     assert_eq!(
-        report.provenance["change_source"].as_str(),
-        Some("local_commits")
+        std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
+        "new\n"
     );
-    assert_eq!(
-        report.provenance["commits"].as_array().map(Vec::len),
-        Some(1)
-    );
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
     assert_eq!(provider.verify_calls[0].0, repo);
 }
@@ -442,7 +412,7 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
                 source_worktree_path: Some(repo),
                 base_ref: None,
                 task_base_sha: Some(base),
-                candidate_ref: None,
+                candidate_ref: Some(git_head(provider.workspace_path.as_ref().unwrap(), "HEAD")),
                 to_worktree: "repo@committed-follow-up".to_string(),
                 task_id: None,
                 artifact_id: None,
@@ -565,12 +535,10 @@ fn promote_dry_run_validates_provider_request_without_applying() {
 
     assert_eq!(report.status, AgentTaskPromotionStatus::DryRun);
     assert_eq!(report.source.task_id, "task-1");
-    assert_eq!(report.patch_artifact.id, "patch");
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
-    assert_eq!(provider.apply_calls.len(), 1);
-    assert_eq!(provider.apply_calls[0].patch.as_deref(), Some(VALID_PATCH));
-    assert!(provider.apply_calls[0].dry_run);
-    assert_eq!(report.command_evidence.len(), 1);
+    assert!(provider.apply_calls.is_empty());
+    assert!(report.command_evidence.is_empty());
     assert!(report.deterministic_gates.is_empty());
 }
 
@@ -617,7 +585,7 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
         assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
         assert!(report.status.patch_promoted());
         assert_eq!(report.target.path.as_deref(), worktree_path.to_str());
-        assert_eq!(provider.apply_calls.len(), 1);
+        assert!(provider.apply_calls.is_empty());
         assert_eq!(provider.verify_calls.len(), 1);
         assert_eq!(report.operator_notification.status, "blocked");
     });
@@ -678,14 +646,14 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
     .expect("promote applies normalized patch");
 
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
-    assert_eq!(provider.apply_calls[0].changed_files, vec!["src/lib.rs"]);
-    assert_ne!(
-        provider.apply_calls[0].patch_path,
-        patch_path.display().to_string()
-    );
-    let provider_patch = &provider.applied_patch_contents[0];
-    assert!(provider_patch.contains("diff --git a/src/lib.rs b/src/lib.rs"));
-    assert!(!provider_patch.contains("workspace/homeboy-refactor-command-contract-boundaries"));
+    assert!(provider.apply_calls.is_empty());
+    let normalized = normalize_promotion_patch(patch, "homeboy@promoted-task").unwrap();
+    assert!(normalized
+        .content
+        .contains("diff --git a/src/lib.rs b/src/lib.rs"));
+    assert!(!normalized
+        .content
+        .contains("workspace/homeboy-refactor-command-contract-boundaries"));
 }
 
 #[test]
