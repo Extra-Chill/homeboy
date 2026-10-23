@@ -46,6 +46,7 @@ pub(super) fn status(
         let capabilities =
             global_execution_capabilities(&runners, Some(&report), Some(&lab_readiness))?;
         let generation_inventory = admission_snapshot.generation_inventory;
+        let retirement_readiness = runner::generation_retirement_readiness(id)?;
         // Lead with the compact authoritative admission answer, summarizing the
         // draining generations by count rather than expanding the full ledger
         // (#9478/#9522). The full inventory stays available as detail below.
@@ -82,6 +83,7 @@ pub(super) fn status(
                             full_command: format!("homeboy runner status {} --full", shell_arg(id)),
                         }),
                         generation_inventory,
+                        retirement_readiness,
                         probe_degradations: readonly_probe::take_degradations(),
                         ..Default::default()
                     },
@@ -109,6 +111,7 @@ pub(super) fn status(
                         sanitized_status_for_output(report),
                     ))),
                     generation_inventory,
+                    retirement_readiness,
                     preferred_lab_runner,
                     selected_lab_runner,
                     managed_followups,
@@ -128,6 +131,12 @@ pub(super) fn status(
     let runners = runner::list()?;
     let sessions = non_local_sessions(&runners, runner::persisted_statuses()?);
     let capabilities = execution_capabilities(&runners, &sessions, Some(&lab_readiness));
+    let mut retirement_readiness = std::collections::BTreeMap::new();
+    for report in &sessions {
+        for (generation, reason) in runner::generation_retirement_readiness(&report.runner_id)? {
+            retirement_readiness.insert(format!("{}/{}", report.runner_id, generation), reason);
+        }
+    }
     if !full {
         let omitted = sessions.len().saturating_sub(DEFAULT_STATUS_SESSION_LIMIT);
         let sessions = sessions
@@ -140,6 +149,7 @@ pub(super) fn status(
                 command: "runner.status".to_string(),
                 extra: RunnerExtra {
                     operator_summaries: sessions,
+                    retirement_readiness,
                     execution_capabilities: Some(capabilities),
                     truncation: Some(RunnerTruncation {
                         omitted_generations: 0,
@@ -191,6 +201,7 @@ pub(super) fn status(
                     .collect(),
                 execution_capabilities: Some(capabilities),
                 inspection: Some(inspection),
+                retirement_readiness,
                 preferred_lab_runner,
                 selected_lab_runner,
                 managed_followups,

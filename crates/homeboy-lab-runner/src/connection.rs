@@ -740,7 +740,11 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     // runtime state and takes no promotion lease. Waiting on that lease would
     // block every reconnect behind any running Cook's generation pin.
     if load_in_roots(roots, runner_id)?.settings.service_managed {
-        return service::connect_service_runner(roots, runner_id);
+        let result = service::connect_service_runner(roots, runner_id)?;
+        if result.1 == 0 {
+            retire_drained_generations(&load_in_roots(roots, runner_id)?)?;
+        }
+        return Ok(result);
     }
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
@@ -1608,6 +1612,7 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     // without agent-task support resolve this as an inert no-op.
     drop(promotion_lease);
     super::runner_probe_gate::invalidate_runner_probes(runner_id);
+    retire_drained_generations(&runner)?;
     Ok((
         RunnerConnectReport {
             runner_id: runner.id,
@@ -2305,6 +2310,26 @@ pub fn reconcile_status_with_outcome_in_roots(
         runner_id,
         super::generation_store::GenerationReconcilePolicy::default(),
     )
+}
+
+/// Read-only retirement diagnostics for draining generations. A `None`
+/// reason means evidence is verified and the next reconcile can attempt stop.
+pub fn generation_retirement_readiness(
+    runner_id: &str,
+) -> Result<std::collections::BTreeMap<String, Option<String>>> {
+    super::generation_store::retirement_readiness(runner_id)
+}
+
+/// Lifecycle hook shared by reconnect, refresh, and upgrade (which refreshes).
+/// Use the normal reconciler and its default, fail-closed evidence policy.
+pub(crate) fn retire_drained_generations(runner: &Runner) -> Result<()> {
+    let policy = super::generation_store::GenerationReconcilePolicy::default();
+    if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(runner) {
+        super::generation_store::reconcile_with_ssh_and_policy(&runner.id, &client, policy)?;
+    } else {
+        super::generation_store::reconcile_with_policy(&runner.id, policy)?;
+    }
+    Ok(())
 }
 
 fn reconcile_status_with_outcome_in_roots_with_policy(
@@ -4115,7 +4140,7 @@ mod status_read_purity_tests {
     }
 }
 
-mod remote_daemon;
+pub(crate) mod remote_daemon;
 mod service;
 mod session_store;
 

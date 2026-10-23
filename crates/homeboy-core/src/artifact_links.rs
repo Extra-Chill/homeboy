@@ -308,11 +308,31 @@ impl RetainedArtifactAvailability {
 pub fn classify_retained_artifact_availability(
     artifact: &ArtifactRecord,
 ) -> Result<RetainedArtifactAvailability> {
+    // A local-looking path on a remote or metadata-only record is not a
+    // controller-owned copy. Classify ownership before inspecting bytes.
+    let is_directory = match artifact.artifact_type.as_str() {
+        "file" => false,
+        "directory" => true,
+        _ => {
+            return Ok(RetainedArtifactAvailability::Missing {
+                reason: "required retained artifact is not controller-owned".to_string(),
+            });
+        }
+    };
     let path = Path::new(&artifact.path);
     let expected_sha256 = artifact.sha256.as_deref().filter(|sha| !sha.is_empty());
-    if !path.is_file() {
+    if !(if is_directory {
+        path.is_dir()
+    } else {
+        path.is_file()
+    }) {
         return Ok(RetainedArtifactAvailability::Missing {
-            reason: "required retained artifact file is missing".to_string(),
+            reason: if is_directory {
+                "required retained artifact directory is missing"
+            } else {
+                "required retained artifact file is missing"
+            }
+            .to_string(),
         });
     }
     let Some(expected_sha256) = expected_sha256 else {
@@ -320,7 +340,11 @@ pub fn classify_retained_artifact_availability(
             reason: "required retained artifact checksum is missing".to_string(),
         });
     };
-    let actual = crate::artifact_metadata::sha256_file(path)?;
+    let actual = if is_directory {
+        crate::observation::directory_tree_sha256(path)?
+    } else {
+        crate::artifact_metadata::sha256_file(path)?
+    };
     if actual != expected_sha256 {
         return Ok(RetainedArtifactAvailability::ChecksumMismatch {
             expected: expected_sha256.to_string(),

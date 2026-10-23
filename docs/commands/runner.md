@@ -762,9 +762,19 @@ homeboy runner reconcile <runner-id>
 ```
 
 Reconciles persisted direct-runner generation state and retires daemon
-generations that have been verified as drained. Use the remediation command
-reported by `homeboy runner status` after it has established that no active work
-still belongs to the generation.
+generations that have been verified as drained. Successful refresh, reconnect,
+and runner upgrade invoke this same reconciler automatically. A generation
+must relinquish admission and have no live work before its daemon can stop.
+Deleted controller runs count as released evidence; retained runs still require
+verified controller files or directory tree checksums and complete source
+inventories. `--release-unverified-evidence` remains an explicit operator choice
+for genuinely unverifiable evidence, not a default lifecycle policy.
+
+`runner status` includes `retirement_readiness` even without `--generations`:
+each draining generation maps to one blocking reason, or `null` when ready for
+the reconciler to attempt its authenticated stop. Unqualified status prefixes
+these keys with the runner ID. Status never performs the stop itself. Failed
+stop attempts remain visible until the next reconciliation.
 
 The command succeeds only when its postcondition has converged: the runner is
 accepting jobs and has no unresolved generation projection. A non-converged
