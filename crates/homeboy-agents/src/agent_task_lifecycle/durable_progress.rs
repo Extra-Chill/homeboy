@@ -55,8 +55,14 @@ pub(crate) fn prepared_unreceipted_action_events(
         if canonical_action_events_own_operation(operation_key, ledger) {
             continue;
         }
+        // New leases have a durable identity; historical claims keep their old
+        // receipt keys so migration does not duplicate already recorded actions.
+        let event_identity = claim["event_identity"]
+            .as_str()
+            .map(|identity| format!("{}\0{operation_key}\0{identity}", record.run_id))
+            .unwrap_or_else(|| operation_key.to_string());
         let accepted_key =
-            crate::orchestration::action_event_idempotency_key(operation_key, "action.accepted");
+            crate::orchestration::action_event_idempotency_key(&event_identity, "action.accepted");
         if !receipts.contains(&homeboy_engine_primitives::content_hash::sha256_hex(
             accepted_key.as_bytes(),
         )) {
@@ -64,7 +70,7 @@ pub(crate) fn prepared_unreceipted_action_events(
                 &run,
                 record,
                 action_claim_request(
-                    operation_key,
+                    &event_identity,
                     "action.accepted",
                     claim["leased_at"].as_str().map(str::to_string),
                     homeboy_core::redaction::redact_json(&json!({
@@ -82,7 +88,8 @@ pub(crate) fn prepared_unreceipted_action_events(
             Some("failed") => "action.failed",
             _ => "action.succeeded",
         };
-        let terminal_key = crate::orchestration::action_event_idempotency_key(operation_key, kind);
+        let terminal_key =
+            crate::orchestration::action_event_idempotency_key(&event_identity, kind);
         if receipts.contains(&homeboy_engine_primitives::content_hash::sha256_hex(
             terminal_key.as_bytes(),
         )) {
@@ -96,7 +103,7 @@ pub(crate) fn prepared_unreceipted_action_events(
             &run,
             record,
             action_claim_request(
-                operation_key,
+                &event_identity,
                 kind,
                 claim["completed_at"].as_str().map(str::to_string),
                 homeboy_core::redaction::redact_json(&terminal_data),
@@ -404,14 +411,7 @@ fn gate_lifecycle_requests_for_promotion(
         .or_else(|| promotion.pointer("/source/task_id").and_then(Value::as_str))
         .unwrap_or("promotion");
     let mut requests = Vec::new();
-    // An empty gate list has not started any gate execution — a promotion can
-    // legitimately be recorded with an empty list before its gates are known
-    // (e.g. a pending/placeholder projection) and a populated one once they
-    // run. The "started" idempotency key is fixed per (run, promotion_index)
-    // and is not meant to track content changes across rewrites, so it must
-    // not fire for a phase that never actually started; emitting it here
-    // would also collide (same key, different digest) with a later write that
-    // does have a real, non-empty gate list for the same promotion_index.
+    // An empty gate list has not started any gate execution.
     if !gates.is_empty() {
         requests.push(progress_request(
             &format!("gate\0{}\0{promotion_index}\0started", record.run_id),
@@ -825,9 +825,20 @@ fn progress_request(
         }
         None => None,
     };
+    // Gate projections can be rewritten by replacement verification. Other
+    // producers (notably runner job sequences) own immutable event identities.
+    let identity = if source == "agent-task-gate" {
+        let digest = homeboy_engine_primitives::content_hash::sha256_hex(
+            &serde_json::to_vec(&json!([source, task, occurred_at, data]))
+                .map_err(|error| Error::internal_unexpected(error.to_string()))?,
+        );
+        format!("{identity}\0{digest}")
+    } else {
+        identity.to_string()
+    };
     Ok(ControlPlaneEventAppendRequest {
         schema: CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA.to_string(),
-        idempotency_key: crate::orchestration::progress_event_idempotency_key(kind, identity),
+        idempotency_key: crate::orchestration::progress_event_idempotency_key(kind, &identity),
         actor: "controller".to_string(),
         kind: kind.to_string(),
         source: ControlPlaneEventSource {

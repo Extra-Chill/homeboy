@@ -167,6 +167,7 @@ fn claim_operation_in_store(
 
         let claim = json!({
             "operation_key": operation_key,
+            "event_identity": Uuid::new_v4().to_string(),
             "state": "running",
             "leased_at": now,
             "lease_deadline": lease_deadline,
