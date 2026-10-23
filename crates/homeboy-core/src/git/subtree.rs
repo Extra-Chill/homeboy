@@ -437,6 +437,7 @@ mod tests {
 
     #[test]
     fn publishes_nested_subtree_and_retries_identically() {
+        let _git = lock_git_wrapper();
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
         git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
@@ -477,6 +478,7 @@ mod tests {
 
     #[test]
     fn preview_does_not_publish() {
+        let _git = lock_git_wrapper();
         let root = tempfile::tempdir().unwrap();
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.email", "test@example.com"]);
@@ -505,6 +507,7 @@ mod tests {
 
     #[test]
     fn rejects_destination_tree_conflict_without_force() {
+        let _git = lock_git_wrapper();
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
         git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
@@ -550,6 +553,7 @@ mod tests {
 
     #[test]
     fn successive_releases_fast_forward_and_old_split_replay_is_noop() {
+        let _git = lock_git_wrapper();
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
         git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
@@ -597,6 +601,7 @@ mod tests {
 
     #[test]
     fn replay_is_noop_when_destination_tree_matches_later_source_commit() {
+        let _git = lock_git_wrapper();
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
         git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
@@ -632,6 +637,7 @@ mod tests {
 
     #[test]
     fn nested_component_invocation_excludes_unrelated_siblings() {
+        let _git = lock_git_wrapper();
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
         git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
@@ -666,10 +672,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn split_budget_allows_real_split_to_run_past_previous_thirty_second_limit() {
-        let _lock = git_wrapper_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn split_within_explicit_budget_succeeds() {
+        let _git = lock_git_wrapper();
         let root = subtree_fixture();
         let remote = tempfile::tempdir().unwrap();
         git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
@@ -678,13 +682,13 @@ mod tests {
             remote: remote.path().display().to_string(),
             branch: "main".into(),
             tag: false,
-            split_timeout_secs: Some(40),
+            split_timeout_secs: Some(5),
             ..Default::default()
         };
 
-        with_delayed_git(&root, 31, || {
+        with_delayed_git(&root, 1, || {
             let evidence = publish_subtree(root.path(), &config, "v1", None, false)
-                .expect("split should outlive the old 30 second budget");
+                .expect("split within its explicit budget should succeed");
             assert_eq!(evidence.branch_action, "create");
         });
     }
@@ -692,9 +696,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn split_timeout_terminates_the_delayed_process_group() {
-        let _lock = git_wrapper_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _git = lock_git_wrapper();
         let root = subtree_fixture();
         let remote = tempfile::tempdir().unwrap();
         git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
@@ -760,10 +762,16 @@ mod tests {
         root
     }
 
-    #[cfg(unix)]
-    fn git_wrapper_lock() -> &'static std::sync::Mutex<()> {
+    // The fake-git fixtures prepend a temp directory to the process-wide PATH,
+    // so every git-spawning test must serialize on this lock or it can resolve
+    // a wrapper that another test has already deleted. The wrapper fixtures are
+    // Unix-only, but the lock itself compiles everywhere and is a harmless
+    // no-op serialization elsewhere.
+    fn lock_git_wrapper() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[cfg(unix)]
@@ -787,9 +795,10 @@ mod tests {
             .find(|path| path.is_file())
             .unwrap();
         let wrapper = bin.path().join("git");
-        // PATH is process-global, so concurrently running tests resolve this
-        // wrapper too. Only this fixture's split is delayed; every other git
-        // call passes straight through to the real binary (#15973).
+        // Only this fixture's split is delayed; every other git call passes
+        // straight through to the real binary (#15973). Every git-spawning
+        // test holds the wrapper lock, so no concurrent test resolves this
+        // wrapper while it exists.
         let fixture = std::fs::canonicalize(root.path()).unwrap();
         homeboy_test_support::write_executable(&wrapper, format!(
                 "#!/bin/sh\ncase \"$(pwd -P)|$*\" in\n  '{}'*\"|\"*subtree*split*)\n    echo \"$*\" > '{}.args'\n    sleep {seconds} &\n    sleep_pid=$!\n    echo $sleep_pid > '{}'\n    wait $sleep_pid\n    ;;\nesac\nexec '{}' \"$@\"\n",
