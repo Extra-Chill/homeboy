@@ -26,11 +26,13 @@ pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
 pub(crate) use promote::capture_declared_base;
 pub(crate) use promote::gate_setup_outcome_failure;
 pub(crate) use promote::{active_gate_supervision, with_gate_supervision};
-pub use promote::{canonical_recoverable_patch_artifacts, CanonicalRecoverablePatchArtifacts};
+pub use promote::{
+    canonical_recoverable_patch_artifacts, CandidateAdmissionError,
+    CanonicalRecoverablePatchArtifacts,
+};
 pub(crate) use promote::{
-    canonical_recoverable_patch_artifacts_in_observation_store, outcome_has_patch_artifacts,
-    preflight_patch_artifact_admission_in_observation_store,
-    preflight_recoverable_candidate_promotion_in_observation_store,
+    canonical_recoverable_patch_artifacts_in_observation_store, patch_only_outcome_error,
+    preflight_recoverable_candidate_promotion_in_observation_store, promotable_candidate,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
     resume_promoted_patch_replacement_gates_in_observation_store,
 };

@@ -100,62 +100,48 @@ fn promote_recoverable_candidate_rejects_zero_actionable_patches() {
 #[test]
 fn promote_recoverable_candidate_harvests_committed_changes_behind_an_empty_patch_artifact() {
     let _home = gate_home();
-    let (temp, repo, base, candidate) = adopted_commit_repo();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = candidate_destination(temp.path());
+    let candidate = harvest_patch_candidate(&repo, VALID_PATCH);
     let empty_patch_path = temp.path().join("empty-candidate.patch");
     std::fs::write(&empty_patch_path, "").expect("write empty candidate patch");
-    let source_path = temp.path().join("recoverable-empty-outcome.json");
-    let source = serde_json::json!({
-        "schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "task_id": "task-1",
-        "status": "candidate_recoverable",
-        "artifacts": [{
-            "schema": AGENT_TASK_ARTIFACT_SCHEMA,
-            "id": "empty-candidate",
-            "kind": "patch",
-            "path": empty_patch_path,
-            "size_bytes": 0,
-            "metadata": {
-                "role": "patch",
-                "run_id": "recoverable-empty-run",
-                "task_id": "task-1",
-                "producer_attempt": 1
-            }
-        }]
-    })
-    .to_string();
-    std::fs::write(&source_path, &source).expect("write recoverable empty source");
+    let source = with_candidate(
+        &serde_json::json!({
+            "schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "task-1",
+            "status": "candidate_recoverable",
+            "artifacts": [{
+                "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                "id": "empty-candidate",
+                "kind": "patch",
+                "path": empty_patch_path,
+                "size_bytes": 0,
+                "metadata": {
+                    "role": "patch",
+                    "run_id": "recoverable-empty-run",
+                    "task_id": "task-1",
+                    "producer_attempt": 1
+                }
+            }]
+        })
+        .to_string(),
+        &candidate,
+    );
 
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(repo.clone()),
-        ..Default::default()
-    };
     let report = promote_with_provider(
         AgentTaskPromotionRequest {
             source,
             source_run_id: Some("recoverable-empty-run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: Some(repo.clone()),
-            base_ref: None,
-            task_base_sha: Some(base.clone()),
-            candidate_ref: None,
-            to_worktree: "repo@recoverable-empty".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
+            task_base_sha: Some(candidate.base_sha.clone()),
+            ..promotion_options(&repo.display().to_string())
         },
-        &mut provider,
+        &mut FakePromotionWorkspaceProvider::default(),
     )
-    .expect("empty provider patch falls back to the committed candidate");
+    .expect("empty provider patch falls back to the harvested candidate commit");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.id, "committed-changes");
-    assert_eq!(
-        report.provenance["commit_range"],
-        format!("{base}..{candidate}")
-    );
+    assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
+    assert_eq!(report.changed_files, vec!["src/lib.rs"]);
 }
 
 #[test]
@@ -277,11 +263,12 @@ fn empty_patch_promotes_a_candidate_already_committed_on_the_destination() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let prior_promotion_command = std::env::var_os("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND");
         std::env::remove_var("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND");
-        let (temp, repo, base, candidate) = adopted_commit_repo();
+        let (temp, repo, base, committed) = adopted_commit_repo();
+        let candidate = harvest_worktree_candidate(&repo, &base);
         let (source_path, source) = write_empty_patch_source(&temp);
 
         let report = promote(AgentTaskPromotionRequest {
-            source,
+            source: with_candidate(&source, &candidate),
             source_run_id: Some("run-committed-on-destination".to_string()),
             source_path: Some(source_path),
             source_worktree_path: Some(repo.clone()),
@@ -304,9 +291,9 @@ fn empty_patch_promotes_a_candidate_already_committed_on_the_destination() {
         .expect("a candidate committed on the destination is promoted");
 
         assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-        assert_eq!(report.patch_artifact.id, "committed-changes");
+        assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
         assert_eq!(report.changed_files, vec!["lib.rs"]);
-        assert_eq!(git_head(&repo, "HEAD"), candidate);
+        assert_eq!(git_head(&repo, "HEAD"), committed);
         assert_eq!(
             std::fs::read_to_string(repo.join("lib.rs")).expect("read candidate"),
             "candidate\n"
@@ -383,45 +370,33 @@ fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
 fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).expect("create repo");
-    git(&repo, &["init"]);
-    git(&repo, &["config", "user.email", "agent@example.test"]);
-    git(&repo, &["config", "user.name", "Agent"]);
-    git(&repo, &["checkout", "-b", "main"]);
-    std::fs::write(repo.join("file.txt"), "base\n").expect("base");
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "base"]);
-    git(&repo, &["checkout", "-b", "unrelated"]);
+    let repo = candidate_destination(temp.path());
+    git(&repo, &["checkout", "-q", "-b", "unrelated"]);
     std::fs::write(repo.join("file.txt"), "unrelated\n").expect("unrelated");
-    git(&repo, &["commit", "-am", "unrelated"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "unrelated"]);
     let unrelated = git_head(&repo, "HEAD");
-    git(&repo, &["checkout", "main"]);
-    std::fs::write(repo.join("file.txt"), "agent\n").expect("agent");
-    git(&repo, &["commit", "-am", "agent"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    let mut candidate = harvest_patch_candidate(&repo, VALID_PATCH);
+    candidate.base_sha = unrelated.clone();
     let (source_path, source) = write_empty_patch_source(&temp);
 
     let error = promote_with_provider(
         AgentTaskPromotionRequest {
-            source,
-            source_run_id: None,
+            source: with_candidate(&source, &candidate),
             source_path: Some(source_path),
-            source_worktree_path: Some(repo),
-            base_ref: None,
-            task_base_sha: Some(unrelated),
-            candidate_ref: None,
-            to_worktree: "repo@promoted".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
+            ..promotion_options(&repo.display().to_string())
         },
         &mut FakePromotionWorkspaceProvider::default(),
     )
     .expect_err("unrelated base rejected");
-    assert!(error.message.contains("not an ancestor"));
+    assert!(
+        error.message.contains("not an ancestor"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.details["reason"], "base_not_ancestor");
+    assert_eq!(git_stdout(&repo, &["status", "--porcelain"]), "");
 }
 
 #[test]
@@ -475,34 +450,23 @@ fn select_patch_artifact_requires_unambiguous_patch() {
 fn promote_applies_patch_with_fake_workspace_provider() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
-    let worktree_path = temp.path().join("controlled-worktree");
+    let worktree_path = std::fs::canonicalize(candidate_destination(temp.path())).unwrap();
+    let candidate = harvest_patch_candidate(&worktree_path, VALID_PATCH);
     let (source_path, source) = write_patch_source(&temp);
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(worktree_path.clone()),
-        ..Default::default()
-    };
+    let mut provider = FakePromotionWorkspaceProvider::default();
 
     let report = promote_with_provider(
         AgentTaskPromotionRequest {
-            source,
+            source: with_candidate(&source, &candidate),
             source_run_id: Some("run-1".to_string()),
             source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@controlled-worktree".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
             gates: VerifyGateOptions {
                 verify: vec!["cargo test --lib agent_task_promotion".to_string()],
                 private_verify: vec!["cargo test --lib hidden".to_string()],
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
                 ..Default::default()
             },
-            provider_invocation: None,
-            repository_integrity_evidence: None,
+            ..promotion_options(&worktree_path.display().to_string())
         },
         &mut provider,
     )
@@ -514,13 +478,7 @@ fn promote_applies_patch_with_fake_workspace_provider() {
         report.provenance["worktree_path"].as_str(),
         Some(worktree_path.to_str().expect("utf-8 temp path"))
     );
-    assert_eq!(provider.apply_calls.len(), 1);
-    assert_eq!(
-        provider.apply_calls[0].to_workspace,
-        "repo@controlled-worktree"
-    );
-    assert_eq!(provider.applied_patch_contents, vec![VALID_PATCH]);
-    assert_eq!(provider.apply_calls[0].changed_files, vec!["src/lib.rs"]);
+    assert!(provider.apply_calls.is_empty());
     assert_eq!(
         provider.verify_calls,
         vec![
@@ -538,11 +496,7 @@ fn promote_applies_patch_with_fake_workspace_provider() {
             )
         ]
     );
-    assert_eq!(report.command_evidence.len(), 1);
-    assert_eq!(
-        report.command_evidence[0].command[0],
-        "fake-workspace-provider"
-    );
+    assert!(report.command_evidence.is_empty());
     assert_eq!(report.deterministic_gates.len(), 2);
     assert_eq!(report.deterministic_gates[0].id, "gate-1");
     assert_eq!(
@@ -555,43 +509,31 @@ fn promote_applies_patch_with_fake_workspace_provider() {
 fn promote_persists_force_added_ignored_git_candidate_paths() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
-    let worktree_path = temp.path().join("controlled-worktree");
-    std::fs::create_dir(&worktree_path).expect("worktree");
-    git(&worktree_path, &["init"]);
+    let worktree_path = candidate_destination(temp.path());
+    std::fs::write(worktree_path.join(".git/info/exclude"), "ignored/\n")
+        .expect("ignore nested candidate file");
+    let ignored = worktree_path.join("ignored/nested/force-added.rs");
+    std::fs::create_dir_all(ignored.parent().expect("ignored parent")).expect("ignored dir");
+    std::fs::write(&ignored, "pub const FORCED: bool = false;\n").expect("ignored file");
     git(
         &worktree_path,
-        &["config", "user.email", "test@example.com"],
+        &["add", "-f", "ignored/nested/force-added.rs"],
     );
-    git(&worktree_path, &["config", "user.name", "Test"]);
-    std::fs::create_dir_all(worktree_path.join("src")).expect("src");
-    std::fs::write(worktree_path.join("src/lib.rs"), "old\n").expect("base source");
-    git(&worktree_path, &["add", "."]);
-    git(&worktree_path, &["commit", "-m", "base"]);
+    git(&worktree_path, &["commit", "-qm", "force-add ignored file"]);
+    let patch = format!(
+        "{VALID_PATCH}diff --git a/ignored/nested/force-added.rs b/ignored/nested/force-added.rs\n--- a/ignored/nested/force-added.rs\n+++ b/ignored/nested/force-added.rs\n@@ -1 +1 @@\n-pub const FORCED: bool = false;\n+pub const FORCED: bool = true;\n"
+    );
+    let candidate = harvest_patch_candidate(&worktree_path, &patch);
     let (source_path, source) = write_patch_source(&temp);
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(worktree_path),
-        force_add_ignored_file: true,
-        ..Default::default()
-    };
 
     let report = promote_with_provider(
         AgentTaskPromotionRequest {
-            source,
+            source: with_candidate(&source, &candidate),
             source_run_id: Some("run-8935".to_string()),
             source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@controlled-worktree".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
+            ..promotion_options(&worktree_path.display().to_string())
         },
-        &mut provider,
+        &mut FakePromotionWorkspaceProvider::default(),
     )
     .expect("promotion accepts the force-added ignored candidate file");
 
@@ -602,6 +544,10 @@ fn promote_persists_force_added_ignored_git_candidate_paths() {
             "ignored/nested/force-added.rs".to_string(),
             "src/lib.rs".to_string(),
         ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&ignored).unwrap(),
+        "pub const FORCED: bool = true;\n"
     );
 }
 
@@ -617,8 +563,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (source_path, source) = write_patch_source(&temp);
 
-        let worktree_path = temp.path().join("worktree");
-        std::fs::create_dir_all(&worktree_path).expect("worktree dir");
+        let worktree_path = candidate_destination(temp.path());
         let deps_marker = worktree_path.join("deps-installed.txt");
         std::fs::write(
             worktree_path.join("homeboy.json"),
@@ -636,11 +581,16 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
             .to_string(),
         )
         .expect("worktree manifest");
+        std::fs::write(worktree_path.join(".gitignore"), "deps-installed.txt\n")
+            .expect("ignore dependency output");
+        git(&worktree_path, &["add", "."]);
+        git(&worktree_path, &["commit", "-qm", "manifest"]);
+        let source = with_candidate(
+            &source,
+            &harvest_patch_candidate(&worktree_path, VALID_PATCH),
+        );
 
-        let mut provider = FakePromotionWorkspaceProvider {
-            workspace_path: Some(worktree_path.clone()),
-            ..Default::default()
-        };
+        let mut provider = FakePromotionWorkspaceProvider::default();
 
         let report = promote_with_provider(
             AgentTaskPromotionRequest {
@@ -651,7 +601,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
                 base_ref: None,
                 task_base_sha: None,
                 candidate_ref: None,
-                to_worktree: "repo@worktree".to_string(),
+                to_worktree: worktree_path.display().to_string(),
                 task_id: None,
                 artifact_id: None,
                 dry_run: false,

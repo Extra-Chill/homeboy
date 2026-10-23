@@ -458,6 +458,127 @@ pub(super) fn adopted_commit_repo() -> (tempfile::TempDir, PathBuf, String, Stri
     (temp, repo, base, candidate)
 }
 
+/// A destination repository on `main` whose committed `src/lib.rs` is the
+/// `old` side of [`VALID_PATCH`].
+pub(super) fn candidate_destination(root: &Path) -> PathBuf {
+    let repo = root.join("destination");
+    std::fs::create_dir_all(repo.join("src")).expect("create destination");
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "agent@example.test"]);
+    git(&repo, &["config", "user.name", "Agent"]);
+    std::fs::write(repo.join("src/lib.rs"), "old\n").expect("write base");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    repo
+}
+
+/// Harvest `patch` on top of `repo`'s HEAD as an immutable candidate commit,
+/// the way the scheduler does: a temporary index, a pinned ref, and HEAD and
+/// the working tree left untouched.
+pub(super) fn harvest_patch_candidate(
+    repo: &Path,
+    patch: &str,
+) -> crate::agent_task::AgentTaskCandidate {
+    let base_sha = git_head(repo, "HEAD");
+    let index = tempfile::NamedTempFile::new().expect("candidate index");
+    let patch_file = tempfile::NamedTempFile::new().expect("candidate patch");
+    std::fs::write(patch_file.path(), patch).expect("write candidate patch");
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_INDEX_FILE", index.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    run(&["read-tree", &base_sha]);
+    run(&[
+        "apply",
+        "--cached",
+        &patch_file.path().display().to_string(),
+    ]);
+    let tree_sha = run(&["write-tree"]);
+    let candidate_sha = run(&["commit-tree", &tree_sha, "-p", &base_sha, "-m", "candidate"]);
+    git(
+        repo,
+        &[
+            "update-ref",
+            &format!("refs/homeboy/candidates/{candidate_sha}"),
+            &candidate_sha,
+        ],
+    );
+    crate::agent_task::AgentTaskCandidate {
+        base_sha,
+        candidate_sha,
+        tree_sha,
+    }
+}
+
+/// Harvest an attempt worktree's final state (its commits plus tracked and
+/// untracked uncommitted changes) as one candidate commit on its HEAD, the
+/// way the scheduler does (#16303).
+pub(super) fn harvest_worktree_candidate(
+    worktree: &Path,
+    base_sha: &str,
+) -> crate::agent_task::AgentTaskCandidate {
+    let index = tempfile::NamedTempFile::new().expect("candidate index");
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .env("GIT_INDEX_FILE", index.path())
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {}", args.join(" "));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    run(&["read-tree", "HEAD"]);
+    run(&["add", "--all", "--", "."]);
+    let tree_sha = run(&["write-tree"]);
+    let candidate_sha = run(&["commit-tree", &tree_sha, "-p", "HEAD", "-m", "candidate"]);
+    crate::agent_task::AgentTaskCandidate {
+        base_sha: base_sha.to_string(),
+        candidate_sha,
+        tree_sha,
+    }
+}
+
+/// Record `candidate` on every outcome in a promotion source.
+pub(super) fn with_candidate(
+    source: &str,
+    candidate: &crate::agent_task::AgentTaskCandidate,
+) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(source).expect("source JSON");
+    let candidate = serde_json::to_value(candidate).expect("candidate JSON");
+    match value
+        .get_mut("outcomes")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        Some(outcomes) => outcomes
+            .iter_mut()
+            .for_each(|outcome| outcome["candidate"] = candidate.clone()),
+        None => value["candidate"] = candidate,
+    }
+    value.to_string()
+}
+
+pub(super) fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git");
+    assert!(output.status.success(), "git {}", args.join(" "));
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
 pub(super) fn git_head(cwd: &Path, reference: &str) -> String {
     let output = Command::new("git")
         .args(["rev-parse", reference])
@@ -472,3 +593,4 @@ mod part_a;
 mod part_b;
 mod part_c;
 mod part_d;
+mod part_e;
