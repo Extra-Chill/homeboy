@@ -2097,6 +2097,35 @@ fn spawn_orchestration_reconciler(
 /// reconcile that panics costs one pass, not the tick and not the daemon.
 /// Overlap is impossible by construction: the sleep happens after all
 /// passes return.
+/// Each periodic pass owns a small run ledger, rather than appending forever
+/// to the daemon lifetime run. Existing run retention owns their cleanup.
+fn observed_daemon_pass(name: &str, body: impl FnOnce() -> Result<()>) {
+    let Ok(store) = crate::observation::ObservationStore::open_initialized() else {
+        let _ = body();
+        return;
+    };
+    let Ok(run) = store.start_run(
+        crate::observation::NewRunRecord::builder("daemon-pass")
+            .command(format!("daemon.{name}"))
+            .current_homeboy_version()
+            .build(),
+    ) else {
+        let _ = body();
+        return;
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.time_run_phase(&run.id, &format!("resolve.{name}"), body)
+    }));
+    let status = match &result {
+        Ok(Ok(())) => crate::observation::RunStatus::Pass,
+        _ => crate::observation::RunStatus::Error,
+    };
+    if result.is_err() {
+        let _ = store.record_run_phase(&run.id, &format!("resolve.{name}"), true);
+    }
+    let _ = store.finish_run(&run.id, status, None);
+}
+
 fn orchestration_tick_loop(
     job_store: JobStore,
     interval: std::time::Duration,
@@ -2104,11 +2133,16 @@ fn orchestration_tick_loop(
 ) {
     loop {
         isolated_tick(|| {
-            let _ = orchestration::reconcile_stale_active_runs();
+            observed_daemon_pass("orchestration", || {
+                orchestration::reconcile_stale_active_runs().map(|_| ())
+            });
         });
         // Registered workflow cadences admit one instance per due slot.
         isolated_tick(|| {
-            let _ = workflow_cadence::admit_due(&job_store, workflow_cadence::now_ms());
+            observed_daemon_pass("cadence", || {
+                workflow_cadence::admit_due(&job_store, workflow_cadence::now_ms());
+                Ok(())
+            });
         });
         // Observation runs (`runs` table) are reconciled here — one rule,
         // one cadence — not as a side effect of reads. HTTP GETs on runs
@@ -2124,10 +2158,16 @@ fn orchestration_tick_loop(
         // terminalize its own daemon jobs, even when the job's in-process
         // supervisor died without persisting anything.
         isolated_tick(|| {
-            let _ = job_store.reconcile_terminal_linked_daemon_jobs();
+            observed_daemon_pass("terminal_jobs", || {
+                job_store
+                    .reconcile_terminal_linked_daemon_jobs()
+                    .map(|_| ())
+            });
         });
         isolated_tick(|| {
-            let _ = job_store.reconcile_controller_completions();
+            observed_daemon_pass("controllers", || {
+                job_store.reconcile_controller_completions().map(|_| ())
+            });
         });
         if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
             return;

@@ -19,7 +19,10 @@ pub const CONTROL_PLANE_EVENT_RETENTION_LIMIT: i64 = 100;
 /// `run.transitioned` is the audit record a compare-and-swap terminal
 /// transition appends in its commit (#15718). A run has a handful at most, so
 /// keeping them does not unbound storage the way progress events would.
-pub const DURABLE_CONTROL_PLANE_EVENT_KINDS: [&str; 2] = ["run.cancelled", "run.transitioned"];
+pub const DURABLE_CONTROL_PLANE_EVENT_KINDS: [&str; 3] =
+    ["run.cancelled", "run.transitioned", "run.phase_spans"];
+/// At most 64 timing reports survive progress pruning for a run.
+pub const PHASE_REPORT_RETENTION_LIMIT: u64 = 64;
 
 pub fn is_durable_control_plane_event_kind(kind: &str) -> bool {
     DURABLE_CONTROL_PLANE_EVENT_KINDS.contains(&kind)
@@ -167,6 +170,45 @@ impl ObservationStore {
             .transpose()
     }
 
+    /// Bounded local ledger projection, without reconciliation or mutations.
+    pub fn durable_control_plane_events(
+        &self,
+        run: &RunId,
+        kind: &str,
+    ) -> Result<Vec<ControlPlaneEvent>> {
+        let has_ledger: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'control_plane_event_appends')", [], |row| row.get(0)).map_err(|error| self.read_error("inspect control-plane event ledger", error))?;
+        if !has_ledger {
+            return Ok(Vec::new());
+        }
+        let has_durable: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('control_plane_event_appends') WHERE name = 'durable_event_json')", [], |row| row.get(0)).map_err(|error| self.read_error("inspect durable payload column", error))?;
+        let payload = if has_durable {
+            "COALESCE(durable_event_json, event_json)"
+        } else {
+            "event_json"
+        };
+        let mut statement = self.connection.prepare(&format!("SELECT event_id, sequence, {payload} FROM control_plane_event_appends WHERE run_id = ?1 AND {payload} IS NOT NULL AND json_extract({payload}, '$.kind') = ?2 ORDER BY sequence LIMIT ?3")).map_err(sqlite_error("read durable events"))?;
+        let rows = statement
+            .query_map(
+                params![run.as_str(), kind, PHASE_REPORT_RETENTION_LIMIT],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .map_err(sqlite_error("read durable events"))?;
+        rows.map(|row| {
+            let (id, sequence, json) = row.map_err(sqlite_error("read durable event"))?;
+            let event = serde_json::from_str(&json)
+                .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+            validate_stored_event(run, &id, sequence, &event)?;
+            Ok(event)
+        })
+        .collect()
+    }
+
     pub fn control_plane_event_retention(
         &self,
         run: &RunId,
@@ -270,6 +312,19 @@ pub(crate) fn append_control_plane_event_on(
     };
     let json = serde_json::to_string(&event)
         .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    // Limit timing evidence atomically with the append. Replays were handled
+    // above, so they neither consume this budget nor duplicate samples.
+    if event.kind == "run.phase_spans" {
+        let count: u64 = connection.query_row("SELECT COUNT(*) FROM control_plane_event_appends WHERE run_id = ?1 AND json_extract(durable_event_json, '$.kind') = 'run.phase_spans'", [run.as_str()], |row| row.get(0)).map_err(sqlite_error("count phase reports"))?;
+        if count >= PHASE_REPORT_RETENTION_LIMIT {
+            return Err(Error::validation_invalid_argument(
+                "phase_spans",
+                "run phase report limit reached",
+                None,
+                None,
+            ));
+        }
+    }
     let durable_json = is_durable_control_plane_event_kind(&event.kind).then_some(json.as_str());
     connection.execute("INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, event_json, durable_event_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", params![run.as_str(), idempotency_digest, request_digest, event.event.as_str(), sequence, json, durable_json, chrono::Utc::now().to_rfc3339()]).map_err(sqlite_error("persist control-plane event"))?;
     connection.execute("UPDATE control_plane_event_appends SET event_json = NULL WHERE run_id = ?1 AND event_json IS NOT NULL AND sequence <= (SELECT MAX(sequence) - ?2 FROM control_plane_event_appends WHERE run_id = ?1)", params![run.as_str(), CONTROL_PLANE_EVENT_RETENTION_LIMIT]).map_err(sqlite_error("prune control-plane event payloads"))?;
@@ -329,6 +384,46 @@ mod tests {
             artifacts: vec![],
             evidence: vec![],
         }
+    }
+
+    #[test]
+    fn phase_reports_survive_progress_pruning_but_remain_bounded() {
+        use homeboy_engine_primitives::phase_timing::PhaseTimer;
+        let (_directory, store, run) = fixture();
+        let mut timer = PhaseTimer::with_version("fixture");
+        timer.record_ok("admit", std::time::Duration::from_millis(1));
+        let report = timer.into_report();
+        for index in 0..PHASE_REPORT_RETENTION_LIMIT {
+            store
+                .record_phase_spans(run.as_str(), &format!("operation-{index}"), &report)
+                .unwrap();
+        }
+        assert!(store
+            .record_phase_spans(run.as_str(), "overflow", &report)
+            .is_err());
+        // An acknowledged replay is still accepted at the cap.
+        store
+            .record_phase_spans(run.as_str(), "operation-0", &report)
+            .unwrap();
+        for index in 0..150 {
+            let req = request(&format!("progress-{index}"), "progress");
+            let digest = format!("{index:064x}");
+            store
+                .append_control_plane_event(&run, &req, &digest, &digest)
+                .unwrap();
+        }
+        assert_eq!(
+            store.phase_spans(run.as_str()).unwrap().spans.len(),
+            PHASE_REPORT_RETENTION_LIMIT as usize
+        );
+        assert_eq!(
+            store
+                .control_plane_event_stream(&run)
+                .unwrap()
+                .unwrap()
+                .len(),
+            CONTROL_PLANE_EVENT_RETENTION_LIMIT as usize
+        );
     }
 
     #[test]

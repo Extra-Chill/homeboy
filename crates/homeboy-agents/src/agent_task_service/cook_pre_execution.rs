@@ -334,15 +334,18 @@ fn materialize_cook_attempt_with_stores_and_runtime(
         } else {
             None
         };
-        let submission = agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
-            lifecycle_store,
-            plan,
-            Some(run_id),
-            execution_runner_id,
-            submission_metadata,
-            admission_status,
-            admit_runtime,
-        );
+        let observation = lifecycle_store.open_observation_initialized()?;
+        let submission = observation.time_run_phase(run_id, "admit", || {
+            agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
+                lifecycle_store,
+                plan,
+                Some(run_id),
+                execution_runner_id,
+                submission_metadata,
+                admission_status,
+                admit_runtime,
+            )
+        });
         if let Err(error) = submission {
             // `submit_plan` persists admission failures before returning them.
             if lifecycle_store.record_exists(run_id)? {

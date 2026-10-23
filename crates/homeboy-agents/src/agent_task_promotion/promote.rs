@@ -190,8 +190,22 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
     observation_store: &homeboy_core::observation::ObservationStore,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
-    let mut report =
-        promote_with_provider_and_checkpoint_internal(options, &mut checkpoint, observation_store)?;
+    let mut report = if let Some(run_id) = options.source_run_id.clone() {
+        observation_store.time_run_phase_with_outcome(
+            &run_id,
+            "promote",
+            || {
+                promote_with_provider_and_checkpoint_internal(
+                    options,
+                    &mut checkpoint,
+                    observation_store,
+                )
+            },
+            |report| report.status.gate_failed(),
+        )?
+    } else {
+        promote_with_provider_and_checkpoint_internal(options, &mut checkpoint, observation_store)?
+    };
     if let Some(runner_id) = crate::agent_task_lifecycle::execution_runner_id() {
         report.provenance["lab_offload"] = json!({
             "runner_id": runner_id,
@@ -2466,6 +2480,31 @@ pub(super) fn retain_committed_changes_artifact(
 }
 
 fn run_promotion_gates(
+    options: &AgentTaskPromotionRequest,
+    worktree_path: &Path,
+    expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
+    gate_workspace: Option<&Path>,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<PromotionGateRun> {
+    let operation = || {
+        run_promotion_gates_inner(
+            options,
+            worktree_path,
+            expected_candidate,
+            gate_workspace,
+            observation_store,
+        )
+    };
+    if let Some(run_id) = options.source_run_id.as_deref() {
+        observation_store.time_run_phase_with_outcome(run_id, "gate", operation, |gates| {
+            gates.status.gate_failed()
+        })
+    } else {
+        operation()
+    }
+}
+
+fn run_promotion_gates_inner(
     options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,

@@ -259,10 +259,67 @@ pub(crate) fn record_lab_offload_phase_with_submission_in_store(
         }
         true
     })?;
-    match updated {
-        Some(record) => Ok(record),
-        None => lifecycle_store.read_record(&record.run_id),
+    let updated = match updated {
+        Some(record) => record,
+        None => lifecycle_store.read_record(&record.run_id)?,
+    };
+    if let Err(error) = persist_lab_phase_history(lifecycle_store, &updated) {
+        homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
     }
+    Ok(updated)
+}
+
+/// Project completed controller staging phases into the shared run ledger.
+/// Stable history identities make progress replays harmless.
+fn persist_lab_phase_history(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> Result<()> {
+    let store = lifecycle_store.open_observation_initialized()?;
+    let Some(run) = store.get_run(&record.run_id)? else {
+        return Ok(());
+    };
+    let Ok(origin) = chrono::DateTime::parse_from_rfc3339(&run.started_at) else {
+        return Ok(());
+    };
+    for entry in record.metadata["phase_history"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let (Some(phase), Some(start), Some(end)) = (
+            entry["phase"].as_str(),
+            entry["started_at"].as_str(),
+            entry["ended_at"].as_str(),
+        ) else {
+            continue;
+        };
+        let (Ok(started), Ok(ended)) = (
+            chrono::DateTime::parse_from_rfc3339(start),
+            chrono::DateTime::parse_from_rfc3339(end),
+        ) else {
+            continue;
+        };
+        let mut timer = homeboy_core::phase_timing::PhaseTimer::with_version(
+            homeboy_core::build_identity::current().version,
+        );
+        timer.record_ok(
+            format!("stage.lab.{phase}"),
+            ended
+                .signed_duration_since(started)
+                .to_std()
+                .unwrap_or_default(),
+        );
+        let mut report = timer.into_report();
+        report.spans[0].start_offset_ms = started
+            .signed_duration_since(origin)
+            .num_microseconds()
+            .unwrap_or(0)
+            .max(0) as f64
+            / 1000.0;
+        store.record_phase_spans(&record.run_id, &format!("lab:{phase}:{start}"), &report)?;
+    }
+    Ok(())
 }
 
 /// Replace a pre-acceptance Lab proxy with the verified controller-local

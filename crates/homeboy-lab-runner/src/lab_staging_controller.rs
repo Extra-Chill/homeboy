@@ -2660,6 +2660,9 @@ fn record_checkpointed_lifecycle_phase(
     request: &LabStagingExecutionRequest,
     checkpoint: &LabStagingCheckpoint,
 ) -> Result<()> {
+    if let Err(error) = persist_staging_phase_spans(checkpoint) {
+        homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
+    }
     let Some(phase) = lifecycle_phase_for_checkpoint(&checkpoint.phase) else {
         return Ok(());
     };
@@ -2672,6 +2675,58 @@ fn record_checkpointed_lifecycle_phase(
         None,
         Some(&request.durable_agent_task_plan),
     )?;
+    Ok(())
+}
+
+/// Publish completed staging checkpoint timings through the same ledger as
+/// local Cook. Checkpoint timing remains the crash-recovery source; it is not
+/// another observation surface.
+fn persist_staging_phase_spans(checkpoint: &LabStagingCheckpoint) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(run) = store.get_run(&checkpoint.run_id)? else {
+        return Ok(());
+    };
+    let Ok(origin) = chrono::DateTime::parse_from_rfc3339(&run.started_at) else {
+        return Ok(());
+    };
+    let existing = store.phase_spans(&checkpoint.run_id)?;
+    for timing in &checkpoint.phase_timings {
+        let (Some(duration), Some(_)) = (timing.duration_ms, timing.ended_at.as_ref()) else {
+            continue;
+        };
+        let id = format!("stage.lab.{}", timing.phase);
+        let Ok(started) = chrono::DateTime::parse_from_rfc3339(&timing.started_at) else {
+            continue;
+        };
+        let offset = started
+            .signed_duration_since(origin)
+            .num_microseconds()
+            .unwrap_or(0)
+            .max(0) as f64
+            / 1000.0;
+        if existing
+            .spans
+            .iter()
+            .any(|span| span.id == id && span.start_offset_ms == offset)
+        {
+            continue;
+        }
+        let mut timer = homeboy_core::phase_timing::PhaseTimer::with_version(
+            homeboy_core::build_identity::current().version,
+        );
+        if timing.status == "succeeded" {
+            timer.record_ok(&id, Duration::from_millis(duration));
+        } else {
+            timer.record_failed(&id, Duration::from_millis(duration));
+        }
+        let mut report = timer.into_report();
+        report.spans[0].start_offset_ms = offset;
+        store.record_phase_spans(
+            &checkpoint.run_id,
+            &format!("lab-checkpoint:{id}:{}", timing.started_at),
+            &report,
+        )?;
+    }
     Ok(())
 }
 

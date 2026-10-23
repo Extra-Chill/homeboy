@@ -19,8 +19,25 @@ use homeboy::fuzz::{
 use super::common::SkippedArtifactRow;
 use super::{CmdResult, RunsOutput};
 
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone, Debug, Default)]
 pub struct RunsHotspotsArgs {
+    /// Aggregate durable phase spans for this run kind instead of fuzz artifacts.
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// Restrict the phase cohort to this component.
+    #[arg(long)]
+    pub component: Option<String>,
+    /// Restrict phase samples to this recording Homeboy version.
+    #[arg(long)]
+    pub homeboy_version: Option<String>,
+    /// Compare phase percentiles recorded by these two versions.
+    #[arg(long, requires = "candidate_version")]
+    pub baseline_version: Option<String>,
+    #[arg(long, requires = "baseline_version")]
+    pub candidate_version: Option<String>,
+    /// Maximum recent matching runs to inspect (bounded at 1000).
+    #[arg(long, default_value_t = 100)]
+    pub last: usize,
     /// One or more persisted Homeboy run ids to inspect.
     #[arg(value_name = "RUN_ID")]
     pub run_ids: Vec<String>,
@@ -48,6 +65,8 @@ pub struct RunsHotspotsOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped_artifacts: Vec<SkippedArtifactRow>,
     pub hotspots: Vec<HotspotRanking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_hotspots: Option<homeboy::core::performance_hotspots::PhaseHotspots>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cohort_comparison: Option<FuzzHotspotCohortComparison>,
 }
@@ -94,6 +113,58 @@ pub(crate) fn runs_hotspots(
     args: RunsHotspotsArgs,
 ) -> CmdResult<RunsOutput> {
     let limit = args.limit.clamp(1, 500);
+    if args.kind.is_some()
+        || args.component.is_some()
+        || args.homeboy_version.is_some()
+        || args.baseline_version.is_some()
+        || args.candidate_version.is_some()
+    {
+        if !args.run_ids.is_empty()
+            || !args.baseline_runs.is_empty()
+            || !args.candidate_runs.is_empty()
+        {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "phase cohorts use --last rather than artifact run ids",
+                None,
+                None,
+            ));
+        }
+        if args.baseline_version.is_some() != args.candidate_version.is_some() {
+            return Err(Error::validation_invalid_argument(
+                "baseline-version",
+                "both comparison versions are required",
+                None,
+                None,
+            ));
+        }
+        let mut phases = homeboy::core::performance_hotspots::phase_hotspots(
+            store,
+            &homeboy::core::performance_hotspots::PhaseHotspotQuery {
+                kind: args.kind,
+                component: args.component,
+                homeboy_version: args.homeboy_version,
+                baseline_version: args.baseline_version,
+                candidate_version: args.candidate_version,
+                last: args.last,
+            },
+        )?;
+        phases.phases.truncate(limit);
+        return Ok((
+            RunsOutput::Hotspots(RunsHotspotsOutput {
+                command: "runs.hotspots",
+                run_ids: phases.run_ids.clone(),
+                inspected_artifact_count: 0,
+                matched_artifact_count: 0,
+                skipped_artifact_count: 0,
+                skipped_artifacts: vec![],
+                hotspots: vec![],
+                cohort_comparison: None,
+                phase_hotspots: Some(phases),
+            }),
+            0,
+        ));
+    }
     validate_hotspot_args(&args)?;
     let ranking_run_ids = if args.run_ids.is_empty() {
         combined_run_ids(&args.baseline_runs, &args.candidate_runs)
@@ -113,6 +184,7 @@ pub(crate) fn runs_hotspots(
             skipped_artifact_count: loaded.skipped.len(),
             skipped_artifacts: loaded.skipped,
             hotspots,
+            phase_hotspots: None,
             cohort_comparison,
         }),
         0,
@@ -862,6 +934,7 @@ mod tests {
                     baseline_runs: Vec::new(),
                     candidate_runs: Vec::new(),
                     limit: 20,
+                    ..Default::default()
                 },
             )
             .expect("hotspots");
@@ -919,6 +992,7 @@ mod tests {
                     baseline_runs: Vec::new(),
                     candidate_runs: Vec::new(),
                     limit: 20,
+                    ..Default::default()
                 },
             )
             .expect("durable run label resolves through runs_service::require_run");
@@ -949,6 +1023,7 @@ mod tests {
                     baseline_runs: Vec::new(),
                     candidate_runs: Vec::new(),
                     limit: 20,
+                    ..Default::default()
                 },
             ) {
                 Ok(_) => panic!("expected a missing-run error"),

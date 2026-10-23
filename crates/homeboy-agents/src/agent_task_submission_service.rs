@@ -572,7 +572,11 @@ fn persist_aggregate(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    store.record_run_aggregate(run_id, plan, aggregate)
+    store
+        .open_observation_initialized()?
+        .time_run_phase(run_id, "publish.aggregate", || {
+            store.record_run_aggregate(run_id, plan, aggregate)
+        })
 }
 
 fn run_with_scheduler(
@@ -586,9 +590,17 @@ fn run_with_scheduler(
     let scheduler = AgentTaskScheduler::new_controller(executor)
         .with_harvest_context(harvest_context)
         .with_lifecycle_store(store.clone());
-    Ok(scheduler
-        .with_run_id(run_id.to_string())
-        .run_with_derived_cook_baseline(plan, derived_cook_baseline))
+    let observation = store.open_observation_initialized()?;
+    observation.time_run_phase_with_outcome(
+        run_id,
+        "provider",
+        || {
+            Ok(scheduler
+                .with_run_id(run_id.to_string())
+                .run_with_derived_cook_baseline(plan, derived_cook_baseline))
+        },
+        |aggregate| aggregate_exit_code(aggregate) != 0,
+    )
 }
 
 fn acknowledgement_outcome(
@@ -876,6 +888,33 @@ mod tests {
             )
             .expect("terminal replay");
 
+            let store = homeboy_core::observation::ObservationStore::open_readonly().unwrap();
+            let spans = store.phase_spans("submission-terminal-replay").unwrap();
+            assert_eq!(
+                spans
+                    .spans
+                    .iter()
+                    .filter(|span| span.id == "provider")
+                    .count(),
+                1
+            );
+            assert!(spans
+                .spans
+                .iter()
+                .all(|span| !span.homeboy_version.is_empty()));
+            let hotspots = homeboy_core::performance_hotspots::phase_hotspots(
+                &store,
+                &homeboy_core::performance_hotspots::PhaseHotspotQuery {
+                    kind: Some("agent-task".into()),
+                    last: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(hotspots
+                .phases
+                .iter()
+                .any(|phase| phase.phase == "provider" && phase.timing.samples == 1));
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert_eq!(
                 replay.acknowledgement.outcome,

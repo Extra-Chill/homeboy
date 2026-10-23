@@ -1,3 +1,8 @@
+mod phase_spans;
+pub use phase_spans::{
+    phase_hotspots, PhaseHotspot, PhaseHotspotQuery, PhaseHotspots, PhasePercentiles,
+};
+
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
