@@ -640,9 +640,20 @@ pub(crate) fn pre_execution_failure_details(
         .and_then(|failure| failure.get("phase"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let classification = failure
-        .and_then(|failure| failure.get("failure_classification"))
+    let classification = error
+        .details
+        .get("failure_class")
         .and_then(Value::as_str)
+        .or_else(|| {
+            failure
+                .and_then(|failure| failure.pointer("/details/failure_class"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            failure
+                .and_then(|failure| failure.get("failure_classification"))
+                .and_then(Value::as_str)
+        })
         .map(str::to_string);
     if phase.is_some() && classification.is_some() {
         return PreExecutionFailureDetails {

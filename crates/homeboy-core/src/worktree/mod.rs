@@ -10,6 +10,7 @@ use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod convergence;
 mod queue_ops;
 mod reaping;
 mod reclaim;

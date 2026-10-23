@@ -638,6 +638,7 @@ fn create_with_store_unlocked(
                     None,
                 )
             })?;
+        restore_recorded_branch_if_missing(&source_checkout, &record)?;
         verify_linked_worktree_identity(&source_checkout, &worktree_path, &options.branch)?;
         return Ok(WorktreeCreateOutput {
             handoff_freshness: handoff_observation
@@ -672,14 +673,7 @@ fn create_with_store_unlocked(
                 ));
             }
         }
-        if !branch_exists(&source_checkout, &options.branch)? {
-            return Err(Error::validation_invalid_argument(
-                "branch",
-                "The declared branch is missing for the active task worktree record",
-                Some(options.branch.clone()),
-                None,
-            ));
-        }
+        restore_recorded_branch_if_missing(&source_checkout, &record)?;
         let previous = create_evidence(&record, "missing".to_string())?;
         let worktree_owner = ownership::owner_for_path_or_ancestor(parent)?;
         git::run_git_with_env(
@@ -818,19 +812,46 @@ struct PendingHandoffFreshness {
     remote_default_sha: String,
 }
 
+fn restore_recorded_branch_if_missing(source: &Path, record: &TaskWorktreeRecord) -> Result<()> {
+    if branch_exists(source, &record.branch)? {
+        return Ok(());
+    }
+    // Restore the recorded identity, never a caller's newer --from. A
+    // surviving remote PR head is authoritative over the original base.
+    let remote = format!("refs/remotes/origin/{}", record.branch);
+    let start = if git::output_optional(
+        source,
+        &["rev-parse", "--verify", &format!("{remote}^{{commit}}")],
+    )
+    .is_some()
+    {
+        remote
+    } else {
+        shared_start_point(source, &record.base_ref)?
+    };
+    git::run_git(
+        source,
+        &["branch", &record.branch, &start],
+        "recreate missing recorded task branch",
+    )?;
+    Ok(())
+}
+
 fn prepare_handoff_freshness(
     source: &Path,
     base_ref: &str,
     git_transport: &[(String, String)],
 ) -> Result<PendingHandoffFreshness> {
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    git::fetch_remote_tracking_refs_until(
-        source,
-        &["fetch", "origin"],
-        "git fetch origin for worktree handoff",
-        git_transport,
-        std::time::Instant::now() + TIMEOUT,
-    )?;
+    super::convergence::retry_fetch(|| {
+        git::fetch_remote_tracking_refs_until(
+            source,
+            &["fetch", "origin"],
+            "git fetch origin for worktree handoff",
+            git_transport,
+            std::time::Instant::now() + TIMEOUT,
+        )
+    })?;
     let advertised = git::run_git_with_env_timeout(
         source,
         &["ls-remote", "--symref", "origin", "HEAD"],

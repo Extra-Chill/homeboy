@@ -179,7 +179,12 @@ pub(crate) fn prior_failed_attempt_owner(
         // Without durable owner evidence the dirt cannot be attributed.
         return Ok(None);
     };
-    if !owner_record.state().is_terminal() || owner_record.state() == AgentTaskRunState::Succeeded {
+    // A crashed driver can leave a nonterminal attempt forever. The OS lock
+    // probe above, not a PID or a stale lifecycle status, proves it no longer
+    // holds the destination. Preserve its candidate just like a failed attempt.
+    if owner_record.state() == AgentTaskRunState::Succeeded
+        || (!owner_record.state().is_terminal() && owner_cook.is_none())
+    {
         return Ok(None);
     }
     let Ok(path) = std::fs::canonicalize(&record.worktree_path) else {

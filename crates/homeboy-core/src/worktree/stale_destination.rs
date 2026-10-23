@@ -7,13 +7,11 @@
 //! the derived worktree. Building on any of that silently produces a candidate
 //! on top of stale history, and resetting it orphans work Homeboy never owned.
 //!
-//! Classification is read-only. A destination is *fresh* only when it is clean,
-//! on the expected branch, and has no commits ahead of `origin/<base>`.
-//! [`refuse_stale_derived_destination`] refuses an issue-derived destination
-//! that holds history this Cook did not create, with a typed error naming the
-//! worktree, the checked-out branch, the commits ahead of the base, and the
-//! commands to discard it or to choose another destination. Nothing is ever
-//! reset or rebased. An explicit `--to-worktree`/`--head` is never classified.
+//! Classification is read-only. Clean behind destinations proceed to managed
+//! convergence after Cook pins its base. Open PRs and unique commits route to
+//! PR-URL rework rather than contradictory stale/ancestry refusals. A different
+//! checked-out branch remains a specific identity refusal. Explicit
+//! `--to-worktree`/`--head` destinations are validated by service admission.
 
 use std::path::{Path, PathBuf};
 
@@ -204,7 +202,12 @@ pub fn classify_component_branch(
     let Ok(source) = super::queue_ops::source_checkout_for_worktree(&target) else {
         return Ok(DestinationFreshness::Unclassified);
     };
-    classify_local_branch(&source, handle, branch, base)
+    let classification = classify_local_branch(&source, handle, branch, base)?;
+    if !matches!(classification, DestinationFreshness::Unclassified) {
+        // Only an existing local branch can be someone's PR head to preserve.
+        super::convergence::require_issue_destination_without_pr(&source, branch)?;
+    }
+    Ok(classification)
 }
 
 /// Refuse an issue-derived Cook destination that holds work this Cook did not
@@ -222,6 +225,12 @@ pub fn refuse_stale_derived_destination(
         Some(super::WorkspaceRefRecord::Task(record))
             if record.state == super::TaskWorktreeState::Active =>
         {
+            if Path::new(&record.worktree_path).is_dir() {
+                super::convergence::require_issue_destination_without_pr(
+                    Path::new(&record.worktree_path),
+                    branch,
+                )?;
+            }
             classify_worktree_destination(Path::new(&record.worktree_path), handle, branch, base)?
         }
         Some(_) => DestinationFreshness::Unclassified,
@@ -240,6 +249,19 @@ fn refuse_foreign_history(classification: DestinationFreshness) -> Result<()> {
                 .iter()
                 .any(|reason| *reason != StaleDestinationReason::UncommittedChanges) =>
         {
+            super::convergence::require_issue_destination_without_pr(
+                &stale.path,
+                &stale.expected_branch,
+            )?;
+            if stale.reasons.iter().all(|reason| {
+                matches!(
+                    reason,
+                    StaleDestinationReason::CommitsAheadOfBase
+                        | StaleDestinationReason::UncommittedChanges
+                )
+            }) {
+                return Err(super::convergence::pr_route(&stale.expected_branch, None));
+            }
             Err(stale.into_error())
         }
         _ => Ok(()),
