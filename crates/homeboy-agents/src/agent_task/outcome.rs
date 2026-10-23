@@ -70,6 +70,16 @@ pub const HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: &str = "homeboy_empty_attempt_veri
 #[cfg(test)]
 use homeboy_core::redaction::RedactionPolicy;
 
+/// The one immutable commit an attempt produced (#16303). Homeboy harvests it
+/// from the attempt's final working tree and pins it under
+/// `refs/homeboy/candidates/<run_id>`; `tree_sha` is that commit's tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCandidate {
+    pub base_sha: String,
+    pub candidate_sha: String,
+    pub tree_sha: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskOutcome {
     #[serde(default = "outcome_schema")]
@@ -96,6 +106,9 @@ pub struct AgentTaskOutcome {
     pub follow_up: Option<AgentTaskFollowUp>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+    /// Homeboy-harvested candidate commit; providers cannot assert it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<AgentTaskCandidate>,
 }
 
 impl Default for AgentTaskOutcome {
@@ -121,6 +134,7 @@ impl Default for AgentTaskOutcome {
             workflow: None,
             follow_up: None,
             metadata: Value::Null,
+            candidate: None,
         }
     }
 }

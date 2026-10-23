@@ -1223,6 +1223,7 @@ impl AgentTaskScheduler {
                     }
                     if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
+                        .and_then(|_| harvest_candidate_commit(&mut outcome, &running_task))
                     {
                         outcome = committed_harvest_failure(outcome, error);
                     }

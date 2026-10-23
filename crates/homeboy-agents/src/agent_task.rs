@@ -47,10 +47,10 @@ pub use executor::{
     AgentTaskRuntimeSelection, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
 };
 pub use outcome::{
-    AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskUsage,
-    AgentTaskUsageCompleteness, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
-    AgentTaskWorkflowStepStatus, AgentTaskWorkflowStepSuggestion, AGENT_TASK_USAGE_METADATA_KEY,
-    HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY,
+    AgentTaskCandidate, AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus,
+    AgentTaskUsage, AgentTaskUsageCompleteness, AgentTaskWorkflowEvidence,
+    AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkflowStepSuggestion,
+    AGENT_TASK_USAGE_METADATA_KEY, HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY,
 };
 pub use policy::{
     AgentTaskLimits, AgentTaskPolicy, AgentToolExecutionLocation, AgentToolPolicy,

@@ -271,6 +271,7 @@ fn candidate_adoption_failure(message: String) -> AgentTaskOutcome {
         workflow: None,
         follow_up: None,
         metadata: serde_json::Value::Null,
+        candidate: None,
     }
 }
 

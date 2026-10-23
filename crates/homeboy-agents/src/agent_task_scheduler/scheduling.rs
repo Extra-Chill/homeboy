@@ -499,6 +499,9 @@ impl AgentTaskScheduleSupport {
                         let harvest = joined.and_then(|_| {
                             super::harvest_uncommitted_patch(&mut recovered, &task)
                                 .and_then(|_| super::harvest_committed_patch(&mut recovered, &task))
+                                .and_then(|_| {
+                                    super::harvest_candidate_commit(&mut recovered, &task)
+                                })
                                 .map_err(|error| format!("{error:?}"))
                         });
                         if harvest.is_ok() {

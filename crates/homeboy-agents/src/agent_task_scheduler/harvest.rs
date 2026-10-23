@@ -114,6 +114,82 @@ pub(super) fn harvest_uncommitted_patch(
     Ok(())
 }
 
+/// Ref namespace that pins harvested candidates against garbage collection.
+pub(crate) const CANDIDATE_REF_PREFIX: &str = "refs/homeboy/candidates/";
+
+/// Turn the attempt's final working tree (tracked + untracked, honoring
+/// `.gitignore`) into one immutable commit on the attempt HEAD (#16303).
+///
+/// The tree is built in a temporary index so the provider's index is never
+/// written (#13448). Identity and dates are fixed (the date is the parent's
+/// committer date), so the same tree on the same parent is the same sha. A
+/// tree equal to the base tree is `NoChanges`: no candidate is recorded.
+pub(super) fn harvest_candidate_commit(
+    outcome: &mut AgentTaskOutcome,
+    running: &RunningTask,
+) -> Result<(), HarvestError> {
+    // Only Homeboy's harvest may assert a candidate.
+    outcome.candidate = None;
+    let Some(base) = running.task_base_sha.as_deref() else {
+        return Ok(());
+    };
+    let Some(root) = running.request.workspace.root.as_deref().map(Path::new) else {
+        return Ok(());
+    };
+    if !git_is_repository(root)? || !git_is_ancestor(root, base, "HEAD")? {
+        return Ok(());
+    }
+    let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
+        command: "create candidate harvest Git index".to_string(),
+        cwd: root.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let index_path = index.path().display().to_string();
+    let index_env: &[(&str, &str)] = &[("GIT_INDEX_FILE", index_path.as_str())];
+    git_output_with_env(root, &["read-tree", "HEAD"], index_env)?;
+    git_output_with_env(root, &["add", "--all", "--", "."], index_env)?;
+    let tree = git_output_with_env(root, &["write-tree"], index_env)?;
+    if tree == git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])? {
+        return Ok(());
+    }
+    let head = git_output(root, &["rev-parse", "HEAD^{commit}"])?;
+    let date = format!(
+        "@{} +0000",
+        git_output(root, &["log", "-1", "--format=%ct", &head])?
+    );
+    let identity_env: &[(&str, &str)] = &[
+        ("GIT_AUTHOR_NAME", "Homeboy"),
+        ("GIT_AUTHOR_EMAIL", "homeboy@localhost"),
+        ("GIT_AUTHOR_DATE", date.as_str()),
+        ("GIT_COMMITTER_NAME", "Homeboy"),
+        ("GIT_COMMITTER_EMAIL", "homeboy@localhost"),
+        ("GIT_COMMITTER_DATE", date.as_str()),
+    ];
+    let commit_args = [
+        "-c",
+        "commit.gpgSign=false",
+        "commit-tree",
+        tree.as_str(),
+        "-p",
+        head.as_str(),
+        "-m",
+        "homeboy: cook candidate",
+    ];
+    let candidate_sha = git_output_with_env(root, &commit_args, identity_env)?;
+    let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
+    let candidate_ref = format!(
+        "{CANDIDATE_REF_PREFIX}{}",
+        homeboy_core::paths::sanitize_path_segment(run_id)
+    );
+    git_output(root, &["update-ref", &candidate_ref, &candidate_sha])?;
+    outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
+        base_sha: base.to_string(),
+        candidate_sha,
+        tree_sha: tree,
+    });
+    Ok(())
+}
+
 /// A deadline can interrupt an otherwise valid workspace diff before the
 /// provider has completed its result contract. Keep that distinction on the
 /// durable artifact: it is recoverable evidence, never an implicitly complete
@@ -647,6 +723,7 @@ pub(super) fn committed_harvest_preflight_outcome(task_id: String) -> AgentTaskO
         workflow: None,
         follow_up: None,
         metadata: serde_json::Value::Null,
+        candidate: None,
     }
 }
 
@@ -1662,5 +1739,148 @@ mod committed_harvest_tests {
             std::fs::read_to_string(patch.path.as_deref().expect("patch path")).expect("patch");
         assert!(contents.contains("agent change"), "{contents}");
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+    }
+
+    fn candidate_attempt_repo(temp: &Path) -> (PathBuf, String) {
+        let workspace = temp.join("attempt-workspace");
+        std::fs::create_dir(&workspace).expect("attempt workspace dir");
+        git(&workspace, &["init", "--quiet", "-b", "main"]);
+        git(&workspace, &["config", "user.email", "test@example.com"]);
+        git(&workspace, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(workspace.join(".gitignore"), "ignored.txt\n").expect("gitignore");
+        std::fs::write(workspace.join("file.txt"), "base\n").expect("base file");
+        git(&workspace, &["add", "."]);
+        git(&workspace, &["commit", "--quiet", "-m", "base"]);
+        let base = git(&workspace, &["rev-parse", "HEAD"]);
+        (workspace, base)
+    }
+
+    fn harvested_candidate(running: &RunningTask) -> Option<crate::agent_task::AgentTaskCandidate> {
+        let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        harvest_candidate_commit(&mut outcome, running).expect("harvest candidate commit");
+        outcome.candidate
+    }
+
+    /// `git write-tree` of the final worktree state, staged in the real index
+    /// only after harvest so the oracle cannot share harvest's mechanism.
+    fn final_worktree_tree(workspace: &Path) -> String {
+        git(workspace, &["add", "--all"]);
+        git(workspace, &["write-tree"])
+    }
+
+    #[test]
+    fn dirty_attempt_harvests_one_candidate_commit_without_touching_the_provider_index() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        std::fs::write(workspace.join("file.txt"), "staged\n").expect("staged edit");
+        git(&workspace, &["add", "file.txt"]);
+        std::fs::write(workspace.join("file.txt"), "agent change\n").expect("modified");
+        std::fs::write(workspace.join("new.txt"), "untracked\n").expect("untracked");
+        std::fs::write(workspace.join("ignored.txt"), "ignored\n").expect("ignored");
+        let index_before = std::fs::read(workspace.join(".git/index")).expect("index");
+        let running = committed_harvest_running_task(temp.path(), &workspace, None, base.clone());
+
+        let candidate = harvested_candidate(&running).expect("dirty attempt has a candidate");
+
+        assert_eq!(
+            std::fs::read(workspace.join(".git/index")).expect("index"),
+            index_before,
+            "harvest must never write the provider's index (#13448)"
+        );
+        assert_eq!(candidate.base_sha, base);
+        let head = git(&workspace, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            git(
+                &workspace,
+                &["rev-parse", &format!("{}^", candidate.candidate_sha)]
+            ),
+            head
+        );
+        assert_eq!(
+            git(
+                &workspace,
+                &["rev-parse", "refs/homeboy/candidates/reaped-harvest-test"]
+            ),
+            candidate.candidate_sha
+        );
+        assert_eq!(
+            git(
+                &workspace,
+                &[
+                    "rev-parse",
+                    &format!("{}^{{tree}}", candidate.candidate_sha)
+                ]
+            ),
+            candidate.tree_sha
+        );
+        assert_eq!(candidate.tree_sha, final_worktree_tree(&workspace));
+        assert_eq!(
+            git(
+                &workspace,
+                &["show", &format!("{}:new.txt", candidate.candidate_sha)]
+            ),
+            "untracked"
+        );
+    }
+
+    #[test]
+    fn committed_attempt_candidate_keeps_provider_commits() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        std::fs::write(workspace.join("file.txt"), "agent change\n").expect("agent edit");
+        git(&workspace, &["commit", "--quiet", "-am", "agent change"]);
+        let head = git(&workspace, &["rev-parse", "HEAD"]);
+        let index_before = std::fs::read(workspace.join(".git/index")).expect("index");
+        let running = committed_harvest_running_task(temp.path(), &workspace, None, base.clone());
+
+        let candidate = harvested_candidate(&running).expect("committed attempt has a candidate");
+
+        assert_eq!(
+            std::fs::read(workspace.join(".git/index")).expect("index"),
+            index_before
+        );
+        assert_eq!(candidate.base_sha, base);
+        assert_eq!(
+            git(
+                &workspace,
+                &["rev-parse", &format!("{}^", candidate.candidate_sha)]
+            ),
+            head
+        );
+        assert_eq!(candidate.tree_sha, final_worktree_tree(&workspace));
+    }
+
+    #[test]
+    fn harvesting_the_same_state_twice_yields_the_same_candidate_sha() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        std::fs::write(workspace.join("new.txt"), "untracked\n").expect("untracked");
+        let running = committed_harvest_running_task(temp.path(), &workspace, None, base);
+
+        let first = harvested_candidate(&running).expect("first harvest");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = harvested_candidate(&running).expect("second harvest");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn unchanged_attempt_has_no_candidate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        std::fs::write(workspace.join("ignored.txt"), "ignored\n").expect("ignored");
+        let running = committed_harvest_running_task(temp.path(), &workspace, None, base);
+        let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+        outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
+            base_sha: "provider".to_string(),
+            candidate_sha: "asserted".to_string(),
+            tree_sha: "candidate".to_string(),
+        });
+
+        harvest_candidate_commit(&mut outcome, &running).expect("harvest");
+
+        assert_eq!(outcome.candidate, None);
+        assert!(git(&workspace, &["for-each-ref", "refs/homeboy/candidates"]).is_empty());
     }
 }
