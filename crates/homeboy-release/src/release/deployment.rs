@@ -944,7 +944,6 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: vec![],
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         };

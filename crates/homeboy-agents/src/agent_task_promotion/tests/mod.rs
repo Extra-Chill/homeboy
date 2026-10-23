@@ -7,7 +7,8 @@ use sha2::{Digest, Sha256};
 
 use super::apply::{AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace};
 
-use super::promote::promote_with_provider;
+mod candidate_fixture;
+mod immutable_candidate;
 use super::types::{
     AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionReport,
     AgentTaskPromotionRequest,
@@ -16,13 +17,14 @@ use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
 use crate::agent_task_gate::{
     AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
+use candidate_fixture::promote_with_provider;
 use homeboy_core::{Error, Result};
 
 pub(super) const VALID_PATCH: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
 
 #[derive(Debug, Default)]
 pub(super) struct FakePromotionWorkspaceProvider {
-    workspace_path: Option<PathBuf>,
+    pub(super) workspace_path: Option<PathBuf>,
     apply_calls: Vec<AgentTaskPromotionApplyRequest>,
     applied_patch_contents: Vec<String>,
     verify_calls: Vec<(

@@ -2279,22 +2279,6 @@ pub enum LabStagingPhase {
     Completed,
 }
 
-/// Controller-owned timing evidence for one durable staging operation. These
-/// records live on the checkpoint so a resumed job retains the original wall
-/// time instead of reporting only the final retry.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LabStagingPhaseTiming {
-    pub phase: String,
-    pub owner: String,
-    pub started_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    pub status: String,
-}
-
 /// An operation is durably declared before its remote effect. Its fixed name is
 /// also the idempotency/reconciliation key used after a controller restart.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2330,7 +2314,7 @@ pub struct LabStagingCheckpoint {
     pub final_runner_job_id: Option<String>,
     pub stage_intent: Option<LabStagingStageIntent>,
     #[serde(default)]
-    pub phase_timings: Vec<LabStagingPhaseTiming>,
+    pub phase_started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_construction_failure: Option<LabWorkspaceConstructionFailure>,
 }
@@ -2349,33 +2333,12 @@ impl LabStagingCheckpoint {
             hydration_id: None,
             final_runner_job_id: None,
             stage_intent: None,
-            phase_timings: Vec::new(),
+            phase_started_at: None,
             workspace_construction_failure: None,
         }
     }
 
     fn public_projection(&self) -> Value {
-        let mut slowest = self
-            .phase_timings
-            .iter()
-            .filter_map(|timing| {
-                timing.duration_ms.map(|duration_ms| {
-                    json!({
-                        "phase": timing.phase,
-                        "owner": timing.owner,
-                        "duration_ms": duration_ms,
-                        "status": timing.status,
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
-        slowest.sort_by(|left, right| {
-            right["duration_ms"]
-                .as_u64()
-                .cmp(&left["duration_ms"].as_u64())
-                .then_with(|| left["phase"].as_str().cmp(&right["phase"].as_str()))
-        });
-        slowest.truncate(3);
         json!({
             "run_id": self.run_id,
             "runner_id": self.runner_id,
@@ -2392,10 +2355,7 @@ impl LabStagingCheckpoint {
                 "code": failure.code,
                 "custody_retained": true,
             })),
-            "staging_latency": {
-                "phases": self.phase_timings,
-                "slowest": slowest,
-            },
+
         })
     }
 
@@ -2411,49 +2371,26 @@ impl LabStagingCheckpoint {
     }
 
     fn start_phase_timing(&mut self) {
-        let phase = Self::phase_timing_name(&self.phase);
-        if self
-            .phase_timings
-            .iter()
-            .any(|timing| timing.phase == phase)
-        {
-            return;
-        }
-        self.phase_timings.push(LabStagingPhaseTiming {
-            phase: phase.to_string(),
-            owner: if self.phase == LabStagingPhase::ObserveRunner {
-                "runner".to_string()
-            } else {
-                "controller".to_string()
-            },
-            started_at: chrono::Utc::now().to_rfc3339(),
-            ended_at: None,
-            duration_ms: None,
-            status: "running".to_string(),
-        });
+        self.phase_started_at
+            .get_or_insert_with(|| chrono::Utc::now().to_rfc3339());
     }
 
     fn finish_phase_timing(&mut self, status: &str) {
-        let phase = Self::phase_timing_name(&self.phase);
-        let Some(timing) = self
-            .phase_timings
-            .iter_mut()
-            .find(|timing| timing.phase == phase)
-        else {
+        let Some(started_at) = self.phase_started_at.take() else {
             return;
         };
-        let ended_at = chrono::Utc::now();
-        timing.duration_ms = chrono::DateTime::parse_from_rfc3339(&timing.started_at)
-            .ok()
-            .and_then(|started_at| {
-                ended_at
-                    .signed_duration_since(started_at)
-                    .num_milliseconds()
-                    .try_into()
-                    .ok()
+        let result =
+            homeboy_core::observation::ObservationStore::open_initialized().and_then(|store| {
+                store.finish_run_phase(
+                    &self.run_id,
+                    &format!("stage.lab.{}", Self::phase_timing_name(&self.phase)),
+                    &started_at,
+                    status != "succeeded",
+                )
             });
-        timing.ended_at = Some(ended_at.to_rfc3339());
-        timing.status = status.to_string();
+        if let Err(error) = result {
+            homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
+        }
     }
 
     fn validate(&self) -> Result<()> {
@@ -2468,26 +2405,19 @@ impl LabStagingCheckpoint {
                 None,
             ));
         }
-        self.input.validate()?;
-        if self.phase_timings.len() > 5
-            || self.phase_timings.iter().any(|timing| {
-                timing.phase.trim().is_empty()
-                    || timing.owner.trim().is_empty()
-                    || chrono::DateTime::parse_from_rfc3339(&timing.started_at).is_err()
-                    || !matches!(
-                        timing.status.as_str(),
-                        "running" | "succeeded" | "failed" | "cancelled"
-                    )
-                    || (timing.duration_ms.is_some() != timing.ended_at.is_some())
-            })
+        if self
+            .phase_started_at
+            .as_deref()
+            .is_some_and(|start| chrono::DateTime::parse_from_rfc3339(start).is_err())
         {
             return Err(Error::validation_invalid_argument(
-                "checkpoint.phase_timings",
-                "Lab staging timing evidence must be bounded, timestamped, and internally consistent",
+                "checkpoint.phase_started_at",
+                "phase start must be an RFC3339 timestamp",
                 None,
                 None,
             ));
         }
+        self.input.validate()?;
         if self.input.run_id() != self.run_id {
             return Err(Error::validation_invalid_argument(
                 "checkpoint.input.run_id",
@@ -2660,9 +2590,6 @@ fn record_checkpointed_lifecycle_phase(
     request: &LabStagingExecutionRequest,
     checkpoint: &LabStagingCheckpoint,
 ) -> Result<()> {
-    if let Err(error) = persist_staging_phase_spans(checkpoint) {
-        homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
-    }
     let Some(phase) = lifecycle_phase_for_checkpoint(&checkpoint.phase) else {
         return Ok(());
     };
@@ -2675,58 +2602,6 @@ fn record_checkpointed_lifecycle_phase(
         None,
         Some(&request.durable_agent_task_plan),
     )?;
-    Ok(())
-}
-
-/// Publish completed staging checkpoint timings through the same ledger as
-/// local Cook. Checkpoint timing remains the crash-recovery source; it is not
-/// another observation surface.
-fn persist_staging_phase_spans(checkpoint: &LabStagingCheckpoint) -> Result<()> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    let Some(run) = store.get_run(&checkpoint.run_id)? else {
-        return Ok(());
-    };
-    let Ok(origin) = chrono::DateTime::parse_from_rfc3339(&run.started_at) else {
-        return Ok(());
-    };
-    let existing = store.phase_spans(&checkpoint.run_id)?;
-    for timing in &checkpoint.phase_timings {
-        let (Some(duration), Some(_)) = (timing.duration_ms, timing.ended_at.as_ref()) else {
-            continue;
-        };
-        let id = format!("stage.lab.{}", timing.phase);
-        let Ok(started) = chrono::DateTime::parse_from_rfc3339(&timing.started_at) else {
-            continue;
-        };
-        let offset = started
-            .signed_duration_since(origin)
-            .num_microseconds()
-            .unwrap_or(0)
-            .max(0) as f64
-            / 1000.0;
-        if existing
-            .spans
-            .iter()
-            .any(|span| span.id == id && span.start_offset_ms == offset)
-        {
-            continue;
-        }
-        let mut timer = homeboy_core::phase_timing::PhaseTimer::with_version(
-            homeboy_core::build_identity::current().version,
-        );
-        if timing.status == "succeeded" {
-            timer.record_ok(&id, Duration::from_millis(duration));
-        } else {
-            timer.record_failed(&id, Duration::from_millis(duration));
-        }
-        let mut report = timer.into_report();
-        report.spans[0].start_offset_ms = offset;
-        store.record_phase_spans(
-            &checkpoint.run_id,
-            &format!("lab-checkpoint:{id}:{}", timing.started_at),
-            &report,
-        )?;
-    }
     Ok(())
 }
 
@@ -4462,11 +4337,7 @@ impl StageExecutionAdapter {
                 checkpoint = LabStagingCheckpoint::validated_transition(&prior, checkpoint)?;
                 // Intent must survive a crash before the effect can begin.
                 persist(&checkpoint)?;
-            } else if !checkpoint.phase_timings.iter().any(|timing| {
-                timing.phase == LabStagingCheckpoint::phase_timing_name(&checkpoint.phase)
-            }) {
-                // Checkpoints written before timing evidence was introduced keep
-                // their exact-once intent and begin measuring from this resume.
+            } else if checkpoint.phase_started_at.is_none() {
                 checkpoint.start_phase_timing();
                 persist(&checkpoint)?;
             }
@@ -4561,7 +4432,6 @@ impl StageExecutionAdapter {
                     return Err(error);
                 }
             };
-            checkpoint.finish_phase_timing("succeeded");
             // `dispatch_runner` binds the accepted job before returning. Once
             // that binding exists, generation ownership moves to the durable
             // runner record and this temporary admission pin can be released.
@@ -4582,6 +4452,7 @@ impl StageExecutionAdapter {
                 persist(&checkpoint)?;
                 return Err(Self::cancellation_error());
             }
+            checkpoint.finish_phase_timing("succeeded");
             checkpoint = match effect {
                 LabStagingStageEffect::Workspace(source_snapshot_id, workspace_id) => {
                     LabStagingCheckpoint {
@@ -5835,56 +5706,6 @@ mod tests {
         assert_eq!(recovered.workspace_id.as_deref(), Some("workspace-1"));
     }
 
-    #[test]
-    fn public_projection_compactly_attributes_slowest_staging_owner() {
-        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
-        checkpoint.phase_timings = vec![
-            LabStagingPhaseTiming {
-                phase: "workspace".to_string(),
-                owner: "controller".to_string(),
-                started_at: "2026-07-27T00:00:00Z".to_string(),
-                ended_at: Some("2026-07-27T00:09:12.317Z".to_string()),
-                duration_ms: Some(552_317),
-                status: "succeeded".to_string(),
-            },
-            LabStagingPhaseTiming {
-                phase: "observe".to_string(),
-                owner: "runner".to_string(),
-                started_at: "2026-07-27T00:09:12.317Z".to_string(),
-                ended_at: Some("2026-07-27T00:09:13.628Z".to_string()),
-                duration_ms: Some(1_311),
-                status: "succeeded".to_string(),
-            },
-            LabStagingPhaseTiming {
-                phase: "hydration".to_string(),
-                owner: "controller".to_string(),
-                started_at: "2026-07-27T00:09:13.628Z".to_string(),
-                ended_at: Some("2026-07-27T00:09:15.628Z".to_string()),
-                duration_ms: Some(2_000),
-                status: "succeeded".to_string(),
-            },
-            LabStagingPhaseTiming {
-                phase: "dispatch".to_string(),
-                owner: "controller".to_string(),
-                started_at: "2026-07-27T00:09:15.628Z".to_string(),
-                ended_at: Some("2026-07-27T00:09:16.128Z".to_string()),
-                duration_ms: Some(500),
-                status: "succeeded".to_string(),
-            },
-        ];
-
-        let projection = checkpoint.public_projection();
-        let slowest = projection["staging_latency"]["slowest"]
-            .as_array()
-            .expect("slowest staging phases");
-        assert_eq!(slowest.len(), 3);
-        assert_eq!(slowest[0]["phase"], "workspace");
-        assert_eq!(slowest[0]["owner"], "controller");
-        assert_eq!(slowest[0]["duration_ms"], 552_317);
-        assert_eq!(slowest[1]["phase"], "hydration");
-        assert_eq!(slowest[2]["phase"], "observe");
-    }
-
     #[derive(Default)]
     struct RecordedStageOperations {
         calls: Mutex<Vec<&'static str>>,
@@ -7112,6 +6933,95 @@ mod tests {
     }
 
     #[test]
+    fn lab_staging_resume_and_offload_timings_are_read_from_sqlite() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let request = execution_request();
+            submit_recipe_run(&request.recipe.run_id);
+            let adapter = StageExecutionAdapter::new(Arc::new(RecordedStageOperations::default()));
+            let token = LabStagingCancellationToken::default();
+            let mut saved = LabStagingCheckpoint::initial(&envelope());
+            record_checkpointed_lifecycle_phase(&request, &saved).unwrap();
+            let mut writes = 0;
+            assert!(adapter
+                .execute_with_checkpoint(&request, saved.clone(), &token, |checkpoint| {
+                    writes += 1;
+                    if writes == 6 {
+                        return Err(Error::internal_unexpected(
+                            "controller interrupted after hydration",
+                        ));
+                    }
+                    saved = checkpoint.clone();
+                    record_checkpointed_lifecycle_phase(&request, checkpoint)
+                })
+                .is_err());
+            let original_start = saved.phase_started_at.clone().unwrap();
+            // Resume from serialized recovery state, not an in-memory timing report.
+            let resumed = serde_json::from_value(serde_json::to_value(&saved).unwrap()).unwrap();
+            let completed = adapter
+                .execute_with_checkpoint(&request, resumed, &token, |checkpoint| {
+                    record_checkpointed_lifecycle_phase(&request, checkpoint)
+                })
+                .unwrap();
+            assert_eq!(completed.phase, LabStagingPhase::Completed);
+            assert!(completed.phase_started_at.is_none());
+            let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+            let spans = store.phase_spans(&request.recipe.run_id).unwrap().spans;
+            for phase in [
+                "workspace",
+                "runtime",
+                "hydration",
+                "dispatch",
+                "observe",
+                "source_materialization",
+                "runtime_staging",
+                "dependency_hydration",
+                "runner_dispatch",
+            ] {
+                let id = format!("stage.lab.{phase}");
+                let matching = spans
+                    .iter()
+                    .filter(|span| span.id == id)
+                    .collect::<Vec<_>>();
+                assert_eq!(matching.len(), 1, "{id}");
+                assert!(matching[0].duration_ms.is_some());
+            }
+            let hotspots = homeboy_core::performance_hotspots::phase_hotspots(
+                &store,
+                &homeboy_core::performance_hotspots::PhaseHotspotQuery {
+                    kind: Some("agent-task".to_string()),
+                    last: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(hotspots
+                .phases
+                .iter()
+                .any(|phase| phase.phase == "stage.lab.hydration"));
+            assert!(hotspots
+                .phases
+                .iter()
+                .any(|phase| phase.phase == "stage.lab.dependency_hydration"));
+            let run = store.get_run(&request.recipe.run_id).unwrap().unwrap();
+            let origin = chrono::DateTime::parse_from_rfc3339(&run.started_at).unwrap();
+            let start = chrono::DateTime::parse_from_rfc3339(&original_start).unwrap();
+            let hydration = spans
+                .iter()
+                .find(|span| span.id == "stage.lab.hydration")
+                .unwrap();
+            assert_eq!(
+                hydration.start_offset_ms,
+                start
+                    .signed_duration_since(origin)
+                    .num_microseconds()
+                    .unwrap()
+                    .max(0) as f64
+                    / 1000.0
+            );
+        });
+    }
+
+    #[test]
     fn checkpoint_phases_have_stable_public_lifecycle_progress() {
         assert_eq!(
             lifecycle_phase_for_checkpoint(&LabStagingPhase::AcceptedMaterializeWorkspace),
@@ -7306,11 +7216,7 @@ mod tests {
                     checkpoint.phase == LabStagingPhase::HydrateDependencies
                         && checkpoint.stage_intent.is_some()
                 }));
-                assert_eq!(persisted[1].phase_timings[0].phase, "hydration");
-                assert_eq!(
-                    persisted[1].phase_timings[0].status,
-                    if cancelled { "cancelled" } else { "failed" }
-                );
+                assert!(persisted[1].phase_started_at.is_none());
                 assert_eq!(operations.calls(), ["validate", "hydration"]);
             }
         });
@@ -7352,7 +7258,7 @@ mod tests {
             let last = persisted.last().unwrap();
             assert_eq!(last.phase, LabStagingPhase::AcceptedMaterializeWorkspace);
             assert!(last.stage_intent.is_some());
-            assert_eq!(last.phase_timings[0].status, "cancelled");
+            assert!(last.phase_started_at.is_none());
             assert_eq!(
                 last.workspace_construction_failure
                     .as_ref()

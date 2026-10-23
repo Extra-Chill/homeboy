@@ -278,7 +278,6 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: vec!["signed artifact missing".to_string()],
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         };
@@ -320,7 +319,6 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: Vec::new(),
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         };
@@ -366,7 +364,6 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: Vec::new(),
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         };

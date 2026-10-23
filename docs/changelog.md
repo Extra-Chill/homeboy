@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.6] - 2026-10-23
+
+### Changed
+- drop stale subtree/gate tests and serialize git-spawning subtree tests
+- lab-runner: delete unreachable predecessor source-package scanner
+- Promote fresh Cook candidates from immutable commits (#16303 S2b)
+
+### Fixed
+- Fix retry event identities for operation claims and replacement gates
+
 ## [0.433.5] - 2026-10-23
 
 ### Changed

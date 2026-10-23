@@ -763,7 +763,6 @@ fn run_dry_run_preflights(
                 status: ReleaseStepStatus::Failed,
                 warnings: Vec::new(),
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         }));
@@ -1972,7 +1971,6 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: vec![],
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         };
@@ -2015,7 +2013,6 @@ mod tests {
                 status: ReleaseStepStatus::PartialSuccess,
                 warnings: vec![],
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         };
@@ -2098,7 +2095,6 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: vec![],
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         };
@@ -2126,7 +2122,6 @@ mod tests {
                 status: ReleaseStepStatus::PartialSuccess,
                 warnings: vec![],
                 summary: None,
-                phase_timings: None,
                 rollback: Some(ReleaseRollbackEvidence {
                     status: "restored".to_string(),
                     original_head: "original".to_string(),
@@ -2170,7 +2165,6 @@ mod tests {
                 status: ReleaseStepStatus::Failed,
                 warnings: vec!["Release rollback was interrupted".to_string()],
                 summary: None,
-                phase_timings: None,
                 rollback: Some(ReleaseRollbackEvidence {
                     status: "interrupted".to_string(),
                     original_head: "original".to_string(),
@@ -2227,7 +2221,6 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: vec![],
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         };

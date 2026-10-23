@@ -239,6 +239,7 @@ pub(crate) fn record_lab_offload_phase_with_submission_in_store(
             submit,
         )?,
     };
+    let record_id = record.run_id.clone();
     let updated = lifecycle_store.mutate_record(&record.run_id, |record| {
         if record.state().is_terminal() {
             return false;
@@ -246,7 +247,13 @@ pub(crate) fn record_lab_offload_phase_with_submission_in_store(
         record.updated_at = Some(now_timestamp());
         let phase_started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
         let metadata = record.ensure_metadata_object();
-        record_lab_offload_phase_metadata(metadata, input.phase, &phase_started_at);
+        record_lab_offload_phase_metadata(
+            lifecycle_store,
+            &record_id,
+            metadata,
+            input.phase,
+            &phase_started_at,
+        );
         metadata.insert("provider_state".to_string(), json!("pending"));
         if let Some(remote_workspace) = input.remote_workspace {
             metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
@@ -263,63 +270,7 @@ pub(crate) fn record_lab_offload_phase_with_submission_in_store(
         Some(record) => record,
         None => lifecycle_store.read_record(&record.run_id)?,
     };
-    if let Err(error) = persist_lab_phase_history(lifecycle_store, &updated) {
-        homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
-    }
     Ok(updated)
-}
-
-/// Project completed controller staging phases into the shared run ledger.
-/// Stable history identities make progress replays harmless.
-fn persist_lab_phase_history(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    record: &AgentTaskRunRecord,
-) -> Result<()> {
-    let store = lifecycle_store.open_observation_initialized()?;
-    let Some(run) = store.get_run(&record.run_id)? else {
-        return Ok(());
-    };
-    let Ok(origin) = chrono::DateTime::parse_from_rfc3339(&run.started_at) else {
-        return Ok(());
-    };
-    for entry in record.metadata["phase_history"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
-        let (Some(phase), Some(start), Some(end)) = (
-            entry["phase"].as_str(),
-            entry["started_at"].as_str(),
-            entry["ended_at"].as_str(),
-        ) else {
-            continue;
-        };
-        let (Ok(started), Ok(ended)) = (
-            chrono::DateTime::parse_from_rfc3339(start),
-            chrono::DateTime::parse_from_rfc3339(end),
-        ) else {
-            continue;
-        };
-        let mut timer = homeboy_core::phase_timing::PhaseTimer::with_version(
-            homeboy_core::build_identity::current().version,
-        );
-        timer.record_ok(
-            format!("stage.lab.{phase}"),
-            ended
-                .signed_duration_since(started)
-                .to_std()
-                .unwrap_or_default(),
-        );
-        let mut report = timer.into_report();
-        report.spans[0].start_offset_ms = started
-            .signed_duration_since(origin)
-            .num_microseconds()
-            .unwrap_or(0)
-            .max(0) as f64
-            / 1000.0;
-        store.record_phase_spans(&record.run_id, &format!("lab:{phase}:{start}"), &report)?;
-    }
-    Ok(())
 }
 
 /// Replace a pre-acceptance Lab proxy with the verified controller-local
@@ -425,7 +376,13 @@ pub fn record_lab_offload_phase_executions_in_store(
         record.updated_at = Some(now_timestamp());
         let phase_started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
         let metadata = record.ensure_metadata_object();
-        record_lab_offload_phase_metadata(metadata, phase, &phase_started_at);
+        record_lab_offload_phase_metadata(
+            lifecycle_store,
+            &run_id,
+            metadata,
+            phase,
+            &phase_started_at,
+        );
         metadata.insert(
             "materialization_execution_ids".to_string(),
             json!(execution_ids),
@@ -456,7 +413,13 @@ pub fn record_lab_staging_controller_job_in_store(
         record.updated_at = Some(now_timestamp());
         let started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
         let metadata = record.ensure_metadata_object();
-        record_lab_offload_phase_metadata(metadata, "materializing", &started_at);
+        record_lab_offload_phase_metadata(
+            lifecycle_store,
+            &sanitize_run_id(run_id),
+            metadata,
+            "materializing",
+            &started_at,
+        );
         metadata.insert(
             "lab_staging_controller_job_id".to_string(),
             json!(controller_job_id),
@@ -611,6 +574,8 @@ fn annotate_live_record(
 }
 
 fn record_lab_offload_phase_metadata(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
     metadata: &mut serde_json::Map<String, Value>,
     phase: &str,
     started_at: &str,
@@ -620,26 +585,25 @@ fn record_lab_offload_phase_metadata(
         .and_then(Value::as_str)
         .map(str::to_string);
     if previous_phase.as_deref() != Some(phase) {
-        if let Some(previous_phase) = previous_phase {
-            if let Some(entry) = metadata
-                .get_mut("phase_history")
-                .and_then(Value::as_array_mut)
-                .and_then(|entries| {
-                    entries.iter_mut().rev().find(|entry| {
-                        entry.get("phase").and_then(Value::as_str) == Some(previous_phase.as_str())
-                            && entry.get("ended_at").is_none()
-                    })
-                })
-            {
-                entry["ended_at"] = json!(started_at);
+        if let (Some(previous_phase), Some(start)) = (
+            previous_phase,
+            metadata.get("phase_started_at").and_then(Value::as_str),
+        ) {
+            let result = lifecycle_store
+                .open_observation_initialized()
+                .and_then(|store| {
+                    store.finish_run_phase(
+                        run_id,
+                        &format!("stage.lab.{previous_phase}"),
+                        start,
+                        false,
+                    )
+                });
+            if let Err(error) = result {
+                homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
             }
         }
-        metadata
-            .entry("phase_history".to_string())
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .expect("phase history is an array")
-            .push(json!({ "phase": phase, "started_at": started_at }));
+        metadata.insert("phase_started_at".to_string(), json!(started_at));
     }
     metadata.insert("phase".to_string(), json!(phase));
     metadata.insert(
@@ -855,7 +819,15 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
         intent["runner_job_id"] = json!(input.runner_job_id);
         intent["accepted_at"] = json!(accepted_at);
     }
-    metadata.insert("phase".to_string(), json!("awaiting_runner_result"));
+    record_lab_offload_phase_metadata(
+        lifecycle_store,
+        &run_id,
+        metadata,
+        "awaiting_runner_result",
+        &accepted_at,
+    );
+    // Handoff ends controller staging; runner execution has its own owner.
+    metadata.remove("phase_started_at");
     metadata.insert(
         "phase_activity".to_string(),
         json!("controller handoff complete; awaiting authoritative runner daemon result"),
