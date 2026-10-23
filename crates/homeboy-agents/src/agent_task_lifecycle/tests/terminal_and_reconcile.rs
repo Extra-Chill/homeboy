@@ -2826,12 +2826,6 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
             )> {
                 unreachable!()
             }
-            fn refresh_mirrored_daemon_evidence(
-                &self,
-                _: &str,
-            ) -> Result<Option<Vec<homeboy_core::observation::RunRecord>>> {
-                Ok(None)
-            }
             fn mirrored_runner_job_identity(
                 &self,
                 _: &homeboy_core::observation::RunRecord,

@@ -295,10 +295,9 @@ pub(crate) fn missing_run_guidance_for_runner_ids(
 /// [`refresh_mirrored_daemon_evidence`] directly. This helper preserves the
 /// historical CLI behavior so the `runs show` / `runs artifacts` commands
 /// keep emitting the same stderr text on failures.
-pub fn refresh_mirrored_daemon_evidence_best_effort(run_id: &str) {
-    if let Err(err) =
-        runner_evidence::with_runner_evidence(|p| p.refresh_mirrored_daemon_evidence(run_id))
-    {
+pub fn refresh_mirrored_daemon_evidence_best_effort(store: &ObservationStore, run: &RunRecord) {
+    let run_id = &run.id;
+    if let Err(err) = runner_evidence::with_runner_evidence(|p| p.refresh_run(store, run)) {
         eprintln!(
             "Warning: could not refresh mirrored Lab runner evidence for `{run_id}`: {}",
             err.message
@@ -309,8 +308,11 @@ pub fn refresh_mirrored_daemon_evidence_best_effort(run_id: &str) {
 /// Refresh one selected mirrored run. A daemon 404 can come from an admission
 /// generation that no longer retains the job, so it remains an actionable
 /// refresh failure rather than terminal evidence for the local mirror.
-pub fn refresh_selected_mirrored_daemon_evidence_best_effort(run: &RunRecord) {
-    if let Some(err) = refresh_selected_mirrored_daemon_evidence(run) {
+pub fn refresh_selected_mirrored_daemon_evidence_best_effort(
+    store: &ObservationStore,
+    run: &RunRecord,
+) {
+    if let Some(err) = refresh_selected_mirrored_daemon_evidence(store, run) {
         let (runner_id, job_id) =
             runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))
                 .expect("selected refresh errors only for mirrored runner jobs");
@@ -358,13 +360,13 @@ fn daemon_job_status(data: &Value, runner_id: &str, job_id: &str) -> Result<Stri
         })
 }
 
-pub fn refresh_selected_mirrored_daemon_evidence(run: &RunRecord) -> Option<Error> {
+pub fn refresh_selected_mirrored_daemon_evidence(
+    store: &ObservationStore,
+    run: &RunRecord,
+) -> Option<Error> {
     let _ = runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))?;
 
-    match runner_evidence::with_runner_evidence(|p| p.refresh_mirrored_daemon_evidence(&run.id)) {
-        Ok(_) => None,
-        Err(err) => Some(err),
-    }
+    runner_evidence::with_runner_evidence(|p| p.refresh_run(store, run)).err()
 }
 
 /// Best-effort refresh of all locally-running Lab runner mirror records.
@@ -392,6 +394,17 @@ pub(crate) fn refresh_running_mirrored_daemon_evidence_best_effort_until(
         })
         .unwrap_or_default();
 
+    refresh_mirrored_runs_until(store, runs, shutdown);
+}
+
+/// Refresh and retain the selected bounded running set for completion tracking.
+pub(crate) fn refresh_mirrored_runs_until(
+    store: &ObservationStore,
+    runs: Vec<RunRecord>,
+    shutdown: impl FnMut() -> bool,
+) -> Vec<String> {
+    let mut running: std::collections::HashSet<String> =
+        runs.iter().map(|run| run.id.clone()).collect();
     visit_until_shutdown(runs, shutdown, |run| {
         let Some((runner_id, job_id)) =
             runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(&run))
@@ -403,10 +416,22 @@ pub(crate) fn refresh_running_mirrored_daemon_evidence_best_effort_until(
         if !is_daemon_job_id(&job_id) {
             return;
         }
-        let Err(err) =
-            runner_evidence::with_runner_evidence(|p| p.refresh_mirrored_daemon_evidence(&run.id))
-        else {
-            return;
+        let err = match runner_evidence::with_runner_evidence(|p| p.refresh_run(store, &run)) {
+            Ok(refresh) => {
+                let settled = super::reconcile_owned_stale_running_run_with_snapshot(
+                    store,
+                    &refresh.run,
+                    refresh.reconciliation_job(),
+                )
+                .ok()
+                .flatten()
+                .is_some();
+                if settled || refresh.run.status != RunStatus::Running.as_str() {
+                    running.remove(&run.id);
+                }
+                return;
+            }
+            Err(err) => err,
         };
         match unrecoverable_refresh_reason(&err) {
             // The owning runner no longer has this job: the mirror can never
@@ -431,6 +456,7 @@ pub(crate) fn refresh_running_mirrored_daemon_evidence_best_effort_until(
             }
         }
     });
+    running.into_iter().collect()
 }
 
 fn visit_until_shutdown<T>(

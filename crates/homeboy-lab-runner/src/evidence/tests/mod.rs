@@ -132,6 +132,8 @@ fn mirror_refresh_recovers_terminal_evidence_from_the_exact_retained_generation(
     );
 }
 
+mod incremental;
+
 pub(crate) use crate::test_support::ssh_runner;
 fn terminal_runner_job() -> Job {
     Job {
