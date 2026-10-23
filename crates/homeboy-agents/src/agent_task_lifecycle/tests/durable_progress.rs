@@ -517,6 +517,72 @@ fn oversize_runner_transport_appends_a_bounded_projection() {
 }
 
 #[test]
+fn oversize_runner_message_appends_a_bounded_projection() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_detached_lab_run_with_submission_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: "durable-oversize-runner-message",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        },
+        &stub_lab_offload_submission,
+    )
+    .expect("running proxy");
+    // A remote `run-plan` prints its whole aggregate as one stdout event; an
+    // outcome with a large patch artifact grows it past the event bound.
+    let stdout = format!(
+        "{{\"command\":\"agent-task\",\"data\":{{\"changed_files\":\"{}\"}}}}",
+        "é".repeat(48 * 1024)
+    );
+    assert!(stdout.len() > 64 * 1024);
+    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+    snapshot.events = vec![homeboy_core::api_jobs::JobEvent {
+        sequence: 1,
+        job_id: snapshot.job.id,
+        kind: homeboy_core::api_jobs::JobEventKind::Stdout,
+        timestamp_ms: 42,
+        message: Some(stdout.clone()),
+        data: None,
+    }];
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("oversize runner stdout still reconciles");
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("replayed oversize runner stdout keeps the same receipt");
+
+    let events = durable_events(&lifecycle_store, &record.run_id);
+    let stdout_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "runner.stdout")
+        .collect();
+    assert_eq!(
+        stdout_events.len(),
+        1,
+        "the bounded projection appends once"
+    );
+    let message = stdout_events[0].data["message"].as_str().expect("message");
+    assert!(message.starts_with("{\"command\":\"agent-task\""));
+    assert!(message.contains(&format!("{} bytes", stdout.len())));
+    assert!(
+        message.contains(&homeboy_engine_primitives::content_hash::sha256_hex(
+            stdout.as_bytes()
+        ))
+    );
+    assert!(
+        serde_json::to_vec(&stdout_events[0].data)
+            .expect("data")
+            .len()
+            < 32 * 1024
+    );
+}
+
+#[test]
 fn conflicting_runner_event_digest_does_not_skip_silently() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
