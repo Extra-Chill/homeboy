@@ -134,8 +134,12 @@ impl RunnerEvidenceProvider for RunnerEvidence {
         super::super::execution::runner_job_cancel_projection(runner_id, job_id, durable_run_id)
     }
 
-    fn refresh_mirrored_daemon_evidence(&self, run_id: &str) -> Result<Option<Vec<RunRecord>>> {
-        super::mirror::refresh_mirrored_daemon_evidence(run_id)
+    fn refresh_run(
+        &self,
+        store: &homeboy_core::observation::ObservationStore,
+        run: &RunRecord,
+    ) -> Result<homeboy_core::observation::runs_service::runner_evidence::MirroredRunRefresh> {
+        super::mirror::refresh_mirrored_daemon_evidence(store, run)
     }
 
     fn mirrored_runner_job_identity(&self, run: &RunRecord) -> Option<(String, String)> {

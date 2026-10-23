@@ -2318,10 +2318,11 @@ fn completion_notify_pass(
     let Ok(store) = ObservationStore::open_initialized() else {
         return;
     };
-    crate::observation::runs_service::refresh_running_mirrored_daemon_evidence_best_effort_until(
-        &store, shutdown,
-    );
-    let running_after = list_running_run_ids(&store);
+    let Ok(running) = crate::observation::runs_service::running_runs(&store, 1000) else {
+        return;
+    };
+    let running_after =
+        crate::observation::runs_service::refresh_mirrored_runs_until(&store, running, shutdown);
     // Departure from the running set is only a *candidate* completion.
     // Confirm terminality against the record itself before reporting:
     // marking delivery is irreversible, so a run wrongly reported here
@@ -2430,21 +2431,6 @@ fn completion_notifications(
         notifications.push((crate::notify::stale_runs_summary(&stale_runs), None));
     }
     notifications
-}
-
-/// Every run currently marked running — exhaustively, not a page of them.
-///
-/// A bounded page here is a silent truncation, not a guard: the completion
-/// notifier's only signal is presence in this set, so any run the bound cuts off
-/// reads as "gone". `list_active_runs` is the unbounded query that exists for
-/// exactly this reason.
-fn list_running_run_ids(store: &crate::observation::ObservationStore) -> Vec<String> {
-    store
-        .list_active_runs()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|run| run.id)
-        .collect()
 }
 
 pub fn route(method: &str, path: &str) -> HttpResponse {

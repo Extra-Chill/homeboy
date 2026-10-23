@@ -53,6 +53,8 @@ pub(crate) struct MirrorEvidenceRequest<'a> {
     pub(crate) run_id: Option<&'a str>,
     pub(crate) run_ownership: MirrorRunOwnership,
     pub(crate) notification_route: Option<&'a NotificationRoute>,
+    pub(crate) existing: Option<&'a RunRecord>,
+    pub(crate) cursor: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -87,6 +89,8 @@ impl<'a> MirrorEvidenceRequest<'a> {
             run_id,
             run_ownership: MirrorRunOwnership::Inferred,
             notification_route,
+            existing: None,
+            cursor: None,
         }
     }
 
@@ -383,20 +387,96 @@ pub fn terminalize_mirrored_daemon_job(
     store.finish_run(&run.id, RunStatus::Fail, Some(metadata))
 }
 
-pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRecord>>> {
-    let store = ObservationStore::open_initialized()?;
-    let Some(run) = store.get_run(run_id)? else {
-        return Ok(None);
-    };
-    let Some((runner_id, job_id)) = mirrored_runner_job_identity(&run) else {
-        return Ok(None);
+pub fn refresh_mirrored_daemon_evidence(
+    store: &ObservationStore,
+    run: &RunRecord,
+) -> Result<homeboy_core::observation::runs_service::runner_evidence::MirroredRunRefresh> {
+    use homeboy_core::observation::runs_service::runner_evidence::MirroredRunRefresh;
+    let run_id = run.id.as_str();
+    let Some((runner_id, job_id)) = mirrored_runner_job_identity(run) else {
+        return Ok(MirroredRunRefresh {
+            run: run.clone(),
+            job: None,
+            events_pending: false,
+            runs: Vec::new(),
+        });
     };
     if crate::generation_store::has_retired_evidence_owner(&runner_id, Some(run_id), None)? {
-        return Ok(Some(vec![run]));
+        return Ok(MirroredRunRefresh {
+            run: run.clone(),
+            job: None,
+            events_pending: false,
+            runs: Vec::new(),
+        });
     }
     let runner = load(&runner_id)?;
-    let RunnerJobLogSnapshot { job, events } =
-        runner_job_log_snapshot_with_owner_recovery(&runner_id, &job_id)?;
+    let after = mirrored_last_sequence(run);
+    let snapshot = runner_job_log_snapshot_with_owner_recovery_with(
+        &runner_id,
+        &job_id,
+        || incremental_job_snapshot(&job_id, after, |path| daemon_api_get(&runner_id, path)),
+        crate::connection::reconnect_job_log_owner,
+        |session, id| {
+            incremental_job_snapshot(id, after, |path| {
+                crate::execution::daemon_api_get_for_session(session, path)
+            })
+        },
+        crate::connection::close_reconnected_job_log_owner,
+    )?;
+    refresh_snapshot(store, run, &runner, snapshot, || {
+        super::super::generation_store::reconcile(&runner_id).map(|_| ())
+    })
+}
+
+fn mirrored_last_sequence(run: &RunRecord) -> u64 {
+    run.metadata_json
+        .pointer("/lab/last_sequence")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            run.metadata_json
+                .pointer("/lab/remote_events")
+                .and_then(Value::as_array)
+                .and_then(|events| events.last())
+                .and_then(|event| event.get("sequence"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0)
+}
+
+pub(super) fn refresh_snapshot(
+    store: &ObservationStore,
+    run: &RunRecord,
+    runner: &Runner,
+    snapshot: (RunnerJobLogSnapshot, bool),
+    reconcile: impl FnOnce() -> Result<()>,
+) -> Result<homeboy_core::observation::runs_service::runner_evidence::MirroredRunRefresh> {
+    use homeboy_core::observation::runs_service::runner_evidence::MirroredRunRefresh;
+    let run_id = run.id.as_str();
+    let after = mirrored_last_sequence(run);
+    let (snapshot, events_pending) = snapshot;
+    let remote_job = snapshot.job.clone();
+    let RunnerJobLogSnapshot {
+        mut job,
+        events: new_events,
+    } = snapshot;
+    if events_pending && job.status.is_terminal() {
+        job.status = JobStatus::Running;
+        job.finished_at_ms = None;
+    }
+    let next = new_events.last().map_or(after, |event| event.sequence);
+    let count = run
+        .metadata_json
+        .pointer("/lab/remote_event_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        + new_events.len() as u64;
+    let mut events: Vec<JobEvent> = run
+        .metadata_json
+        .pointer("/lab/remote_events")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    events.extend(new_events);
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
     let cwd = run.cwd.as_deref().unwrap_or("");
     let command = run
@@ -404,28 +484,70 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         .as_ref()
         .map(|command| vec![command.clone()])
         .unwrap_or_default();
-    refresh_mirrored_daemon_evidence_with(
-        &store,
-        MirrorEvidenceRequest::new(
-            &runner,
-            cwd,
-            &command,
-            &job,
-            &events,
-            &result,
-            (run.kind == "runner-exec").then_some(run_id),
-            None,
-        ),
-        || {
-            if matches!(
-                job.status,
-                JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
-            ) {
-                super::super::generation_store::reconcile(&runner_id)?;
-            }
-            Ok(())
-        },
-    )
+    let mut request = MirrorEvidenceRequest::new(
+        runner,
+        cwd,
+        &command,
+        &job,
+        &events,
+        &result,
+        Some(run_id),
+        None,
+    );
+    request.existing = Some(run);
+    request.cursor = Some((next, count));
+    let runs = refresh_mirrored_daemon_evidence_with(store, request, || {
+        if matches!(
+            job.status,
+            JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+        ) {
+            reconcile()?;
+        }
+        Ok(())
+    })?
+    .unwrap_or_default();
+    let updated = runs
+        .iter()
+        .find(|row| row.id == run.id)
+        .cloned()
+        .unwrap_or_else(|| run.clone());
+    Ok(MirroredRunRefresh {
+        run: updated,
+        job: Some(remote_job),
+        events_pending,
+        runs,
+    })
+}
+
+pub(super) fn incremental_job_snapshot(
+    job_id: &str,
+    after: u64,
+    mut get: impl FnMut(&str) -> Result<Value>,
+) -> Result<(RunnerJobLogSnapshot, bool)> {
+    let job_data = get(&format!("/jobs/{job_id}"))?;
+    let job_body = canonical_daemon_body(&job_data, "daemon job response")?;
+    let job: Job = serde_json::from_value(job_body["job"].clone())
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let data = get(&format!(
+        "/jobs/{job_id}/watch?after_sequence={after}&limit={MIRRORED_REMOTE_EVENT_LIMIT}"
+    ))?;
+    let body = canonical_daemon_body(&data, "daemon job watch response")?;
+    if !body["failure"].is_null() {
+        return Err(Error::internal_unexpected(format!(
+            "daemon watch failed: {}",
+            body["failure"]
+        )));
+    }
+    let mut event_values = body["events"].clone();
+    if let Some(events) = event_values.as_array_mut() {
+        for event in events {
+            event["job_id"] = json!(job.id);
+        }
+    }
+    let events = serde_json::from_value(event_values)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let events_pending = job.status.is_terminal() && body["terminal"] != true;
+    Ok((RunnerJobLogSnapshot { job, events }, events_pending))
 }
 
 pub(super) fn refresh_mirrored_daemon_evidence_with<F>(
@@ -459,7 +581,7 @@ where
         } else {
             remote_runs
         };
-        if request.job.status == JobStatus::Failed
+        if (request.job.status == JobStatus::Failed || request.existing.is_some())
             && !runs.iter().any(|run| run.id == local_job_run.run.id)
         {
             runs.push(local_job_run.run.clone());
@@ -516,26 +638,11 @@ pub fn runner_job_log_snapshot(runner_id: &str, job_id: &str) -> Result<RunnerJo
     })
 }
 
-/// Refresh one mirrored run through its original daemon generation when the
-/// mutable admission daemon has rotated away from that job.
-fn runner_job_log_snapshot_with_owner_recovery(
-    runner_id: &str,
-    job_id: &str,
-) -> Result<RunnerJobLogSnapshot> {
-    runner_job_log_snapshot_with_owner_recovery_with(
-        runner_id,
-        job_id,
-        || runner_job_log_snapshot(runner_id, job_id),
-        |runner_id, job_id| crate::connection::reconnect_job_log_owner(runner_id, job_id),
-        |session, job_id| runner_job_log_snapshot_for_session(session, job_id),
-        crate::connection::close_reconnected_job_log_owner,
-    )
-}
-
 /// Keep the routing transaction independent from its direct-SSH transport so
 /// the exact owner selection remains deterministic and testable.
 pub(super) fn runner_job_log_snapshot_with_owner_recovery_with<
     Owner,
+    SnapshotValue,
     Current,
     Reconnect,
     Snapshot,
@@ -547,11 +654,11 @@ pub(super) fn runner_job_log_snapshot_with_owner_recovery_with<
     reconnect: Reconnect,
     snapshot: Snapshot,
     close: Close,
-) -> Result<RunnerJobLogSnapshot>
+) -> Result<SnapshotValue>
 where
-    Current: FnOnce() -> Result<RunnerJobLogSnapshot>,
+    Current: FnOnce() -> Result<SnapshotValue>,
     Reconnect: FnOnce(&str, &str) -> Result<Owner>,
-    Snapshot: FnOnce(&Owner, &str) -> Result<RunnerJobLogSnapshot>,
+    Snapshot: FnOnce(&Owner, &str) -> Result<SnapshotValue>,
     Close: FnOnce(&Owner),
 {
     match current() {
@@ -781,6 +888,27 @@ pub(super) fn mirror_job_run_request(
         "explicit_run_id": run_id,
         "result_availability": result_availability_metadata(job),
     });
+    if let Some((sequence, count)) = request.cursor {
+        lab["last_sequence"] = json!(sequence);
+        lab["remote_event_count"] = json!(count);
+        if let Some(previous) = request
+            .existing
+            .and_then(|run| run.metadata_json.get("lab"))
+        {
+            if result.as_object().is_some_and(|result| result.is_empty()) {
+                for key in [
+                    "result_summary",
+                    "source_snapshot",
+                    "agent_task_lifecycle_event",
+                    "failure",
+                ] {
+                    if let Some(value) = previous.get(key) {
+                        lab[key] = value.clone();
+                    }
+                }
+            }
+        }
+    }
     if let Some(failure) = runner_failure_projection(runner, job, result) {
         lab["failure"] = failure;
     }
@@ -796,6 +924,34 @@ pub(super) fn mirror_job_run_request(
     if run_id.is_none() {
         // Controller-generated ownership capability, never runner input.
         lab["synthetic_publication_token"] = Value::String(synthetic_token.clone());
+    }
+    if let Some(existing) = request.existing {
+        let mut metadata = existing.metadata_json.clone();
+        metadata["lab"] = lab;
+        if let Some(route) = notification_route {
+            route.insert_into_metadata(&mut metadata);
+        }
+        let mut run = if metadata == existing.metadata_json {
+            existing.clone()
+        } else {
+            store.update_run_metadata(&existing.id, metadata)?
+        };
+        if !controller_owns_observation(existing)
+            && job.status.is_terminal()
+            && existing.status == "running"
+        {
+            run = store.finish_run(
+                &existing.id,
+                RunStatus::from_label(job_status_as_run_status(job.status)).expect("mapped status"),
+                Some(run.metadata_json),
+            )?;
+        }
+        // Controller-owned rows are settled by the shared reconciler, not by
+        // runner metadata publication.
+        return Ok(MirroredJobRun {
+            run,
+            synthetic_ownership: None,
+        });
     }
     if let Some(run_id) = run_id {
         let run_ownership = if run_ownership == MirrorRunOwnership::Inferred

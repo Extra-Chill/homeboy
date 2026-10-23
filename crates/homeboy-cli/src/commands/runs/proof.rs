@@ -59,8 +59,8 @@ pub struct RunsProofOutput {
 
 pub fn proof(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
     runs_service::reconcile_owned_stale_running_runs(&store, 1000)?;
-    runs_service::require_run(&store, run_id)?;
-    runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);
+    let run = runs_service::require_run(&store, run_id)?;
+    runs_service::refresh_mirrored_daemon_evidence_best_effort(store, &run);
     let run = runs_service::require_run(&store, run_id)?;
     Ok((RunsOutput::Proof(build_proof(&run)?), 0))
 }

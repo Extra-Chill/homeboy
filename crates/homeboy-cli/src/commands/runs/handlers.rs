@@ -750,8 +750,6 @@ fn active_runner_job_run_summary_if_durable(
 
 pub(crate) fn show_run_in_store(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
     let run = runs_service::require_run(store, run_id)?;
-    runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(&run);
-    let run = runs_service::require_run(store, run_id)?;
     runs_service::reconcile_owned_stale_running_run(store, &run)?;
     let run = run_detail(store, run_id)?;
     let actionable = actionable_for_run_detail(&run);
