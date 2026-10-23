@@ -2572,7 +2572,7 @@ fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
         assert!(bounded["actionable"]["blocker"]
             .as_str()
             .expect("bounded concrete blocker")
-            .contains("no concrete executed model"));
+            .contains("non-recoverable: outcome has no immutable candidate"));
         assert_eq!(bounded["evidence_refs"][0]["run_id"], run_id);
         assert!(!bounded.to_string().contains("<run-id>"));
         assert_eq!(
@@ -2590,7 +2590,7 @@ fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
             .expect("blocked")["message"]
             .as_str()
             .expect("message")
-            .contains("no concrete executed model"));
+            .contains("non-recoverable: outcome has no immutable candidate"));
     });
 }
 
