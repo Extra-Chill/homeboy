@@ -570,10 +570,11 @@ fn require_run_reads_terminal_lab_review_alias_while_runner_probe_is_stalled() {
             unreachable!("local lookup must not mutate runner jobs")
         }
 
-        fn refresh_mirrored_daemon_evidence(
+        fn refresh_run(
             &self,
-            _run_id: &str,
-        ) -> Result<Option<Vec<RunRecord>>> {
+            _: &ObservationStore,
+            _: &RunRecord,
+        ) -> Result<super::runner_evidence::MirroredRunRefresh> {
             unreachable!("local lookup must not reconcile runner evidence")
         }
 

@@ -171,7 +171,6 @@ themselves.
 - `--all` — show all components regardless of current directory context
 - `--global` — show the local, count-only control-plane snapshot from any CWD; no component remote fetches or runner probes
 - `--outdated` — (project mode) show only components whose installed-on-target version is behind the latest release
-- `--timings` — include completed phase timings in JSON, useful when diagnosing slow status runs
 
 ## Scope selectors
 

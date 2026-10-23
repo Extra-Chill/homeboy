@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.7] - 2026-10-23
+
+### Changed
+- make mirrored-run polling incremental and reuse the caller's store
+- Retire LabOffloadOverhead, deploy phase_history timing and StatusTiming onto phase spans
+- Make run.phase_spans authoritative for Lab and release timings
+
+## [0.433.6] - 2026-10-23
+
+### Changed
+- drop stale subtree/gate tests and serialize git-spawning subtree tests
+- lab-runner: delete unreachable predecessor source-package scanner
+- Promote fresh Cook candidates from immutable commits (#16303 S2b)
+
+### Fixed
+- Fix retry event identities for operation claims and replacement gates
+
 ## [0.433.5] - 2026-10-23
 
 ### Changed

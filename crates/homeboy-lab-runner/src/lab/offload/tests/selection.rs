@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn real_offload_persists_selection_and_failed_preflight_spans() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        use homeboy_core::observation::{NewRunRecord, ObservationStore, ACTIVE_RUN_ID_ENV};
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(NewRunRecord::builder("test").build())
+            .expect("run");
+        let prior = std::env::var_os(ACTIVE_RUN_ID_ENV);
+        std::env::set_var(ACTIVE_RUN_ID_ENV, &run.id);
+        let args = vec!["homeboy".to_string(), "test".to_string()];
+        let result = execute_lab_offload(LabOffloadRequest {
+            placement_decision: test_placement_decision(
+                homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
+                Some("missing-runner"),
+            ),
+            command: Some(portable_lab_command("test")),
+            explicit_runner: Some("missing-runner"),
+            ..LabOffloadRequest::for_test(&args)
+        });
+        match prior {
+            Some(value) => std::env::set_var(ACTIVE_RUN_ID_ENV, value),
+            None => std::env::remove_var(ACTIVE_RUN_ID_ENV),
+        }
+        assert!(result.is_err());
+        let report = store.phase_spans(&run.id).expect("durable spans");
+        assert!(report
+            .span("stage.lab.selection")
+            .expect("selection")
+            .is_ok());
+        let preflight = report.span("stage.lab.preflight").expect("preflight");
+        assert_eq!(
+            preflight.status,
+            homeboy_core::phase_timing::PhaseStatus::Failed
+        );
+        assert!(preflight.duration_ms.is_some());
+        assert!(report.span("provider").is_none());
+        let hotspots = homeboy_core::performance_hotspots::phase_hotspots(
+            &store,
+            &homeboy_core::performance_hotspots::PhaseHotspotQuery {
+                last: 1,
+                ..Default::default()
+            },
+        )
+        .expect("hotspots");
+        assert_eq!(hotspots.runs_with_spans, 1);
+        assert!(hotspots
+            .phases
+            .iter()
+            .any(|phase| phase.phase == "stage.lab.selection"));
+        assert!(hotspots
+            .phases
+            .iter()
+            .any(|phase| phase.phase == "stage.lab.preflight" && phase.failed == 1));
+    });
+}
+
+#[test]
 fn busy_default_runner_fails_closed_for_release_gate() {
     let busy = RunnerAvailability::from_status_parts(
         "homeboy-lab",

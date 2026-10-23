@@ -113,8 +113,6 @@ pub(crate) fn runs_dossier_in_store(
     run_id: &str,
 ) -> CmdResult<RunsOutput> {
     let run = runs_service::require_run(store, run_id)?;
-    runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(&run);
-    let run = runs_service::require_run(store, run_id)?;
     runs_service::reconcile_owned_stale_running_run(store, &run)?;
     let (run, artifacts) = runs_service::load_run_with_artifacts(store, run_id)?;
     let artifact_index = evidence_report::evidence_artifact_index(&artifacts);

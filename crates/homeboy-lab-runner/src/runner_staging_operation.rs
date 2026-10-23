@@ -116,22 +116,14 @@ pub struct SourcePackageContributor {
     pub bytes: u64,
 }
 
+/// Read-only verdict of applying the sealed source-package policy to a tree.
 #[derive(Debug, Clone)]
-#[allow(
-    dead_code,
-    reason = "The scanner verdict is the public read-only surface."
-)]
 pub struct SourcePackageScan {
     pub verdict: SourcePackageCheckVerdict,
-    payloads: BTreeMap<String, SourcePackagePayload>,
 }
 
 /// Apply the same source policy as sealed Lab staging without creating a
 /// transfer, artifact, workspace, run, job, or connection.
-#[allow(
-    unreachable_code,
-    reason = "The finalized sealed builder is the scanner authority."
-)]
 pub fn scan_source_package(root: &Path) -> SourcePackageScan {
     // `from_directory` is the sealed package scanner/builder. Reuse its output
     // so this read-only surface cannot drift from staging's v1/v2 identity.
@@ -148,7 +140,7 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
                 .iter()
                 .map(|entry| entry.size_bytes)
                 .sum();
-            return SourcePackageScan {
+            SourcePackageScan {
                 verdict: SourcePackageCheckVerdict {
                     schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
                     valid: true,
@@ -163,304 +155,27 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
                     excluded,
                     blocked: Vec::new(),
                 },
-                payloads: BTreeMap::new(),
-            };
-        }
-        Err(error) => {
-            return SourcePackageScan {
-                verdict: SourcePackageCheckVerdict {
-                    schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
-                    valid: false,
-                    limits: source_package_limits(),
-                    accepted: None,
-                    partial: source_package_partial_from_error(&error).or(Some(
-                        SourcePackagePartial {
-                            file_count: 0,
-                            bytes: 0,
-                            largest_entries: Vec::new(),
-                        },
-                    )),
-                    excluded: Vec::new(),
-                    blocked: vec![SourcePackageFailure {
-                        kind: "source_package".to_string(),
-                        path: root.display().to_string(),
-                        message: error.message,
-                    }],
-                },
-                payloads: BTreeMap::new(),
-            };
-        }
-    }
-
-    #[cfg(unix)]
-    {
-        #[allow(unreachable_code)]
-        fn failure(kind: &str, path: &Path, message: impl Into<String>) -> SourcePackageFailure {
-            SourcePackageFailure {
-                kind: kind.to_string(),
-                path: path.display().to_string(),
-                message: message.into(),
             }
         }
-
-        fn tracked_symlinks(root: &Path) -> Result<BTreeSet<String>> {
-            let output = match Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(["ls-files", "--stage", "-z", "--", "."])
-                .output()
-            {
-                Ok(output) => output,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(BTreeSet::new())
-                }
-                Err(error) => {
-                    return Err(Error::internal_io(
-                        error.to_string(),
-                        Some(root.display().to_string()),
-                    ))
-                }
-            };
-            if !output.status.success() {
-                if String::from_utf8_lossy(&output.stderr).contains("not a git repository") {
-                    return Ok(BTreeSet::new());
-                }
-                return Err(Error::validation_invalid_argument(
-                    "source_path",
-                    "could not read Git tracking metadata for source package",
-                    Some(root.display().to_string()),
-                    None,
-                ));
-            }
-            Ok(output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|record| !record.is_empty())
-                .filter_map(|record| {
-                    let separator = record.iter().position(|byte| *byte == b'\t')?;
-                    let (metadata, path) = record.split_at(separator);
-                    let path = &path[1..];
-                    (metadata.starts_with(b"120000 ") && std::str::from_utf8(path).is_ok()).then(
-                        || {
-                            std::str::from_utf8(path)
-                                .expect("validated UTF-8")
-                                .replace('\\', "/")
-                        },
-                    )
-                })
-                .collect())
-        }
-
-        fn collect(
-            root: &Path,
-            directory: &Path,
-            tracked_links: &BTreeSet<String>,
-            payloads: &mut BTreeMap<String, SourcePackagePayload>,
-            exclusions: &mut Vec<SourcePackageExclusion>,
-            failures: &mut Vec<SourcePackageFailure>,
-        ) -> bool {
-            let entries = match fs::read_dir(directory) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    failures.push(failure(
-                        "unreadable_directory",
-                        directory,
-                        error.to_string(),
-                    ));
-                    return false;
-                }
-            };
-            let mut entries = match entries.collect::<std::result::Result<Vec<_>, _>>() {
-                Ok(entries) => entries,
-                Err(error) => {
-                    failures.push(failure(
-                        "unreadable_directory",
-                        directory,
-                        error.to_string(),
-                    ));
-                    return false;
-                }
-            };
-            entries.sort_by_key(|entry| entry.file_name());
-            for entry in entries {
-                let path = entry.path();
-                if path.strip_prefix(root).expect("walk remains under root") == Path::new(".git") {
-                    continue;
-                }
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        failures.push(failure("unreadable_entry", &path, error.to_string()));
-                        return false;
-                    }
-                };
-                if metadata.file_type().is_symlink() {
-                    let relative = path.strip_prefix(root).expect("walk remains under root");
-                    let relative = relative.to_string_lossy().replace('\\', "/");
-                    if !tracked_links.contains(&relative) {
-                        exclusions.push(SourcePackageExclusion {
-                            kind: "untracked_symlink".to_string(),
-                            path: path.display().to_string(),
-                        });
-                        continue;
-                    }
-                    let target = match fs::read_link(&path)
-                        .map_err(|error| {
-                            Error::internal_io(error.to_string(), Some(path.display().to_string()))
-                        })
-                        .and_then(|target| {
-                            target.into_os_string().into_string().map_err(|_| {
-                                Error::validation_invalid_argument(
-                                    "source_path",
-                                    "tracked source symlink target must be valid UTF-8 text",
-                                    Some(path.display().to_string()),
-                                    None,
-                                )
-                            })
-                        })
-                        .and_then(|target| source_package_symlink_verdict(&relative, &target))
-                    {
-                        Ok(verdict) => verdict,
-                        Err(_error) => {
-                            failures.push(failure(
-                            "tracked_symlink",
-                            &path,
-                            "tracked source symlink must have a relative target contained within the source root",
-                        ));
-                            return false;
-                        }
-                    };
-                    payloads.insert(
-                        relative,
-                        SourcePackagePayload::Symlink {
-                            target: target.target,
-                        },
-                    );
-                    if payloads.len() > MAX_SOURCE_PACKAGE_ENTRIES
-                        || payloads
-                            .values()
-                            .map(SourcePackagePayload::size_bytes)
-                            .sum::<u64>()
-                            > MAX_SOURCE_ARTIFACT_BYTES
-                    {
-                        failures.push(failure(
-                            "package_too_large",
-                            root,
-                            "source package exceeds configured entry or total size bounds",
-                        ));
-                        return false;
-                    }
-                    continue;
-                }
-                if metadata.is_dir() {
-                    if !collect(root, &path, tracked_links, payloads, exclusions, failures) {
-                        return false;
-                    }
-                    continue;
-                }
-                if !metadata.is_file() {
-                    failures.push(failure(
-                        "special_file",
-                        &path,
-                        "source package accepts only regular files and directories",
-                    ));
-                    return false;
-                }
-                let bytes = match read_regular_file_nofollow(&path) {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        failures.push(failure("unreadable_file", &path, error.to_string()));
-                        return false;
-                    }
-                };
-                let relative = path.strip_prefix(root).expect("walk remains under root");
-                payloads.insert(
-                    relative.to_string_lossy().replace('\\', "/"),
-                    SourcePackagePayload::File {
-                        content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                    },
-                );
-                if payloads.len() > MAX_SOURCE_PACKAGE_ENTRIES
-                    || payloads
-                        .values()
-                        .map(SourcePackagePayload::size_bytes)
-                        .sum::<u64>()
-                        > MAX_SOURCE_ARTIFACT_BYTES
-                {
-                    failures.push(failure(
-                        "package_too_large",
-                        root,
-                        "source package exceeds configured entry or total size bounds",
-                    ));
-                    return false;
-                }
-            }
-            true
-        }
-
-        let mut payloads = BTreeMap::new();
-        let mut exclusions = Vec::new();
-        let mut failures = Vec::new();
-        match fs::symlink_metadata(root) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                match tracked_symlinks(root) {
-                    Ok(tracked_links) => {
-                        collect(
-                            root,
-                            root,
-                            &tracked_links,
-                            &mut payloads,
-                            &mut exclusions,
-                            &mut failures,
-                        );
-                    }
-                    Err(error) => failures.push(failure("tracking_metadata", root, error.message)),
-                }
-            }
-            Ok(_) => failures.push(failure(
-                "invalid_root",
-                root,
-                "source package root must be a readable non-symlink directory",
-            )),
-            Err(error) => failures.push(failure("unreadable_root", root, error.to_string())),
-        }
-        if failures.is_empty() && payloads.is_empty() {
-            failures.push(failure(
-                "empty_root",
-                root,
-                "source package root must contain at least one regular file",
-            ));
-        }
-        let file_count = payloads.len();
-        let bytes = payloads
-            .values()
-            .map(SourcePackagePayload::size_bytes)
-            .sum();
-        let accepted = failures.is_empty().then(|| {
-            let package = source_package_bytes(&payloads);
-            SourcePackageAccepted {
-                package_format: source_package_format(&payloads).to_string(),
-                file_count,
-                bytes,
-                digest: format!("sha256:{:x}", Sha256::digest(&package)),
-            }
-        });
-        SourcePackageScan {
+        Err(error) => SourcePackageScan {
             verdict: SourcePackageCheckVerdict {
                 schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
-                valid: failures.is_empty(),
+                valid: false,
                 limits: source_package_limits(),
-                accepted,
-                partial: (!failures.is_empty()).then_some(SourcePackagePartial {
-                    file_count,
-                    bytes,
-                    largest_entries: source_package_contributors(&payloads),
-                }),
-                excluded: exclusions,
-                blocked: failures,
+                accepted: None,
+                partial: source_package_partial_from_error(&error).or(Some(SourcePackagePartial {
+                    file_count: 0,
+                    bytes: 0,
+                    largest_entries: Vec::new(),
+                })),
+                excluded: Vec::new(),
+                blocked: vec![SourcePackageFailure {
+                    kind: "source_package".to_string(),
+                    path: root.display().to_string(),
+                    message: error.message,
+                }],
             },
-            payloads,
-        }
+        },
     }
 }
 
@@ -605,40 +320,6 @@ fn source_package_limit_error(
         }
     });
     error
-}
-
-fn source_package_format(payloads: &BTreeMap<String, SourcePackagePayload>) -> &'static str {
-    if payloads
-        .values()
-        .any(|payload| matches!(payload, SourcePackagePayload::Symlink { .. }))
-    {
-        "homeboy/source-package-json/v2"
-    } else {
-        "homeboy/source-package-json/v1"
-    }
-}
-
-fn source_package_bytes(payloads: &BTreeMap<String, SourcePackagePayload>) -> Vec<u8> {
-    if source_package_format(payloads) == "homeboy/source-package-json/v2" {
-        serde_json::to_vec(payloads)
-    } else {
-        serde_json::to_vec(
-            &payloads
-                .iter()
-                .map(|(path, payload)| match payload {
-                    SourcePackagePayload::File { content_base64 } => (path, content_base64),
-                    SourcePackagePayload::Symlink { .. } => unreachable!("v1 has no links"),
-                })
-                .collect::<BTreeMap<_, _>>(),
-        )
-    }
-    .expect("source package serializes")
-}
-
-#[cfg(unix)]
-fn read_regular_file_nofollow(path: &Path) -> Result<Vec<u8>> {
-    fs::read(path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
 }
 
 /// The portable v2 representation of a tracked source symlink. Consumers that

@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 
 use homeboy_core::is_zero_u32;
-use homeboy_core::phase_timing::PhaseTimingReport;
 use homeboy_core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus};
 
 /// Ordered release plan shared by dry-run output and release execution.
@@ -196,8 +195,6 @@ pub struct ReleaseRunResult {
     pub(crate) warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) summary: Option<ReleaseRunSummary>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) phase_timings: Option<PhaseTimingReport>,
     /// Recorded only after a failed release has restored the checkout. This
     /// makes the result describe the durable exit state rather than mutations
     /// attempted before rollback.
@@ -1011,7 +1008,6 @@ mod tests {
             status: ReleaseStepStatus::Success,
             warnings: Vec::new(),
             summary: None,
-            phase_timings: None,
             rollback: None,
         };
 

@@ -415,7 +415,7 @@ pub(crate) struct LabDispatchExecutionContext<'a> {
     pub(crate) admission: Option<DaemonAdmissionReservation>,
     pub(crate) plan: HomeboyPlan,
     pub(crate) messages: Vec<String>,
-    pub(crate) overhead: LabOffloadOverhead,
+    pub(crate) observation: OffloadObservation,
     pub(crate) mirror_evidence: bool,
     pub(crate) print_handoff: bool,
     pub(crate) detach_after_handoff: bool,
@@ -647,8 +647,9 @@ pub(crate) fn exec_lab_context(
         &context.path_remaps,
     )?;
     context
-        .overhead
-        .record(LabOffloadPhase::Preflight, pre_dispatch_started.elapsed());
+        .observation
+        .timer
+        .record_ok("stage.lab.preflight", pre_dispatch_started.elapsed());
 
     // Persist the controller parent before the daemon accepts a child. This is
     // intentionally before `exec`: a controller timeout must leave status and
@@ -684,9 +685,25 @@ pub(crate) fn exec_lab_context(
         lab_runner_exec_options(&context, env, secret_env_names),
         Some(context.runner_status.clone()),
     );
-    context
-        .overhead
-        .record(LabOffloadPhase::Command, remote_exec_started.elapsed());
+    let command_phase = if context.contract.routing_policy.release_gate {
+        "gate"
+    } else {
+        "provider"
+    };
+    if exec_result
+        .as_ref()
+        .is_ok_and(|(_, exit_code)| *exit_code == 0)
+    {
+        context
+            .observation
+            .timer
+            .record_ok(command_phase, remote_exec_started.elapsed());
+    } else {
+        context
+            .observation
+            .timer
+            .record_failed(command_phase, remote_exec_started.elapsed());
+    }
     let (exec_output, exit_code) = match exec_result {
         Ok(output) => output,
         Err(err) => {
@@ -976,8 +993,8 @@ pub(crate) fn exec_lab_context(
         Some(path) => Some(download_lab_output_file(runner_id, path)?),
         None => None,
     };
-    context.overhead.record(
-        LabOffloadPhase::ArtifactImport,
+    context.observation.timer.record_ok(
+        "stage.lab.artifact_import",
         artifact_import_started.elapsed(),
     );
     if let Some(host_telemetry) = context.host_telemetry {
@@ -1485,7 +1502,7 @@ fn direct_readiness_fence_before_detached_staging(
     plan: &HomeboyPlan,
     hot_label: &str,
     release_gate: bool,
-    overhead: &mut LabOffloadOverhead,
+    observation: &mut OffloadObservation,
 ) -> Result<(Runner, RunnerStatusReport, Option<LabOffloadOutcome>)> {
     if !status
         .session
@@ -1523,7 +1540,7 @@ fn direct_readiness_fence_before_detached_staging(
         readiness.runner.settings.concurrency_limit,
         hot_label,
         release_gate,
-        overhead,
+        observation,
     )?;
     Ok((readiness.runner, readiness.status, fallback))
 }
@@ -1541,7 +1558,7 @@ fn detached_direct_staging_fallback_or_refusal(
     concurrency_limit: Option<usize>,
     hot_label: &str,
     release_gate: bool,
-    overhead: &mut LabOffloadOverhead,
+    observation: &mut OffloadObservation,
 ) -> Result<Option<LabOffloadOutcome>> {
     if let Some(outcome) = late_direct_identity_fallback(
         request,
@@ -1550,7 +1567,7 @@ fn detached_direct_staging_fallback_or_refusal(
         status,
         runner_homeboy,
         release_gate,
-        overhead,
+        observation,
     )? {
         return Ok(Some(outcome));
     }
@@ -1574,7 +1591,7 @@ fn late_direct_identity_fallback(
     status: &RunnerStatusReport,
     runner_homeboy: &serde_json::Value,
     release_gate: bool,
-    overhead: &mut LabOffloadOverhead,
+    observation: &mut OffloadObservation,
 ) -> Result<Option<LabOffloadOutcome>> {
     let Some(identity_drift) = status.stale_daemon.as_ref().filter(|warning| {
         status
@@ -1595,7 +1612,7 @@ fn late_direct_identity_fallback(
     }
 
     let reason = format!("runner_identity_drift: {}", identity_drift.message);
-    overhead.set_fallback_reason(&reason);
+    observation.set_fallback_reason(&reason);
     let mut metadata = lab_offload_metadata(
         plan,
         selection.source.metadata_value(),
@@ -1611,7 +1628,7 @@ fn late_direct_identity_fallback(
     metadata["final_placement"] = serde_json::json!("local");
     metadata["runner_jobs_created"] = serde_json::json!(0);
     metadata["transport_retry_attempts"] = serde_json::json!(0);
-    attach_lab_offload_overhead(&mut metadata, overhead);
+    attach_offload_selection(&mut metadata, observation);
 
     if let Some(target) = request.placement_outcome_target {
         agent_task_lifecycle::record_local_lab_identity_fallback(
@@ -1635,7 +1652,7 @@ pub(crate) fn run_lab_offload_inner(
     contract: LabOffloadCommand,
     mut plan: HomeboyPlan,
     mut messages: Vec<String>,
-    mut overhead: LabOffloadOverhead,
+    mut observation: OffloadObservation,
     prepared_runner_status: RunnerStatusReport,
 ) -> Result<LabOffloadOutcome> {
     // One store for the whole offload. Every phase record, plan read,
@@ -1677,7 +1694,7 @@ pub(crate) fn run_lab_offload_inner(
             &plan,
             contract.hot_label,
             contract.routing_policy.release_gate,
-            &mut overhead,
+            &mut observation,
         )?;
         if let Some(outcome) = fallback {
             return Ok(outcome);
@@ -1773,7 +1790,7 @@ pub(crate) fn run_lab_offload_inner(
             &runner_workspace_root,
             final_preflight_homeboy_path(converged_homeboy_path.as_deref(), &runner)?,
             &runner_status,
-            overhead,
+            observation,
         );
     }
 
@@ -1971,7 +1988,7 @@ pub(crate) fn run_lab_offload_inner(
         &runner_status,
         &runner_homeboy,
         contract.routing_policy.release_gate,
-        &mut overhead,
+        &mut observation,
     )? {
         return Ok(outcome);
     }
@@ -2063,21 +2080,15 @@ pub(crate) fn run_lab_offload_inner(
     let execution_toolchain = admission_plan.toolchain;
     let capability_plan = Some(admission_plan.capability);
     if let Some(capability_plan) = &capability_plan {
-        // Capability/daemon preflight is runner setup overhead (#3001); time it
-        // and record the elapsed duration on every exit path so a fallback-to-
-        // local still reports the attempted preflight cost.
-        let capability_preflight_started = std::time::Instant::now();
-        let decision = match evaluate_lab_runner_capabilities_for_runner(
-            &runner,
-            capability_plan,
-            selection.source.gate_mode(),
-        ) {
+        let decision = match observation.timer.time("stage.lab.preflight", || {
+            evaluate_lab_runner_capabilities_for_runner(
+                &runner,
+                capability_plan,
+                selection.source.gate_mode(),
+            )
+        }) {
             Ok(decision) => decision,
             Err(err) if matches!(selection.source, LabRunnerSelectionSource::Default) => {
-                overhead.record(
-                    LabOffloadPhase::Preflight,
-                    capability_preflight_started.elapsed(),
-                );
                 let reason = format!("runner capability preflight failed: {}", err.message);
                 plan = with_step(
                     plan,
@@ -2095,22 +2106,18 @@ pub(crate) fn run_lab_offload_inner(
                 {
                     return Err(local_execution_denied_error(&reason, Some(runner_id)));
                 }
-                overhead.set_fallback_reason(&reason);
+                observation.set_fallback_reason(&reason);
                 return automatic_capability_fallback(
                     &request,
                     plan,
                     runner_id,
                     &runner_status,
                     reason,
-                    &overhead,
+                    &observation,
                 );
             }
             Err(err) => return Err(err),
         };
-        overhead.record(
-            LabOffloadPhase::Preflight,
-            capability_preflight_started.elapsed(),
-        );
 
         let gate_result = decision.clone();
         match decision {
@@ -2144,7 +2151,7 @@ pub(crate) fn run_lab_offload_inner(
                         ))
                         .build(),
                     );
-                    overhead.set_fallback_reason(&reason);
+                    observation.set_fallback_reason(&reason);
                     return automatic_capability_fallback_or_error(
                         &request,
                         plan,
@@ -2153,7 +2160,7 @@ pub(crate) fn run_lab_offload_inner(
                         reason,
                         remediation,
                         &request.placement_decision,
-                        &overhead,
+                        &observation,
                     );
                 }
                 LabRunnerSelectionSource::Explicit => {
@@ -2248,7 +2255,7 @@ pub(crate) fn run_lab_offload_inner(
             output_file_content: Some(format!("{stdout}\n")),
         });
     }
-    let workspace_sync_timer = overhead.phase(LabOffloadPhase::SourceMaterialization);
+    let workspace_sync_timer = observation.timer.start("stage.lab.materialize");
     let workspace_stage = match prepare_lab_offload_workspace_stage(
         &request,
         crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(&contract),
@@ -2289,7 +2296,7 @@ pub(crate) fn run_lab_offload_inner(
             return Err(error);
         }
     };
-    workspace_sync_timer.finish();
+    drop(workspace_sync_timer);
     let LabOffloadWorkspaceStage {
         plan: next_plan,
         sync_mode,
@@ -2394,7 +2401,7 @@ pub(crate) fn run_lab_offload_inner(
         )?;
     }
 
-    let dependency_hydration_timer = overhead.phase(LabOffloadPhase::DependencyHydration);
+    let dependency_hydration_timer = observation.timer.start("stage.lab.hydrate");
     let component_id = request
         .durable_agent_task_plan
         .and_then(homeboy_agents::agent_task_service::cook_repository_identity_component_id);
@@ -2408,7 +2415,7 @@ pub(crate) fn run_lab_offload_inner(
             agent_task_run_id.as_deref(),
             component_id.as_deref(),
         )?;
-    dependency_hydration_timer.finish();
+    drop(dependency_hydration_timer);
     let dependency_hydration = recorded_dependency_hydration.hydration;
     plan = dependency_hydration.plan;
     if let Some(run_id) = agent_task_run_id.as_deref() {
@@ -2683,7 +2690,9 @@ pub(crate) fn run_lab_offload_inner(
                 return Err(error);
             }
         };
-    overhead.record(LabOffloadPhase::QueueAdmission, admission_started.elapsed());
+    observation
+        .timer
+        .record_ok("stage.lab.queue_admission", admission_started.elapsed());
     // Name the reservation on the durable record before anything else can fail.
     // Until this write lands the reservation exists only in this process, so an
     // operator who lost the caller cannot tell which admission belongs to which
@@ -2719,7 +2728,7 @@ pub(crate) fn run_lab_offload_inner(
         });
     // Admission is the final setup step before handing metadata to the runner.
     // Attach now so the published setup total includes every completed phase.
-    attach_lab_offload_overhead(&mut lab_metadata, &overhead);
+    attach_offload_selection(&mut lab_metadata, &observation);
     exec_lab_context(LabDispatchExecutionContext {
         request: &request,
         selection: &selection,
@@ -2771,7 +2780,7 @@ pub(crate) fn run_lab_offload_inner(
         admission: Some(admission),
         plan,
         messages,
-        overhead,
+        observation,
         mirror_evidence: true,
         print_handoff: true,
         detach_after_handoff: request.detach_after_handoff,
@@ -3310,7 +3319,7 @@ mod tests {
             admission: None,
             plan: base_lab_plan(None),
             messages: Vec::new(),
-            overhead: LabOffloadOverhead::start(),
+            observation: OffloadObservation::start(),
             mirror_evidence: false,
             print_handoff: false,
             detach_after_handoff: false,
@@ -3738,7 +3747,7 @@ mod tests {
                 &status,
                 &runner_homeboy,
                 false,
-                &mut LabOffloadOverhead::start(),
+                &mut OffloadObservation::start(),
             )
             .expect("fallback decision")
             .expect("automatic local fallback");
@@ -3797,7 +3806,7 @@ mod tests {
             None,
             "cook",
             false,
-            &mut LabOffloadOverhead::start(),
+            &mut OffloadObservation::start(),
         )
         .expect("detached admission fence")
         .is_none()
@@ -3817,7 +3826,7 @@ mod tests {
             &status,
             &runner_homeboy,
             false,
-            &mut LabOffloadOverhead::start(),
+            &mut OffloadObservation::start(),
         )
         .expect("explicit runner fails closed")
         .is_none());
@@ -3828,7 +3837,7 @@ mod tests {
             &status,
             &runner_homeboy,
             true,
-            &mut LabOffloadOverhead::start(),
+            &mut OffloadObservation::start(),
         )
         .expect("release gate fails closed")
         .is_none());
@@ -3860,7 +3869,7 @@ mod tests {
             &status,
             &runner_homeboy,
             false,
-            &mut LabOffloadOverhead::start(),
+            &mut OffloadObservation::start(),
         )
         .expect("disallowed fallback fails closed")
         .is_none());
@@ -3912,7 +3921,7 @@ mod tests {
                 None,
                 "cook",
                 false,
-                &mut LabOffloadOverhead::start(),
+                &mut OffloadObservation::start(),
             )
             .map(|outcome| {
                 if outcome.is_none() {

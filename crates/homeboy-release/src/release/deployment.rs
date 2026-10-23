@@ -944,7 +944,6 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: vec![],
                 summary: None,
-                phase_timings: None,
                 rollback: None,
             },
         };
@@ -1318,8 +1317,10 @@ mod tests {
                 events
                     .iter()
                     .map(|event| event.kind.as_str())
+                    .filter(|kind| *kind != "run.phase_spans")
                     .collect::<Vec<_>>(),
-                vec!["action.accepted", "action.succeeded"]
+                vec!["action.accepted", "action.succeeded"],
+                "phase timing events are expected; action events stay exactly once"
             );
             let recovered: ReleaseDeploymentResult =
                 serde_json::from_value(acknowledgement.result.data.clone())

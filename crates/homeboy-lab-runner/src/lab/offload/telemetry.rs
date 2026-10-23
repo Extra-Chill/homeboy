@@ -2,7 +2,7 @@
 //!
 //! Lab scale benchmarks (10/100/500/1000 clients) need to tell *workload*
 //! behavior apart from *runner capacity / cleanup* problems. The per-phase
-//! timing in [`super::overhead`] (#3001) explains where time went; this module
+//! timing in [`super::observation`] (#3001) explains where time went; this module
 //! captures the host-resource picture *around* the offloaded run boundary so a
 //! report can answer "did the runner run out of capacity?" and "did the run
 //! leave artifacts / child processes behind?".

@@ -226,18 +226,6 @@ impl ReleaseControlPlaneObservation {
         } else {
             RunStatus::Fail
         };
-        if let Some(report) = run.result.phase_timings.as_ref() {
-            let mut report = report.clone();
-            for span in &mut report.spans {
-                span.homeboy_version = homeboy_core::build_identity::current().version.clone();
-            }
-            if let Err(error) =
-                self.store
-                    .record_phase_spans(&self.context.release_run_id, "release", &report)
-            {
-                homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
-            }
-        }
         self.store.finish_running_run(
             &self.context.release_run_id,
             status,
@@ -337,7 +325,6 @@ mod tests {
                         status: ReleaseStepStatus::Success,
                         warnings: Vec::new(),
                         summary: None,
-                        phase_timings: None,
                         rollback: None,
                     },
                 })

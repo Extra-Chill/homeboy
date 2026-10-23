@@ -15,7 +15,28 @@ use homeboy_runner_contract::RunnerArtifactRef;
 use serde_json::Value;
 
 use crate::error::{Error, Result};
-use crate::observation::RunRecord;
+use crate::observation::{ObservationStore, RunRecord};
+
+/// One refresh transaction, independent of the runner transport.
+#[derive(Debug)]
+pub struct MirroredRunRefresh {
+    pub run: RunRecord,
+    pub job: Option<crate::api_jobs::Job>,
+    /// A terminal snapshot cannot settle the row until its event pages drain.
+    pub events_pending: bool,
+    pub runs: Vec<RunRecord>,
+}
+
+impl MirroredRunRefresh {
+    /// Only a drained terminal snapshot is sufficient settlement evidence.
+    pub fn reconciliation_job(&self) -> Option<&crate::api_jobs::Job> {
+        if self.events_pending {
+            None
+        } else {
+            self.job.as_ref()
+        }
+    }
+}
 
 /// A connected runner's status, slimmed to the fields `runs_service` needs.
 #[derive(Debug, Clone, Default)]
@@ -135,8 +156,20 @@ pub trait RunnerEvidenceProvider: Send + Sync {
         ))
     }
 
-    /// Refresh mirrored daemon evidence for a run, returning any mirrored runs.
-    fn refresh_mirrored_daemon_evidence(&self, run_id: &str) -> Result<Option<Vec<RunRecord>>>;
+    /// Refresh using the caller's store and selected row. The returned job is
+    /// the authoritative snapshot for reconciliation in this poll.
+    fn refresh_run(
+        &self,
+        _store: &ObservationStore,
+        run: &RunRecord,
+    ) -> Result<MirroredRunRefresh> {
+        Ok(MirroredRunRefresh {
+            run: run.clone(),
+            job: None,
+            events_pending: false,
+            runs: Vec::new(),
+        })
+    }
 
     /// The `(runner_id, job_id)` identity mirrored onto a run record, if any.
     fn mirrored_runner_job_identity(&self, run: &RunRecord) -> Option<(String, String)>;
@@ -214,10 +247,6 @@ impl RunnerEvidenceProvider for NoopRunnerEvidenceProvider {
         ))
     }
 
-    fn refresh_mirrored_daemon_evidence(&self, _run_id: &str) -> Result<Option<Vec<RunRecord>>> {
-        Ok(None)
-    }
-
     fn mirrored_runner_job_identity(&self, _run: &RunRecord) -> Option<(String, String)> {
         None
     }
@@ -266,11 +295,14 @@ pub(crate) fn reset_runner_evidence_provider_for_test() {
 
 /// Refresh runner-owned evidence and return its authenticated runner/job
 /// identities without exposing runner-specific metadata to consumers.
-pub fn mirrored_runner_job_identities(run_id: &str) -> Result<Vec<(String, String)>> {
+pub fn mirrored_runner_job_identities(
+    store: &ObservationStore,
+    run: &RunRecord,
+) -> Result<Vec<(String, String)>> {
     let mut identities = with_runner_evidence(|provider| -> Result<Vec<(String, String)>> {
         Ok(provider
-            .refresh_mirrored_daemon_evidence(run_id)?
-            .unwrap_or_default()
+            .refresh_run(store, run)?
+            .runs
             .iter()
             .filter_map(|run| provider.mirrored_runner_job_identity(run))
             .collect())
@@ -335,9 +367,12 @@ mod tests {
         let noop = NoopRunnerEvidenceProvider;
         assert!(noop.statuses().is_empty());
         assert!(noop.mirror_connected_runner_run("run-x").unwrap().is_none());
+        let temp = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(temp.path().join("runs.db")).unwrap();
         assert!(noop
-            .refresh_mirrored_daemon_evidence("run-x")
+            .refresh_run(&store, &run("run-x"))
             .unwrap()
+            .job
             .is_none());
     }
 
@@ -384,9 +419,6 @@ mod tests {
                 _: &str,
             ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
                 unreachable!()
-            }
-            fn refresh_mirrored_daemon_evidence(&self, _: &str) -> Result<Option<Vec<RunRecord>>> {
-                Ok(None)
             }
             fn mirrored_runner_job_identity(&self, _: &RunRecord) -> Option<(String, String)> {
                 None
@@ -445,9 +477,6 @@ mod tests {
             ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
                 unreachable!()
             }
-            fn refresh_mirrored_daemon_evidence(&self, _: &str) -> Result<Option<Vec<RunRecord>>> {
-                Ok(None)
-            }
             fn mirrored_runner_job_identity(&self, _: &RunRecord) -> Option<(String, String)> {
                 None
             }
@@ -496,9 +525,6 @@ mod tests {
             ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
                 unreachable!()
             }
-            fn refresh_mirrored_daemon_evidence(&self, _: &str) -> Result<Option<Vec<RunRecord>>> {
-                Ok(None)
-            }
             fn mirrored_runner_job_identity(&self, _: &RunRecord) -> Option<(String, String)> {
                 None
             }
@@ -540,16 +566,22 @@ mod tests {
             ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
                 unreachable!()
             }
-            fn refresh_mirrored_daemon_evidence(
+            fn refresh_run(
                 &self,
-                run_id: &str,
-            ) -> Result<Option<Vec<RunRecord>>> {
-                Ok(Some(match run_id {
-                    "duplicates" => vec![run("same"), run("same")],
-                    "none" => vec![run("no-identity")],
-                    "distinct" => vec![run("first"), run("second")],
-                    _ => Vec::new(),
-                }))
+                _: &ObservationStore,
+                selected: &RunRecord,
+            ) -> Result<MirroredRunRefresh> {
+                Ok(MirroredRunRefresh {
+                    run: selected.clone(),
+                    job: None,
+                    events_pending: false,
+                    runs: match selected.id.as_str() {
+                        "duplicates" => vec![run("same"), run("same")],
+                        "none" => vec![run("no-identity")],
+                        "distinct" => vec![run("first"), run("second")],
+                        _ => Vec::new(),
+                    },
+                })
             }
             fn mirrored_runner_job_identity(&self, run: &RunRecord) -> Option<(String, String)> {
                 match run.id.as_str() {
@@ -568,16 +600,19 @@ mod tests {
             }
         }
 
+        let temp = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(temp.path().join("runs.db")).unwrap();
         register_runner_evidence_provider(Box::new(FakeProvider));
         assert_eq!(
-            mirrored_runner_job_identities("duplicates").expect("duplicate identities"),
+            mirrored_runner_job_identities(&store, &run("duplicates"))
+                .expect("duplicate identities"),
             vec![("runner".to_string(), "job".to_string())]
         );
-        assert!(mirrored_runner_job_identities("none")
+        assert!(mirrored_runner_job_identities(&store, &run("none"))
             .expect("no identity")
             .is_empty());
         assert_eq!(
-            mirrored_runner_job_identities("distinct").expect("distinct identities"),
+            mirrored_runner_job_identities(&store, &run("distinct")).expect("distinct identities"),
             vec![
                 ("runner-a".to_string(), "job-a".to_string()),
                 ("runner-b".to_string(), "job-b".to_string()),
@@ -621,16 +656,30 @@ mod tests {
             unreachable!()
         }
 
-        fn refresh_mirrored_daemon_evidence(&self, run_id: &str) -> Result<Option<Vec<RunRecord>>> {
-            self.calls.lock().expect("calls").push(run_id.to_string());
-            if self.converge_target && run_id == "target" {
-                ObservationStore::open_initialized()?.finish_run(
-                    run_id,
+        fn refresh_run(
+            &self,
+            store: &ObservationStore,
+            run: &RunRecord,
+        ) -> Result<MirroredRunRefresh> {
+            self.calls.lock().expect("calls").push(run.id.clone());
+            let run = if self.converge_target && run.id == "target" {
+                store.finish_run(
+                    &run.id,
                     RunStatus::Pass,
                     Some(serde_json::json!({ "refreshed": true })),
-                )?;
-            }
-            self.error.clone().map_or(Ok(None), Err)
+                )?
+            } else {
+                run.clone()
+            };
+            self.error.clone().map_or(
+                Ok(MirroredRunRefresh {
+                    run,
+                    job: None,
+                    events_pending: false,
+                    runs: Vec::new(),
+                }),
+                Err,
+            )
         }
 
         fn mirrored_runner_job_identity(&self, run: &RunRecord) -> Option<(String, String)> {
@@ -663,6 +712,38 @@ mod tests {
     }
 
     #[test]
+    fn completion_refresh_derives_running_ids_from_the_supplied_page() {
+        let _lock = provider_lock().lock().expect("provider lock");
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().unwrap();
+            let mut target = mirrored_run("target");
+            target.metadata_json["lab"]["remote_job"]["id"] =
+                serde_json::json!("00000000-0000-4000-8000-000000000001");
+            store.import_run(&target).unwrap();
+            store.import_run(&run("local")).unwrap();
+            // Not part of this bounded page: must not be swept or added back.
+            store.import_run(&mirrored_run("outside-page")).unwrap();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            register_runner_evidence_provider(Box::new(SelectedRefreshProvider {
+                calls: calls.clone(),
+                error: None,
+                converge_target: true,
+            }));
+            let running = super::super::refresh_mirrored_runs_until(
+                &store,
+                vec![target, run("local")],
+                || false,
+            );
+            assert_eq!(running, vec!["local"]);
+            assert_eq!(*calls.lock().unwrap(), vec!["target"]);
+        });
+        provider_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+
+    #[test]
     fn selected_refresh_skips_unrelated_mirrors_and_non_mirrors() {
         let _lock = provider_lock().lock().expect("provider lock");
         with_isolated_home(|_| {
@@ -678,7 +759,10 @@ mod tests {
                 converge_target: false,
             }));
 
-            assert!(super::super::refresh_selected_mirrored_daemon_evidence(&selected).is_none());
+            assert!(
+                super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
+                    .is_none()
+            );
             assert!(calls.lock().expect("calls").is_empty());
         });
         provider_slot()
@@ -705,7 +789,7 @@ mod tests {
                 converge_target: false,
             }));
 
-            let err = super::super::refresh_selected_mirrored_daemon_evidence(&selected)
+            let err = super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
                 .expect("actionable refresh error");
             assert_eq!(err.details["http_status"], 404);
             assert_eq!(*calls.lock().expect("calls"), vec!["selected"]);
@@ -732,7 +816,7 @@ mod tests {
                 converge_target: false,
             }));
 
-            let err = super::super::refresh_selected_mirrored_daemon_evidence(&selected)
+            let err = super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
                 .expect("actionable refresh error");
             assert_eq!(err.message, "runner transport unavailable");
             assert_eq!(*calls.lock().expect("calls"), vec!["selected"]);
@@ -770,7 +854,9 @@ mod tests {
                 converge_target: true,
             }));
 
-            assert!(super::super::refresh_selected_mirrored_daemon_evidence(&target).is_none());
+            assert!(
+                super::super::refresh_selected_mirrored_daemon_evidence(&store, &target).is_none()
+            );
             assert_eq!(*calls.lock().expect("calls"), vec!["target"]);
             assert_eq!(
                 store

@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-use super::{refresh_selected_mirrored_daemon_evidence, selected_mirrored_daemon_job_status};
+use super::selected_mirrored_daemon_job_status;
 use crate::engine::run_dir;
 use crate::observation::{
     run_has_active_remote_job, run_owner_pid, ObservationStore, RunListFilter, RunRecord,
@@ -72,19 +72,45 @@ pub fn reconcile_owned_stale_running_run(
     store: &ObservationStore,
     run: &RunRecord,
 ) -> Result<Option<ReconciledRunSummary>> {
+    let refresh = match super::runner_evidence::with_runner_evidence(|p| p.refresh_run(store, run))
+    {
+        Ok(refresh) => refresh,
+        Err(_) => return Ok(None),
+    };
+    reconcile_owned_stale_running_run_with_snapshot(
+        store,
+        &refresh.run,
+        refresh.reconciliation_job(),
+    )
+}
+
+/// Reconcile with the job already fetched by this poll, never probing it again.
+pub fn reconcile_owned_stale_running_run_with_snapshot(
+    store: &ObservationStore,
+    run: &RunRecord,
+    job: Option<&crate::api_jobs::Job>,
+) -> Result<Option<ReconciledRunSummary>> {
     if run.status != RunStatus::Running.as_str() {
         return Ok(None);
     }
-    if store.expire_running_run_handoff(&run.id)?.is_some() {
-        return Ok(None);
+    if let Some(expired) = store.expire_running_run_handoff(&run.id)? {
+        return Ok(Some(ReconciledRunSummary {
+            id: expired.id,
+            kind: expired.kind,
+            previous_status: run.status.clone(),
+            status: expired.status,
+            started_at: expired.started_at,
+            finished_at: expired.finished_at,
+            owner_pid: run_owner_pid(run),
+            reason: "ownership handoff expired".to_string(),
+            artifact_count: store.list_artifacts(&run.id)?.len(),
+            remote_job_status: None,
+        }));
     }
     if handoff_is_transferring(run) {
         return Ok(None);
     }
-    let remote_status = match selected_mirrored_daemon_job_status(run) {
-        Ok(status) => status,
-        Err(_) => return Ok(None),
-    };
+    let remote_status = job.map(|job| job.status.as_str().to_string());
     // A focused read must not turn an unavailable runner probe into stale
     // evidence. Fleet reconciliation still applies its bounded orphan policy;
     // this path changes a single selected mirror only on explicit terminal
@@ -187,11 +213,6 @@ fn reconcile_orphaned_running_run(
     dry_run: bool,
 ) -> Result<Option<ReconciledRunSummary>> {
     let owner_pid = run_owner_pid(run);
-    if !dry_run {
-        // Candidate selection is entirely local. Refresh only a selected row,
-        // never the unrelated running mirrors that happen to share the store.
-        refresh_selected_mirrored_daemon_evidence(run);
-    }
     let artifact_count = if dry_run {
         store.list_artifacts(&run.id)?.len()
     } else {

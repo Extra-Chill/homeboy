@@ -91,15 +91,44 @@ impl WatchPoller for StorePoller<'_> {
     type Item = RunRecord;
 
     fn poll(&self, run_id: &str) -> homeboy::core::Result<RunRecord> {
-        let run = runs_service::require_run(self.store, run_id)?;
-        runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(&run);
-        let run = runs_service::require_run(self.store, run_id)?;
-        runs_service::reconcile_owned_stale_running_run(self.store, &run)?;
-        runs_service::require_run(self.store, run_id)
+        poll_run(self.store, run_id, |run| {
+            runs_service::runner_evidence::with_runner_evidence(|p| p.refresh_run(self.store, run))
+        })
     }
 
     fn is_terminal(&self, run: &RunRecord) -> bool {
         is_terminal_status(&run.status)
+    }
+}
+
+fn poll_run(
+    store: &ObservationStore,
+    run_id: &str,
+    refresh: impl FnOnce(
+        &RunRecord,
+    )
+        -> homeboy::core::Result<runs_service::runner_evidence::MirroredRunRefresh>,
+) -> homeboy::core::Result<RunRecord> {
+    let run = runs_service::require_run(store, run_id)?;
+    let refresh = match refresh(&run) {
+        Ok(refresh) => refresh,
+        Err(err) => {
+            eprintln!(
+                "Warning: could not refresh mirrored runner evidence for `{run_id}`: {}",
+                err.message
+            );
+            return Ok(run);
+        }
+    };
+    let settled = runs_service::reconcile_owned_stale_running_run_with_snapshot(
+        store,
+        &refresh.run,
+        refresh.reconciliation_job(),
+    )?;
+    if settled.is_some() {
+        runs_service::require_run(store, run_id)
+    } else {
+        Ok(refresh.run)
     }
 }
 
@@ -110,7 +139,7 @@ pub(crate) fn watch_run(store: &ObservationStore, args: RunsWatchArgs) -> CmdRes
         .transpose()?;
     let config = WatchConfig { interval, timeout };
 
-    let poller = StorePoller { store: &store };
+    let poller = StorePoller { store };
 
     let started = Instant::now();
     let run_id = args.run_id.clone();
@@ -365,6 +394,66 @@ mod tests {
     fn unknown_status_is_treated_as_terminal_failure() {
         assert!(is_terminal_status("definitely-not-a-status"));
         assert_eq!(exit_code_for_status("definitely-not-a-status"), 1);
+    }
+
+    #[test]
+    fn store_poll_reuses_the_refresh_snapshot_and_converges() {
+        use homeboy::core::observation::runs_service::runner_evidence::MirroredRunRefresh;
+        let temp = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(temp.path().join("runs.db")).unwrap();
+        let mut row = run_record("selected", "running");
+        row.metadata_json =
+            serde_json::json!({"lab": {"runner": {"id": "lab"}, "remote_job": {"id": "job"}}});
+        store.import_run(&row).unwrap();
+        let calls = Cell::new(0);
+        for status in ["running", "succeeded"] {
+            let observed = poll_run(&store, "selected", |run| {
+                calls.set(calls.get() + 1);
+                let job = serde_json::from_value(serde_json::json!({
+                    "id": "00000000-0000-4000-8000-000000000001", "operation": "exec",
+                    "status": status, "created_at_ms": 1, "updated_at_ms": 1,
+                    "event_count": 0, "artifacts": []
+                }))
+                .unwrap();
+                Ok(MirroredRunRefresh {
+                    run: run.clone(),
+                    job: Some(job),
+                    events_pending: false,
+                    runs: Vec::new(),
+                })
+            })
+            .unwrap();
+            assert_eq!(
+                observed.status,
+                if status == "running" {
+                    "running"
+                } else {
+                    "pass"
+                }
+            );
+        }
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn store_poll_settles_a_dead_local_owner_without_remote_evidence() {
+        use homeboy::core::observation::runs_service::runner_evidence::MirroredRunRefresh;
+        let temp = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(temp.path().join("runs.db")).unwrap();
+        let mut row = run_record("dead-owner", "running");
+        row.started_at = chrono::Utc::now().to_rfc3339();
+        row.metadata_json = serde_json::json!({"homeboy_run_owner": {"pid": 2147483647}});
+        store.import_run(&row).unwrap();
+        let observed = poll_run(&store, "dead-owner", |run| {
+            Ok(MirroredRunRefresh {
+                run: run.clone(),
+                job: None,
+                events_pending: false,
+                runs: Vec::new(),
+            })
+        })
+        .unwrap();
+        assert_eq!(observed.status, "stale");
     }
 
     #[test]

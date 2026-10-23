@@ -98,6 +98,110 @@ fn durable_events(
 }
 
 #[test]
+fn replacement_gate_retry_with_changed_results_gets_distinct_events() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "replacement-event-retry";
+    store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .unwrap();
+    for command in ["false", "true"] {
+        store.mutate_record(run_id, |record| {
+            record.metadata["cook_delivery"] = json!({"schema": "homeboy/cook-delivery/v2", "artifacts": {"promotions": [{
+                "status": "gate_failed",
+                "deterministic_gates": [{"command": [command], "status": "failed"}]
+            }]}});
+            true
+        }).expect("changed replacement gate evidence must append");
+    }
+    let events = durable_events(&store, run_id);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "gate.result")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn failed_action_retry_and_distinct_cooks_have_distinct_event_identities() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    for run_id in ["first-cook", "second-cook"] {
+        store
+            .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+            .unwrap();
+        let key = "control-plane-action:retry:https://github.com/example/repo/issues/1";
+        for attempt in [1, 2] {
+            assert_eq!(
+                claim_cook_operation_in_store(
+                    &store,
+                    run_id,
+                    key,
+                    std::time::Duration::from_secs(60)
+                )
+                .unwrap(),
+                ClaimOutcome::Acquired
+            );
+            fail_cook_operation_in_store(
+                &store,
+                run_id,
+                key,
+                json!({
+                    "outcome": "failed", "verify": [format!("gate-{attempt}")]
+                }),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            claim_cook_operation_in_store(&store, run_id, key, std::time::Duration::from_secs(60))
+                .unwrap(),
+            ClaimOutcome::Acquired
+        );
+        let result = json!({"outcome": "succeeded", "verify": ["corrected"]});
+        complete_cook_operation_in_store(&store, run_id, key, result.clone()).unwrap();
+        assert_eq!(
+            claim_cook_operation_in_store(&store, run_id, key, std::time::Duration::from_secs(60))
+                .unwrap(),
+            ClaimOutcome::AlreadyCompleted(result)
+        );
+        let before = durable_events(&store, run_id);
+        store.mutate_record(run_id, |_| true).unwrap();
+        assert_eq!(
+            durable_events(&store, run_id),
+            before,
+            "identical projection replays stored events"
+        );
+        assert_eq!(
+            before
+                .iter()
+                .filter(|event| event.kind == "action.accepted")
+                .count(),
+            3
+        );
+    }
+    let observation = store.open_observation_readonly().unwrap();
+    let first_receipts = observation
+        .control_plane_event_receipt_digests(&RunId::new("first-cook").unwrap())
+        .unwrap();
+    let second_receipts = observation
+        .control_plane_event_receipt_digests(&RunId::new("second-cook").unwrap())
+        .unwrap();
+    assert!(first_receipts
+        .iter()
+        .all(|key| !second_receipts.contains(key)));
+    let first = durable_events(&store, "first-cook");
+    let second = durable_events(&store, "second-cook");
+    for event in first
+        .iter()
+        .filter(|event| event.kind.starts_with("action."))
+    {
+        assert!(second.iter().all(|other| other.event != event.event));
+    }
+}
+
+#[test]
 fn reserve_provider_execution_appends_running_progress_once() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
