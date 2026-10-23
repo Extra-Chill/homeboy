@@ -555,6 +555,19 @@ pub fn refresh_homeboy_binary_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     options: HomeboyBinaryRefreshOptions,
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
+    let should_retire = !options.dry_run;
+    let runner_id = options.runner_id.clone();
+    let result = refresh_homeboy_binary_inner_in_roots(roots, options)?;
+    if should_retire && result.1 == 0 {
+        super::connection::retire_drained_generations(&load_in_roots(roots, &runner_id)?)?;
+    }
+    Ok(result)
+}
+
+fn refresh_homeboy_binary_inner_in_roots(
+    roots: &homeboy_core::paths::PathRoots,
+    options: HomeboyBinaryRefreshOptions,
+) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
     begin_refresh_live_progress("prepare");
     let _refresh_live = RefreshLiveGuard;
     let mut plan = plan_homeboy_binary_refresh_in_roots(roots, &options)?;

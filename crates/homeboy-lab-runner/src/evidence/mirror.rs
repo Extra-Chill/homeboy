@@ -190,13 +190,28 @@ pub(crate) fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<
 }
 
 pub(crate) fn validate_controller_artifact_bytes(artifact: &ArtifactRecord) -> Result<()> {
-    if artifact.artifact_type != "file" {
+    if !matches!(artifact.artifact_type.as_str(), "file" | "directory") {
         return Err(Error::validation_invalid_argument(
             "artifact.type",
-            "terminal artifact must be a controller-owned file",
+            "terminal artifact must be a controller-owned file or directory",
             Some(artifact.id.clone()),
             None,
         ));
+    }
+    // Directory publications carry a tree hash, not a file byte length.
+    // Classify them using the same tree checksum contract as publication.
+    if artifact.artifact_type == "directory" {
+        return match homeboy_core::artifact_links::classify_retained_artifact_availability(
+            artifact,
+        )? {
+            homeboy_core::artifact_links::RetainedArtifactAvailability::Available { .. } => Ok(()),
+            availability => Err(Error::validation_invalid_argument(
+                "artifact.sha256",
+                format!("controller directory evidence is unavailable: {availability:?}"),
+                Some(artifact.id.clone()),
+                None,
+            )),
+        };
     }
     let expected_size = artifact.size_bytes.ok_or_else(|| {
         Error::validation_invalid_argument(

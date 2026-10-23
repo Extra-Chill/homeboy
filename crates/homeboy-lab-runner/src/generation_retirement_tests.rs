@@ -318,12 +318,23 @@ fn controller_lifecycle_process() {
     assert!(!operations.reconcile_terminal_jobs(&stale));
     assert!(!operations.stop(&stale));
     assert_eq!(operations.active_jobs(&a), Some(0));
+    // A retained nonterminal controller record still fences retirement. A
+    // missing controller run, in contrast, has been released by retention.
+    ObservationStore::open_initialized()
+        .unwrap()
+        .start_run_with_id(
+            homeboy_core::observation::NewRunRecord::builder("lint")
+                .metadata(json!({"lab":{"runner":{"id":"runner-a"}}}))
+                .build(),
+            "retained-a".to_string(),
+        )
+        .unwrap();
     let blocked = reconcile("runner-a").unwrap();
     assert!(blocked.retired_generation_ids.is_empty());
     assert!(blocked
         .retirement_blockers
         .values()
-        .any(|reason| reason.contains("controller run is missing")));
+        .any(|reason| reason.contains("controller run is not terminal")));
 
     // Use the same verified-copy primitive as terminal mirroring. The source
     // bytes come from A's real HTTP artifact route, not a shared artifact root.
@@ -342,7 +353,7 @@ fn controller_lifecycle_process() {
         .unwrap();
     assert_eq!(bytes.as_ref(), BYTES);
     let store = ObservationStore::open_initialized().unwrap();
-    store.import_run(&run).unwrap();
+    store.upsert_imported_run_preserving_terminal(&run).unwrap();
     std::fs::write(
         sync().join("expected-run.json"),
         serde_json::to_vec(&run).unwrap(),
@@ -383,8 +394,33 @@ fn controller_lifecycle_process() {
         .retired_generation_ids
         .is_empty());
     activate("runner-a", &b, "C".to_string(), c.clone(), &[]).unwrap();
-    let second = reconcile("runner-a").unwrap();
-    assert_eq!(second.retired_generation_ids, ["B"]);
+    // A successful binary refresh invokes the same reconciler; no operator
+    // `runner reconcile` is needed to retire the idle, drained B generation.
+    crate::create(r#"{"id":"runner-a","kind":"local"}"#, false).unwrap();
+    let binary = sync().join("selected-homeboy");
+    std::fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"data\":{\"git_commit\":\"refresh-fixture\",\"git_dirty\":false}}'\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (_, exit) = crate::refresh_homeboy_binary(crate::HomeboyBinaryRefreshOptions {
+        runner_id: "runner-a".into(),
+        mode: crate::HomeboyBinaryRefreshMode::Select {
+            binary_path: binary.display().to_string(),
+        },
+        source: None,
+        git_ref: None,
+        target_dir: None,
+        reconnect: false,
+        force: false,
+        allow_downgrade: true,
+        dry_run: false,
+    })
+    .unwrap();
+    assert_eq!(exit, 0);
+    assert!(!read("runner-a")
+        .unwrap()
+        .unwrap()
+        .generations
+        .contains_key("B"));
     assert_eq!(live_sessions("runner-a").unwrap(), [c]);
     check_reads();
 }

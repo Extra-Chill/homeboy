@@ -353,9 +353,9 @@ pub(crate) use connection::daemon_endpoint_identity;
 pub use connection::{
     close_reconnected_job_log_owner, connect, connect_with_live_lease_adoption,
     connect_with_orphan_adoption, connect_with_unleased_candidate_reconciliation,
-    diagnostic_status, disconnect, disconnect_local_recovery, peer_session_maintenance,
-    persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
-    reconcile_status_with_outcome, reconcile_status_with_outcome_with_policy,
+    diagnostic_status, disconnect, disconnect_local_recovery, generation_retirement_readiness,
+    peer_session_maintenance, persisted_status, persisted_status_until, persisted_statuses,
+    reconcile_status, reconcile_status_with_outcome, reconcile_status_with_outcome_with_policy,
     reconcile_status_with_outcome_with_remote_attestation, reconcile_terminal_jobs,
     reconnect_job_log_owner, remote_lifecycle_plan, runner_artifact_content, status, statuses,
     statuses_indexed, PeerSessionMaintenanceReport, RunnerReconcileWithAttestationOutcome,

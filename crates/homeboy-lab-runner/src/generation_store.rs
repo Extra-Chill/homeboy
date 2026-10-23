@@ -53,6 +53,12 @@ fn path(runner_id: &str) -> Result<PathBuf> {
     Ok(path_in_root(&paths::homeboy()?, runner_id))
 }
 
+/// Lab-runner session discovery treats every JSON child as a session record,
+/// so retirement diagnostics live in a non-JSON sidecar.
+fn retirement_blockers_path(runner_id: &str) -> Result<PathBuf> {
+    Ok(path(runner_id)?.with_file_name("retirement-blockers.state"))
+}
+
 fn recovery_lock_path(runner_id: &str, generation: &str) -> Result<PathBuf> {
     let generation = generation
         .chars()
@@ -1779,8 +1785,9 @@ pub struct GenerationReconcilePolicy {
 }
 
 /// Result references are provenance, not a reason to keep a process alive.
-/// Only controller-owned, terminal records with verified bytes discharge the
-/// evidence obligation. Unknown/legacy references remain fail-closed.
+/// Deleted controller runs have released their evidence obligation. Retained
+/// runs must be terminal with verified controller-owned bytes and complete
+/// source inventories. Unknown/legacy references remain fail-closed.
 fn verify_retained_evidence(
     runner_id: &str,
     generations: &RollingGenerations<RunnerSession>,
@@ -1808,10 +1815,14 @@ fn verify_retained_evidence(
     let invalid = |id: &str, reason: &str| {
         Error::internal_unexpected(format!("retained evidence {id}: {reason}"))
     };
+    let mut released_runs = std::collections::BTreeSet::new();
     for id in &runs {
-        let run = store
-            .get_run(id)?
-            .ok_or_else(|| invalid(id, "controller run is missing"))?;
+        // Controller retention has already released this run's evidence.
+        // Absence is authoritative; storage errors above still fail closed.
+        let Some(run) = store.get_run(id)? else {
+            released_runs.insert(*id);
+            continue;
+        };
         let owner = run
             .metadata_json
             .pointer("/lab/runner/id")
@@ -1869,16 +1880,26 @@ fn verify_retained_evidence(
         }
     }
     for id in artifacts {
-        let artifact = store
-            .get_artifact(id)?
-            .ok_or_else(|| invalid(id, "controller artifact is missing"))?;
+        let Some(artifact) = store.get_artifact(id)? else {
+            // Retention may remove the run and its artifacts together. Only
+            // discharge an absent artifact when every run obligation was released.
+            if !runs.is_empty() && released_runs.len() == runs.len() {
+                continue;
+            }
+            return Err(invalid(id, "controller artifact is missing"));
+        };
+        if store.get_run(&artifact.run_id)?.is_none() {
+            continue;
+        }
         if !runs.contains(artifact.run_id.as_str()) {
             return Err(invalid(
                 id,
                 "artifact has no retained run owned by this generation",
             ));
         }
-        crate::evidence::validate_controller_artifact_bytes(&artifact)?;
+        if !released_runs.contains(artifact.run_id.as_str()) {
+            crate::evidence::validate_controller_artifact_bytes(&artifact)?;
+        }
     }
     Ok(())
 }
@@ -1955,6 +1976,95 @@ fn audit_ownership(generations: &RollingGenerations<RunnerSession>) -> Ownership
         );
     }
     audit
+}
+
+pub(crate) fn retirement_readiness(
+    runner_id: &str,
+) -> Result<std::collections::BTreeMap<String, Option<String>>> {
+    let Some(generations) = read(runner_id)? else {
+        return Ok(Default::default());
+    };
+    let operations = HttpGenerationEndpointOperations {
+        client: reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|error| Error::internal_unexpected(error.to_string()))?,
+    };
+    let runner = crate::load(runner_id).ok();
+    let remote = runner.as_ref().and_then(|runner| {
+        crate::connection::remote_daemon::resolve_ssh_runner(runner)
+            .ok()
+            .flatten()
+    });
+    if let Some((_, _, client)) = remote {
+        return retirement_readiness_with(
+            runner_id,
+            &generations,
+            &FallbackGenerationEndpointOperations {
+                primary: &operations,
+                fallback: &SshGenerationEndpointOperations { client: &client },
+            },
+        );
+    }
+    retirement_readiness_with(runner_id, &generations, &operations)
+}
+
+fn retirement_readiness_with(
+    runner_id: &str,
+    generations: &RollingGenerations<RunnerSession>,
+    operations: &impl GenerationEndpointOperations,
+) -> Result<std::collections::BTreeMap<String, Option<String>>> {
+    let audit = audit_ownership(generations);
+    let diagnostics_path = retirement_blockers_path(runner_id)?;
+    let previous: std::collections::BTreeMap<String, String> = std::fs::read(&diagnostics_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    Ok(generations
+        .generations
+        .iter()
+        .filter_map(|(id, entry)| {
+            if id == &generations.admission_owner
+                || entry.drain_state != crate::RollingDrainState::Draining
+            {
+                return None;
+            }
+            let reason = audit.retirement_blockers.get(id).cloned().or_else(|| {
+                if audit.fences_retirement {
+                    Some("generation ownership is ambiguous".to_string())
+                } else if entry.observed_active_jobs != Some(0) {
+                    Some(match entry.observed_active_jobs {
+                        Some(count) => format!("generation has {count} live jobs"),
+                        None => "generation active job count is unverified".to_string(),
+                    })
+                } else {
+                    verify_retained_evidence(
+                        runner_id,
+                        generations,
+                        id,
+                        &entry.endpoint,
+                        operations,
+                    )
+                    .err()
+                    .map(|error| error.to_string())
+                }
+            });
+            // Stop/settlement gates are mutating and cannot be retried by
+            // status. Preserve the last reconciler's exact reason for them.
+            let reason = reason.or_else(|| {
+                previous
+                    .get(id)
+                    .filter(|reason| {
+                        reason.as_str()
+                            == "authenticated idle stop or endpoint shutdown was not confirmed"
+                            || reason.as_str() == "ownership changed before stop"
+                    })
+                    .cloned()
+            });
+            Some((id.clone(), reason))
+        })
+        .collect())
 }
 
 pub(crate) fn reconcile(runner_id: &str) -> Result<GenerationReconcileResult> {
@@ -2347,6 +2457,10 @@ fn reconcile_with_operations(
             }
         }
         write(runner_id, &generations)?;
+        homeboy_core::engine::local_files::write_json_file(
+            &retirement_blockers_path(runner_id)?,
+            &retirement_blockers,
+        )?;
         Ok(retired)
     })?;
     // A release is only reported for generations that actually retired.
@@ -3315,6 +3429,7 @@ mod tests {
     #[derive(Default)]
     struct FakeEndpointOperations {
         queued: RefCell<Vec<crate::RunnerJob>>,
+        evidence: RefCell<std::collections::BTreeMap<String, serde_json::Value>>,
         cancelled: RefCell<Vec<(String, String)>>,
         active_jobs: RefCell<std::collections::BTreeMap<String, usize>>,
         terminal_reconcile_failures: RefCell<std::collections::BTreeSet<String>>,
@@ -3326,6 +3441,10 @@ mod tests {
     }
 
     impl GenerationEndpointOperations for FakeEndpointOperations {
+        fn evidence(&self, _: &RunnerSession, path: &str) -> Option<serde_json::Value> {
+            self.evidence.borrow().get(path).cloned()
+        }
+
         fn queued_jobs(&self, _session: &RunnerSession) -> Option<Vec<crate::RunnerJob>> {
             Some(self.queued.borrow().clone())
         }
@@ -3478,12 +3597,166 @@ mod tests {
         let current = session("lease-current", "daemon-current", Some(303));
         let mut generations = RollingGenerations::new("lease-current".to_string(), current);
         generations.begin("lease-idle", idle);
-        // A legacy run the controller never recorded: verification fails with
-        // "controller run is missing", like the Lab's pre-0.40 generations.
+        // A retained, nonterminal run is genuinely unverifiable.
+        let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+        store
+            .start_run_with_id(
+                homeboy_core::observation::NewRunRecord::builder("runner-exec")
+                    .metadata(serde_json::json!({"lab":{"runner":{"id":"runner-a"}}}))
+                    .build(),
+                "run-legacy".to_string(),
+            )
+            .unwrap();
         generations
             .run_owners
             .insert("run-legacy".to_string(), "lease-idle".to_string());
         write("runner-a", &generations).expect("persist generations");
+    }
+
+    #[test]
+    fn missing_controller_run_releases_evidence_without_attestation() {
+        test_support::with_isolated_home(|_| {
+            let idle = session("lease-idle", "daemon-idle", Some(101));
+            let current = session("lease-current", "daemon-current", Some(303));
+            let mut generations = RollingGenerations::new("lease-current".to_string(), current);
+            generations.begin("lease-idle", idle);
+            generations
+                .generations
+                .get_mut("lease-idle")
+                .unwrap()
+                .observed_active_jobs = Some(0);
+            generations
+                .run_owners
+                .insert("missing-run".into(), "lease-idle".into());
+            generations
+                .artifact_owners
+                .insert("deleted-artifact".into(), "lease-idle".into());
+            write("runner-a", &generations).unwrap();
+            let operations = FakeEndpointOperations::default();
+            operations.active_jobs.borrow_mut().extend([
+                ("lease-idle".to_string(), 0),
+                ("lease-current".to_string(), 0),
+            ]);
+            assert_eq!(
+                retirement_readiness("runner-a").unwrap().get("lease-idle"),
+                Some(&None)
+            );
+            let result = reconcile_with("runner-a", &operations).unwrap();
+            assert_eq!(result.retired_generation_ids, ["lease-idle"]);
+            assert!(result.evidence_blocked_generation_ids.is_empty());
+            assert!(result.released_unverified_evidence.is_empty());
+        });
+    }
+
+    #[test]
+    fn status_reports_idle_stop_blocker_without_retrying_stop() {
+        test_support::with_isolated_home(|_| {
+            let idle = session("lease-idle", "daemon-idle", Some(101));
+            let current = session("lease-current", "daemon-current", Some(303));
+            let mut generations = RollingGenerations::new("lease-current".to_string(), current);
+            generations.begin("lease-idle", idle);
+            write("runner-a", &generations).unwrap();
+            let operations = FakeEndpointOperations::default();
+            operations.active_jobs.borrow_mut().extend([
+                ("lease-idle".to_string(), 0),
+                ("lease-current".to_string(), 0),
+            ]);
+            operations
+                .stop_failures
+                .borrow_mut()
+                .insert("lease-idle".into());
+            let outcome = reconcile_with("runner-a", &operations).unwrap();
+            assert!(outcome.retired_generation_ids.is_empty());
+            let before = std::fs::read(path("runner-a").unwrap()).unwrap();
+            assert_eq!(
+                retirement_readiness("runner-a").unwrap()["lease-idle"],
+                Some(outcome.retirement_blockers["lease-idle"].clone())
+            );
+            assert_eq!(before, std::fs::read(path("runner-a").unwrap()).unwrap());
+            assert_eq!(operations.stopped_leases.borrow().len(), 1);
+        });
+    }
+
+    #[test]
+    fn controller_directory_artifact_is_verified_by_tree_classification() {
+        test_support::with_isolated_home(|home| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+            let run = homeboy_core::observation::RunRecord {
+                id: "directory-run".into(),
+                kind: "lint".into(),
+                status: "pass".into(),
+                started_at: "2026-10-23T00:00:00Z".into(),
+                finished_at: Some("2026-10-23T00:00:01Z".into()),
+                metadata_json: serde_json::json!({"lab":{"runner":{"id":"runner-a"}}}),
+                ..Default::default()
+            };
+            store.import_run(&run).unwrap();
+            let source = home.path().join("directory-source");
+            std::fs::create_dir_all(&source).unwrap();
+            std::fs::write(source.join("evidence.txt"), b"verified evidence").unwrap();
+            let artifact = store
+                .record_directory_artifact(&run.id, "evidence", &source)
+                .unwrap();
+            assert_eq!(artifact.artifact_type, "directory");
+            // The same local path must not make an unowned reference count as
+            // retained controller evidence. Classification precedes hashing.
+            let mut remote_reference = artifact.clone();
+            remote_reference.artifact_type = "remote_file".into();
+            assert!(matches!(
+                homeboy_core::artifact_links::classify_retained_artifact_availability(
+                    &remote_reference
+                )
+                .unwrap(),
+                homeboy_core::artifact_links::RetainedArtifactAvailability::Missing { .. }
+            ));
+            let idle = session("lease-idle", "daemon-idle", Some(101));
+            let current = session("lease-current", "daemon-current", Some(303));
+            let mut generations = RollingGenerations::new("lease-current".to_string(), current);
+            generations.begin("lease-idle", idle);
+            generations
+                .run_owners
+                .insert(run.id.clone(), "lease-idle".into());
+            generations
+                .artifact_owners
+                .insert(artifact.id.clone(), "lease-idle".into());
+            write("runner-a", &generations).unwrap();
+            let operations = FakeEndpointOperations::default();
+            operations.active_jobs.borrow_mut().extend([
+                ("lease-idle".to_string(), 0),
+                ("lease-current".to_string(), 0),
+            ]);
+            operations.evidence.borrow_mut().extend([
+                (
+                    "/runs/directory-run/artifacts".into(),
+                    serde_json::json!({"data":{"body":{"artifacts":[artifact.clone()]}}}),
+                ),
+                (
+                    "/runs/directory-run/findings".into(),
+                    serde_json::json!({"data":{"body":{"findings":[]}}}),
+                ),
+            ]);
+            // Tree verification is not an exemption: altered bytes block.
+            std::fs::write(
+                std::path::Path::new(&artifact.path).join("evidence.txt"),
+                b"tampered",
+            )
+            .unwrap();
+            assert!(reconcile_with("runner-a", &operations)
+                .unwrap()
+                .retired_generation_ids
+                .is_empty());
+            assert!(retirement_readiness("runner-a").unwrap()["lease-idle"]
+                .as_deref()
+                .unwrap()
+                .contains("directory evidence is unavailable"));
+            std::fs::write(
+                std::path::Path::new(&artifact.path).join("evidence.txt"),
+                b"verified evidence",
+            )
+            .unwrap();
+            let result = reconcile_with("runner-a", &operations).unwrap();
+            assert_eq!(result.retired_generation_ids, ["lease-idle"]);
+        });
     }
 
     /// #15653: by default an idle generation whose retained evidence cannot be
@@ -4246,6 +4519,15 @@ mod tests {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
 
+            let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+            store
+                .start_run_with_id(
+                    homeboy_core::observation::NewRunRecord::builder("runner-exec")
+                        .metadata(serde_json::json!({"lab":{"runner":{"id":"runner-a"}}}))
+                        .build(),
+                    "run-a".to_string(),
+                )
+                .unwrap();
             record_job("runner-a", &a, "job-a").expect("record A job");
             record_job_run("runner-a", "job-a", "run-a").expect("record A run");
             record_job_artifacts("runner-a", "job-a", ["artifact-a".to_string()])
