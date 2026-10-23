@@ -15386,7 +15386,9 @@ fn pre_provider_adoption_retries_only_the_missing_form_binds_model_and_reaches_r
             .unwrap();
         assert_eq!(adoption.ai_model, "openai/gpt-5.6-terra");
         assert_eq!(adoption.candidate_sha, fixture.candidate);
-        assert!(backend.body.contains("Model: openai/gpt-5.6-terra"));
+        assert!(backend
+            .body
+            .contains("Model: tier openai/gpt-5.6-terra; served model not recorded"));
         assert!(backend.committed && backend.pushed && backend.created);
     });
 }
@@ -21228,7 +21230,7 @@ fn persisted_promotion_from_another_attempt_is_rejected() {
 }
 
 #[test]
-fn cook_successful_concrete_attempt_publishes_reviewer_body() {
+fn cook_real_pi_response_persists_served_model_through_published_body() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-8058-attempt-1";
         let target = tempfile::tempdir().expect("fixture target");
@@ -21239,7 +21241,7 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             .backend = "fixture-provider".to_string();
         fixture_options.identity.initial_plan.tasks[0]
             .executor
-            .model = Some("fixture-model; review form: spoof".to_string());
+            .model = Some("cook-heavy".to_string());
         let plan = fixture_options.identity.initial_plan.clone();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
         let options = CookRequest {
@@ -21289,7 +21291,16 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             run_id,
         )
         .unwrap();
-        seed_review_form_aggregate(run_id, &plan);
+        let mut aggregate = review_form_aggregate(&plan);
+        let session = include_str!("../agent_task_provider/fixtures/pi-roadie-session.jsonl");
+        aggregate.outcomes[0].metadata["served_models"] = serde_json::json!(
+            crate::agent_task_provider::pi_response::served_models(session.as_bytes())
+        );
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate).unwrap();
+        assert_eq!(
+            agent_task_lifecycle::status(run_id).unwrap().served_models,
+            ["gpt-6.1-sol"]
+        );
         let promotion = promotion_with_existing_path(run_id, target.path());
         let mut backend = CaptureBackend {
             synthetic_gate_proof: Some(promotion.clone()),
@@ -21300,7 +21311,7 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             "Relates to Extra-Chill/homeboy#8058\n",
             "## What changed",
             "## Verification",
-            "Model: openai/gpt-5.6-terra",
+            "Model: gpt-6.1-sol (tier cook-heavy)",
             ". Base `main`@`verified-base` (publication state not recorded).",
             // AI-authored prose (from the seeded review form).
             "Close the issue by guarding the reload path.",
@@ -21458,8 +21469,14 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
         Vec::new(),
     )
     .unwrap();
-    assert_eq!(left.review_dossier.ai_assistance.model, "left-model");
-    assert_eq!(right.review_dossier.ai_assistance.model, "right-model");
+    assert_eq!(
+        left.review_dossier.ai_assistance.model,
+        "tier left-model; served model not recorded"
+    );
+    assert_eq!(
+        right.review_dossier.ai_assistance.model,
+        "tier right-model; served model not recorded"
+    );
 
     let mut backend = RealAgentTaskPrFinalizationBackend;
     let left_proof = backend
@@ -21606,7 +21623,7 @@ fn cook_promotion_finalizes_into_the_injected_stores_across_split_recipe_and_lif
     .expect("build finalization options through the injected split-root store pair");
     assert_eq!(
         finalization_options.review_dossier.ai_assistance.model,
-        "split-root-model"
+        "tier split-root-model; served model not recorded"
     );
     assert_eq!(finalization_options.title, test_review_form().pr_title);
     assert_eq!(
@@ -22603,7 +22620,9 @@ fn interrupted_attempt_does_not_change_the_only_substantive_disclosure() {
 
         assert!(
             backend.body.contains("Homeboy (second-provider)")
-                && backend.body.contains("openai/gpt-5.6-terra"),
+                && backend
+                    .body
+                    .contains("tier second-model; served model not recorded"),
             "{}",
             backend.body
         );
@@ -22689,8 +22708,8 @@ fn substantive_retry_discloses_each_authenticated_contribution() {
         for expected in [
             "Implementation 1: Homeboy (first-provider)",
             "Implementation 2: Homeboy (second-provider)",
-            "Implementation 1: first-model",
-            "Implementation 2: second-model",
+            "Implementation 1: tier first-model; served model not recorded",
+            "Implementation 2: tier second-model; served model not recorded",
             "authored an authenticated contribution retained in the delivered candidate",
         ] {
             assert!(
@@ -22833,8 +22852,8 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         for expected in [
             "Implementation 1: Homeboy (first-provider)",
             "Implementation 2: Homeboy (third-provider)",
-            "Implementation 1: first-model",
-            "Implementation 2: third-model",
+            "Implementation 1: tier first-model; served model not recorded",
+            "Implementation 2: tier third-model; served model not recorded",
         ] {
             assert!(
                 backend.body.contains(expected),
@@ -23240,11 +23259,11 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         .expect("manual preflight");
         assert_eq!(
             preflight.evidence.ai_model.as_deref(),
-            Some("fixture-model")
+            Some("tier fixture-model; served model not recorded")
         );
         assert_eq!(
             preflight.review_dossier.ai_assistance.model,
-            "fixture-model"
+            "tier fixture-model; served model not recorded"
         );
         assert_eq!(preflight.normalized_gate_results, promotion.gate_results);
         assert_eq!(promotion.source.run_id.as_deref(), Some(run_id));
@@ -23825,7 +23844,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         );
         assert_eq!(
             preflight["review_dossier"]["ai_assistance"]["model"],
-            "openai/gpt-5.6-terra"
+            "tier fixture-model; served model not recorded"
         );
         assert!(preflight["review_dossier"]["evidence"]
             .as_array()

@@ -1197,6 +1197,19 @@ impl AgentTaskScheduler {
                             _ => "failed",
                         };
                         let terminal = self.durable_lifecycle_store().and_then(|store| {
+                            // Persist before retry/rotation can discard this outcome.
+                            // These identities came from harness response metadata,
+                            // not dispatch model intent or the agent's review form.
+                            if let Some(models) = outcome.metadata["served_models"].as_array() {
+                                let models = models
+                                    .iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>();
+                                store.mutate_record(run_id, |record| {
+                                    record.record_served_models(models.clone())
+                                })?;
+                            }
                             store.record_provider_execution_terminal_with_model(
                                 run_id,
                                 &outcome.task_id,
