@@ -2495,6 +2495,7 @@ fn run_promotion_gates(
             options,
             worktree_path,
             expected_candidate,
+            committed_candidate,
             gate_workspace,
             observation_store,
         )
@@ -2512,6 +2513,7 @@ fn run_promotion_gates_inner(
     options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
+    committed_candidate: Option<&crate::agent_task::AgentTaskCandidate>,
     gate_workspace: Option<&Path>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PromotionGateRun> {
