@@ -582,25 +582,28 @@ pub struct RuntimeSourceRevisionProbe {
     pub timed_out: bool,
 }
 
-/// Resolve a runtime checkout's source revision under a bounded deadline.
+/// Resolve a runtime checkout's source revision.
 ///
-/// The git probe is the part that can wedge, so it runs under
-/// [`AGENT_RUNTIME_REVISION_PROBE_TIMEOUT`]. The `.source-revision` file
-/// fallback is a plain file read and stays available even when git timed out —
-/// a timed-out git probe still degrades to whatever the extracted install
-/// recorded, and only reports `timed_out` when no answer was found at all.
+/// Extracted installs (`runtime_package`) record their revision in
+/// `.source-revision` and are not git checkouts, so that plain file read wins
+/// whenever it exists and no git process is spawned. Only a checkout without
+/// the file (a dev checkout) probes git, and the git probe — the part that can
+/// wedge — still runs under [`AGENT_RUNTIME_REVISION_PROBE_TIMEOUT`] (#9763).
 pub fn runtime_source_revision_probe(path: &Path) -> RuntimeSourceRevisionProbe {
+    if let Ok(revision) = std::fs::read_to_string(path.join(".source-revision")) {
+        let revision = revision.trim();
+        if !revision.is_empty() {
+            return RuntimeSourceRevisionProbe {
+                revision: Some(revision.to_string()),
+                timed_out: false,
+            };
+        }
+    }
     let probe = crate::git::head_sha_within(path, AGENT_RUNTIME_REVISION_PROBE_TIMEOUT);
     let timed_out = probe.timed_out();
-    let revision = probe.resolved().or_else(|| {
-        std::fs::read_to_string(path.join(".source-revision"))
-            .ok()
-            .map(|revision| revision.trim().to_string())
-            .filter(|revision| !revision.is_empty())
-    });
     RuntimeSourceRevisionProbe {
-        timed_out: timed_out && revision.is_none(),
-        revision,
+        revision: probe.resolved(),
+        timed_out,
     }
 }
 
@@ -1068,7 +1071,7 @@ mod materialization_tests {
     }
 
     #[test]
-    fn revision_probe_falls_back_to_the_recorded_source_revision() {
+    fn revision_probe_returns_the_recorded_source_revision() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join(".source-revision"),
@@ -1082,6 +1085,52 @@ mod materialization_tests {
             probe.revision.as_deref(),
             Some("0123456789abcdef0123456789abcdef01234567")
         );
+        assert!(!probe.timed_out);
+    }
+
+    #[test]
+    fn revision_probe_prefers_the_recorded_source_revision_over_git() {
+        use crate::test_support::run_git_command as git;
+
+        // An installed runtime generation (`runtime_package`) sits inside a
+        // directory that carries `.source-revision` but no `.git`, while a dev
+        // checkout next to it resolves its revision from git. The recorded
+        // revision must win without spawning git at all: the surrounding
+        // repository's HEAD differs from the file, so a probe that consulted
+        // git first would answer with the HEAD instead.
+        let repo = tempfile::tempdir().expect("tempdir");
+        git(repo.path(), &["init", "--quiet"]);
+        std::fs::write(repo.path().join("README.md"), "hello\n").expect("write fixture file");
+        git(repo.path(), &["add", "README.md"]);
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        let head = crate::git::head_sha(repo.path()).expect("repo head");
+
+        let installed = repo.path().join("agent-runtimes/pi");
+        std::fs::create_dir_all(&installed).expect("create installed runtime dir");
+        std::fs::write(
+            installed.join(".source-revision"),
+            "444455556666777788889999aaaabbbbccccdddd\n",
+        )
+        .expect("write source revision");
+
+        let probe = runtime_source_revision_probe(&installed);
+
+        assert_eq!(
+            probe.revision.as_deref(),
+            Some("444455556666777788889999aaaabbbbccccdddd")
+        );
+        assert_ne!(probe.revision.as_deref(), Some(head.as_str()));
         assert!(!probe.timed_out);
     }
 
