@@ -704,7 +704,8 @@ fn runner_job_event_request(
                 .get("message")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .or_else(|| string_field(&data, "message")),
+                .or_else(|| string_field(&data, "message"))
+                .map(bounded_runner_message),
             "provider": string_field(&data, "provider")
                 .or_else(|| string_field(&data, "backend")),
             "phase": string_field(&data, "phase"),
@@ -740,6 +741,28 @@ fn bounded_runner_transport(data: Value) -> Value {
             .map(|object| object.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default(),
     })
+}
+
+/// Runner job messages are captured output, not progress text: a remote
+/// `agent-task run-plan` prints its whole aggregate as one stdout event, which
+/// grows with the outcome's artifacts past the event bound. The ledger keeps
+/// the head of an oversize message plus its size and digest; the full text
+/// stays in the runner job log.
+fn bounded_runner_message(message: String) -> String {
+    let limit = CONTROL_PLANE_EVENT_DATA_MAX_BYTES / 4;
+    if message.len() <= limit {
+        return message;
+    }
+    let end = (0..=limit)
+        .rev()
+        .find(|index| message.is_char_boundary(*index))
+        .unwrap_or(0);
+    format!(
+        "{}\n[runner message truncated: {} bytes, sha256 {}; read it from the runner job log]",
+        &message[..end],
+        message.len(),
+        homeboy_engine_primitives::content_hash::sha256_hex(message.as_bytes()),
+    )
 }
 
 pub(crate) fn canonical_action_events_own_operation(
