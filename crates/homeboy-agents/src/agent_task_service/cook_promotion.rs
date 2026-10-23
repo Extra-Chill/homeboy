@@ -1731,6 +1731,8 @@ pub fn record_replacement_gate_proof(
         // resolved policy here keeps that valid standard policy explicit.
         "environment_policy": replacement.deterministic_gates.iter().map(|gate| serde_json::json!({
             "gate_id": gate.id,
+            "runner_id": gate.environment.lab_runner,
+            "lab_receipt": gate.lab_receipt,
             "environment": gate.environment,
         })).collect::<Vec<_>>(),
     });
@@ -2174,6 +2176,15 @@ fn verify_replacement_gates_owned(
     external_authorization: String,
     interrupted_rerun_authorization: Option<String>,
 ) -> Result<AgentTaskPromotionReport> {
+    let mut gates = gates;
+    // Recovery admits new commands, not a new execution placement. Reuse the
+    // same durable placement default as fresh and continued Cook promotion.
+    if let Some(recipe) = super::cook_recipe::load_recipe_for_attempt(run_id)? {
+        super::cook_recipe::default_gate_lab_runner_from_attempt_dispatch(
+            &mut gates,
+            &recipe.promotion_transport["attempt_dispatch"],
+        );
+    }
     let accept_inherited_failures = gates.accept_inherited_failures;
     let gate_timeout = gates.gate_timeout();
     let admitted_component_id = gates.gate_environment.admitted_component_id.clone();
