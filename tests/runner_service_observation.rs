@@ -401,8 +401,6 @@ fn runner_service_lease_publication_race_retries_denial_and_preserves_job_identi
 #[cfg(unix)]
 #[test]
 fn service_runner_exec_waits_for_the_published_lease_and_diagnostics_stay_read_only() {
-    use std::os::unix::fs::PermissionsExt;
-
     homeboy_core::test_support::with_isolated_home(|home| {
         let binary = env!("CARGO_BIN_EXE_homeboy");
         let root = home.path();
@@ -466,7 +464,7 @@ fn service_runner_exec_waits_for_the_published_lease_and_diagnostics_stay_read_o
         let restart_waiting = root.join("service-restart-waiting");
         let publish_service = root.join("publish-service");
         let systemctl = fake_bin.join("systemctl");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &systemctl,
             format!(
                 r##"#!/bin/sh
@@ -482,10 +480,9 @@ esac
                 waiting = "service-restart-waiting",
                 release = "publish-service",
             ),
+            0o755,
         )
         .expect("write disposable systemctl shim");
-        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
-            .expect("make systemctl shim executable");
 
         let server_path = root
             .join(".config/homeboy/servers")

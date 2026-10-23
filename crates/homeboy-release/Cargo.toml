@@ -38,5 +38,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }
 
 [dev-dependencies]
+homeboy-test-support = { path = "../homeboy-test-support" }
+
 homeboy-agents = { version = "0.1.0", path = "../homeboy-agents" }
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

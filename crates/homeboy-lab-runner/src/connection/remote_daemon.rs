@@ -1603,21 +1603,16 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
 mod tests {
     use super::*;
     use homeboy_core::{server, test_support};
-    use std::os::unix::fs::PermissionsExt;
+
     use std::time::Instant;
 
     #[test]
     fn bounded_status_records_a_timed_out_remote_daemon_probe() {
         test_support::with_isolated_home(|home| {
             let daemon = home.path().join("slow-homeboy");
-            std::fs::write(&daemon, "#!/bin/sh\nsleep 1\n")
+            homeboy_test_support::write_executable(&daemon, "#!/bin/sh\nsleep 1\n", 0o755)
                 .expect("write slow remote Homeboy shim");
-            let mut permissions = std::fs::metadata(&daemon)
-                .expect("read remote Homeboy shim metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&daemon, permissions)
-                .expect("make remote Homeboy shim executable");
+
             server::create(
                 &serde_json::json!({ "id": "slow-runner", "host": "localhost", "user": "test" })
                     .to_string(),

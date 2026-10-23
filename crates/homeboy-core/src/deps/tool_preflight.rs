@@ -245,8 +245,7 @@ mod tests {
         );
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            homeboy_test_support::write_executable(&script, "#!/bin/sh\n", 0o755).unwrap();
         }
         assert!(program_is_available("./tool.sh", dir.path()));
         assert!(program_is_available(

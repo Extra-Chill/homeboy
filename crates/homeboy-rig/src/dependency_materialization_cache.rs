@@ -853,13 +853,11 @@ fn io_error(context: &str, error: std::io::Error) -> Error {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn tool(script: &str) -> tempfile::TempPath {
         let file = tempfile::NamedTempFile::new().expect("tool");
-        std::fs::write(file.path(), script).expect("tool script");
-        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o755))
-            .expect("tool mode");
+        homeboy_test_support::write_executable(file.path(), script, 0o755).expect("tool script");
+
         file.into_temp_path()
     }
 

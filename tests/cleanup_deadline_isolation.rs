@@ -1,7 +1,6 @@
 #![cfg(unix)]
 
 use serde_json::Value;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -150,18 +149,14 @@ impl CleanupHangFixture {
         let invoked = root.path().join("invoked");
         let release = root.path().join("release");
         let survivor = root.path().join("survivor");
-        std::fs::write(
-            &script,
-            format!(
+        homeboy_test_support::write_executable(&script, format!(
                 "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> '{}'\ncase \"$1\" in\n  repo_artifacts|retained_storage|controller_scratch)\n    (while [ ! -f '{}' ]; do sleep 0.01; done; touch '{}') &\n    while :; do sleep 1; done\n    ;;\nesac\n",
                 invoked.display(),
                 release.display(),
                 survivor.display(),
-            ),
-        )
+            ), 0o755)
         .expect("write cleanup fixture");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("make cleanup fixture executable");
+
         Self {
             root,
             script,

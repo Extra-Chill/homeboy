@@ -69,17 +69,11 @@ fn queued_binary_revalidates_target_before_install() {
 #[cfg(unix)]
 #[test]
 fn successful_same_version_noop_installer_does_not_prove_replacement() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().expect("target directory");
     let target = directory.path().join("homeboy");
-    std::fs::write(&target, "#!/bin/sh\necho 'homeboy 0.370.0'\n")
+    homeboy_test_support::write_executable(&target, "#!/bin/sh\necho 'homeboy 0.370.0'\n", 0o755)
         .expect("write installed fixture");
-    let mut permissions = std::fs::metadata(&target)
-        .expect("target metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&target, permissions).expect("make fixture executable");
+
     let checkpoint = ReplacementCheckpoint::pending(&target, Some("0.370.0"), None, None)
         .expect("capture replacement baseline");
 
@@ -93,18 +87,16 @@ fn successful_same_version_noop_installer_does_not_prove_replacement() {
 #[cfg(unix)]
 #[test]
 fn exact_source_bytes_prove_replacement_even_when_identity_probe_fails() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().expect("target directory");
     let target = directory.path().join("homeboy");
     let candidate = directory.path().join("candidate");
-    std::fs::write(&target, "#!/bin/sh\necho 'homeboy 0.370.0'\n# old\n")
-        .expect("write installed fixture");
-    let mut permissions = std::fs::metadata(&target)
-        .expect("target metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&target, permissions).expect("make fixture executable");
+    homeboy_test_support::write_executable(
+        &target,
+        "#!/bin/sh\necho 'homeboy 0.370.0'\n# old\n",
+        0o755,
+    )
+    .expect("write installed fixture");
+
     std::fs::write(&candidate, b"selected source bytes that cannot execute")
         .expect("write candidate bytes");
     let checkpoint = ReplacementCheckpoint::pending(
@@ -123,11 +115,7 @@ fn exact_source_bytes_prove_replacement_even_when_identity_probe_fails() {
 
 #[cfg(unix)]
 fn write_executable_fixture(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::write(path, body).expect("write executable fixture");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .expect("make fixture executable");
+    homeboy_test_support::write_executable(path, body, 0o755).expect("write executable fixture");
 }
 
 /// #15733: `homeboy upgrade --force` with the selected release already
@@ -152,7 +140,12 @@ fn already_active_exact_release_bytes_prove_replacement() {
     )
     .expect("capture replacement baseline");
 
-    std::fs::copy(&staged, &target).expect("reinstall identical bytes");
+    homeboy_test_support::write_executable(
+        &target,
+        std::fs::read(&staged).expect("read staged release"),
+        0o755,
+    )
+    .expect("reinstall identical bytes");
 
     assert!(replacement_was_applied(&checkpoint).expect("inspect identical release bytes"));
     assert_eq!(

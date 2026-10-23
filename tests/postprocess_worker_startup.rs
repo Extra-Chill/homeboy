@@ -34,17 +34,9 @@ impl AgentTaskExecutorAdapter for NoopExecutor {
 
 fn install_helper(home: &std::path::Path) {
     let helper = home.join("postprocess-helper");
-    std::fs::write(
-        &helper,
-        "#!/bin/sh\ncase \"$1\" in report) printf report > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;; esac\n",
-    )
+    homeboy_test_support::write_executable(&helper, "#!/bin/sh\ncase \"$1\" in report) printf report > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;; esac\n", 0o755)
     .expect("helper");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("helper permissions");
-    }
+
     let registry = home.join("postprocess-helpers.json");
     std::fs::write(
         &registry,

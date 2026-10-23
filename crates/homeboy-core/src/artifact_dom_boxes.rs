@@ -546,7 +546,7 @@ fn write_report(path: &Path, report: &DomBoxReport) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+
     use std::sync::Mutex;
 
     static PROVIDER_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -603,13 +603,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let provider = dir.path().join("dom-provider");
         let payload = serde_json::to_string(&payload).expect("provider payload");
-        std::fs::write(&provider, format!("#!/bin/sh\nprintf '%s' '{payload}'\n"))
-            .expect("provider");
-        let mut perms = std::fs::metadata(&provider)
-            .expect("metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&provider, perms).expect("chmod");
+        homeboy_test_support::write_executable(
+            &provider,
+            format!("#!/bin/sh\nprintf '%s' '{payload}'\n"),
+            0o755,
+        )
+        .expect("provider");
 
         let previous = env::var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND").ok();
         env::set_var(
@@ -779,18 +778,10 @@ mod tests {
         let _guard = PROVIDER_ENV_LOCK.lock().expect("provider env lock");
         let dir = tempfile::tempdir().expect("tempdir");
         let provider = dir.path().join("dom-provider");
-        std::fs::write(
-            &provider,
-            r#"#!/bin/sh
+        homeboy_test_support::write_executable(&provider, r#"#!/bin/sh
 printf '%s' '{"entrypoints":[{"page_path":"/index.html","page_url":"http://127.0.0.1/index.html","viewport":{"width":1440,"height":900,"device_scale_factor":1},"elements":[{"node_id":"12:34","node_name":"Hero","selector":"div[data-figma-node-id=\"12:34\"]","tag":"div","text_sample":"Hello world","boundingClientRect":{"x":1,"y":2,"width":3,"height":4,"top":2,"right":4,"bottom":6,"left":1},"computed_style":{"display":"block"},"text_metrics":{"line_count":1},"asset_state":{"loaded":true},"visibility":{"is_visible":true},"source":{"kind":"fixture"}}]}]}'
-"#,
-        )
+"#, 0o755)
         .expect("provider");
-        let mut perms = std::fs::metadata(&provider)
-            .expect("metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&provider, perms).expect("chmod");
 
         let previous = env::var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND").ok();
         env::set_var(

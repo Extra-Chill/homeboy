@@ -63,8 +63,6 @@ fn explicit_binary_upgrade_requires_the_selected_release_version() {
 #[cfg(unix)]
 #[test]
 fn binary_upgrade_verifies_the_path_active_destination_after_launcher_replacement() {
-    use std::os::unix::fs::PermissionsExt;
-
     // A promoted binary can replace a symlinked launcher. The old launcher path
     // is then gone, but a fresh PATH lookup reaches the installed executable.
     let directory = tempfile::tempdir().expect("tempdir");
@@ -74,18 +72,24 @@ fn binary_upgrade_verifies_the_path_active_destination_after_launcher_replacemen
     std::fs::create_dir_all(&installed_dir).expect("installed directory");
     let launcher = launcher_dir.join("homeboy");
     let installed = installed_dir.join("homeboy");
-    std::fs::write(&installed, "#!/bin/sh\nprintf 'homeboy 0.326.0\\n'\n")
-        .expect("old installed binary");
-    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755))
-        .expect("make old installed binary executable");
+    homeboy_test_support::write_executable(
+        &installed,
+        "#!/bin/sh\nprintf 'homeboy 0.326.0\\n'\n",
+        0o755,
+    )
+    .expect("old installed binary");
+
     std::os::unix::fs::symlink(&installed, &launcher).expect("launcher symlink");
 
     // Model the installer's promotion: publish the replacement, then retire the
     // launcher it had used before the promotion.
-    std::fs::write(&installed, "#!/bin/sh\nprintf 'homeboy 0.326.1\\n'\n")
-        .expect("replacement binary");
-    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755))
-        .expect("make replacement binary executable");
+    homeboy_test_support::write_executable(
+        &installed,
+        "#!/bin/sh\nprintf 'homeboy 0.326.1\\n'\n",
+        0o755,
+    )
+    .expect("replacement binary");
+
     std::fs::remove_file(&launcher).expect("retire replaced launcher");
     let path_var = format!("{}:{}", launcher_dir.display(), installed_dir.display());
 
@@ -177,14 +181,14 @@ fn staged_verification_names_the_stage_when_unverifiable() {
 #[cfg(unix)]
 #[test]
 fn staged_verification_rejects_a_wrong_candidate_version() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().expect("stage directory");
     let staged = directory.path().join("homeboy");
-    std::fs::write(&staged, "#!/bin/sh\nprintf 'homeboy 0.376.0\\n'\n")
-        .expect("write stale staged candidate");
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
-        .expect("make staged candidate executable");
+    homeboy_test_support::write_executable(
+        &staged,
+        "#!/bin/sh\nprintf 'homeboy 0.376.0\\n'\n",
+        0o755,
+    )
+    .expect("write stale staged candidate");
 
     let error = verify_staged_release_candidate("0.376.1", &staged)
         .expect_err("a wrong staged version must not verify");

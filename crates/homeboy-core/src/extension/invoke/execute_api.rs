@@ -511,14 +511,7 @@ mod tests {
     }
 
     fn write_executable(path: &std::path::Path, content: &str) {
-        fs::write(path, content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(path).unwrap().permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(path, permissions).unwrap();
-        }
+        homeboy_test_support::write_executable(path, content, 0o755).unwrap();
     }
 
     fn write_runnable_extension(home: &std::path::Path, id: &str, script: &str) {

@@ -3,17 +3,9 @@ use crate::commands::fuzz::execution::{effective_fuzz_run_id, ensure_strict_rig_
 
 fn install_fuzz_postprocess_helper(home: &std::path::Path) {
     let helper = home.join("fuzz-postprocess-helper");
-    std::fs::write(
-        &helper,
-        "#!/bin/sh\ncase \"$1\" in copy) cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;; missing) : ;; esac\n",
-    )
+    homeboy_test_support::write_executable(&helper, "#!/bin/sh\ncase \"$1\" in copy) cp \"$HOMEBOY_ARTIFACT_POSTPROCESS_INPUT\" \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;; missing) : ;; esac\n", 0o755)
     .expect("helper");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-            .expect("helper permissions");
-    }
+
     let registry = home.join("fuzz-postprocess-helpers.json");
     std::fs::write(
         &registry,

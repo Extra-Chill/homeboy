@@ -588,17 +588,13 @@ fn write_component_test_secret_fixture(home: &std::path::Path, source: &std::pat
         }"#,
     )
     .expect("extension manifest");
-    std::fs::write(extension_dir.join("test.sh"), "#!/bin/sh\nexit 0\n").expect("extension script");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let script = extension_dir.join("test.sh");
-        let mut permissions = std::fs::metadata(&script)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(script, permissions).expect("executable script");
-    }
+    homeboy_test_support::write_executable(
+        extension_dir.join("test.sh"),
+        "#!/bin/sh\nexit 0\n",
+        0o755,
+    )
+    .expect("extension script");
+
     std::fs::write(
         source.join("homeboy.json"),
         r#"{"id":"lab-test-secret-consumer","extensions":{"lab-test-secret-fixture":{}}}"#,

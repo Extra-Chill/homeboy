@@ -1194,7 +1194,7 @@ fn owned_worktree_survives_push_and_pr_boundary_until_finalization_and_cwd_exit(
             fs::create_dir(&bin).expect("fake gh bin");
             let gh_log = home.path().join("gh-cwd.log");
             let fake_gh = bin.join("gh");
-            fs::write(
+            homeboy_test_support::write_executable(
                 &fake_gh,
                 r#"#!/bin/sh
 if [ "$1 $2" = "pr create" ]; then
@@ -1203,14 +1203,10 @@ if [ "$1 $2" = "pr create" ]; then
   printf '%s\n' 'https://github.com/example/lifecycle-fixture/pull/13971'
 fi
 "#,
+                0o755,
             )
             .expect("write fake gh");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755))
-                    .expect("make fake gh executable");
-            }
+
             let mut command_path = std::ffi::OsString::from(bin.as_os_str());
             command_path.push(":");
             command_path.push(std::env::var_os("PATH").unwrap_or_default());

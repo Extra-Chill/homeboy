@@ -2425,14 +2425,8 @@ mod tests {
 
     #[cfg(unix)]
     fn write_executable(path: &std::path::Path, contents: &str) {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::write(path, contents).expect("write executable fixture");
-        let mut permissions = std::fs::metadata(path)
-            .expect("target metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("make target executable");
+        homeboy_test_support::write_executable(path, contents, 0o755)
+            .expect("write executable fixture");
     }
 
     #[test]

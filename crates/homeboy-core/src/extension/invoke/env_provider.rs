@@ -149,8 +149,6 @@ mod tests {
 
     #[cfg(unix)]
     fn install_provider_fixture(root: &Path, id: &str, output: &str) {
-        use std::os::unix::fs::PermissionsExt;
-
         let source = root.join(id);
         std::fs::create_dir_all(&source).expect("provider source directory");
         std::fs::write(
@@ -161,10 +159,13 @@ mod tests {
         )
         .expect("provider manifest");
         let script = source.join("env.sh");
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{output}'\n"))
-            .expect("provider script");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("provider executable");
+        homeboy_test_support::write_executable(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' '{output}'\n"),
+            0o755,
+        )
+        .expect("provider script");
+
         crate::extension::lifecycle::install(
             &source.display().to_string(),
             Some(id),

@@ -1521,8 +1521,7 @@ fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+
     use std::process::Command;
     use std::sync::Arc;
 
@@ -1633,13 +1632,8 @@ mod tests {
 
             let install_record = home.path().join("installed-source.txt");
             let command = home.path().join("fake-homeboy");
-            std::fs::write(
-                &command,
-                "#!/bin/sh\ncase \"$1 $2\" in\n  'rig sources') printf '%s' '{\"data\":{\"report\":{\"sources\":[]}}}' ;;\n  'rig install') printf '%s' \"$3\" > \"$HOMEBOY_TEST_INSTALL_SOURCE\"; printf '%s' '{\"data\":{\"installed\":[{\"id\":\"fixture-matrix\",\"path\":\"/runner/rigs/fixture-matrix\"}]}}' ;;\nesac\n",
-            )
+            homeboy_test_support::write_executable(&command, "#!/bin/sh\ncase \"$1 $2\" in\n  'rig sources') printf '%s' '{\"data\":{\"report\":{\"sources\":[]}}}' ;;\n  'rig install') printf '%s' \"$3\" > \"$HOMEBOY_TEST_INSTALL_SOURCE\"; printf '%s' '{\"data\":{\"installed\":[{\"id\":\"fixture-matrix\",\"path\":\"/runner/rigs/fixture-matrix\"}]}}' ;;\nesac\n", 0o755)
             .expect("fake homeboy");
-            std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755))
-                .expect("make fake homeboy executable");
 
             let mut runner = local_runner();
             runner.id = "relative-rig-source".to_string();

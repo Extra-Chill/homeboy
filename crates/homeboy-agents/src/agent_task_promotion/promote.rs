@@ -1890,15 +1890,9 @@ mod declared_base_tests {
 
     #[cfg(unix)]
     fn write_git_fixture(dir: &Path, script: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
         let git = dir.join("git");
-        std::fs::write(&git, script).expect("write Git fixture");
-        let mut permissions = std::fs::metadata(&git)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("make fixture executable");
+        homeboy_test_support::write_executable(&git, script, 0o755).expect("write Git fixture");
+
         git
     }
 

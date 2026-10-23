@@ -1450,17 +1450,9 @@ mod tests {
             .expect("extension manifest");
             fs::write(extension_dir.join(".source-revision"), "abc123\n").expect("revision");
             let command = home.path().join("extension-show");
-            fs::write(
-                &command,
-                "#!/bin/sh\nprintf '%s\\n' '{\"success\":true,\"data\":{\"extension\":{\"id\":\"rust\",\"ready\":true,\"source_revision\":\"old456\"}}}'\n",
-            )
+            homeboy_test_support::write_executable(&command, "#!/bin/sh\nprintf '%s\\n' '{\"success\":true,\"data\":{\"extension\":{\"id\":\"rust\",\"ready\":true,\"source_revision\":\"old456\"}}}'\n", 0o755)
             .expect("write command");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
-                    .expect("make command executable");
-            }
+
             let mut runner = runner_with_overlay("other", "/tmp/other", "unused");
             runner.settings.homeboy_path = Some(command.display().to_string());
             let resources_before = runner.resources.clone();
@@ -1609,13 +1601,9 @@ mod tests {
             )
             .expect("create runner");
             let command = home.path().join("extension-install");
-            fs::write(&command, "#!/bin/sh\nexit 0\n").expect("write command");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
-                    .expect("make command executable");
-            }
+            homeboy_test_support::write_executable(&command, "#!/bin/sh\nexit 0\n", 0o755)
+                .expect("write command");
+
             let plan = ExtensionParityPlan {
                 runner_id: "homeboy-lab".to_string(),
                 homeboy_path: command.display().to_string(),
@@ -1685,17 +1673,9 @@ mod tests {
             )
             .expect("create runner");
             let command = home.path().join("extension-show");
-            fs::write(
-                &command,
-                "#!/bin/sh\nprintf '%s\\n' '{\"success\":true,\"data\":{\"extension\":{\"id\":\"rust\",\"ready\":true,\"source_revision\":\"abc123\"}}}'\n",
-            )
+            homeboy_test_support::write_executable(&command, "#!/bin/sh\nprintf '%s\\n' '{\"success\":true,\"data\":{\"extension\":{\"id\":\"rust\",\"ready\":true,\"source_revision\":\"abc123\"}}}'\n", 0o755)
             .expect("write command");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
-                    .expect("make command executable");
-            }
+
             let mut runner = crate::load("homeboy-lab").expect("runner");
             runner.settings.homeboy_path = Some(command.display().to_string());
             let resources_before = runner.resources.clone();

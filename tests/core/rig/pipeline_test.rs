@@ -833,21 +833,9 @@ fn test_requirement_executable_reports_missing_tool() {
 }
 
 fn write_executable(path: &std::path::Path) {
-    std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("write executable");
-    make_executable(path);
+    homeboy_test_support::write_executable(path, "#!/bin/sh\nexit 0\n", 0o755)
+        .expect("write executable");
 }
-
-#[cfg(unix)]
-fn make_executable(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).expect("chmod");
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &std::path::Path) {}
 
 // ---- Dependency-aware ordering ---------------------------------------------
 

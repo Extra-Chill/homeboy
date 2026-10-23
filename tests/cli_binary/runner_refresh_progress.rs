@@ -32,12 +32,8 @@ fn refresh_emits_early_heartbeat_and_reuses_terminal_ids_for_success_and_failure
     );
 
     let success_binary = context.root().join("slow-homeboy");
-    fs::write(
-        &success_binary,
-        "#!/bin/sh\nsleep 2\nprintf '%s\\n' '{\"data\":{\"version\":\"0.383.10\",\"display\":\"homeboy 0.383.10+fixture\",\"git_commit\":\"fixture\",\"git_dirty\":false}}'\n",
-    )
+    homeboy_test_support::write_executable(&success_binary, "#!/bin/sh\nsleep 2\nprintf '%s\\n' '{\"data\":{\"version\":\"0.383.10\",\"display\":\"homeboy 0.383.10+fixture\",\"git_commit\":\"fixture\",\"git_dirty\":false}}'\n", 0o755)
     .expect("write slow identity fixture");
-    make_executable(&success_binary);
 
     let (success, success_status, _) = run_refresh(&context, &success_binary);
     assert_eq!(success_status, Some(0));
@@ -45,9 +41,9 @@ fn refresh_emits_early_heartbeat_and_reuses_terminal_ids_for_success_and_failure
     let success_run_id = terminal_run_id(&success);
 
     let failure_binary = context.root().join("slow-failing-homeboy");
-    fs::write(&failure_binary, "#!/bin/sh\nsleep 2\nexit 23\n")
+    homeboy_test_support::write_executable(&failure_binary, "#!/bin/sh\nsleep 2\nexit 23\n", 0o755)
         .expect("write slow failure fixture");
-    make_executable(&failure_binary);
+
     let (failure, failure_status, _) = run_refresh(&context, &failure_binary);
     assert_ne!(failure_status, Some(0));
     assert_eq!(failure["success"], false);
@@ -127,16 +123,4 @@ fn terminal_run_id(envelope: &Value) -> String {
         .as_str()
         .expect("terminal run id")
         .to_string()
-}
-
-fn make_executable(binary: &Path) {
-    let mut permissions = fs::metadata(binary)
-        .expect("fixture metadata")
-        .permissions();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        permissions.set_mode(0o755);
-        fs::set_permissions(binary, permissions).expect("make fixture executable");
-    }
 }

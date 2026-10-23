@@ -1670,18 +1670,18 @@ mod tests {
         let fixture = tempdir().expect("fixture");
         let homeboy = fixture.path().join("configured-homeboy");
         let git = fixture.path().join("configured-git");
-        fs::write(
+        homeboy_test_support::write_executable(
             &homeboy,
             "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nexit 1\n",
+            0o755,
         )
         .expect("write configured homeboy");
-        fs::write(
+        homeboy_test_support::write_executable(
             &git,
             "#!/bin/sh\n[ \"$1\" = configured-version ] && exit 0\nexit 1\n",
+            0o755,
         )
         .expect("write git on PATH");
-        make_executable(&homeboy);
-        make_executable(&git);
 
         let runner = Runner {
             id: "local".to_string(),
@@ -1774,12 +1774,12 @@ mod tests {
     fn runner_tool_capability_probe_resolves_env_backed_binary() {
         let temp = tempdir().expect("tempdir");
         let bin = temp.path().join("wp-codebox-fixture");
-        fs::write(
+        homeboy_test_support::write_executable(
             &bin,
             "#!/bin/sh\n[ \"$1\" = wordpress.editor-validate-blocks ] && exit 0\nexit 2\n",
+            0o755,
         )
         .expect("write tool");
-        make_executable(&bin);
 
         let mut runner = Runner {
             id: "local".to_string(),
@@ -1959,18 +1959,6 @@ mod tests {
         assert_eq!(error.details["probe"]["stderr"], "transport warning");
         assert_eq!(error.details["probe"]["missing_tool_records"][0], "git");
     }
-
-    #[cfg(unix)]
-    fn make_executable(path: &std::path::Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).expect("chmod");
-    }
-
-    #[cfg(not(unix))]
-    fn make_executable(_path: &std::path::Path) {}
 
     #[test]
     fn every_required_runner_tool_has_doctor_metadata() {

@@ -1,7 +1,6 @@
 use super::*;
 use clap::Parser;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 #[derive(Parser)]
 struct Cli {
@@ -51,7 +50,7 @@ fn fixture(home: &Path, mode: &str) -> (std::path::PathBuf, String, String) {
             "input_schema":review::ai::REQUEST_SCHEMA, "output_schema":review::ai::RESPONSE_SCHEMA
         },"produces":[{"kind":"evidence","schema":review::ai::RESPONSE_SCHEMA}]}]
     })).unwrap()).unwrap();
-    fs::write(extension.join("review.py"), r#"#!/usr/bin/env python3
+    homeboy_test_support::write_executable(extension.join("review.py"), r#"#!/usr/bin/env python3
 import json, sys, time
 r=json.load(sys.stdin)
 mode=r['settings']['mode']
@@ -65,12 +64,8 @@ o={'schema':'homeboy/ai-review-response/v1','execution':'skipped' if mode=='skip
    'findings':[{'tool':'fixture','severity':'warning','message':'Validate this caller','location':{'file':'source.txt','line':1}}],
    'reason':'diff cap' if mode=='skip' else None,'provenance':{'model':'fixture'},'usage':{'cost_usd':0.12}}
 print(json.dumps(o))
-"#).unwrap();
-    fs::set_permissions(
-        extension.join("review.py"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
+"#, 0o755).unwrap();
+
     (repo, base, head)
 }
 

@@ -385,17 +385,14 @@ mod tests {
 
     #[cfg(unix)]
     fn install_provider(manifest: &str, script: &str) {
-        use std::os::unix::fs::PermissionsExt;
-
         let extension_dir = homeboy_paths::extensions()
             .expect("extensions directory")
             .join("fixture");
         std::fs::create_dir_all(&extension_dir).expect("extension directory");
         std::fs::write(extension_dir.join("fixture.json"), manifest).expect("manifest");
         let script_path = extension_dir.join("env.sh");
-        std::fs::write(&script_path, script).expect("provider script");
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
-            .expect("provider executable");
+        homeboy_test_support::write_executable(&script_path, script, 0o755)
+            .expect("provider script");
     }
 
     #[test]

@@ -6514,8 +6514,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_budget_draining_category_cannot_starve_later_categories_across_passes() {
-        use std::os::unix::fs::PermissionsExt;
-
         homeboy::test_support::with_isolated_home(|root| {
             let mut config = defaults::load_config();
             config.retention.automatic_retention_max_run_seconds = 1;
@@ -6524,13 +6522,13 @@ mod tests {
             std::fs::create_dir_all(&runtime_tmp).expect("runtime temp root");
             // The first category in the sweep drains the entire budget.
             let fixture = root.path().join("drain-budget.sh");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &fixture,
                 "#!/bin/sh\n[ \"$1\" = terminal_runs ] && sleep 1.3\nexit 0\n",
+                0o755,
             )
             .expect("write fixture");
-            std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755))
-                .expect("make fixture executable");
+
             let previous_tmp = std::env::var_os("HOMEBOY_RUNTIME_TMPDIR");
             let previous_fixture = std::env::var_os(CLEANUP_CATEGORY_FIXTURE_ENV);
             std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", &runtime_tmp);

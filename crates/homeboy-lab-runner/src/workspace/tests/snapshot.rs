@@ -107,17 +107,9 @@ fn snapshot_git_readback_failure_rolls_back_remote_workspace_and_registration() 
         let runner_root = tempfile::tempdir().expect("runner root");
         let shim_root = tempfile::tempdir().expect("git shim root");
         let shim = shim_root.path().join("git");
-        fs::write(
-            &shim,
-            "#!/bin/sh\nif [ \"$1\" = \"-C\" ] && [ \"$3\" = \"rev-parse\" ] && [ \"$4\" = \"HEAD\" ] && [ -e \"$2/.git/refs/notes/homeboy-snapshot\" ]; then exit 1; fi\nexec /usr/bin/git \"$@\"\n",
-        )
+        homeboy_test_support::write_executable(&shim, "#!/bin/sh\nif [ \"$1\" = \"-C\" ] && [ \"$3\" = \"rev-parse\" ] && [ \"$4\" = \"HEAD\" ] && [ -e \"$2/.git/refs/notes/homeboy-snapshot\" ]; then exit 1; fi\nexec /usr/bin/git \"$@\"\n", 0o755)
         .expect("write git shim");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
-                .expect("make git shim executable");
-        }
+
         crate::create(
             &format!(
                 r#"{{"id":"lab-readback-failure","kind":"local","workspace_root":"{}"}}"#,
@@ -526,17 +518,9 @@ fn snapshot_git_fails_before_handoff_when_controller_closure_is_unavailable() {
         .expect("create runner");
         let shim_root = tempfile::tempdir().expect("git shim root");
         let shim = shim_root.path().join("git");
-        fs::write(
-            &shim,
-            "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = \"rev-list\" ] && { echo 'missing promisor object' >&2; exit 91; }; done\nexec /usr/bin/git \"$@\"\n",
-        )
+        homeboy_test_support::write_executable(&shim, "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = \"rev-list\" ] && { echo 'missing promisor object' >&2; exit 91; }; done\nexec /usr/bin/git \"$@\"\n", 0o755)
         .expect("write git shim");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
-                .expect("make git shim executable");
-        }
+
         let original_path = std::env::var_os("PATH").expect("PATH");
         let mut paths = vec![shim_root.path().to_path_buf()];
         paths.extend(std::env::split_paths(&original_path));
@@ -1593,20 +1577,12 @@ fn snapshot_git_hydrates_partial_clone_on_controller_without_lab_remote_access()
         let shim = shim_root.path().join("git");
         let lab_remote_access = shim_root.path().join("lab-remote-accessed");
         let origin_url = format!("file://{}", origin.path().display());
-        fs::write(
-            &shim,
-            format!(
+        homeboy_test_support::write_executable(&shim, format!(
                 "#!/bin/sh\nif [ \"$1\" = clone ]; then for arg in \"$@\"; do [ \"$arg\" = {origin_url:?} ] && {{ : > {}; exit 91; }}; done; fi\nexec /usr/bin/git \"$@\"\n",
                 lab_remote_access.display(),
-            ),
-        )
+            ), 0o755)
         .expect("write git shim");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
-                .expect("make shim executable");
-        }
+
         let original_path = std::env::var_os("PATH").expect("PATH");
         let mut paths = vec![shim_root.path().to_path_buf()];
         paths.extend(std::env::split_paths(&original_path));
@@ -1979,9 +1955,8 @@ fn immutable_replay_snapshot_preserves_executable_files() {
 
     let source = tempfile::tempdir().expect("source");
     let script = source.path().join("script.sh");
-    fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write script");
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
-        .expect("make script executable");
+    homeboy_test_support::write_executable(&script, "#!/bin/sh\nexit 0\n", 0o755)
+        .expect("write script");
 
     let snapshot = immutable_replay_snapshot(source.path(), &[]).expect("seal replay artifact");
     assert_ne!(

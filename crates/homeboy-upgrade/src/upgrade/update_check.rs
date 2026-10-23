@@ -607,16 +607,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn version_probe_kills_a_slow_path_binary() {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = tempfile::tempdir().expect("temporary directory");
         let binary = directory.path().join("homeboy");
-        std::fs::write(&binary, "#!/bin/sh\nexec sleep 1\n").expect("slow binary fixture");
-        let mut permissions = std::fs::metadata(&binary)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&binary, permissions).expect("make fixture executable");
+        homeboy_test_support::write_executable(&binary, "#!/bin/sh\nexec sleep 1\n", 0o755)
+            .expect("slow binary fixture");
 
         let started = Instant::now();
         assert!(probe_version(&binary).is_none());

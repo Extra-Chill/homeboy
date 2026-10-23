@@ -319,9 +319,7 @@ fn connect_fences_two_active_jobs_before_starting_a_new_daemon_generation() {
     test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let ensure_running = home.path().join("ensure-running");
-        std::fs::write(
-            &daemon,
-            format!(
+        homeboy_test_support::write_executable(&daemon, format!(
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
@@ -336,12 +334,9 @@ case "$1 $2" in
 esac
 "#,
                 ensure_running.display()
-            ),
-        )
+            ), 0o755)
         .expect("write remote Homeboy shim");
-        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+
         server::create(
             &serde_json::json!({ "id": "homeboy-lab", "host": "localhost", "user": "test" })
                 .to_string(),
@@ -1183,9 +1178,7 @@ fn runner_connect_persists_recovery_evidence_after_daemon_failure() {
                     .expect("endpoint response");
             }
         });
-        std::fs::write(
-            &daemon,
-            format!(
+        homeboy_test_support::write_executable(&daemon, format!(
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
@@ -1202,15 +1195,8 @@ printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 
 esac
 "#,
                 address = address,
-            ),
-        )
+            ), 0o755)
         .expect("write remote Homeboy shim");
-        let mut permissions = std::fs::metadata(&daemon)
-            .expect("read remote Homeboy shim metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&daemon, permissions)
-            .expect("make remote Homeboy shim executable");
 
         server::create(
             &serde_json::json!({
@@ -1381,9 +1367,7 @@ fn rejected_state_loss_refusal_is_retired_before_plain_connect_retries(
                     .expect("endpoint response");
             }
         });
-        std::fs::write(
-            &daemon,
-            format!(
+        homeboy_test_support::write_executable(&daemon, format!(
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
@@ -1413,12 +1397,9 @@ esac
                 address = address,
                 generation_count = generation_count.display(),
                 rejection_exit = if transport_success { "" } else { "      exit 2" },
-            ),
-        )
+            ), 0o755)
         .expect("write remote Homeboy shim");
-        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+
         server::create(
             &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
                 .to_string(),
@@ -1565,9 +1546,7 @@ fn recovery_retry_reattaches_journaled_b_after_four_lost_health_requests() {
                 }
             }
         });
-        std::fs::write(
-            &daemon,
-            format!(
+        homeboy_test_support::write_executable(&daemon, format!(
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
@@ -1585,12 +1564,9 @@ esac
 "#,
                 address = address,
                 generation_count = generation_count.display(),
-            ),
-        )
+            ), 0o755)
         .expect("write remote Homeboy shim");
-        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+
         server::create(
             &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
                 .to_string(),
@@ -1707,9 +1683,7 @@ fn normal_start_response_loss_replays_b_without_creating_c() {
                 }
             }
         });
-        std::fs::write(
-            &old_daemon,
-            format!(
+        homeboy_test_support::write_executable(&old_daemon, format!(
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
@@ -1735,17 +1709,10 @@ esac
 "#,
                 generation_count = generation_count.display(),
                 old_replay = old_replay.display(),
-            ),
-        )
+            ), 0o755)
         .expect("write remote Homeboy shim");
-        let mut permissions = std::fs::metadata(&old_daemon)
-            .expect("metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&old_daemon, permissions).expect("make shim executable");
-        std::fs::write(
-            &selected_daemon,
-            format!(
+
+        homeboy_test_support::write_executable(&selected_daemon, format!(
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
@@ -1763,15 +1730,9 @@ esac
 "#,
                 address = address,
                 selected_argv = selected_argv.display(),
-            ),
-        )
+            ), 0o755)
         .expect("write selected Homeboy shim");
-        let mut permissions = std::fs::metadata(&selected_daemon)
-            .expect("metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&selected_daemon, permissions)
-            .expect("make selected shim executable");
+
         server::create(
             &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
                 .to_string(),
@@ -1875,9 +1836,7 @@ fn explicit_candidate_reconciliation_supersedes_pending_ensure_running_replay() 
         let daemon = home.path().join("remote-homeboy");
         let ensure_running = home.path().join("ensure-running");
         let reconciliation_argv = home.path().join("reconciliation-argv");
-        std::fs::write(
-            &daemon,
-            format!(
+        homeboy_test_support::write_executable(&daemon, format!(
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
@@ -1895,12 +1854,9 @@ esac
 "#,
                 ensure_running = ensure_running.display(),
                 reconciliation_argv = reconciliation_argv.display(),
-            ),
-        )
+            ), 0o755)
         .expect("write remote Homeboy shim");
-        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+
         server::create(
             &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
                 .to_string(),
@@ -2187,9 +2143,7 @@ fn with_idle_stale_replacement_shim(
                     .expect("response");
             }
         });
-        std::fs::write(
-            &daemon,
-            format!(
+        homeboy_test_support::write_executable(&daemon, format!(
                 r#"#!/bin/sh
 printf '%s\n' "$@" >> "$HOMEBOY_TEST_REPLACEMENT_ARGV"
 case "$1 $2" in
@@ -2212,15 +2166,9 @@ esac
                 marker = marker.display(),
                 address = address,
                 post_lease_id = post_lease_id_for_server,
-            ),
-        )
+            ), 0o755)
         .expect("write remote Homeboy shim");
-        let mut permissions = std::fs::metadata(&daemon)
-            .expect("read remote Homeboy shim metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&daemon, permissions)
-            .expect("make remote Homeboy shim executable");
+
         server::create(
             &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
                 .to_string(),
@@ -2338,14 +2286,13 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
 fn stale_replacement_force_stop_rejects_a_success_envelope_without_stop_action() {
     test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &daemon,
             "#!/bin/sh\nprintf '%s\\n' '{\"success\":true,\"data\":{\"action\":\"status\"}}'\n",
+            0o755,
         )
         .expect("write remote Homeboy shim");
-        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+
         server::create(
             &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
                 .to_string(),
@@ -2413,9 +2360,7 @@ fn rejected_ensure_running_refusal_is_retired_before_plain_connect_retries() {
                     .expect("endpoint response");
             }
         });
-        std::fs::write(
-            &daemon,
-            format!(
+        homeboy_test_support::write_executable(&daemon, format!(
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
@@ -2441,12 +2386,9 @@ esac
                 marker = marker.display(),
                 address = address,
                 generation_count = generation_count.display(),
-            ),
-        )
+            ), 0o755)
         .expect("write remote Homeboy shim");
-        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+
         server::create(
             &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
                 .to_string(),

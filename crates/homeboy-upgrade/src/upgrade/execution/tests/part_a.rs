@@ -87,24 +87,19 @@ fn parses_homeboy_version_output() {
 #[test]
 fn candidate_admission_cause_survives_process_exit_and_durable_status() {
     use crate::upgrade::operation::{load_upgrade_operation_status, UpgradeOperation};
-    use std::os::unix::fs::PermissionsExt;
 
     homeboy_core::test_support::with_isolated_home(|home| {
         let candidate = home.path().join("candidate");
-        std::fs::write(
-            &candidate,
-            concat!(
+        homeboy_test_support::write_executable(&candidate, concat!(
             "#!/bin/sh\n",
             "printf 'candidate diagnostic notice\\n' >&2\n",
             "printf '%s\\n' '{\"schema\":\"homeboy/command-result/v3\",\"success\":false,",
             "\"diagnostics\":{\"code\":\"validation.invalid_argument\",\"message\":\"replacement blocked by unresolved runner ownership\",",
             "\"details\":{\"tried\":[\"homeboy runner reconcile fixture\"]}}}'\n",
             "exit 2\n"
-        ),
-        )
+        ), 0o700)
         .expect("write candidate executable");
-        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700))
-            .expect("make executable");
+
         let error = run_verified_target_admission(&candidate, "1.0.0", "old", "fixture")
             .expect_err("candidate must refuse replacement");
         assert_eq!(
@@ -201,8 +196,6 @@ fn source_build_command_receives_build_only_contract() {
 #[cfg(unix)]
 #[test]
 fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failure() {
-    use std::os::unix::fs::PermissionsExt;
-
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::write(
         workspace.path().join("Cargo.toml"),
@@ -212,23 +205,17 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
     let installed = workspace.path().join("installed-homeboy");
     let candidate = workspace.path().join("staged-homeboy");
     let evidence = workspace.path().join("admission-evidence");
-    std::fs::write(
+    homeboy_test_support::write_executable(
         &installed,
         "#!/bin/sh\nif [ \"$1\" = self ]; then exit 64; fi\nprintf 'homeboy 0.351.0+old\\n'\n",
+        0o755,
     )
     .expect("installed controller");
-    std::fs::write(
-        &candidate,
-        format!(
+    homeboy_test_support::write_executable(&candidate, format!(
             "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nprintf '%s|%s|%s|%s\\n' \"$1\" \"$4\" \"$6\" \"$8\" > {}\nexit 0\n",
             quote_path(&evidence.display().to_string())
-        ),
-    )
+        ), 0o755)
     .expect("staged candidate");
-    for path in [&installed, &candidate] {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .expect("executable fixture");
-    }
 
     let candidate_identity = verify_source_candidate_target_admission(
         workspace.path(),
@@ -250,13 +237,9 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
         )
     );
 
-    std::fs::write(
-        &candidate,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nexit 1\n",
-    )
+    homeboy_test_support::write_executable(&candidate, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nexit 1\n", 0o755)
     .expect("failing staged candidate");
-    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755))
-        .expect("failing candidate executable");
+
     let error = verify_source_candidate_target_admission(
         workspace.path(),
         &candidate,
@@ -526,14 +509,15 @@ fn installer_timeout_terminates_and_reaps_the_process_tree() {
 #[cfg(unix)]
 #[test]
 fn installer_timeout_classifies_bytes_mutated_before_the_hang() {
-    use std::os::unix::fs::PermissionsExt;
-
     let workspace = tempfile::tempdir().expect("workspace");
     let target = workspace.path().join("homeboy");
-    std::fs::write(&target, "#!/bin/sh\necho 'homeboy 0.2.0'\n# old\n")
-        .expect("write installed fixture");
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
-        .expect("make fixture executable");
+    homeboy_test_support::write_executable(
+        &target,
+        "#!/bin/sh\necho 'homeboy 0.2.0'\n# old\n",
+        0o755,
+    )
+    .expect("write installed fixture");
+
     let checkpoint = ReplacementCheckpoint::pending(&target, Some("0.2.0"), None, None)
         .expect("capture immutable pre-install evidence");
     let shell = format!(

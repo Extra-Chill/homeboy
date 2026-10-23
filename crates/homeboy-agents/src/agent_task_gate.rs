@@ -6677,8 +6677,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cargo_gate_rejects_zero_match_and_accepts_one_match_through_supported_declarations() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = env_mutex();
         let temp = tempfile::tempdir().expect("temporary Cargo fixture");
         std::fs::create_dir(temp.path().join("src")).expect("fixture source directory");
@@ -6695,16 +6693,9 @@ mod tests {
         let bin = temp.path().join("bin");
         std::fs::create_dir(&bin).expect("wrapper directory");
         let timeout = bin.join("timeout");
-        std::fs::write(
-            &timeout,
-            "#!/bin/sh\nwhile [ \"$1\" = -s ] || [ \"$1\" = --signal ]; do shift; shift; done\nshift\nshift\nHOME=\"$HOMEBOY_ORIGINAL_HOME\"\nPATH=\"$HOMEBOY_ORIGINAL_PATH\"\nexport HOME PATH\nexec cargo \"$@\"\n",
-        )
+        homeboy_test_support::write_executable(&timeout, "#!/bin/sh\nwhile [ \"$1\" = -s ] || [ \"$1\" = --signal ]; do shift; shift; done\nshift\nshift\nHOME=\"$HOMEBOY_ORIGINAL_HOME\"\nPATH=\"$HOMEBOY_ORIGINAL_PATH\"\nexport HOME PATH\nexec cargo \"$@\"\n", 0o755)
         .expect("timeout wrapper");
-        let mut permissions = std::fs::metadata(&timeout)
-            .expect("timeout wrapper metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&timeout, permissions).expect("make timeout wrapper executable");
+
         let target = temp.path().join("target");
         let command = |timeout_options: &str, cargo_invocation: &str| {
             format!(
@@ -7049,22 +7040,15 @@ mod tests {
         homeboy_engine_primitives::test_execution::TestExecutionPlan,
         AgentTaskGateEnvironmentPolicy,
     ) {
-        use std::os::unix::fs::PermissionsExt;
-
         let workspace = tempfile::tempdir().expect("workspace");
         let bin = workspace.path().join("bin");
         std::fs::create_dir(&bin).expect("bin");
         let homeboy = bin.join("homeboy");
-        std::fs::write(
-            &homeboy,
-            format!(
+        homeboy_test_support::write_executable(&homeboy, format!(
                 "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test && test \"$3\" = '$HOME' || exit 97\nif [ \"$HOMEBOY_FAKE_GATE_BLOCK\" = 1 ]; then while :; do sleep 1; done; fi\n[ -z \"$HOMEBOY_FAKE_GATE_SLEEP\" ] || sleep \"$HOMEBOY_FAKE_GATE_SLEEP\"\nprintf '%s|%s|%s|%s' \"$1\" \"$2\" \"$3\" \"$HOMEBOY_TEST_TIMEOUT_SECONDS\"\nexit {exit_code}\n"
-            ),
-        )
+            ), 0o755)
         .expect("adapter");
-        let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&homeboy, permissions).unwrap();
+
         let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
             vec![
                 "homeboy".to_string(),
@@ -7501,16 +7485,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn legacy_gate_preserves_declared_path_at_readiness_candidate_and_baseline() {
-        use std::os::unix::fs::PermissionsExt;
-
         let workspace = tempfile::tempdir().expect("workspace");
         let runtime = tempfile::tempdir().expect("runtime");
         let bin = workspace.path().join("bin");
         fs::create_dir(&bin).unwrap();
         // Shadow a system tool so login-profile PATH reordering is observable.
         let tool = bin.join("bash");
-        fs::write(&tool, "#!/bin/sh\nset -eu\ntest -d \"$HOME\"\ntest -d \"$XDG_CONFIG_HOME\"\ntest \"$HOME\" != \"$OPERATOR_HOME\"\nif test \"${1:-}\" = readiness; then printf '%s\\n' \"$0\" > \"$READINESS_RECORD\"; else printf '%s\\n' \"$0\"; fi\n").unwrap();
-        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        homeboy_test_support::write_executable(&tool, "#!/bin/sh\nset -eu\ntest -d \"$HOME\"\ntest -d \"$XDG_CONFIG_HOME\"\ntest \"$HOME\" != \"$OPERATOR_HOME\"\nif test \"${1:-}\" = readiness; then printf '%s\\n' \"$0\" > \"$READINESS_RECORD\"; else printf '%s\\n' \"$0\"; fi\n", 0o755).unwrap();
+
         let readiness = workspace.path().join("readiness");
         let mut policy = AgentTaskGateEnvironmentPolicy::default();
         policy.isolate_home = true;
@@ -7754,20 +7736,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn declared_baseline_executor_exports_the_plan_deadline() {
-        use std::os::unix::fs::PermissionsExt;
-
         let workspace = tempfile::tempdir().expect("workspace");
         let bin = workspace.path().join("bin");
         std::fs::create_dir(&bin).expect("bin");
         let homeboy = bin.join("homeboy");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &homeboy,
             "#!/bin/sh\nprintf %s \"$HOMEBOY_TEST_TIMEOUT_SECONDS\"\n",
+            0o755,
         )
         .expect("adapter");
-        let mut permissions = std::fs::metadata(&homeboy).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&homeboy, permissions).unwrap();
+
         let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
             vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
             42,
@@ -9413,8 +9392,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn declared_environment_probe_checks_external_browser_cache_before_suite() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = env_mutex();
         let workspace = tempfile::tempdir().expect("workspace");
         let host_home = tempfile::tempdir().expect("host home");
@@ -9426,12 +9403,13 @@ mod tests {
         )
         .expect("host credential fixture");
         let browser = browser_cache.join("chromium");
-        fs::write(&browser, "#!/bin/sh\nprintf 'Chromium 128.4\\n'\n").expect("browser fixture");
-        let mut permissions = fs::metadata(&browser)
-            .expect("browser metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&browser, permissions).expect("executable browser");
+        homeboy_test_support::write_executable(
+            &browser,
+            "#!/bin/sh\nprintf 'Chromium 128.4\\n'\n",
+            0o755,
+        )
+        .expect("browser fixture");
+
         let expected_version = browser_cache.join("expected-version");
         fs::write(&expected_version, "Chromium 128.4\n").expect("expected browser version");
         fs::write(workspace.path().join("suite-ran"), "absent").expect("suite sentinel");
@@ -9560,8 +9538,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn toolchain_preflight_preserves_only_declared_homes_for_cargo_on_path() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = env_mutex();
         if !rerun_alone_to_replace_path(
             "toolchain_preflight_preserves_only_declared_homes_for_cargo_on_path",
@@ -9573,18 +9549,13 @@ mod tests {
         let cargo_bin = original_home.path().join(".cargo/bin");
         fs::create_dir_all(&cargo_bin).expect("cargo bin");
         let cargo = cargo_bin.join("cargo");
-        fs::write(
-            &cargo,
-            format!(
+        homeboy_test_support::write_executable(&cargo, format!(
                 "#!/bin/sh\ntest \"$RUSTUP_HOME\" = \"{}/.rustup\" && test \"$CARGO_HOME\" = \"{}/.cargo\"\n",
                 original_home.path().display(),
                 original_home.path().display(),
-            ),
-        )
+            ), 0o755)
         .expect("cargo probe");
-        let mut permissions = fs::metadata(&cargo).expect("cargo metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&cargo, permissions).expect("cargo executable");
+
         let _env = EnvVarGuard::set(&[
             ("HOME", original_home.path()),
             ("PATH", cargo_bin.as_path()),
@@ -9619,8 +9590,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rust_gate_cache_hydration_resolves_rustc_from_toolchain_bin() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = env_mutex();
         if !rerun_alone_to_replace_path(
             "rust_gate_cache_hydration_resolves_rustc_from_toolchain_bin",
@@ -9633,29 +9602,27 @@ mod tests {
         let host_bin = tempfile::tempdir().expect("host bin");
 
         let toolchain_cargo = fixtures.path().join("cargo");
-        fs::write(
+        homeboy_test_support::write_executable(
             &toolchain_cargo,
             "#!/bin/sh\nrustc -vV >/dev/null || exit 101\n",
+            0o755,
         )
         .expect("toolchain cargo fixture");
         let toolchain_rustc = fixtures.path().join("rustc");
-        fs::write(&toolchain_rustc, "#!/bin/sh\necho 'rustc 1.95.0-test'\n")
-            .expect("toolchain rustc fixture");
+        homeboy_test_support::write_executable(
+            &toolchain_rustc,
+            "#!/bin/sh\necho 'rustc 1.95.0-test'\n",
+            0o755,
+        )
+        .expect("toolchain rustc fixture");
         let rustup = host_bin.path().join("rustup");
-        fs::write(
-            &rustup,
-            format!(
+        homeboy_test_support::write_executable(&rustup, format!(
                 "#!/bin/sh\nbin=\"$RUSTUP_HOME/toolchains/1.95.0-test/bin\"\nif test \"$1\" = toolchain; then\n  /bin/mkdir -p \"$bin\"\n  /bin/cp \"{}\" \"$bin/cargo\"\n  /bin/cp \"{}\" \"$bin/rustc\"\nelif test \"$1\" = which; then\n  printf '%s\\n' \"$bin/cargo\"\nfi\n",
                 toolchain_cargo.display(),
                 toolchain_rustc.display()
-            ),
-        )
+            ), 0o755)
         .expect("rustup fixture");
-        for path in [&toolchain_cargo, &toolchain_rustc, &rustup] {
-            let mut permissions = fs::metadata(path).expect("tool metadata").permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(path, permissions).expect("tool executable");
-        }
+
         let _environment = EnvVarGuard::set(&[("PATH", host_bin.path())]);
 
         let relative = hydrate_rust_cache_with_timeout(
@@ -9674,8 +9641,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rust_gate_cache_hydrates_once_coordinates_waiters_and_separates_identities() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = env_mutex();
         if !rerun_alone_to_replace_path(
             "rust_gate_cache_hydrates_once_coordinates_waiters_and_separates_identities",
@@ -9693,31 +9658,26 @@ mod tests {
         )
         .expect("toolchain");
         let direct_cargo = bin.path().join("direct-cargo");
-        fs::write(
+        homeboy_test_support::write_executable(
             &direct_cargo,
             "#!/bin/sh\nprintf '%s\\n' cargo >> \"$CARGO_HOME/registry/hydration.log\"\n",
+            0o755,
         )
         .expect("direct cargo fixture");
         let rustup = bin.path().join("rustup");
-        fs::write(
-            &rustup,
-            format!(
+        homeboy_test_support::write_executable(&rustup, format!(
                 "#!/bin/sh\ntest \"$0\" = \"$CARGO_HOME/bin/rustup\"\nif test \"$1\" = toolchain; then\n  /bin/mkdir -p \"$CARGO_HOME/registry\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin\"\n  /bin/cp \"{}\" \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\n  printf '%s\\n' rustup >> \"$CARGO_HOME/registry/hydration.log\"\nelif test \"$1\" = which; then\n  printf '%s\\n' \"$RUSTUP_HOME/toolchains/1.95.0-test/bin/cargo\"\nfi\n/bin/sleep 0.1\n",
                 direct_cargo.display()
-            ),
-        )
+            ), 0o755)
         .expect("rustup fixture");
         let cargo = bin.path().join("cargo");
-        fs::write(
+        homeboy_test_support::write_executable(
             &cargo,
             "#!/bin/sh\necho 'host rustup proxy must not execute' >&2\nexit 70\n",
+            0o755,
         )
         .expect("host cargo proxy fixture");
-        for path in [&direct_cargo, &rustup, &cargo] {
-            let mut permissions = fs::metadata(&path).expect("tool metadata").permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(path, permissions).expect("tool executable");
-        }
+
         let _environment = EnvVarGuard::set(&[
             (homeboy_core::paths::HOMEBOY_DATA_DIR_ENV, root.path()),
             ("PATH", bin.path()),
@@ -9856,18 +9816,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rust_gate_cache_preserves_safe_symlinks_and_rejects_unsafe_content() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::os::unix::fs::symlink;
 
         let source = tempfile::tempdir().expect("source");
         let overlay = tempfile::tempdir().expect("overlay");
         fs::create_dir_all(source.path().join("bin")).expect("cache bin");
         let rustup = source.path().join("bin/rustup");
-        fs::write(&rustup, "#!/bin/sh\nprintf 'rustup\\n'\n").expect("rustup proxy");
-        let mut permissions = fs::metadata(&rustup)
-            .expect("rustup metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&rustup, permissions).expect("rustup executable");
+        homeboy_test_support::write_executable(&rustup, "#!/bin/sh\nprintf 'rustup\\n'\n", 0o755)
+            .expect("rustup proxy");
+
         symlink("rustup", source.path().join("bin/cargo")).expect("normal cargo proxy");
         symlink(&rustup, source.path().join("absolute-rustup")).expect("absolute safe link");
         copy_tree_preserving_safe_symlinks(source.path(), overlay.path()).expect("copy cache");
@@ -9919,8 +9876,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rust_gate_cache_bounds_stalled_hydration() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = env_mutex();
         if !rerun_alone_to_replace_path("rust_gate_cache_bounds_stalled_hydration") {
             return;
@@ -9930,10 +9885,8 @@ mod tests {
         let cache = tempfile::tempdir().expect("cache");
         for tool in ["rustup", "cargo"] {
             let path = bin.path().join(tool);
-            fs::write(&path, "#!/bin/sh\n/bin/sleep 1\n").expect("tool fixture");
-            let mut permissions = fs::metadata(&path).expect("tool metadata").permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(path, permissions).expect("tool executable");
+            homeboy_test_support::write_executable(&path, "#!/bin/sh\n/bin/sleep 1\n", 0o755)
+                .expect("tool fixture");
         }
         let _environment = EnvVarGuard::set(&[("PATH", bin.path())]);
         let started = Instant::now();
@@ -9949,8 +9902,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn toolchain_preflight_reports_generic_initialization_failures_without_code_feedback() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = env_mutex();
         if !rerun_alone_to_replace_path(
             "toolchain_preflight_reports_generic_initialization_failures_without_code_feedback",
@@ -9960,10 +9911,13 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let bin = tempfile::tempdir().expect("bin");
         let tool = bin.path().join("other-tool");
-        fs::write(&tool, "#!/bin/sh\necho unavailable >&2\nexit 7\n").expect("tool");
-        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&tool, permissions).expect("tool executable");
+        homeboy_test_support::write_executable(
+            &tool,
+            "#!/bin/sh\necho unavailable >&2\nexit 7\n",
+            0o755,
+        )
+        .expect("tool");
+
         let prior_path = std::env::var_os("PATH");
         std::env::set_var("PATH", bin.path());
 
@@ -10023,8 +9977,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn gate_preflight_rejects_an_unresolvable_homeboy_gate_as_a_declaration() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = env_mutex();
         if !rerun_alone_to_replace_path(
             "gate_preflight_rejects_an_unresolvable_homeboy_gate_as_a_declaration",
@@ -10036,20 +9988,15 @@ mod tests {
         let homeboy = bin.path().join("homeboy");
         // Stands in for the real CLI: only `--preflight-only` is allowed, and
         // only `ready-component` resolves.
-        fs::write(
-            &homeboy,
-            r#"#!/bin/sh
+        homeboy_test_support::write_executable(&homeboy, r#"#!/bin/sh
 eval "last=\${$#}"
 [ "$last" = "--preflight-only" ] || { echo "probe ran the gate" >&2; exit 9; }
 [ "$3" = "ready-component" ] && { echo '{"success":true,"data":{"preflight":"ready"}}'; exit 0; }
 echo '{"success":false,"diagnostics":{"code":"component.not_found","message":"Component not found"}}'
 exit 2
-"#,
-        )
+"#, 0o755)
         .expect("homeboy");
-        let mut permissions = fs::metadata(&homeboy).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&homeboy, permissions).expect("executable");
+
         let prior_path = std::env::var_os("PATH");
         std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.path().display()));
 
@@ -10098,8 +10045,6 @@ exit 2
     #[cfg(unix)]
     #[test]
     fn gate_probe_sees_the_components_linked_extensions_under_isolated_home() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = env_mutex();
         if !rerun_alone_to_replace_path(
             "gate_probe_sees_the_components_linked_extensions_under_isolated_home",
@@ -10133,7 +10078,7 @@ exit 2
         // Stands in for the real CLI: the test capability resolves only when
         // the component's extension is installed in the HOME it runs under,
         // and a failure is reported the way Homeboy reports it, on stdout.
-        fs::write(
+        homeboy_test_support::write_executable(
             &homeboy,
             r#"#!/bin/sh
 manifest="${HOMEBOY_CONFIG_ROOT:-$HOME/.config/homeboy}/extensions/probe-ext/probe-ext.json"
@@ -10141,11 +10086,10 @@ manifest="${HOMEBOY_CONFIG_ROOT:-$HOME/.config/homeboy}/extensions/probe-ext/pro
 echo '{"success":false,"summary":"no linked extensions provide test support: probe-ext"}'
 exit 2
 "#,
+            0o755,
         )
         .expect("homeboy");
-        let mut permissions = fs::metadata(&homeboy).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&homeboy, permissions).expect("executable");
+
         std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.path().display()));
 
         let gates = VerifyGateOptions {
@@ -10176,8 +10120,6 @@ exit 2
     #[cfg(unix)]
     #[test]
     fn toolchain_preflight_runs_in_the_invocation_tmpdir() {
-        use std::os::unix::fs::PermissionsExt;
-
         // Deliberately hermetic: the probe is addressed by absolute path so the
         // test never mutates PATH. Sibling tests spawn `sh` without holding
         // ENV_MUTEX, so clobbering PATH here would break them under the test
@@ -10190,17 +10132,11 @@ exit 2
         // Fails unless every temp-dir variable points at the invocation temp
         // dir. An unset variable compares as empty and exits non-zero too.
         let tool = bin.path().join("record-tmpdir");
-        fs::write(
-            &tool,
-            format!(
+        homeboy_test_support::write_executable(&tool, format!(
                 "#!/bin/sh\n[ \"$TMPDIR\" = '{dir}' ] || exit 3\n[ \"$TEMP\" = '{dir}' ] || exit 4\n[ \"$TMP\" = '{dir}' ] || exit 5\nexit 0\n",
                 dir = gate_tmpdir.display()
-            ),
-        )
+            ), 0o755)
         .expect("tool");
-        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&tool, permissions).expect("tool executable");
 
         preflight_gate_toolchains(
             workspace.path(),
@@ -10219,23 +10155,19 @@ exit 2
     #[cfg(unix)]
     #[test]
     fn toolchain_preflight_times_out_and_reaps_descendants() {
-        use std::os::unix::fs::PermissionsExt;
-
         let workspace = tempfile::tempdir().expect("workspace");
         let bin = tempfile::tempdir().expect("bin");
         let pid_file = workspace.path().join("descendant.pid");
         let tool = bin.path().join("hung-tool");
-        fs::write(
+        homeboy_test_support::write_executable(
             &tool,
             format!(
                 "#!/bin/sh\n/bin/sleep 30 &\necho $! > '{}'\nwait\n",
                 pid_file.display()
             ),
+            0o755,
         )
         .expect("tool");
-        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&tool, permissions).expect("tool executable");
 
         let started = std::time::Instant::now();
         let error = preflight_gate_toolchains(
@@ -10273,14 +10205,10 @@ exit 2
     #[cfg(unix)]
     #[test]
     fn toolchain_preflight_honors_a_100ms_limit() {
-        use std::os::unix::fs::PermissionsExt;
-
         let workspace = tempfile::tempdir().expect("workspace");
         let tool = workspace.path().join("hung-tool");
-        fs::write(&tool, "#!/bin/sh\n/bin/sleep 30\n").expect("tool");
-        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&tool, permissions).expect("tool executable");
+        homeboy_test_support::write_executable(&tool, "#!/bin/sh\n/bin/sleep 30\n", 0o755)
+            .expect("tool");
 
         let started = std::time::Instant::now();
         let error = preflight_gate_toolchains(
@@ -10304,19 +10232,18 @@ exit 2
     #[cfg(unix)]
     #[test]
     fn toolchain_preflight_shares_one_total_deadline_across_probes() {
-        use std::os::unix::fs::PermissionsExt;
-
         let workspace = tempfile::tempdir().expect("workspace");
         let bin = tempfile::tempdir().expect("bin");
         let first = bin.path().join("first-tool");
         let second = bin.path().join("second-tool");
-        fs::write(&first, "#!/bin/sh\n/bin/sleep 0.1\n").expect("first tool");
-        fs::write(&second, "#!/bin/sh\n/bin/sleep 0.05\nexit 7\n").expect("second tool");
-        for tool in [&first, &second] {
-            let mut permissions = fs::metadata(tool).expect("tool metadata").permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(tool, permissions).expect("tool executable");
-        }
+        homeboy_test_support::write_executable(&first, "#!/bin/sh\n/bin/sleep 0.1\n", 0o755)
+            .expect("first tool");
+        homeboy_test_support::write_executable(
+            &second,
+            "#!/bin/sh\n/bin/sleep 0.05\nexit 7\n",
+            0o755,
+        )
+        .expect("second tool");
 
         let started = std::time::Instant::now();
         let error = preflight_gate_toolchains(
@@ -10355,19 +10282,15 @@ exit 2
     #[cfg(unix)]
     #[test]
     fn toolchain_preflight_bounds_output_and_reports_capture_metadata() {
-        use std::os::unix::fs::PermissionsExt;
-
         let workspace = tempfile::tempdir().expect("workspace");
         let bin = tempfile::tempdir().expect("bin");
         let tool = bin.path().join("noisy-tool");
-        fs::write(
+        homeboy_test_support::write_executable(
             &tool,
             "#!/bin/sh\nyes stdout | head -c 70000\nyes stderr | head -c 70000 >&2\nexit 7\n",
+            0o755,
         )
         .expect("tool");
-        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&tool, permissions).expect("tool executable");
 
         let error = preflight_gate_toolchains(
             workspace.path(),

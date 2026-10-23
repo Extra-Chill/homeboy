@@ -774,14 +774,8 @@ mod tests {
         fn install(name: &str, script: &str) -> Self {
             let bin = tempfile::tempdir().expect("bin tempdir");
             let exe = bin.path().join(name);
-            std::fs::write(&exe, script).expect("fake bin");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut mode = std::fs::metadata(&exe).expect("metadata").permissions();
-                mode.set_mode(0o755);
-                std::fs::set_permissions(&exe, mode).expect("chmod fake bin");
-            }
+            homeboy_test_support::write_executable(&exe, script, 0o755).expect("fake bin");
+
             Self { _bin: bin }
         }
 
@@ -1455,14 +1449,17 @@ mod tests {
 
             #[cfg(unix)]
             {
-                use std::os::unix::fs::{symlink, PermissionsExt};
+                use std::os::unix::fs::symlink;
                 let cli = project.path().join("node_modules/@fixture/tool/bin/cli");
                 std::fs::create_dir_all(cli.parent().expect("CLI directory"))
                     .expect("scoped package");
-                std::fs::write(&cli, "#!/bin/sh\nprintf 'hydrated-cli\\n'\n")
-                    .expect("installed CLI");
-                std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
-                    .expect("CLI mode");
+                homeboy_test_support::write_executable(
+                    &cli,
+                    "#!/bin/sh\nprintf 'hydrated-cli\\n'\n",
+                    0o755,
+                )
+                .expect("installed CLI");
+
                 let bins = project.path().join("node_modules/.bin");
                 std::fs::create_dir(&bins).expect("npm executable links");
                 symlink("../@fixture/tool/bin/cli", bins.join("fixture-tool"))
@@ -1632,20 +1629,13 @@ mod tests {
                 .join(entrypoint);
             std::fs::create_dir_all(runner_script.parent().expect("script parent"))
                 .expect("runner extension directory");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &runner_script,
                 "#!/bin/sh\nprintf '%s\\n' \"$1\" > hydrated-by-runner-extension.txt\n",
+                0o755,
             )
             .expect("runner extension script");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut mode = std::fs::metadata(&runner_script)
-                    .expect("script metadata")
-                    .permissions();
-                mode.set_mode(0o755);
-                std::fs::set_permissions(&runner_script, mode).expect("chmod script");
-            }
+
             crate::create(
                 &serde_json::json!({
                     "id": "lab-local",

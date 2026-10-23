@@ -169,7 +169,6 @@ fn explicit_unregistered_repo_is_proven_by_the_workspace_remote() {
 #[test]
 fn existing_pr_cook_resolution_uses_canonical_refs_for_preview_and_update() {
     with_isolated_home(|_| {
-        use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
 
         let root = tempfile::tempdir().expect("fixture root");
@@ -206,14 +205,13 @@ fn existing_pr_cook_resolution_uses_canonical_refs_for_preview_and_update() {
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).expect("fake gh directory");
         let gh = bin.join("gh");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &gh,
             "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
+            0o755,
         )
         .expect("fake gh");
-        let mut permissions = std::fs::metadata(&gh).expect("gh metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&gh, permissions).expect("executable gh");
+
         let _path = homeboy::core::test_support::EnvVarGuard::set(
             "PATH",
             format!(
@@ -256,8 +254,6 @@ fn existing_pr_cook_resolution_uses_canonical_refs_for_preview_and_update() {
 #[cfg(unix)]
 #[test]
 fn cwd_only_unregistered_repo_fails_without_hydrating_unrelated_components() {
-    use std::os::unix::fs::PermissionsExt;
-
     with_isolated_home(|_| {
         let checkout = tempfile::tempdir().expect("checkout");
         init_runtime_component_checkout(checkout.path());
@@ -278,14 +274,9 @@ fn cwd_only_unregistered_repo_fails_without_hydrating_unrelated_components() {
 
         let bin = tempfile::tempdir().expect("fake git bin");
         let git = bin.path().join("git");
-        std::fs::write(
-            &git,
-            "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then sleep 30; exit 0; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
-        )
+        homeboy_test_support::write_executable(&git, "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then sleep 30; exit 0; fi\nPATH=/usr/bin:/bin git \"$@\"\n", 0o755)
         .expect("write fake git");
-        let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+
         let _stale_checkout = homeboy::core::test_support::EnvVarGuard::set(
             "HOMEBOY_STALE_CHECKOUT",
             std::fs::canonicalize(stale.path())
@@ -416,8 +407,6 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
 #[cfg(unix)]
 #[test]
 fn cook_repository_selection_skips_unrelated_portable_git_enrichment() {
-    use std::os::unix::fs::PermissionsExt;
-
     with_isolated_home(|_| {
         let target = tempfile::tempdir().expect("target checkout");
         init_runtime_component_checkout(target.path());
@@ -443,14 +432,9 @@ fn cook_repository_selection_skips_unrelated_portable_git_enrichment() {
 
         let bin = tempfile::tempdir().expect("fake git bin");
         let git = bin.path().join("git");
-        std::fs::write(
-            &git,
-            "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then touch \"$PWD/probed\"; exit 1; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
-        )
+        homeboy_test_support::write_executable(&git, "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then touch \"$PWD/probed\"; exit 1; fi\nPATH=/usr/bin:/bin git \"$@\"\n", 0o755)
         .expect("write fake git");
-        let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+
         let _stale_checkout = homeboy::core::test_support::EnvVarGuard::set(
             "HOMEBOY_STALE_CHECKOUT",
             std::fs::canonicalize(stale.path())

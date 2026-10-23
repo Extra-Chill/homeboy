@@ -5,9 +5,6 @@ mod session;
 
 use super::*;
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
 use super::super::session::RunnerStaleRuntimePath;
 use super::connection_daemon::{
     daemon_identity_from_body, daemon_lab_handoff_capabilities_from_body,

@@ -830,17 +830,9 @@ mod tests {
             // process-global environment other tests may be reading.
             let fixture = tempfile::tempdir().expect("fixture");
             let ssh = fixture.path().join("down-ssh");
-            std::fs::write(
-                &ssh,
-                "#!/bin/sh\nprintf '%s\\n' 'ssh: connect to host git.example.test port 22: Connection refused' >&2\nexit 255\n",
-            )
+            homeboy_test_support::write_executable(&ssh, "#!/bin/sh\nprintf '%s\\n' 'ssh: connect to host git.example.test port 22: Connection refused' >&2\nexit 255\n", 0o755)
             .expect("ssh fixture");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod ssh fixture");
-            }
+
             git(repo, &["config", "core.sshCommand", ssh.to_str().unwrap()]);
 
             let read = remote_branch_head_over_push_transport(repo, "origin", "feature")

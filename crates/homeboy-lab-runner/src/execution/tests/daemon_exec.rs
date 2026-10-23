@@ -575,20 +575,9 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
         r#"{"id":"fixture","name":"Fixture","version":"1.2.3","env_provider":{"script":"env.sh","secret_env":["FIXTURE_SECRET"]}}"#,
     )
     .expect("manifest");
-    std::fs::write(
-        extension.path().join("env.sh"),
-            "#!/bin/sh\ntest -n \"$HOMEBOY_ENV_PROVIDER_COMMAND_PAYLOAD\" || exit 23\nprintf '%s\\n' '{\"FIXTURE_RUNTIME\":\"runner-local\",\"HOMEBOY_ACTIVE_RUN_ID\":\"provider-active\",\"HOMEBOY_RUN_ID\":\"provider-homeboy\",\"HOMEBOY_BENCH_RUN_ID\":\"provider-bench\",\"WORKFLOW_BENCH_RUN_ID\":\"provider-workflow\"}'\n",
-    )
+    homeboy_test_support::write_executable(extension.path().join("env.sh"), "#!/bin/sh\ntest -n \"$HOMEBOY_ENV_PROVIDER_COMMAND_PAYLOAD\" || exit 23\nprintf '%s\\n' '{\"FIXTURE_RUNTIME\":\"runner-local\",\"HOMEBOY_ACTIVE_RUN_ID\":\"provider-active\",\"HOMEBOY_RUN_ID\":\"provider-homeboy\",\"HOMEBOY_BENCH_RUN_ID\":\"provider-bench\",\"WORKFLOW_BENCH_RUN_ID\":\"provider-workflow\"}'\n", 0o755)
     .expect("provider");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            extension.path().join("env.sh"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .expect("provider executable");
-    }
+
     homeboy_core::extension::lifecycle::install(
         &extension.path().display().to_string(),
         Some("fixture"),

@@ -778,8 +778,6 @@ mod tests {
         pid_file: &Path,
         test: impl FnOnce(),
     ) {
-        use std::os::unix::fs::PermissionsExt;
-
         let bin = tempfile::tempdir().unwrap();
         let real_git = std::env::var("PATH")
             .unwrap()
@@ -793,18 +791,15 @@ mod tests {
         // wrapper too. Only this fixture's split is delayed; every other git
         // call passes straight through to the real binary (#15973).
         let fixture = std::fs::canonicalize(root.path()).unwrap();
-        std::fs::write(
-            &wrapper,
-            format!(
+        homeboy_test_support::write_executable(&wrapper, format!(
                 "#!/bin/sh\ncase \"$(pwd -P)|$*\" in\n  '{}'*\"|\"*subtree*split*)\n    echo \"$*\" > '{}.args'\n    sleep {seconds} &\n    sleep_pid=$!\n    echo $sleep_pid > '{}'\n    wait $sleep_pid\n    ;;\nesac\nexec '{}' \"$@\"\n",
                 fixture.display(),
                 pid_file.display(),
                 pid_file.display(),
                 real_git.display()
-            ),
-        )
+            ), 0o755)
         .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
         let old_path = std::env::var("PATH").unwrap();
         std::env::set_var("PATH", format!("{}:{old_path}", bin.path().display()));
         test();

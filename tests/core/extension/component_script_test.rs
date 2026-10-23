@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -273,17 +272,12 @@ fn component_config_env_is_visible_to_env_providers() {
             }"#,
         )
         .expect("extension manifest");
-        fs::write(
+        homeboy_test_support::write_executable(
             extension_dir.join("env.sh"),
             "#!/bin/sh\nprintf '{\"PROVIDER_SAW\":\"%s\"}' \"$SHARED_CACHE_DIR\"\n",
+            0o755,
         )
         .expect("extension env script");
-        let mut permissions = fs::metadata(extension_dir.join("env.sh"))
-            .expect("extension env metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(extension_dir.join("env.sh"), permissions)
-            .expect("extension env executable");
 
         let mut component = script_component(dir.path(), "printf '%s' \"$PROVIDER_SAW\" > marker");
         component.env.insert(
@@ -330,17 +324,12 @@ fn component_scripts_include_linked_extension_env_provider_output() {
             }"#,
         )
         .expect("extension manifest");
-        fs::write(
+        homeboy_test_support::write_executable(
             extension_dir.join("env.sh"),
             "#!/bin/sh\nprintf '{\"FIXTURE_ENV\":\"%s\"}' \"$EXTRA_VALUE\"\n",
+            0o755,
         )
         .expect("extension env script");
-        let mut permissions = fs::metadata(extension_dir.join("env.sh"))
-            .expect("extension env metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(extension_dir.join("env.sh"), permissions)
-            .expect("extension env executable");
 
         let mut component = script_component(dir.path(), "printf '%s' \"$FIXTURE_ENV\" > marker");
         component.extensions = Some(HashMap::from([(
@@ -464,17 +453,8 @@ fn command_dispatch_falls_back_to_extension_when_component_script_is_absent() {
         )
         .expect("extension manifest should be written");
         let extension_script = extension_dir.join("test.sh");
-        fs::write(
-            &extension_script,
-            "#!/bin/sh\nprintf 'extension ran\n' > \"$HOMEBOY_COMPONENT_PATH/extension-marker\"\nprintf 'Tests: 1\\nFailures: 0\\n'\n",
-        )
+        homeboy_test_support::write_executable(&extension_script, "#!/bin/sh\nprintf 'extension ran\n' > \"$HOMEBOY_COMPONENT_PATH/extension-marker\"\nprintf 'Tests: 1\\nFailures: 0\\n'\n", 0o755)
         .expect("extension script should be written");
-        let mut perms = fs::metadata(&extension_script)
-            .expect("extension script metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&extension_script, perms)
-            .expect("extension script should be executable");
 
         let (output, exit_code) =
             run_test(test_command_args(dir.path())).expect("extension test should run");
@@ -518,7 +498,7 @@ fn full_extension_test_supplies_canonical_result_sidecar() {
         )
         .expect("extension manifest should be written");
         let extension_script = extension_dir.join("test.sh");
-        fs::write(
+        homeboy_test_support::write_executable(
             &extension_script,
             r#"#!/bin/sh
 set -eu
@@ -527,10 +507,11 @@ test -f "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
 . "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
 homeboy_write_test_results 2 2 0 0
 "#,
+            0o755,
         )
         .expect("extension script should be written");
         let parser_script = extension_dir.join("parse-results.sh");
-        fs::write(
+        homeboy_test_support::write_executable(
             &parser_script,
             r#"#!/bin/sh
 set -eu
@@ -539,13 +520,9 @@ test "${2:-}" = "fixture-json"
 . "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
 homeboy_write_test_results 2 2 0 0
 "#,
+            0o755,
         )
         .expect("parser script should be written");
-        for script in [&extension_script, &parser_script] {
-            let mut perms = fs::metadata(script).expect("script metadata").permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(script, perms).expect("script should be executable");
-        }
 
         let (output, exit_code) =
             run_test(test_command_args(dir.path())).expect("extension test should run");
@@ -589,9 +566,7 @@ fn nested_runner_artifact_handoff_supplies_declared_parser() {
         )
         .expect("extension manifest should be written");
         let extension_script = extension_dir.join("test.sh");
-        fs::write(
-            &extension_script,
-            r#"#!/bin/sh
+        homeboy_test_support::write_executable(&extension_script, r#"#!/bin/sh
 set -eu
 root="$HOMEBOY_INVOCATION_ARTIFACT_DIR"
 mkdir -p "$root/nested/files" "$root/decoy/files"
@@ -600,11 +575,10 @@ printf '{"schema":"provider/test-results/v1","summary":{"total":1,"passed":0,"fa
 printf 'passing provider output\n' > "$root/nested/files/phpunit-output.log"
 printf '{"schema":"homeboy/artifact-manifest/v1","artifacts":[{"id":"test-results.json","path":"nested/files/test-results.json","kind":"test-results","semantic_key":"test_results"},{"id":"decoy-results.json","path":"decoy/files/test-results.json","kind":"test-results"},{"id":"phpunit-output.log","path":"nested/files/phpunit-output.log","kind":"phpunit-output","semantic_key":"phpunit_output"}]}\n' > "$root/homeboy-artifact-manifest.json"
 printf 'artifact://files/test-results.json artifact://files/phpunit-output.log\n'
-"#,
-        )
+"#, 0o755)
         .expect("extension script should be written");
         let parser_script = extension_dir.join("parse-results.sh");
-        fs::write(
+        homeboy_test_support::write_executable(
             &parser_script,
             r#"#!/bin/sh
 set -eu
@@ -613,13 +587,9 @@ grep -q 'provider/test-results/v1' "$1"
 . "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
 homeboy_write_test_results 3 3 0 0
 "#,
+            0o755,
         )
         .expect("parser script should be written");
-        for script in [&extension_script, &parser_script] {
-            let mut perms = fs::metadata(script).expect("script metadata").permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(script, perms).expect("script should be executable");
-        }
 
         let (output, exit_code) =
             run_test(test_command_args(dir.path())).expect("extension test should run");
@@ -678,17 +648,9 @@ fn changed_wordpress_php_smoke_test_executes_with_generic_result_adapter() {
         )
         .expect("extension manifest should be written");
         let extension_script = extension_dir.join("test.sh");
-        fs::write(
-            &extension_script,
-            "#!/bin/sh\nset -eu\nprintf '%s' \"$HOMEBOY_CHANGED_TEST_FILES\" | grep -q 'tests/patterns/patterns-ability-smoke.php'\ntest -n \"$HOMEBOY_TEST_RESULTS_FILE\"\nmkdir -p \"$(dirname \"$HOMEBOY_TEST_RESULTS_FILE\")\"\nprintf '{\"total\":1,\"passed\":1,\"failed\":0,\"skipped\":0}\\n' > \"$HOMEBOY_TEST_RESULTS_FILE\"\n",
-        )
+        homeboy_test_support::write_executable(&extension_script, "#!/bin/sh\nset -eu\nprintf '%s' \"$HOMEBOY_CHANGED_TEST_FILES\" | grep -q 'tests/patterns/patterns-ability-smoke.php'\ntest -n \"$HOMEBOY_TEST_RESULTS_FILE\"\nmkdir -p \"$(dirname \"$HOMEBOY_TEST_RESULTS_FILE\")\"\nprintf '{\"total\":1,\"passed\":1,\"failed\":0,\"skipped\":0}\\n' > \"$HOMEBOY_TEST_RESULTS_FILE\"\n", 0o755)
         .expect("extension script should be written");
-        let mut perms = fs::metadata(&extension_script)
-            .expect("extension script metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&extension_script, perms)
-            .expect("extension script should be executable");
+
         init_git_repo(dir.path());
 
         let mut args = test_command_args(dir.path());
@@ -754,17 +716,9 @@ fn changed_nested_extension_js_smokes_use_component_relative_exclusive_route() {
         )
         .expect("extension manifest should be written");
         let extension_script = extension_dir.join("test.sh");
-        fs::write(
-            &extension_script,
-            "#!/bin/sh\n[ \"$HOMEBOY_TEST_SCOPE_KIND\" = exclusive_env ]\n[ \"$HOMEBOY_TEST_SCOPE_ENV_NAME\" = HOMEBOY_JS_SMOKE_FILES ]\nprintf '%s' \"$HOMEBOY_TEST_SCOPE_ENV_VALUE\" | cmp -s - \"$HOMEBOY_COMPONENT_PATH/expected-js-smokes\"\nprintf 'js smoke passed=3 failed=0\\n'\n",
-        )
+        homeboy_test_support::write_executable(&extension_script, "#!/bin/sh\n[ \"$HOMEBOY_TEST_SCOPE_KIND\" = exclusive_env ]\n[ \"$HOMEBOY_TEST_SCOPE_ENV_NAME\" = HOMEBOY_JS_SMOKE_FILES ]\nprintf '%s' \"$HOMEBOY_TEST_SCOPE_ENV_VALUE\" | cmp -s - \"$HOMEBOY_COMPONENT_PATH/expected-js-smokes\"\nprintf 'js smoke passed=3 failed=0\\n'\n", 0o755)
         .expect("extension script should be written");
-        let mut perms = fs::metadata(&extension_script)
-            .expect("extension script metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&extension_script, perms)
-            .expect("extension script should be executable");
+
         fs::write(
             extension_root.join("expected-js-smokes"),
             "tests/wp-codebox-database-service-smoke.mjs\ntests/wp-codebox-phpunit-aggregate-smoke.mjs\ntests/wp-codebox-phpunit-multisite-smoke.mjs",
@@ -825,17 +779,12 @@ fn successful_selected_test_without_result_evidence_fails_closed() {
         )
         .expect("extension manifest should be written");
         let extension_script = extension_dir.join("test.sh");
-        fs::write(
+        homeboy_test_support::write_executable(
             &extension_script,
             "#!/bin/sh\nprintf 'runner completed without a result adapter\\n'\n",
+            0o755,
         )
         .expect("extension script should be written");
-        let mut perms = fs::metadata(&extension_script)
-            .expect("extension script metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&extension_script, perms)
-            .expect("extension script should be executable");
 
         let mut args = test_command_args(dir.path());
         args.changed.since.changed_since = Some("origin/main".to_string());
@@ -874,13 +823,8 @@ fn selected_filter_that_skips_every_test_fails_closed() {
         )
         .expect("extension manifest");
         let script = extension_dir.join("test.sh");
-        fs::write(&script, "#!/bin/sh\nprintf 'filter selected no runnable tests passed=0 failed=0 skipped=1\\n'\n")
+        homeboy_test_support::write_executable(&script, "#!/bin/sh\nprintf 'filter selected no runnable tests passed=0 failed=0 skipped=1\\n'\n", 0o755)
             .expect("extension script");
-        let mut permissions = fs::metadata(&script)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions).expect("script executable");
 
         let (output, exit_code) = run_test(test_command_args(dir.path())).expect("test run");
         assert_eq!(exit_code, 1);
@@ -905,16 +849,8 @@ fn extension_policy_with_evidence_allows_a_neutral_no_test_scope() {
         fs::write(extension_dir.join("docs.json"), r#"{"name":"Docs","version":"1.0.0","test":{"extension_script":"test.sh","no_tests_applicable":{}}}"#)
             .expect("extension manifest");
         let script = extension_dir.join("test.sh");
-        fs::write(
-            &script,
-            "#!/bin/sh\nprintf '{\"schema\":\"homeboy/no-tests-applicable/v1\",\"extension_id\":\"%s\",\"step\":\"test\",\"nonce\":\"%s\",\"reason\":\"docs only\"}' \"$HOMEBOY_NO_TESTS_APPLICABLE_EXTENSION_ID\" \"$HOMEBOY_NO_TESTS_APPLICABLE_NONCE\" > \"$HOMEBOY_NO_TESTS_APPLICABLE_FILE\"\n",
-        )
+        homeboy_test_support::write_executable(&script, "#!/bin/sh\nprintf '{\"schema\":\"homeboy/no-tests-applicable/v1\",\"extension_id\":\"%s\",\"step\":\"test\",\"nonce\":\"%s\",\"reason\":\"docs only\"}' \"$HOMEBOY_NO_TESTS_APPLICABLE_EXTENSION_ID\" \"$HOMEBOY_NO_TESTS_APPLICABLE_NONCE\" > \"$HOMEBOY_NO_TESTS_APPLICABLE_FILE\"\n", 0o755)
         .expect("extension script");
-        let mut permissions = fs::metadata(&script)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions).expect("script executable");
 
         let (output, exit_code) = run_test(test_command_args(dir.path())).expect("test run");
         assert_eq!(exit_code, 0);
@@ -943,16 +879,12 @@ fn extension_no_test_policy_requires_its_evidence_in_runner_output() {
         fs::write(extension_dir.join("docs.json"), r#"{"name":"Docs","version":"1.0.0","test":{"extension_script":"test.sh","no_tests_applicable":{}}}"#)
             .expect("extension manifest");
         let script = extension_dir.join("test.sh");
-        fs::write(
+        homeboy_test_support::write_executable(
             &script,
             "#!/bin/sh\nprintf 'NO TESTS APPLICABLE (spoofed stdout)\\n'\n",
+            0o755,
         )
         .expect("extension script");
-        let mut permissions = fs::metadata(&script)
-            .expect("script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions).expect("script executable");
 
         let (output, exit_code) = run_test(test_command_args(dir.path())).expect("test run");
         assert_eq!(exit_code, 1);

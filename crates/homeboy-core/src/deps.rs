@@ -1541,13 +1541,8 @@ mod tests {
             let missing = missing_dependency_tools(project.path(), None);
 
             let pnpm = bin.path().join("pnpm");
-            std::fs::write(&pnpm, "#!/bin/sh\n").expect("fake pnpm");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&pnpm, std::fs::Permissions::from_mode(0o755))
-                    .expect("executable");
-            }
+            homeboy_test_support::write_executable(&pnpm, "#!/bin/sh\n", 0o755).expect("fake pnpm");
+
             let available = missing_dependency_tools(project.path(), None);
             match previous_path {
                 Some(path) => std::env::set_var("PATH", path),
@@ -2049,17 +2044,9 @@ mod tests {
     fn stale_state_runs_exact_declared_command_and_reports_progress() {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
-            std::fs::write(
-                root.path().join("install-fixture"),
-                "#!/bin/sh\nprintf '%s' \"$*\" > invoked-argv\nprintf '%s|%s' \"$CI\" \"$PWD\" > execution-context\nprintf ready > prepared.state\n",
-            )
+            homeboy_test_support::write_executable(root.path().join("install-fixture"), "#!/bin/sh\nprintf '%s' \"$*\" > invoked-argv\nprintf '%s|%s' \"$CI\" \"$PWD\" > execution-context\nprintf ready > prepared.state\n", 0o755)
             .expect("fixture installer");
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                root.path().join("install-fixture"),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .expect("fixture permissions");
+
             std::fs::write(
                 root.path().join("homeboy.json"),
                 r#"{"id":"fixture-deps","deps":{
@@ -2543,17 +2530,13 @@ mod tests {
     fn hydration_evidence_redacts_declared_command_secrets() {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 root.path().join("install-fixture"),
                 "#!/bin/sh\nprintf 'fixture-secret-value'\nprintf ready > prepared.state\n",
+                0o755,
             )
             .expect("fixture installer");
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                root.path().join("install-fixture"),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .expect("fixture permissions");
+
             std::fs::write(
                 root.path().join("homeboy.json"),
                 r#"{"id":"fixture-deps","deps":{

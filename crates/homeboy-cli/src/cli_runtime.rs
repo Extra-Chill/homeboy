@@ -6854,15 +6854,11 @@ mod tests {
             let invocation = home.path().join("runtime-a-invocation");
             let runtime_a = home.path().join("runtime-a");
             let identity = "homeboy test-runtime-a";
-            std::fs::write(
-                &runtime_a,
-                format!(
+            homeboy_test_support::write_executable(&runtime_a, format!(
                     "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":\"{identity}\"}}}}'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > \"$HOMEBOY_TEST_RUNTIME_A_INVOCATION\"\nexit 17\n"
-                ),
-            )
+                ), 0o700)
             .expect("write runtime-A fixture");
-            std::fs::set_permissions(&runtime_a, std::fs::Permissions::from_mode(0o700))
-                .expect("make runtime-A fixture executable");
+
             let digest = format!(
                 "{:x}",
                 Sha256::digest(std::fs::read(&runtime_a).expect("read runtime-A fixture"))

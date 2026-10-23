@@ -1,5 +1,4 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -90,10 +89,5 @@ fn git_head() -> String {
 }
 
 fn write_executable(path: &Path, content: &str) {
-    fs::write(path, content).expect("write fixture executable");
-    let mut permissions = fs::metadata(path)
-        .expect("fixture executable metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("make fixture executable");
+    homeboy_test_support::write_executable(path, content, 0o755).expect("write fixture executable");
 }

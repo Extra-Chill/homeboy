@@ -726,6 +726,7 @@ dependencies = [
  "homeboy-lab-contract",
  "homeboy-product-identity",
  "homeboy-runner-contract",
+ "homeboy-test-support",
  "libc",
  "reqwest",
  "rusqlite",
@@ -752,6 +753,7 @@ dependencies = [
  "homeboy-extension-contract",
  "homeboy-lab-contract",
  "homeboy-runner-contract",
+ "homeboy-test-support",
  "homeboy-upgrade",
  "libc",
  "regex",
@@ -793,6 +795,7 @@ dependencies = [
  "homeboy-review",
  "homeboy-rig",
  "homeboy-runner-contract",
+ "homeboy-test-support",
  "homeboy-tunnel",
  "homeboy-upgrade",
  "homeboy-version",
@@ -856,6 +859,7 @@ dependencies = [
  "homeboy-product-identity",
  "homeboy-redaction",
  "homeboy-runner-contract",
+ "homeboy-test-support",
  "keyring",
  "libc",
  "regex",
@@ -890,6 +894,7 @@ dependencies = [
  "homeboy-extension-contract",
  "homeboy-paths",
  "homeboy-product-identity",
+ "homeboy-test-support",
  "homeboy-version",
  "libc",
  "regex",
@@ -910,6 +915,7 @@ dependencies = [
  "homeboy-error",
  "homeboy-paths",
  "homeboy-product-identity",
+ "homeboy-test-support",
  "inventory",
  "libc",
  "regex",
@@ -995,6 +1001,7 @@ dependencies = [
  "homeboy-product-identity",
  "homeboy-rig",
  "homeboy-runner-contract",
+ "homeboy-test-support",
  "homeboy-upgrade",
  "libc",
  "regex",
@@ -1059,6 +1066,7 @@ dependencies = [
  "homeboy-extension-contract",
  "homeboy-paths",
  "homeboy-product-identity",
+ "homeboy-test-support",
  "homeboy-version",
  "libc",
  "regex",
@@ -1096,6 +1104,7 @@ dependencies = [
  "homeboy-lifecycle-contract",
  "homeboy-paths",
  "homeboy-product-identity",
+ "homeboy-test-support",
  "libc",
  "serde",
  "serde_json",
@@ -1112,6 +1121,14 @@ dependencies = [
  "homeboy-redaction",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-test-support"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
 ]
 
 [[package]]
@@ -1140,6 +1157,7 @@ dependencies = [
  "homeboy-engine-primitives",
  "homeboy-extension-contract",
  "homeboy-product-identity",
+ "homeboy-test-support",
  "libc",
  "regex",
  "reqwest",
@@ -1159,6 +1177,7 @@ dependencies = [
  "homeboy-core",
  "homeboy-extension-contract",
  "homeboy-product-identity",
+ "homeboy-test-support",
  "regex",
  "semver",
  "serde",

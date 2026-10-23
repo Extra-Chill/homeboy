@@ -260,8 +260,8 @@ mod tests {
     fn executable_requirement_uses_env_aliases_before_path() {
         let temp = tempdir().expect("tempdir");
         let alias_bin = temp.path().join("alias-tool");
-        fs::write(&alias_bin, "#!/bin/sh\nexit 0\n").expect("write executable");
-        make_executable(&alias_bin);
+        homeboy_test_support::write_executable(&alias_bin, "#!/bin/sh\nexit 0\n", 0o755)
+            .expect("write executable");
 
         let primary_env = "HOMEBOY_TEST_PRIMARY_TOOL_BIN";
         let alias_env = "HOMEBOY_TEST_ALIAS_TOOL_BIN";
@@ -327,16 +327,4 @@ mod tests {
             "error: {error}"
         );
     }
-
-    #[cfg(unix)]
-    fn make_executable(path: &std::path::Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).expect("chmod");
-    }
-
-    #[cfg(not(unix))]
-    fn make_executable(_path: &std::path::Path) {}
 }

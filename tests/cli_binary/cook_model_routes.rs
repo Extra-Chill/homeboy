@@ -204,7 +204,7 @@ fn cook_preview_reports_the_readiness_bound_rotation_route() {
 #[cfg(unix)]
 #[test]
 fn acknowledged_cook_launches_pi_with_the_concrete_cli_model() {
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::symlink;
 
     let context = HermeticTestContext::new();
     let home = context.home();
@@ -260,9 +260,7 @@ fn acknowledged_cook_launches_pi_with_the_concrete_cli_model() {
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join("pi-argv.jsonl"));
     let fake_pi = bin.join("pi");
-    std::fs::write(
-        &fake_pi,
-        format!(
+    homeboy_test_support::write_executable(&fake_pi, format!(
             r#"#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
@@ -278,14 +276,8 @@ if (args[0] === '--version') {{
     process.exit(1);
 }}
 "#
-        ),
-    )
+        ), 0o755)
     .expect("write fake Pi executable");
-    let mut permissions = std::fs::metadata(&fake_pi)
-        .expect("fake executable metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_pi, permissions).expect("make fake executable runnable");
 
     let source = home.join("source");
     initialize_git_repository(&source);

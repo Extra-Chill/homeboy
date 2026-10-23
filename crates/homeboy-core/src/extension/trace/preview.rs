@@ -1036,18 +1036,12 @@ mod tests {
         // `noexec` $TMPDIR would fail before the lifecycle assertions (#6760).
         let temp = homeboy_core::test_support::exec_capable_tempdir();
         let client = temp.path().join("homeboy-preview-client-fixture.sh");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &client,
             "#!/bin/sh\nprintf 'ready https://run-42-tunnel.preview.example.test\\n'\nsleep 5\n",
+            0o755,
         )
         .expect("write native client fixture");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&client).expect("metadata").permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&client, permissions).expect("chmod fixture");
-        }
 
         let artifact_dir = temp.path().join("artifacts");
         let session = TracePublicPreviewSession::start_with_artifact_dir(

@@ -84,20 +84,13 @@ mod tests {
             write_extension_manifest(home.path(), "fixture", "test");
             let extension_dir = home.path().join(".config/homeboy/extensions/fixture");
             let script = extension_dir.join("test.sh");
-            std::fs::write(
+            homeboy_test_support::write_executable(
                 &script,
                 "#!/bin/sh\nprintf '%s' \"$HOMEBOY_SETTINGS_JSON\"\n",
+                0o755,
             )
             .expect("test script");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut permissions = std::fs::metadata(&script)
-                    .expect("script metadata")
-                    .permissions();
-                permissions.set_mode(0o755);
-                std::fs::set_permissions(&script, permissions).expect("make script executable");
-            }
+
             let project = homeboy_core::project::Project {
                 id: "site".to_string(),
                 extensions: Some(std::collections::HashMap::from([(

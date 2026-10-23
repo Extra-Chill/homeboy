@@ -55,9 +55,7 @@ fn test_build_trace_runner() {
     fs::create_dir_all(&component_dir).unwrap();
     write_extension_manifest(&extension_dir);
     let script = extension_dir.join("trace-runner.sh");
-    fs::write(
-        &script,
-        r#"#!/usr/bin/env bash
+    homeboy_test_support::write_executable(&script, r#"#!/usr/bin/env bash
 set -euo pipefail
 {
   printf 'results=%s\n' "$HOMEBOY_TRACE_RESULTS_FILE"
@@ -73,16 +71,8 @@ set -euo pipefail
 cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
 {"component_id":"example","scenario_id":"close-window","status":"pass","timeline":[],"assertions":[],"artifacts":[{"label":"env","path":"artifacts/env.txt"}]}
 JSON
-"#,
-    )
+"#, 0o755)
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script, perms).unwrap();
-    }
 
     let component = component_with_extension("example", &component_dir);
     let context = trace_context(&component, &extension_dir);
@@ -148,7 +138,7 @@ fn test_run_trace_list_workflow() {
     fs::create_dir_all(&component_dir).unwrap();
     write_extension_manifest(&extension_dir);
     let script = extension_dir.join("trace-runner.sh");
-    fs::write(
+    homeboy_test_support::write_executable(
         &script,
         r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -157,15 +147,9 @@ cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
 {"component_id":"example","scenarios":[{"id":"close-window"}]}
 JSON
 "#,
+        0o755,
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script, perms).unwrap();
-    }
 
     let component = component_with_extension("example", &component_dir);
     let context = trace_context(&component, &extension_dir);
@@ -322,9 +306,7 @@ fn run_trace_workflow_merges_probe_events_into_results() {
     fs::write(&log_path, "before\n").unwrap();
     write_extension_manifest(&extension_dir);
     let script = extension_dir.join("trace-runner.sh");
-    fs::write(
-        &script,
-        format!(
+    homeboy_test_support::write_executable(&script, format!(
             r#"#!/usr/bin/env bash
 set -euo pipefail
 printf 'probe needle\n' >> '{}'
@@ -333,16 +315,8 @@ cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
 JSON
 "#,
             log_path.display()
-        ),
-    )
+        ), 0o755)
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script, perms).unwrap();
-    }
 
     let component = component_with_extension("example", &component_dir);
     let context = trace_context(&component, &extension_dir);
@@ -398,24 +372,14 @@ fn parsed_pass_result_overrides_noisy_runner_exit() {
     fs::create_dir_all(&component_dir).unwrap();
     write_extension_manifest(&extension_dir);
     let script = extension_dir.join("trace-runner.sh");
-    fs::write(
-        &script,
-        r#"#!/usr/bin/env bash
+    homeboy_test_support::write_executable(&script, r#"#!/usr/bin/env bash
 cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
 {"component_id":"example","scenario_id":"close-window","status":"pass","summary":"captured metrics","timeline":[],"assertions":[{"id":"trace-ok","status":"pass","message":"trace completed"}],"artifacts":[]}
 JSON
 printf 'runner envelope could not parse JSON\n' >&2
 exit 1
-"#,
-    )
+"#, 0o755)
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script, perms).unwrap();
-    }
 
     let component = component_with_extension("example", &component_dir);
     let context = trace_context(&component, &extension_dir);
@@ -472,9 +436,7 @@ fn trace_attach_logfile_observes_without_owning_lifecycle() {
     let log_path = temp.path().join("already-running.log");
     fs::write(&log_path, "before\n").unwrap();
     let script = extension_dir.join("trace-runner.sh");
-    fs::write(
-        &script,
-        format!(
+    homeboy_test_support::write_executable(&script, format!(
             r#"#!/usr/bin/env bash
 set -euo pipefail
 printf 'during\n' >> '{}'
@@ -483,16 +445,8 @@ cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
 JSON
 "#,
             log_path.display()
-        ),
-    )
+        ), 0o755)
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script, perms).unwrap();
-    }
 
     let component = component_with_extension("example", &component_dir);
     let context = trace_context(&component, &extension_dir);
@@ -742,28 +696,18 @@ fn overlay_fixture(keep_overlay: bool) -> OverlayFixture {
 }
 
 fn write_overlay_runner(script: &std::path::Path) {
-    fs::write(
-        script,
-        r#"#!/usr/bin/env bash
+    homeboy_test_support::write_executable(script, r#"#!/usr/bin/env bash
 set -euo pipefail
 grep -q '^overlay$' "$HOMEBOY_TRACE_COMPONENT_PATH/scenario.txt"
 cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
 {"component_id":"example","scenario_id":"overlay","status":"pass","timeline":[],"assertions":[],"artifacts":[]}
 JSON
-"#,
-    )
+"#, 0o755)
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(script, perms).unwrap();
-    }
 }
 
 fn write_failing_overlay_runner(script: &std::path::Path) {
-    fs::write(
+    homeboy_test_support::write_executable(
         script,
         r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -771,15 +715,9 @@ grep -q '^overlay$' "$HOMEBOY_TRACE_COMPONENT_PATH/scenario.txt"
 printf 'intentional trace failure\n' >&2
 exit 7
 "#,
+        0o755,
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(script, perms).unwrap();
-    }
 }
 
 fn init_git_repo(path: &std::path::Path) {

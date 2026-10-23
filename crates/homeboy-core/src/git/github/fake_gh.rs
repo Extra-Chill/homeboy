@@ -6,7 +6,6 @@
 //! expected to append `"$*"` to `$HOMEBOY_FAKE_GH_LOG` so tests can assert the
 //! exact argv each mutation produced.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::test_support::EnvVarGuard;
@@ -35,9 +34,7 @@ pub(super) fn fake_gh_component(home: &Path, id: &str, gh_script: &str) -> FakeG
     let bin = home.join("fake-gh-bin");
     std::fs::create_dir_all(&bin).expect("fake gh bin directory");
     let gh = bin.join("gh");
-    std::fs::write(&gh, gh_script).expect("write fake gh");
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
-        .expect("make fake gh executable");
+    homeboy_test_support::write_executable(&gh, gh_script, 0o755).expect("write fake gh");
 
     let log = home.join("gh.log");
     let path_env = EnvVarGuard::set(

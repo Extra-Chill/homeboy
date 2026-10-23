@@ -27,4 +27,6 @@ sha2 = "0.10.9"
 fs4 = "0.13"
 
 [dev-dependencies]
+homeboy-test-support = { path = "../homeboy-test-support" }
+
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

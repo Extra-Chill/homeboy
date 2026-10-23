@@ -6338,15 +6338,13 @@ mod cook_pull_request_ref_tests {
 
         let bin = tempfile::tempdir().expect("fake gh bin");
         let gh = bin.path().join("gh");
-        std::fs::write(
+        homeboy_test_support::write_executable(
             &gh,
             "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
+            0o755,
         )
         .expect("fake gh");
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&gh).expect("gh metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&gh, permissions).expect("executable gh");
+
         let _path = homeboy::core::test_support::EnvVarGuard::set(
             "PATH",
             format!(

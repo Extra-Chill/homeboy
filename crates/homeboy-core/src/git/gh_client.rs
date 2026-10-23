@@ -436,8 +436,7 @@ mod tests {
     use std::io::Cursor;
 
     use std::collections::HashMap;
-    #[cfg(target_os = "linux")]
-    use std::os::unix::fs::PermissionsExt;
+
     #[cfg(target_os = "linux")]
     use std::sync::{Mutex, OnceLock};
     #[cfg(target_os = "linux")]
@@ -726,16 +725,13 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let pid_file = fixture.path().join("descendant.pid");
         let gh = fixture.path().join("gh");
-        std::fs::write(
-            &gh,
-            format!(
+        homeboy_test_support::write_executable(&gh, format!(
                 "#!/bin/sh\nsetsid sh -c 'echo $$ > \"$1\"; sleep 30' sh {} &\nwhile [ ! -s {} ]; do :; done\nexit 0\n",
                 homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
                 homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
-            ),
-        )
+            ), 0o755)
         .unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
         let previous_path = std::env::var_os("PATH");
         let mut paths = vec![fixture.path().to_path_buf()];
         paths.extend(std::env::split_paths(

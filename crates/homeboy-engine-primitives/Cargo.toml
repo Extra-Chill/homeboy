@@ -30,6 +30,8 @@ sha2 = "0.10.9"
 fs4 = "0.13"
 
 [dev-dependencies]
+homeboy-test-support = { path = "../homeboy-test-support" }
+
 tempfile = "3.14"
 
 [target.'cfg(windows)'.dependencies]

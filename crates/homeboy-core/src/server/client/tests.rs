@@ -871,14 +871,9 @@ fn managed_session_connect_builds_master_command() {
 #[cfg(unix)]
 fn ssh_equivalent_command(fixture: &tempfile::TempDir, remote_command: &str) -> Command {
     let transport = fixture.path().join("ssh");
-    std::fs::write(
-        &transport,
-        "#!/bin/sh\nfor argument do remote_command=$argument; done\nexec /bin/sh -c \"$remote_command\"\n",
-    )
+    homeboy_test_support::write_executable(&transport, "#!/bin/sh\nfor argument do remote_command=$argument; done\nexec /bin/sh -c \"$remote_command\"\n", 0o755)
     .expect("write SSH-equivalent transport");
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&transport, std::fs::Permissions::from_mode(0o755))
-        .expect("make SSH-equivalent transport executable");
+
     let mut command = Command::new(transport);
     command
         .args(["fixture@remote", remote_command])
@@ -1001,21 +996,15 @@ fn timed_ssh_child_with_stuck_streams_fails_within_its_cleanup_bound() {
 #[cfg(unix)]
 #[test]
 fn managed_alias_reuses_its_controlpath_and_bounds_mux_control() {
-    use std::os::unix::fs::PermissionsExt;
-
     let fixture = tempfile::tempdir().expect("fixture directory");
     let ssh = fixture.path().join("ssh");
     let args_file = fixture.path().join("args");
-    std::fs::write(
-        &ssh,
-        &format!(
+    homeboy_test_support::write_executable(&ssh, &format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncase \"$*\" in *'-O check'*) sleep 5 ;; *) printf reused ;; esac\n",
             crate::engine::shell::quote_path(&args_file.to_string_lossy())
-        ),
-    )
+        ), 0o755)
     .expect("fake ssh");
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
-        .expect("make fake ssh executable");
+
     let client = SshClient {
         host: "sandbox-alias".to_string(),
         user: "deploy".to_string(),

@@ -221,7 +221,6 @@ fn apply_component_runtime_requirements(
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     fn requirement(id: &str, version: &str) -> ExtensionApiRuntimeRequirement {
         ExtensionApiRuntimeRequirement {
@@ -236,12 +235,8 @@ mod tests {
         fs::create_dir_all(extension_dir.join("scripts/env")).expect("extension dirs");
         fs::write(extension_dir.join(format!("{id}.json")), manifest).expect("manifest");
         let script_path = extension_dir.join("scripts/env/detect.sh");
-        fs::write(&script_path, script).expect("write detector");
-        let mut perms = fs::metadata(&script_path)
-            .expect("script metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).expect("chmod detector");
+        homeboy_test_support::write_executable(&script_path, script, 0o755)
+            .expect("write detector");
     }
 
     fn write_component(homeboy_json: &str) -> tempfile::TempDir {

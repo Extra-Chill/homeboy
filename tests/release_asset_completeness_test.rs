@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -74,10 +73,7 @@ fn digest(path: &Path) -> String {
 }
 
 fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write mock executable");
-    let mut permissions = fs::metadata(path).expect("mock metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("mark mock executable");
+    homeboy_test_support::write_executable(path, contents, 0o755).expect("write mock executable");
 }
 
 fn write_artifacts(root: &Path) -> BTreeMap<String, String> {

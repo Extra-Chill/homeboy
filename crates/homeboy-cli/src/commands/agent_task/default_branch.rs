@@ -428,15 +428,12 @@ mod tests {
     #[test]
     #[ignore = "runs under the parent test with an isolated delayed Git probe"]
     fn delayed_git_probe_returns_bounded_destination_resolution_evidence_child() {
-        use std::os::unix::fs::PermissionsExt;
-
         let (_fixture, checkout) = default_branch_checkout("main");
         let bin = tempfile::tempdir().expect("fake git bin");
         let git = bin.path().join("git");
-        std::fs::write(&git, "#!/bin/sh\nsleep 30\n").expect("write delayed git");
-        let mut permissions = std::fs::metadata(&git).expect("git metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+        homeboy_test_support::write_executable(&git, "#!/bin/sh\nsleep 30\n", 0o755)
+            .expect("write delayed git");
+
         let _path = homeboy::core::test_support::EnvVarGuard::set(
             "PATH",
             format!(
@@ -499,19 +496,12 @@ mod tests {
     #[test]
     #[ignore = "runs under the parent test with an isolated delayed Git remote"]
     fn delayed_remote_lookup_returns_bounded_destination_resolution_evidence_child() {
-        use std::os::unix::fs::PermissionsExt;
-
         let (_fixture, checkout) = default_branch_checkout("main");
         let bin = tempfile::tempdir().expect("fake git bin");
         let git = bin.path().join("git");
-        std::fs::write(
-            &git,
-            "#!/bin/sh\nif [ \"$1\" = rev-parse ] && [ \"$2\" = --show-toplevel ]; then printf '%s\\n' \"$PWD\"; exit 0; fi\nif [ \"$1\" = remote ]; then sleep 30; exit 0; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
-        )
+        homeboy_test_support::write_executable(&git, "#!/bin/sh\nif [ \"$1\" = rev-parse ] && [ \"$2\" = --show-toplevel ]; then printf '%s\\n' \"$PWD\"; exit 0; fi\nif [ \"$1\" = remote ]; then sleep 30; exit 0; fi\nPATH=/usr/bin:/bin git \"$@\"\n", 0o755)
         .expect("write delayed remote git");
-        let mut permissions = std::fs::metadata(&git).expect("git metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+
         let _path = homeboy::core::test_support::EnvVarGuard::set(
             "PATH",
             format!(

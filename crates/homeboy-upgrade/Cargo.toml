@@ -26,4 +26,6 @@ libc = "0.2"
 tempfile = "3.14"
 
 [dev-dependencies]
+homeboy-test-support = { path = "../homeboy-test-support" }
+
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

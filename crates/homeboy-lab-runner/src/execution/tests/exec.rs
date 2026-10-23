@@ -113,17 +113,17 @@ fn runner_child_environment_keeps_daemon_state_with_redirected_home() {
 #[cfg(unix)]
 #[test]
 fn bare_homeboy_argv_uses_configured_runner_executable_in_real_subprocess() {
-    use std::os::unix::fs::PermissionsExt;
-
     let workspace = tempfile::tempdir().expect("workspace");
     let tools = tempfile::tempdir().expect("tools");
     let configured = tools.path().join("homeboy-managed");
     let decoy = tools.path().join("homeboy");
     for (path, output) in [(&configured, "configured"), (&decoy, "decoy")] {
-        std::fs::write(path, format!("#!/bin/sh\nprintf '%s' '{output}'\n"))
-            .expect("write executable fixture");
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .expect("make fixture executable");
+        homeboy_test_support::write_executable(
+            path,
+            format!("#!/bin/sh\nprintf '%s' '{output}'\n"),
+            0o755,
+        )
+        .expect("write executable fixture");
     }
 
     let mut runner = local_runner(workspace.path().display().to_string());
@@ -163,8 +163,6 @@ fn bare_homeboy_argv_uses_configured_runner_executable_in_real_subprocess() {
 #[cfg(unix)]
 #[test]
 fn homeboy_runtime_contract_keeps_direct_script_and_login_shell_worktrees_on_owner_repo() {
-    use std::os::unix::fs::PermissionsExt;
-
     fn git(args: &[&str]) -> String {
         let output = Command::new("git")
             .args(args)
@@ -252,9 +250,8 @@ fn homeboy_runtime_contract_keeps_direct_script_and_login_shell_worktrees_on_own
             "#!/bin/sh\nexec git -C '{}' worktree add -b \"$2\" \"$1\" HEAD\n",
             repo.display()
         );
-        std::fs::write(binary, script).expect("write executable fixture");
-        std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755))
-            .expect("make executable fixture");
+        homeboy_test_support::write_executable(binary, script, 0o755)
+            .expect("write executable fixture");
     }
     let script_file = root.path().join("create-worktree.sh");
     std::fs::write(
@@ -383,19 +380,16 @@ fn homeboy_runtime_contract_keeps_direct_script_and_login_shell_worktrees_on_own
     let authority_bin = root.path().join("authority-bin");
     std::fs::create_dir_all(&authority_bin).expect("authority bin");
     let default_name_runtime = authority_bin.join("homeboy");
-    std::fs::write(
+    homeboy_test_support::write_executable(
         &default_name_runtime,
         format!(
             "#!/bin/sh\nexec git -C '{}' worktree add -b \"$2\" \"$1\" HEAD\n",
             owner_repo.display()
         ),
+        0o755,
     )
     .expect("write default-name configured runtime");
-    std::fs::set_permissions(
-        &default_name_runtime,
-        std::fs::Permissions::from_mode(0o755),
-    )
-    .expect("make default-name runtime executable");
+
     runner.settings.homeboy_path = Some(default_name_runtime.display().to_string());
     std::fs::write(&script_file, "#!/bin/bash\nexec homeboy \"$1\" \"$2\"\n")
         .expect("write bare-command script fixture");
@@ -1545,17 +1539,9 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
         )
         .expect("provider manifest");
         let provider = extension.path().join("env.sh");
-        std::fs::write(
-            &provider,
-            "#!/bin/sh\nprintf '%s\\n' '{\"HOMEBOY_ACTIVE_RUN_ID\":\"provider-active\",\"HOMEBOY_RUN_ID\":\"provider-homeboy\",\"HOMEBOY_BENCH_RUN_ID\":\"provider-bench\",\"WORKFLOW_BENCH_RUN_ID\":\"provider-workflow\"}'\n",
-        )
+        homeboy_test_support::write_executable(&provider, "#!/bin/sh\nprintf '%s\\n' '{\"HOMEBOY_ACTIVE_RUN_ID\":\"provider-active\",\"HOMEBOY_RUN_ID\":\"provider-homeboy\",\"HOMEBOY_BENCH_RUN_ID\":\"provider-bench\",\"WORKFLOW_BENCH_RUN_ID\":\"provider-workflow\"}'\n", 0o755)
         .expect("provider script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
-                .expect("provider executable");
-        }
+
         homeboy_core::extension::lifecycle::install(
             &extension.path().display().to_string(),
             Some("fixture"),

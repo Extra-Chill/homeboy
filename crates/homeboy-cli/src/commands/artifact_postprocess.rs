@@ -110,17 +110,9 @@ mod tests {
 
     fn install_test_helper(home: &tempfile::TempDir) {
         let helper = home.path().join("binary-helper");
-        std::fs::write(
-            &helper,
-            "#!/bin/sh\ncase \"$1\" in binary) printf '\\001\\377\\020' > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;; esac\n",
-        )
+        homeboy_test_support::write_executable(&helper, "#!/bin/sh\ncase \"$1\" in binary) printf '\\001\\377\\020' > \"$HOMEBOY_ARTIFACT_POSTPROCESS_OUTPUT\" ;; esac\n", 0o755)
         .expect("helper");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
-                .expect("helper permissions");
-        }
+
         let registry = home.path().join("helpers.json");
         std::fs::write(
             &registry,

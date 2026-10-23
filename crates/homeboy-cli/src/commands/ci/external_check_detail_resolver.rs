@@ -254,18 +254,13 @@ fn timeout_fixture_command(extension: &std::path::Path) -> Vec<String> {
 
 #[cfg(all(feature = "test-support", unix))]
 fn fixture_program(extension: &std::path::Path, fixture_mode_env: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
-
     let name = "fixture-resolver";
     let path = extension.join(name);
-    std::fs::write(
-        &path,
-        format!(
+    homeboy_test_support::write_executable(&path, format!(
             "#!/bin/sh\ncat >/dev/null\ncase \"${fixture_mode_env}\" in\nsuccess) printf '%s\\n' '{{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"fixture hydrated failure\",\"actions\":[\"fixture-ci replay 42\"]}}' ;;\nmalformed) printf '%s' 'not json' ;;\nunavailable) exit 23 ;;\ntimeout) sleep 30 ;;\n*) exit 24 ;;\nesac\n"
-        ),
-    )
+        ), 0o755)
     .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
     name.to_string()
 }
 

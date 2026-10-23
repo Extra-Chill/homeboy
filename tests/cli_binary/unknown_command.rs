@@ -132,17 +132,15 @@ impl Fixture {
 
 #[cfg(unix)]
 fn write_logging_shim(path: &Path, tool: &str, log: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::write(
+    homeboy_test_support::write_executable(
         path,
         format!(
             "#!/bin/sh\necho \"{tool} $*\" >> '{}'\nexit 1\n",
             log.display()
         ),
+        0o755,
     )
     .expect("write shim");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make shim executable");
 }
 
 fn homeboy_bin() -> PathBuf {
