@@ -3106,9 +3106,9 @@ pub fn resolve_cook_continuation_run_id_in_store(
     Ok(continuation_source_run_id(lifecycle_store, &recipe, run_id))
 }
 
-/// A latest attempt that failed before any provider ran, with a failure that
-/// is not retryable, has nothing to continue: it produced no candidate and
-/// replaying it reproduces the same failure. The Cook still owns earlier
+/// A latest cancelled or failed attempt without candidate, gate, or executor
+/// evidence has nothing to continue. Retryable pre-provider failures remain
+/// selected so they can be retried. The Cook still owns earlier
 /// attempts. Continue from the newest one that holds a recoverable candidate,
 /// so its promotion and feedback loop can dispatch a fresh retry. This is also
 /// the only continuation a historical recipe admits after a controller upgrade
@@ -3123,11 +3123,15 @@ fn continuation_source_run_id(
     let Ok(latest) = lifecycle_store.read_record(&latest_run_id) else {
         return latest_run_id;
     };
-    let stranded_pre_provider_failure = latest.state() == AgentTaskRunState::Failed
-        && latest.metadata.get("pre_execution_failure").is_some()
-        && has_unambiguous_zero_execution(&latest)
-        && !super::cook_pre_execution::retryable_pre_execution_failure(&latest);
-    if !stranded_pre_provider_failure {
+    let empty_terminal_attempt =
+        matches!(
+            latest.state(),
+            AgentTaskRunState::Cancelled | AgentTaskRunState::Failed
+        ) && !agent_task_lifecycle::attempt_preserves_candidate_or_gate(
+            lifecycle_store,
+            &latest_run_id,
+        ) && !super::cook_pre_execution::retryable_pre_execution_failure(&latest);
+    if !empty_terminal_attempt {
         return latest_run_id;
     }
     recipe
@@ -4629,6 +4633,60 @@ mod tests {
             "retry",
             "a retryable pre-provider failure is retried"
         );
+    }
+
+    #[test]
+    fn continuation_and_reader_skip_empty_cancelled_or_failed_followup() {
+        for state in [
+            agent_task_lifecycle::AgentTaskRunState::Cancelled,
+            agent_task_lifecycle::AgentTaskRunState::Failed,
+        ] {
+            let context = homeboy_core::test_support::HermeticTestContext::new();
+            let (store, lifecycle_store) = rooted_stores(&context);
+            let (_, plan) = persist_recipe_run(&store, &lifecycle_store);
+            lifecycle_store
+                .mutate_record("run", |record| {
+                    record.set_state_for_test(
+                        agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
+                    );
+                    record.ensure_metadata_object().insert(
+                        "cook_delivery".into(),
+                        serde_json::json!({
+                            "schema": super::super::cook_delivery::COOK_DELIVERY_SCHEMA,
+                            "delivery": {
+                                "state": "verified",
+                                "candidate": { "promotion": "applied", "target_applied": true }
+                            }
+                        }),
+                    );
+                    true
+                })
+                .unwrap();
+            record_recipe_attempt_in_store(&store, "cook", 2, "retry", &plan).unwrap();
+            lifecycle_store
+                .submit_plan_with_runtime_admission(&plan, "retry", |_| Ok(serde_json::json!({})))
+                .unwrap();
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &lifecycle_store,
+                "cook",
+                2,
+                "retry",
+            )
+            .unwrap();
+            lifecycle_store
+                .mutate_record("retry", |record| {
+                    record.set_state_for_test(state);
+                    true
+                })
+                .unwrap();
+            let selected =
+                resolve_cook_continuation_run_id_in_store(&store, &lifecycle_store, "cook")
+                    .unwrap();
+            assert_eq!(selected, "run");
+            assert_eq!(selected, agent_task_lifecycle::resolve_cook_reader_run_id_in_store(
+                &lifecycle_store, "cook",
+            ).unwrap());
+        }
     }
 
     #[test]

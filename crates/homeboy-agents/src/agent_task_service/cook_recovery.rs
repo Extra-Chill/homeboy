@@ -146,6 +146,8 @@ pub(crate) struct CookRecoveryInputs<'a> {
     pub ambiguous_artifact_ids: &'a [String],
     /// The attempt's terminal continuation failed and must be rearmed.
     pub continuation_rearm_required: bool,
+    /// A completed terminal continuation cannot be claimed again.
+    pub continuation_completed: bool,
     /// The attempt whose recorded review form is consulted below.
     pub run_id: &'a str,
     /// `incomplete_reason` of a recorded review form that declares the task
@@ -158,6 +160,9 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// The attempt's applied candidate is verified, carries a publishable
     /// review form, and has no publication receipt.
     pub publish_ready: bool,
+    /// Applied, verified candidate with no publication receipt, independently
+    /// of whether its outcome contains a publishable review form.
+    pub verified_unpublished: bool,
     /// HEAD of the destination worktree when its branch holds commits ahead
     /// of the recorded base (#16181). A terminal `no_changes` attempt in that
     /// state is adoptable: the operator's committed work is the candidate the
@@ -208,6 +213,19 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
     }
     if inputs.publish_ready && !status_is_settled(&status) {
         return CookRecoveryStep::Publish;
+    }
+    if status == CookStatus::CandidateRecoverable {
+        if inputs.verified_unpublished {
+            return CookRecoveryStep::none(format!(
+                "The verified candidate has no publishable review form. Inspect it with `agent-task diagnose {run}`; if the task is done, publish it with a complete review form via `agent-task recover {run} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`.",
+                run = inputs.run_id
+            ));
+        }
+        if inputs.continuation_completed {
+            return CookRecoveryStep::none(
+                "The candidate's terminal continuation is already completed; inspect it with `agent-task diagnose` before supplying publication inputs.",
+            );
+        }
     }
     if status == CookStatus::NoChanges {
         if let Some(candidate_ref) = inputs.adoptable_candidate_ref {
@@ -470,8 +488,7 @@ pub struct CookRecoveryReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission: Option<Value>,
     pub result: Option<Value>,
-    /// The declared failure cause when recovery exits nonzero because the
-    /// Cook's state admits no recovery step.
+    /// The declared cause of a refused recovery step or a state admitting none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<Value>,
 }
@@ -633,7 +650,7 @@ pub fn recover_cook(
         (CookRecoveryStep::ChooseArtifact { .. }, None, true) => None,
         _ => selected_artifact(&plan, artifact_id)?,
     };
-    let mut report = CookRecoveryReport {
+    let report = CookRecoveryReport {
         schema: COOK_RECOVERY_SCHEMA,
         cook_id: plan.cook_id,
         run_id: plan.run_id,
@@ -648,16 +665,14 @@ pub fn recover_cook(
     let run_id = report.run_id.clone();
     let run_id = run_id.as_str();
     if !overrides.is_empty() {
-        let (result, exit_code) =
-            performer.continue_cook(run_id, overrides.has_route_override(), None, &overrides)?;
-        report.result = Some(result);
-        return Ok((report, exit_code));
+        let result =
+            performer.continue_cook(run_id, overrides.has_route_override(), None, &overrides);
+        return Ok(finish_performed_step(report, result));
     }
     if preflight {
         if report.step == CookRecoveryStep::Publish {
-            let (admission, exit_code) = performer.publish(run_id, &publish, true)?;
-            report.admission = Some(admission);
-            return Ok((report, exit_code));
+            let result = performer.publish(run_id, &publish, true);
+            return Ok(finish_performed_step(report, result));
         }
         if report.step == CookRecoveryStep::ReplaceGates {
             // Replacement gates execute operator shell programs; preflight
@@ -684,42 +699,71 @@ pub fn recover_cook(
         let Some((rearm, artifact_id)) = continuation else {
             return Ok((report, 0));
         };
-        let (admission, exit_code) =
-            performer.preflight_continue_cook(run_id, rearm, artifact_id)?;
-        report.admission = Some(admission);
-        return Ok((report, exit_code));
+        let result = performer.preflight_continue_cook(run_id, rearm, artifact_id);
+        return Ok(finish_performed_step(report, result));
+    }
+    if report.step.is_none() {
+        return Ok(finish_without_step(report));
     }
     let none = CookRecoveryOverrides::default();
-    let (result, exit_code) = match &report.step {
-        CookRecoveryStep::Continue => performer.continue_cook(run_id, false, None, &none)?,
-        CookRecoveryStep::ContinueWithArtifact { .. } | CookRecoveryStep::ChooseArtifact { .. } => {
-            performer.continue_cook(run_id, true, selected_artifact.as_deref(), &none)?
-        }
-        CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, None, &none)?,
-        CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => performer.retry(run_id)?,
-        CookRecoveryStep::Reconcile => performer.reconcile(run_id)?,
-        CookRecoveryStep::Adopt { candidate_ref } => performer.adopt(run_id, candidate_ref)?,
-        CookRecoveryStep::ReplaceGates => {
-            let Some(replace_gates) = replace_gates else {
-                return Err(replace_gates_inputs_required(run_id));
-            };
-            let (mut result, exit_code) = performer.replace_gates(run_id, replace_gates)?;
-            if let Some(object) = result.as_object_mut() {
-                object.insert(
+    let result = (|| {
+        Ok(match &report.step {
+            CookRecoveryStep::Continue => performer.continue_cook(run_id, false, None, &none)?,
+            CookRecoveryStep::ContinueWithArtifact { .. }
+            | CookRecoveryStep::ChooseArtifact { .. } => {
+                performer.continue_cook(run_id, true, selected_artifact.as_deref(), &none)?
+            }
+            CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, None, &none)?,
+            CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => {
+                performer.retry(run_id)?
+            }
+            CookRecoveryStep::Reconcile => performer.reconcile(run_id)?,
+            CookRecoveryStep::Adopt { candidate_ref } => performer.adopt(run_id, candidate_ref)?,
+            CookRecoveryStep::ReplaceGates => {
+                let Some(replace_gates) = replace_gates else {
+                    return Err(replace_gates_inputs_required(run_id));
+                };
+                let (mut result, exit_code) = performer.replace_gates(run_id, replace_gates)?;
+                if let Some(object) = result.as_object_mut() {
+                    object.insert(
                     "handoff".to_string(),
                     serde_json::json!({
                         "next_command": super::cook_recover_command(None, run_id, None),
                         "status_command": super::cook_recovery_command(run_id, &["status", run_id]),
                     }),
                 );
+                }
+                (result, exit_code)
             }
-            (result, exit_code)
+            CookRecoveryStep::Publish => performer.publish(run_id, &publish, false)?,
+            CookRecoveryStep::None { .. } => unreachable!("no-step handled before performing"),
+        })
+    })();
+    Ok(finish_performed_step(report, result))
+}
+
+fn finish_performed_step(
+    mut report: CookRecoveryReport,
+    result: Result<(Value, i32)>,
+) -> (CookRecoveryReport, i32) {
+    match result {
+        Ok((value, exit_code)) => {
+            if report.preflight {
+                report.admission = Some(value);
+            } else {
+                report.result = Some(value);
+            }
+            (report, exit_code)
         }
-        CookRecoveryStep::Publish => performer.publish(run_id, &publish, false)?,
-        CookRecoveryStep::None { .. } => return Ok(finish_without_step(report)),
-    };
-    report.result = Some(result);
-    Ok((report, exit_code))
+        Err(error) => {
+            report.failure = Some(serde_json::json!({
+                "code": error.code.as_str(),
+                "message": error.message,
+                "details": error.details,
+            }));
+            (report, 1)
+        }
+    }
 }
 
 fn replace_gates_inputs_required(run_id: &str) -> Error {
@@ -992,6 +1036,64 @@ mod tests {
             CookRecoveryStep::Continue,
             "other recoverable candidates still continue"
         );
+    }
+
+    #[test]
+    fn verified_candidate_without_review_form_requires_operator_form() {
+        let decided = step("candidate_recoverable", |inputs| {
+            inputs.run_id = "run-1";
+            inputs.verified_unpublished = true;
+            inputs.continuation_completed = true;
+        });
+        let CookRecoveryStep::None { reason } = decided else {
+            panic!("missing review form must not continue: {decided:?}");
+        };
+        assert!(reason.contains("agent-task recover run-1 --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>"));
+        assert_eq!(
+            step("candidate_recoverable", |inputs| {
+                inputs.verified_unpublished = true;
+                inputs.continuation_completed = true;
+                inputs.publish_ready = true;
+            }),
+            CookRecoveryStep::Publish
+        );
+        assert!(step("candidate_recoverable", |inputs| {
+            inputs.continuation_completed = true;
+        })
+        .is_none());
+
+        let mut plan = CookRecoveryPlan {
+            cook_id: "cook".to_string(),
+            run_id: "run-1".to_string(),
+            status: "candidate_recoverable".to_string(),
+            step: CookRecoveryStep::none(reason),
+        };
+        let supplied = super::super::AgentTaskSuppliedReviewForm {
+            form: serde_json::from_value(serde_json::json!({
+                "pr_title": "Recover verified work",
+                "summary": "The verified candidate completes the task.",
+                "what_changed": ["Preserve verified work"],
+                "compatibility": "Additive",
+                "used_for": "Inspected the candidate",
+                "completion": "complete"
+            }))
+            .unwrap(),
+            tool: "pi".to_string(),
+            model: "test-model".to_string(),
+            operator: "operator".to_string(),
+        };
+        validate_step_inputs(
+            &mut plan,
+            None,
+            &CookRecoveryOverrides::default(),
+            false,
+            &CookPublishRequest {
+                review_form: Some(supplied),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.step, CookRecoveryStep::Publish);
     }
 
     #[test]
@@ -1307,6 +1409,21 @@ mod tests {
         assert_eq!(value["failure"]["message"], reason);
         assert_eq!(value["failure"]["details"]["status"], "gate_failed");
         assert_eq!(value["failure"]["details"]["run_id"], "run-1");
+    }
+
+    #[test]
+    fn refused_performed_step_reports_the_error_as_its_failure_cause() {
+        let message = "cannot be claimed because its continuation is Completed";
+        let mut report = no_step_report("candidate_recoverable", "");
+        report.step = CookRecoveryStep::Continue;
+        let error = Error::validation_invalid_argument("run_id", message, None, None);
+        let (report, exit_code) = finish_performed_step(report, Err(error));
+        assert_eq!(exit_code, 1);
+        assert!(report.failure.unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains(message));
+        assert!(report.result.is_none());
     }
 
     #[test]

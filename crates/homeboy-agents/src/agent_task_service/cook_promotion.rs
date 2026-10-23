@@ -7189,6 +7189,7 @@ pub(crate) fn cook_failure_context_with_stores(
                     &recipe,
                 ),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
+                continuation_state == Some(super::cook_recipe::CookContinuationState::Completed),
                 agent_incomplete_reason(lifecycle_store, record_run_id).as_deref(),
                 adoptable_candidate_ref.as_deref(),
                 delivered_candidate,
@@ -7719,6 +7720,7 @@ struct DeliveredCandidateFacts {
     applied_gate_failure: bool,
     /// Verified, unpublished candidate with a publishable review form.
     publish_ready: bool,
+    verified_unpublished: bool,
 }
 
 /// HEAD of the Cook's destination worktree when the worktree's branch holds
@@ -7818,7 +7820,7 @@ fn delivered_candidate_facts(
         .unwrap_or(false);
     let applied_gate_failure =
         applied_candidate_needs_replacement_gates(&promotion, accept_inherited_failures);
-    let publish_ready = matches!(
+    let verified_unpublished = matches!(
         promotion.status,
         AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
     ) && promotion.finalization_eligible(accept_inherited_failures)
@@ -7827,11 +7829,13 @@ fn delivered_candidate_facts(
             .sha256
             .as_deref()
             .is_some_and(|sha| !sha.is_empty())
-        && !delivery.is_some_and(super::CookDelivery::published)
-        && publishable_review_form(lifecycle_store, &record.run_id);
+        && !delivery.is_some_and(super::CookDelivery::published);
+    let publish_ready =
+        verified_unpublished && publishable_review_form(lifecycle_store, &record.run_id);
     DeliveredCandidateFacts {
         applied_gate_failure,
         publish_ready,
+        verified_unpublished,
     }
 }
 
@@ -7894,6 +7898,7 @@ fn cook_recovery_actions(
         exact_checkpoint_candidate_mismatch,
         ambiguous_artifact_ids,
         false,
+        false,
         None,
         None,
         DeliveredCandidateFacts::default(),
@@ -7911,6 +7916,7 @@ fn cook_recovery_actions_with_prefix(
     exact_checkpoint_candidate_mismatch: bool,
     ambiguous_artifact_ids: Vec<String>,
     continuation_rearm_required: bool,
+    continuation_completed: bool,
     agent_incomplete_reason: Option<&str>,
     adoptable_candidate_ref: Option<&str>,
     delivered_candidate: DeliveredCandidateFacts,
@@ -7928,11 +7934,13 @@ fn cook_recovery_actions_with_prefix(
             exact_checkpoint_candidate_mismatch,
             ambiguous_artifact_ids: &ambiguous_artifact_ids,
             continuation_rearm_required,
+            continuation_completed,
             run_id,
             agent_incomplete_reason,
             adoptable_candidate_ref,
             applied_gate_failure: delivered_candidate.applied_gate_failure,
             publish_ready: delivered_candidate.publish_ready,
+            verified_unpublished: delivered_candidate.verified_unpublished,
         });
     if !recovery_legal {
         let reason = match &step {

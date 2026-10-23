@@ -8211,21 +8211,27 @@ fn preserved_candidate_attempt(
     })
 }
 
-fn attempt_preserves_candidate_or_gate(
+pub(crate) fn attempt_preserves_candidate_or_gate(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> bool {
     let Ok(record) = lifecycle_store.read_record_bounded(run_id) else {
         return false;
     };
+    if record.latest_executor_evidence.is_some() {
+        return true;
+    }
     use crate::agent_task_promotion::AgentTaskPromotionStatus as Status;
     let Some(delivery) =
         crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
     else {
-        return record.latest_executor_evidence.is_some();
+        return false;
     };
+    if !delivery.gates.is_empty() {
+        return true;
+    }
     let Some(candidate) = delivery.candidate.as_ref() else {
-        return record.latest_executor_evidence.is_some();
+        return false;
     };
     matches!(
         candidate.promotion,
@@ -8233,8 +8239,7 @@ fn attempt_preserves_candidate_or_gate(
             | Status::NoChangesGateFailed
             | Status::VerificationPending
             | Status::Applied
-    ) || !delivery.gates.is_empty()
-        || candidate.fingerprint.is_some()
+    ) || candidate.fingerprint.is_some()
         || candidate.patch_artifact.is_some()
 }
 
