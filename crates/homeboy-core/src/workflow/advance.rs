@@ -296,6 +296,8 @@ impl FinishedStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepResult {
     pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub status: FinishedStatus,
     /// A domain outcome that overrides `status` (a Cook's run state).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -521,6 +523,7 @@ impl Machine<'_> {
                 .clone()
                 .unwrap_or_else(|| result.status.as_str().to_string())
         };
+        step.error = result.error.clone();
         step.output = result.output.clone();
         step.run_id = result.run_id.clone();
         let attempt = step.attempt;
@@ -569,6 +572,7 @@ impl Machine<'_> {
                 .clone()
                 .unwrap_or_else(|| result.status.as_str().to_string())
         };
+        item.error = result.error.clone();
         item.output = result.output.clone();
         item.run_id = result.run_id.clone();
         item.outcome = Some(outcome.clone());
@@ -750,10 +754,21 @@ impl Machine<'_> {
         step.carried = false;
         step.outcome = Some(outcome);
         if failure {
+            let error = step.error.clone().or_else(|| {
+                step.items
+                    .iter()
+                    .find(|item| {
+                        item.outcome
+                            .as_deref()
+                            .is_some_and(|outcome| FAILURE_OUTCOMES.contains(&outcome))
+                    })
+                    .and_then(|item| item.error.clone())
+            });
             self.state.failing = true;
-            self.state
-                .reason
-                .get_or_insert_with(|| format!("step `{id}` did not succeed"));
+            self.state.reason.get_or_insert_with(|| match error {
+                Some(error) => format!("step `{id}` did not succeed: {error}"),
+                None => format!("step `{id}` did not succeed"),
+            });
         }
     }
 

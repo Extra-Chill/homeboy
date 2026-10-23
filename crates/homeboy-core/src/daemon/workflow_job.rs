@@ -483,8 +483,26 @@ fn step_result(
         Some(_) => (None, output_path.and_then(|path| read_output(&path))),
         None => (None, None),
     };
+    let error = if status == FinishedStatus::Failed {
+        store.events(job.id).ok().and_then(|events| {
+            events
+                .into_iter()
+                .rev()
+                .find(|event| {
+                    event.kind == JobEventKind::Error
+                        && event
+                            .message
+                            .as_deref()
+                            .is_some_and(|message| !message.trim().is_empty())
+                })
+                .and_then(|event| event.message)
+        })
+    } else {
+        None
+    };
     Some(StepResult {
         key: key.to_string(),
+        error,
         status,
         outcome,
         output,

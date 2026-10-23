@@ -714,11 +714,16 @@ fn unnamed_failure_diagnostics(
             .and_then(Value::as_str)
             .map(str::to_string)
     });
-    let message = match subject {
-        Some(subject) => {
+    let reason = (identity.command == "workflow")
+        .then(|| data.get("reason").and_then(Value::as_str))
+        .flatten()
+        .filter(|reason| !reason.trim().is_empty());
+    let message = match (reason, subject) {
+        (Some(reason), _) => reason.to_string(),
+        (None, Some(subject)) => {
             format!("{operation} exited {exit_code} without reporting a failure cause; subject state: {subject}")
         }
-        None => format!("{operation} exited {exit_code} without reporting a failure cause"),
+        (None, None) => format!("{operation} exited {exit_code} without reporting a failure cause"),
     };
     Some(CommandDiagnostics {
         code: "command.failed".to_string(),
@@ -3199,6 +3204,23 @@ mod tests {
         assert_eq!(value["diagnostics"]["message"], reason);
         assert_eq!(value["diagnostics"]["code"], "agent_task.recover_no_step");
         assert_eq!(value["diagnostics"]["details"]["status"], "gate_failed");
+    }
+
+    #[test]
+    fn workflow_status_summarizes_the_failure_reason() {
+        let reason = "step `prepare` did not succeed: repository does not exist";
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(json!({ "status": "failed", "reason": reason })),
+            1,
+            &CommandIdentity::with_operation("workflow", "status"),
+            None,
+        );
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["summary"], reason);
+        assert_eq!(value["diagnostics"]["message"], reason);
+        assert!(!value
+            .to_string()
+            .contains("without reporting a failure cause"));
     }
 
     #[test]

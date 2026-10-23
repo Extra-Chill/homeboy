@@ -1723,6 +1723,16 @@ fn relationship_reference(value: &str) -> String {
     }
     value.to_string()
 }
+/// Render response identity independently of the requested routing tier.
+/// Missing response metadata is explicit, including for legacy run records.
+pub(crate) fn served_model_disclosure(served_models: &[String], rotation: &str) -> String {
+    if served_models.is_empty() {
+        format!("tier {rotation}; served model not recorded")
+    } else {
+        format!("{} (tier {rotation})", served_models.join(", "))
+    }
+}
+
 fn placeholder_model(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -2826,13 +2836,56 @@ mod tests {
     }
 
     #[test]
-    fn disclosure_has_one_process_label_and_records_model_identity() {
+    fn disclosure_names_served_model_from_real_pi_response_fixture() {
+        // Real Roadie response metadata; assistant text was replaced with a
+        // false self-report to prove disclosure ignores agent-written text.
+        let session = include_str!("agent_task_provider/fixtures/pi-roadie-session.jsonl");
+        let served = crate::agent_task_provider::pi_response::served_models(session.as_bytes());
+        assert_eq!(served, ["gpt-6.1-sol"]);
+        let aggregate = serde_json::from_value(serde_json::json!({
+            "plan_id": "pi-fixture", "status": "succeeded", "totals": {"skipped": 0},
+            "outcomes": [{ "task_id": "cook-homeboy", "status": "succeeded",
+                "metadata": { "model": "cook-heavy", "served_models": served } }]
+        }))
+        .expect("real Pi session normalized into aggregate");
+        let mut record = crate::agent_task_lifecycle::AgentTaskRunRecord::new_queued(
+            "pi-fixture",
+            "pi-fixture",
+            "plan.json",
+            "2026-10-23T02:29:33Z",
+        );
+        crate::agent_task_lifecycle::project_outcome_models(&mut record, &aggregate);
+        let persisted = serde_json::to_vec(&record).expect("durable run serialization");
+        let record: crate::agent_task_lifecycle::AgentTaskRunRecord =
+            serde_json::from_slice(&persisted).expect("durable run read");
+        assert_eq!(record.served_models, ["gpt-6.1-sol"]);
         let mut value = dossier();
-        value.ai_assistance.model = "anthropic/claude-sonnet-5 (tier cook-heavy)".into();
+        value.ai_assistance.model = served_model_disclosure(&record.served_models, "cook-heavy");
+        let body = render_review_dossier(&value, &default_profile());
+        assert!(
+            body.contains("Model: gpt-6.1-sol (tier cook-heavy)"),
+            "{body}"
+        );
+        assert!(!body.contains("claude-opus-5-5"), "{body}");
+
+        value.ai_assistance.model = served_model_disclosure(&[], "cook-heavy");
+        let body = render_review_dossier(&value, &default_profile());
+        assert!(body.contains("Model: tier cook-heavy; served model not recorded"));
+        assert_eq!(
+            served_model_disclosure(
+                &["gpt-6.1-sol".into(), "claude-opus-5-5".into()],
+                "cook-heavy"
+            ),
+            "gpt-6.1-sol, claude-opus-5-5 (tier cook-heavy)"
+        );
+    }
+
+    #[test]
+    fn disclosure_has_one_process_label() {
+        let mut value = dossier();
         value.ai_assistance.used_for =
             "AI disclosure: Implemented `StyleResolver` and tested `<html>`.".into();
         let body = render_review_dossier(&value, &default_profile());
-        assert!(body.contains("Model: anthropic/claude-sonnet-5 (tier cook-heavy)"));
         assert_eq!(body.matches("Used for:").count(), 1);
         assert!(!body.contains("AI disclosure:"));
         assert!(body.contains("`StyleResolver`"));

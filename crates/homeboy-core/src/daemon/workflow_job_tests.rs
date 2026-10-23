@@ -81,6 +81,54 @@ fn sh(script: &str) -> Value {
     json!({ "program": "sh", "args": ["-c", script] })
 }
 
+#[test]
+fn failed_step_cause_reaches_the_workflow_status() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-failure-test".to_string());
+        let request = request(
+            json!({
+                "schema": "homeboy/workflow/v1",
+                "id": "failure-cause",
+                "steps": [{"id": "prepare", "exec": sh("echo repository-does-not-exist >&2; exit 7")}]
+            }),
+            home.path(),
+        );
+        let job_id = admit(&store, &request);
+        crate::daemon::start_controller_job(job_id, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job_id, 30).status, JobStatus::Failed);
+
+        let initial = InstanceState::new(
+            &request.definition,
+            &request.instance,
+            request.inputs.clone(),
+        );
+        let (running, _) = advance(&request.definition, &initial, &Event::Start, 0);
+        let key = running.steps["prepare"].key.as_deref().unwrap();
+        let result = step_result(&request, &running, key, &store).unwrap();
+        let error = result.error.clone().expect("failed child has an error");
+        assert!(error.contains("repository-does-not-exist"), "{error}");
+        let reason = format!("step `prepare` did not succeed: {error}");
+        let (finished, _) = advance(
+            &request.definition,
+            &running,
+            &Event::StepFinished(result),
+            1,
+        );
+        assert_eq!(
+            finished.steps["prepare"].error.as_deref(),
+            Some(error.as_str())
+        );
+        assert_eq!(finished.reason.as_deref(), Some(reason.as_str()));
+        let status = workflow_status(&store, &request.instance).unwrap();
+        assert_eq!(status["steps"]["prepare"]["error"], error);
+        assert_eq!(status["reason"], reason);
+    });
+}
+
 /// `evaluate` reports findings on its first run and acceptance on its
 /// second; the gate launches `fix` only on findings, and the `until` gate
 /// passes on iteration 2. Every step job runs exactly once.

@@ -319,6 +319,8 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         if let Some(candidate) = &record.candidate {
             value["candidate_commit"] = json!(candidate);
         }
+        // Provider response identity, distinct from the requested routing tier.
+        value["served_models"] = json!(record.served_models);
         attach_lab_snapshot_failure_projection(&mut value, &record);
         if let Some(diagnostic) = lab_staging_root_cause(&record) {
             value["blocker_summary"] = json!(diagnostic.message);
@@ -438,6 +440,12 @@ fn compact_control_plane_status(value: Value) -> Value {
     // belongs next to the state, so operators plan rotations on facts (#15854).
     if let Some(provider) = value.get("provider").filter(|provider| !provider.is_null()) {
         compact["provider"] = bounded_control_plane_value(provider);
+    }
+    if let Some(models) = value
+        .get("served_models")
+        .filter(|models| !models.is_null())
+    {
+        compact["served_models"] = bounded_control_plane_value(models);
     }
 
     for key in ["artifacts", "evidence"] {
@@ -597,12 +605,17 @@ mod compact_status_tests {
                 "id": "anthropic",
                 "model": "airline/claude-sonnet-5"
             },
+            "served_models": ["claude-sonnet-5", "gpt-6.1-sol"],
             "action_eligibility": { "actions": [] }
         });
         let compact = compact_control_plane_status(value);
         assert_eq!(
             compact["provider"]["model"],
             json!("airline/claude-sonnet-5")
+        );
+        assert_eq!(
+            compact["served_models"],
+            json!(["claude-sonnet-5", "gpt-6.1-sol"])
         );
 
         // No provider summary yet means no invented projection: the compact
