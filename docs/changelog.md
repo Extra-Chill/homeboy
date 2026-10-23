@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.432.5] - 2026-10-23
+
+### Changed
+- Harvest records one immutable candidate commit; promotion gates on it (#16303 S1)
+
 ## [0.432.4] - 2026-10-23
 
 ### Fixed
