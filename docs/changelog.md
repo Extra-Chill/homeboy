@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.5] - 2026-10-23
+
+### Changed
+- Recover agrees with status on a Cook's recoverable candidate
+
+### Fixed
+- surface failed step job causes in status
+
 ## [0.433.4] - 2026-10-23
 
 ### Changed
