@@ -1,0 +1,256 @@
+//! Candidate-only recovery regressions: real Git, durable records, no patch list.
+use super::*;
+
+fn make_multi_attempt(
+    options: &CookRequest,
+    promotion: &AgentTaskPromotionReport,
+    target: &std::path::Path,
+    green: bool,
+) -> (CookRequest, AgentTaskPromotionReport) {
+    let recipes = CookRecipeStore::from_current_data_root().unwrap();
+    let store = test_lifecycle_store();
+    let original = &options.identity.initial_run_id;
+    let mut options = options.clone();
+    options.identity.initial_run_id = format!("{original}-attempt-2");
+    let run = &options.identity.initial_run_id;
+    recipes
+        .record_recipe_attempt(
+            &options.identity.cook_id,
+            2,
+            run,
+            &options.identity.initial_plan,
+        )
+        .unwrap();
+    submit_plan_in_test_store(&store, &options.identity.initial_plan, Some(run)).unwrap();
+    store
+        .record_cook_attempt(&options.identity.cook_id, 2, run)
+        .unwrap();
+    let aggregate = store.read_aggregate(original).unwrap();
+    store
+        .record_run_aggregate(run, &options.identity.initial_plan, &aggregate)
+        .unwrap();
+    let execution = store
+        .read_record(original)
+        .unwrap()
+        .lifecycle
+        .provider_runtime;
+    store
+        .mutate_record(run, |record| {
+            record.lifecycle.provider_runtime = execution.clone();
+            true
+        })
+        .unwrap();
+    let mut promotion = promotion.clone();
+    promotion.source.run_id = Some(run.clone());
+    let sha = promotion.provenance["candidate_commit"]["candidate_sha"]
+        .as_str()
+        .unwrap();
+    git_output(
+        target,
+        &["update-ref", &format!("refs/homeboy/candidates/{run}"), sha],
+    )
+    .unwrap();
+    promotion
+        .provenance
+        .as_object_mut()
+        .unwrap()
+        .remove("replacement_gate_proof");
+    promotion.status = AgentTaskPromotionStatus::GateFailed;
+    promotion.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
+    promotion.deterministic_gates[0].exit_code = 1;
+    promotion.normalize_gate_outcome();
+    store
+        .record_promotion(run, serde_json::to_value(&promotion).unwrap())
+        .unwrap();
+    let promotion = if green {
+        verify_replacement_gates(
+            run,
+            VerifyGateOptions {
+                verify: vec!["test \"$(cat tracked.txt)\" = promoted".into()],
+                ..Default::default()
+            },
+            "operator authorizes candidate-only replacement".into(),
+            None,
+        )
+        .unwrap()
+    } else {
+        promotion
+    };
+    assert!(aggregate.outcomes[0].artifacts.is_empty());
+    assert!(aggregate.outcomes[0].candidate.is_some());
+    assert_eq!(
+        aggregate.outcomes[0].status,
+        crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable
+    );
+    (options, promotion)
+}
+
+struct PublishCandidate(std::sync::Mutex<CaptureBackend>);
+impl crate::agent_task_service::CookRecoveryPerformer for PublishCandidate {
+    fn continue_cook(
+        &self,
+        _: &str,
+        _: bool,
+        _: &crate::agent_task_service::CookRecoveryOverrides,
+    ) -> Result<(Value, i32)> {
+        panic!("must publish without provider redispatch")
+    }
+    fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+        panic!("must publish")
+    }
+    fn retry(&self, _: &str) -> Result<(Value, i32)> {
+        panic!("must not retry")
+    }
+    fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+        panic!("must not reconcile")
+    }
+    fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+        panic!("must not adopt")
+    }
+    fn publish(
+        &self,
+        run: &str,
+        _: &crate::agent_task_service::CookPublishRequest,
+        preflight: bool,
+    ) -> Result<(Value, i32)> {
+        assert!(!preflight);
+        let value =
+            recover_cook_pr_with_backend(run, Vec::new(), false, &mut *self.0.lock().unwrap())?;
+        Ok((value, 0))
+    }
+}
+
+#[test]
+fn multi_attempt_candidate_recoverable_recover_publishes_candidate_sha() {
+    with_corrected_gate_candidate(|options, target, promotion| {
+        let (options, promotion) = make_multi_attempt(&options, &promotion, &target, true);
+        let sha = promotion.provenance["candidate_commit"]["candidate_sha"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            git_output(
+                &target,
+                &[
+                    "rev-parse",
+                    &format!(
+                        "refs/homeboy/candidates/{}",
+                        options.identity.initial_run_id
+                    )
+                ]
+            )
+            .unwrap(),
+            sha
+        );
+        assert!(promotion
+            .deterministic_gates
+            .iter()
+            .all(|gate| gate.exit_code == 0));
+        let performer = PublishCandidate(std::sync::Mutex::new(CaptureBackend {
+            hydrate_run_id: Some(options.identity.initial_run_id.clone()),
+            committed_sha: Some(sha.to_string()),
+            ..Default::default()
+        }));
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            &options.identity.cook_id,
+            Default::default(),
+            &performer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Publish
+        );
+        assert_eq!(report.result.unwrap()["status"], "review_ready");
+        let backend = performer.0.lock().unwrap();
+        assert!(backend.created);
+        assert!(backend.body.contains("gpt-6.1-sol"));
+    });
+}
+
+#[test]
+fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
+    with_corrected_gate_candidate(|options, target, promotion| {
+        let (options, promotion) = make_multi_attempt(&options, &promotion, &target, true);
+        let sha = promotion.provenance["candidate_commit"]["candidate_sha"]
+            .as_str()
+            .unwrap();
+        // The candidate commit, not destination HEAD or any patch evidence.
+        assert_ne!(git_output(&target, &["rev-parse", "HEAD"]).unwrap(), sha);
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(options.identity.initial_run_id.clone()),
+            committed_sha: Some(sha.to_string()),
+            ..Default::default()
+        };
+        let result = adopt_cook_candidate_with_dispatcher_and_backend(
+            &options.identity.cook_id,
+            sha,
+            AgentTaskCandidateAdoptionOptions::default(),
+            |_| Ok(None),
+            Arc::new(UnusedExecutor),
+            &mut backend,
+        )
+        .unwrap();
+        assert_eq!(result.exit_code, 0, "{result:#?}");
+        assert_eq!(result.value.status, "review_ready");
+        assert!(backend.created);
+        assert!(backend.body.contains("gpt-6.1-sol"));
+        let stored = persisted_promotion_for_attempt(&options.identity.initial_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.provenance["candidate_commit"]["candidate_sha"], sha);
+        assert!(stored.provenance.get("cook_follow_up").is_none());
+    });
+}
+
+#[test]
+fn replacement_gates_recover_attaches_proof_to_candidate_sha_without_artifacts() {
+    with_corrected_gate_candidate(|options, target, promotion| {
+        let (options, mut promotion) = make_multi_attempt(&options, &promotion, &target, false);
+        let candidate = promotion.provenance["candidate_commit"].clone();
+        promotion
+            .provenance
+            .as_object_mut()
+            .unwrap()
+            .remove("replacement_gate_proof");
+        promotion.deterministic_gates[0].exit_code = 1;
+        promotion.deterministic_gates[0].status =
+            crate::agent_task_gate::AgentTaskGateStatus::Failed;
+        promotion.normalize_gate_outcome();
+        test_lifecycle_store()
+            .record_promotion(
+                &options.identity.initial_run_id,
+                serde_json::to_value(promotion).unwrap(),
+            )
+            .unwrap();
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            &options.identity.cook_id,
+            crate::agent_task_service::CookRecoveryRequest {
+                replace_gates: Some(crate::agent_task_service::CookReplaceGatesRequest {
+                    proof: crate::agent_task_service::CookReplacementProof::Gates(
+                        VerifyGateOptions {
+                            verify: vec!["test \"$(cat tracked.txt)\" = promoted".into()],
+                            ..Default::default()
+                        },
+                    ),
+                    authorize_external_proof: "operator authorizes candidate-bound gates".into(),
+                    authorize_interrupted_rerun: None,
+                }),
+                ..Default::default()
+            },
+            &ReplacementOnlyRecoveryPerformer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::ReplaceGates
+        );
+        let stored = persisted_promotion_for_attempt(&options.identity.initial_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.provenance["candidate_commit"], candidate);
+        assert!(stored.provenance.get("replacement_gate_proof").is_some());
+        assert_eq!(stored.deterministic_gates[0].exit_code, 0);
+    });
+}

@@ -957,23 +957,25 @@ mod tests {
 
     #[test]
     fn sample_resources_output_is_contract_valid() {
-        let (RunsOutput::Resources(output), exit_code) = runs_resources(RunsResourcesArgs {
-            sample: true,
-            ..Default::default()
-        })
-        .expect("sample resources") else {
-            panic!("expected resources output");
-        };
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let (RunsOutput::Resources(output), exit_code) = runs_resources(RunsResourcesArgs {
+                sample: true,
+                ..Default::default()
+            })
+            .expect("sample resources") else {
+                panic!("expected resources output");
+            };
 
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.command, "runs.resources");
-        assert_eq!(output.schema, RESOURCE_LIFECYCLE_INDEX_SCHEMA);
-        assert_eq!(output.mode, ResourceCleanupMode::Inspect);
-        assert_eq!(output.source_count, 1);
-        assert_eq!(output.resource_count, 1);
-        assert_eq!(output.actionable_count, 1);
-        assert_eq!(output.cleanup_eligible_count, 1);
-        assert!(output.cleanup.is_none());
+            assert_eq!(exit_code, 0);
+            assert_eq!(output.command, "runs.resources");
+            assert_eq!(output.schema, RESOURCE_LIFECYCLE_INDEX_SCHEMA);
+            assert_eq!(output.mode, ResourceCleanupMode::Inspect);
+            assert_eq!(output.source_count, 1);
+            assert_eq!(output.resource_count, 1);
+            assert_eq!(output.actionable_count, 1);
+            assert_eq!(output.cleanup_eligible_count, 1);
+            assert!(output.cleanup.is_none());
+        });
     }
 
     #[test]

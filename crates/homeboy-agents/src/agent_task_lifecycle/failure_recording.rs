@@ -2831,6 +2831,7 @@ pub fn verified_controller_artifact_projection_path_in_store(
 /// Resolve a controller-retained artifact by its durable logical identity. This
 /// is intentionally independent of the runner-reported path: Lab workspaces
 /// are disposable after their aggregate has been mirrored.
+#[cfg(test)]
 pub(crate) fn verified_controller_artifact_projection(
     run_id: &str,
     task_id: &str,

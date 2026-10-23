@@ -588,17 +588,14 @@ pub struct RecoverArgs {
     /// continuation step also validates continuation admission read-only.
     #[arg(long)]
     pub preflight: bool,
-    /// Patch artifact to promote when the step asks to choose among several
-    /// distinct patch candidates.
-    #[arg(long = "artifact-id", value_name = "ID")]
-    pub artifact_id: Option<String>,
+
     /// Explicitly increase the provider timeout for a new retry attempt of a
     /// terminal provider timeout. The override and its operator authority are
     /// retained in the Cook recipe.
     #[arg(
         long = "timeout-ms",
         value_name = "MS",
-        conflicts_with_all = ["preflight", "artifact_id"]
+        conflicts_with_all = ["preflight"]
     )]
     pub timeout_ms: Option<u64>,
     /// Explicitly increase the optional review-form deadline for a new retry
@@ -607,20 +604,20 @@ pub struct RecoverArgs {
     #[arg(
         long = "review-form-timeout-ms",
         value_name = "MS",
-        conflicts_with_all = ["preflight", "artifact_id", "timeout_ms"]
+        conflicts_with_all = ["preflight", "timeout_ms"]
     )]
     pub review_form_timeout_ms: Option<u64>,
     /// Backend for a rearmed retry of a terminal attempt. The original Cook
     /// recipe remains authoritative for prompt, gates, worktree, notification
     /// and disclosure.
-    #[arg(long, value_name = "BACKEND", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    #[arg(long, value_name = "BACKEND", conflicts_with_all = ["preflight", "timeout_ms", "review_form_timeout_ms"])]
     pub backend: Option<String>,
     /// Provider-specific selector for a rearmed retry of a terminal attempt.
-    #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR", conflicts_with_all = ["preflight", "timeout_ms", "review_form_timeout_ms"])]
     pub selector: Option<String>,
     /// Model for a rearmed retry of a terminal attempt. Confirm the pinned
     /// route with --acknowledge-model-override.
-    #[arg(long, value_name = "MODEL", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    #[arg(long, value_name = "MODEL", conflicts_with_all = ["preflight", "timeout_ms", "review_form_timeout_ms"])]
     pub model: Option<String>,
     /// Confirm an explicit model override that pins this retry.
     #[arg(long, requires = "model")]

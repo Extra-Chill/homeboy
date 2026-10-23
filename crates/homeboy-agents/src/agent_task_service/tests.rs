@@ -1806,31 +1806,6 @@ fn persisted_timeout_candidate_is_admitted_for_continuation() {
         }
         assert_eq!(artifact.metadata["run_id"], "service-timeout-candidate");
         assert_eq!(artifact.metadata["task_id"], outcome.task_id);
-
-        let source = serde_json::to_string(&aggregate).expect("serialize persisted aggregate");
-        let admitted = crate::agent_task_promotion::preflight_recoverable_candidate_promotion_in_observation_store(
-            &crate::agent_task_promotion::AgentTaskPromotionRequest {
-                source,
-                source_run_id: Some("service-timeout-candidate".to_string()),
-                source_path: Some(lifecycle_store.aggregate_path("service-timeout-candidate")),
-                source_worktree_path: None,
-                base_ref: None,
-                task_base_sha: None,
-                candidate_ref: None,
-                to_worktree: "timeout-continuation-target".to_string(),
-                task_id: Some(outcome.task_id.clone()),
-                artifact_id: Some(artifact.id.clone()),
-                dry_run: false,
-                gates: crate::agent_task_gate::VerifyGateOptions::default(),
-                provider_invocation: None,
-            repository_integrity_evidence: None,
-            },
-            &lifecycle_store
-                .open_observation_initialized()
-                .expect("observation store"),
-        )
-        .expect("persisted timeout candidate is eligible for cook continuation");
-        assert_eq!(admitted.id, artifact.id);
     });
 }
 

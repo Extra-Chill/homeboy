@@ -278,33 +278,6 @@ mod timeout_tests {
                 );
             }
             assert_eq!(patch.metadata["run_id"], "timeout-dirty-fingerprint");
-            let lifecycle_store =
-                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .expect("lifecycle store");
-            let source = serde_json::to_string(&aggregate).expect("serialize aggregate");
-            let admitted = crate::agent_task_promotion::preflight_recoverable_candidate_promotion_in_observation_store(
-                &crate::agent_task_promotion::AgentTaskPromotionRequest {
-                    source,
-                    source_run_id: Some("timeout-dirty-fingerprint".to_string()),
-                    source_path: Some(lifecycle_store.aggregate_path("timeout-dirty-fingerprint")),
-                    source_worktree_path: None,
-                    base_ref: None,
-                    task_base_sha: patch.metadata["base_ref"].as_str().map(str::to_string),
-                    candidate_ref: None,
-                    to_worktree: "timeout-dirty-fingerprint-target".to_string(),
-                    task_id: Some(outcome.task_id.clone()),
-                    artifact_id: Some(patch.id.clone()),
-                    dry_run: false,
-                    gates: crate::agent_task_gate::VerifyGateOptions::default(),
-                    provider_invocation: None,
-                    repository_integrity_evidence: None,
-                },
-                &lifecycle_store
-                    .open_observation_initialized()
-                    .expect("observation store"),
-            )
-            .expect("recover --artifact-id admits the fingerprinted timeout patch");
-            assert_eq!(admitted.id, patch.id);
         });
     }
 

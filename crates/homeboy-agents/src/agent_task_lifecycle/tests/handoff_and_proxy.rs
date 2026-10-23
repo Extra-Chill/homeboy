@@ -12,7 +12,7 @@ use crate::agent_task_scheduler::{
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use homeboy_core::test_support::with_isolated_home;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -926,9 +926,11 @@ fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
         let patch = format!("{}\n", git(&["diff", "--binary"]));
         let patch_path = temp.path().join("candidate.patch");
         std::fs::write(&patch_path, &patch).expect("write patch artifact");
-        let patch_sha = format!("{:x}", Sha256::digest(patch.as_bytes()));
-
         let source_run = "cook-follow-up-source";
+        let candidate = crate::agent_task_promotion::tests::candidate_snapshot::snapshot(
+            &repo, &head, source_run,
+        );
+        let patch_sha = candidate.candidate_sha;
         let mut plan = test_plan();
         plan.tasks[0].inputs = json!({
             "cook_loop": {
@@ -957,6 +959,7 @@ fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
                 },
                 "provenance": {
                     "worktree_path": repo,
+                    "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(&repo, &head, source_run),
                     "gate_feedback_baseline": {"current_diff": patch},
                 },
                 "operator_notification": {"status": "completed", "message": "complete"},

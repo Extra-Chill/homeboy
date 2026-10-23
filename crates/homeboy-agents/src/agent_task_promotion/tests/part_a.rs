@@ -18,66 +18,6 @@ use serde_json::Value;
 use std::process::Command;
 
 #[test]
-fn promotion_rejects_missing_or_mismatched_recovered_controller_projection() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let observation_store =
-            homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        let run_id = "recovered-lab-run";
-        let task_id = "implement";
-        let artifact_id = "patch";
-        let source = recovered_runner_aggregate(
-            task_id,
-            artifact_id,
-            &sha256_hex(VALID_PATCH),
-            VALID_PATCH.len(),
-        );
-        let temp = tempfile::tempdir().expect("promotion tempdir");
-        let mut provider = FakePromotionWorkspaceProvider {
-            workspace_path: Some(temp.path().join("target")),
-            ..Default::default()
-        };
-        let options = || AgentTaskPromotionRequest {
-            source: source.clone(),
-            source_run_id: Some(run_id.to_string()),
-            source_path: None,
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "homeboy@recovered-promotion".to_string(),
-            task_id: Some(task_id.to_string()),
-            artifact_id: Some(artifact_id.to_string()),
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        };
-
-        let missing = promote_with_provider_in_observation_store(
-            options(),
-            &mut provider,
-            &observation_store,
-        )
-        .expect_err("missing projection rejected");
-        assert!(missing
-            .message
-            .contains("verified controller-side artifact projection"));
-
-        record_controller_projection(run_id, task_id, artifact_id, "different patch bytes");
-        let mismatched = promote_with_provider_in_observation_store(
-            options(),
-            &mut provider,
-            &observation_store,
-        )
-        .expect_err("mismatched projection rejected");
-        assert!(mismatched
-            .message
-            .contains("does not match the aggregate SHA-256 and size"));
-        assert!(provider.apply_calls.is_empty());
-    });
-}
-
-#[test]
 fn promotion_uses_recovered_controller_projection_without_public_artifact_path() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let observation_store =
@@ -275,168 +215,6 @@ fn committed_changes_retention_uses_the_explicit_observation_store() {
     assert!(retained.starts_with(left_context.root()));
     assert_eq!(left_store.list_artifacts(run_id).unwrap().len(), 1);
     assert!(right_store.list_artifacts(run_id).unwrap().is_empty());
-}
-
-#[test]
-fn promote_recoverable_candidate_rejects_mismatched_run_provenance() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = recoverable_patch_source(&temp, 1);
-    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
-    source["artifacts"][0]["metadata"]["run_id"] = Value::String("different-run".to_string());
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let error = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source: source.to_string(),
-            source_run_id: Some("recoverable-run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@recoverable".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-    )
-    .expect_err("mismatched provenance rejected");
-
-    assert!(error.message.contains("fingerprinted artifact"));
-    assert!(provider.apply_calls.is_empty());
-}
-
-const TASK_BASE_SHA: &str = "1111111111111111111111111111111111111111";
-const DERIVED_BASELINE_COMMIT: &str = "2222222222222222222222222222222222222222";
-const DERIVED_BASELINE_TREE: &str = "3333333333333333333333333333333333333333";
-
-/// A recoverable candidate harvested against a Cook-derived pre-existing
-/// candidate baseline: `base_ref` is the derived commit, and the artifact's own
-/// verified baseline provenance names it.
-fn preexisting_baseline_recoverable_source(
-    temp: &tempfile::TempDir,
-    baseline_run_id: &str,
-) -> (PathBuf, Value) {
-    let (source_path, source) = recoverable_patch_source(temp, 1);
-    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
-    let metadata = &mut source["artifacts"][0]["metadata"];
-    metadata["base_ref"] = Value::String(DERIVED_BASELINE_COMMIT.to_string());
-    metadata["source_provenance"] = serde_json::json!({
-        "parent_snapshot": null,
-        "verified_cook_baseline": {
-            "baseline_commit": DERIVED_BASELINE_COMMIT,
-            "baseline_tree": DERIVED_BASELINE_TREE,
-            "parent_snapshot_identity": null,
-            "preexisting_candidate": true,
-            "promoted_patch_artifact_sha256": sha256_hex("pre-existing candidate tree"),
-            "source_run_id": baseline_run_id,
-            "source_task_id": "task-1",
-        }
-    });
-    std::fs::write(&source_path, source.to_string()).expect("write recoverable source");
-    (source_path, source)
-}
-
-fn recoverable_request_with_task_base(
-    source: &Value,
-    source_path: PathBuf,
-) -> AgentTaskPromotionRequest {
-    AgentTaskPromotionRequest {
-        source: source.to_string(),
-        source_run_id: Some("recoverable-run".to_string()),
-        source_path: Some(source_path),
-        source_worktree_path: None,
-        base_ref: None,
-        task_base_sha: Some(TASK_BASE_SHA.to_string()),
-        candidate_ref: None,
-        to_worktree: "repo@recoverable".to_string(),
-        task_id: None,
-        artifact_id: None,
-        dry_run: false,
-        gates: VerifyGateOptions::default(),
-        provider_invocation: None,
-        repository_integrity_evidence: None,
-    }
-}
-
-// Regression: a Cook launched into a dirty worktree derives a pre-existing
-// candidate baseline and harvests against it. On timeout, the recovered
-// candidate's base_ref is that derived commit, not the task base, and
-// recoverable promotion rejected it as unfingerprinted even though the
-// artifact carried the baseline provenance that explains it.
-#[test]
-fn promote_recoverable_candidate_accepts_bound_preexisting_cook_baseline() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = preexisting_baseline_recoverable_source(&temp, "recoverable-run");
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = homeboy_core::observation::ObservationStore::open_initialized_in_roots(
-        &context.path_roots(),
-    )
-    .unwrap();
-    let outcome = serde_json::from_value(source.clone()).unwrap();
-    let admission = super::super::promote::recoverable_candidate_promotion_admission(
-        &source,
-        &outcome,
-        &recoverable_request_with_task_base(&source, source_path),
-        &store,
-    )
-    .unwrap();
-    assert_eq!(
-        admission.promotion_chain_baseline.unwrap()["source_tree"],
-        DERIVED_BASELINE_TREE
-    );
-}
-
-#[test]
-fn promote_recoverable_candidate_rejects_preexisting_baseline_from_another_run() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = preexisting_baseline_recoverable_source(&temp, "other-run");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let error = promote_with_provider(
-        recoverable_request_with_task_base(&source, source_path),
-        &mut provider,
-    )
-    .expect_err("baseline bound to another run is rejected");
-
-    assert!(error.message.contains("fingerprinted artifact"));
-    assert!(provider.apply_calls.is_empty());
-}
-
-#[test]
-fn promote_recoverable_candidate_rejects_unexplained_base_mismatch() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, mut source) =
-        preexisting_baseline_recoverable_source(&temp, "recoverable-run");
-    source["artifacts"][0]["metadata"]
-        .as_object_mut()
-        .expect("artifact metadata")
-        .remove("source_provenance");
-    std::fs::write(&source_path, source.to_string()).expect("write recoverable source");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let error = promote_with_provider(
-        recoverable_request_with_task_base(&source, source_path),
-        &mut provider,
-    )
-    .expect_err("base mismatch without baseline provenance is rejected");
-
-    assert!(error.message.contains("fingerprinted artifact"));
-    assert!(provider.apply_calls.is_empty());
 }
 
 #[test]
@@ -684,7 +462,6 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(worktree_path.clone()),
         verify_transport_error: true,
-        apply_to_git: true,
         ..Default::default()
     };
     let mut checkpoints = Vec::new();
@@ -772,41 +549,34 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         provider_invocation: None,
         repository_integrity_evidence: None,
     };
-    // Resume remains patch-carried in S2b. Exercise the same checkpointed
-    // destination through its retained patch contract (S2c owns migration).
-    let mut checkpoint = serde_json::to_value(&checkpoints[0]).expect("checkpoint value");
-    checkpoint["patch_artifact"] = serde_json::json!({"id": "patch", "kind": "patch", "path": temp.path().join("changes.patch"), "sha256": sha256_hex(VALID_PATCH)});
-    let resumed = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
+    let checkpoint = serde_json::to_value(&checkpoints[0]).expect("checkpoint value");
+    let mut options = resume_options();
+    let mut source: Value = serde_json::from_str(&options.source).unwrap();
+    if source.get("outcomes").is_some() {
+        source["outcomes"][0]["candidate"] = checkpoint["provenance"]["candidate_commit"].clone();
+    } else {
+        source["candidate"] = checkpoint["provenance"]["candidate_commit"].clone();
+    }
+    options.source = source.to_string();
+    let sha = checkpoint["provenance"]["candidate_commit"]["candidate_sha"]
+        .as_str()
+        .unwrap();
+    git(
+        &worktree_path,
+        &["update-ref", "refs/homeboy/candidates/restartable-run", sha],
+    );
+    let resumed = resume_promoted_patch(options.clone(), &worktree_path, &checkpoint)
         .expect("resume exact applied candidate");
     assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
     assert!(provider.apply_calls.is_empty(), "resume must not reapply");
 
     std::fs::write(worktree_path.join("src/lib.rs"), "tampered\n").expect("tamper candidate");
-    let mismatch = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
-        .expect_err("modified candidate rejected");
-    assert!(mismatch
-        .message
-        .contains("differs from the exact checkpointed"));
+    let restored = resume_promoted_patch(options, &worktree_path, &checkpoint)
+        .expect("restore recorded candidate");
+    assert_eq!(restored.patch_artifact.id, sha);
     assert_eq!(
-        mismatch
-            .details
-            .pointer("/recovery/action")
-            .and_then(Value::as_str),
-        Some("fork_replacement")
-    );
-
-    std::fs::write(worktree_path.join("extra.rs"), "extra\n").expect("add extra candidate file");
-    let extra = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
-        .expect_err("extra candidate change rejected");
-    assert!(extra
-        .message
-        .contains("differs from the exact checkpointed"));
-    assert_eq!(
-        extra
-            .details
-            .pointer("/recovery/action")
-            .and_then(Value::as_str),
-        Some("fork_replacement")
+        std::fs::read_to_string(worktree_path.join("src/lib.rs")).unwrap(),
+        "new\n"
     );
 }
 
@@ -913,7 +683,6 @@ fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
 
         let mut provider = FakePromotionWorkspaceProvider {
             workspace_path: Some(worktree_path.clone()),
-            apply_to_git: true,
             ..Default::default()
         };
         let mut checkpoints = Vec::new();
@@ -954,7 +723,6 @@ fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
         // succeeds.
         let mut provider = FakePromotionWorkspaceProvider {
             workspace_path: Some(worktree_path.clone()),
-            apply_to_git: true,
             ..Default::default()
         };
         let report =

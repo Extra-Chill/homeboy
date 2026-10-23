@@ -3162,8 +3162,8 @@ fn derived_destination_refuses_a_stale_leftover_branch_but_explicit_head_is_auth
 
         let error = resolve(&[]).expect_err("a stale derived destination is refused");
         assert!(
-            error.message.contains("Closed PR work"),
-            "names the commits ahead: {}",
+            error.message.contains("existing PR work"),
+            "names the existing PR work: {}",
             error.message
         );
         assert_eq!(

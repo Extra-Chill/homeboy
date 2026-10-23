@@ -25,18 +25,13 @@ pub fn materialize_recovered_patch_artifact(
 ) -> Result<bool> {
     let mut record = reconcile_status(run_id)?;
     let mut aggregate = store::read_aggregate(&record.run_id)?;
-    let artifact_id = artifact_id
-        .map(|artifact_id| resolve_promotion_patch_artifact_id(run_id, task_id, artifact_id))
-        .transpose()?;
     let mut changed = false;
     for outcome in &mut aggregate.outcomes {
         if task_id.is_some_and(|expected| expected != outcome.task_id) {
             continue;
         }
         for artifact in &mut outcome.artifacts {
-            if artifact_id
-                .as_deref()
-                .is_some_and(|expected| expected != artifact.id)
+            if artifact_id.is_some_and(|expected| expected != artifact.id)
                 || !is_patch_artifact_kind(&artifact.kind)
             {
                 continue;
@@ -85,54 +80,6 @@ pub fn materialize_recovered_patch_artifact(
         )?;
     }
     Ok(changed)
-}
-
-/// Resolve a persisted artifact record id to the lifecycle artifact id used by
-/// promotion. The canonical runner ref uses that persisted id; friendly logical
-/// names remain metadata.
-pub fn resolve_promotion_patch_artifact_id(
-    run_id: &str,
-    task_id: Option<&str>,
-    artifact_id: &str,
-) -> Result<String> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    let mut logical_ids = store
-        .list_artifacts(run_id)?
-        .into_iter()
-        .filter(|artifact| is_patch_artifact_kind(&artifact.kind))
-        .filter(|artifact| {
-            task_id.is_none_or(|task_id| {
-                artifact
-                    .metadata_json
-                    .pointer("/agent_task/task_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(task_id)
-            })
-        })
-        .filter_map(|artifact| {
-            let logical_id = artifact
-                .metadata_json
-                .pointer("/agent_task/logical_artifact_id")
-                .and_then(serde_json::Value::as_str)?;
-            (artifact.id == artifact_id || logical_id == artifact_id)
-                .then(|| logical_id.to_string())
-        })
-        .collect::<Vec<_>>();
-    logical_ids.sort();
-    logical_ids.dedup();
-
-    match logical_ids.as_slice() {
-        [] => Ok(artifact_id.to_string()),
-        [logical_id] => Ok(logical_id.clone()),
-        _ => Err(Error::validation_invalid_argument(
-            "artifact_id",
-            format!(
-                "persisted artifact id '{artifact_id}' matches multiple logical patch artifacts for run '{run_id}'"
-            ),
-            Some(artifact_id.to_string()),
-            None,
-        )),
-    }
 }
 
 fn is_recovered_artifact(
