@@ -704,9 +704,12 @@ fn materialize_follow_up_baseline_at(
             )
         })?
     };
-    let artifact_sha256 = content_hash::sha256_hex(&artifact_bytes);
+    let mut artifact_sha256 = content_hash::sha256_hex(&artifact_bytes);
     if let Some(expected) = promotion.patch_artifact.sha256.as_deref() {
-        if expected != artifact_sha256 {
+        // A candidate commit's digest names its own delta, not stored bytes (#16303).
+        if promotion.patch_artifact.kind == "candidate_commit" {
+            artifact_sha256 = expected.to_string();
+        } else if expected != artifact_sha256 {
             return Err(Error::validation_invalid_argument(
                 "promotion.patch_artifact.sha256",
                 "promoted artifact bytes no longer match durable sha256",

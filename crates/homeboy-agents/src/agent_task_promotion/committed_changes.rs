@@ -1,5 +1,4 @@
-use homeboy_engine_primitives::content_hash;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::{json, Value};
@@ -8,110 +7,76 @@ use homeboy_core::{Error, Result};
 
 use super::types::AgentTaskPromotionRequest;
 
-pub(crate) struct CommittedChangesPatch {
-    pub(crate) base_ref: String,
-    pub(crate) candidate: String,
-    pub(crate) historical_task_base: Option<String>,
-    pub(crate) adoption_merge: Option<AdoptionMergeProof>,
-    pub(crate) patch_path: PathBuf,
-    pub(crate) sha256: String,
-    pub(crate) commit_range: String,
-    pub(crate) commits: Vec<Value>,
+/// An explicitly adopted revision (`candidate_ref`) as the Cook candidate
+/// commit (#16303), with the lineage evidence that authenticated it.
+pub(crate) struct AdoptedCandidate {
+    pub(crate) candidate: crate::agent_task::AgentTaskCandidate,
+    pub(crate) provenance: Value,
 }
 
-/// The graph roles authenticated when adoption selects a merge commit. Keeping
-/// these immutable IDs in promotion evidence makes the candidate-only delta
-/// independently reviewable without relying on branch names or mutable refs.
-#[derive(Clone)]
-pub(crate) struct AdoptionMergeProof {
-    pub(crate) candidate_parent: String,
-    pub(crate) resolved_base_parent: String,
-    pub(crate) candidate_tree: String,
-    pub(crate) resolved_base_tree: String,
-}
-
-/// The committed delta of an explicitly adopted candidate (`candidate_ref`).
-pub(crate) fn committed_changes_patch(
-    options: &AgentTaskPromotionRequest,
-) -> Result<Option<CommittedChangesPatch>> {
-    let Some(worktree_path) = options.source_worktree_path.as_deref() else {
-        return Ok(None);
-    };
-    if !worktree_path.is_dir() {
-        return Ok(None);
-    }
-    ensure_clean_source(worktree_path)?;
+/// Resolve the adopted revision to a candidate commit. Its base is the
+/// immutable base the lineage validation authenticates against the recorded
+/// task base: the candidate's parent, or the resolved base parent of a merge.
+pub(crate) fn adopted_candidate(options: &AgentTaskPromotionRequest) -> Result<AdoptedCandidate> {
+    let worktree_path = options
+        .source_worktree_path
+        .as_deref()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "source_worktree",
+                "candidate adoption requires the recorded source worktree",
+                None,
+                None,
+            )
+        })?;
     let candidate = resolve_candidate(worktree_path, options.candidate_ref.as_deref())?;
-    let head = git_stdout(worktree_path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    if candidate != head.trim() {
-        return Err(Error::validation_invalid_argument(
-            "candidate_ref",
-            "candidate revision must equal the recorded source worktree HEAD",
-            Some(candidate),
-            None,
-        ));
-    }
     let (base_ref, historical_task_base, adoption_merge) = resolve_adoption_candidate_base(
         worktree_path,
         &candidate,
         options.task_base_sha.as_deref(),
         options.base_ref.as_deref(),
     )?;
-    if !is_ancestor(worktree_path, &base_ref, &candidate)? {
-        return Err(Error::validation_invalid_argument(
-            "candidate_ref",
-            "candidate revision is not descended from the recorded task base",
-            Some(candidate),
-            None,
-        ));
-    }
     let changed_files = git_lines(
         worktree_path,
         &["diff", "--name-only", &base_ref, &candidate],
     )?;
-    if changed_files.is_empty() {
-        return Ok(None);
-    }
-    let patch = git_stdout(
-        worktree_path,
-        &[
-            "diff",
-            "--binary",
-            "--full-index",
-            "--find-renames",
-            &base_ref,
-            &candidate,
-        ],
-    )?;
-    if patch.trim().is_empty() {
-        return Ok(None);
-    }
     let commit_range = format!("{base_ref}..{candidate}");
     let commits = committed_change_evidence(worktree_path, &commit_range)?;
-    if commits.is_empty() {
-        return Ok(None);
+    if changed_files.is_empty() || commits.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "candidate_ref",
+            "candidate revision contains no changes after the recorded task base",
+            Some(candidate),
+            None,
+        ));
     }
-    let sha256 = content_hash::sha256_hex(patch.as_bytes());
-    let patch_path = committed_changes_patch_path(options, &sha256)?;
-    std::fs::write(&patch_path, patch.as_bytes()).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!(
-                "write committed changes promotion patch {}",
-                patch_path.display()
-            )),
-        )
-    })?;
-    Ok(Some(CommittedChangesPatch {
-        base_ref,
-        candidate,
-        historical_task_base,
-        adoption_merge,
-        patch_path,
-        sha256,
-        commit_range,
-        commits,
-    }))
+    let tree_sha = git_stdout(
+        worktree_path,
+        &["rev-parse", &format!("{candidate}^{{tree}}")],
+    )?
+    .trim()
+    .to_string();
+    let adoption_merge = adoption_merge.map(|mut proof| {
+        proof["candidate"] = json!(candidate);
+        proof["changed_files"] = json!(changed_files);
+        proof
+    });
+    Ok(AdoptedCandidate {
+        provenance: json!({
+            "change_source": "local_commits",
+            "base_ref": base_ref,
+            "commit_range": commit_range,
+            "commits": commits,
+            "historical_task_base": historical_task_base,
+            "adoption_merge": adoption_merge,
+        }),
+        candidate: crate::agent_task::AgentTaskCandidate {
+            base_sha: base_ref,
+            candidate_sha: candidate,
+            tree_sha,
+        },
+    })
 }
 
 /// Explicit adoption is scoped to the immutable candidate delta, not the task's
@@ -122,7 +87,7 @@ fn resolve_adoption_candidate_base(
     candidate: &str,
     task_base_sha: Option<&str>,
     resolved_base_ref: Option<&str>,
-) -> Result<(String, Option<String>, Option<AdoptionMergeProof>)> {
+) -> Result<(String, Option<String>, Option<Value>)> {
     let parents = git_stdout(cwd, &["rev-list", "--parents", "-n", "1", candidate])?;
     let mut identities = parents.split_whitespace();
     let _commit = identities.next();
@@ -192,22 +157,16 @@ fn resolve_adoption_candidate_base(
             Ok((
                 resolved_base_parent.clone(),
                 historical_task_base,
-                Some(AdoptionMergeProof {
-                    candidate_parent: candidate_parent.clone(),
-                    resolved_base_parent: resolved_base_parent.clone(),
-                    candidate_tree: git_stdout(
-                        cwd,
-                        &["rev-parse", &format!("{candidate}^{{tree}}")],
-                    )?
-                    .trim()
-                    .to_string(),
-                    resolved_base_tree: git_stdout(
+                Some(json!({
+                    "candidate_parent": candidate_parent,
+                    "resolved_base_parent": resolved_base_parent,
+                    "candidate_tree": git_stdout(cwd, &["rev-parse", &format!("{candidate}^{{tree}}")])?.trim(),
+                    "resolved_base_tree": git_stdout(
                         cwd,
                         &["rev-parse", &format!("{resolved_base_parent}^{{tree}}")],
                     )?
-                    .trim()
-                    .to_string(),
-                }),
+                    .trim(),
+                })),
             ))
         }
         _ => Err(adoption_graph_error(
@@ -285,19 +244,6 @@ fn adoption_graph_error(candidate: &str, message: &str) -> Error {
     Error::validation_invalid_argument("candidate_ref", message, Some(candidate.to_string()), None)
 }
 
-fn ensure_clean_source(cwd: &Path) -> Result<()> {
-    let status = git_stdout(cwd, &["status", "--porcelain"])?;
-    if status.trim().is_empty() {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-        "source_worktree",
-        "candidate source worktree is dirty; refusing to derive an ambiguous commit candidate",
-        Some(cwd.display().to_string()),
-        None,
-    ))
-}
-
 pub(crate) fn resolve_candidate_revision(cwd: &Path, requested: &str) -> Result<String> {
     resolve_candidate(cwd, Some(requested))
 }
@@ -317,26 +263,6 @@ fn resolve_candidate(cwd: &Path, requested: Option<&str>) -> Result<String> {
             None,
         )
     })
-}
-
-fn committed_changes_patch_path(
-    options: &AgentTaskPromotionRequest,
-    sha256: &str,
-) -> Result<PathBuf> {
-    if let Some(parent) = options.source_path.as_deref().and_then(Path::parent) {
-        return Ok(parent.join(format!("committed-changes-{sha256}.patch")));
-    }
-    let dir = std::env::temp_dir().join("homeboy-agent-task-promotions");
-    std::fs::create_dir_all(&dir).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!(
-                "create committed changes promotion artifact directory {}",
-                dir.display()
-            )),
-        )
-    })?;
-    Ok(dir.join(format!("committed-changes-{sha256}.patch")))
 }
 
 fn committed_change_evidence(cwd: &Path, range: &str) -> Result<Vec<Value>> {

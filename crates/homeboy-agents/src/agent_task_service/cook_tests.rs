@@ -4385,7 +4385,8 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
             .expect("evidence");
 
         std::fs::write(path.join("tracked.txt"), "candidate\n").unwrap();
-        let patch = path.join("candidate.patch");
+        let patch_dir = tempfile::tempdir().expect("patch dir");
+        let patch = patch_dir.path().join("candidate.patch");
         let output = Command::new("git")
             .args(["diff", "--binary"])
             .current_dir(path)
@@ -4394,6 +4395,26 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
         assert!(output.status.success());
         let patch_contents = String::from_utf8(output.stdout).unwrap();
         std::fs::write(&patch, &patch_contents).unwrap();
+        // The recoverable candidate is the commit harvest records (#16303).
+        let run_id = "admitted-policy-normal-promotion";
+        git(&["add", "tracked.txt"]);
+        let tree_sha = git_output(path, &["write-tree"]).unwrap();
+        let message = format!(
+            "homeboy: cook candidate\n\nHomeboy-Run: {run_id}\nHomeboy-Task: provider\nHomeboy-Workspace: {}",
+            path.display()
+        );
+        let candidate_sha = git_output(
+            path,
+            &[
+                "commit-tree",
+                &tree_sha,
+                "-p",
+                &admitted_head,
+                "-m",
+                &message,
+            ],
+        )
+        .unwrap();
         git(&["reset", "--hard"]);
         std::fs::write(
             &policy,
@@ -4403,7 +4424,6 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
         )
         .unwrap();
 
-        let run_id = "admitted-policy-normal-promotion";
         let mut options = batch_cook_options(
             "admitted-policy-normal-promotion",
             Arc::new(RecordingDetachedAttemptDispatcher {
@@ -4447,6 +4467,11 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
                     }],
                     outputs: test_review_form_outputs(),
                     metadata: serde_json::json!({ "model": "fixture-model" }),
+                    candidate: Some(crate::agent_task::AgentTaskCandidate {
+                        base_sha: admitted_head.clone(),
+                        candidate_sha: candidate_sha.clone(),
+                        tree_sha: tree_sha.clone(),
+                    }),
                     ..Default::default()
                 }],
                 events: Vec::new(),
@@ -8492,9 +8517,8 @@ fn adoption_accepts_an_identical_immutable_baseline_failure_when_explicitly_auth
         );
         assert_eq!(
             promotion.provenance["candidate"]["fingerprint"]["head"],
-            git_output(&fixture.target, &["rev-parse", "HEAD"])
-                .expect("native direct target head"),
-            "native direct promotion retains the target commit and authenticates the candidate as a patch"
+            fixture.candidate,
+            "adoption promotes the immutable candidate in the source worktree that holds it (#16303)"
         );
         assert!(
             promotion.deterministic_gates[0]
@@ -8831,7 +8855,13 @@ fn adoption_rejects_a_baseline_component_symlink_escape_before_external_gate_exe
         let error = fixture
             .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
             .expect_err("baseline symlink escape must reject adoption");
-        assert_eq!(error.details["field"], "promotion_provider.patch");
+        // The candidate commit is admitted without a patch apply, so the
+        // escape is refused by baseline workspace containment (#16303).
+        assert_eq!(
+            error.details["field"], "gate_workspace",
+            "{}",
+            error.message
+        );
         assert!(
             !external.join("gate-ran").exists(),
             "external gate must not execute"

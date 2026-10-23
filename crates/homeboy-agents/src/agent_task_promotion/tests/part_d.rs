@@ -109,14 +109,151 @@ fn promotion_applies_verified_snapshot_when_source_artifact_is_replaced() {
     );
 }
 
+/// Adopting a revision promotes that commit: no patch artifact exists or is
+/// written, and the gates run on a destination materialized from it (#16303).
 #[test]
-fn promote_recoverable_candidate_applies_exactly_one_actionable_patch() {
-    let (result, apply_calls) = promote_recoverable_patch_count(1);
-    assert_eq!(
-        result.expect("single candidate applies").status,
-        AgentTaskPromotionStatus::Applied
+fn adopted_revision_promotes_without_a_patch_artifact_and_gates_on_it() {
+    let _home = gate_home();
+    let (temp, repo, base, candidate) = adopted_commit_repo();
+    let mut provider = FakePromotionWorkspaceProvider {
+        run_verify_command: true,
+        ..Default::default()
+    };
+    let gate = format!("test \"$(git rev-parse HEAD)\" = {candidate} && grep -qx candidate lib.rs");
+    let options = adopted_commit_options(
+        &temp,
+        &repo,
+        base.clone(),
+        candidate.clone(),
+        VerifyGateOptions {
+            verify: vec![gate],
+            ..Default::default()
+        },
     );
-    assert_eq!(apply_calls, 1);
+
+    let report = promote_with_provider(options, &mut provider).expect("adopted revision promotes");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
+    assert_eq!(report.patch_artifact.id, candidate);
+    assert_eq!(
+        report.provenance["candidate_commit"]["candidate_sha"],
+        candidate
+    );
+    assert_eq!(
+        report.provenance["commit_range"],
+        format!("{base}..{candidate}")
+    );
+    assert_eq!(report.changed_files, vec!["lib.rs"]);
+    assert_eq!(provider.verify_calls.len(), 1);
+    assert_eq!(
+        report.deterministic_gates[0].status,
+        crate::agent_task_gate::AgentTaskGateStatus::Succeeded
+    );
+    assert_eq!(report.provenance["candidate_checkout"]["commit"], candidate);
+    let patches = std::fs::read_dir(temp.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "patch"))
+        .count();
+    assert_eq!(patches, 0, "adoption must not write a patch artifact");
+}
+
+/// A provider timeout leaves edits behind: harvest records them as a candidate
+/// commit, and promotion admits and gates that commit with no patch artifact
+/// present (#16303).
+#[test]
+fn recoverable_candidate_promotes_its_harvested_commit() {
+    let _home = gate_home();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = candidate_destination(temp.path());
+    let base = git_head(&repo, "HEAD");
+    let candidate = harvest_recoverable_candidate(&repo, "timeout-run", "task-1");
+    let mut provider = FakePromotionWorkspaceProvider::default();
+    let mut options = recoverable_candidate_request(&repo, &candidate, "timeout-run");
+    options.gates.verify = vec!["true".to_string()];
+
+    let report = promote_with_provider(options, &mut provider)
+        .expect("recoverable candidate commit promotes");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
+    assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
+    assert_eq!(report.changed_files, vec!["src/lib.rs"]);
+    assert_eq!(provider.verify_calls.len(), 1);
+    assert_eq!(git_head(&repo, "HEAD"), base);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
+        "new\n"
+    );
+}
+
+/// The producing run, task, base and attempt workspace are checked on the
+/// candidate commit itself; a mismatch is a typed admission error and the
+/// destination is never touched.
+#[test]
+fn recoverable_candidate_with_mismatched_provenance_is_refused() {
+    let _home = gate_home();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = candidate_destination(temp.path());
+    let candidate = harvest_recoverable_candidate(&repo, "other-run", "task-1");
+    let mut provider = FakePromotionWorkspaceProvider::default();
+
+    let error = promote_with_provider(
+        recoverable_candidate_request(&repo, &candidate, "timeout-run"),
+        &mut provider,
+    )
+    .expect_err("a candidate from another run is refused");
+
+    let expected = super::super::CandidateAdmissionError::ProvenanceMismatch {
+        candidate_sha: candidate.candidate_sha.clone(),
+        check: "run".to_string(),
+        expected: "timeout-run".to_string(),
+        actual: Some("other-run".to_string()),
+    };
+    assert_eq!(error.message, expected.to_string());
+    assert_eq!(error.details["reason"], "provenance_mismatch");
+    assert_eq!(error.details["check"], "run");
+    assert!(provider.verify_calls.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
+        "old\n"
+    );
+
+    // A candidate harvested for another task, or not on the recorded task
+    // base, is refused the same way.
+    let other_task = harvest_recoverable_candidate(&repo, "timeout-run", "task-2");
+    let error = promote_with_provider(
+        recoverable_candidate_request(&repo, &other_task, "timeout-run"),
+        &mut provider,
+    )
+    .expect_err("a candidate from another task is refused");
+    assert_eq!(error.details["check"], "task");
+    let candidate = harvest_recoverable_candidate(&repo, "timeout-run", "task-1");
+    let mut options = recoverable_candidate_request(&repo, &candidate, "timeout-run");
+    options.task_base_sha = Some(candidate.candidate_sha.clone());
+    let error = promote_with_provider(options, &mut provider)
+        .expect_err("a candidate off the recorded task base is refused");
+    assert_eq!(error.details["check"], "base");
+}
+
+/// Harvest predating candidate trailers left no recorded provenance; it fails
+/// explicitly instead of being read through a compatibility path.
+#[test]
+fn recoverable_candidate_without_recorded_provenance_is_refused() {
+    let _home = gate_home();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = candidate_destination(temp.path());
+    let candidate = harvest_patch_candidate(&repo, VALID_PATCH);
+
+    let error = promote_with_provider(
+        recoverable_candidate_request(&repo, &candidate, "timeout-run"),
+        &mut FakePromotionWorkspaceProvider::default(),
+    )
+    .expect_err("an unattributed candidate is refused");
+
+    assert_eq!(error.details["check"], "task");
+    assert_eq!(error.details["actual"], Value::Null);
 }
 
 #[test]
@@ -200,7 +337,6 @@ fn empty_patch_records_declared_base_candidate_delta_before_running_gates() {
             .base,
         "main"
     );
-    assert_eq!(provider.apply_calls.len(), 0);
     assert_eq!(provider.verify_calls.len(), 2);
     assert_eq!(provider.verify_calls[0].0, repo);
     assert_eq!(provider.verify_calls[1].2, AgentTaskGateVisibility::Private);
@@ -281,7 +417,6 @@ fn verified_unchanged_attempt_promotes_as_no_change_without_running_gates() {
     );
     assert!(report.deterministic_gates.is_empty());
     assert!(provider.verify_calls.is_empty(), "no gate may run");
-    assert!(provider.apply_calls.is_empty());
     assert_eq!(report.target.head.as_deref(), Some(revision.as_str()));
 }
 
@@ -329,7 +464,6 @@ fn no_op_without_patch_artifact_still_requires_an_audited_candidate_without_veri
     assert!(error
         .message
         .contains("no-op promotion requires an audited committed candidate"));
-    assert!(provider.apply_calls.is_empty());
 }
 
 #[test]
@@ -381,7 +515,6 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
         report.provenance["change_source"].as_str(),
         Some("candidate_commit")
     );
-    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
     assert_eq!(provider.verify_calls[0].0, attempt);
     assert_eq!(git_head(&repo, "HEAD"), base);
@@ -389,86 +522,6 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
         std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
         "new\n"
     );
-}
-
-#[test]
-fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let observation_store =
-            homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        let (temp, repo, base, candidate) = adopted_commit_repo();
-        record_controller_projection("baseline-run", "other-task", "other", VALID_PATCH);
-        let mut provider = FakePromotionWorkspaceProvider {
-            workspace_path: Some(repo.clone()),
-            ..Default::default()
-        };
-        let mut options =
-            adopted_commit_options(&temp, &repo, base, candidate, VerifyGateOptions::default());
-        options.source_run_id = Some("baseline-run".to_string());
-
-        let report =
-            promote_with_provider_in_observation_store(options, &mut provider, &observation_store)
-                .expect("committed changes promote");
-        let original_path = temp.path().join(format!(
-            "committed-changes-{}.patch",
-            report.patch_artifact.sha256.as_deref().expect("patch sha")
-        ));
-        assert_ne!(
-            report.patch_artifact.path,
-            original_path.display().to_string()
-        );
-        std::fs::remove_file(&original_path).expect("clean original promotion artifact");
-        crate::agent_task_lifecycle::verified_controller_artifact_projection(
-            "baseline-run",
-            "adoption-task",
-            "committed-changes",
-            "patch",
-            report.patch_artifact.sha256.as_deref().expect("patch sha"),
-            None,
-        )
-        .expect("retained projection lookup")
-        .expect("committed changes retained before cleanup");
-        let baseline = serde_json::json!({
-            "source_run_id": "baseline-run",
-            "source_task_id": "adoption-task",
-            "patch_artifact": report.patch_artifact,
-        });
-        let bound = super::super::promote::bind_gate_feedback_baseline(Some(baseline))
-            .expect("continuation resolves controller mirror")
-            .expect("bound baseline");
-        assert!(bound["patch_artifact"].get("path").is_none());
-        assert_eq!(
-            bound["patch_artifact"]["controller_artifact"]["logical_artifact_id"],
-            "committed-changes"
-        );
-        let forged = serde_json::json!({
-            "source_run_id": "baseline-run",
-            "source_task_id": "forged-task",
-            "patch_artifact": {
-                "id": "forged",
-                "kind": "patch",
-                "path": temp.path().join("unbounded.patch"),
-                "sha256": sha256_hex(VALID_PATCH),
-            }
-        });
-        let error = super::super::promote::bind_gate_feedback_baseline(Some(forged))
-            .expect_err("unindexed baseline path cannot be imported");
-        assert!(error
-            .message
-            .contains("controller artifact mirror is missing"));
-        assert!(
-            crate::agent_task_lifecycle::verified_controller_artifact_projection(
-                "baseline-run",
-                "forged-task",
-                "forged",
-                "patch",
-                &sha256_hex(VALID_PATCH),
-                None,
-            )
-            .expect("forged lookup")
-            .is_none()
-        );
-    });
 }
 
 #[test]
@@ -505,7 +558,6 @@ fn promote_dry_run_validates_provider_request_without_applying() {
     assert_eq!(report.source.task_id, "task-1");
     assert_eq!(report.patch_artifact.id, "patch");
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
-    assert!(provider.apply_calls.is_empty());
     assert_eq!(git_stdout(&repo, &["status", "--porcelain"]), "");
     assert!(report.deterministic_gates.is_empty());
 }
@@ -540,7 +592,6 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
         assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
         assert!(report.status.patch_promoted());
         assert_eq!(report.target.path.as_deref(), worktree_path.to_str());
-        assert!(provider.apply_calls.is_empty());
         assert_eq!(provider.verify_calls.len(), 1);
         assert_eq!(report.operator_notification.status, "blocked");
     });
@@ -587,7 +638,6 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
     // Changed files come from the commit, never from sandbox patch headers.
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
     assert_eq!(report.patch_artifact.id, "patch");
-    assert!(provider.apply_calls.is_empty());
     assert_eq!(
         std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
         "new\n"
@@ -632,7 +682,6 @@ fn explicit_candidate_rejections_leave_target_unmodified() {
             "{name}: {}",
             error.message
         );
-        assert!(provider.apply_calls.is_empty(), "{name} mutated target");
     }
 }
 

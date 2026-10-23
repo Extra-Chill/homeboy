@@ -1,6 +1,5 @@
 use homeboy_engine_primitives::content_hash;
 use std::cell::RefCell;
-use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
@@ -38,15 +37,8 @@ use homeboy_core::gate::HomeboyGateResult;
 use homeboy_core::git::GitPushTransportClass;
 use homeboy_core::{Error, Result};
 
-use super::apply::{
-    apply_patch, verify_with_runtime_tmpdir, AgentTaskPromotionApplyRequest,
-    AgentTaskPromotionWorkspace, TrustedUnpushedCandidateDestination,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
-};
-use super::committed_changes::{
-    committed_changes_patch, git_lines, is_ancestor, CommittedChangesPatch,
-};
-use super::patch::write_normalized_patch;
+use super::apply::verify_with_runtime_tmpdir;
+use super::committed_changes::{adopted_candidate, git_lines, is_ancestor};
 pub(crate) use super::patch::{normalize_promotion_patch, validate_artifact_content};
 #[cfg(test)]
 use super::tests::FakePromotionWorkspaceProvider;
@@ -789,18 +781,6 @@ pub(super) fn promote_with_provider_in_observation_store(
 }
 
 #[cfg(test)]
-pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
-    options: AgentTaskPromotionRequest,
-    provider: &mut FakePromotionWorkspaceProvider,
-    checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
-    observation_store: &homeboy_core::observation::ObservationStore,
-) -> Result<AgentTaskPromotionReport> {
-    with_test_promotion_operations(provider, || {
-        promote_with_provider_and_checkpoint_internal(options, checkpoint, observation_store)
-    })
-}
-
-#[cfg(test)]
 fn with_test_promotion_operations<T>(
     provider: &mut FakePromotionWorkspaceProvider,
     operation: impl FnOnce() -> T,
@@ -812,22 +792,6 @@ fn with_test_promotion_operations<T>(
         *provider = slot.borrow_mut().take().expect("promotion test provider");
         result
     })
-}
-
-fn apply_promotion_patch(
-    request: AgentTaskPromotionApplyRequest,
-    materialized_workspace: Option<&Path>,
-) -> Result<AgentTaskPromotionWorkspace> {
-    #[cfg(test)]
-    if TEST_PROMOTION_OPERATIONS.with(|slot| slot.borrow().is_some()) {
-        return TEST_PROMOTION_OPERATIONS.with(|slot| {
-            slot.borrow_mut()
-                .as_mut()
-                .expect("promotion test provider")
-                .apply_patch(request)
-        });
-    }
-    apply_patch(request, materialized_workspace)
 }
 
 fn materialized_promotion_workspace() -> Result<Option<PathBuf>> {
@@ -917,7 +881,6 @@ fn promote_with_provider_and_checkpoint_internal(
             Some(options.source.clone()),
         )
     })?;
-    let source_for_provenance = source_value.clone();
     let (source_kind, outcome) = select_outcome(source_value, options.task_id.as_deref())?;
 
     let failed_candidate_adoption = options.candidate_ref.is_some()
@@ -946,29 +909,23 @@ fn promote_with_provider_and_checkpoint_internal(
         ));
     }
 
-    // Adoption supplies an immutable commit candidate. It intentionally bypasses
-    // provider artifact selection, but still uses the ordinary promotion/gates
-    // implementation and durable checkpoint.
+    // Adoption names the candidate commit directly; it bypasses provider
+    // artifacts but uses the ordinary candidate admission, gates and
+    // durable checkpoint (#16303).
     if options.candidate_ref.is_some() {
-        let committed_patch = committed_changes_patch(&options)?.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "candidate_ref",
-                "candidate revision contains no changes after the recorded task base",
-                options.candidate_ref.clone(),
-                None,
-            )
-        })?;
-        return promote_committed_changes(
+        let adopted = adopted_candidate(&options)?;
+        return promote_candidate_commit(
             &options,
             checkpoint,
             observation_store,
             &source_kind,
             &outcome,
-            committed_patch,
+            &adopted.candidate,
+            Some(adopted.provenance),
         );
     }
 
-    if let Some(candidate) = promotable_candidate(&outcome) {
+    if let Some(candidate) = outcome.candidate.as_ref() {
         return promote_candidate_commit(
             &options,
             checkpoint,
@@ -976,255 +933,38 @@ fn promote_with_provider_and_checkpoint_internal(
             &source_kind,
             &outcome,
             candidate,
+            None,
         );
     }
-    if outcome.status != AgentTaskOutcomeStatus::CandidateRecoverable {
-        if let Some(error) = patch_only_outcome_error(&outcome) {
-            return Err(error);
-        }
-        if outcome.status == AgentTaskOutcomeStatus::NoOp {
-            return Err(Error::validation_invalid_argument(
-                "source",
-                "no-op promotion requires an audited committed candidate after the task base",
-                None,
-                None,
-            ));
-        }
-        return promote_no_change(&options, observation_store, &source_kind, &outcome);
+    if let Some(error) = patch_only_outcome_error(&outcome) {
+        return Err(error);
     }
-
-    let admission = recoverable_candidate_promotion_admission(
-        &source_for_provenance,
-        &outcome,
-        &options,
-        observation_store,
-    )?;
-    let artifact = admission.artifact;
-    let promotion_chain_baseline = admission.promotion_chain_baseline;
-    let destination_baseline = promotion_chain_baseline
-        .as_ref()
-        .or(admission.gate_feedback_baseline.as_ref())
-        .cloned();
-    let PatchArtifactAdmission {
-        path: patch_path,
-        normalized_patch,
-    } = patch_artifact_admission(&artifact, &outcome, &options, observation_store)?;
-    let patch_artifact = AgentTaskPromotionArtifactRef {
-        id: artifact.id.clone(),
-        kind: artifact.kind.clone(),
-        path: patch_path.display().to_string(),
-        sha256: artifact.sha256.clone(),
-    };
-    let applied = apply_promotion_candidate_patch(
-        &options,
-        patch_artifact,
-        &normalized_patch,
-        destination_baseline,
-        None,
-    )?;
-    finish_applied_promotion(
-        &options,
-        checkpoint,
-        observation_store,
-        &source_kind,
-        &outcome,
-        AppliedPromotion {
-            artifact_metadata: artifact.metadata,
-            committed_candidate: outcome.candidate.as_ref(),
-            provenance: json!({ "prior_baseline": promotion_chain_baseline }),
-            ..applied
-        },
-    )
-}
-
-/// A candidate applied to the promotion destination, ready to checkpoint and
-/// gate. Recoverable-patch, adoption and candidate-commit promotion share it.
-struct AppliedPromotion<'a> {
-    patch_artifact: AgentTaskPromotionArtifactRef,
-    changed_files: Vec<String>,
-    /// Report the destination fingerprint's changed files over `changed_files`.
-    changed_files_from_destination: bool,
-    command_evidence: Vec<AgentTaskPromotionCommandReport>,
-    worktree_path: Option<PathBuf>,
-    pre_apply_verified_base: Option<AgentTaskPromotionVerifiedBase>,
-    base_verified_before_apply: bool,
-    artifact_metadata: Value,
-    committed_candidate: Option<&'a crate::agent_task::AgentTaskCandidate>,
-    /// Path-specific provenance merged into the report provenance.
-    provenance: Value,
-}
-
-/// Apply a verified patch to the destination. The declared remote base is
-/// validated BEFORE the target worktree is mutated: a nonexistent declared base
-/// (e.g. `--base trunk` on a repo whose base is `main`) fails with no patch
-/// applied and no durable post-apply state, so it can be retried (#9400).
-fn apply_promotion_candidate_patch(
-    options: &AgentTaskPromotionRequest,
-    patch_artifact: AgentTaskPromotionArtifactRef,
-    normalized_patch: &super::patch::NormalizedPromotionPatch,
-    gate_feedback_baseline: Option<Value>,
-    trusted_unpushed_candidate_destination: Option<TrustedUnpushedCandidateDestination>,
-) -> Result<AppliedPromotion<'static>> {
-    let materialized_workspace = materialized_promotion_workspace()?;
-    let pre_apply_verified_base = if !options.dry_run {
-        capture_declared_base_before_apply(
-            &options.to_worktree,
-            materialized_workspace.as_deref(),
-            trusted_unpushed_candidate_destination.as_ref(),
-            options.base_ref.as_deref(),
-        )?
-    } else {
-        None
-    };
-    let base_verified_before_apply = pre_apply_verified_base.is_some()
-        || options
-            .base_ref
-            .as_deref()
-            .map(str::trim)
-            .is_none_or(str::is_empty);
-    // The provider reads an owned snapshot of the verified bytes. Never hand
-    // it the producer/controller path after validation: that path can be
-    // replaced before the provider opens it.
-    let provider_patch = write_normalized_patch(&normalized_patch.content)?;
-    emit_promotion_progress("apply", None, Some("applying patch".to_string()));
-    let target = apply_promotion_patch(
-        AgentTaskPromotionApplyRequest {
-            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-            to_workspace: options.to_worktree.clone(),
-            patch: Some(normalized_patch.content.clone()),
-            patch_path: provider_patch.path().display().to_string(),
-            changed_files: normalized_patch.changed_files.clone(),
-            gate_feedback_baseline,
-            dry_run: options.dry_run,
-            trusted_unpushed_candidate_destination,
-        },
-        materialized_workspace.as_deref(),
-    )?;
-    Ok(AppliedPromotion {
-        patch_artifact,
-        changed_files: normalized_patch.changed_files.clone(),
-        changed_files_from_destination: true,
-        command_evidence: target.command_evidence,
-        worktree_path: (!options.dry_run).then_some(target.path),
-        pre_apply_verified_base,
-        base_verified_before_apply,
-        artifact_metadata: Value::Null,
-        committed_candidate: None,
-        provenance: Value::Null,
-    })
-}
-
-/// Checkpoint the applied destination, run the promotion gates on it, and
-/// report the verdict.
-fn finish_applied_promotion(
-    options: &AgentTaskPromotionRequest,
-    checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
-    observation_store: &homeboy_core::observation::ObservationStore,
-    source_kind: &str,
-    outcome: &AgentTaskOutcome,
-    applied: AppliedPromotion<'_>,
-) -> Result<AgentTaskPromotionReport> {
-    let target = AgentTaskPromotionTarget::from_worktree(
-        options.to_worktree.clone(),
-        applied.worktree_path.as_deref(),
-    );
-    let post_apply = applied
-        .worktree_path
-        .as_deref()
-        .map(|worktree_path| {
-            let report = post_apply_report(
-                options,
-                source_kind,
-                outcome,
-                applied.patch_artifact.clone(),
-                applied.changed_files.clone(),
-                applied.command_evidence.clone(),
-                target.clone(),
-                worktree_path,
-                &outcome.schema,
-                applied.artifact_metadata.clone(),
-                applied.pre_apply_verified_base.clone(),
-            )?;
-            checkpoint(&report)?;
-            Ok::<_, Error>(report)
-        })
-        .transpose()?;
-    // Gates can create incidental files. Feedback must retain the identity
-    // that was captured immediately after applying the candidate.
-    let candidate = post_apply
-        .as_ref()
-        .and_then(|report| report.provenance.get("candidate").cloned())
-        .and_then(|value| serde_json::from_value(value).ok());
-    let (gates, verified_base) = match applied.worktree_path.as_deref() {
-        Some(worktree_path) => {
-            // Reuse the base verified before apply; only re-capture when the
-            // destination had no resolvable provider-owned pre-apply path.
-            let verified_base = if applied.base_verified_before_apply {
-                applied.pre_apply_verified_base
-            } else {
-                capture_gate_verified_base(worktree_path, options.base_ref.as_deref())?
-            };
-            let gates = run_promotion_gates(
-                options,
-                worktree_path,
-                candidate.as_ref(),
-                applied.committed_candidate,
-                None,
-                observation_store,
-            )?;
-            (gates, verified_base)
-        }
-        None => (PromotionGateRun::without_gates(options.dry_run), None),
-    };
-    let operator_notification =
-        promotion_notification_with_gate_summary(gates.status, &target, &gates.deterministic_gates);
-    let gate_feedback_baseline = post_apply
-        .as_ref()
-        .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
-    let changed_files = if applied.changed_files_from_destination {
-        persisted_changed_files(applied.changed_files, candidate.as_ref())
-    } else {
-        applied.changed_files
-    };
-    let mut provenance = json!({
-        "source_schema": outcome.schema,
-        "artifact_metadata": applied.artifact_metadata,
-        "worktree_path": applied.worktree_path,
-        "dependencies_materialized": gates.dependencies_materialized,
-        "candidate_checkout_setup": gates.candidate_setup,
-        "destination_gate_setup": gates.destination_gate_setup,
-        "candidate_checkout": gates.candidate_checkout,
-        "candidate": candidate,
-        "destination_baseline": candidate,
-        "gate_feedback_baseline": gate_feedback_baseline,
-    });
-    if let (Some(provenance), Value::Object(extra)) =
-        (provenance.as_object_mut(), applied.provenance)
-    {
-        provenance.extend(extra);
+    if outcome.status == AgentTaskOutcomeStatus::NoOp {
+        return Err(Error::validation_invalid_argument(
+            "source",
+            "no-op promotion requires an audited committed candidate after the task base",
+            None,
+            None,
+        ));
     }
-    Ok(AgentTaskPromotionReport {
-        schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
-        status: gates.status,
-        source: promotion_source(source_kind, outcome, options),
-        to_worktree: options.to_worktree.clone(),
-        target,
-        patch_artifact: applied.patch_artifact,
-        changed_files,
-        command_evidence: applied.command_evidence,
-        deterministic_gates: gates.deterministic_gates,
-        gate_results: gates.gate_results,
-        verified_base,
-        repository_integrity_evidence: options.repository_integrity_evidence.clone(),
-        provenance,
-        operator_notification,
-    })
+    if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable {
+        let mut error = Error::validation_invalid_argument(
+            "source",
+            "recoverable-candidate promotion requires a harvested candidate commit (#16303)",
+            Some(outcome.task_id.clone()),
+            None,
+        );
+        error.details["recoverable"] = json!(false);
+        return Err(error);
+    }
+    promote_no_change(&options, observation_store, &source_kind, &outcome)
 }
 
 /// Promote the harvested candidate commit (#16303). The commit is the only
 /// candidate identity: it is verified against its recorded tree and base, the
 /// destination must still hold that base, and the destination's working tree
-/// is materialized from the commit while its branch stays checked out.
+/// is materialized from the commit while its branch stays checked out. The
+/// destination is then checkpointed, gated, and the verdict reported.
 fn promote_candidate_commit(
     options: &AgentTaskPromotionRequest,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
@@ -1232,12 +972,17 @@ fn promote_candidate_commit(
     source_kind: &str,
     outcome: &AgentTaskOutcome,
     candidate: &crate::agent_task::AgentTaskCandidate,
+    adoption: Option<Value>,
 ) -> Result<AgentTaskPromotionReport> {
     let materialized_workspace = materialized_promotion_workspace()?;
+    // An adopted revision may be promoted in the source worktree that holds it.
+    let adopted_source = adoption
+        .as_ref()
+        .and(options.source_worktree_path.as_deref());
     let target_path = resolve_promotion_target_path(
         &options.to_worktree,
         materialized_workspace.as_deref(),
-        None,
+        adopted_source,
     )?
     .ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -1248,8 +993,11 @@ fn promote_candidate_commit(
         )
     })?;
     let (changed_files, materialized) = admit_candidate_commit(&target_path, candidate)?;
+    if adoption.is_none() && outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable {
+        verify_recoverable_candidate_provenance(&target_path, options, outcome, candidate)?;
+    }
     // The declared base is validated before the destination is touched (#9400).
-    let pre_apply_verified_base = if options.dry_run {
+    let verified_base = if options.dry_run {
         None
     } else {
         capture_gate_verified_base(&target_path, options.base_ref.as_deref())?
@@ -1257,8 +1005,9 @@ fn promote_candidate_commit(
     // Patch artifacts are derived evidence of this candidate, never its input.
     // A resumable checkpoint still names a verified harvested patch, which the
     // resume contract re-authenticates until resume reads the commit (#16303).
-    let patch_artifact = select_patch_artifact(outcome, options.artifact_id.as_deref())
-        .ok()
+    let harvested_patch = (adoption.is_none())
+        .then(|| select_patch_artifact(outcome, options.artifact_id.as_deref()).ok())
+        .flatten()
         .filter(is_actionable_patch_artifact)
         .and_then(|artifact| {
             let admission =
@@ -1269,39 +1018,177 @@ fn promote_candidate_commit(
                 path: admission.path.display().to_string(),
                 sha256: artifact.sha256,
             })
-        })
-        .unwrap_or_else(|| AgentTaskPromotionArtifactRef {
+        });
+    // Without one, the candidate's identity is the digest of its own delta.
+    let patch_artifact = match harvested_patch {
+        Some(artifact) => artifact,
+        None => AgentTaskPromotionArtifactRef {
             id: candidate.candidate_sha.clone(),
             kind: "candidate_commit".to_string(),
             path: String::new(),
-            sha256: None,
-        });
-    if !options.dry_run && !materialized {
-        emit_promotion_progress("apply", None, Some("materializing candidate".to_string()));
-        materialize_candidate_commit(&target_path, candidate)?;
-    }
-    finish_applied_promotion(
-        options,
-        checkpoint,
-        observation_store,
-        source_kind,
-        outcome,
-        AppliedPromotion {
-            patch_artifact,
-            changed_files,
-            changed_files_from_destination: false,
-            command_evidence: Vec::new(),
-            worktree_path: (!options.dry_run).then_some(target_path),
-            pre_apply_verified_base,
-            base_verified_before_apply: true,
-            artifact_metadata: Value::Null,
-            committed_candidate: Some(candidate),
-            provenance: json!({
-                "change_source": "candidate_commit",
-                "candidate_commit": candidate,
-            }),
+            sha256: Some(content_hash::sha256_hex(
+                git_output(
+                    &target_path,
+                    &[
+                        "diff",
+                        "--binary",
+                        &candidate.base_sha,
+                        &candidate.candidate_sha,
+                    ],
+                )?
+                .as_bytes(),
+            )),
         },
-    )
+    };
+    let worktree_path = (!options.dry_run).then_some(target_path);
+    let target = AgentTaskPromotionTarget::from_worktree(
+        options.to_worktree.clone(),
+        worktree_path.as_deref(),
+    );
+    let post_apply = worktree_path
+        .as_deref()
+        .map(|worktree_path| {
+            if !materialized {
+                emit_promotion_progress("apply", None, Some("materializing candidate".to_string()));
+                materialize_candidate_commit(worktree_path, candidate)?;
+            }
+            let report = post_apply_report(
+                options,
+                source_kind,
+                outcome,
+                patch_artifact.clone(),
+                changed_files.clone(),
+                Vec::new(),
+                target.clone(),
+                worktree_path,
+                &outcome.schema,
+                Value::Null,
+                verified_base.clone(),
+            )?;
+            checkpoint(&report)?;
+            Ok::<_, Error>(report)
+        })
+        .transpose()?;
+    // Gates can create incidental files. Feedback must retain the identity
+    // that was captured immediately after materializing the candidate.
+    let destination = post_apply
+        .as_ref()
+        .and_then(|report| report.provenance.get("candidate").cloned())
+        .and_then(|value| serde_json::from_value(value).ok());
+    let gates = match worktree_path.as_deref() {
+        Some(worktree_path) => run_promotion_gates(
+            options,
+            worktree_path,
+            destination.as_ref(),
+            Some(candidate),
+            None,
+            observation_store,
+        )?,
+        None => PromotionGateRun::without_gates(options.dry_run),
+    };
+    let operator_notification =
+        promotion_notification_with_gate_summary(gates.status, &target, &gates.deterministic_gates);
+    let gate_feedback_baseline = post_apply
+        .as_ref()
+        .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
+    let provenance = merge_provenance(
+        json!({
+            "source_schema": outcome.schema,
+            "artifact_metadata": Value::Null,
+            "worktree_path": worktree_path,
+            "dependencies_materialized": gates.dependencies_materialized,
+            "candidate_checkout_setup": gates.candidate_setup,
+            "destination_gate_setup": gates.destination_gate_setup,
+            "candidate_checkout": gates.candidate_checkout,
+            "candidate": destination,
+            "destination_baseline": destination,
+            "gate_feedback_baseline": gate_feedback_baseline,
+            "change_source": "candidate_commit",
+            "candidate_commit": candidate,
+        }),
+        adoption,
+    );
+    Ok(AgentTaskPromotionReport {
+        schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
+        status: gates.status,
+        source: promotion_source(source_kind, outcome, options),
+        to_worktree: options.to_worktree.clone(),
+        target,
+        patch_artifact,
+        changed_files,
+        command_evidence: Vec::new(),
+        deterministic_gates: gates.deterministic_gates,
+        gate_results: gates.gate_results,
+        verified_base,
+        repository_integrity_evidence: options.repository_integrity_evidence.clone(),
+        provenance,
+        operator_notification,
+    })
+}
+
+fn merge_provenance(mut base: Value, extra: Option<Value>) -> Value {
+    if let (Some(base), Some(Value::Object(extra))) = (base.as_object_mut(), extra) {
+        base.extend(extra);
+    }
+    base
+}
+
+/// The commit trailers harvest records on a candidate commit: the producing
+/// run and task are part of the immutable candidate itself.
+pub(crate) const CANDIDATE_RUN_TRAILER: &str = "Homeboy-Run";
+pub(crate) const CANDIDATE_TASK_TRAILER: &str = "Homeboy-Task";
+pub(crate) const CANDIDATE_WORKSPACE_TRAILER: &str = "Homeboy-Workspace";
+
+/// A recoverable candidate (e.g. left behind by a provider timeout) is only
+/// admitted when it was harvested by the producing run and task this promotion
+/// names, on the recorded task base (#16303). The commit's presence in the
+/// destination repository was already established by admission.
+fn verify_recoverable_candidate_provenance(
+    destination: &Path,
+    options: &AgentTaskPromotionRequest,
+    outcome: &AgentTaskOutcome,
+    candidate: &crate::agent_task::AgentTaskCandidate,
+) -> Result<()> {
+    let message = git_output(
+        destination,
+        &["show", "-s", "--format=%B", &candidate.candidate_sha],
+    )?;
+    let trailer = |key: &str| {
+        message
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}: ")))
+            .map(|value| value.trim().to_string())
+    };
+    let mismatch = |check: &str, expected: &str, actual: Option<String>| {
+        Err(CandidateAdmissionError::ProvenanceMismatch {
+            candidate_sha: candidate.candidate_sha.clone(),
+            check: check.to_string(),
+            expected: expected.to_string(),
+            actual,
+        }
+        .into())
+    };
+    let task = trailer(CANDIDATE_TASK_TRAILER);
+    if task.as_deref() != Some(outcome.task_id.as_str()) {
+        return mismatch("task", &outcome.task_id, task);
+    }
+    if let Some(run_id) = options.source_run_id.as_deref() {
+        let run = trailer(CANDIDATE_RUN_TRAILER);
+        if run.as_deref() != Some(run_id) {
+            return mismatch("run", run_id, run);
+        }
+    }
+    if trailer(CANDIDATE_WORKSPACE_TRAILER).is_none_or(|workspace| workspace.is_empty()) {
+        return mismatch("workspace", "the harvesting attempt workspace", None);
+    }
+    if let Some(task_base) = options.task_base_sha.as_deref() {
+        // A Cook launched into a dirty destination harvests against a derived
+        // baseline commit on top of the task base.
+        if !is_ancestor(destination, task_base, &candidate.base_sha)? {
+            return mismatch("base", task_base, Some(candidate.base_sha.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// Why a harvested candidate commit cannot be promoted (#16303).
@@ -1321,6 +1208,14 @@ pub enum CandidateAdmissionError {
     BaseNotAncestor {
         base_sha: String,
         candidate_sha: String,
+    },
+    /// A recoverable candidate was not harvested by the producing run, task
+    /// or base this promotion names.
+    ProvenanceMismatch {
+        candidate_sha: String,
+        check: String,
+        expected: String,
+        actual: Option<String>,
     },
     /// The destination no longer holds the candidate's base.
     DestinationMoved {
@@ -1345,6 +1240,11 @@ impl std::fmt::Display for CandidateAdmissionError {
             Self::BaseNotAncestor { base_sha, candidate_sha } => write!(
                 formatter,
                 "candidate base {base_sha} is not an ancestor of candidate commit {candidate_sha}"
+            ),
+            Self::ProvenanceMismatch { candidate_sha, check, expected, actual } => write!(
+                formatter,
+                "recoverable candidate {candidate_sha} was harvested for {check} {}, not the producing {check} {expected}",
+                actual.as_deref().unwrap_or("<unrecorded>")
             ),
             Self::DestinationMoved { base_sha, base_tree, destination_head, destination_tree } => write!(
                 formatter,
@@ -1582,87 +1482,6 @@ fn promote_no_change(
     })
 }
 
-fn promotion_chain_baseline_for_artifact(
-    source: &Value,
-    outcome: &AgentTaskOutcome,
-    selected: &AgentTaskArtifact,
-) -> Result<Option<Value>> {
-    let canonical = outcome
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.id == selected.id)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                "selected patch artifact is missing from canonical outcome artifacts",
-                None,
-                None,
-            )
-        })?;
-    let source_provenance = source_canonical_artifact(source, &outcome.task_id, &canonical.id)?
-        .and_then(|artifact| {
-            artifact.pointer("/metadata/source_provenance/verified_cook_baseline")
-        });
-    let provenance = source_provenance.or_else(|| {
-        canonical
-            .metadata
-            .pointer("/source_provenance/verified_cook_baseline")
-    });
-    let Some(provenance) = provenance else {
-        return Ok(None);
-    };
-    if source_provenance.is_some()
-        && canonical
-            .metadata
-            .pointer("/source_provenance/verified_cook_baseline")
-            != source_provenance
-    {
-        return Err(Error::validation_invalid_argument(
-            "artifact_id",
-            "canonical patch artifact source baseline provenance changed during source deserialization",
-            Some(canonical.id.clone()),
-            None,
-        ));
-    }
-    let source_tree = provenance
-        .get("baseline_tree")
-        .and_then(Value::as_str)
-        .filter(|tree| valid_git_object_id(tree))
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                "follow-up patch artifact has no valid verified source tree",
-                Some(canonical.id.clone()),
-                None,
-            )
-        })?;
-    let prior_sha256 = provenance
-        .get("promoted_patch_artifact_sha256")
-        .and_then(Value::as_str)
-        .filter(|sha256| valid_sha256(sha256))
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                "follow-up patch artifact has no valid prior promoted artifact identity",
-                Some(canonical.id.clone()),
-                None,
-            )
-        })?;
-    Ok(Some(json!({
-        "schema": "homeboy/agent-task-promotion-chain-baseline/v1",
-        "source_tree": source_tree,
-        "prior_patch_artifact": {
-            "sha256": prior_sha256,
-            "source_run_id": provenance.get("source_run_id"),
-            "source_task_id": provenance.get("source_task_id"),
-        },
-    })))
-}
-
-fn valid_git_object_id(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 fn has_candidate_adoption_recovery_eligibility(outcome: &AgentTaskOutcome) -> bool {
     let eligibility = outcome
         .metadata
@@ -1673,220 +1492,6 @@ fn has_candidate_adoption_recovery_eligibility(outcome: &AgentTaskOutcome) -> bo
             crate::agent_task_lifecycle::candidate_adoption_recovery_eligibility(value).is_some()
         })
         .is_some()
-}
-
-fn gate_feedback_baseline_for_artifact(
-    source: &Value,
-    outcome: &AgentTaskOutcome,
-    selected: &AgentTaskArtifact,
-) -> Result<Option<Value>> {
-    let canonical = outcome
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.id == selected.id)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                "selected patch artifact is missing from canonical outcome artifacts",
-                None,
-                None,
-            )
-        })?;
-    let source_baseline = source_canonical_artifact(source, &outcome.task_id, &canonical.id)?
-        .and_then(|artifact| artifact.get("metadata"))
-        .and_then(|metadata| metadata.get("gate_feedback_baseline"))
-        .cloned();
-    let baseline = source_baseline
-        .clone()
-        .or_else(|| canonical.metadata.get("gate_feedback_baseline").cloned());
-    if let Some(raw) = source_baseline.as_ref() {
-        if canonical.metadata.get("gate_feedback_baseline") != Some(raw) {
-            return Err(Error::validation_invalid_argument(
-                "artifact_id",
-                "canonical patch artifact baseline provenance changed during source deserialization",
-                Some(canonical.id.clone()),
-                None,
-            ));
-        }
-    }
-    for typed in &outcome.typed_artifacts {
-        if let Some(duplicate) = typed
-            .artifact
-            .as_ref()
-            .filter(|artifact| artifact.id == canonical.id)
-            .and_then(|artifact| artifact.metadata.get("gate_feedback_baseline"))
-        {
-            if baseline.as_ref() != Some(duplicate) {
-                return Err(Error::validation_invalid_argument(
-                    "artifact_id",
-                    "typed patch artifact baseline provenance conflicts with the canonical artifact",
-                    Some(canonical.id.clone()),
-                    None,
-                ));
-            }
-        }
-    }
-    Ok(baseline)
-}
-
-/// Replace a runner-local baseline path with the controller artifact-store
-/// identity before a follow-up can reuse a dirty destination. Older baselines
-/// without source identity retain their existing strict path/hash contract.
-#[cfg(test)]
-// Superseded by `bind_gate_feedback_baseline_internal` in cb7c0317e; retained as the tests' entry point.
-pub(crate) fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Option<Value>> {
-    // One call is one unit of work, so the store resolves once here rather
-    // than at each projection lookup inside (#7505).
-    let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    bind_gate_feedback_baseline_internal(baseline, &observation_store)
-}
-
-fn bind_gate_feedback_baseline_internal(
-    baseline: Option<Value>,
-    observation_store: &homeboy_core::observation::ObservationStore,
-) -> Result<Option<Value>> {
-    let Some(mut baseline) = baseline else {
-        return Ok(None);
-    };
-    let source_run_id = baseline
-        .get("source_run_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let source_task_id = baseline
-        .get("source_task_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let Some(artifact) = baseline.get("patch_artifact").and_then(Value::as_object) else {
-        return Ok(Some(baseline));
-    };
-    let run_id = artifact
-        .get("run_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or(source_run_id);
-    let task_id = artifact
-        .get("task_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or(source_task_id);
-    let (Some(run_id), Some(task_id)) = (run_id, task_id) else {
-        return Ok(Some(baseline));
-    };
-    let artifact_id = artifact
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "gate_feedback_candidate_baseline",
-                "gate-feedback baseline with a source run requires a patch artifact id",
-                None,
-                None,
-            )
-        })?;
-    let kind = artifact
-        .get("kind")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("patch")
-        .to_string();
-    let sha256 = artifact
-        .get("sha256")
-        .and_then(Value::as_str)
-        .filter(|value| valid_sha256(value))
-        .map(str::to_string)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "gate_feedback_candidate_baseline",
-                "gate-feedback baseline with a source run requires a valid patch artifact sha256",
-                Some(artifact_id.clone()),
-                None,
-            )
-        })?;
-    let projection = crate::agent_task_lifecycle::verified_controller_artifact_projection_in_store(
-        observation_store,
-        &run_id,
-        &task_id,
-        &artifact_id,
-        &kind,
-        &sha256,
-        None,
-    )?;
-    let (record_id, _) = projection
-    .ok_or_else(|| Error::validation_invalid_argument(
-        "gate_feedback_candidate_baseline",
-        format!(
-            "controller artifact mirror is missing for baseline run '{run_id}', task '{task_id}', and artifact '{artifact_id}'"
-        ),
-        Some(artifact_id.clone()),
-        None,
-    ))?;
-    let artifact = baseline
-        .get_mut("patch_artifact")
-        .and_then(Value::as_object_mut)
-        .expect("patch artifact was checked above");
-    artifact.remove("path");
-    artifact.insert(
-        "controller_artifact".to_string(),
-        json!({
-            "schema": "homeboy/controller-artifact-reference/v1",
-            "run_id": run_id,
-            "task_id": task_id,
-            "logical_artifact_id": artifact_id,
-            "kind": kind,
-            "sha256": sha256,
-            "record_id": record_id,
-        }),
-    );
-    Ok(Some(baseline))
-}
-
-fn source_canonical_artifact<'a>(
-    source: &'a Value,
-    task_id: &str,
-    artifact_id: &str,
-) -> Result<Option<&'a Value>> {
-    let outcomes = if source.get("schema").and_then(Value::as_str)
-        == Some(AGENT_TASK_OUTCOME_SCHEMA)
-    {
-        std::slice::from_ref(source)
-    } else if source.get("schema").and_then(Value::as_str) == Some(AGENT_TASK_AGGREGATE_SCHEMA) {
-        source
-            .get("outcomes")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    } else {
-        return Ok(None);
-    };
-    let outcome = outcomes
-        .iter()
-        .find(|outcome| outcome.get("task_id").and_then(Value::as_str) == Some(task_id));
-    let artifact = outcome
-        .and_then(|outcome| outcome.get("artifacts"))
-        .and_then(Value::as_array)
-        .and_then(|artifacts| {
-            artifacts
-                .iter()
-                .find(|artifact| artifact.get("id").and_then(Value::as_str) == Some(artifact_id))
-        });
-    Ok(artifact)
-}
-
-/// The harvested candidate commit a fresh promotion admits (#16303).
-/// Recoverable outcomes with patch candidates keep their patch admission.
-pub(crate) fn promotable_candidate(
-    outcome: &AgentTaskOutcome,
-) -> Option<&crate::agent_task::AgentTaskCandidate> {
-    outcome.candidate.as_ref().filter(|_| {
-        outcome.status != AgentTaskOutcomeStatus::CandidateRecoverable
-            || !outcome.artifacts.iter().any(is_actionable_patch_artifact)
-    })
 }
 
 /// An outcome whose change exists only as a patch artifact predates candidate
@@ -1903,146 +1508,6 @@ pub(crate) fn patch_only_outcome_error(outcome: &AgentTaskOutcome) -> Option<Err
     );
     error.details["recoverable"] = json!(false);
     Some(error)
-}
-
-fn has_recoverable_candidate_provenance(
-    options: &AgentTaskPromotionRequest,
-    outcome: &AgentTaskOutcome,
-    artifact: &AgentTaskArtifact,
-) -> bool {
-    canonical_patch_kind(&artifact.kind).is_some()
-        && artifact.size_bytes.is_some_and(|size| size > 0)
-        && artifact.sha256.as_deref().is_some_and(valid_sha256)
-        && artifact.metadata.get("task_id").and_then(Value::as_str) == Some(&outcome.task_id)
-        && artifact
-            .metadata
-            .get("producer_attempt")
-            .is_some_and(Value::is_u64)
-        && [
-            "run_id",
-            "base_ref",
-            "provider_backend",
-            "repository_identity",
-            "workspace_identity",
-        ]
-        .iter()
-        .all(|key| {
-            artifact
-                .metadata
-                .get(*key)
-                .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-        })
-        && options.source_run_id.as_deref().is_none_or(|run_id| {
-            artifact.metadata.get("run_id").and_then(Value::as_str) == Some(run_id)
-        })
-        && options.task_base_sha.as_deref().is_none_or(|task_base| {
-            let base_ref = artifact.metadata.get("base_ref").and_then(Value::as_str);
-            base_ref == Some(task_base)
-                || base_ref.is_some_and(|base_ref| {
-                    is_bound_preexisting_cook_baseline(options, outcome, artifact, base_ref)
-                })
-        })
-}
-
-/// A Cook launched into a dirty destination commits that pre-existing work as
-/// a derived baseline and harvests the attempt against it, so a recovered
-/// candidate's `base_ref` is the derived baseline commit rather than the task
-/// base. Accept it only when the artifact's own verified baseline provenance
-/// names that commit as a pre-existing candidate produced by this same run and
-/// task. The destination tree is still checked against the baseline tree by
-/// the promotion-chain baseline that admission derives next.
-fn is_bound_preexisting_cook_baseline(
-    options: &AgentTaskPromotionRequest,
-    outcome: &AgentTaskOutcome,
-    artifact: &AgentTaskArtifact,
-    base_ref: &str,
-) -> bool {
-    let Some(baseline) = artifact
-        .metadata
-        .pointer("/source_provenance/verified_cook_baseline")
-    else {
-        return false;
-    };
-    let field = |key: &str| baseline.get(key).and_then(Value::as_str);
-    baseline
-        .get("preexisting_candidate")
-        .and_then(Value::as_bool)
-        == Some(true)
-        && valid_git_object_id(base_ref)
-        && field("baseline_commit") == Some(base_ref)
-        && field("baseline_tree").is_some_and(valid_git_object_id)
-        && field("source_task_id") == Some(outcome.task_id.as_str())
-        && field("source_run_id").is_some_and(|baseline_run| {
-            artifact.metadata.get("run_id").and_then(Value::as_str) == Some(baseline_run)
-                && options
-                    .source_run_id
-                    .as_deref()
-                    .is_none_or(|run_id| run_id == baseline_run)
-        })
-}
-
-struct RecoverableCandidatePromotionAdmission {
-    artifact: AgentTaskArtifact,
-    gate_feedback_baseline: Option<Value>,
-    promotion_chain_baseline: Option<Value>,
-}
-
-/// Perform the complete read-only admission that recoverable-candidate
-/// promotion uses before resolving or mutating its destination.
-fn recoverable_candidate_promotion_admission(
-    source: &Value,
-    outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionRequest,
-    observation_store: &homeboy_core::observation::ObservationStore,
-) -> Result<RecoverableCandidatePromotionAdmission> {
-    let artifact = select_recoverable_patch_artifact(outcome, options, observation_store)?;
-    if !has_recoverable_candidate_provenance(options, outcome, &artifact) {
-        return Err(Error::validation_invalid_argument(
-            "artifact_id",
-            "recoverable-candidate promotion requires a fingerprinted artifact bound to its producing run, task, base, and workspace",
-            Some(artifact.id.clone()),
-            None,
-        ));
-    }
-    let gate_feedback_baseline = bind_gate_feedback_baseline_internal(
-        gate_feedback_baseline_for_artifact(source, outcome, &artifact)?,
-        observation_store,
-    )?;
-    let promotion_chain_baseline =
-        promotion_chain_baseline_for_artifact(source, outcome, &artifact)?;
-    Ok(RecoverableCandidatePromotionAdmission {
-        artifact,
-        gate_feedback_baseline,
-        promotion_chain_baseline,
-    })
-}
-
-pub(crate) fn preflight_recoverable_candidate_promotion_in_observation_store(
-    options: &AgentTaskPromotionRequest,
-    observation_store: &homeboy_core::observation::ObservationStore,
-) -> Result<AgentTaskArtifact> {
-    validate_workspace_handle(&options.to_worktree)?;
-    let source: Value = serde_json::from_str(&options.source).map_err(|error| {
-        Error::validation_invalid_json(
-            error,
-            Some("agent-task promotion source".to_string()),
-            Some(options.source.clone()),
-        )
-    })?;
-    let (_, outcome) = select_outcome(source.clone(), options.task_id.as_deref())?;
-    if outcome.status != AgentTaskOutcomeStatus::CandidateRecoverable {
-        return Err(Error::validation_invalid_argument(
-            "source",
-            "recoverable-candidate promotion admission requires a recoverable-candidate outcome",
-            Some(outcome.task_id),
-            None,
-        ));
-    }
-    Ok(
-        recoverable_candidate_promotion_admission(&source, &outcome, options, observation_store)?
-            .artifact,
-    )
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -2446,165 +1911,6 @@ mod declared_base_tests {
             std::env::current_dir().and_then(std::fs::canonicalize).ok()
         );
     }
-}
-
-fn promote_committed_changes(
-    options: &AgentTaskPromotionRequest,
-    checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
-    observation_store: &homeboy_core::observation::ObservationStore,
-    source_kind: &str,
-    outcome: &AgentTaskOutcome,
-    committed_patch: CommittedChangesPatch,
-) -> Result<AgentTaskPromotionReport> {
-    let patch = std::fs::read_to_string(&committed_patch.patch_path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!(
-                "read committed changes promotion patch {}",
-                committed_patch.patch_path.display()
-            )),
-        )
-    })?;
-    let actual_sha256 = content_hash::sha256_hex(patch.as_bytes());
-    if actual_sha256 != committed_patch.sha256 {
-        return Err(Error::validation_invalid_argument(
-            "committed_changes.sha256",
-            format!(
-                "committed changes patch sha256 mismatch: expected {}, read {actual_sha256}",
-                committed_patch.sha256
-            ),
-            Some(committed_patch.patch_path.display().to_string()),
-            None,
-        ));
-    }
-    let retained_patch_path = retain_committed_changes_artifact(
-        options,
-        outcome,
-        &patch,
-        &committed_patch.sha256,
-        observation_store,
-    )?
-    .unwrap_or_else(|| committed_patch.patch_path.clone());
-    let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
-    // The adopted candidate is the source workspace HEAD. When that workspace
-    // is also the promotion destination, the destination already holds the
-    // candidate, so let apply verify it is already present instead.
-    let trusted_unpushed_candidate_destination =
-        options
-            .source_worktree_path
-            .clone()
-            .map(|path| TrustedUnpushedCandidateDestination {
-                path,
-                head: committed_patch.candidate.clone(),
-            });
-    let patch_artifact = AgentTaskPromotionArtifactRef {
-        id: "committed-changes".to_string(),
-        kind: "patch".to_string(),
-        path: retained_patch_path.display().to_string(),
-        sha256: Some(committed_patch.sha256.clone()),
-    };
-    let applied = apply_promotion_candidate_patch(
-        options,
-        patch_artifact,
-        &normalized_patch,
-        None,
-        trusted_unpushed_candidate_destination,
-    )?;
-    let changed_files = normalized_patch.changed_files;
-    let adoption_merge = committed_patch.adoption_merge.as_ref().map(|proof| {
-        json!({
-            "candidate_parent": &proof.candidate_parent,
-            "resolved_base_parent": &proof.resolved_base_parent,
-            "candidate_tree": &proof.candidate_tree,
-            "resolved_base_tree": &proof.resolved_base_tree,
-            "candidate": &committed_patch.candidate,
-            "changed_files": &changed_files,
-            "patch_sha256": &committed_patch.sha256,
-        })
-    });
-    finish_applied_promotion(
-        options,
-        checkpoint,
-        observation_store,
-        source_kind,
-        outcome,
-        AppliedPromotion {
-            committed_candidate: outcome.candidate.as_ref(),
-            provenance: json!({
-                "change_source": "local_commits",
-                "base_ref": committed_patch.base_ref,
-                "commit_range": committed_patch.commit_range,
-                "commits": committed_patch.commits,
-                "historical_task_base": committed_patch.historical_task_base,
-                "adoption_merge": adoption_merge,
-            }),
-            ..applied
-        },
-    )
-}
-
-/// Retain the controller-generated committed delta before its producer path can
-/// be cleaned up. Only an existing controller run may own this projection.
-pub(super) fn retain_committed_changes_artifact(
-    options: &AgentTaskPromotionRequest,
-    outcome: &AgentTaskOutcome,
-    patch: &str,
-    sha256: &str,
-    // The caller resolves one store for the whole promotion; this projection
-    // is written against that store rather than re-resolving the environment
-    // partway through a promotion already in flight (#7505).
-    store: &homeboy_core::observation::ObservationStore,
-) -> Result<Option<PathBuf>> {
-    let Some(run_id) = options.source_run_id.as_deref() else {
-        return Ok(None);
-    };
-    if store.get_run(run_id)?.is_none() {
-        return Ok(None);
-    }
-    let mut snapshot = tempfile::NamedTempFile::new().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create committed changes artifact snapshot".to_string()),
-        )
-    })?;
-    snapshot
-        .as_file_mut()
-        .write_all(patch.as_bytes())
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("write committed changes artifact snapshot".to_string()),
-            )
-        })?;
-    snapshot
-        .as_file_mut()
-        .seek(SeekFrom::Start(0))
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("rewind committed changes artifact snapshot".to_string()),
-            )
-        })?;
-    let record_id = format!(
-        "agent-task-committed-changes-{}",
-        content_hash::sha256_hex(format!("{run_id}\0{}\0{sha256}", outcome.task_id).as_bytes())
-    );
-    let projection = store.record_verified_artifact_from_open_file_with_id(
-        run_id,
-        "patch",
-        snapshot.as_file_mut(),
-        &record_id,
-        i64::try_from(patch.len()).unwrap_or(i64::MAX),
-        sha256,
-        json!({
-            "agent_task": {
-                "task_id": outcome.task_id,
-                "logical_artifact_id": "committed-changes",
-                "projection": "committed_changes"
-            }
-        }),
-    )?;
-    Ok(Some(PathBuf::from(projection.path)))
 }
 
 fn run_promotion_gates(
@@ -3922,20 +3228,22 @@ fn promotion_source(
     }
 }
 
-/// Resolve the target before applying a patch so a declared base can be
-/// validated without mutating the working tree (#9400).
+/// Resolve the target before materializing a candidate so a declared base can
+/// be validated without mutating the working tree (#9400).
 fn resolve_promotion_target_path(
     to_worktree: &str,
     materialized_workspace: Option<&Path>,
-    trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
+    adopted_source: Option<&Path>,
 ) -> Result<Option<PathBuf>> {
     // Direct paths do not need provider resolution, but must participate in
     // the same pre-apply declared-base contract as provider-owned targets.
-    if let Some(target) = materialized_workspace.or_else(|| {
-        Path::new(to_worktree)
-            .is_dir()
-            .then(|| Path::new(to_worktree))
-    }) {
+    // An adopted revision is promoted in the source worktree that holds it,
+    // where its gates run.
+    let direct = Path::new(to_worktree);
+    if let Some(target) = materialized_workspace
+        .or_else(|| direct.is_dir().then_some(direct))
+        .or_else(|| adopted_source.filter(|path| path.is_dir()))
+    {
         let path = std::fs::canonicalize(target).map_err(|error| {
             Error::internal_io(error.to_string(), Some(target.display().to_string()))
         })?;
@@ -3952,51 +3260,11 @@ fn resolve_promotion_target_path(
         }
         return Ok(Some(path));
     }
-    if let Some(trusted) = trusted_unpushed_candidate_destination {
-        if trusted.path.is_dir() {
-            let path = std::fs::canonicalize(&trusted.path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(trusted.path.display().to_string()))
-            })?;
-            if homeboy_core::git::output_allow_empty(&path, &["rev-parse", "--is-inside-work-tree"])
-                .as_deref()
-                == Some("true")
-            {
-                return Ok(Some(path));
-            }
-        }
-    }
     match homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(to_worktree) {
         Ok(Some(target)) => Ok(target.path.is_dir().then_some(target.path)),
         Ok(None) => Ok(None),
         Err(error) => Err(error),
     }
-}
-
-/// A declared base is part of the pre-mutation promotion contract. Do not let
-/// an opaque provider apply before Homeboy can authenticate that contract.
-fn capture_declared_base_before_apply(
-    to_worktree: &str,
-    materialized_workspace: Option<&Path>,
-    trusted_unpushed_candidate_destination: Option<&TrustedUnpushedCandidateDestination>,
-    base_ref: Option<&str>,
-) -> Result<Option<AgentTaskPromotionVerifiedBase>> {
-    if base_ref.is_none_or(|base| base.trim().is_empty()) {
-        return Ok(None);
-    }
-    let target_path = resolve_promotion_target_path(
-        to_worktree,
-        materialized_workspace,
-        trusted_unpushed_candidate_destination,
-    )?
-    .ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "base_ref",
-            "declared base requires a resolvable target worktree before promotion apply",
-            Some(to_worktree.to_string()),
-            None,
-        )
-    })?;
-    capture_gate_verified_base(&target_path, base_ref)
 }
 
 /// The base a promotion records as verified: the commit its gates actually
@@ -4758,80 +4026,7 @@ pub(crate) fn select_patch_artifact(
     }
 }
 
-/// Select one recoverable patch after collapsing provider aliases and duplicate
-/// representations. Content is normalized before hashing so sandbox wrappers do
-/// not turn one patch into a false review choice.
-fn select_recoverable_patch_artifact(
-    outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionRequest,
-    observation_store: &homeboy_core::observation::ObservationStore,
-) -> Result<AgentTaskArtifact> {
-    let canonical =
-        canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)?;
-    match canonical.artifacts.len() {
-        1 => Ok(canonical
-            .artifacts
-            .into_iter()
-            .next()
-            .expect("one canonical patch")),
-        0 => Err(canonical_budget_rejection_error(&canonical.unavailable).unwrap_or_else(|| Error::new(
-            homeboy_core::ErrorCode::ValidationInvalidArgument,
-            "recoverable-candidate promotion found no readable actionable patch; reconcile or hydrate the run artifacts before retrying",
-            json!({
-                "field": "artifact_id",
-                "next_action": "homeboy agent-task review <run-id> --to-worktree <managed-worktree>",
-                "unavailable_artifacts": canonical.unavailable,
-            }),
-        ))),
-        _ => Err(Error::new(
-            homeboy_core::ErrorCode::ValidationInvalidArgument,
-            "recoverable-candidate promotion found distinct actionable patches; select one with --artifact-id",
-            json!({
-                "field": "artifact_id",
-                "review_choices": canonical.artifacts.into_iter().map(|artifact| json!({
-                    "id": artifact.id,
-                    "kind": artifact.kind,
-                    "sha256": artifact.sha256,
-                    "canonical_identity": canonical_patch_identity(&artifact),
-                })).collect::<Vec<_>>(),
-            }),
-        )),
-    }
-}
-
 const CANONICAL_PATCH_BYTE_BUDGET_EXCEEDED: &str = "canonical_patch_byte_budget_exceeded";
-
-/// Name the size rejection explicitly when the comparison budget is the only
-/// reason no candidate survived, so operators select the artifact by ID
-/// instead of reconciling or hydrating artifacts that are already present.
-pub(crate) fn canonical_budget_rejection_error(unavailable: &[Value]) -> Option<Error> {
-    let rejected = unavailable.iter().find(|entry| {
-        entry.get("reason").and_then(Value::as_str) == Some(CANONICAL_PATCH_BYTE_BUDGET_EXCEEDED)
-    })?;
-    let id = rejected
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("<artifact-id>");
-    let size = rejected
-        .get("size_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    Some(Error::new(
-        homeboy_core::ErrorCode::ValidationInvalidArgument,
-        format!(
-            "recoverable-candidate promotion rejected patch artifact `{id}`: {CANONICAL_PATCH_BYTE_BUDGET_EXCEEDED} ({size} bytes exceeds the {CANONICAL_PATCH_BYTES_TOTAL_LIMIT}-byte candidate comparison limit); select it explicitly with --artifact-id {id}"
-        ),
-        json!({
-            "field": "artifact_id",
-            "reason": CANONICAL_PATCH_BYTE_BUDGET_EXCEEDED,
-            "artifact_id": id,
-            "size_bytes": size,
-            "limit_bytes": CANONICAL_PATCH_BYTES_TOTAL_LIMIT,
-            "next_action": format!("pass --artifact-id {id} to select the patch explicitly"),
-            "unavailable_artifacts": unavailable,
-        }),
-    ))
-}
 
 #[derive(Debug, Clone)]
 pub struct CanonicalRecoverablePatchArtifacts {
@@ -5065,14 +4260,6 @@ fn canonical_patch_stored_identity(
     size: u64,
 ) -> String {
     format!("{sha256}|{size}|{}", canonical_patch_provenance(artifact))
-}
-
-fn canonical_patch_identity(artifact: &AgentTaskArtifact) -> String {
-    format!(
-        "{}|{}",
-        artifact.sha256.as_deref().unwrap_or("unavailable"),
-        canonical_patch_provenance(artifact)
-    )
 }
 
 fn canonical_patch_identity_with_digest(artifact: &AgentTaskArtifact, digest: &str) -> String {

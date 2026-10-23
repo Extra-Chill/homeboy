@@ -79,110 +79,6 @@ fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
 }
 
 #[test]
-fn promote_recoverable_candidate_rejects_zero_actionable_patches() {
-    let (result, apply_calls) = promote_recoverable_patch_count(0);
-    let error = result.expect_err("missing candidate rejected");
-    assert!(error.message.contains("no readable actionable patch"));
-    assert!(error.details["next_action"]
-        .as_str()
-        .expect("recoverable next action")
-        .contains("agent-task review"));
-    assert_eq!(apply_calls, 0);
-}
-
-/// A provider that commits its work and reports an empty patch still leaves a
-/// real candidate behind. Promotion must harvest it from the worktree instead
-/// of rejecting the run for having no readable actionable patch.
-///
-/// This is the state Cook's own dirty-checkout recovery produces: it directs
-/// the operator to commit the candidate and adopt HEAD, after which the
-/// provider has nothing left to emit as a patch.
-#[test]
-fn promote_recoverable_candidate_harvests_committed_changes_behind_an_empty_patch_artifact() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let repo = candidate_destination(temp.path());
-    let candidate = harvest_patch_candidate(&repo, VALID_PATCH);
-    let empty_patch_path = temp.path().join("empty-candidate.patch");
-    std::fs::write(&empty_patch_path, "").expect("write empty candidate patch");
-    let source = with_candidate(
-        &serde_json::json!({
-            "schema": AGENT_TASK_OUTCOME_SCHEMA,
-            "task_id": "task-1",
-            "status": "candidate_recoverable",
-            "artifacts": [{
-                "schema": AGENT_TASK_ARTIFACT_SCHEMA,
-                "id": "empty-candidate",
-                "kind": "patch",
-                "path": empty_patch_path,
-                "size_bytes": 0,
-                "metadata": {
-                    "role": "patch",
-                    "run_id": "recoverable-empty-run",
-                    "task_id": "task-1",
-                    "producer_attempt": 1
-                }
-            }]
-        })
-        .to_string(),
-        &candidate,
-    );
-
-    let report = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some("recoverable-empty-run".to_string()),
-            task_base_sha: Some(candidate.base_sha.clone()),
-            ..promotion_options(&repo.display().to_string())
-        },
-        &mut FakePromotionWorkspaceProvider::default(),
-    )
-    .expect("empty provider patch falls back to the harvested candidate commit");
-
-    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
-    assert_eq!(report.changed_files, vec!["src/lib.rs"]);
-}
-
-#[test]
-fn promote_recoverable_candidate_reports_unreadable_patch_evidence() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = recoverable_patch_source(&temp, 1);
-    std::fs::remove_file(temp.path().join("candidate-0.patch")).expect("remove patch");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-    let error = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some("recoverable-run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@recoverable".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-    )
-    .expect_err("unreadable artifact requires recovery");
-
-    assert_eq!(
-        error.details["unavailable_artifacts"][0]["id"],
-        "candidate-0"
-    );
-    assert_eq!(provider.apply_calls.len(), 0);
-}
-
-#[test]
 fn validate_patch_extracts_safe_changed_files() {
     let patch = normalize_promotion_patch(VALID_PATCH, "repo@promoted-task").expect("valid patch");
 
@@ -362,7 +258,6 @@ fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
     assert!(error
         .message
         .contains("no-op promotion requires an audited committed candidate"));
-    assert!(provider.apply_calls.is_empty());
     assert!(provider.verify_calls.is_empty());
 }
 
@@ -478,7 +373,6 @@ fn promote_applies_patch_with_fake_workspace_provider() {
         report.provenance["worktree_path"].as_str(),
         Some(worktree_path.to_str().expect("utf-8 temp path"))
     );
-    assert!(provider.apply_calls.is_empty());
     assert_eq!(
         provider.verify_calls,
         vec![
@@ -668,7 +562,7 @@ fn explicit_candidate_adoption_ignores_recoverable_provider_patch_selection() {
             candidate
         )
     );
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
     assert_eq!(provider.verify_calls.len(), 1);
     assert_eq!(
         report.deterministic_gates[0].status,
@@ -712,7 +606,7 @@ fn explicit_candidate_adopts_only_durable_pre_provider_transport_failures() {
     let report = promote_with_provider(options.clone(), &mut provider)
         .expect("eligible transport failure adopts immutable candidate through gates");
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
     assert_eq!(provider.verify_calls.len(), 1);
 
     for recovery in [

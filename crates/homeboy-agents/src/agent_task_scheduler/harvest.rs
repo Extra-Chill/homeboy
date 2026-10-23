@@ -186,6 +186,17 @@ pub(super) fn harvest_candidate_commit(
         ("GIT_COMMITTER_EMAIL", "homeboy@localhost"),
         ("GIT_COMMITTER_DATE", date.as_str()),
     ];
+    // The producing run and task are part of the immutable candidate, so a
+    // recoverable candidate's provenance is checked on the commit (#16303).
+    let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
+    let message = format!(
+        "homeboy: cook candidate\n\n{}: {run_id}\n{}: {}\n{}: {}",
+        crate::agent_task_promotion::CANDIDATE_RUN_TRAILER,
+        crate::agent_task_promotion::CANDIDATE_TASK_TRAILER,
+        running.task_id,
+        crate::agent_task_promotion::CANDIDATE_WORKSPACE_TRAILER,
+        root.display()
+    );
     let commit_args = [
         "-c",
         "commit.gpgSign=false",
@@ -194,10 +205,9 @@ pub(super) fn harvest_candidate_commit(
         "-p",
         head.as_str(),
         "-m",
-        "homeboy: cook candidate",
+        message.as_str(),
     ];
     let candidate_sha = git_output_with_env(root, &commit_args, identity_env)?;
-    let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
     let candidate_ref = format!(
         "{CANDIDATE_REF_PREFIX}{}",
         homeboy_core::paths::sanitize_path_segment(run_id)

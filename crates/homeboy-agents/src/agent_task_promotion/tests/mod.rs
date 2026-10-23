@@ -5,12 +5,8 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use super::apply::{AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace};
-
-use super::promote::promote_with_provider;
 use super::types::{
-    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionReport,
-    AgentTaskPromotionRequest,
+    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionRequest,
 };
 use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
 use crate::agent_task_gate::{
@@ -23,8 +19,6 @@ pub(super) const VALID_PATCH: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- 
 #[derive(Debug, Default)]
 pub(super) struct FakePromotionWorkspaceProvider {
     workspace_path: Option<PathBuf>,
-    apply_calls: Vec<AgentTaskPromotionApplyRequest>,
-    applied_patch_contents: Vec<String>,
     verify_calls: Vec<(
         PathBuf,
         String,
@@ -35,54 +29,9 @@ pub(super) struct FakePromotionWorkspaceProvider {
     verify_transport_error: bool,
     run_verify_command: bool,
     verify_worktrees_clean: Vec<bool>,
-    force_add_ignored_file: bool,
-    apply_to_git: bool,
-    replace_source_on_apply: Option<(PathBuf, String)>,
 }
 
 impl FakePromotionWorkspaceProvider {
-    pub(super) fn apply_patch(
-        &mut self,
-        request: AgentTaskPromotionApplyRequest,
-    ) -> Result<AgentTaskPromotionWorkspace> {
-        if let Some((path, contents)) = self.replace_source_on_apply.take() {
-            std::fs::write(path, contents).expect("replace source during provider handoff");
-        }
-        self.applied_patch_contents
-            .push(std::fs::read_to_string(&request.patch_path).unwrap_or_else(|_| String::new()));
-        self.apply_calls.push(request.clone());
-        let path = self.workspace_path.clone().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "to_worktree",
-                "fake workspace provider could not resolve the requested workspace",
-                None,
-                None,
-            )
-        })?;
-        if self.apply_to_git {
-            git(&path, &["apply", &request.patch_path]);
-        }
-        if self.force_add_ignored_file {
-            git(&path, &["apply", &request.patch_path]);
-            std::fs::write(path.join(".git/info/exclude"), "ignored/\n")
-                .expect("ignore nested candidate file");
-            let ignored = path.join("ignored/nested/force-added.rs");
-            std::fs::create_dir_all(ignored.parent().expect("ignored parent"))
-                .expect("create ignored nested directory");
-            std::fs::write(&ignored, "pub const FORCED: bool = true;\n")
-                .expect("write ignored nested candidate file");
-            git(&path, &["add", "-f", "ignored/nested/force-added.rs"]);
-        }
-        Ok(AgentTaskPromotionWorkspace {
-            path,
-            command_evidence: vec![command_report(vec![
-                "fake-workspace-provider",
-                "apply-patch",
-                request.to_workspace.as_str(),
-            ])],
-        })
-    }
-
     #[expect(
         clippy::too_many_arguments,
         reason = "test gate injection mirrors the native verifier inputs"
@@ -329,37 +278,6 @@ pub(super) fn recoverable_patch_source(
     (source_path, source)
 }
 
-pub(super) fn promote_recoverable_patch_count(
-    patch_count: usize,
-) -> (Result<AgentTaskPromotionReport>, usize) {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = recoverable_patch_source(&temp, patch_count);
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-    let result = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some("recoverable-run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@recoverable".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-    );
-    (result, provider.apply_calls.len())
-}
-
 /// An isolated home for a test that executes or resumes promotion gates.
 ///
 /// Gate execution leases controller scratch, invocation state, and runtime run
@@ -479,6 +397,54 @@ pub(super) fn harvest_patch_candidate(
     repo: &Path,
     patch: &str,
 ) -> crate::agent_task::AgentTaskCandidate {
+    harvest_patch_candidate_with_message(repo, patch, "candidate")
+}
+
+/// A recoverable candidate as the scheduler harvests it: the commit message
+/// carries the producing run, task and attempt workspace trailers.
+pub(super) fn harvest_recoverable_candidate(
+    repo: &Path,
+    run_id: &str,
+    task_id: &str,
+) -> crate::agent_task::AgentTaskCandidate {
+    let message = format!(
+        "homeboy: cook candidate\n\n{}: {run_id}\n{}: {task_id}\n{}: {}",
+        super::CANDIDATE_RUN_TRAILER,
+        super::CANDIDATE_TASK_TRAILER,
+        super::CANDIDATE_WORKSPACE_TRAILER,
+        repo.display()
+    );
+    harvest_patch_candidate_with_message(repo, VALID_PATCH, &message)
+}
+
+/// A `candidate_recoverable` outcome (e.g. a provider timeout) whose only
+/// candidate identity is `candidate`; no patch artifact is recorded.
+pub(super) fn recoverable_candidate_request(
+    repo: &Path,
+    candidate: &crate::agent_task::AgentTaskCandidate,
+    source_run_id: &str,
+) -> AgentTaskPromotionRequest {
+    let source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "task-1",
+        "status": "candidate_recoverable",
+        "failure_classification": "timeout",
+        "artifacts": [],
+        "candidate": candidate,
+    });
+    AgentTaskPromotionRequest {
+        source: source.to_string(),
+        source_run_id: Some(source_run_id.to_string()),
+        task_base_sha: Some(candidate.base_sha.clone()),
+        ..promotion_options(&repo.display().to_string())
+    }
+}
+
+fn harvest_patch_candidate_with_message(
+    repo: &Path,
+    patch: &str,
+    message: &str,
+) -> crate::agent_task::AgentTaskCandidate {
     let base_sha = git_head(repo, "HEAD");
     let index = tempfile::NamedTempFile::new().expect("candidate index");
     let patch_file = tempfile::NamedTempFile::new().expect("candidate patch");
@@ -505,7 +471,7 @@ pub(super) fn harvest_patch_candidate(
         &patch_file.path().display().to_string(),
     ]);
     let tree_sha = run(&["write-tree"]);
-    let candidate_sha = run(&["commit-tree", &tree_sha, "-p", &base_sha, "-m", "candidate"]);
+    let candidate_sha = run(&["commit-tree", &tree_sha, "-p", &base_sha, "-m", message]);
     git(
         repo,
         &[

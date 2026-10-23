@@ -3,15 +3,12 @@
 
 use super::super::promote::{
     normalize_promotion_patch, promote_with_provider, promote_with_provider_and_checkpoint,
-    promote_with_provider_and_checkpoint_in_observation_store,
     promote_with_provider_in_observation_store, resume_promoted_patch,
-    retain_committed_changes_artifact,
 };
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA;
 use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
-use crate::agent_task_scheduler::AgentTaskAggregate;
 use serde_json::Value;
 use std::process::Command;
 
@@ -68,7 +65,6 @@ fn candidate_promotion_ignores_missing_or_mismatched_recovered_controller_projec
             std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
             "new\n"
         );
-        assert!(provider.apply_calls.is_empty());
     });
 }
 
@@ -117,321 +113,6 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
             candidate.candidate_sha
         );
     });
-}
-
-#[test]
-fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
-    let _home = gate_home();
-    let left_context = homeboy_core::test_support::HermeticTestContext::new();
-    let right_context = homeboy_core::test_support::HermeticTestContext::new();
-    let left_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(left_context.path_roots())
-            .open_observation_initialized()
-            .expect("left observation store");
-    let right_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(right_context.path_roots())
-            .open_observation_initialized()
-            .expect("right observation store");
-    let run_id = "same-projected-run";
-    let task_id = "same-projected-task";
-    let artifact_id = "same-projected-patch";
-    let mut source: Value = serde_json::from_str(&recovered_runner_aggregate(
-        task_id,
-        artifact_id,
-        &sha256_hex(VALID_PATCH),
-        VALID_PATCH.len(),
-    ))
-    .expect("aggregate JSON");
-    source["status"] = Value::String("partial_recoverable".to_string());
-    source["outcomes"][0]["status"] = Value::String("candidate_recoverable".to_string());
-    source["outcomes"][0]["artifacts"][0]["metadata"] = serde_json::json!({
-        "executor_artifact_finalized": true,
-        "run_id": run_id,
-        "task_id": task_id,
-        "producer_attempt": 1,
-        "base_ref": "base-sha",
-        "provider_backend": "test",
-        "repository_identity": "repo",
-        "workspace_identity": "workspace",
-        "gate_feedback_baseline": {
-            "source_run_id": run_id,
-            "source_task_id": task_id,
-            "patch_artifact": {
-                "id": artifact_id,
-                "kind": "patch",
-                "sha256": sha256_hex(VALID_PATCH),
-            }
-        }
-    });
-    source["outcomes"][0]["artifacts"][0]
-        .as_object_mut()
-        .expect("patch artifact")
-        .remove("path");
-    record_controller_projection_in_store(
-        &right_store,
-        run_id,
-        task_id,
-        artifact_id,
-        "wrong patch bytes",
-    );
-    let projected = record_controller_projection_in_store(
-        &left_store,
-        run_id,
-        task_id,
-        artifact_id,
-        VALID_PATCH,
-    );
-    let temp = tempfile::tempdir().expect("promotion tempdir");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let result = promote_with_provider_and_checkpoint_in_observation_store(
-        AgentTaskPromotionRequest {
-            source: source.to_string(),
-            source_run_id: Some(run_id.to_string()),
-            source_path: None,
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "homeboy@rooted-projection".to_string(),
-            task_id: Some(task_id.to_string()),
-            artifact_id: Some(artifact_id.to_string()),
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-        &mut |_| Ok(()),
-        &left_store,
-    )
-    .expect("explicit projection is promoted");
-
-    assert_eq!(result.patch_artifact.path, projected.display().to_string());
-    assert_eq!(provider.apply_calls.len(), 1);
-}
-
-#[test]
-fn committed_changes_retention_uses_the_explicit_observation_store() {
-    let left_context = homeboy_core::test_support::HermeticTestContext::new();
-    let right_context = homeboy_core::test_support::HermeticTestContext::new();
-    let left_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(left_context.path_roots())
-            .open_observation_initialized()
-            .expect("left observation store");
-    let right_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(right_context.path_roots())
-            .open_observation_initialized()
-            .expect("right observation store");
-    let run_id = "same-committed-retention-run";
-    left_store
-        .upsert_imported_run(&homeboy_core::observation::RunRecord {
-            id: run_id.to_string(),
-            kind: "agent-task".to_string(),
-            started_at: "2026-08-15T00:00:00Z".to_string(),
-            finished_at: Some("2026-08-15T00:00:01Z".to_string()),
-            status: "pass".to_string(),
-            command: Some("homeboy agent-task".to_string()),
-            homeboy_version: Some("test".to_string()),
-            metadata_json: serde_json::json!({}),
-            ..Default::default()
-        })
-        .expect("record explicit run");
-    let aggregate: AgentTaskAggregate = serde_json::from_str(&recovered_runner_aggregate(
-        "committed-task",
-        "patch",
-        &sha256_hex(VALID_PATCH),
-        VALID_PATCH.len(),
-    ))
-    .expect("aggregate");
-    let mut options = promotion_options("homeboy@committed-retention");
-    options.source_run_id = Some(run_id.to_string());
-
-    let retained = retain_committed_changes_artifact(
-        &options,
-        &aggregate.outcomes[0],
-        VALID_PATCH,
-        &sha256_hex(VALID_PATCH),
-        &left_store,
-    )
-    .expect("retain committed changes")
-    .expect("retained path");
-
-    assert!(retained.starts_with(left_context.root()));
-    assert_eq!(left_store.list_artifacts(run_id).unwrap().len(), 1);
-    assert!(right_store.list_artifacts(run_id).unwrap().is_empty());
-}
-
-#[test]
-fn promote_recoverable_candidate_rejects_mismatched_run_provenance() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = recoverable_patch_source(&temp, 1);
-    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
-    source["artifacts"][0]["metadata"]["run_id"] = Value::String("different-run".to_string());
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let error = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source: source.to_string(),
-            source_run_id: Some("recoverable-run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@recoverable".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-    )
-    .expect_err("mismatched provenance rejected");
-
-    assert!(error.message.contains("fingerprinted artifact"));
-    assert!(provider.apply_calls.is_empty());
-}
-
-const TASK_BASE_SHA: &str = "1111111111111111111111111111111111111111";
-const DERIVED_BASELINE_COMMIT: &str = "2222222222222222222222222222222222222222";
-const DERIVED_BASELINE_TREE: &str = "3333333333333333333333333333333333333333";
-
-/// A recoverable candidate harvested against a Cook-derived pre-existing
-/// candidate baseline: `base_ref` is the derived commit, and the artifact's own
-/// verified baseline provenance names it.
-fn preexisting_baseline_recoverable_source(
-    temp: &tempfile::TempDir,
-    baseline_run_id: &str,
-) -> (PathBuf, Value) {
-    let (source_path, source) = recoverable_patch_source(temp, 1);
-    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
-    let metadata = &mut source["artifacts"][0]["metadata"];
-    metadata["base_ref"] = Value::String(DERIVED_BASELINE_COMMIT.to_string());
-    metadata["source_provenance"] = serde_json::json!({
-        "parent_snapshot": null,
-        "verified_cook_baseline": {
-            "baseline_commit": DERIVED_BASELINE_COMMIT,
-            "baseline_tree": DERIVED_BASELINE_TREE,
-            "parent_snapshot_identity": null,
-            "preexisting_candidate": true,
-            "promoted_patch_artifact_sha256": sha256_hex("pre-existing candidate tree"),
-            "source_run_id": baseline_run_id,
-            "source_task_id": "task-1",
-        }
-    });
-    std::fs::write(&source_path, source.to_string()).expect("write recoverable source");
-    (source_path, source)
-}
-
-fn recoverable_request_with_task_base(
-    source: &Value,
-    source_path: PathBuf,
-) -> AgentTaskPromotionRequest {
-    AgentTaskPromotionRequest {
-        source: source.to_string(),
-        source_run_id: Some("recoverable-run".to_string()),
-        source_path: Some(source_path),
-        source_worktree_path: None,
-        base_ref: None,
-        task_base_sha: Some(TASK_BASE_SHA.to_string()),
-        candidate_ref: None,
-        to_worktree: "repo@recoverable".to_string(),
-        task_id: None,
-        artifact_id: None,
-        dry_run: false,
-        gates: VerifyGateOptions::default(),
-        provider_invocation: None,
-        repository_integrity_evidence: None,
-    }
-}
-
-// Regression: a Cook launched into a dirty worktree derives a pre-existing
-// candidate baseline and harvests against it. On timeout, the recovered
-// candidate's base_ref is that derived commit, not the task base, and
-// recoverable promotion rejected it as unfingerprinted even though the
-// artifact carried the baseline provenance that explains it.
-#[test]
-fn promote_recoverable_candidate_accepts_bound_preexisting_cook_baseline() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = preexisting_baseline_recoverable_source(&temp, "recoverable-run");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let report = promote_with_provider(
-        recoverable_request_with_task_base(&source, source_path),
-        &mut provider,
-    )
-    .expect("candidate on a bound pre-existing baseline is promotable");
-
-    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.apply_calls.len(), 1);
-    // The destination is still bound to the derived baseline tree: the apply
-    // request carries the promotion-chain baseline, not the bare task base.
-    let applied_baseline = provider.apply_calls[0]
-        .gate_feedback_baseline
-        .as_ref()
-        .expect("apply carries the derived baseline");
-    assert_eq!(applied_baseline["source_tree"], DERIVED_BASELINE_TREE);
-    assert_eq!(
-        report.provenance["prior_baseline"]["source_tree"],
-        DERIVED_BASELINE_TREE
-    );
-}
-
-#[test]
-fn promote_recoverable_candidate_rejects_preexisting_baseline_from_another_run() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = preexisting_baseline_recoverable_source(&temp, "other-run");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let error = promote_with_provider(
-        recoverable_request_with_task_base(&source, source_path),
-        &mut provider,
-    )
-    .expect_err("baseline bound to another run is rejected");
-
-    assert!(error.message.contains("fingerprinted artifact"));
-    assert!(provider.apply_calls.is_empty());
-}
-
-#[test]
-fn promote_recoverable_candidate_rejects_unexplained_base_mismatch() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, mut source) =
-        preexisting_baseline_recoverable_source(&temp, "recoverable-run");
-    source["artifacts"][0]["metadata"]
-        .as_object_mut()
-        .expect("artifact metadata")
-        .remove("source_provenance");
-    std::fs::write(&source_path, source.to_string()).expect("write recoverable source");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let error = promote_with_provider(
-        recoverable_request_with_task_base(&source, source_path),
-        &mut provider,
-    )
-    .expect_err("base mismatch without baseline provenance is rejected");
-
-    assert!(error.message.contains("fingerprinted artifact"));
-    assert!(provider.apply_calls.is_empty());
 }
 
 #[test]
@@ -499,7 +180,6 @@ fn empty_patch_failing_gate_is_reported_against_destination() {
         report.gate_results[0].status,
         homeboy_core::gate::HomeboyGateStatus::Failed
     );
-    assert_eq!(provider.apply_calls.len(), 0);
     assert_eq!(provider.verify_calls[0].0, repo);
 }
 
@@ -569,7 +249,6 @@ fn candidate_without_patch_artifact_promotes_from_the_commit() {
         git_stdout(&repo, &["status", "--porcelain"]),
         " M src/lib.rs\n"
     );
-    assert!(provider.apply_calls.is_empty());
 }
 
 #[test]
@@ -708,7 +387,6 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     .expect_err("gate transport failure propagates after checkpoint");
 
     assert!(!error.message.is_empty());
-    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(
@@ -764,7 +442,6 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     let resumed = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
         .expect("resume exact applied candidate");
     assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
-    assert!(provider.apply_calls.is_empty(), "resume must not reapply");
 
     std::fs::write(worktree_path.join("src/lib.rs"), "tampered\n").expect("tamper candidate");
     let mismatch = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
@@ -823,7 +500,6 @@ fn explicit_candidate_rejects_non_ancestor_base_and_dirty_source_before_apply() 
         "{}",
         error.message
     );
-    assert!(provider.apply_calls.is_empty());
 
     std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("dirty source");
     let error = promote_with_provider(
@@ -831,8 +507,11 @@ fn explicit_candidate_rejects_non_ancestor_base_and_dirty_source_before_apply() 
         &mut provider,
     )
     .expect_err("dirty source");
-    assert!(error.message.contains("source worktree is dirty"));
-    assert!(provider.apply_calls.is_empty());
+    assert!(
+        error.message.contains("promotion destination moved"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]
