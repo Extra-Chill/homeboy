@@ -383,6 +383,7 @@ impl homeboy::agents::agent_tasks::AgentTaskExecutorAdapter for LocalBenchMatrix
                 "scheduler_plan_id": context.plan_id,
                 "attempt": context.attempt,
             }),
+            candidate: None,
         }
     }
 }

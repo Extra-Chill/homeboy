@@ -329,6 +329,7 @@ fn resume_promoted_patch_internal<'a>(
         &options,
         target_path,
         expected_candidate.as_ref(),
+        outcome.candidate.as_ref(),
         gate_workspace,
         observation_store,
     )?;
@@ -1050,7 +1051,7 @@ fn promote_with_provider_and_checkpoint_internal(
         let unchanged_attempt = outcome.is_verified_unchanged_attempt();
         let gates = match worktree_path {
             Some(worktree_path) if !unchanged_attempt => {
-                run_promotion_gates(&options, worktree_path, None, None, observation_store)?
+                run_promotion_gates(&options, worktree_path, None, None, None, observation_store)?
             }
             _ => PromotionGateRun::without_gates(options.dry_run),
         };
@@ -1249,6 +1250,7 @@ fn promote_with_provider_and_checkpoint_internal(
                         )
                     })?
                     .as_ref(),
+                outcome.candidate.as_ref(),
                 None,
                 observation_store,
             )?,
@@ -2331,6 +2333,7 @@ fn promote_committed_changes(
                         )
                     })?
                     .as_ref(),
+                outcome.candidate.as_ref(),
                 None,
                 observation_store,
             )?,
@@ -2469,6 +2472,7 @@ fn run_promotion_gates(
     options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
+    committed_candidate: Option<&crate::agent_task::AgentTaskCandidate>,
     gate_workspace: Option<&Path>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PromotionGateRun> {
@@ -2499,6 +2503,7 @@ fn run_promotion_gates(
             .as_deref()
             .unwrap_or("unrecorded-promotion"),
         expected_candidate,
+        committed_candidate,
         observation_store,
     )?;
     // The immutable candidate establishes source identity only. Dependency
@@ -2814,7 +2819,7 @@ mod lab_gate_binding_tests {
                     "gate_environment":{"lab_runner":"absent-fixture-runner", "hydrate_rust_cache":false}
                 }
             })).unwrap();
-            let report = run_promotion_gates(&options, repo, Some(&candidate), None, store)
+            let report = run_promotion_gates(&options, repo, Some(&candidate), None, None, store)
                 .expect("non-execution is retained, not a fabricated candidate mismatch");
             assert_eq!(report.status, AgentTaskPromotionStatus::GateDeferred);
             assert_eq!(report.deterministic_gates.len(), 2);
@@ -2873,7 +2878,7 @@ mod lab_gate_binding_tests {
             }))
             .unwrap();
 
-            let report = run_promotion_gates(&options, repo, Some(&candidate), None, store)
+            let report = run_promotion_gates(&options, repo, Some(&candidate), None, None, store)
                 .expect("an absent runner defers the gate; it is not a setup error");
 
             assert_eq!(report.status, AgentTaskPromotionStatus::GateDeferred);
@@ -2919,7 +2924,7 @@ mod lab_gate_binding_tests {
             }))
             .unwrap();
 
-            let report = run_promotion_gates(&options, repo, Some(&candidate), None, store)
+            let report = run_promotion_gates(&options, repo, Some(&candidate), None, None, store)
                 .expect("local gates run against the destination workspace");
 
             assert!(repo.join("hydration-count").is_file());
@@ -2932,13 +2937,128 @@ mod lab_gate_binding_tests {
         });
     }
 
+    /// Commit the destination's dirty tree on HEAD the way harvest does, so
+    /// the candidate exists in the destination repository before promotion.
+    fn harvested_candidate(repo: &Path) -> crate::agent_task::AgentTaskCandidate {
+        let index = tempfile::NamedTempFile::new().unwrap();
+        let git_with_index = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .env("GIT_INDEX_FILE", index.path())
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git_with_index(&["read-tree", "HEAD"]);
+        git_with_index(&["add", "--all"]);
+        let tree_sha = git_with_index(&["write-tree"]);
+        let base_sha = git_output(repo, &["rev-parse", "HEAD"]).unwrap();
+        let candidate_sha = git_output(
+            repo,
+            &["commit-tree", &tree_sha, "-p", &base_sha, "-m", "harvested"],
+        )
+        .unwrap();
+        git_output(
+            repo,
+            &[
+                "update-ref",
+                "refs/homeboy/candidates/fixture",
+                &candidate_sha,
+            ],
+        )
+        .unwrap();
+        crate::agent_task::AgentTaskCandidate {
+            base_sha,
+            candidate_sha,
+            tree_sha,
+        }
+    }
+
+    fn commit_objects(repo: &Path) -> std::collections::BTreeSet<String> {
+        git_output(
+            repo,
+            &[
+                "cat-file",
+                "--batch-all-objects",
+                "--batch-check=%(objecttype) %(objectname)",
+            ],
+        )
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("commit ").map(str::to_string))
+        .collect()
+    }
+
+    #[test]
+    fn matching_harvested_candidate_is_the_gate_checkout_without_a_new_commit() {
+        with_git_candidate(|repo, store| {
+            std::fs::write(repo.join("candidate.txt"), "changed\n").unwrap();
+            std::fs::write(repo.join("new.txt"), "untracked\n").unwrap();
+            let candidate = harvested_candidate(repo);
+            let commits_before = commit_objects(repo);
+
+            let checkout = ImmutableCandidateCheckout::materialize(
+                repo,
+                "candidate-fixture",
+                None,
+                Some(&candidate),
+                store,
+            )
+            .unwrap()
+            .expect("Git destination materializes a gate checkout");
+
+            assert_eq!(
+                git_output(&checkout.path, &["rev-parse", "HEAD"]).unwrap(),
+                candidate.candidate_sha
+            );
+            assert_eq!(checkout.identity().commit, candidate.candidate_sha);
+            assert_eq!(checkout.identity().tree, candidate.tree_sha);
+            assert_eq!(commit_objects(repo), commits_before);
+        });
+    }
+
+    #[test]
+    fn mismatching_harvested_candidate_tree_fails_with_typed_error() {
+        with_git_candidate(|repo, store| {
+            std::fs::write(repo.join("candidate.txt"), "changed\n").unwrap();
+            let candidate = harvested_candidate(repo);
+            std::fs::write(repo.join("candidate.txt"), "diverged\n").unwrap();
+
+            let error = ImmutableCandidateCheckout::materialize(
+                repo,
+                "candidate-fixture",
+                None,
+                Some(&candidate),
+                store,
+            )
+            .err()
+            .expect("a diverged destination tree must not be gated");
+
+            let mismatch = std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<CandidateTreeMismatch>())
+                .expect("typed candidate tree mismatch");
+            assert_eq!(mismatch.candidate_sha, candidate.candidate_sha);
+            assert_eq!(mismatch.candidate_tree, candidate.tree_sha);
+            assert_ne!(mismatch.destination_tree, candidate.tree_sha);
+            assert!(error.message.contains(&candidate.tree_sha));
+            assert!(error.message.contains(&mismatch.destination_tree));
+        });
+    }
+
     #[test]
     fn executed_lab_tree_mismatch_is_rejected_at_real_checkout_binding_boundary() {
         with_git_candidate(|repo, store| {
-            let checkout =
-                ImmutableCandidateCheckout::materialize(repo, "lab-binding-fixture", None, store)
-                    .unwrap()
-                    .unwrap();
+            let checkout = ImmutableCandidateCheckout::materialize(
+                repo,
+                "lab-binding-fixture",
+                None,
+                None,
+                store,
+            )
+            .unwrap()
+            .unwrap();
             let environment = crate::agent_task_gate::AgentTaskGateEnvironmentPolicy {
                 hydrate_rust_cache: false,
                 ..Default::default()
@@ -3206,6 +3326,43 @@ fn gate_setup_outcome_summary(outcome: &homeboy_core::deps::DependencyHydrationO
     }
 }
 
+/// The harvested candidate commit's tree is not the destination's candidate
+/// tree, so gating either would not gate the other (#16303).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateTreeMismatch {
+    pub candidate_sha: String,
+    pub candidate_tree: String,
+    pub destination_tree: String,
+}
+
+impl std::fmt::Display for CandidateTreeMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "harvested candidate {} has tree {}, but the promotion destination tree is {}",
+            self.candidate_sha, self.candidate_tree, self.destination_tree
+        )
+    }
+}
+
+impl std::error::Error for CandidateTreeMismatch {}
+
+impl From<CandidateTreeMismatch> for Error {
+    fn from(mismatch: CandidateTreeMismatch) -> Self {
+        Error::new(
+            homeboy_core::ErrorCode::ValidationInvalidArgument,
+            mismatch.to_string(),
+            json!({
+                "field": "promotion.candidate.tree_sha",
+                "candidate_sha": mismatch.candidate_sha,
+                "candidate_tree": mismatch.candidate_tree,
+                "destination_tree": mismatch.destination_tree,
+            }),
+        )
+        .with_source(mismatch)
+    }
+}
+
 /// A run-scoped detached worktree whose commit tree is exactly the promoted
 /// candidate. The source destination stays dirty for final commit/push/PR.
 struct ImmutableCandidateCheckout {
@@ -3220,6 +3377,7 @@ impl ImmutableCandidateCheckout {
         source_root: &Path,
         run_id: &str,
         expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
+        committed_candidate: Option<&crate::agent_task::AgentTaskCandidate>,
         observation_store: &homeboy_core::observation::ObservationStore,
     ) -> Result<Option<Self>> {
         if !source_root.is_dir() {
@@ -3254,21 +3412,57 @@ impl ImmutableCandidateCheckout {
         else {
             return Ok(None);
         };
-        let commit = git_output(
-            source_root,
-            &[
-                "-c",
-                "user.name=Homeboy",
-                "-c",
-                "user.email=homeboy@localhost",
-                "commit-tree",
-                &fingerprint.tree,
-                "-p",
+        // The harvested commit is this destination's candidate when it is
+        // reachable here and descends from the destination HEAD. A destination
+        // caught up to a moved base is a different candidate (S2 of #16303).
+        let git_succeeds = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(source_root)
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let reachable = committed_candidate.filter(|committed| {
+            git_succeeds(&[
+                "cat-file",
+                "-e",
+                &format!("{}^{{commit}}", committed.candidate_sha),
+            ]) && git_succeeds(&[
+                "merge-base",
+                "--is-ancestor",
                 &fingerprint.head,
-                "-m",
-                "homeboy: immutable promotion candidate",
-            ],
-        )?;
+                &committed.candidate_sha,
+            ])
+        });
+        let commit = match reachable {
+            // The harvested candidate commit is the gated identity (#16303).
+            Some(committed) if committed.tree_sha == fingerprint.tree => {
+                committed.candidate_sha.clone()
+            }
+            Some(committed) => {
+                return Err(CandidateTreeMismatch {
+                    candidate_sha: committed.candidate_sha.clone(),
+                    candidate_tree: committed.tree_sha.clone(),
+                    destination_tree: fingerprint.tree.clone(),
+                }
+                .into())
+            }
+            None => git_output(
+                source_root,
+                &[
+                    "-c",
+                    "user.name=Homeboy",
+                    "-c",
+                    "user.email=homeboy@localhost",
+                    "commit-tree",
+                    &fingerprint.tree,
+                    "-p",
+                    &fingerprint.head,
+                    "-m",
+                    "homeboy: immutable promotion candidate",
+                ],
+            )?,
+        };
         let data_root = observation_store.data_root().ok_or_else(|| {
             Error::internal_unexpected("promotion observation store has no data root")
         })?;

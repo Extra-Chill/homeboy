@@ -1005,6 +1005,7 @@ pub(crate) fn build_pre_execution_failure_outcome(
             "provider_executions_consumed": 0,
             "candidate_adoption_recovery": candidate_adoption_recovery,
         }),
+        candidate: None,
     }
 }
 
@@ -1219,6 +1220,7 @@ pub fn record_pre_dispatch_failure_in_store(
             workflow: None,
             follow_up: None,
             metadata,
+            candidate: None,
         }],
         events: vec![
             AgentTaskProgressEvent {
@@ -3005,6 +3007,11 @@ pub(crate) fn apply_aggregate_to_record(
     record.provider_handles = provider_handles_for_outcomes(&aggregate.outcomes);
     persist_provider_handle_models(&mut record.provider_handles, plan);
     record.latest_executor_evidence = latest_executor_evidence(&record.run_id, plan, aggregate);
+    record.candidate = aggregate
+        .outcomes
+        .iter()
+        .rev()
+        .find_map(|outcome| outcome.candidate.clone());
     update_lifecycle_from_record(record, plan);
     // The model each provider actually ran is aggregate evidence; it is
     // projected with the aggregate it came from, not repaired on a later read.

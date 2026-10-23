@@ -314,6 +314,7 @@ fn run_execution(
             "execution_kind": REPO_LOCAL_GATE_EXECUTION_KIND,
             "artifact_root": execution.artifact_root,
         }),
+        candidate: None,
     })
 }
 
@@ -512,6 +513,7 @@ fn gate_failure_outcome(
         workflow: None,
         follow_up: None,
         metadata: Value::Null,
+        candidate: None,
     }
 }
 

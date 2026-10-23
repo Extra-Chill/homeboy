@@ -57,8 +57,8 @@ pub use engine::*;
 use engine::{QuarantinedTask, ResourceWait, RunningTask, ScheduledTask};
 use harvest::mark_timeout_workspace_candidates_incomplete;
 use harvest::{
-    committed_harvest_failure, committed_harvest_preflight_outcome, harvest_committed_patch,
-    harvest_uncommitted_patch,
+    committed_harvest_failure, committed_harvest_preflight_outcome, harvest_candidate_commit,
+    harvest_committed_patch, harvest_uncommitted_patch,
 };
 pub(crate) use harvest::{git_output, HarvestError};
 use outcome::event;

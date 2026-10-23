@@ -191,6 +191,7 @@ fn agent_task_outcome_for_entry(
             "status": entry.status,
             "exit_code": entry.exit_code,
         }),
+        candidate: None,
     })
 }
 

@@ -157,6 +157,9 @@ pub struct AgentTaskRunRecord {
     pub workspace_claim: Option<WorkspaceClaim>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+    /// The latest Homeboy-harvested candidate commit of this run (#16303).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<crate::agent_task::AgentTaskCandidate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -538,6 +541,7 @@ impl AgentTaskRunRecord {
             workspace_owner_lease: None,
             workspace_claim: None,
             metadata: Value::Null,
+            candidate: None,
         }
     }
 

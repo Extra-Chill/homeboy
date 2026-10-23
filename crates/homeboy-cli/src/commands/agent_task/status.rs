@@ -315,6 +315,10 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
     if let Ok(record) = bounded_exact_record(&target.run_id) {
+        // The typed immutable candidate commit harvest recorded (#16303).
+        if let Some(candidate) = &record.candidate {
+            value["candidate_commit"] = json!(candidate);
+        }
         attach_lab_snapshot_failure_projection(&mut value, &record);
         if let Some(diagnostic) = lab_staging_root_cause(&record) {
             value["blocker_summary"] = json!(diagnostic.message);
@@ -467,7 +471,11 @@ fn compact_control_plane_status(value: Value) -> Value {
             compact[format!("{key}_refs")] = json!(refs);
         }
     }
-    for key in ["lab_snapshot_failure", "lab_staging_diagnostic"] {
+    for key in [
+        "candidate_commit",
+        "lab_snapshot_failure",
+        "lab_staging_diagnostic",
+    ] {
         if let Some(diagnostic) = value.get(key) {
             compact[key] = bounded_control_plane_value(diagnostic);
         }
