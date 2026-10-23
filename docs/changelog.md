@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.432.4] - 2026-10-23
+
+### Fixed
+- bound runner job messages in control-plane progress events
+
 ## [0.432.3] - 2026-10-22
 
 ### Changed
