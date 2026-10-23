@@ -1331,6 +1331,53 @@ fn create_restores_missing_active_record_from_an_unclaimed_existing_branch() {
 }
 
 #[test]
+fn create_recreates_missing_recorded_branch_from_recorded_base() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, mut options) = registered_create_fixture(home.path(), "missing-branch");
+        let created = create(options.clone()).unwrap();
+        let path = PathBuf::from(&created.record.worktree_path);
+        let base = git::run_git(&path, &["rev-parse", "HEAD"], "base").unwrap();
+        run_git(&source, &["worktree", "remove", &path.to_string_lossy()]);
+        run_git(&source, &["branch", "-D", &options.branch]);
+        options.from = Some("does-not-exist".into());
+        let restored = create(options).expect("restore using record rather than caller input");
+        assert_eq!(restored.record, created.record);
+        assert_eq!(
+            git::run_git(&path, &["rev-parse", "HEAD"], "head").unwrap(),
+            base
+        );
+    });
+}
+
+#[test]
+fn create_recreates_missing_recorded_branch_from_surviving_remote_head() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "missing-remote-branch");
+        let created = create(options.clone()).unwrap();
+        let path = PathBuf::from(&created.record.worktree_path);
+        fs::write(path.join("candidate.txt"), "candidate").unwrap();
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-m", "candidate"]);
+        let head = git::run_git(&path, &["rev-parse", "HEAD"], "head").unwrap();
+        run_git(
+            &source,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{}", options.branch),
+                head.trim(),
+            ],
+        );
+        run_git(&source, &["worktree", "remove", &path.to_string_lossy()]);
+        run_git(&source, &["branch", "-D", &options.branch]);
+        create(options).expect("restore remote head");
+        assert_eq!(
+            git::run_git(&path, &["rev-parse", "HEAD"], "head").unwrap(),
+            head
+        );
+    });
+}
+
+#[test]
 fn create_returns_existing_matching_task_worktree_idempotently() {
     crate::test_support::with_isolated_home(|home| {
         let (_, options) = registered_create_fixture(home.path(), "existing-fixture");

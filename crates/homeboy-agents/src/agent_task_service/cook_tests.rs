@@ -9199,7 +9199,7 @@ fn cook_persists_initial_base_transport_failure_before_provider_execution() {
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
-            "workspace_base_ancestry_preflight"
+            "cook_pre_execution"
         );
         assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
         let persisted = record.metadata.to_string();
@@ -25902,8 +25902,11 @@ fn tracked_candidate_destination_is_not_converged_to_a_newer_pinned_base() {
             false,
         );
         assert!(
-            untracked.is_err(),
-            "without a tracked candidate a behind destination is still reported"
+            matches!(
+                untracked,
+                Ok(Some(CookWorkspaceBaseValidation::Snapshot(_)))
+            ),
+            "an unregistered provider checkout uses a snapshot, never a managed reset"
         );
     });
 }
@@ -26116,19 +26119,6 @@ fn recook_preservation_leaves_unattributed_dirt_for_existing_admission() {
         );
         assert_eq!(porcelain(&target), dirty);
 
-        // A still-running owner may be writing its candidate.
-        let running =
-            materialize_prior_cook_attempt("cook-15775-running", AgentTaskRunState::Running);
-        homeboy_core::worktree::record_active_for_run_at_for_test(handle, &target, &running);
-        assert_eq!(
-            super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
-                &lifecycle_store,
-                &options,
-            )
-            .expect("classify running owner"),
-            None
-        );
-
         // A succeeded owner's leftovers are not a failed candidate.
         let succeeded =
             materialize_prior_cook_attempt("cook-15775-succeeded", AgentTaskRunState::Succeeded);
@@ -26239,6 +26229,43 @@ fn a_destination_whose_cook_is_still_driving_refuses_another_cook() {
             .is_some()
         );
         assert_eq!(porcelain(&target), "");
+    });
+}
+
+#[test]
+fn cook_takes_over_a_nonterminal_destination_after_driver_death() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let handle = "fixture@fix-issue-16323-fixture";
+        let prior_cook = "cook-16323-dead";
+        let prior_run = materialize_prior_cook_attempt(prior_cook, AgentTaskRunState::Running);
+        let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
+        leave_prior_candidate(&target);
+        let options = recook_options("cook-16323-takeover", handle, &target);
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        // A stale PID is diagnostic only: the unlocked OS lock is the proof.
+        let lock_path = homeboy_core::paths::homeboy_data()
+            .unwrap()
+            .join("agent-task-cooks")
+            .join(prior_cook)
+            .join("driver.lock");
+        std::fs::write(lock_path, "99999999").unwrap();
+        super::super::cook_prior_candidate::require_destination_free_of_live_cook(
+            &lifecycle_store,
+            &options,
+        )
+        .unwrap();
+        let evidence = super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
+            &lifecycle_store,
+            &options,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(evidence["prior_run_id"], prior_run);
+        assert_eq!(porcelain(&target), "");
+        assert!(evidence["recovery_command"]
+            .as_str()
+            .unwrap()
+            .contains("cherry-pick --no-commit"));
     });
 }
 

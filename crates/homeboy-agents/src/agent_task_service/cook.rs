@@ -5949,39 +5949,16 @@ fn run_cook_spine(
             error
         })?;
     }
-    // Reject a known-invalid managed workspace before base capture reaches its
-    // remote. Detached first handoffs have no local source path and remain
-    // eligible for runner-owned materialization below.
+    // Identity checks are read-only and precede remote access. State repair
+    // itself runs only after base capture, in destination convergence below.
     if cook_attempt_needs_execution_with_store(lifecycle_store, &options.identity.initial_run_id)
         && !cook_workspace_lookup_pending(&options.identity.initial_plan)
-        && (options.provider_transport.attempt_dispatcher.is_none()
-            || options.workspace.source_worktree_path.is_some())
     {
-        let workspace_base = run_cook_startup_phase(
-            lifecycle_store,
-            durable_observer,
-            &options.identity.cook_id,
-            &options.identity.initial_run_id,
-            "workspace_base_preflight",
-            || {
-                validate_cook_workspace_with_adopted_candidate(
-                    lifecycle_store,
-                    &options,
-                    verification_pending_continuation
-                        || (options.workspace.source_worktree_path.is_some()
-                            && !cook_uses_explicit_cwd_workspace(&options)),
-                )
-            },
-        )
-        .map_err(|mut error| {
-            error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
-            error
-        })?;
-        if let Some(CookWorkspaceBaseValidation::Snapshot(snapshot)) = workspace_base {
-            if let Some(resolved_base) = snapshot.get("resolved_base").and_then(Value::as_str) {
-                options.workspace.task_base_sha = Some(resolved_base.to_string());
-                options.identity.initial_plan.metadata["cook_workspace_base_snapshot"] = snapshot;
-            }
+        if let Some(source) = options.workspace.source_worktree_path.as_deref() {
+            homeboy_core::worktree_provider::require_linked_worktree_mutation_path(
+                source,
+                &options.workspace.to_worktree,
+            )?;
         }
     }
     // Base resolution reaches origin. Keep its transport failure behind the
@@ -8170,6 +8147,20 @@ fn validate_cook_workspace_with_adopted_candidate(
     options: &CookRequest,
     adopted_dirty_candidate: bool,
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
+    let native_record = native_cook_destination_record(options)?;
+    let adopted_dirty_candidate = adopted_dirty_candidate
+        && native_record.as_ref().is_none_or(|record| {
+            cook_has_provider_execution_in_store(lifecycle_store, &options.identity.cook_id)
+                .unwrap_or(false)
+                && record.run_id.as_deref().is_some_and(|owner| {
+                    lifecycle_store
+                        .read_cook_index(&options.identity.cook_id)
+                        .ok()
+                        .is_some_and(|index| {
+                            index.attempts.iter().any(|attempt| attempt.run_id == owner)
+                        })
+                })
+        });
     let continuation = tracked_promotion_continuation_in_store(lifecycle_store, options)?;
     let source = options.workspace.source_worktree_path.as_deref();
     let target = if cook_uses_explicit_cwd_workspace(options) {
@@ -8402,8 +8393,9 @@ fn pin_cook_workspace_base_at(options: &mut CookRequest, workspace: &Path) -> Re
         counter.count.fetch_add(1, Ordering::SeqCst);
     }
     let declared = &options.finalization.base;
-    let pinned = match crate::agent_task_promotion::capture_declared_base(workspace, Some(declared))
-    {
+    let pinned = match homeboy_core::worktree::convergence::retry_fetch(|| {
+        crate::agent_task_promotion::capture_declared_base(workspace, Some(declared))
+    }) {
         Ok(Some(base)) => CookWorkspaceBasePin {
             base: base.base,
             sha: base.sha,
@@ -8462,6 +8454,21 @@ fn local_tracking_cook_base(workspace: &Path, base: &str) -> Option<CookWorkspac
     })
 }
 
+fn native_cook_destination_record(
+    options: &CookRequest,
+) -> Result<Option<homeboy_core::worktree::TaskWorktreeRecord>> {
+    let handle = &options.workspace.to_worktree;
+    if Path::new(handle).is_absolute() || handle.contains(std::path::MAIN_SEPARATOR) {
+        return Ok(None);
+    }
+    Ok(
+        match homeboy_core::worktree::resolve_workspace_ref_if_present(handle)? {
+            Some(homeboy_core::worktree::WorkspaceRefRecord::Task(record)) => Some(record),
+            _ => None,
+        },
+    )
+}
+
 fn preflight_cook_workspace_base_ancestry_with_provider(
     target: &Path,
     options: &CookRequest,
@@ -8501,59 +8508,56 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
             .as_deref()
             .unwrap_or(&options.finalization.base)
     };
-    match preflight_cook_workspace_base_ancestry(target, base, adopted_dirty_candidate) {
-        Ok(snapshot) => Ok(snapshot.map(CookWorkspaceBaseValidation::Snapshot)),
-        Err(error)
-            if error.details["workspace_base_ancestry"]["direction"] == "behind"
-                && options.workspace.task_base_sha.is_some()
-                && !tracked_candidate =>
-        {
-            if let Some(native) =
-                homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
-                    &options.workspace.to_worktree,
-                )?
-            {
-                // Homeboy owns this task worktree directly, so it can converge
-                // the clean, pinned checkout without requiring an external provider.
-                homeboy_core::git::run_git(
-                    target,
-                    &["merge", "--ff-only", base],
-                    "converge Homeboy task worktree to pinned Cook base",
-                )?;
-                let snapshot =
-                    preflight_cook_workspace_base_ancestry(target, base, adopted_dirty_candidate)?;
-                return Ok(Some(match snapshot {
-                    Some(snapshot) => CookWorkspaceBaseValidation::Snapshot(snapshot),
-                    None => CookWorkspaceBaseValidation::Convergence(serde_json::json!({
-                        "schema": "homeboy/cook-workspace-base-convergence/v1",
-                        "planned_base_sha": base,
-                        "provider_id": "native",
-                        "handle": native.handle,
-                        "path": native.path,
-                    })),
-                }));
-            }
-            Err(error)
-        }
-        // A continuation that already holds a promoted candidate was verified
-        // on the destination's recorded HEAD. Fast-forwarding that worktree to
-        // the Cook's original base pin moves the candidate onto a commit its
-        // gates never ran on, and finalization then refuses with "candidate
-        // changed after promotion". The tracked promotion is the authority for
-        // the destination, so leave it where the candidate was verified;
-        // finalization's candidate fingerprint check still guards drift. The
-        // same holds when the base moved past the authenticated candidate:
-        // Cook owns that branch and catches it up at publication (#16049).
-        Err(error)
-            if matches!(
-                error.details["workspace_base_ancestry"]["direction"].as_str(),
-                Some("behind" | "diverged")
-            ) && tracked_candidate =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(error),
+    if tracked_candidate {
+        // Authentication happened before this call. Neither convergence nor a
+        // scheduler snapshot may replace the gate-verified candidate's HEAD.
+        return Ok(None);
     }
+    let native_owned = matches!(
+        native_cook_destination_record(options)?,
+        Some(record)
+            if record.state == homeboy_core::worktree::TaskWorktreeState::Active
+                && std::fs::canonicalize(&record.worktree_path).ok().as_deref()
+                    == std::fs::canonicalize(target).ok().as_deref()
+    );
+    if !cook_uses_explicit_cwd_workspace(options) && native_owned {
+        // This is the sole mutation boundary before provider execution. Preview
+        // classifies only; caller-owned checkouts retain snapshot semantics.
+        let Some(pin) = options.workspace.task_base_sha.as_deref() else {
+            // Base capture owns resolution. Converge only after it has pinned
+            // the immutable base, not in the earlier read-only preflight.
+            return Ok(None);
+        };
+        let resolved = materialize_prepared_cook_base(target, pin)?;
+        let issue_owned = options
+            .identity
+            .initial_plan
+            .tasks
+            .first()
+            .is_some_and(|task| {
+                task.workspace
+                    .task_url
+                    .as_deref()
+                    .is_some_and(|url| url.contains("/issues/"))
+            });
+        homeboy_core::worktree::convergence::converge_destination(
+            target,
+            &resolved,
+            adopted_dirty_candidate,
+            issue_owned,
+        )?;
+        return Ok(Some(CookWorkspaceBaseValidation::Convergence(
+            serde_json::json!({
+                "schema": "homeboy/cook-workspace-base-convergence/v1",
+                "planned_base_sha": resolved,
+                "provider_id": "native",
+                "handle": options.workspace.to_worktree,
+                "path": target,
+            }),
+        )));
+    }
+    preflight_cook_workspace_base_ancestry(target, base, adopted_dirty_candidate)
+        .map(|snapshot| snapshot.map(CookWorkspaceBaseValidation::Snapshot))
 }
 
 /// A candidate diff is meaningful only when its destination contains the
@@ -8578,20 +8582,21 @@ fn preflight_cook_workspace_base_ancestry(
     if !origin.status.success() {
         return Ok(None);
     }
-    let (declared_base, resolved_base) = if base.len() == 40
-        && base.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        (
-            base.to_string(),
-            materialize_prepared_cook_base(target, base)?,
-        )
-    } else {
-        let Some(base) = crate::agent_task_promotion::capture_declared_base(target, Some(base))?
-        else {
-            return Ok(None);
+    let (declared_base, resolved_base) =
+        if base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            (
+                base.to_string(),
+                materialize_prepared_cook_base(target, base)?,
+            )
+        } else {
+            let Some(base) = homeboy_core::worktree::convergence::retry_fetch(|| {
+                crate::agent_task_promotion::capture_declared_base(target, Some(base))
+            })?
+            else {
+                return Ok(None);
+            };
+            (base.base, base.sha)
         };
-        (base.base, base.sha)
-    };
     preflight_cook_workspace_resolved_base_ancestry(
         target,
         target,
@@ -8609,27 +8614,29 @@ fn materialize_prepared_cook_base(target: &Path, base_sha: &str) -> Result<Strin
     ) {
         return Ok(resolved.trim().to_string());
     }
-    homeboy_core::git::with_remote_tracking_authority_until(
-        target,
-        "materialize prepared Cook base",
-        std::time::Instant::now() + std::time::Duration::from_secs(30),
-        |remaining| {
-            homeboy_core::git::run_git_with_env_timeout(
-                target,
-                &[
-                    "fetch",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    "origin",
-                    base_sha,
-                ],
-                "materialize prepared Cook base",
-                &[],
-                remaining,
-            )
-            .map(|_| ())
-        },
-    )?;
+    homeboy_core::worktree::convergence::retry_fetch(|| {
+        homeboy_core::git::with_remote_tracking_authority_until(
+            target,
+            "materialize prepared Cook base",
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+            |remaining| {
+                homeboy_core::git::run_git_with_env_timeout(
+                    target,
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        "origin",
+                        base_sha,
+                    ],
+                    "materialize prepared Cook base",
+                    &[],
+                    remaining,
+                )
+                .map(|_| ())
+            },
+        )
+    })?;
     Ok(homeboy_core::git::run_git(
         target,
         &["rev-parse", "--verify", &format!("{base_sha}^{{commit}}")],
@@ -8684,9 +8691,10 @@ pub fn prepare_cook_workspace_base(target: &Path, base: &str) -> Result<CookBase
     std::fs::write(&alternates, format!("{}/objects\n", common_dir.trim())).map_err(|error| {
         Error::internal_io(error.to_string(), Some(alternates.display().to_string()))
     })?;
-    let Some(resolved) = tolerate_retryable_cook_base_resolution(
-        crate::agent_task_promotion::capture_declared_base(graph.path(), Some(base)),
-    )?
+    let Some(resolved) =
+        tolerate_retryable_cook_base_resolution(homeboy_core::worktree::convergence::retry_fetch(
+            || crate::agent_task_promotion::capture_declared_base(graph.path(), Some(base)),
+        ))?
     else {
         return Ok(deferred_cook_base_preparation(base));
     };
@@ -8776,7 +8784,10 @@ fn preflight_cook_workspace_resolved_base_ancestry(
     if !dirty_paths.is_empty() && !adopted_dirty_candidate {
         let mut error = Error::validation_invalid_argument(
             "workspace",
-            "Cook destination has uncommitted changes; refusing provider execution",
+            format!(
+                "Cook cannot attribute uncommitted destination changes: {}",
+                dirty_paths.join(", ")
+            ),
             Some(target.display().to_string()),
             None,
         );
@@ -8802,38 +8813,8 @@ fn preflight_cook_workspace_resolved_base_ancestry(
         return Ok(None);
     }
     if ahead == 0 {
-        // A recipe-pinned base is controller authority to converge the managed
-        // provider checkout. An unpinned declared ref instead authorizes an
-        // isolated scheduler snapshot without mutating that checkout.
-        if base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            let direction = "behind";
-            let mut error = Error::validation_invalid_argument(
-                "base",
-                format!(
-                    "Cook destination is {direction} from resolved base `{}` at {}; converge the destination before provider execution",
-                    base, resolved_base
-                ),
-                Some(target.display().to_string()),
-                Some(vec![format!(
-                    "Update the destination with `{}` and rerun Cook; provider execution has not started.",
-                    format!("git merge --ff-only {resolved_base}")
-                )]),
-            );
-            error.details["workspace_base_ancestry"] = serde_json::json!({
-                "schema": "homeboy/cook-workspace-base-ancestry/v1",
-                "base": base,
-                "resolved_base": resolved_base,
-                "destination_head": fingerprint.head,
-                "direction": direction,
-                "base_only_commits": behind,
-                "candidate_only_commits": ahead,
-                "next_action": "converge_destination_before_provider",
-            });
-            // A behind destination under a recipe-pinned base is a deterministic
-            // workspace topology condition, not a transport failure: retrying
-            // cannot converge it and must not spend transport retries (#14699).
-            return Err(error);
-        }
+        // Managed destinations converge at admission. Read-only preview and
+        // caller-owned checkouts project the immutable scheduler snapshot.
         return Ok(Some(serde_json::json!({
             "schema": "homeboy/cook-workspace-base-snapshot/v1",
             "base": declared_base,
@@ -8845,18 +8826,16 @@ fn preflight_cook_workspace_resolved_base_ancestry(
         })));
     }
     let direction = "diverged";
-    let mut error = Error::validation_invalid_argument(
-        "base",
-        format!(
-            "Cook destination is {direction} from resolved base `{}` at {}; converge the destination before provider execution",
-            base, resolved_base
-        ),
-        Some(target.display().to_string()),
-        Some(vec![
-            format!("Merge the prepared base with `git merge {resolved_base}` and rerun Cook."),
-            format!("Or rebase the candidate with `git rebase {resolved_base}` and rerun Cook."),
-        ]),
-    );
+    let branch = homeboy_core::git::run_git(
+        target,
+        &["symbolic-ref", "--short", "HEAD"],
+        "identify existing candidate branch",
+    )?;
+    homeboy_core::worktree::convergence::require_issue_destination_without_pr(
+        target,
+        branch.trim(),
+    )?;
+    let mut error = homeboy_core::worktree::convergence::pr_route(branch.trim(), None);
     error.details["workspace_base_ancestry"] = serde_json::json!({
         "schema": "homeboy/cook-workspace-base-ancestry/v1",
         "base": base,
@@ -8865,7 +8844,7 @@ fn preflight_cook_workspace_resolved_base_ancestry(
         "direction": direction,
         "base_only_commits": behind,
         "candidate_only_commits": ahead,
-        "next_action": "converge_destination_before_provider",
+        "next_action": "cook_pr_url",
     });
     // Divergence requires an operator merge/rebase; retrying without one can
     // never change the outcome, so it is deterministic and consumes no

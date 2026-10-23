@@ -6150,8 +6150,9 @@ pub(crate) fn resolve_cook_destination(
     }
     resolve_cook_base(&mut args)?;
     if derived {
-        // An issue-derived destination may hold a closed PR's commits or another
-        // branch an operator left there; never build on it (#16217).
+        // Read-only projection of convergence: preserve unique history and
+        // route an existing open PR to its exact PR-URL Cook command. Clean
+        // behind destinations converge once the service pins the base.
         homeboy::core::worktree::stale_destination::refuse_stale_derived_destination(
             &handle_repository,
             &handle,
@@ -6581,9 +6582,13 @@ fn project_preview_dirty_admission(provision: &mut Value) {
     let mut tracked = 0;
     let mut staged = 0;
     let mut untracked = 0;
+    let mut files = Vec::new();
     for entry in output.stdout.split(|byte| *byte == b'\0') {
         if entry.len() < 2 {
             continue;
+        }
+        if entry.len() > 3 {
+            files.push(String::from_utf8_lossy(&entry[3..]).into_owned());
         }
         if entry.starts_with(b"??") {
             untracked += 1;
@@ -6595,7 +6600,9 @@ fn project_preview_dirty_admission(provision: &mut Value) {
     if tracked + staged + untracked > 0 {
         provision["admission"] = serde_json::json!({
             "status": "would_refuse_dirty_candidate",
-            "reason": "Cook requires a clean destination before its first provider execution",
+            "reason": "Cook requires attributable changes or a clean destination before provider execution",
+            "files": files,
+            "recovery_command": "git stash push --include-untracked",
             "changes": { "tracked": tracked, "staged": staged, "untracked": untracked },
         });
     }
