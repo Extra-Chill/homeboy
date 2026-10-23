@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::*;
+use crate::agent_task::CANDIDATE_BUNDLE_ARTIFACT_KIND;
 
 pub(super) fn harvest_committed_patch(
     outcome: &mut AgentTaskOutcome,
@@ -128,8 +129,11 @@ pub(super) fn harvest_candidate_commit(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
 ) -> Result<(), HarvestError> {
-    // Only Homeboy's harvest may assert a candidate.
+    // Only Homeboy's harvest may assert a candidate or its bundle.
     outcome.candidate = None;
+    outcome
+        .artifacts
+        .retain(|artifact| artifact.kind != CANDIDATE_BUNDLE_ARTIFACT_KIND);
     let Some(base) = running.task_base_sha.as_deref() else {
         return Ok(());
     };
@@ -182,6 +186,28 @@ pub(super) fn harvest_candidate_commit(
         homeboy_core::paths::sanitize_path_segment(run_id)
     );
     git_output(root, &["update-ref", &candidate_ref, &candidate_sha])?;
+    // A Lab runner hands its candidate back as the commit itself (#16303).
+    if crate::agent_task_lifecycle::execution_runner_id().is_some() {
+        let file = attempt_patch_path(running, "candidate")?.with_extension("bundle");
+        let (path, exclude) = (file.display().to_string(), format!("^{base}"));
+        git_output(
+            root,
+            &["bundle", "create", "-q", &path, &candidate_ref, &exclude],
+        )?;
+        let bytes = std::fs::read(&file).map_err(|error| HarvestError::ArtifactWrite {
+            path: file,
+            message: error.to_string(),
+        })?;
+        outcome.artifacts.push(AgentTaskArtifact {
+            id: attempt_patch_id(running, "candidate-bundle"),
+            kind: CANDIDATE_BUNDLE_ARTIFACT_KIND.to_string(),
+            path: Some(path),
+            size_bytes: Some(bytes.len() as u64),
+            sha256: Some(patch_sha256(&bytes)),
+            metadata: serde_json::json!({ "run_id": run_id }),
+            ..AgentTaskArtifact::default()
+        });
+    }
     outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
         base_sha: base.to_string(),
         candidate_sha,
@@ -1822,6 +1848,64 @@ mod committed_harvest_tests {
             ),
             "untracked"
         );
+    }
+
+    #[test]
+    fn runner_harvest_bundles_the_dirty_attempt_for_a_base_only_controller() {
+        let _home = homeboy_core::test_support::home_env_guard();
+        let runner_env = homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
+        let _runner = homeboy_core::test_support::EnvVarGuard::set(runner_env, "lab-1");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        let controller = temp.path().join("controller");
+        let source = workspace.to_str().expect("utf-8 path");
+        git(temp.path(), &["clone", "-q", source, "controller"]);
+        std::fs::write(workspace.join("file.txt"), "agent change\n").expect("dirty");
+        std::fs::write(workspace.join("new.txt"), "untracked\n").expect("untracked");
+        let running = committed_harvest_running_task(temp.path(), &workspace, None, base);
+        let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+
+        harvest_candidate_commit(&mut outcome, &running).expect("harvest");
+
+        let candidate = outcome.candidate.clone().expect("dirty attempt candidate");
+        let bundles = |outcome: &AgentTaskOutcome| -> Vec<AgentTaskArtifact> {
+            let artifacts = outcome.artifacts.iter().cloned();
+            artifacts
+                .filter(|artifact| artifact.kind == CANDIDATE_BUNDLE_ARTIFACT_KIND)
+                .collect()
+        };
+        let [bundle] = bundles(&outcome)
+            .try_into()
+            .expect("one candidate bundle artifact");
+        let path = bundle.path.as_deref().expect("bundle path");
+        let bytes = std::fs::read(path).expect("bundle bytes");
+        assert_eq!(bundle.size_bytes, Some(bytes.len() as u64));
+        assert_eq!(bundle.sha256, Some(patch_sha256(&bytes)));
+        assert_eq!(bundle.metadata["run_id"], "reaped-harvest-test");
+        let candidate_ref = "refs/homeboy/candidates/reaped-harvest-test";
+        git(
+            &controller,
+            &[
+                "fetch",
+                "-q",
+                path,
+                &format!("{candidate_ref}:{candidate_ref}"),
+            ],
+        );
+        assert_eq!(
+            git(&controller, &["rev-parse", candidate_ref]),
+            candidate.candidate_sha
+        );
+        let tree = git(
+            &controller,
+            &["rev-parse", &format!("{candidate_ref}^{{tree}}")],
+        );
+        assert_eq!(tree, candidate.tree_sha);
+        assert_eq!(tree, final_worktree_tree(&workspace));
+
+        // A re-harvest replaces, never duplicates, the bundle.
+        harvest_candidate_commit(&mut outcome, &running).expect("re-harvest");
+        assert_eq!(bundles(&outcome).len(), 1);
     }
 
     #[test]

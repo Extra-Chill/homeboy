@@ -6,9 +6,9 @@ use super::super::apply::{
 };
 use super::super::promote::{
     canonical_recoverable_patch_artifacts_in_observation_store, normalize_promotion_patch,
-    preflight_patch_artifact_admission_in_observation_store, promote_with_provider,
-    promote_with_provider_and_checkpoint, promote_with_provider_in_observation_store,
-    resume_promoted_patch, select_patch_artifact, validate_artifact_content,
+    promote_with_provider, promote_with_provider_and_checkpoint,
+    promote_with_provider_in_observation_store, resume_promoted_patch, select_patch_artifact,
+    validate_artifact_content,
 };
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
@@ -225,20 +225,22 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
         assert_eq!(selected_id, artifact_id);
 
         let temp = tempfile::tempdir().expect("promotion tempdir");
-        let mut provider = FakePromotionWorkspaceProvider {
-            workspace_path: Some(temp.path().join("target")),
-            ..Default::default()
-        };
+        let repo = candidate_destination(temp.path());
+        let candidate = harvest_patch_candidate(&repo, VALID_PATCH);
+        let mut provider = FakePromotionWorkspaceProvider::default();
         let report = promote_with_provider_in_observation_store(
             AgentTaskPromotionRequest {
-                source: serde_json::to_string(&aggregate).expect("aggregate json"),
+                source: with_candidate(
+                    &serde_json::to_string(&aggregate).expect("aggregate json"),
+                    &candidate,
+                ),
                 source_run_id: Some(run_id.to_string()),
                 source_path: None,
                 source_worktree_path: None,
                 base_ref: None,
                 task_base_sha: None,
                 candidate_ref: None,
-                to_worktree: "homeboy@recovered-promotion".to_string(),
+                to_worktree: repo.display().to_string(),
                 task_id: Some(task_id.to_string()),
                 artifact_id: Some(selected_id),
                 dry_run: false,
@@ -252,218 +254,100 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
         .expect("promote recovered controller projection");
         assert_ne!(report.patch_artifact.path, patch.path);
         assert!(Path::new(&report.patch_artifact.path).is_file());
+        assert_eq!(report.patch_artifact.id, artifact_id);
         assert_eq!(
-            provider.applied_patch_contents,
-            vec![VALID_PATCH.to_string()]
+            std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
+            "new\n"
         );
     });
 }
 
+/// Gate feedback through the candidate commit: the destination still holds the
+/// prior candidate uncommitted, and the gate-fix attempt's base commits that
+/// prior candidate on top of the destination HEAD. Only the fix is the new
+/// candidate's change.
 #[test]
-fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let observation_store =
-            homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        let temp = tempfile::tempdir().expect("tempdir");
-        let patch_path = temp.path().join("remediation.patch");
-        std::fs::write(&patch_path, VALID_PATCH).expect("write remediation patch");
-        let baseline_patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
-        let baseline_sha256 = sha256_hex(baseline_patch);
-        record_controller_projection(
-            "source-run",
-            "source-task",
-            "baseline-patch",
-            baseline_patch,
-        );
-        let baseline = serde_json::json!({
-        "source_run_id": "source-run",
-        "source_task_id": "source-task",
-        "source_patch_task_id": "source-task",
-        "to_worktree": "fixture@target",
-        "current_diff": "diff --git a/a b/a",
-        "failed_gates": [],
-        "patch_artifact": {
-            "id": "baseline-patch",
-            "kind": "patch",
-            "path": "/home/lab/ephemeral/candidate.patch",
-            "sha256": baseline_sha256
-        }
-        });
-        let source = serde_json::json!({
-        "schema": "homeboy/agent-task-aggregate/v1",
-        "plan_id": "follow-up-plan",
-        "status": "succeeded",
-        "totals": {
-            "queued": 0,
-            "running": 0,
-            "blocked": 0,
-            "skipped": 0,
-            "succeeded": 1,
-            "candidate_recoverable": 0,
-            "recoverable_candidates": 0,
-            "failed": 0,
-            "cancelled": 0,
-            "timed_out": 0
+fn gate_feedback_candidate_promotes_over_the_prior_uncommitted_candidate() {
+    let _home = gate_home();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = candidate_destination(temp.path());
+    let prior = harvest_patch_candidate(&repo, VALID_PATCH);
+    let fix_patch = "diff --git a/src/fix.rs b/src/fix.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/fix.rs\n@@ -0,0 +1 @@\n+fix\n";
+    git(&repo, &["checkout", "-q", "--detach", &prior.candidate_sha]);
+    let fix = harvest_patch_candidate(&repo, fix_patch);
+    git(&repo, &["checkout", "-q", "main"]);
+    std::fs::write(repo.join("src/lib.rs"), "new\n").expect("prior candidate stays uncommitted");
+    let (_, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider::default();
+
+    let report = promote_with_provider(
+        AgentTaskPromotionRequest {
+            source: with_candidate(&source, &fix),
+            ..promotion_options(&repo.display().to_string())
         },
-        "outcomes": [{
-            "schema": AGENT_TASK_OUTCOME_SCHEMA,
-            "task_id": "follow-up",
-            "status": "succeeded",
-            "artifacts": [{
-                "schema": AGENT_TASK_ARTIFACT_SCHEMA,
-                "id": "patch",
-                "kind": "patch",
-                "path": patch_path,
-                "size_bytes": VALID_PATCH.len(),
-                "sha256": sha256_hex(VALID_PATCH),
-                "metadata": { "gate_feedback_baseline": baseline }
-            }],
-            "typed_artifacts": [{
-                "name": "patch",
-                "payload": { "artifact_id": "patch" },
-                "metadata": { "normalized_from": "artifact" }
-            }]
-        }]
-        })
-        .to_string();
-        let mut provider = FakePromotionWorkspaceProvider {
-            workspace_path: Some(temp.path().to_path_buf()),
-            ..Default::default()
-        };
-        promote_with_provider_in_observation_store(
-            AgentTaskPromotionRequest {
-                source,
-                source_run_id: Some("follow-up-run".to_string()),
-                source_path: None,
-                source_worktree_path: None,
-                base_ref: None,
-                task_base_sha: None,
-                candidate_ref: None,
-                to_worktree: "fixture@target".to_string(),
-                task_id: Some("follow-up".to_string()),
-                artifact_id: Some("patch".to_string()),
-                dry_run: false,
-                gates: VerifyGateOptions::default(),
-                provider_invocation: None,
-                repository_integrity_evidence: None,
-            },
-            &mut provider,
-            &observation_store,
-        )
-        .expect("aggregate promotion");
-        let forwarded = provider.apply_calls[0]
-            .gate_feedback_baseline
-            .as_ref()
-            .expect("baseline forwarded");
-        assert!(forwarded["patch_artifact"].get("path").is_none());
-        assert_eq!(
-            forwarded["patch_artifact"]["controller_artifact"]["run_id"],
-            "source-run"
-        );
-        assert_eq!(
-            forwarded["patch_artifact"]["controller_artifact"]["sha256"],
-            baseline_sha256
-        );
-    });
+        &mut provider,
+    )
+    .expect("gate-fix candidate promotes over the prior candidate");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(report.changed_files, vec!["src/fix.rs"]);
+    assert_eq!(git_head(&repo, "HEAD"), prior.base_sha);
+    assert_eq!(
+        git_stdout(&repo, &["status", "--porcelain"]),
+        " M src/lib.rs\n?? src/fix.rs\n"
+    );
+    assert!(report.provenance["gate_feedback_baseline"]["current_diff"]
+        .as_str()
+        .is_some_and(|diff| diff.contains("src/lib.rs")));
 }
 
+/// A follow-up candidate records the commit chain it extends: its base is the
+/// destination HEAD the promotion verified.
 #[test]
 fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
-    let remote = temp.path().join("origin.git");
-    let target = temp.path().join("target");
-    std::fs::create_dir(&target).expect("create target");
-    git(&target, &["init", "--initial-branch=main"]);
-    git(&target, &["config", "user.email", "test@example.com"]);
-    git(&target, &["config", "user.name", "Test"]);
-    std::fs::write(target.join("base.txt"), "base\n").expect("write base");
-    git(&target, &["add", "base.txt"]);
-    git(&target, &["commit", "-m", "base"]);
+    let target = candidate_destination(temp.path());
     git(
         temp.path(),
-        &["init", "--bare", "--initial-branch=main", "origin.git"],
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "--initial-branch=main",
+            "origin.git",
+        ],
     );
+    let remote = temp.path().join("origin.git");
     git(
         &target,
         &["remote", "add", "origin", remote.to_str().unwrap()],
     );
-    git(&target, &["push", "-u", "origin", "main"]);
-    let patch_path = temp.path().join("follow-up.patch");
-    std::fs::write(&patch_path, VALID_PATCH).expect("write follow-up patch");
-    let prior_sha256 = "b".repeat(64);
-    let source_tree = "c".repeat(40);
-    let source = serde_json::json!({
-        "schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "task_id": "follow-up",
-        "status": "succeeded",
-        "artifacts": [{
-            "schema": AGENT_TASK_ARTIFACT_SCHEMA,
-            "id": "patch",
-            "kind": "patch",
-            "path": patch_path,
-            "size_bytes": VALID_PATCH.len(),
-            "sha256": sha256_hex(VALID_PATCH),
-            "metadata": {
-                "source_provenance": {
-                    "verified_cook_baseline": {
-                        "source_run_id": "v1-run",
-                        "source_task_id": "v1-task",
-                        "promoted_patch_artifact_sha256": prior_sha256,
-                        "baseline_tree": source_tree
-                    }
-                }
-            }
-        }]
-    })
-    .to_string();
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(target.clone()),
-        ..Default::default()
-    };
+    git(&target, &["push", "-q", "-u", "origin", "main"]);
+    let candidate = harvest_patch_candidate(&target, VALID_PATCH);
+    let (_, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider::default();
 
     let report = promote_with_provider(
         AgentTaskPromotionRequest {
-            source,
+            source: with_candidate(&source, &candidate),
             source_run_id: Some("v2-run".to_string()),
-            source_path: None,
-            source_worktree_path: None,
             base_ref: Some("main".to_string()),
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: target.display().to_string(),
-            task_id: Some("follow-up".to_string()),
-            artifact_id: Some("patch".to_string()),
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
+            task_id: Some("task-1".to_string()),
+            ..promotion_options(&target.display().to_string())
         },
         &mut provider,
     )
     .expect("promote follow-up");
 
     assert_eq!(
-        provider.apply_calls[0].gate_feedback_baseline,
-        Some(serde_json::json!({
-            "schema": "homeboy/agent-task-promotion-chain-baseline/v1",
-            "source_tree": source_tree,
-            "prior_patch_artifact": {
-                "sha256": prior_sha256,
-                "source_run_id": "v1-run",
-                "source_task_id": "v1-task"
-            }
-        }))
+        report.provenance["candidate_commit"],
+        serde_json::to_value(&candidate).unwrap()
     );
     assert_eq!(
-        report.provenance["prior_baseline"]["source_tree"],
-        source_tree
+        report.verified_base.as_ref().map(|base| base.sha.as_str()),
+        Some(candidate.base_sha.as_str())
     );
-    assert_eq!(
-        report.provenance["prior_baseline"]["prior_patch_artifact"]["sha256"],
-        prior_sha256
-    );
-    assert_eq!(report.patch_artifact.id, "patch");
     assert!(report.provenance["destination_baseline"].is_object());
 }
 
@@ -883,72 +767,45 @@ fn validate_patch_rejects_empty_patch() {
 fn promote_no_op_outcome_uses_audited_committed_candidate() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).expect("create repo");
-    git(&repo, &["init"]);
-    git(&repo, &["config", "user.email", "agent@example.test"]);
-    git(&repo, &["config", "user.name", "Agent"]);
-    git(&repo, &["checkout", "-b", "main"]);
-    std::fs::write(repo.join("lib.rs"), "base\n").expect("write base");
-    git(&repo, &["add", "lib.rs"]);
-    git(&repo, &["commit", "-m", "base"]);
-    let base = git_head(&repo, "HEAD");
-    std::fs::write(repo.join("lib.rs"), "candidate\n").expect("write candidate");
-    git(&repo, &["commit", "-am", "agent candidate"]);
-
-    let source_path = temp.path().join("outcome.json");
-    let mut outcome = serde_json::json!({
-        "schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "task_id": "task",
-        "status": "succeeded",
-        "artifacts": []
-    });
-    outcome["status"] = Value::String("no_op".to_string());
-    let source = outcome.to_string();
-    std::fs::write(&source_path, &source).expect("write mutated outcome");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(repo.clone()),
-        ..Default::default()
-    };
+    let repo = candidate_destination(temp.path());
+    let candidate = harvest_patch_candidate(&repo, VALID_PATCH);
+    let source = with_candidate(
+        &serde_json::json!({
+            "schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "task",
+            "status": "no_op",
+            "artifacts": []
+        })
+        .to_string(),
+        &candidate,
+    );
+    let mut provider = FakePromotionWorkspaceProvider::default();
 
     let report = promote_with_provider(
         AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: Some(repo.clone()),
-            base_ref: None,
-            task_base_sha: Some(base.clone()),
-            candidate_ref: None,
-            to_worktree: "repo@promotion".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
+            task_base_sha: Some(candidate.base_sha.clone()),
             gates: VerifyGateOptions {
                 verify: vec!["true".to_string()],
-                private_verify: Vec::new(),
-                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_invocation: None,
-            repository_integrity_evidence: None,
+            ..promotion_options(&repo.display().to_string())
         },
         &mut provider,
     )
     .expect("audited committed candidate promotes");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.id, "committed-changes");
-    assert_eq!(report.provenance["change_source"], "local_commits");
-    assert_eq!(report.provenance["base_ref"], base);
+    assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
+    assert_eq!(report.provenance["change_source"], "candidate_commit");
     assert_eq!(report.provenance["candidate"]["kind"], "git");
     assert_eq!(
         report.provenance["candidate"]["fingerprint"]["head"],
-        git_head(&repo, "HEAD")
+        candidate.base_sha
     );
-    assert_eq!(report.provenance["candidate"]["fingerprint"]["base"], base);
     assert_eq!(report.deterministic_gates.len(), 1);
-    assert_eq!(provider.apply_calls.len(), 1);
+    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
 }
 
@@ -1327,75 +1184,71 @@ fn adoption_rejects_an_unrelated_historical_task_base() {
         .contains("unrelated to the adopted candidate parent"));
 }
 
+/// #16303: provider commits and the uncommitted changes left on top of them
+/// are one candidate commit, and its diff from the base is the changed set.
 #[test]
 fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).expect("create repo");
-    git(&repo, &["init"]);
-    git(&repo, &["config", "user.email", "agent@example.test"]);
-    git(&repo, &["config", "user.name", "Agent"]);
-    git(&repo, &["checkout", "-b", "main"]);
-    std::fs::write(repo.join("first.txt"), "base\n").expect("base");
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "base"]);
-    let remote = temp.path().join("origin.git");
-    assert!(Command::new("git")
-        .args(["init", "--bare", remote.to_str().expect("remote path")])
-        .status()
-        .expect("create remote")
-        .success());
+    let repo = candidate_destination(temp.path());
+    let base = git_head(&repo, "HEAD");
+    let attempt = temp.path().join("attempt");
     git(
         &repo,
         &[
-            "remote",
+            "worktree",
             "add",
-            "origin",
-            remote.to_str().expect("remote path"),
+            "-q",
+            "-b",
+            "agent/work",
+            attempt.to_str().unwrap(),
+            &base,
         ],
     );
-    git(&repo, &["push", "-u", "origin", "main"]);
-    let base = git_head(&repo, "HEAD");
-    git(&repo, &["checkout", "-b", "agent/work"]);
-    std::fs::write(repo.join("first.txt"), "one\n").expect("first");
-    git(&repo, &["commit", "-am", "agent: first"]);
-    std::fs::write(repo.join("second.txt"), "two\n").expect("second");
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "agent: second"]);
-    let (source_path, source) = write_empty_patch_source(&temp);
+    std::fs::write(attempt.join("src/lib.rs"), "one\n").expect("first");
+    git(&attempt, &["commit", "-qam", "agent: first"]);
+    std::fs::write(attempt.join("second.txt"), "two\n").expect("second");
+    git(&attempt, &["add", "."]);
+    git(&attempt, &["commit", "-qm", "agent: second"]);
+    std::fs::write(attempt.join("second.txt"), "two, edited\n").expect("uncommitted edit");
+    std::fs::write(attempt.join("third.txt"), "three\n").expect("untracked file");
+    let candidate = harvest_worktree_candidate(&attempt, &base);
+    let (_, source) = write_empty_patch_source(&temp);
 
     let report = promote_with_provider(
         AgentTaskPromotionRequest {
-            source,
+            source: with_candidate(&source, &candidate),
             source_run_id: Some("run-two-commits".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: Some(repo.clone()),
-            base_ref: Some("main".to_string()),
             task_base_sha: Some(base.clone()),
-            candidate_ref: None,
-            to_worktree: repo.display().to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
+            ..promotion_options(&repo.display().to_string())
         },
-        &mut FakePromotionWorkspaceProvider {
-            workspace_path: Some(repo.clone()),
-            ..Default::default()
-        },
+        &mut FakePromotionWorkspaceProvider::default(),
     )
-    .expect("commits promoted");
+    .expect("commits and uncommitted changes promote as one candidate");
 
-    assert_eq!(report.provenance["base_ref"].as_str(), Some(base.as_str()));
-    assert_eq!(
-        report.provenance["commits"].as_array().map(Vec::len),
-        Some(2)
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    let diff = git_stdout(
+        &repo,
+        &["diff", "--name-only", &base, &candidate.candidate_sha],
     );
-    assert_eq!(report.provenance["commits"][0]["subject"], "agent: first");
-    assert_eq!(report.provenance["commits"][1]["subject"], "agent: second");
+    assert_eq!(report.changed_files, diff.lines().collect::<Vec<_>>());
+    assert_eq!(
+        report.changed_files,
+        vec!["second.txt", "src/lib.rs", "third.txt"]
+    );
+    assert_eq!(git_head(&repo, "HEAD"), base);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
+        "one\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("second.txt")).unwrap(),
+        "two, edited\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("third.txt")).unwrap(),
+        "three\n"
+    );
 }
 
 #[test]
@@ -1419,84 +1272,6 @@ fn validate_artifact_content_rejects_sha_mismatch() {
     let err = validate_artifact_content(&artifact, VALID_PATCH).expect_err("sha rejected");
 
     assert!(err.message.contains("sha256 mismatch"));
-}
-
-#[test]
-fn shared_patch_preflight_rejects_execution_hash_and_normalization_failures() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (source_path, source) = write_patch_source(&temp);
-        let mut outcome: AgentTaskOutcome = serde_json::from_str(&source).expect("outcome JSON");
-        let options = AgentTaskPromotionRequest {
-            source,
-            source_run_id: None,
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@preflight".to_string(),
-            task_id: None,
-            artifact_id: Some("patch".to_string()),
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        };
-        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-
-        std::fs::write(temp.path().join("changes.patch"), "different").unwrap();
-        let hash_error =
-            preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
-                .expect_err("preflight and execution share content authentication");
-        assert!(hash_error.message.contains("size mismatch"));
-
-        let unsafe_patch = "diff --git a/../secret b/../secret\n--- a/../secret\n+++ b/../secret\n@@ -1 +1 @@\n-old\n+new\n";
-        std::fs::write(temp.path().join("changes.patch"), unsafe_patch).unwrap();
-        outcome.artifacts[0].size_bytes = Some(unsafe_patch.len() as u64);
-        outcome.artifacts[0].sha256 = Some(sha256_hex(unsafe_patch));
-        let normalization_error =
-            preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
-                .expect_err("preflight and execution share patch normalization");
-        assert!(normalization_error.message.contains("unsafe patch path"));
-    });
-}
-
-#[test]
-fn execution_revalidates_artifact_bytes_after_passing_preflight() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (source_path, source) = write_patch_source(&temp);
-        let outcome: AgentTaskOutcome = serde_json::from_str(&source).expect("outcome JSON");
-        let options = AgentTaskPromotionRequest {
-            source,
-            source_run_id: None,
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@preflight-revalidation".to_string(),
-            task_id: None,
-            artifact_id: Some("patch".to_string()),
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        };
-        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
-            .expect("original artifact passes preflight");
-        std::fs::write(temp.path().join("changes.patch"), "changed after preflight")
-            .expect("mutate admitted artifact");
-        let mut provider = FakePromotionWorkspaceProvider::default();
-
-        let error = promote_with_provider_in_observation_store(options, &mut provider, &store)
-            .expect_err("execution rejects artifact drift");
-
-        assert!(error.message.contains("size mismatch"), "{error:?}");
-        assert!(provider.applied_patch_contents.is_empty());
-    });
 }
 
 #[test]
@@ -1781,10 +1556,10 @@ fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence()
     git(&workspace, &["add", "."]);
     git(&workspace, &["commit", "-m", "base"]);
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
     let downstream_marker = temp.path().join("broad-gate-ran");
     let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(workspace),
-        apply_to_git: true,
+        workspace_path: Some(workspace.clone()),
         run_verify_command: true,
         ..Default::default()
     };
@@ -1798,7 +1573,7 @@ fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence()
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -1863,9 +1638,9 @@ fn promotion_rejects_a_cargo_gate_that_selected_zero_tests() {
     .expect("fake cargo executable");
 
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
     let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(workspace),
-        apply_to_git: true,
+        workspace_path: Some(workspace.clone()),
         run_verify_command: true,
         ..Default::default()
     };
@@ -1879,7 +1654,7 @@ fn promotion_rejects_a_cargo_gate_that_selected_zero_tests() {
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -1944,10 +1719,10 @@ fn continue_all_gate_policy_runs_downstream_command_after_failure() {
     git(&workspace, &["add", "."]);
     git(&workspace, &["commit", "-m", "base"]);
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
     let downstream_marker = temp.path().join("broad-gate-ran");
     let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(workspace),
-        apply_to_git: true,
+        workspace_path: Some(workspace.clone()),
         run_verify_command: true,
         ..Default::default()
     };
@@ -1961,7 +1736,7 @@ fn continue_all_gate_policy_runs_downstream_command_after_failure() {
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -2015,6 +1790,7 @@ fn typed_plan_and_legacy_gate_keep_contiguous_gate_ids() {
     git(&workspace, &["add", "."]);
     git(&workspace, &["commit", "-m", "base"]);
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
     let bin = temp.path().join("bin");
     std::fs::create_dir(&bin).expect("bin");
     let homeboy = bin.join("homeboy");
@@ -2030,8 +1806,7 @@ fn typed_plan_and_legacy_gate_keep_contiguous_gate_ids() {
         .variables
         .insert("PATH".to_string(), format!("{}:/bin", bin.display()));
     let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(workspace),
-        apply_to_git: true,
+        workspace_path: Some(workspace.clone()),
         run_verify_command: true,
         ..Default::default()
     };
@@ -2045,7 +1820,7 @@ fn typed_plan_and_legacy_gate_keep_contiguous_gate_ids() {
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -2092,9 +1867,9 @@ fn promotion_runs_gates_in_the_destination_workspace() {
     git(&workspace, &["add", "."]);
     git(&workspace, &["commit", "-m", "base"]);
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(workspace.clone()),
-        apply_to_git: true,
         run_verify_command: true,
         ..Default::default()
     };
@@ -2108,7 +1883,7 @@ fn promotion_runs_gates_in_the_destination_workspace() {
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -2168,9 +1943,9 @@ fn promotion_hydrates_destination_package_execution_projections_before_gates() {
         git(&workspace, &["add", "."]);
         git(&workspace, &["commit", "-m", "base"]);
         let (source_path, source) = write_patch_source(&temp);
+        let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
         let mut provider = FakePromotionWorkspaceProvider {
             workspace_path: Some(workspace.clone()),
-            apply_to_git: true,
             run_verify_command: true,
             ..Default::default()
         };
@@ -2184,7 +1959,7 @@ fn promotion_hydrates_destination_package_execution_projections_before_gates() {
                 base_ref: None,
                 task_base_sha: None,
                 candidate_ref: None,
-                to_worktree: "fixture@target".to_string(),
+                to_worktree: workspace.display().to_string(),
                 task_id: None,
                 artifact_id: None,
                 dry_run: false,
@@ -2246,9 +2021,9 @@ fn promotion_can_disable_candidate_dependency_hydration() {
     git(&workspace, &["add", "."]);
     git(&workspace, &["commit", "-m", "base"]);
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
     let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(workspace),
-        apply_to_git: true,
+        workspace_path: Some(workspace.clone()),
         ..Default::default()
     };
     let report = promote_with_provider(
@@ -2260,7 +2035,7 @@ fn promotion_can_disable_candidate_dependency_hydration() {
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -2305,9 +2080,9 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
         git(&workspace, &["add", "."]);
         git(&workspace, &["commit", "-m", "base"]);
         let (source_path, source) = write_patch_source(&temp);
+        let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
         let mut provider = FakePromotionWorkspaceProvider {
             workspace_path: Some(workspace.clone()),
-            apply_to_git: true,
             ..Default::default()
         };
 
@@ -2320,7 +2095,7 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
                 base_ref: None,
                 task_base_sha: None,
                 candidate_ref: None,
-                to_worktree: "fixture@target".to_string(),
+                to_worktree: workspace.display().to_string(),
                 task_id: None,
                 artifact_id: None,
                 dry_run: false,
@@ -2379,9 +2154,9 @@ fn missing_destination_tool_is_a_typed_setup_failure_before_provider_verificatio
     git(&workspace, &["add", "."]);
     git(&workspace, &["commit", "-m", "base"]);
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
     let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(workspace),
-        apply_to_git: true,
+        workspace_path: Some(workspace.clone()),
         ..Default::default()
     };
 
@@ -2394,7 +2169,7 @@ fn missing_destination_tool_is_a_typed_setup_failure_before_provider_verificatio
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -2443,9 +2218,9 @@ fn promotion_rejects_mutation_after_checkpoint_before_gate_materialization() {
     git(&workspace, &["add", "."]);
     git(&workspace, &["commit", "-m", "base"]);
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(workspace.clone()),
-        apply_to_git: true,
         ..Default::default()
     };
 
@@ -2458,7 +2233,7 @@ fn promotion_rejects_mutation_after_checkpoint_before_gate_materialization() {
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -2564,9 +2339,9 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
     git(&workspace, &["add", "."]);
     git(&workspace, &["commit", "-m", "base"]);
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &harvest_patch_candidate(&workspace, VALID_PATCH));
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(workspace.clone()),
-        apply_to_git: true,
         verify_exit_code: 1,
         ..Default::default()
     };
@@ -2580,7 +2355,7 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
+            to_worktree: workspace.display().to_string(),
             task_id: None,
             artifact_id: None,
             dry_run: false,
@@ -2631,71 +2406,38 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
 
 /// Regression for Extra-Chill/homeboy#15378: a Lab gate-fix attempt that made no
 /// change reports a pathless, zero-byte patch with the empty SHA-256. Runner
-/// reconciliation never mirrors it, so promotion must admit it as an empty
-/// patch instead of demanding a controller-side projection.
+/// reconciliation never mirrors it, so promotion must treat it as a no-change
+/// attempt instead of demanding a controller-side projection.
 #[test]
 fn pathless_verified_empty_patch_is_admitted_without_controller_projection() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let outcome_for = |size: u64, sha: String| -> AgentTaskOutcome {
-            serde_json::from_value(serde_json::json!({
-                "schema": AGENT_TASK_OUTCOME_SCHEMA,
-                "task_id": "cook-extrachill-gate-fix-2-gate-fix-3",
-                "status": "succeeded",
-                "artifacts": [{
-                    "schema": AGENT_TASK_ARTIFACT_SCHEMA,
-                    "id": "patch",
-                    "kind": "patch",
-                    "size_bytes": size,
-                    "sha256": sha
-                }]
-            }))
-            .expect("outcome JSON")
-        };
-        let options_for = |outcome: &AgentTaskOutcome| AgentTaskPromotionRequest {
-            source: serde_json::to_string(outcome).expect("source"),
+        let outcome: AgentTaskOutcome = serde_json::from_value(serde_json::json!({
+            "schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "cook-extrachill-gate-fix-2-gate-fix-3",
+            "status": "succeeded",
+            "artifacts": [{
+                "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                "id": "patch",
+                "kind": "patch",
+                "size_bytes": 0,
+                "sha256": sha256_hex("")
+            }]
+        }))
+        .expect("outcome JSON");
+        let options = AgentTaskPromotionRequest {
+            source: serde_json::to_string(&outcome).expect("source"),
             source_run_id: Some("cook-detached-x-attempt-3-lab".to_string()),
-            source_path: None,
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@empty-gate-fix".to_string(),
-            task_id: None,
             artifact_id: Some("patch".to_string()),
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
+            ..promotion_options("repo@empty-gate-fix")
         };
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let mut provider = FakePromotionWorkspaceProvider::default();
 
-        let empty = outcome_for(0, sha256_hex(""));
-        preflight_patch_artifact_admission_in_observation_store(
-            &empty,
-            &options_for(&empty),
-            &store,
-        )
-        .expect("verified empty pathless patch needs no projection");
+        let report = promote_with_provider_in_observation_store(options, &mut provider, &store)
+            .expect("verified empty pathless patch needs no projection");
 
-        // A pathless patch that claims content still requires a verified projection.
-        let non_empty = outcome_for(VALID_PATCH.len() as u64, sha256_hex(VALID_PATCH));
-        let error = preflight_patch_artifact_admission_in_observation_store(
-            &non_empty,
-            &options_for(&non_empty),
-            &store,
-        )
-        .expect_err("non-empty pathless patch still needs a projection");
-        assert!(error
-            .message
-            .contains("verified controller-side artifact projection"));
-
-        // Zero size with a non-empty digest is not a proven-empty patch.
-        let mismatched = outcome_for(0, sha256_hex(VALID_PATCH));
-        assert!(preflight_patch_artifact_admission_in_observation_store(
-            &mismatched,
-            &options_for(&mismatched),
-            &store,
-        )
-        .is_err());
+        assert_eq!(report.status, AgentTaskPromotionStatus::VerifiedNoChanges);
+        assert!(report.changed_files.is_empty());
+        assert!(provider.apply_calls.is_empty());
     });
 }

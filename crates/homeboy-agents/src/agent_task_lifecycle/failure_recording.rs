@@ -2357,6 +2357,7 @@ fn requires_durable_lab_projection(artifact: &AgentTaskArtifact) -> bool {
             artifact.kind.as_str(),
             "transcript" | "result" | "agent-result" | "agent_result"
         )
+        || artifact.kind == crate::agent_task::CANDIDATE_BUNDLE_ARTIFACT_KIND
 }
 
 /// A direct artifact import can retain the same deterministic lifecycle id

@@ -146,7 +146,7 @@ fn read_apply_input(path: &str) -> Result<LabPatchApplyInput> {
     }
 }
 
-fn local_source_path(snapshot: &SourceSnapshot) -> Result<PathBuf> {
+pub(crate) fn local_source_path(snapshot: &SourceSnapshot) -> Result<PathBuf> {
     let path = snapshot.local_path.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "source_snapshot.local_path",

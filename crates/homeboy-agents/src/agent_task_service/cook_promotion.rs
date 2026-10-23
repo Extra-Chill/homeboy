@@ -876,28 +876,29 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         repository_integrity_evidence: None,
     };
     let observation_store = lifecycle_store.open_observation_readonly()?;
-    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
-        if artifact_id.is_none()
-            && !crate::agent_task_promotion::outcome_has_patch_artifacts(outcome)
-        {
-            return Ok(json!({
-                "behavior": "promote_committed_candidate",
-                "artifact_id": Value::Null,
-                "candidate_fingerprint": Value::Null,
-                "execution_only_checks": ["committed_candidate_resolution", "promotion_target_resolution", "patch_apply", "verification_gates"],
-            }));
-        }
-        let artifact =
-            crate::agent_task_promotion::preflight_patch_artifact_admission_in_observation_store(
-                outcome,
-                &promotion_options,
-                &observation_store,
-            )?;
+    if let Some(candidate) = crate::agent_task_promotion::promotable_candidate(outcome) {
         return Ok(json!({
-            "behavior": "promote_new",
-            "artifact_id": artifact.id,
+            "behavior": "promote_candidate_commit",
+            "artifact_id": Value::Null,
+            "candidate_fingerprint": {
+                "schema": "homeboy/agent-task-candidate-commit/v1",
+                "kind": "candidate_commit",
+                "base_sha": candidate.base_sha,
+                "candidate_sha": candidate.candidate_sha,
+                "tree_sha": candidate.tree_sha,
+            },
+            "execution_only_checks": ["candidate_commit_admission", "promotion_target_resolution", "candidate_materialization", "verification_gates"],
+        }));
+    }
+    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
+        if let Some(error) = crate::agent_task_promotion::patch_only_outcome_error(outcome) {
+            return Err(error);
+        }
+        return Ok(json!({
+            "behavior": "promote_no_change",
+            "artifact_id": Value::Null,
             "candidate_fingerprint": Value::Null,
-            "execution_only_checks": ["promotion_target_resolution", "patch_apply", "verification_gates"],
+            "execution_only_checks": ["verification_gates"],
         }));
     }
     let artifact = preflight_recoverable_candidate_promotion_in_observation_store(
