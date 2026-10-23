@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.4] - 2026-10-23
+
+### Changed
+- Retire drained runner generations automatically after refresh
+- Upgrade owns a drain window across controller and runners
+
+### Fixed
+- Fix executable fixture publication races across workspace tests
+
 ## [0.433.3] - 2026-10-23
 
 ### Changed
