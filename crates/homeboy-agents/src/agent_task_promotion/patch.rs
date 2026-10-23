@@ -1,7 +1,4 @@
 use homeboy_engine_primitives::content_hash;
-use std::io::Write;
-
-use tempfile::NamedTempFile;
 
 use crate::agent_task::AgentTaskArtifact;
 use homeboy_core::{Error, Result};
@@ -82,25 +79,6 @@ pub(crate) fn normalize_promotion_patch(
         content,
         changed_files,
     })
-}
-
-pub(crate) fn write_normalized_patch(content: &str) -> Result<NamedTempFile> {
-    let mut file = NamedTempFile::new().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create normalized promotion patch".to_string()),
-        )
-    })?;
-    file.write_all(content.as_bytes()).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!(
-                "write normalized promotion patch {}",
-                file.path().display()
-            )),
-        )
-    })?;
-    Ok(file)
 }
 
 fn normalize_patch_header_line(line: &str, repo_slug: &str) -> Result<String> {

@@ -351,58 +351,6 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
     assert!(report.provenance["destination_baseline"].is_object());
 }
 
-#[test]
-fn promote_recoverable_candidate_collapses_duplicate_digest_aliases() {
-    let (result, apply_calls) = promote_recoverable_patch_count(3);
-    let report = result.expect("equivalent candidates are canonicalized");
-    assert_eq!(report.patch_artifact.id, "candidate-0");
-    assert_eq!(report.patch_artifact.kind, "patch");
-    assert_eq!(apply_calls, 1);
-}
-
-#[test]
-fn promote_recoverable_candidate_retains_patch_larger_than_256_kib() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = recoverable_patch_source(&temp, 1);
-    let patch = padded_patch(300 * 1024, 'x');
-    std::fs::write(temp.path().join("candidate-0.patch"), &patch).expect("write large patch");
-    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
-    source["artifacts"][0]["size_bytes"] = Value::from(patch.len());
-    source["artifacts"][0]["sha256"] = Value::String(sha256_hex(&patch));
-    let source = source.to_string();
-    std::fs::write(&source_path, &source).expect("rewrite source");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let report = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some("recoverable-run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@recoverable".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-    )
-    .expect("large patch remains promotable within the aggregate budget");
-
-    assert_eq!(report.patch_artifact.id, "candidate-0");
-    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.applied_patch_contents, vec![patch]);
-}
-
 fn recoverable_request(source: String, source_path: PathBuf) -> AgentTaskPromotionRequest {
     AgentTaskPromotionRequest {
         source,
@@ -481,180 +429,12 @@ fn canonical_recoverable_candidates_compare_over_budget_candidates_by_stored_dig
     });
 }
 
-#[test]
-fn promote_recoverable_candidate_selects_sole_patch_larger_than_byte_budget() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let patch = padded_patch(2 * 1024 * 1024, 'x');
-    let (source_path, source) = recoverable_source_with_patches(&temp, &[(&patch, true)]);
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let report = promote_with_provider(recoverable_request(source, source_path), &mut provider)
-        .expect("a sole SHA-verified patch is promotable regardless of size");
-
-    assert_eq!(report.patch_artifact.id, "candidate-0");
-    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.applied_patch_contents, vec![patch]);
-}
-
-#[test]
-fn promote_recoverable_candidate_collapses_identical_patches_larger_than_byte_budget() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let patch = padded_patch(1024 * 1024 + 4096, 'y');
-    let (source_path, source) =
-        recoverable_source_with_patches(&temp, &[(&patch, true), (&patch, true)]);
-    let outcome: AgentTaskOutcome = serde_json::from_str(&source).expect("outcome");
-    let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-    let canonical = canonical_recoverable_patch_artifacts_in_observation_store(
-        &outcome,
-        &recoverable_request(source.clone(), source_path.clone()),
-        &store,
-    )
-    .expect("canonical selection");
-    assert_eq!(
-        canonical
-            .artifacts
-            .iter()
-            .map(|artifact| artifact.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["candidate-0"]
-    );
-    assert!(canonical.unavailable.is_empty());
-
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-    let report = promote_with_provider(recoverable_request(source, source_path), &mut provider)
-        .expect("identical large candidates collapse to one promotable patch");
-    assert_eq!(report.patch_artifact.id, "candidate-0");
-    assert_eq!(provider.applied_patch_contents, vec![patch]);
-}
-
-#[test]
-fn promote_recoverable_candidate_names_byte_budget_rejection() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let first = padded_patch(1024 * 1024 + 4096, 'a');
-    let second = padded_patch(1024 * 1024 + 8192, 'b');
-    let (source_path, source) =
-        recoverable_source_with_patches(&temp, &[(&first, false), (&second, false)]);
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let error = promote_with_provider(recoverable_request(source, source_path), &mut provider)
-        .expect_err("unverifiable over-budget candidates cannot be compared");
-
-    let message = error.message;
-    assert!(
-        message.contains("canonical_patch_byte_budget_exceeded"),
-        "{message}"
-    );
-    assert!(message.contains(&first.len().to_string()), "{message}");
-    assert!(message.contains(&(1024 * 1024).to_string()), "{message}");
-    assert!(message.contains("--artifact-id candidate-0"), "{message}");
-    assert!(!message.contains("reconcile or hydrate"), "{message}");
-    assert_eq!(
-        error.details["reason"],
-        "canonical_patch_byte_budget_exceeded"
-    );
-    assert_eq!(error.details["size_bytes"], first.len());
-    assert_eq!(error.details["limit_bytes"], 1024 * 1024);
-}
-
 fn padded_patch(size: usize, fill: char) -> String {
     assert!(size > VALID_PATCH.len() + 2);
     format!(
         "{VALID_PATCH}+{}\n",
         fill.to_string().repeat(size - VALID_PATCH.len() - 2)
     )
-}
-
-#[test]
-fn promote_recoverable_candidate_reports_distinct_patch_review_choices() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = recoverable_patch_source(&temp, 2);
-    let distinct = VALID_PATCH.replace("+new", "+different");
-    std::fs::write(temp.path().join("candidate-1.patch"), &distinct).expect("write distinct patch");
-    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
-    source["artifacts"][1]["sha256"] = Value::String(sha256_hex(&distinct));
-    source["artifacts"][1]["size_bytes"] = Value::from(distinct.len());
-    let source = source.to_string();
-    std::fs::write(&source_path, &source).expect("rewrite source");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let error = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some("recoverable-run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: Some("main".to_string()),
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@recoverable".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-    )
-    .expect_err("distinct candidates require a choice");
-
-    assert_eq!(error.details["review_choices"].as_array().unwrap().len(), 2);
-    assert_eq!(provider.apply_calls.len(), 0);
-}
-
-#[test]
-fn promote_recoverable_candidate_keeps_same_patch_from_distinct_attempts() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = recoverable_patch_source(&temp, 2);
-    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
-    source["artifacts"][1]["metadata"]["producer_attempt"] = Value::from(2);
-    let source = source.to_string();
-    std::fs::write(&source_path, &source).expect("rewrite source");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let error = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some("recoverable-run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "repo@recoverable".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-    )
-    .expect_err("different attempts remain review choices");
-
-    assert_eq!(error.details["review_choices"].as_array().unwrap().len(), 2);
-    assert_eq!(provider.apply_calls.len(), 0);
 }
 
 #[test]
@@ -805,7 +585,6 @@ fn promote_no_op_outcome_uses_audited_committed_candidate() {
         candidate.base_sha
     );
     assert_eq!(report.deterministic_gates.len(), 1);
-    assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
 }
 
@@ -873,7 +652,8 @@ fn adopt_no_op_pre_existing_candidate_when_base_equals_candidate() {
     .expect("pre-existing immutable candidate is adopted after no-op review");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.id, "committed-changes");
+    assert_eq!(report.patch_artifact.id, candidate);
+    assert_eq!(report.patch_artifact.kind, "candidate_commit");
     assert_eq!(report.changed_files, vec!["lib.rs"]);
     assert_eq!(report.provenance["base_ref"], git_head(&repo, "HEAD~1"));
     assert_eq!(report.provenance["historical_task_base"], candidate);
@@ -881,7 +661,6 @@ fn adopt_no_op_pre_existing_candidate_when_base_equals_candidate() {
         report.provenance["candidate"]["fingerprint"]["head"],
         candidate
     );
-    assert_eq!(provider.apply_calls.len(), 1);
     assert_eq!(provider.verify_calls.len(), 1);
 }
 
@@ -1538,7 +1317,6 @@ fn explicit_candidate_gate_failure_is_recorded_after_normal_promotion_handoff() 
     )
     .expect("gate failure is a promotion report");
     assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
-    assert_eq!(provider.apply_calls.len(), 1);
     assert_eq!(provider.verify_calls.len(), 1);
 }
 
@@ -2438,6 +2216,5 @@ fn pathless_verified_empty_patch_is_admitted_without_controller_projection() {
 
         assert_eq!(report.status, AgentTaskPromotionStatus::VerifiedNoChanges);
         assert!(report.changed_files.is_empty());
-        assert!(provider.apply_calls.is_empty());
     });
 }

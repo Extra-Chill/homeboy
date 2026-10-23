@@ -25,7 +25,6 @@ fn refuse(repo: &Path, candidate: &AgentTaskCandidate, reason: &str) -> homeboy_
     .expect_err("candidate admission refuses");
     assert_eq!(error.details["field"], "promotion.candidate", "{error:?}");
     assert_eq!(error.details["reason"], reason, "{error:?}");
-    assert!(provider.apply_calls.is_empty());
     assert!(provider.verify_calls.is_empty());
     error
 }
@@ -110,7 +109,6 @@ fn patch_only_outcome_is_not_promotable() {
         "{}",
         error.message
     );
-    assert!(provider.apply_calls.is_empty());
     assert_eq!(git_stdout(&repo, &["status", "--porcelain"]), "");
 }
 

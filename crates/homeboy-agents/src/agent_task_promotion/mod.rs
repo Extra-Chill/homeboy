@@ -32,7 +32,6 @@ pub use promote::{
 };
 pub(crate) use promote::{
     canonical_recoverable_patch_artifacts_in_observation_store, patch_only_outcome_error,
-    preflight_recoverable_candidate_promotion_in_observation_store, promotable_candidate,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
     resume_promoted_patch_replacement_gates_in_observation_store,
 };
@@ -40,6 +39,9 @@ pub(crate) use promote::{emit_promotion_progress, emit_promotion_progress_with_o
 pub use promote::{
     promote, promote_with_checkpoint, resume_promoted_patch, with_promotion_progress,
     PromotionProgress, PromotionProgressCallback,
+};
+pub(crate) use promote::{
+    CANDIDATE_RUN_TRAILER, CANDIDATE_TASK_TRAILER, CANDIDATE_WORKSPACE_TRAILER,
 };
 pub use run_plan_projection::mirror_agent_task_run_plan_aggregate;
 pub use types::{

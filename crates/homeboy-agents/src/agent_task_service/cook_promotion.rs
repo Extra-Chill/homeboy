@@ -31,7 +31,6 @@ use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
     candidate_fingerprint, canonical_recoverable_patch_artifacts,
     canonical_recoverable_patch_artifacts_in_observation_store,
-    preflight_recoverable_candidate_promotion_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
     resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionCandidate,
     AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionStatus,
@@ -783,7 +782,9 @@ pub fn preflight_cook_promotion_for_observation_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &CookRequest,
     run_id: &str,
-    artifact_id: Option<&str>,
+    // A candidate commit is the only candidate identity (#16303); the
+    // `--artifact-id` dimension is retired with the recover artifact choice.
+    _artifact_id: Option<&str>,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Value> {
@@ -852,31 +853,16 @@ pub fn preflight_cook_promotion_for_observation_in_store(
             ),
         }));
     }
-    let source = serde_json::to_string_pretty(&aggregate).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some(format!("serialize agent-task aggregate {run_id}")),
-        )
-    })?;
-    let promotion_options = AgentTaskPromotionRequest {
-        source,
-        source_run_id: Some(run_id.to_string()),
-        source_path: Some(lifecycle_store.aggregate_path(run_id)),
-        source_worktree_path: component_workspace_path(options)?
-            .or_else(|| options.workspace.source_worktree_path.clone()),
-        base_ref: Some(options.finalization.base.clone()),
-        task_base_sha: cook_candidate_base_sha(options),
-        candidate_ref: None,
-        to_worktree: options.workspace.to_worktree.clone(),
-        task_id: Some(outcome.task_id.clone()),
-        artifact_id: artifact_id.map(str::to_string),
-        dry_run: false,
-        gates: options.gates.clone(),
-        provider_invocation: options.provider_transport.provider_invocation.clone(),
-        repository_integrity_evidence: None,
-    };
-    let observation_store = lifecycle_store.open_observation_readonly()?;
-    if let Some(candidate) = crate::agent_task_promotion::promotable_candidate(outcome) {
+    if let Some(candidate) = outcome.candidate.as_ref() {
+        let mut checks = vec!["candidate_commit_admission"];
+        if outcome.status == crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
+            checks.push("candidate_provenance");
+        }
+        checks.extend([
+            "promotion_target_resolution",
+            "candidate_materialization",
+            "verification_gates",
+        ]);
         return Ok(json!({
             "behavior": "promote_candidate_commit",
             "artifact_id": Value::Null,
@@ -887,42 +873,27 @@ pub fn preflight_cook_promotion_for_observation_in_store(
                 "candidate_sha": candidate.candidate_sha,
                 "tree_sha": candidate.tree_sha,
             },
-            "execution_only_checks": ["candidate_commit_admission", "promotion_target_resolution", "candidate_materialization", "verification_gates"],
+            "execution_only_checks": checks,
         }));
     }
-    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
-        if let Some(error) = crate::agent_task_promotion::patch_only_outcome_error(outcome) {
-            return Err(error);
-        }
-        return Ok(json!({
-            "behavior": "promote_no_change",
-            "artifact_id": Value::Null,
-            "candidate_fingerprint": Value::Null,
-            "execution_only_checks": ["verification_gates"],
-        }));
+    if let Some(error) = crate::agent_task_promotion::patch_only_outcome_error(outcome) {
+        return Err(error);
     }
-    let artifact = preflight_recoverable_candidate_promotion_in_observation_store(
-        &promotion_options,
-        &observation_store,
-    )?;
+    if outcome.status == crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
+        let mut error = Error::validation_invalid_argument(
+            "source",
+            "recoverable-candidate promotion requires a harvested candidate commit (#16303)",
+            Some(outcome.task_id.clone()),
+            None,
+        );
+        error.details["recoverable"] = json!(false);
+        return Err(error);
+    }
     Ok(json!({
-        "behavior": "promote_new",
-        "artifact_id": artifact.id,
-        "execution_only_checks": ["promotion_target_resolution", "patch_apply", "verification_gates"],
-        "candidate_fingerprint": {
-            "schema": "homeboy/agent-task-recoverable-candidate-fingerprint/v1",
-            "kind": "recoverable_patch",
-            "artifact_id": artifact.id,
-            "sha256": artifact.sha256,
-            "size_bytes": artifact.size_bytes,
-            "run_id": artifact.metadata.get("run_id"),
-            "task_id": artifact.metadata.get("task_id"),
-            "producer_attempt": artifact.metadata.get("producer_attempt"),
-            "base_ref": artifact.metadata.get("base_ref"),
-            "provider_backend": artifact.metadata.get("provider_backend"),
-            "repository_identity": artifact.metadata.get("repository_identity"),
-            "workspace_identity": artifact.metadata.get("workspace_identity"),
-        }
+        "behavior": "promote_no_change",
+        "artifact_id": Value::Null,
+        "candidate_fingerprint": Value::Null,
+        "execution_only_checks": ["verification_gates"],
     }))
 }
 

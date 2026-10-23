@@ -210,7 +210,7 @@ mod timeout_tests {
     }
 
     #[test]
-    fn timeout_after_dirty_worktree_fingerprints_the_producing_run_patch() {
+    fn timeout_after_dirty_worktree_harvests_and_promotes_a_candidate_commit() {
         struct EditThenTimeout;
 
         impl AgentTaskExecutorAdapter for EditThenTimeout {
@@ -278,33 +278,50 @@ mod timeout_tests {
                 );
             }
             assert_eq!(patch.metadata["run_id"], "timeout-dirty-fingerprint");
-            let lifecycle_store =
-                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .expect("lifecycle store");
-            let source = serde_json::to_string(&aggregate).expect("serialize aggregate");
-            let admitted = crate::agent_task_promotion::preflight_recoverable_candidate_promotion_in_observation_store(
-                &crate::agent_task_promotion::AgentTaskPromotionRequest {
-                    source,
+            // The timed-out worktree is recorded as one candidate commit, and
+            // promotion admits that commit rather than the patch (#16303).
+            let candidate = outcome
+                .candidate
+                .clone()
+                .expect("timeout harvests a candidate");
+            let destination = temp.path().join("destination");
+            let destination_arg = destination.display().to_string();
+            let base = candidate.base_sha.clone();
+            assert!(Command::new("git")
+                .args(["worktree", "add", "--detach", &destination_arg, &base])
+                .current_dir(&source)
+                .status()
+                .expect("git worktree add")
+                .success());
+            let source_json = serde_json::to_string(&aggregate).expect("serialize aggregate");
+            let report = crate::agent_task_promotion::promote(
+                crate::agent_task_promotion::AgentTaskPromotionRequest {
+                    source: source_json,
                     source_run_id: Some("timeout-dirty-fingerprint".to_string()),
-                    source_path: Some(lifecycle_store.aggregate_path("timeout-dirty-fingerprint")),
+                    source_path: None,
                     source_worktree_path: None,
                     base_ref: None,
-                    task_base_sha: patch.metadata["base_ref"].as_str().map(str::to_string),
+                    task_base_sha: Some(base),
                     candidate_ref: None,
-                    to_worktree: "timeout-dirty-fingerprint-target".to_string(),
+                    to_worktree: destination_arg,
                     task_id: Some(outcome.task_id.clone()),
-                    artifact_id: Some(patch.id.clone()),
+                    artifact_id: None,
                     dry_run: false,
                     gates: crate::agent_task_gate::VerifyGateOptions::default(),
                     provider_invocation: None,
                     repository_integrity_evidence: None,
                 },
-                &lifecycle_store
-                    .open_observation_initialized()
-                    .expect("observation store"),
             )
-            .expect("recover --artifact-id admits the fingerprinted timeout patch");
-            assert_eq!(admitted.id, patch.id);
+            .expect("the recoverable candidate commit promotes");
+            assert_eq!(
+                report.provenance["candidate_commit"]["candidate_sha"],
+                candidate.candidate_sha.as_str()
+            );
+            assert_eq!(
+                fs::read_to_string(destination.join("provider-change.txt"))
+                    .expect("materialized candidate"),
+                "partial work survives timeout\n"
+            );
         });
     }
 
