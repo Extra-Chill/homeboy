@@ -168,20 +168,13 @@ pub fn promote_with_checkpoint(
     // resolves once here and is passed down. The interior used to receive
     // `None` and re-resolve the environment partway through (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let handback = lab_candidate_handback(&options);
     let mut report = promote_with_provider_and_checkpoint_internal(
         options,
         &mut checkpoint,
         &observation_store,
     )?;
-    if let Some(runner_id) = crate::agent_task_lifecycle::execution_runner_id() {
-        report.provenance["lab_offload"] = json!({
-            "runner_id": runner_id,
-            "source_aggregate": report.source.path,
-            "source_artifact": report.patch_artifact.path,
-            "target_worktree": report.to_worktree,
-            "target_workspace": report.target.path,
-        });
-    }
+    stamp_lab_offload(&mut report, handback);
     Ok(report)
 }
 
@@ -190,6 +183,7 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
     observation_store: &homeboy_core::observation::ObservationStore,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
+    let handback = lab_candidate_handback(&options);
     let mut report = if let Some(run_id) = options.source_run_id.clone() {
         observation_store.time_run_phase_with_outcome(
             &run_id,
@@ -206,6 +200,11 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
     } else {
         promote_with_provider_and_checkpoint_internal(options, &mut checkpoint, observation_store)?
     };
+    stamp_lab_offload(&mut report, handback);
+    Ok(report)
+}
+
+fn stamp_lab_offload(report: &mut AgentTaskPromotionReport, candidate_handback: Value) {
     if let Some(runner_id) = crate::agent_task_lifecycle::execution_runner_id() {
         report.provenance["lab_offload"] = json!({
             "runner_id": runner_id,
@@ -213,9 +212,31 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
             "source_artifact": report.patch_artifact.path,
             "target_worktree": report.to_worktree,
             "target_workspace": report.target.path,
+            "candidate_handback": candidate_handback,
         });
     }
-    Ok(report)
+}
+
+/// The harvested candidate commit and the runner artifact bundling it: the
+/// controller fetches the commit itself, never a patch (#16303).
+fn lab_candidate_handback(options: &AgentTaskPromotionRequest) -> Value {
+    let source = serde_json::from_str(&options.source).unwrap_or(Value::Null);
+    let Ok((_, outcome)) = select_outcome(source, options.task_id.as_deref()) else {
+        return Value::Null;
+    };
+    let kind = crate::agent_task::CANDIDATE_BUNDLE_ARTIFACT_KIND;
+    match (
+        outcome.artifacts.iter().find(|a| a.kind == kind),
+        &outcome.candidate,
+    ) {
+        (Some(bundle), Some(candidate)) => json!({
+            "run_id": bundle.metadata["run_id"],
+            "task_id": outcome.task_id,
+            "artifact_id": bundle.id,
+            "candidate": candidate,
+        }),
+        _ => Value::Null,
+    }
 }
 
 /// Rebuild a full proof for a clean candidate from a durable post-apply report.
@@ -2801,6 +2822,72 @@ fn bind_lab_gate_candidate_checkout(
 #[cfg(test)]
 mod lab_gate_binding_tests {
     use super::*;
+
+    #[test]
+    fn runner_report_hands_back_the_candidate_commit_and_its_bundle() {
+        let _home = homeboy_core::test_support::home_env_guard();
+        let runner_env = homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
+        let mut report: AgentTaskPromotionReport = serde_json::from_value(json!({
+            "status": "gate_failed",
+            "source": { "kind": "aggregate", "task_id": "task-1" },
+            "to_worktree": "repo@fix",
+            "target": { "worktree": "repo@fix" },
+            "patch_artifact": { "id": "patch", "kind": "patch", "path": "p.patch" },
+            "operator_notification": { "status": "failed", "message": "gate failed" },
+        }))
+        .expect("report");
+        let candidate = json!({ "base_sha": "base", "candidate_sha": "c", "tree_sha": "t" });
+        let bundle = json!({
+            "id": "task-1-attempt-1-candidate-bundle",
+            "kind": crate::agent_task::CANDIDATE_BUNDLE_ARTIFACT_KIND,
+            "metadata": { "run_id": "run-1" },
+        });
+        let options = |artifacts: Value| AgentTaskPromotionRequest {
+            source: json!({
+                "schema": crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA,
+                "task_id": "task-1",
+                "status": "succeeded",
+                "candidate": candidate,
+                "artifacts": artifacts,
+            })
+            .to_string(),
+            source_run_id: None,
+            source_path: None,
+            source_worktree_path: None,
+            to_worktree: "repo@fix".to_string(),
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: Default::default(),
+            provider_invocation: None,
+            repository_integrity_evidence: None,
+        };
+        let handback = lab_candidate_handback(&options(json!([bundle])));
+        assert_eq!(
+            handback,
+            json!({
+                "run_id": "run-1",
+                "task_id": "task-1",
+                "artifact_id": "task-1-attempt-1-candidate-bundle",
+                "candidate": candidate,
+            })
+        );
+        assert!(lab_candidate_handback(&options(json!([]))).is_null());
+
+        let _local = homeboy_core::test_support::EnvVarGuard::unset(runner_env);
+        stamp_lab_offload(&mut report, handback.clone());
+        assert!(report.provenance.get("lab_offload").is_none());
+        let _runner = homeboy_core::test_support::EnvVarGuard::set(runner_env, "lab-1");
+        stamp_lab_offload(&mut report, handback.clone());
+        assert_eq!(report.provenance["lab_offload"]["runner_id"], "lab-1");
+        assert_eq!(
+            report.provenance["lab_offload"]["candidate_handback"],
+            handback
+        );
+    }
 
     fn with_git_candidate(test: impl FnOnce(&Path, &homeboy_core::observation::ObservationStore)) {
         homeboy_core::test_support::with_isolated_home(|home| {
