@@ -6,6 +6,8 @@ use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub(crate) mod pi_response;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 

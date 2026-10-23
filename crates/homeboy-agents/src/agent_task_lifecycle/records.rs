@@ -125,6 +125,9 @@ pub struct AgentTaskRunRecord {
     pub totals: Option<crate::agent_task_scheduler::AgentTaskAggregateTotals>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<AgentTaskRunTask>,
+    /// Provider response identities, in first-use order; never dispatch aliases.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_models: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<AgentTaskArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -528,6 +531,7 @@ impl AgentTaskRunRecord {
             aggregate_path: None,
             totals: None,
             tasks: Vec::new(),
+            served_models: Vec::new(),
             artifact_refs: Vec::new(),
             provider_handles: Vec::new(),
             latest_executor_evidence: None,
@@ -543,6 +547,22 @@ impl AgentTaskRunRecord {
             metadata: Value::Null,
             candidate: None,
         }
+    }
+
+    /// Merge response identities without changing their first-use ordering.
+    pub(crate) fn record_served_models(
+        &mut self,
+        models: impl IntoIterator<Item = String>,
+    ) -> bool {
+        let mut changed = false;
+        for model in models {
+            let model = model.trim();
+            if !model.is_empty() && !self.served_models.iter().any(|known| known == model) {
+                self.served_models.push(model.to_string());
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// The stored run state.

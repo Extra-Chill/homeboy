@@ -4000,6 +4000,11 @@ fn manual_candidate_binding(
         ));
     };
     let model = record.lifecycle.provider_runtime.iter().rev().find_map(|runtime| runtime.metadata["model"].as_str()).filter(|model| !model.trim().is_empty()).ok_or_else(|| Error::validation_invalid_argument("run_id", "candidate-recoverable manual finalization requires concrete provider model provenance", Some(run_id.to_string()), None))?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let plan = store.read_controller_plan(run_id)?;
+    let outcome = selected_outcome_for_attempt_in_store(&store, run_id)?;
+    let (_, disclosure) = authoritative_execution_identity(&plan, &record, &outcome, run_id)?;
+    let disclosure = disclosure.as_deref().unwrap_or(model);
     let commit = report
         .publication_proof
         .git_identity
@@ -4012,8 +4017,8 @@ fn manual_candidate_binding(
         || !promotion.finalization_eligible(false)
         || fingerprint.head != commit
         || fingerprint.changed_files != report.changed_files
-        || report.evidence.ai_model.as_deref() != Some(model)
-        || report.review_dossier.ai_assistance.model != model
+        || report.evidence.ai_model.as_deref() != Some(disclosure)
+        || report.review_dossier.ai_assistance.model != disclosure
         || promotion.gate_results != report.normalized_gate_results
     {
         return Err(Error::validation_invalid_argument(
@@ -5817,51 +5822,21 @@ fn authoritative_execution_identity(
         plan,
         record.metadata.get("provider_executions"),
     );
-    let model = selected_execution_model(
-        record
-            .metadata
-            .get("provider_executions")
-            .unwrap_or(&Value::Null),
-        outcome,
-        terminal
-            .as_ref()
-            .and_then(|identity| identity.model.as_deref()),
-        run_id,
-    )?;
-    if model.is_none()
-        && outcome.metadata["model_identity"]["provider_reported"]
-            .as_str()
-            .is_none()
-        && outcome.metadata["model_identity"]["requested"]
-            .as_str()
-            .zip(outcome.metadata["model_identity"]["resolved"].as_str())
-            .is_some_and(|(requested, resolved)| requested != resolved)
-    {
-        return Err(Error::validation_invalid_argument(
-            "provider_model",
-            "Cook lineage has unresolved requested and resolved model disagreement without a provider-reported executed model",
-            Some(run_id.to_string()),
-            None,
-        ));
-    }
-    // The ledger and the normalized outcome can both miss the executed model
-    // when the provider resolved its own default (#15112). The outcome's own
-    // identity evidence and the harvested candidate's model binding are the
-    // remaining durable authorities; disclosure uses the same chain promotion
-    // admits so an attempt that promotes also finalizes.
-    let model = match outcome_model_identity_evidence(outcome).or(model) {
-        Some(model) => Some(model),
-        None => candidate_artifact_model_evidence(outcome, run_id)?,
-    };
-    let model = model.map(
-        |served| match outcome.selected_model().filter(|tier| *tier != served) {
-            Some(tier) => format!("{served} (tier {tier})"),
-            None if matches!(served.as_str(), "cook-heavy" | "cook" | "subagent") => {
-                format!("tier {served}; served model not recorded")
-            }
-            None => served,
-        },
-    );
+    // Routing identity is not response identity. In particular metadata.model
+    // and patch provider_model can both contain a Roadie pool alias.
+    let rotation = outcome.metadata["model_identity"]["requested"]
+        .as_str()
+        .or_else(|| task.executor.model())
+        .or_else(|| {
+            terminal
+                .as_ref()
+                .and_then(|identity| identity.model.as_deref())
+        })
+        .unwrap_or("not recorded");
+    let model = Some(crate::agent_task_review_dossier::served_model_disclosure(
+        &record.served_models,
+        rotation,
+    ));
     Ok((
         terminal
             .map(|identity| identity.backend)
@@ -6175,7 +6150,9 @@ fn substantive_lineage(
             ),
             model,
             used_for: terminal_form.used_for.clone(),
-            composed_model_disclosure: false,
+            // This already includes response identity and tier attribution;
+            // finalization must not replace it with legacy metadata.model.
+            composed_model_disclosure: true,
             preserve_used_for_disclosure: false,
         });
     }

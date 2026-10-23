@@ -171,6 +171,7 @@ pub(super) fn run_materialized_provider_command_with_credentials(
     // This state belongs to one invocation's retry sequence. It cannot couple
     // unrelated tasks that happen to use the same provider concurrently.
     let mut prior_immediate_failure = None;
+    let mut served_models = Vec::new();
     loop {
         let started = Instant::now();
         let mut outcome = run_materialized_provider_command_once_with_credentials(
@@ -179,6 +180,14 @@ pub(super) fn run_materialized_provider_command_with_credentials(
             execution,
             credential_env,
         );
+        if let Some(models) = outcome.metadata["served_models"].as_array() {
+            for model in models.iter().filter_map(Value::as_str) {
+                if !served_models.iter().any(|known| known == model) {
+                    served_models.push(model.to_string());
+                }
+            }
+            outcome.metadata["served_models"] = json!(served_models);
+        }
         classify_provider_policy_denial(request, &mut outcome);
         classify_structured_runtime_failure(
             &mut outcome,
@@ -824,6 +833,18 @@ fn run_materialized_provider_command_once_with_credentials(
         execution,
         credential_env,
     );
+    // Adapter metadata.model is the requested Pi route, not the provider's
+    // responseModel. Keep response identity separate from routing identity.
+    if request.request.executor.backend == "pi" {
+        let models = super::pi_response::session_served_models(
+            &request.artifacts_path,
+            &request.request.task_id,
+        );
+        if !outcome.metadata.is_object() {
+            outcome.metadata = json!({});
+        }
+        outcome.metadata["served_models"] = json!(models);
+    }
     containment_report.annotate(&mut outcome);
     if let Err(error) = retain_failed_workspace_artifacts(&mut outcome, request) {
         push_unique_diagnostic(

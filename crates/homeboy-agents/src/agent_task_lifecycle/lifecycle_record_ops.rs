@@ -96,6 +96,10 @@ pub(crate) fn project_outcome_models(
 ) -> bool {
     let mut changed = false;
     for outcome in &aggregate.outcomes {
+        if let Some(models) = outcome.metadata["served_models"].as_array() {
+            changed |= record
+                .record_served_models(models.iter().filter_map(Value::as_str).map(str::to_string));
+        }
         let Some(model) = outcome
             .metadata
             .get("model")
