@@ -983,13 +983,14 @@ fn upgrade_runner_convergence_diagnostics(
     exit_code: i32,
     data: &Value,
 ) -> Option<CommandDiagnostics> {
-    if !is_partial_upgrade_outcome(data)
-        && !(data["command"] == "upgrade"
-            && matches!(
-                data["outcome"].as_str(),
-                Some("runner_preflight_failed" | "extension_preflight_failed")
-            ))
-    {
+    // A runner preflight failure surfaces the refusing runners; other
+    // preflight failures installed nothing and carry no runner diagnostics.
+    let runner_preflight_refused = data["command"] == "upgrade"
+        && data["outcome"] == "runner_preflight_failed"
+        && data["runners_skipped"]
+            .as_array()
+            .is_some_and(|runners| !runners.is_empty());
+    if !is_partial_upgrade_outcome(data) && !runner_preflight_refused {
         return None;
     }
 
