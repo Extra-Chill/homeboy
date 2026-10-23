@@ -1209,9 +1209,8 @@ pub struct AgentTaskGateTestResult {
 /// The Cargo test population actually observed by a deterministic gate.
 ///
 /// A positional Cargo filter is substring matching unless the test harness gets
-/// `--exact`; a filter whose selected IDs all use it as a module prefix is also
-/// admitted. Recording the interpretation and IDs makes focused evidence
-/// independently reviewable.
+/// `--exact`. Recording the interpretation and IDs keeps a broad selection
+/// visible to reviewers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateCargoSelection {
     pub effective_argv: Vec<String>,
@@ -1225,7 +1224,7 @@ pub struct AgentTaskGateCargoSelection {
     pub selected_ids: Vec<String>,
     pub selected_count: usize,
     /// Deterministic, redacted next action when a focused Cargo gate fails
-    /// closed rather than proving an exact or module-prefix selection.
+    /// closed because its filter selected no tests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<AgentTaskGateCargoSelectionRecovery>,
 }
@@ -1235,8 +1234,6 @@ pub struct AgentTaskGateCargoSelection {
 enum FocusedCargoSelectionProblem {
     /// The filter selected no tests.
     NoTests,
-    /// The filter selected tests by substring, not by exact ID or module prefix.
-    Substring,
 }
 
 impl AgentTaskGateCargoSelection {
@@ -1245,11 +1242,6 @@ impl AgentTaskGateCargoSelection {
             None
         } else if self.selected_count == 0 {
             Some(FocusedCargoSelectionProblem::NoTests)
-        } else if !matches!(
-            self.filter_interpretation.as_str(),
-            "exact" | "module_prefix"
-        ) {
-            Some(FocusedCargoSelectionProblem::Substring)
         } else {
             None
         }
@@ -4961,9 +4953,6 @@ fn gate_failure_evidence(
         Some((_, FocusedCargoSelectionProblem::NoTests)) => {
             AgentTaskGateFailureClassification::ZeroTestsSelected
         }
-        Some((_, FocusedCargoSelectionProblem::Substring)) => {
-            AgentTaskGateFailureClassification::GateDeclaration
-        }
         None if missing_script.is_some()
             || missing_executable.is_some()
             || shell_rejection.is_some()
@@ -4973,17 +4962,11 @@ fn gate_failure_evidence(
         }
         None => AgentTaskGateFailureClassification::CandidateCode,
     };
-    let summary = if let Some((selection, problem)) = selection_problem {
+    let summary = if let Some((selection, FocusedCargoSelectionProblem::NoTests)) =
+        selection_problem
+    {
         let filter = selection.filter.as_deref().unwrap_or_default();
-        match problem {
-            FocusedCargoSelectionProblem::NoTests => format!(
-                "invalid_focused_cargo_selection: filter {filter:?} selected no tests"
-            ),
-            FocusedCargoSelectionProblem::Substring => format!(
-                "invalid_focused_cargo_selection: filter {filter:?} is a substring match that selected {} tests ({:?}); a focused gate needs an exact test ID with `-- --exact`, or a module path prefix from the crate root so every selected test ID starts with `{filter}::`",
-                selection.selected_count, selection.selected_ids,
-            ),
-        }
+        format!("invalid_focused_cargo_selection: filter {filter:?} selected no tests")
     } else if let Some(bin) = missing_executable.as_deref() {
         format!("gate environment cannot run `{bin}`: executable not found")
     } else {
@@ -5007,16 +4990,16 @@ fn gate_failure_evidence(
             .and_then(|selection| selection.recovery.as_ref())
             .map(|recovery| match recovery.action.as_str() {
                 "rerun_exact" => format!(
-                "The Cargo test gate must use an exact or module-prefix filter and select at least one test. Rerun the structured exact recovery command `{}` before rerunning Cook.",
+                    "The Cargo test gate filter selected no tests. Rerun the structured exact recovery command `{}` before rerunning Cook.",
                     recovery.command
                 ),
                 _ => format!(
-                    "The Cargo test gate must use an exact or module-prefix filter and select at least one test. Run the structured discovery command `{}` and choose a bounded module or exact filter before rerunning Cook.",
+                    "The Cargo test gate filter selected no tests. Run the structured discovery command `{}` and choose a filter that selects at least one test before rerunning Cook.",
                     recovery.command
                 ),
             })
             .unwrap_or_else(|| {
-                "The Cargo test gate must use an exact or module-prefix filter and select at least one test before rerunning Cook.".to_string()
+                "The Cargo test gate filter selected no tests. Choose a filter that selects at least one test before rerunning Cook.".to_string()
             })
     } else if let Some(bin) = missing_executable.as_deref() {
         format!("The declared gate is invalid, not candidate-code feedback. The gate environment cannot run `{bin}`: executable not found. Declare an installed tool or add the setup step before rerunning Cook. Do not change candidate code to satisfy this gate.")
@@ -5165,6 +5148,9 @@ fn gate_shell_rejection(exit_code: i32, stderr: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A focused gate that selected no tests proves nothing, so it fails closed
+/// even when cargo itself exits 0. Every other selection keeps cargo's real
+/// exit code.
 fn effective_gate_exit_code(
     runner_exit_code: i32,
     cargo_selection: Option<&AgentTaskGateCargoSelection>,
@@ -6397,19 +6383,10 @@ mod tests {
             vec!["selected_test", "selected_test_unrelated"]
         );
         assert_eq!(ambiguous.selected_count, 2);
-        assert_eq!(effective_gate_exit_code(0, Some(&ambiguous)), 1);
-        let evidence =
-            gate_failure_evidence("cargo test selected_test", 1, "", "", Some(&ambiguous));
-        assert_eq!(
-            evidence.classification,
-            AgentTaskGateFailureClassification::GateDeclaration
-        );
-        assert!(evidence
-            .summary
-            .contains("\"selected_test\" is a substring match"));
-        assert!(evidence.summary.contains("selected 2 tests"));
-        assert!(evidence.summary.contains("`-- --exact`"));
-        assert!(evidence.summary.contains("starts with `selected_test::`"));
+        assert_eq!(effective_gate_exit_code(0, Some(&ambiguous)), 0);
+        let serialized = serde_json::to_value(&ambiguous).expect("selection evidence serializes");
+        assert_eq!(serialized["filter_interpretation"], "substring_ambiguous");
+        assert_eq!(serialized["selected_count"], 2);
         let multiple_recovery = ambiguous.recovery.expect("discovery recovery metadata");
         assert_eq!(multiple_recovery.action, "discover_and_choose");
         assert_eq!(multiple_recovery.command, "cargo test -- --list");
@@ -6431,7 +6408,7 @@ mod tests {
         )
         .expect("Cargo selection");
         assert_eq!(non_exact_single.selected_count, 1);
-        assert_eq!(effective_gate_exit_code(0, Some(&non_exact_single)), 1);
+        assert_eq!(effective_gate_exit_code(0, Some(&non_exact_single)), 0);
         let serialized_recovery = serde_json::to_value(&non_exact_single)
             .expect("reviewer-facing recovery metadata serializes");
         assert_eq!(
@@ -6522,6 +6499,18 @@ mod tests {
         assert!(zero_match.selected_ids.is_empty());
         assert_eq!(zero_match.selected_count, 0);
         assert_eq!(effective_gate_exit_code(0, Some(&zero_match)), 1);
+        let zero_evidence = gate_failure_evidence(
+            "cargo test --test integration missing_test --lib -- --ignored --exact",
+            1,
+            "",
+            "",
+            Some(&zero_match),
+        );
+        assert_eq!(
+            zero_evidence.classification,
+            AgentTaskGateFailureClassification::ZeroTestsSelected
+        );
+        assert!(zero_evidence.summary.contains("selected no tests"));
         let zero_recovery = zero_match.recovery.expect("discovery recovery metadata");
         assert_eq!(zero_recovery.action, "discover_and_choose");
         assert_eq!(
@@ -6655,6 +6644,36 @@ mod tests {
         assert_eq!(effective_gate_exit_code(0, Some(&quiet_zero_match)), 1);
     }
 
+    #[test]
+    fn failing_substring_selection_fails_with_the_real_cargo_exit_code() {
+        let failing = cargo_selection(
+            "cargo test selected_test",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test selected_test".to_string(),
+            ],
+            "selected_test: test\nselected_test_unrelated: test\ntest selected_test ... ok\ntest selected_test_unrelated ... FAILED\n",
+            "",
+            None,
+        )
+        .expect("Cargo selection");
+        assert_eq!(failing.filter_interpretation, "substring_ambiguous");
+        assert_eq!(failing.selected_count, 2);
+        assert_eq!(effective_gate_exit_code(101, Some(&failing)), 101);
+        let evidence =
+            gate_failure_evidence("cargo test selected_test", 101, "", "", Some(&failing));
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::CandidateCode
+        );
+        assert_eq!(evidence.exit_code, 101);
+        assert!(evidence
+            .summary
+            .contains("deterministic gate failed with exit code 101"));
+        assert!(!evidence.summary.contains("invalid_focused_cargo_selection"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn cargo_gate_rejects_zero_match_and_accepts_one_match_through_supported_declarations() {
@@ -6670,7 +6689,7 @@ mod tests {
         .expect("fixture manifest");
         std::fs::write(
             temp.path().join("src/lib.rs"),
-            "#[cfg(test)]\nmod tests { #[test] fn selected_test() {} }\n",
+            "#[cfg(test)]\nmod tests { #[test] fn selected_test() {} #[test] fn other_test() { panic!(\"intentional substring failure\"); } }\n",
         )
         .expect("fixture test");
         let bin = temp.path().join("bin");
@@ -6687,9 +6706,9 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&timeout, permissions).expect("make timeout wrapper executable");
         let target = temp.path().join("target");
-        let command = |timeout_options: &str, filter: &str| {
+        let command = |timeout_options: &str, cargo_invocation: &str| {
             format!(
-                "RUSTFLAGS=\"-D warnings\" HOMEBOY_ORIGINAL_HOME='{}' HOMEBOY_ORIGINAL_PATH='{}' CARGO_TARGET_DIR='{}' PATH='{}' timeout {timeout_options} 30 cargo --quiet test {filter} -- --exact",
+                "RUSTFLAGS=\"-D warnings\" HOMEBOY_ORIGINAL_HOME='{}' HOMEBOY_ORIGINAL_PATH='{}' CARGO_TARGET_DIR='{}' PATH='{}' timeout {timeout_options} 30 cargo {cargo_invocation}",
                 std::env::var("HOME").expect("host HOME"),
                 std::env::var("PATH").expect("host PATH"),
                 target.display(),
@@ -6697,8 +6716,12 @@ mod tests {
             )
         };
 
-        let zero = run_gate_command(temp.path(), 1, &command("-s TERM", "tests::missing_test"))
-            .expect("zero-match Cargo gate report");
+        let zero = run_gate_command(
+            temp.path(),
+            1,
+            &command("-s TERM", "--quiet test tests::missing_test -- --exact"),
+        )
+        .expect("zero-match Cargo gate report");
         assert_eq!(zero.status, AgentTaskGateStatus::Failed);
         assert_eq!(
             zero.failure_evidence
@@ -6719,10 +6742,18 @@ mod tests {
         let selected = run_gate_command(
             temp.path(),
             2,
-            &command("--signal TERM", "tests::selected_test"),
+            &command(
+                "--signal TERM",
+                "--quiet test tests::selected_test -- --exact",
+            ),
         )
         .expect("one-match Cargo gate report");
-        assert_eq!(selected.status, AgentTaskGateStatus::Succeeded);
+        assert_eq!(
+            selected.status,
+            AgentTaskGateStatus::Succeeded,
+            "{:#?}",
+            selected.failure_evidence
+        );
         let selected_counts = selected
             .test_result
             .as_ref()
@@ -6730,6 +6761,48 @@ mod tests {
         assert_eq!(selected_counts.total, 1);
         assert_eq!(selected_counts.passed, 1);
         assert_eq!(selected_counts.failed, 0);
+
+        // A substring selection that ran passing tests is a gate pass: cargo's
+        // real exit code stands, while the broad selection stays visible in
+        // the recorded evidence.
+        let substring =
+            run_gate_command(temp.path(), 3, &command("--signal TERM", "test selected"))
+                .expect("passing substring Cargo gate report");
+        assert_eq!(
+            substring.status,
+            AgentTaskGateStatus::Succeeded,
+            "{:#?}",
+            substring.failure_evidence
+        );
+        let substring_selection = substring
+            .cargo_selection
+            .expect("substring selection evidence");
+        assert_eq!(
+            substring_selection.filter_interpretation,
+            "substring_ambiguous"
+        );
+        assert_eq!(substring_selection.selected_count, 1);
+        assert_eq!(
+            substring_selection.selected_ids,
+            vec!["tests::selected_test"]
+        );
+
+        // A substring selection with a failing test fails on the candidate,
+        // not on the gate declaration, and carries cargo's real exit code.
+        let failing = run_gate_command(temp.path(), 4, &command("--signal TERM", "test other"))
+            .expect("failing substring Cargo gate report");
+        assert_eq!(failing.status, AgentTaskGateStatus::Failed);
+        let failing_evidence = failing
+            .failure_evidence
+            .expect("failing substring failure evidence");
+        assert_eq!(
+            failing_evidence.classification,
+            AgentTaskGateFailureClassification::CandidateCode
+        );
+        assert_eq!(failing_evidence.exit_code, 101);
+        assert!(failing_evidence
+            .summary
+            .contains("deterministic gate failed with exit code 101"));
     }
 
     #[test]

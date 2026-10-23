@@ -19732,7 +19732,7 @@ fn with_corrected_gate_candidate(
                 .unwrap()
                 .success());
         }
-        let invalid = "cargo test -p corrected-gate-fixture provider";
+        let invalid = "cargo test -p corrected-gate-fixture missing_provider";
         assert!(Command::new("git")
             .args(["remote", "add", "origin"])
             .arg(&target)
@@ -19747,7 +19747,7 @@ fn with_corrected_gate_candidate(
                 .as_ref()
                 .unwrap()
                 .classification,
-            crate::agent_task_gate::AgentTaskGateFailureClassification::GateDeclaration
+            crate::agent_task_gate::AgentTaskGateFailureClassification::ZeroTestsSelected
         );
         std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
         let mut options = batch_cook_options(
@@ -19852,7 +19852,7 @@ fn corrected_gate_guided_continuation_publishes_without_provider_redispatch_and_
             .contains("test \"$(cat tracked.txt)\" = promoted"));
         assert!(!backend
             .body
-            .contains("cargo test -p corrected-gate-fixture provider"));
+            .contains("cargo test -p corrected-gate-fixture missing_provider"));
     });
 }
 

@@ -541,15 +541,8 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
                 Some(other) => other,
                 None => "selection not verified",
             };
-            // A non-exact filter is judged after the build; state the rule it
-            // will be held to so the caller can tighten it before admission.
-            let rule = if interpretation == "candidate_resolved" {
-                format!("; the gate passes only as an exact test ID with `-- --exact`, or as a module path prefix from the crate root so every selected test ID starts with `{filter}::`")
-            } else {
-                String::new()
-            };
             lines.push(format!(
-                "Gate selection deferred: {kind} filter `{filter}` ({interpretation}){rule} — {reason}"
+                "Gate selection deferred: {kind} filter `{filter}` ({interpretation}) — {reason}"
             ));
         }
     }
@@ -1226,37 +1219,6 @@ mod tests {
         ));
         assert!(summary.contains("Private gate selections deferred: 1 (details withheld)"));
         assert!(!summary.contains("private-command-secret"));
-    }
-
-    #[test]
-    fn cook_preview_summary_states_the_rule_for_a_deferred_non_exact_cargo_filter() {
-        let payload = json!({
-            "schema": "homeboy/agent-task-cook-preview/v1",
-            "resolved": {
-                "placement": { "requested": "local" },
-                "provider": { "backend": "fixture", "model": "test-model" },
-                "workspace": { "path": "/tmp/worktree" },
-                "gates": { "public": 1, "private": 0 },
-                "gate_contract_validation": {
-                    "schema": "homeboy/cook-preview-gate-validation/v1",
-                    "deferred_public": [{
-                        "kind": "cargo",
-                        "status": "selection_deferred",
-                        "filter_interpretation": "candidate_resolved",
-                        "filter": "terminal_continuation",
-                        "validation": "test_inventory_unavailable_without_build"
-                    }],
-                    "deferred_private_count": 0
-                }
-            },
-            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload)
-            .expect("cook preview summary");
-        assert!(summary.contains(
-            "Gate selection deferred: cargo filter `terminal_continuation` (candidate_resolved); the gate passes only as an exact test ID with `-- --exact`, or as a module path prefix from the crate root so every selected test ID starts with `terminal_continuation::` — test inventory unavailable without building test binaries"
-        ));
     }
 
     /// #14729: preview must report the *resolved* placement, not the
