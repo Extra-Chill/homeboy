@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.3] - 2026-10-23
+
+### Changed
+- Cook PR disclosure names the served model, not the routing tier
+- Report recorded Cook failures and honor publication verdicts
+
 ## [0.433.2] - 2026-10-23
 
 ### Changed
