@@ -70,7 +70,7 @@ use super::super::execution::{
     DaemonJobHandoffState,
 };
 use super::super::lab_apply::{
-    apply_lab_offload_patch, apply_lab_promotion_patch, PromotionPatchIntent,
+    apply_lab_candidate, apply_lab_offload_patch, promotion_candidate_handback,
 };
 use super::super::lab_args::{
     inject_agent_task_default_provider_config_in_args,

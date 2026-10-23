@@ -80,6 +80,9 @@ pub struct AgentTaskCandidate {
     pub tree_sha: String,
 }
 
+/// Artifact kind of a Lab runner's `git bundle` of its candidate commit.
+pub const CANDIDATE_BUNDLE_ARTIFACT_KIND: &str = "git_bundle";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskOutcome {
     #[serde(default = "outcome_schema")]
