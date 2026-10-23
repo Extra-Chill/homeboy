@@ -23,7 +23,7 @@ mod fallback_commands;
 mod hydration;
 mod inner;
 pub(crate) mod metadata;
-mod overhead;
+mod observation;
 mod path_materialization;
 mod resident;
 mod telemetry;
@@ -139,7 +139,7 @@ use super::agent_task_bridge::{
 use super::evidence::terminal_lab_run_evidence;
 use super::fallback::{
     is_build_command, local_execution_denied_error, skipped_automatic_run_local,
-    skipped_automatic_run_local_with_overhead, unsupported_build_lab_error,
+    skipped_automatic_run_local_with_selection, unsupported_build_lab_error,
 };
 use super::provider_preflight::preflight_agent_task_provider_on_runner;
 use super::secrets::{
@@ -160,7 +160,7 @@ pub(crate) use fallback_commands::*;
 pub(crate) use hydration::*;
 pub(crate) use inner::*;
 pub(crate) use metadata::*;
-pub(crate) use overhead::*;
+pub(crate) use observation::*;
 pub(crate) use path_materialization::*;
 pub(crate) use resident::*;
 pub(crate) use telemetry::*;

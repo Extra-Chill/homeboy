@@ -192,14 +192,18 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         request.normalized_args,
     )?;
 
-    // Begin runner-agnostic overhead accounting (#3001). Each setup phase
-    // (selection, preflight, source materialization, dependency hydration,
-    // admission, artifact import) is
-    // timed independently so reports can separate `lab_overhead_ms` from the
-    // workload command duration, regardless of runner transport.
-    let mut overhead = LabOffloadOverhead::start();
+    let mut observation = OffloadObservation::for_run(
+        std::env::var(homeboy_core::observation::ACTIVE_RUN_ID_ENV)
+            .ok()
+            .or_else(|| {
+                request
+                    .placement_outcome_target
+                    .map(|target| target.agent_task_run_id().to_string())
+            })
+            .or_else(|| request.durable_run_id.map(str::to_string)),
+    );
 
-    let selection_timer = overhead.phase(LabOffloadPhase::Selection);
+    let selection_timer = observation.timer.start("stage.lab.selection");
     let selection = request
         .placement_decision
         .runner
@@ -216,7 +220,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             },
             mode: crate::lab_selection::runner_status_tunnel_mode(&runner.runner_id),
         });
-    selection_timer.finish();
+    drop(selection_timer);
     let Some(selection) = selection else {
         if placement == homeboy_lab_contract::Placement::Auto {
             fail_if_no_default_runner_accepts_jobs(&contract)?;
@@ -240,18 +244,20 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             return Err(local_execution_denied_error(reason, None));
         }
         // No runner was selected: record the skip reason as the fallback so the
-        // overhead metadata consistently explains why this ran locally.
-        overhead.set_fallback_reason(reason);
+        // selection metadata consistently explains why this ran locally.
+        observation.set_fallback_reason(reason);
         record_local_outcome(&request)?;
-        return Ok(skipped_automatic_run_local_with_overhead(
-            plan, reason, &overhead,
+        return Ok(skipped_automatic_run_local_with_selection(
+            plan,
+            reason,
+            &observation,
         ));
     };
 
     // A runner was selected (explicit or default). Record the attempted
     // selection up front so a later connect/preflight fallback still reports
     // what the offload tried first.
-    overhead.set_attempted(
+    observation.set_attempted(
         &selection.runner_id,
         selection.source.metadata_value(),
         Some(selection.mode.metadata_value()),
@@ -295,9 +301,9 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             .build(),
     );
 
-    let prepare_timer = overhead.phase(LabOffloadPhase::Preflight);
-    let preparation = prepare_lab_runner_for_offload(&selection)?;
-    prepare_timer.finish();
+    let preparation = observation.timer.time("stage.lab.preflight", || {
+        prepare_lab_runner_for_offload(&selection)
+    })?;
     let runner_status = match preparation {
         LabRunnerPreparation::Ready { connect_authority } => {
             // A full runner is a readiness failure.
@@ -326,7 +332,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                         && matches!(selection.source, LabRunnerSelectionSource::Default)
                     {
                         let reason = format!("runner_unavailable: {}", error.message);
-                        overhead.set_fallback_reason(&reason);
+                        observation.set_fallback_reason(&reason);
                         let mut metadata = lab_offload_metadata(
                             &plan,
                             selection.source.metadata_value(),
@@ -336,7 +342,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                             None,
                             Some(&reason),
                         );
-                        attach_lab_offload_overhead(&mut metadata, &overhead);
+                        attach_offload_selection(&mut metadata, &observation);
                         record_local_outcome(&request)?;
                         return Ok(LabOffloadOutcome::RunLocal {
                             metadata: Some(metadata),
@@ -401,7 +407,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                     )],
                 ));
             }
-            overhead.set_fallback_reason(&reason);
+            observation.set_fallback_reason(&reason);
             let mut metadata = lab_offload_metadata(
                 &plan,
                 selection.source.metadata_value(),
@@ -411,7 +417,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 None,
                 Some(&reason),
             );
-            attach_lab_offload_overhead(&mut metadata, &overhead);
+            attach_offload_selection(&mut metadata, &observation);
             record_local_outcome(&request)?;
             return Ok(LabOffloadOutcome::RunLocal {
                 metadata: Some(metadata),
@@ -427,7 +433,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         contract,
         plan,
         messages,
-        overhead,
+        observation,
         runner_status,
     )
 }

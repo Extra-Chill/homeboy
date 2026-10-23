@@ -577,16 +577,20 @@ mod tests {
                 .get_run(&run_id)
                 .expect("read run")
                 .expect("run");
-            let phases = run.metadata_json["phase_history"]
-                .as_array()
-                .expect("phase history")
-                .iter()
-                .filter_map(|entry| entry["phase"].as_str())
-                .collect::<Vec<_>>();
 
-            assert_eq!(phases, ["admitted", "transfer", "failed"]);
             assert_eq!(run.metadata_json["remote_mutation_started"], true);
             assert_eq!(run.status, "error");
+            let report = ObservationStore::open_initialized()
+                .expect("store")
+                .phase_spans(&run_id)
+                .expect("spans");
+            assert_eq!(
+                report
+                    .span("stage.deploy.transfer")
+                    .expect("transfer")
+                    .status,
+                homeboy_core::phase_timing::PhaseStatus::Failed
+            );
         });
     }
 
@@ -890,13 +894,7 @@ mod tests {
                 .get_run(&run_id)
                 .expect("read run")
                 .expect("run");
-            let phases = run.metadata_json["phase_history"]
-                .as_array()
-                .expect("phase history")
-                .iter()
-                .filter_map(|entry| entry["phase"].as_str())
-                .collect::<Vec<_>>();
-            assert_eq!(phases, ["admitted", "transfer", "extract", "verify"]);
+
             assert_eq!(run.metadata_json["remote_mutation_started"], true);
         });
     }

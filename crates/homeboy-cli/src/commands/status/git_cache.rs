@@ -13,7 +13,7 @@ use homeboy::core::git;
 use homeboy_deploy::{self as deploy, ReleaseState};
 use homeboy_release::release::version;
 
-use super::types::{StatusTimer, UnreleasedMerge, UpstreamDrift};
+use super::types::{StatusBudget, UnreleasedMerge, UpstreamDrift};
 
 pub(super) struct ProjectRemoteVersionProbe {
     pub(super) result: deploy::RemoteVersionProbeResult,
@@ -42,7 +42,7 @@ impl StatusGitCache {
 }
 
 impl StatusGitCache {
-    pub(super) fn fetch_origin_tags_for(&mut self, path: &str, timer: &StatusTimer) {
+    pub(super) fn fetch_origin_tags_for(&mut self, path: &str, timer: &StatusBudget) {
         let cache_key = upstream_drift_cache_key(path, timer);
         if self.refresh && self.fetched_tags.insert(cache_key) {
             fetch_origin_tags(path, timer);
@@ -52,7 +52,7 @@ impl StatusGitCache {
     pub(super) fn fetch_upstream_drift_for(
         &mut self,
         component: &component::Component,
-        timer: &StatusTimer,
+        timer: &StatusBudget,
     ) -> Option<UpstreamDrift> {
         let path = &component.local_path;
         let cache_key = component_cache_key(component);
@@ -77,7 +77,7 @@ impl StatusGitCache {
     pub(super) fn release_state_for(
         &mut self,
         component: &component::Component,
-        timer: &StatusTimer,
+        timer: &StatusBudget,
     ) -> Option<&ReleaseState> {
         let cache_key = component_cache_key(component);
         if !self.release_states.contains_key(&cache_key) {
@@ -96,7 +96,7 @@ impl StatusGitCache {
     fn baseline_for(
         &mut self,
         component: &component::Component,
-        timer: &StatusTimer,
+        timer: &StatusBudget,
     ) -> Option<&git::BaselineInfo> {
         let cache_key = component_cache_key(component);
         if !self.baselines.contains_key(&cache_key) {
@@ -138,7 +138,7 @@ impl StatusGitCache {
             .insert(phase);
     }
 
-    fn default_origin_branch_for(&mut self, path: &str, timer: &StatusTimer) -> Option<&str> {
+    fn default_origin_branch_for(&mut self, path: &str, timer: &StatusBudget) -> Option<&str> {
         let cache_key = upstream_drift_cache_key(path, timer);
         if !self.origin_branches.contains_key(&cache_key) {
             self.origin_branches
@@ -153,7 +153,7 @@ impl StatusGitCache {
     pub(super) fn detect_unreleased_merges_for(
         &mut self,
         comp: &component::Component,
-        timer: &StatusTimer,
+        timer: &StatusBudget,
     ) -> Option<UnreleasedMerge> {
         let path = &comp.local_path;
 
@@ -184,7 +184,7 @@ impl StatusGitCache {
     }
 }
 
-pub(super) fn upstream_drift_cache_key(path: &str, timer: &StatusTimer) -> String {
+pub(super) fn upstream_drift_cache_key(path: &str, timer: &StatusBudget) -> String {
     timer
         .remaining()
         .and_then(|_| local_probe_timeout(timer))
@@ -203,13 +203,13 @@ pub(super) fn component_cache_key(component: &component::Component) -> String {
 const STATUS_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const STATUS_LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn local_probe_timeout(timer: &StatusTimer) -> Option<Duration> {
+fn local_probe_timeout(timer: &StatusBudget) -> Option<Duration> {
     timer
         .remaining()
         .map(|remaining| remaining.min(STATUS_LOCAL_GIT_TIMEOUT))
 }
 
-fn fetch_origin_tags(path: &str, timer: &StatusTimer) {
+fn fetch_origin_tags(path: &str, timer: &StatusBudget) {
     // Best-effort, timeout-bounded fetch — silently proceeds on no remote,
     // network issue, or timeout, using whatever local tags are already present.
     let Some(remaining) = timer.remaining() else {
@@ -226,7 +226,7 @@ fn fetch_origin_tags(path: &str, timer: &StatusTimer) {
 
 fn get_upstream_drift(
     component: &component::Component,
-    timer: &StatusTimer,
+    timer: &StatusBudget,
 ) -> Option<UpstreamDrift> {
     let path = &component.local_path;
     let snapshot = git::get_repo_snapshot_with_timeout(path, local_probe_timeout(timer)?).ok()?;
@@ -257,7 +257,7 @@ fn detect_baseline_with_deadline(
     path: &str,
     current_version: Option<&str>,
     tag_prefix: Option<&str>,
-    timer: &StatusTimer,
+    timer: &StatusBudget,
 ) -> Result<git::BaselineInfo, ()> {
     let Some(tag) = latest_merged_release_tag(path, tag_prefix, timer)? else {
         return Ok(git::BaselineInfo {
@@ -310,7 +310,7 @@ fn detect_baseline_with_deadline(
 fn latest_merged_release_tag(
     path: &str,
     tag_prefix: Option<&str>,
-    timer: &StatusTimer,
+    timer: &StatusBudget,
 ) -> Result<Option<String>, ()> {
     let tags = git::run_git_with_env_timeout(
         std::path::Path::new(path),
@@ -337,7 +337,7 @@ fn latest_merged_release_tag(
 fn release_state_for_baseline(
     component: &component::Component,
     baseline: &git::BaselineInfo,
-    timer: &StatusTimer,
+    timer: &StatusBudget,
 ) -> Option<ReleaseState> {
     let range = baseline
         .reference
@@ -422,7 +422,7 @@ pub(super) fn log_unreleased_merges(merges: &[UnreleasedMerge]) {
 ///
 /// Precedence matches the deploy planner: `origin/HEAD` symbolic ref first, then
 /// the conventional `origin/main` / `origin/trunk` / `origin/master` fallbacks.
-pub(super) fn default_origin_branch(path: &str, timer: &StatusTimer) -> Option<String> {
+pub(super) fn default_origin_branch(path: &str, timer: &StatusBudget) -> Option<String> {
     if let Ok(symbolic) = git::run_git_with_env_timeout(
         std::path::Path::new(path),
         &[
@@ -463,7 +463,7 @@ pub(super) fn default_origin_branch(path: &str, timer: &StatusTimer) -> Option<S
 pub(super) fn fetch_project_remote_versions(
     project_id: &str,
     components: &[component::Component],
-    timer: &StatusTimer,
+    timer: &StatusBudget,
 ) -> ProjectRemoteVersionProbe {
     match deploy::fetch_project_remote_versions_with_deadline(
         project_id,

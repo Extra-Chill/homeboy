@@ -20,13 +20,13 @@ pub(crate) fn run_runner_resident_lab_offload(
     runner_workspace_root: &str,
     homeboy_path: &str,
     runner_status: &RunnerStatusReport,
-    mut overhead: LabOffloadOverhead,
+    mut observation: OffloadObservation,
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, runner_status);
-    let managed_sources_timer = overhead.phase(LabOffloadPhase::SourceMaterialization);
+    let managed_sources_timer = observation.timer.start("stage.lab.materialize");
     let source_syncs = refresh_managed_runner_sources(runner_id, runner_workspace_root)?;
-    managed_sources_timer.finish();
+    drop(managed_sources_timer);
     if source_syncs.is_empty() {
         plan = with_step(
             plan,
@@ -204,7 +204,7 @@ pub(crate) fn run_runner_resident_lab_offload(
         admission: None,
         plan,
         messages,
-        overhead,
+        observation,
         mirror_evidence,
         print_handoff,
         detach_after_handoff: false,
