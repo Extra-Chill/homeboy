@@ -2355,7 +2355,11 @@ fn requires_durable_lab_projection(artifact: &AgentTaskArtifact) -> bool {
     crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
         || matches!(
             artifact.kind.as_str(),
-            "transcript" | "result" | "agent-result" | "agent_result"
+            "transcript"
+                | "result"
+                | "agent-result"
+                | "agent_result"
+                | crate::agent_task_promotion::CANDIDATE_BUNDLE_ARTIFACT_KIND
         )
 }
 

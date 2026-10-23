@@ -815,6 +815,54 @@ fn apply_promotion_patch(
     apply_patch(request, materialized_workspace)
 }
 
+fn lab_candidate_bundle(
+    outcome: &AgentTaskOutcome,
+) -> Option<(&crate::agent_task::AgentTaskCandidate, &AgentTaskArtifact)> {
+    let bundle = outcome.artifacts.iter().find(|artifact| {
+        artifact.kind == super::candidate_bundle::CANDIDATE_BUNDLE_ARTIFACT_KIND
+    })?;
+    Some((outcome.candidate.as_ref()?, bundle))
+}
+
+/// Fetch and verify the runner's candidate commit into the destination, then
+/// make the destination worktree exactly its tree (#16303).
+fn materialize_lab_candidate(
+    options: &AgentTaskPromotionRequest,
+    outcome: &AgentTaskOutcome,
+    candidate: &crate::agent_task::AgentTaskCandidate,
+    bundle: &AgentTaskArtifact,
+    materialized_workspace: Option<&Path>,
+    observation_store: &homeboy_core::observation::ObservationStore,
+) -> Result<AgentTaskPromotionWorkspace> {
+    let run_id = options.source_run_id.as_deref();
+    let bundle = resolve_artifact_path(
+        bundle,
+        &outcome.task_id,
+        run_id,
+        options.source_path.as_deref(),
+        observation_store,
+    )?;
+    let path =
+        resolve_promotion_target_path(&options.to_worktree, materialized_workspace, None, None)?
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "to_worktree",
+                    "candidate commit promotion requires a Git destination worktree",
+                    Some(options.to_worktree.clone()),
+                    None,
+                )
+            })?;
+    let run_id = run_id.unwrap_or("unrecorded-run");
+    super::candidate_bundle::fetch_candidate_bundle(&path, &bundle, run_id, candidate)?;
+    if !options.dry_run {
+        super::candidate_bundle::materialize_candidate_tree(&path, candidate)?;
+    }
+    Ok(AgentTaskPromotionWorkspace {
+        path,
+        command_evidence: Vec::new(),
+    })
+}
+
 fn materialized_promotion_workspace() -> Result<Option<PathBuf>> {
     materialized_promotion_workspace_in_context(
         crate::agent_task_lifecycle::execution_runner_id().as_deref(),
@@ -1175,19 +1223,30 @@ fn promote_with_provider_and_checkpoint_internal(
         let normalized_patch_file = write_normalized_patch(&normalized_patch.content)?;
         let provider_patch_path = normalized_patch_file.path().display().to_string();
         emit_promotion_progress("apply", None, Some("applying patch".to_string()));
-        let target = apply_promotion_patch(
-            AgentTaskPromotionApplyRequest {
-                schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-                to_workspace: options.to_worktree.clone(),
-                patch: Some(normalized_patch.content.clone()),
-                patch_path: provider_patch_path,
-                changed_files: changed_files.clone(),
-                gate_feedback_baseline: destination_baseline,
-                dry_run: options.dry_run,
-                trusted_unpushed_candidate_destination: None,
-            },
-            materialized_workspace.as_deref(),
-        )?;
+        let target = match lab_candidate_bundle(&outcome) {
+            // A Lab Cook hands back its candidate commit; never its patch.
+            Some((candidate, bundle)) => materialize_lab_candidate(
+                &options,
+                &outcome,
+                candidate,
+                bundle,
+                materialized_workspace.as_deref(),
+                observation_store,
+            )?,
+            None => apply_promotion_patch(
+                AgentTaskPromotionApplyRequest {
+                    schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+                    to_workspace: options.to_worktree.clone(),
+                    patch: Some(normalized_patch.content.clone()),
+                    patch_path: provider_patch_path,
+                    changed_files: changed_files.clone(),
+                    gate_feedback_baseline: destination_baseline,
+                    dry_run: options.dry_run,
+                    trusted_unpushed_candidate_destination: None,
+                },
+                materialized_workspace.as_deref(),
+            )?,
+        };
         command_evidence.extend(target.command_evidence);
         if !options.dry_run {
             applied_worktree_path = Some(target.path);
@@ -3016,6 +3075,107 @@ mod lab_gate_binding_tests {
             assert_eq!(checkout.identity().commit, candidate.candidate_sha);
             assert_eq!(checkout.identity().tree, candidate.tree_sha);
             assert_eq!(commit_objects(repo), commits_before);
+        });
+    }
+
+    #[test]
+    fn lab_candidate_bundle_materializes_the_commit_tree_and_gates_it_without_a_new_commit() {
+        with_git_candidate(|destination, store| {
+            let runner = destination.with_file_name("runner");
+            let clone = [
+                "clone",
+                "-q",
+                destination.to_str().unwrap(),
+                runner.to_str().unwrap(),
+            ];
+            homeboy_core::test_support::run_git_fixture_command(destination, &clone);
+            for (key, value) in [
+                ("user.name", "Runner"),
+                ("user.email", "runner@example.invalid"),
+            ] {
+                homeboy_core::test_support::run_git_fixture_command(
+                    &runner,
+                    &["config", key, value],
+                );
+            }
+            std::fs::write(runner.join("candidate.txt"), "changed\n").unwrap();
+            std::fs::write(runner.join("new.txt"), "untracked\n").unwrap();
+            let candidate = harvested_candidate(&runner);
+            let bundle = runner.with_file_name("candidate.bundle");
+            let exclude = format!("^{}", candidate.base_sha);
+            let bundle_path = bundle.display().to_string();
+            let create = [
+                "bundle",
+                "create",
+                "-q",
+                &bundle_path,
+                "refs/homeboy/candidates/fixture",
+                &exclude,
+            ];
+            git_output(&runner, &create).unwrap();
+            let branch = git_output(destination, &["symbolic-ref", "HEAD"]).unwrap();
+            let outcome = AgentTaskOutcome {
+                task_id: "lab-task".to_string(),
+                candidate: Some(candidate.clone()),
+                artifacts: vec![AgentTaskArtifact {
+                    id: "candidate-bundle".to_string(),
+                    kind: super::super::CANDIDATE_BUNDLE_ARTIFACT_KIND.to_string(),
+                    path: Some(bundle_path),
+                    ..AgentTaskArtifact::default()
+                }],
+                ..AgentTaskOutcome::default()
+            };
+            let options =
+                super::super::tests::promotion_options(&destination.display().to_string());
+            let (recorded, bundle) = lab_candidate_bundle(&outcome).expect("Lab candidate");
+
+            let target =
+                materialize_lab_candidate(&options, &outcome, recorded, bundle, None, store)
+                    .unwrap();
+
+            assert_eq!(target.path, std::fs::canonicalize(destination).unwrap());
+            assert_eq!(
+                git_output(destination, &["symbolic-ref", "HEAD"]).unwrap(),
+                branch
+            );
+            assert_eq!(
+                git_output(destination, &["rev-parse", "HEAD"]).unwrap(),
+                candidate.base_sha
+            );
+            let index = tempfile::NamedTempFile::new().unwrap();
+            let worktree_tree = Command::new("sh")
+                .args([
+                    "-c",
+                    "git read-tree HEAD && git add --all && git write-tree",
+                ])
+                .env("GIT_INDEX_FILE", index.path())
+                .current_dir(destination)
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&worktree_tree.stdout).trim(),
+                candidate.tree_sha
+            );
+            let commits_before = commit_objects(destination);
+            assert!(commits_before.contains(&candidate.candidate_sha));
+
+            let checkout = ImmutableCandidateCheckout::materialize(
+                destination,
+                "lab-candidate",
+                None,
+                Some(&candidate),
+                store,
+            )
+            .unwrap()
+            .expect("Git destination materializes a gate checkout");
+
+            assert_eq!(checkout.identity().commit, candidate.candidate_sha);
+            assert_eq!(
+                git_output(&checkout.path, &["rev-parse", "HEAD"]).unwrap(),
+                candidate.candidate_sha
+            );
+            drop(checkout);
+            assert_eq!(commit_objects(destination), commits_before);
         });
     }
 
