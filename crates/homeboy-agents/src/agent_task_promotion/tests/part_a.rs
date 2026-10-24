@@ -3,7 +3,7 @@
 
 use super::super::promote::{
     normalize_promotion_patch, promote_with_provider, promote_with_provider_and_checkpoint,
-    promote_with_provider_in_observation_store, resume_promoted_patch,
+    promote_with_provider_in_observation_store, resume_promoted_patch, CandidateAdmissionError,
 };
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
@@ -476,6 +476,148 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
             .and_then(Value::as_str),
         Some("fork_replacement")
     );
+}
+
+/// A destination that moved after apply (here: the applied candidate plus an
+/// extra commit) is no longer the checkpointed candidate. Resume refuses it
+/// with the typed tree mismatch and the `fork_replacement` recovery, before
+/// any gate runs (#16303). The same checkpoint resumes, and does run its gate,
+/// once the destination is back at the candidate tree.
+#[test]
+fn resume_refuses_a_destination_moved_past_the_checkpointed_candidate_tree() {
+    let _home = gate_home();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let worktree_path = temp.path().join("managed-target");
+    std::fs::create_dir(&worktree_path).expect("create target");
+    git(&worktree_path, &["init"]);
+    git(
+        &worktree_path,
+        &["config", "user.email", "test@example.com"],
+    );
+    git(&worktree_path, &["config", "user.name", "Test"]);
+    std::fs::create_dir_all(worktree_path.join("src")).expect("source dir");
+    std::fs::write(worktree_path.join("src/lib.rs"), "old\n").expect("base source");
+    git(&worktree_path, &["add", "."]);
+    git(&worktree_path, &["commit", "-m", "base"]);
+    git(&worktree_path, &["branch", "-M", "main"]);
+    let remote = temp.path().join("origin.git");
+    git(
+        temp.path(),
+        &["init", "--bare", remote.to_str().expect("remote path")],
+    );
+    git(
+        &worktree_path,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    git(&worktree_path, &["push", "-u", "origin", "main"]);
+    let base_head = git_head(&worktree_path, "HEAD");
+    let candidate = harvest_patch_candidate(&worktree_path, VALID_PATCH);
+    let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &candidate);
+    // The gate leaves a marker outside the destination, so the test can tell
+    // whether resume ran it.
+    let gate_marker = temp.path().join("gate-ran");
+    let request = || AgentTaskPromotionRequest {
+        source: source.clone(),
+        source_run_id: Some("moved-destination-run".to_string()),
+        source_path: Some(source_path.clone()),
+        source_worktree_path: None,
+        base_ref: Some("main".to_string()),
+        task_base_sha: None,
+        candidate_ref: None,
+        to_worktree: worktree_path.display().to_string(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        gates: VerifyGateOptions {
+            verify: vec![format!("touch '{}'", gate_marker.display())],
+            private_verify: Vec::new(),
+            private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            ..Default::default()
+        },
+        provider_invocation: None,
+        repository_integrity_evidence: None,
+    };
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(worktree_path.clone()),
+        verify_transport_error: true,
+        ..Default::default()
+    };
+    let mut checkpoints = Vec::new();
+    promote_with_provider_and_checkpoint(request(), &mut provider, &mut |report| {
+        checkpoints.push(report.clone());
+        Ok(())
+    })
+    .expect_err("gate transport failure propagates after checkpoint");
+    assert_eq!(checkpoints.len(), 1);
+    assert!(
+        !gate_marker.exists(),
+        "the fake provider ran the promotion gates"
+    );
+    let checkpoint = serde_json::to_value(&checkpoints[0]).expect("checkpoint value");
+    assert_eq!(
+        checkpoint["provenance"]["candidate_commit"],
+        serde_json::to_value(&candidate).expect("candidate JSON"),
+        "the checkpoint records the candidate commit"
+    );
+
+    // The destination moves on after apply: the applied candidate is
+    // committed and another commit lands on top of it.
+    git(&worktree_path, &["add", "-A"]);
+    git(
+        &worktree_path,
+        &["commit", "-m", "commit applied candidate"],
+    );
+    std::fs::write(worktree_path.join("later.rs"), "later\n").expect("later change");
+    git(&worktree_path, &["add", "-A"]);
+    git(&worktree_path, &["commit", "-m", "later commit"]);
+    let moved_tree = git_head(&worktree_path, "HEAD^{tree}");
+    assert_ne!(moved_tree, candidate.tree_sha);
+
+    let error = resume_promoted_patch(request(), &worktree_path, &checkpoint)
+        .expect_err("a moved destination is not the checkpointed candidate");
+    let Some(CandidateAdmissionError::TreeMismatch {
+        candidate_sha,
+        candidate_tree,
+        actual_tree,
+    }) = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<CandidateAdmissionError>())
+    else {
+        panic!("typed candidate tree mismatch: {error:?}");
+    };
+    assert_eq!(candidate_sha, &candidate.candidate_sha);
+    assert_eq!(candidate_tree, &candidate.tree_sha);
+    assert_eq!(actual_tree, &moved_tree);
+    assert_eq!(error.details["reason"], "tree_mismatch");
+    assert_eq!(
+        error
+            .details
+            .pointer("/recovery/action")
+            .and_then(Value::as_str),
+        Some("fork_replacement")
+    );
+    assert!(
+        !gate_marker.exists(),
+        "resume ran gates against a moved destination"
+    );
+
+    // Positive control: back at the candidate tree, the same checkpoint
+    // resumes and its gate does run.
+    git(&worktree_path, &["reset", "--hard", &base_head]);
+    git(
+        &worktree_path,
+        &["checkout", &candidate.candidate_sha, "--", "."],
+    );
+    git(&worktree_path, &["reset"]);
+    let resumed = resume_promoted_patch(request(), &worktree_path, &checkpoint)
+        .expect("resume the exact applied candidate");
+    assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
+    assert!(gate_marker.exists(), "resume ran the checkpointed gate");
 }
 
 #[test]
