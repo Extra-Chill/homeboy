@@ -372,27 +372,6 @@ impl NativeWorktreeProvider {
         Ok(None)
     }
 
-    pub fn plan(&self, intent: &WorktreeProvisionIntent) -> Result<WorktreeProvisionPlan> {
-        let intent = native_provision_intent(intent)?;
-        if let Some(ownership) = self.resolve(&intent.handle)? {
-            return Ok(WorktreeProvisionPlan::Admitted(
-                WorktreeProvisionDestination { ownership },
-            ));
-        }
-        Ok(WorktreeProvisionPlan::Planned(
-            WorktreeProvisionDestination {
-                ownership: WorktreeOwnership {
-                    handle: intent.handle.clone(),
-                    path: worktree::planned_create_path(&intent.repo, &intent.head, &intent.base)?,
-                    kind: WorktreeWorkspaceKind::TaskWorktree,
-                    branch: Some(intent.head.clone()),
-                    task_url: intent.task_url.clone(),
-                    provenance: None,
-                },
-            },
-        ))
-    }
-
     pub fn ensure(
         &self,
         intent: &WorktreeProvisionIntent,
@@ -593,8 +572,33 @@ pub fn ensure_worktree_provision(
     NativeWorktreeProvider.ensure(intent, lifecycle)
 }
 
-pub fn plan_worktree_provision(intent: &WorktreeProvisionIntent) -> Result<WorktreeProvisionPlan> {
-    NativeWorktreeProvider.plan(intent)
+pub fn plan_worktree_provision(
+    intent: &WorktreeProvisionIntent,
+    source: (&str, &Path),
+) -> Result<WorktreeProvisionPlan> {
+    let intent = native_provision_intent(intent)?;
+    if let Some(ownership) = NativeWorktreeProvider.resolve(&intent.handle)? {
+        return Ok(WorktreeProvisionPlan::Admitted(
+            WorktreeProvisionDestination { ownership },
+        ));
+    }
+    Ok(WorktreeProvisionPlan::Planned(
+        WorktreeProvisionDestination {
+            ownership: WorktreeOwnership {
+                handle: intent.handle.clone(),
+                path: worktree::planned_create_path(
+                    source.0,
+                    source.1,
+                    &intent.head,
+                    &intent.base,
+                )?,
+                kind: WorktreeWorkspaceKind::TaskWorktree,
+                branch: Some(intent.head.clone()),
+                task_url: intent.task_url.clone(),
+                provenance: None,
+            },
+        },
+    ))
 }
 
 pub fn finalize_worktree(
@@ -638,7 +642,8 @@ mod tests {
             task_url: None,
         };
 
-        let error = plan_worktree_provision(&intent).expect_err("mismatched handle must fail");
+        let error = plan_worktree_provision(&intent, ("fixture", Path::new(".")))
+            .expect_err("mismatched handle must fail");
 
         assert_eq!(error.details["field"], "to_worktree");
         assert!(error.message.contains("expected `fixture@fix-13940`"));
@@ -853,7 +858,7 @@ mod tests {
             std::fs::remove_dir_all(&path).expect("simulate deleted checkout");
 
             assert!(matches!(
-                plan_worktree_provision(&intent).expect("restoration plan"),
+                plan_worktree_provision(&intent, ("fixture", &source)).expect("restoration plan"),
                 WorktreeProvisionPlan::Planned(_)
             ));
             assert!(!path.exists(), "planning remains read-only");

@@ -592,10 +592,13 @@ pub fn resolve_default_remote_until(git_root: &Path, deadline: Instant) -> Resul
 /// Resolve the cached remote-tracking default branch under a shared deadline.
 ///
 /// This preserves [`default_remote_branch`]'s local-ref policy for callers that
-/// must not contact a remote, while making both remote selection and each Git
-/// probe obey the supplied deadline.
-pub fn default_remote_branch_until(git_root: &Path, deadline: Instant) -> Result<Option<String>> {
-    let remote = resolve_default_remote_until(git_root, deadline)?;
+/// must not contact a remote. The caller supplies the resolved remote; each Git
+/// probe obeys the supplied deadline.
+pub fn default_remote_branch_until(
+    git_root: &Path,
+    remote: &str,
+    deadline: Instant,
+) -> Result<Option<String>> {
     let head_ref = format!("refs/remotes/{remote}/HEAD");
     let output = run_git_output_with_env_timeout(
         git_root,

@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::component::{self, TargetSpec};
 use crate::error::{Error, Result};
 use crate::git;
 
@@ -183,29 +182,15 @@ pub fn classify_local_branch(
 /// worktree creation would adopt it. Unresolvable components are unclassified
 /// so creation reports its own, more specific error.
 pub fn classify_component_branch(
-    component_id: &str,
+    source: &Path,
     handle: &str,
     branch: &str,
     base: &str,
 ) -> Result<DestinationFreshness> {
-    let Ok(target) = component::resolve_target(TargetSpec {
-        component_id: Some(component_id),
-        path_override: None,
-        project: None,
-        capability: None,
-        allow_synthetic: true,
-        accept_bare_directory: true,
-        ..TargetSpec::default()
-    }) else {
-        return Ok(DestinationFreshness::Unclassified);
-    };
-    let Ok(source) = super::queue_ops::source_checkout_for_worktree(&target) else {
-        return Ok(DestinationFreshness::Unclassified);
-    };
-    let classification = classify_local_branch(&source, handle, branch, base)?;
+    let classification = classify_local_branch(source, handle, branch, base)?;
     if !matches!(classification, DestinationFreshness::Unclassified) {
         // Only an existing local branch can be someone's PR head to preserve.
-        super::convergence::require_issue_destination_without_pr(&source, branch)?;
+        super::convergence::require_issue_destination_without_pr(source, branch)?;
     }
     Ok(classification)
 }
@@ -216,7 +201,7 @@ pub fn classify_component_branch(
 /// during preview. Uncommitted changes alone are left to Cook admission, which
 /// owns reuse of a Cook's own in-progress candidate.
 pub fn refuse_stale_derived_destination(
-    component_id: &str,
+    source: Option<&Path>,
     handle: &str,
     branch: &str,
     base: &str,
@@ -234,7 +219,10 @@ pub fn refuse_stale_derived_destination(
             classify_worktree_destination(Path::new(&record.worktree_path), handle, branch, base)?
         }
         Some(_) => DestinationFreshness::Unclassified,
-        None => classify_component_branch(component_id, handle, branch, base)?,
+        None => match source {
+            Some(source) => classify_component_branch(source, handle, branch, base)?,
+            None => DestinationFreshness::Unclassified,
+        },
     };
     refuse_foreign_history(classification)
 }

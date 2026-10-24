@@ -276,7 +276,7 @@ fn parse_issues(issues: &[String]) -> Result<Vec<IssueRef>> {
 pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value> {
     let issues = parse_issues(&args.issues)?;
     let repo = registered_repo(&args.repo)?;
-    let (repository, component) = super::run::cook_repository_names_for_selection(&repo, None)?;
+    let (repository, component) = super::run::cook_repository_names_for_selection(&repo)?;
     let path =
         super::run::cook_component_path_for_repository_name(&component)?.ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -286,14 +286,17 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
                 None,
             )
         })?;
-    let resolution = resolve_default_branch(DefaultBranchRequest {
-        explicit_base: args.base.as_deref(),
-        explicit_from: None,
-        workspace: None,
-        component: Some(&path),
-        destination: None,
-        compatibility_fallback: None,
-    })?;
+    let resolution = resolve_default_branch(
+        DefaultBranchRequest {
+            explicit_base: args.base.as_deref(),
+            explicit_from: None,
+            workspace: None,
+            component: Some(&path),
+            destination: None,
+            compatibility_fallback: None,
+        },
+        None,
+    )?;
     // Resolve the base once: every child is cut from this exact commit.
     let _ = git(&path, &["fetch", "--quiet", "origin", &resolution.base]);
     let base_sha = git(

@@ -14,7 +14,8 @@ pub(in crate::commands::agent_task) use super::super::run::CookContinueArgs;
 pub(in crate::commands::agent_task) use super::super::run::{
     continue_cook_with, resume, retry, retry_with, run_cook_with_executor,
     run_cook_with_executor_and_dispatcher, run_loaded_plan, run_resume_with_executor,
-    run_submitted, run_submitted_with_executor, validate_cook_request, validate_plan,
+    run_submitted, run_submitted_with_executor, validate_cook_request_with_provenance,
+    validate_plan,
 };
 pub(in crate::commands::agent_task) use super::super::status::{
     cancel, diagnose, evidence, logs, reconcile_run, replay_provider_boundary, status,
