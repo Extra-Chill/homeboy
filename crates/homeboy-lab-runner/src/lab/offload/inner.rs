@@ -973,19 +973,20 @@ pub(crate) fn exec_lab_context(
         });
     }
 
-    let promotion_intent = promotion_handoff_intent(request.normalized_args, &exec_output.stdout)?;
-    if request.capture_patch && (exit_code == 0 || promotion_intent.is_some()) {
-        let apply_output = match promotion_intent.as_ref() {
-            Some(intent) => apply_lab_promotion_patch(&exec_output, intent)?,
-            None => apply_lab_offload_patch(&exec_output)?,
-        };
-        let Some(apply_output) = apply_output else {
-            return Err(missing_mutation_patch_error(
+    let cook_promotion = request
+        .normalized_args
+        .windows(2)
+        .any(|args| args == ["agent-task", "promote"]);
+    if cook_promotion {
+        apply_lab_candidate(&exec_output)?;
+    } else if request.capture_patch && exit_code == 0 {
+        let apply_output = apply_lab_offload_patch(&exec_output)?.ok_or_else(|| {
+            missing_mutation_patch_error(
                 request.normalized_args,
                 request.mutation_flag,
                 &exec_output,
-            ));
-        };
+            )
+        })?;
         context.plan = with_lab_apply_patch_step(context.plan, Some(apply_output));
     }
     let artifact_import_started = std::time::Instant::now();
@@ -1172,51 +1173,6 @@ where
         id: matching.remove(0),
         daemon_generation,
     })
-}
-
-fn promotion_handoff_intent(args: &[String], stdout: &str) -> Result<Option<PromotionPatchIntent>> {
-    if !args
-        .windows(2)
-        .any(|args| args == ["agent-task", "promote"])
-    {
-        return Ok(None);
-    }
-    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|error| {
-        Error::validation_invalid_json(
-            error,
-            Some("portable promotion result".to_string()),
-            Some(stdout.to_string()),
-        )
-    })?;
-    let report = value.get("data").unwrap_or(&value);
-    let status = report.get("status").and_then(|value| value.as_str());
-    if !matches!(status, Some("applied" | "gate_failed")) {
-        return Ok(None);
-    }
-    let changed_files = report
-        .get("changed_files")
-        .and_then(|files| files.as_array())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "promotion_handoff.changed_files",
-                "portable promotion result did not declare changed files for safe controller handback",
-                None,
-                None,
-            )
-        })?
-        .iter()
-        .map(|file| {
-            file.as_str().map(str::to_string).ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "promotion_handoff.changed_files",
-                    "portable promotion result contains a non-string changed file",
-                    None,
-                    None,
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Some(PromotionPatchIntent { changed_files }))
 }
 
 fn final_preflight_homeboy_path<'a>(

@@ -1407,6 +1407,16 @@ pub fn record_remote_dispatch_failure_in_store(
     );
     metadata.insert("provider_run_ids".to_string(), json!(provider_run_ids));
 
+    if aggregate
+        .outcomes
+        .iter()
+        .any(|outcome| outcome.candidate.is_some())
+    {
+        let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
+        crate::agent_task_promotion::candidate_bundle::fetch_run_candidates(
+            &record, &plan, &aggregate,
+        )?;
+    }
     if needs_atomic_terminal_commit {
         lifecycle_store.import_record_with_aggregate(&mut record, &aggregate)?;
     } else {
@@ -2355,7 +2365,7 @@ fn requires_durable_lab_projection(artifact: &AgentTaskArtifact) -> bool {
     crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
         || matches!(
             artifact.kind.as_str(),
-            "transcript" | "result" | "agent-result" | "agent_result"
+            "transcript" | "result" | "agent-result" | "agent_result" | "git_bundle"
         )
 }
 

@@ -826,23 +826,7 @@ fn promote_candidate(
             None,
         )
     })?;
-    validate_candidate_commit(&path, commit)?;
-    let head = git_output(&path, &["rev-parse", "HEAD"])?;
-    if head != commit.base_sha {
-        return Err(CandidateDestinationMoved {
-            expected: commit.base_sha.clone(),
-            actual: head,
-        }
-        .into());
-    }
-    if !git_output(&path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "to_worktree",
-            "candidate destination must be clean",
-            None,
-            None,
-        ));
-    }
+    super::candidate_bundle::validate_destination(&path, commit)?;
     let base_tree = git_output(
         &path,
         &["rev-parse", &format!("{}^{{tree}}", commit.base_sha)],
@@ -868,12 +852,7 @@ fn promote_candidate(
     });
     if !options.dry_run {
         capture_gate_verified_base(&path, options.base_ref.as_deref())?;
-        // Replace the index and working tree, not HEAD: the destination branch
-        // remains checked out for the existing finalization contract.
-        git_output(
-            &path,
-            &["read-tree", "--reset", "-u", &commit.candidate_sha],
-        )?;
+        super::materialize_candidate_tree(&path, commit)?;
     }
     let applied_worktree_path = (!options.dry_run).then_some(path);
     let command_evidence = Vec::new();
@@ -2788,7 +2767,7 @@ impl Drop for ImmutableCandidateCheckout {
     }
 }
 
-fn git_output(path: &Path, args: &[&str]) -> Result<String> {
+pub(super) fn git_output(path: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(path)

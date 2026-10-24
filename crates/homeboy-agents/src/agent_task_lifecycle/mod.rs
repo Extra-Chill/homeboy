@@ -35,7 +35,7 @@ pub mod activity_provider;
 pub mod agent_task_handoff_event;
 pub mod agent_task_lifecycle_event;
 mod aggregate_transition;
-mod artifact_materialization;
+pub(crate) mod artifact_materialization;
 mod cancellation;
 mod control_plane_identities;
 pub mod controller_pin_reference_provider;
