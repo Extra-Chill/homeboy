@@ -1207,14 +1207,12 @@ fn prepare_local_review_dependencies(
         ..Default::default()
     };
     let deadline_ms = policy.timeout.as_millis();
-    let started = Instant::now();
     emit_local_review_setup_progress(LocalReviewSetupProgress {
         phase: "dependency_setup",
         status: "running",
         component: &component.id,
         provider: None,
         current: None,
-        elapsed_ms: 0,
         last_progress_ms_ago: None,
         deadline_ms,
         liveness: None,
@@ -1234,7 +1232,6 @@ fn prepare_local_review_dependencies(
                 component: &component_id,
                 provider: Some(&progress.provider_id),
                 current: progress.current.as_deref(),
-                elapsed_ms: progress.elapsed_ms,
                 last_progress_ms_ago: progress.last_progress_ms_ago,
                 deadline_ms,
                 liveness: None,
@@ -1273,7 +1270,6 @@ fn prepare_local_review_dependencies(
             component: &component.id,
             provider: Some(&failed.provider_id),
             current: None,
-            elapsed_ms: started.elapsed().as_millis(),
             last_progress_ms_ago: None,
             deadline_ms,
             liveness: None,
@@ -1307,7 +1303,6 @@ fn prepare_local_review_dependencies(
         component: &component.id,
         provider: None,
         current: None,
-        elapsed_ms: started.elapsed().as_millis(),
         last_progress_ms_ago: None,
         deadline_ms,
         liveness: Some(homeboy_engine_primitives::command::CommandLiveness::Output),
@@ -1411,7 +1406,6 @@ struct LocalReviewSetupProgress<'a> {
     component: &'a str,
     provider: Option<&'a str>,
     current: Option<&'a str>,
-    elapsed_ms: u128,
     last_progress_ms_ago: Option<u128>,
     deadline_ms: u128,
     /// Set on completed setup: the extension stage that follows emits no
@@ -1429,7 +1423,6 @@ fn emit_local_review_setup_progress(progress: LocalReviewSetupProgress<'_>) {
             "status": progress.status,
             "component": progress.component,
             "provider": progress.provider,
-            "elapsed_ms": progress.elapsed_ms,
             "last_progress_ms_ago": progress.last_progress_ms_ago,
             "deadline_ms": progress.deadline_ms,
             "liveness": progress.liveness,
@@ -1451,13 +1444,12 @@ fn format_local_review_setup_progress(progress: &LocalReviewSetupProgress<'_>) -
         .map(|elapsed| format!(" last_progress={elapsed}ms"))
         .unwrap_or_default();
     format!(
-        "[review] phase={} status={} component={}{}{} elapsed={}ms{} deadline={}ms",
+        "[review] phase={} status={} component={}{}{}{} deadline={}ms",
         progress.phase,
         progress.status,
         progress.component,
         provider,
         current,
-        progress.elapsed_ms,
         last_progress,
         progress.deadline_ms,
     )
@@ -2561,7 +2553,6 @@ mod tests {
             component: "fixture",
             provider: Some("declared-provider"),
             current: Some("shared-component"),
-            elapsed_ms: 12_500,
             last_progress_ms_ago: Some(250),
             deadline_ms: 1_800_000,
             liveness: None,
@@ -2569,7 +2560,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "[review] phase=building status=heartbeat component=fixture provider=declared-provider current=shared-component elapsed=12500ms last_progress=250ms deadline=1800000ms"
+            "[review] phase=building status=heartbeat component=fixture provider=declared-provider current=shared-component last_progress=250ms deadline=1800000ms"
         );
     }
 

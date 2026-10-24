@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,8 +27,6 @@ pub struct ExtensionReadyStatus {
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_age_seconds: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub probe_duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,7 +125,6 @@ pub fn extension_ready_status_with(
                 "Metadata-only inspection did not run ready_check and no matching live readiness probe is cached. Run `{follow_up_command}`."
             )),
             cache_age_seconds: None,
-            probe_duration_ms: None,
             timeout_ms: Some(duration_ms(ready_check_timeout())),
             follow_up_command: Some(follow_up_command),
         });
@@ -146,7 +143,6 @@ pub fn extension_ready_status_with(
                 "ready_check skipped: already evaluating readiness for this extension (re-entrant invocation)".to_string(),
             ),
             cache_age_seconds: None,
-            probe_duration_ms: None,
             timeout_ms: Some(duration_ms(ready_check_timeout())),
             follow_up_command: Some(follow_up_command),
         };
@@ -159,7 +155,6 @@ pub fn extension_ready_status_with(
             reason: Some("missing_extension_path".to_string()),
             detail: Some("ready_check configured but extension_path is missing".to_string()),
             cache_age_seconds: None,
-            probe_duration_ms: None,
             timeout_ms: Some(duration_ms(ready_check_timeout())),
             follow_up_command: Some(follow_up_command),
         };
@@ -172,16 +167,21 @@ pub fn extension_ready_status_with(
     ];
     let command = template::render(ready_check, &vars);
     let timeout = ready_check_timeout();
-    let started = Instant::now();
     // Mark the child (and anything it spawns) as running inside a ready_check so
     // a re-entrant `homeboy` invocation trips the guard above.
-    let output = execute_local_command_in_dir_with_timeout(
-        &command,
-        Some(extension_path),
-        Some(&[(READY_CHECK_ACTIVE_ENV, "1")]),
-        timeout,
-    );
-    let probe_duration_ms = duration_ms(started.elapsed());
+    let output = crate::observation::phase_timing::time_with_outcome(
+        "admit.extension_readiness",
+        || {
+            Ok(execute_local_command_in_dir_with_timeout(
+                &command,
+                Some(extension_path),
+                Some(&[(READY_CHECK_ACTIVE_ENV, "1")]),
+                timeout,
+            ))
+        },
+        |output| !output.success,
+    )
+    .expect("readiness operation is infallible");
 
     let status = if output.success {
         ExtensionReadyStatus {
@@ -190,7 +190,6 @@ pub fn extension_ready_status_with(
             reason: None,
             detail: None,
             cache_age_seconds: Some(0),
-            probe_duration_ms: Some(probe_duration_ms),
             timeout_ms: Some(duration_ms(timeout)),
             follow_up_command: Some(follow_up_command.clone()),
         }
@@ -209,7 +208,6 @@ pub fn extension_ready_status_with(
                 follow_up_command
             )),
             cache_age_seconds: Some(0),
-            probe_duration_ms: Some(probe_duration_ms),
             timeout_ms: Some(duration_ms(timeout)),
             follow_up_command: Some(follow_up_command.clone()),
         }
@@ -238,7 +236,6 @@ pub fn extension_ready_status_with(
             reason: Some("ready_check_failed".to_string()),
             detail: Some(detail),
             cache_age_seconds: Some(0),
-            probe_duration_ms: Some(probe_duration_ms),
             timeout_ms: Some(duration_ms(timeout)),
             follow_up_command: Some(follow_up_command.clone()),
         }
@@ -255,7 +252,6 @@ fn static_ready_status() -> ExtensionReadyStatus {
         reason: None,
         detail: None,
         cache_age_seconds: None,
-        probe_duration_ms: None,
         timeout_ms: None,
         follow_up_command: None,
     }
@@ -458,6 +454,16 @@ mod tests {
 
     #[test]
     fn a_failed_ready_check_is_typed_not_ready() {
+        let timing_dir = tempfile::tempdir().unwrap();
+        let timing_store = crate::observation::ObservationStore::open_initialized_at(
+            timing_dir.path().join("timing.db"),
+        )
+        .unwrap();
+        let timing_run = timing_store
+            .start_run(crate::observation::NewRunRecord::builder("test").build())
+            .unwrap();
+        let _timing = crate::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+
         let manifest = manifest_with_ready_check("/tmp", "exit 7");
         let _environment = ReadinessEnvironment::new(None, None);
 
@@ -466,8 +472,14 @@ mod tests {
         assert_eq!(status.state, ExtensionReadinessState::NotReady);
         assert_eq!(status.ready, Some(false));
         assert_eq!(status.reason.as_deref(), Some("ready_check_failed"));
-        assert!(status.probe_duration_ms.is_some());
         assert_eq!(status.timeout_ms, Some(30_000));
+        let spans = timing_store.phase_spans(&timing_run.id).unwrap().spans;
+        let span = spans
+            .iter()
+            .find(|span| span.id == "admit.extension_readiness")
+            .expect("persisted phase");
+        assert_eq!(span.status, crate::phase_timing::PhaseStatus::Failed);
+        assert!(span.duration_ms.is_some());
     }
 
     #[test]

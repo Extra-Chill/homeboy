@@ -1930,7 +1930,6 @@ fn running_runs_timeout_returns_partial_status_with_targeted_follow_up() {
         degradations[0].reason_code,
         crate::readonly_probe::REASON_PROBE_TIMEOUT
     );
-    assert!(degradations[0].elapsed_ms >= 10);
     assert_eq!(degradations[0].deadline_ms, 10);
     assert_eq!(
         degradations[0].follow_up,

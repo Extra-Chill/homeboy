@@ -663,6 +663,19 @@ struct RetainedStorageReconciliation {
 }
 
 fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResult<Value> {
+    observe_cleanup(
+        || {
+            homeboy::core::observation::phase_timing::time_with_outcome(
+                "cleanup.retained_storage",
+                || retained_storage_child_report(args),
+                |(_, code)| *code != 0,
+            )
+        },
+        |(_, code)| *code != 0,
+    )
+}
+
+fn retained_storage_child_report(args: CleanupRetainedStorageArgs) -> CmdResult<Value> {
     const CATEGORY: &str = "retained_storage";
     if cfg!(test) || std::env::var(CLEANUP_CATEGORY_CHILD_ENV).ok().as_deref() == Some(CATEGORY) {
         run_cleanup_category_fixture(CATEGORY)?;
@@ -704,11 +717,6 @@ fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResul
         process.args(["--cursor", cursor]);
     }
     homeboy::core::engine::command::isolate_process_tree(&mut process);
-    eprintln!(
-        "[cleanup category={CATEGORY} phase=starting timeout_ms={}]",
-        timeout.as_millis()
-    );
-    let started = Instant::now();
     let mut last_progress = None;
     let mut child = process.spawn().map_err(|error| {
         homeboy::core::Error::internal_io(
@@ -732,8 +740,7 @@ fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResul
                 last_progress = Some(progress.to_string());
             }
             eprintln!(
-                "[cleanup category={CATEGORY} phase=running elapsed_ms={} remaining_ms={}] {}",
-                elapsed.as_millis(),
+                "[cleanup category={CATEGORY} phase=running remaining_ms={}] {}",
                 timeout.saturating_sub(elapsed).as_millis(),
                 progress.unwrap_or("waiting for retained-storage evidence")
             );
@@ -746,7 +753,6 @@ fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResul
             Some("supervise retained-storage inventory".to_string()),
         )
     })?;
-    let elapsed_ms = started.elapsed().as_millis();
     if supervised.termination
         != homeboy::core::engine::command::SupervisedCommandTermination::Completed
     {
@@ -756,13 +762,12 @@ fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResul
                 "status": "partial_failure",
                 "outcome": "timed_out",
                 "inventory_completeness": "partial",
-                "elapsed_ms": elapsed_ms,
                 "timeout_ms": timeout.as_millis(),
                 "last_progress": last_progress,
                 "continuation_command": format!("homeboy cleanup retained-storage --limit {}", args.limit),
                 "failure": {
                     "code": "cleanup.category_timeout",
-                    "message": format!("retained-storage inventory timed out after {elapsed_ms} ms"),
+                    "message": "retained-storage inventory exceeded its deadline",
                     "retryable": true,
                 },
             }),
@@ -1711,7 +1716,6 @@ pub struct CleanupInventoryCategory {
     pub failure: Option<CleanupInventoryCategoryFailure>,
     pub outcome: String,
     pub inventory_completeness: String,
-    pub elapsed_ms: u128,
     pub timeout_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_progress: Option<String>,
@@ -2197,13 +2201,46 @@ fn cleanup_inventory_with_deadline(
     args: CleanupArgs,
     deadline: Option<SystemTime>,
 ) -> homeboy::core::Result<CleanupInventoryResult> {
-    let sweep = CleanupSweep::new(&args)?;
-    let mut budget = CleanupPassBudget::until(deadline);
-    let mut categories = Vec::new();
-    for category in sweep.selected_categories() {
-        run_cleanup_category(&sweep, category, &mut budget, &mut categories);
+    observe_cleanup(
+        || {
+            let sweep = CleanupSweep::new(&args)?;
+            let mut budget = CleanupPassBudget::until(deadline);
+            let mut categories = Vec::new();
+            for category in sweep.selected_categories() {
+                run_cleanup_category(&sweep, category, &mut budget, &mut categories);
+            }
+            sweep.finish(categories)
+        },
+        |result| result.exit_code != 0,
+    )
+}
+
+fn observe_cleanup<T>(
+    work: impl FnOnce() -> homeboy::core::Result<T>,
+    failed: impl FnOnce(&T) -> bool,
+) -> homeboy::core::Result<T> {
+    let observation = homeboy::core::observation::ActiveObservation::start(
+        homeboy::core::observation::NewRunRecord::builder("cleanup").build(),
+    )
+    .map_err(|error| {
+        homeboy::core::log_status!("observe", "phase timing persistence failed: {}", error)
+    })
+    .ok();
+    let _timing = observation
+        .as_ref()
+        .map(|run| homeboy::core::observation::phase_timing::for_run(run.store(), run.run_id()));
+    let result = work();
+    if let Some(run) = observation {
+        run.finish(
+            if result.as_ref().is_ok_and(|result| !failed(result)) {
+                homeboy::core::observation::RunStatus::Pass
+            } else {
+                homeboy::core::observation::RunStatus::Fail
+            },
+            None,
+        );
     }
-    sweep.finish(categories)
+    result
 }
 
 /// The order an aggregate sweep visits its categories in.
@@ -2434,6 +2471,8 @@ fn run_cleanup_category(
     budget: &mut CleanupPassBudget,
     categories: &mut Vec<CleanupInventoryCategory>,
 ) -> bool {
+    let started = Instant::now();
+    let first_category = categories.len();
     let args = sweep.args;
     let apply = args.apply;
     let metadata = cleanup_category_metadata(category);
@@ -3045,6 +3084,13 @@ fn run_cleanup_category(
             );
         }
     }
+    homeboy::core::observation::phase_timing::finish(
+        &format!("cleanup.{}", metadata.category),
+        started,
+        categories[first_category..]
+            .iter()
+            .any(|category| category.failure.is_some()),
+    );
     true
 }
 
@@ -3164,25 +3210,15 @@ fn isolate_cleanup_category(
     specialist_command: Option<&str>,
     action: impl FnOnce() -> homeboy::core::Result<Vec<CleanupInventoryCategory>>,
 ) {
-    let started = Instant::now();
     match action() {
-        Ok(mut completed) => {
-            for category in &mut completed {
-                category.elapsed_ms = started.elapsed().as_millis();
-            }
-            categories.append(&mut completed)
-        }
-        Err(error) => {
-            let mut category = cleanup_category_failure(
-                metadata,
-                apply,
-                canonical_cleanup_command,
-                specialist_command,
-                error,
-            );
-            category.elapsed_ms = started.elapsed().as_millis();
-            categories.push(category);
-        }
+        Ok(mut completed) => categories.append(&mut completed),
+        Err(error) => categories.push(cleanup_category_failure(
+            metadata,
+            apply,
+            canonical_cleanup_command,
+            specialist_command,
+            error,
+        )),
     }
 }
 
@@ -3244,7 +3280,6 @@ fn isolate_cleanup_category_bounded(
                 "phase": if failed { "category_failed" } else { "category_completed" },
                 "category": metadata.category,
                 "outcome": if failed { "failed" } else { "completed" },
-                "elapsed_ms": completed.iter().map(|category| category.elapsed_ms).max().unwrap_or(0),
                 "continuation_command": metadata.canonical_cleanup_command(apply),
             }));
             categories.append(&mut completed)
@@ -3255,7 +3290,6 @@ fn isolate_cleanup_category_bounded(
                 "phase": "category_failed",
                 "category": metadata.category,
                 "outcome": category.outcome.clone(),
-                "elapsed_ms": category.elapsed_ms,
                 "last_progress": category.last_progress.clone(),
                 "continuation_command": category.continuation_command.clone(),
             }));
@@ -3276,7 +3310,6 @@ fn run_cleanup_category_process(
             metadata,
             args.apply,
             Duration::ZERO,
-            0,
             Some(
                 "aggregate cleanup has too little time remaining to start and reap this category"
                     .to_string(),
@@ -3292,7 +3325,6 @@ fn run_cleanup_category_process(
                 metadata,
                 args.apply,
                 timeout,
-                0,
                 None,
                 format!("resolve cleanup category executable: {error}"),
             )))
@@ -3319,12 +3351,6 @@ fn run_cleanup_category_process(
         .stderr(Stdio::piped());
     append_cleanup_child_args(&mut process, args);
     homeboy::core::engine::command::isolate_process_tree(&mut process);
-    eprintln!(
-        "[cleanup category={} phase=starting timeout_ms={}]",
-        metadata.category,
-        timeout.as_millis()
-    );
-    let started = Instant::now();
     let mut last_progress = None;
     let mut child = match process.spawn() {
         Ok(child) => child,
@@ -3333,7 +3359,6 @@ fn run_cleanup_category_process(
                 metadata,
                 args.apply,
                 timeout,
-                started.elapsed().as_millis(),
                 None,
                 format!("start cleanup category process: {error}"),
             )))
@@ -3355,9 +3380,8 @@ fn run_cleanup_category_process(
                 last_progress = Some(progress.to_string());
             }
             eprintln!(
-                "[cleanup category={} phase=running elapsed_ms={} remaining_ms={}] {}",
+                "[cleanup category={} phase=running remaining_ms={}] {}",
                 metadata.category,
-                elapsed.as_millis(),
                 timeout.saturating_sub(elapsed).as_millis(),
                 progress.unwrap_or("waiting for category evidence")
             );
@@ -3370,13 +3394,11 @@ fn run_cleanup_category_process(
                 metadata,
                 args.apply,
                 timeout,
-                started.elapsed().as_millis(),
                 last_progress,
                 format!("supervise cleanup category process: {error}"),
             )))
         }
     };
-    let elapsed_ms = started.elapsed().as_millis();
     if supervised.termination
         != homeboy::core::engine::command::SupervisedCommandTermination::Completed
     {
@@ -3384,7 +3406,6 @@ fn run_cleanup_category_process(
             metadata,
             args.apply,
             timeout,
-            elapsed_ms,
             last_progress,
             cleanup_category_replay_command(metadata, args),
         )));
@@ -3398,7 +3419,6 @@ fn run_cleanup_category_process(
                 metadata,
                 args.apply,
                 timeout,
-                elapsed_ms,
                 last_progress,
                 format!("parse cleanup category evidence: {error}"),
             )))
@@ -3412,7 +3432,6 @@ fn run_cleanup_category_process(
             metadata,
             args.apply,
             timeout,
-            elapsed_ms,
             last_progress,
             format!(
                 "cleanup category process returned no category evidence (status {:?})",
@@ -3429,13 +3448,11 @@ fn run_cleanup_category_process(
                     metadata,
                     args.apply,
                     timeout,
-                    elapsed_ms,
                     last_progress,
                     format!("decode cleanup category evidence: {error}"),
                 )))
             }
         };
-        category.elapsed_ms = elapsed_ms;
         category.timeout_ms = timeout.as_millis();
         if category.last_progress.is_none() {
             category.last_progress.clone_from(&last_progress);
@@ -3443,10 +3460,6 @@ fn run_cleanup_category_process(
         category.cleanup_run_ref = active_cleanup_run_ref();
         categories.push(category);
     }
-    eprintln!(
-        "[cleanup category={} phase=completed elapsed_ms={elapsed_ms}]",
-        metadata.category
-    );
     Ok(categories)
 }
 
@@ -3530,7 +3543,6 @@ fn cleanup_category_deferred(
         failure: None,
         outcome: CLEANUP_PHASE_OUTCOME_DEFERRED.to_string(),
         inventory_completeness: "partial".to_string(),
-        elapsed_ms: 0,
         timeout_ms: 0,
         last_progress: None,
         continuation_command: continuation_command.clone(),
@@ -3674,7 +3686,6 @@ fn cleanup_category_timeout_failure(
     metadata: CleanupInventoryCategoryMetadata,
     apply: bool,
     timeout: Duration,
-    elapsed_ms: u128,
     last_progress: Option<String>,
     continuation_command: String,
 ) -> CleanupInventoryCategory {
@@ -3691,14 +3702,13 @@ fn cleanup_category_timeout_failure(
         failure: Some(CleanupInventoryCategoryFailure {
             code: "cleanup.category_timeout".to_string(),
             message: format!(
-                "cleanup category `{}` timed out after {elapsed_ms} ms",
+                "cleanup category `{}` exceeded its deadline",
                 metadata.category
             ),
             retryable: Some(true),
         }),
         outcome: CLEANUP_CATEGORY_OUTCOME_TIMED_OUT.to_string(),
         inventory_completeness: "partial".to_string(),
-        elapsed_ms,
         timeout_ms: timeout.as_millis(),
         last_progress,
         continuation_command: continuation_command.clone(),
@@ -3714,7 +3724,6 @@ fn cleanup_category_timeout_failure(
         output: serde_json::json!({
             "category": metadata.category,
             "outcome": "timed_out",
-            "elapsed_ms": elapsed_ms,
             "timeout_ms": timeout.as_millis(),
             "continuation_command": continuation_command,
         }),
@@ -3768,7 +3777,6 @@ fn cleanup_category_process_failure(
     metadata: CleanupInventoryCategoryMetadata,
     apply: bool,
     timeout: Duration,
-    elapsed_ms: u128,
     last_progress: Option<String>,
     message: String,
 ) -> CleanupInventoryCategory {
@@ -3779,7 +3787,6 @@ fn cleanup_category_process_failure(
         None,
         homeboy::core::Error::internal_unexpected(message),
     );
-    category.elapsed_ms = elapsed_ms;
     category.timeout_ms = timeout.as_millis();
     category.last_progress = last_progress;
     category
@@ -3861,7 +3868,6 @@ fn store_unavailable_category(
         }),
         outcome: "failed".to_string(),
         inventory_completeness: "partial".to_string(),
-        elapsed_ms: 0,
         timeout_ms: 0,
         last_progress: None,
         continuation_command: metadata.canonical_cleanup_command(apply),
@@ -3912,7 +3918,6 @@ fn cleanup_category_failure(
         }),
         outcome: "failed".to_string(),
         inventory_completeness: "partial".to_string(),
-        elapsed_ms: 0,
         timeout_ms: 0,
         last_progress: None,
         cleanup_run_ref: active_cleanup_run_ref(),
@@ -4087,7 +4092,6 @@ fn repo_artifacts_category(
             "complete"
         }
         .to_string(),
-        elapsed_ms: 0,
         timeout_ms: 0,
         last_progress: None,
         continuation_command: repo_artifact_continuation_command(
@@ -4433,7 +4437,6 @@ fn category_from_command<T: Serialize>(
         failure: None,
         outcome: category_outcome(commands.apply, &metrics),
         inventory_completeness: "complete".to_string(),
-        elapsed_ms: 0,
         timeout_ms: 0,
         last_progress: None,
         cleanup_run_ref: None,
@@ -4509,7 +4512,6 @@ fn persisted_artifacts_category(
         failure: None,
         outcome: "completed".to_string(),
         inventory_completeness: "complete".to_string(),
-        elapsed_ms: 0,
         timeout_ms: 0,
         last_progress: None,
         continuation_command: PERSISTED_RUN_ARTIFACTS_METADATA
@@ -4549,7 +4551,6 @@ fn remote_lab_workspace_categories(
                 failure: None,
                 outcome: "completed".to_string(),
                 inventory_completeness: "complete".to_string(),
-                elapsed_ms: 0,
                 timeout_ms: 0,
                 last_progress: None,
                 continuation_command: REMOTE_LAB_WORKSPACES_METADATA
@@ -5214,6 +5215,16 @@ mod tests {
             }
 
             let result = result.expect("aggregate result");
+            let store = homeboy::core::observation::ObservationStore::open_initialized().unwrap();
+            let runs = store.list_runs(Default::default()).unwrap();
+            let run = runs.iter().find(|run| run.kind == "cleanup").unwrap();
+            let spans = store.phase_spans(&run.id).unwrap().spans;
+            let span = spans
+                .iter()
+                .find(|span| span.id == "cleanup.runtime_tmp")
+                .unwrap();
+            assert_eq!(span.status, homeboy::core::phase_timing::PhaseStatus::Ok);
+            assert!(span.duration_ms.is_some());
             let category = &result.output["categories"][0];
             assert_eq!(category["category"], "runtime_tmp");
             assert_eq!(category["output"]["has_more"], true);
@@ -6711,7 +6722,6 @@ mod tests {
                 "phase": "category_failed",
                 "category": "repo_artifacts",
                 "outcome": "timed_out",
-                "elapsed_ms": 30_000,
                 "continuation_command": "homeboy cleanup --include repo-artifacts"
             }))
             .expect("public cleanup progress");
@@ -6999,7 +7009,6 @@ mod tests {
                 failure: None,
                 outcome: "completed".to_string(),
                 inventory_completeness: "complete".to_string(),
-                elapsed_ms: 0,
                 timeout_ms: 0,
                 last_progress: None,
                 continuation_command: TASK_WORKTREES_METADATA

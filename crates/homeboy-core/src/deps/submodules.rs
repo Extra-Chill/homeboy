@@ -342,6 +342,11 @@ fn outcome(
     stdout: String,
     stderr: String,
 ) -> DependencyHydrationOutcome {
+    crate::observation::phase_timing::finish(
+        "stage.git_submodules",
+        started,
+        status == DependencyHydrationStatus::Failed,
+    );
     hydration_outcome(
         workspace,
         ".",
@@ -349,7 +354,6 @@ fn outcome(
         command,
         checkout.display().to_string(),
         reason,
-        started.elapsed(),
         termination,
         status,
         exit_code,

@@ -128,7 +128,6 @@ pub struct DependencyHydrationOutcome {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cwd: String,
     pub reason: String,
-    pub duration_ms: u64,
     pub termination: DependencyHydrationTermination,
     pub status: DependencyHydrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,7 +145,6 @@ pub struct DependencyHydrationProgress {
     pub provider_id: String,
     pub phase: String,
     pub current: Option<String>,
-    pub elapsed_ms: u128,
     pub last_progress_ms_ago: Option<u128>,
 }
 
@@ -208,13 +206,23 @@ pub fn hydrate_declared_dependencies_for_component(
     component_id: Option<&str>,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
     let deadline = Instant::now() + policy.timeout;
-    hydrate_declared_dependencies_unlocked(
-        path,
-        workspace,
-        package_root,
-        policy,
-        deadline,
-        component_id.map(str::to_string),
+    crate::observation::phase_timing::time_with_outcome(
+        "stage.dependency_hydration",
+        || {
+            hydrate_declared_dependencies_unlocked(
+                path,
+                workspace,
+                package_root,
+                policy,
+                deadline,
+                component_id.map(str::to_string),
+            )
+        },
+        |outcomes| {
+            outcomes
+                .iter()
+                .any(|outcome| outcome.status == DependencyHydrationStatus::Failed)
+        },
     )
 }
 
@@ -294,12 +302,10 @@ fn hydrate_declared_dependencies_unlocked(
         }
         let provider_id = crate::redaction::redact_string(&plan.provider_id);
         let install_command = crate::redaction::redact_argv(&plan.install.argv());
-        let started = Instant::now();
         (policy.on_progress)(&DependencyHydrationProgress {
             provider_id: provider_id.clone(),
             phase: "assessing_reusable_state".to_string(),
             current: None,
-            elapsed_ms: 0,
             last_progress_ms_ago: None,
         });
 
@@ -323,7 +329,6 @@ fn hydrate_declared_dependencies_unlocked(
                     reusable_command,
                     reusable.command.cwd.display().to_string(),
                     "reusable_state_assessment_failed".to_string(),
-                    started.elapsed(),
                     assessment.termination,
                     DependencyHydrationStatus::Failed,
                     assessment.exit_code,
@@ -344,7 +349,6 @@ fn hydrate_declared_dependencies_unlocked(
                     install_command,
                     plan.install.cwd.display().to_string(),
                     reusable_reason,
-                    started.elapsed(),
                     DependencyHydrationTermination::NotStarted,
                     DependencyHydrationStatus::Reused,
                     None,
@@ -359,7 +363,6 @@ fn hydrate_declared_dependencies_unlocked(
             provider_id: provider_id.clone(),
             phase: "installing".to_string(),
             current: None,
-            elapsed_ms: started.elapsed().as_millis(),
             last_progress_ms_ago: None,
         });
         let execution =
@@ -372,7 +375,6 @@ fn hydrate_declared_dependencies_unlocked(
                 install_command,
                 plan.install.cwd.display().to_string(),
                 stale_reason,
-                started.elapsed(),
                 execution.termination,
                 DependencyHydrationStatus::Failed,
                 execution.exit_code,
@@ -390,7 +392,6 @@ fn hydrate_declared_dependencies_unlocked(
                 install_command,
                 plan.install.cwd.display().to_string(),
                 stale_reason,
-                started.elapsed(),
                 DependencyHydrationTermination::ExitFailure,
                 DependencyHydrationStatus::Failed,
                 exit_code,
@@ -408,7 +409,6 @@ fn hydrate_declared_dependencies_unlocked(
                 install_command,
                 plan.install.cwd.display().to_string(),
                 "provider_declared_outputs_missing_after_install".to_string(),
-                started.elapsed(),
                 DependencyHydrationTermination::OutputValidationFailed,
                 DependencyHydrationStatus::Failed,
                 exit_code,
@@ -426,7 +426,6 @@ fn hydrate_declared_dependencies_unlocked(
             install_command,
             plan.install.cwd.display().to_string(),
             stale_reason,
-            started.elapsed(),
             DependencyHydrationTermination::Completed,
             DependencyHydrationStatus::Succeeded,
             exit_code,
@@ -595,7 +594,6 @@ fn deadline_hydration_outcome(
         } else {
             "dependency hydration exceeded its total operation deadline".to_string()
         },
-        Duration::ZERO,
         if (policy.is_cancelled)() {
             DependencyHydrationTermination::Cancelled
         } else {
@@ -622,7 +620,6 @@ fn hydration_progress(
         current: command_progress
             .and_then(|progress| progress.current.as_deref())
             .map(crate::redaction::redact_string),
-        elapsed_ms: heartbeat.elapsed.as_millis(),
         last_progress_ms_ago: heartbeat
             .last_progress_elapsed
             .map(|value| value.as_millis()),
@@ -659,7 +656,6 @@ fn hydration_outcome(
     command: Vec<String>,
     cwd: String,
     reason: String,
-    duration: Duration,
     termination: DependencyHydrationTermination,
     status: DependencyHydrationStatus,
     exit_code: Option<i32>,
@@ -674,7 +670,6 @@ fn hydration_outcome(
         command,
         cwd: crate::redaction::redact_string(&cwd),
         reason: crate::redaction::redact_string(&reason),
-        duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         termination,
         status,
         exit_code,
@@ -1994,12 +1989,21 @@ mod tests {
         assert_eq!(progress.provider_id, "fixture-provider");
         assert_eq!(progress.phase, "building");
         assert_eq!(progress.current.as_deref(), Some("shared-component"));
-        assert_eq!(progress.elapsed_ms, 4_200);
         assert_eq!(progress.last_progress_ms_ago, Some(175));
     }
 
     #[test]
     fn provider_declared_reusable_state_skips_install() {
+        let timing_dir = tempfile::tempdir().unwrap();
+        let timing_store = crate::observation::ObservationStore::open_initialized_at(
+            timing_dir.path().join("timing.db"),
+        )
+        .unwrap();
+        let timing_run = timing_store
+            .start_run(crate::observation::NewRunRecord::builder("test").build())
+            .unwrap();
+        let _timing = crate::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
             std::fs::write(
@@ -2036,6 +2040,13 @@ mod tests {
                 DependencyHydrationTermination::NotStarted
             );
             assert!(!root.path().join("install-ran").exists());
+            let spans = timing_store.phase_spans(&timing_run.id).unwrap().spans;
+            let span = spans
+                .iter()
+                .find(|span| span.id == "stage.dependency_hydration")
+                .expect("persisted phase");
+            assert_eq!(span.status, crate::phase_timing::PhaseStatus::Ok);
+            assert!(span.duration_ms.is_some());
         });
     }
 

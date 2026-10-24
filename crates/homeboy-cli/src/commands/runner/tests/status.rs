@@ -1918,7 +1918,6 @@ fn peer_session_preview_action_satisfies_the_cli_contract() {
         runner_id: Some("homeboy lab".to_string()),
         reason_code: homeboy::runner::readonly_probe::REASON_PROBE_TRUNCATED,
         timeout_seconds: 0,
-        elapsed_ms: 0,
         deadline_ms: 0,
         follow_up: "homeboy runner peer-sessions 'homeboy lab'".to_string(),
         follow_up_action: Some(homeboy::core::error::ExecutableAction::new(

@@ -1318,7 +1318,6 @@ mod tests {
                         command: vec!["sh".to_string(), "-c".to_string(), "exit 3".to_string()],
                         cwd: "/runner/workspaces/candidate".to_string(),
                         reason: "install_failed".to_string(),
-                        duration_ms: 3,
                         termination: homeboy_core::deps::DependencyHydrationTermination::ExitFailure,
                         status: homeboy_core::deps::DependencyHydrationStatus::Failed,
                         exit_code: Some(3),

@@ -47,7 +47,6 @@ pub(crate) const RECORDED_HYDRATION_STATUSES: [&str; 5] = [
 pub(crate) struct LabWorkspaceHydrationStep {
     pub(crate) provider_id: String,
     pub(crate) command: Vec<String>,
-    pub(crate) duration_ms: u64,
     pub(crate) exit_code: i32,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
@@ -209,6 +208,17 @@ fn hydrate_lab_workspace_dependencies_with_policy(
     offline_only: bool,
     component_id: Option<&str>,
 ) -> Result<LabWorkspaceHydrationOutput> {
+    let _timing = parent_run_id.and_then(|run_id| {
+        match homeboy_core::observation::ObservationStore::open_initialized() {
+            Ok(store) => Some(homeboy_core::observation::phase_timing::for_run(
+                &store, run_id,
+            )),
+            Err(error) => {
+                homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
+                None
+            }
+        }
+    });
     let plan = deps::dependency_install_plan_for_component(
         std::path::Path::new(local_path),
         component_id,
@@ -265,22 +275,26 @@ fn hydrate_lab_workspace_dependencies_with_policy(
     let mut steps = Vec::new();
     for (index, plan_step) in plan.iter().enumerate() {
         let command = runner_hydration_command(&plan_step.invocation)?;
-        let started = std::time::Instant::now();
         let component_root = dependency_root(remote_path, plan_step)?;
         let options =
             hydration_runner_exec_options(command.clone(), &component_root, parent_run_id, index);
-        let (output, exit_code) = exec(
-            runner_id,
-            // The install command is provider-built shell argv, not a
-            // Homeboy-routed command, so dispatch it raw exactly as produced.
-            // Hydration is a workspace-setup sub-step of the agent-task offload,
-            // so do not mirror it as a standalone controller-side run record.
-            options,
+        let (output, exit_code) = homeboy_core::observation::phase_timing::time_with_outcome(
+            "stage.lab.dependency_hydration",
+            || {
+                exec(
+                    runner_id,
+                    // The install command is provider-built shell argv, not a
+                    // Homeboy-routed command, so dispatch it raw exactly as produced.
+                    // Hydration is a workspace-setup sub-step of the agent-task offload,
+                    // so do not mirror it as a standalone controller-side run record.
+                    options,
+                )
+            },
+            |(_, exit_code)| *exit_code != 0,
         )?;
         let step = LabWorkspaceHydrationStep {
             provider_id: plan_step.provider_id.clone(),
             command,
-            duration_ms: started.elapsed().as_millis() as u64,
             exit_code,
             stdout: output.stdout,
             stderr: output.stderr,
@@ -583,7 +597,6 @@ pub(crate) fn hydration_failure_error(
     error.details["provider_id"] = serde_json::json!(step.provider_id);
     error.details["command"] = serde_json::json!(step.command);
     error.details["exit_code"] = serde_json::json!(step.exit_code);
-    error.details["duration_ms"] = serde_json::json!(step.duration_ms);
     error.details["job_id"] = serde_json::json!(step.job_id);
     error
 }
@@ -905,7 +918,6 @@ mod tests {
                 "install".to_string(),
                 "--no-interaction".to_string(),
             ],
-            duration_ms: 1234,
             exit_code: 2,
             stdout: String::new(),
             stderr: "missing ext-dom".to_string(),
@@ -919,7 +931,6 @@ mod tests {
         assert_eq!(error.details["classification"], "workspace_setup");
         assert_eq!(error.details["provider_id"], "declared-provider");
         assert_eq!(error.details["exit_code"], 2);
-        assert_eq!(error.details["duration_ms"], 1234);
         assert_eq!(error.details["job_id"], "job-1");
         assert!(error.message.contains("lab_workspace_dependency_hydration"));
     }
@@ -1083,7 +1094,6 @@ mod tests {
         let step = LabWorkspaceHydrationStep {
             provider_id: "declared-provider".to_string(),
             command: vec!["fixture-tool".to_string(), "install".to_string()],
-            duration_ms: 500,
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),
@@ -1096,7 +1106,6 @@ mod tests {
             value["command"],
             serde_json::json!(["fixture-tool", "install"])
         );
-        assert_eq!(value["duration_ms"], 500);
         assert_eq!(value["exit_code"], 0);
         assert_eq!(value["job_id"], "job-7");
         assert_eq!(value["event_count"], 4);
@@ -1107,6 +1116,17 @@ mod tests {
     /// command, and exit status.
     #[test]
     fn hydration_runs_detected_provider_install_on_runner() {
+        let timing_dir = tempfile::tempdir().unwrap();
+        let timing_store = homeboy_core::observation::ObservationStore::open_initialized_at(
+            timing_dir.path().join("timing.db"),
+        )
+        .unwrap();
+        let timing_run = timing_store
+            .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+            .unwrap();
+        let _timing =
+            homeboy_core::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+
         homeboy_core::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
                 "fixture-tool",
@@ -1139,6 +1159,13 @@ mod tests {
             let step = &output.steps[0];
             assert_eq!(step.provider_id, "declared-provider");
             assert_eq!(step.exit_code, 0);
+            let spans = timing_store.phase_spans(&timing_run.id).unwrap().spans;
+            let span = spans
+                .iter()
+                .find(|span| span.id == "stage.lab.dependency_hydration")
+                .expect("persisted phase");
+            assert_eq!(span.status, homeboy_core::phase_timing::PhaseStatus::Ok);
+            assert!(span.duration_ms.is_some());
             assert_eq!(
                 step.command,
                 vec![

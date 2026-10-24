@@ -198,7 +198,8 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
             let mut request = [0; 4096];
-            stream.read(&mut request).expect("read request");
+            let read = stream.read(&mut request).expect("read request");
+            assert!(read > 0);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{")
                 .expect("partial response");

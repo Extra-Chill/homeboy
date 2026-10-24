@@ -22420,7 +22420,6 @@ fn failed_attempt_manual_preflight_hydrates_serialized_intent_and_publishes() {
                 command: vec!["fixture-install".to_string()],
                 cwd: "/fixture".to_string(),
                 reason: "deterministic fixture".to_string(),
-                duration_ms: 17,
                 termination: homeboy_core::deps::DependencyHydrationTermination::Completed,
                 status: homeboy_core::deps::DependencyHydrationStatus::Succeeded,
                 exit_code: Some(0),
@@ -22445,8 +22444,8 @@ fn failed_attempt_manual_preflight_hydrates_serialized_intent_and_publishes() {
         let record = agent_task_lifecycle::reconcile_status(run_id).expect("read intent");
         assert_eq!(
             record.metadata["cook_delivery"]["artifacts"]["manual"]["intent"]["verification"]
-                ["dependency_hydration"][0]["duration_ms"],
-            17
+                ["dependency_hydration"][0]["exit_code"],
+            0
         );
 
         let continuation = format!("homeboy agent-task recover {run_id}");

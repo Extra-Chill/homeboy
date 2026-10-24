@@ -13,6 +13,7 @@ pub mod evidence_report;
 mod lifecycle;
 pub mod observed_workflow;
 mod phase_spans;
+pub mod phase_timing;
 pub mod records;
 mod run_failure_causes;
 

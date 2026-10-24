@@ -829,3 +829,19 @@ mod managed_service_plan_tests {
         assert_eq!(round_trip.postprocess_steps, plan.postprocess_steps);
     }
 }
+
+pub(crate) fn for_execution_timing(
+    execution: &crate::agent_tasks::AgentTaskExecutionContext,
+) -> Option<homeboy_core::observation::phase_timing::Scope> {
+    let run_id = execution.run_id.as_deref()?;
+    let store = execution
+        .lifecycle_store()?
+        .open_observation_initialized()
+        .map_err(|error| {
+            homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error)
+        })
+        .ok()?;
+    Some(homeboy_core::observation::phase_timing::for_run(
+        &store, run_id,
+    ))
+}

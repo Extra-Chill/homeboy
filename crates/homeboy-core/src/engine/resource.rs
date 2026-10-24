@@ -27,7 +27,6 @@ pub struct RunResourceSummary {
     pub pid: u32,
     pub started_at: String,
     pub finished_at: String,
-    pub duration_ms: u128,
     pub platform: String,
     pub load_average_before: Option<LoadAverage>,
     pub load_average_after: Option<LoadAverage>,
@@ -147,13 +146,13 @@ impl ResourceSummaryRun {
     }
 
     fn finish_with_probe(&self, probe: &impl ResourceProbe) -> RunResourceSummary {
+        crate::observation::phase_timing::finish("resource.run", self.started_instant, false);
         let after = probe.snapshot();
         RunResourceSummary::from_snapshots(
             self.label.clone(),
             self.pid,
             self.started_at.to_rfc3339(),
             Utc::now().to_rfc3339(),
-            self.started_instant.elapsed().as_millis(),
             self.platform.clone(),
             self.before.clone(),
             after,
@@ -176,7 +175,6 @@ impl RunResourceSummary {
         pid: u32,
         started_at: String,
         finished_at: String,
-        duration_ms: u128,
         platform: String,
         before: ResourceSnapshot,
         after: ResourceSnapshot,
@@ -192,7 +190,6 @@ impl RunResourceSummary {
             pid,
             started_at,
             finished_at,
-            duration_ms,
             platform,
             load_average_before: before.load_average,
             load_average_after: after.load_average,
@@ -362,7 +359,6 @@ mod tests {
             42,
             started_at,
             finished_at,
-            25,
             "test-os".to_string(),
             snapshot(1.0, 100, Some("same_warning")),
             snapshot(2.0, 150, Some("same_warning")),
@@ -371,7 +367,6 @@ mod tests {
 
         assert_eq!(summary.label.as_deref(), Some("lint homeboy"));
         assert_eq!(summary.pid, 42);
-        assert_eq!(summary.duration_ms, 25);
         assert_eq!(summary.platform, "test-os");
         assert_eq!(summary.load_average_before.unwrap().one, 1.0);
         assert_eq!(summary.load_average_after.unwrap().one, 2.0);
@@ -382,6 +377,16 @@ mod tests {
 
     #[test]
     fn start_and_finish_use_injected_probe_values() {
+        let timing_dir = tempfile::tempdir().unwrap();
+        let timing_store = crate::observation::ObservationStore::open_initialized_at(
+            timing_dir.path().join("timing.db"),
+        )
+        .unwrap();
+        let timing_run = timing_store
+            .start_run(crate::observation::NewRunRecord::builder("test").build())
+            .unwrap();
+        let _timing = crate::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+
         let before_probe = FakeProbe {
             snapshot: snapshot(3.0, 300, None),
         };
@@ -397,6 +402,13 @@ mod tests {
         let summary = run.finish_with_probe(&after_probe);
 
         assert_eq!(summary.label.as_deref(), Some("test"));
+        let spans = timing_store.phase_spans(&timing_run.id).unwrap().spans;
+        let span = spans
+            .iter()
+            .find(|span| span.id == "resource.run")
+            .expect("persisted phase");
+        assert_eq!(span.status, crate::phase_timing::PhaseStatus::Ok);
+        assert!(span.duration_ms.is_some());
         assert_eq!(summary.load_average_before.unwrap().one, 3.0);
         assert!(summary.load_average_after.is_none());
         assert_eq!(summary.homeboy_rss_bytes_before, Some(300));
@@ -416,7 +428,6 @@ mod tests {
                 7,
                 Utc::now().to_rfc3339(),
                 Utc::now().to_rfc3339(),
-                1,
                 "test".to_string(),
                 ResourceSnapshot {
                     load_average: None,
@@ -478,7 +489,6 @@ mod tests {
             assert_eq!(summary.label.as_deref(), Some("lint homeboy"));
             assert_eq!(output["label"], "lint homeboy");
             assert_eq!(output["pid"], std::process::id());
-            assert!(output["duration_ms"].as_u64().is_some());
             assert_eq!(output["platform"], std::env::consts::OS);
 
             run_dir.cleanup();
