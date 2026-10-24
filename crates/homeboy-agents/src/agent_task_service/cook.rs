@@ -5850,6 +5850,15 @@ fn run_cook_spine(
     // Canonicalization and native-worktree discovery can block on provider
     // runtime state. The recipe and lifecycle attempt above must therefore own
     // their result before either check begins.
+    let timing_store = lifecycle_store
+        .open_observation_initialized()
+        .map_err(|error| {
+            homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
+        })
+        .ok();
+    let _timing = timing_store
+        .as_ref()
+        .map(|store| crate::phase_timing::for_run(store, &options.identity.initial_run_id));
     let startup_cook_id = options.identity.cook_id.clone();
     let startup_run_id = options.identity.initial_run_id.clone();
     run_cook_startup_phase(

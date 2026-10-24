@@ -207,7 +207,6 @@ pub fn start_candidate_adoption_with_policy_in_store(
             gate_started_at: None,
             gate_timeout_seconds: None,
             gate_output_tail: String::new(),
-            gate_elapsed_ms: None,
             gate_last_progress_ms_ago: None,
             gate_progress: None,
             resume_count: 0,
@@ -305,7 +304,6 @@ pub(crate) fn start_candidate_adoption_gate_in_store(
         attempt.gate_started_at = Some(now.clone());
         attempt.gate_timeout_seconds = Some(timeout_seconds);
         attempt.gate_output_tail.clear();
-        attempt.gate_elapsed_ms = Some(0);
         attempt.gate_last_progress_ms_ago = None;
         attempt.gate_progress = None;
         attempt.heartbeat_at = now.clone();
@@ -356,7 +354,6 @@ pub(crate) fn heartbeat_candidate_adoption_gate_in_store(
         attempt.heartbeat_at = now.clone();
         attempt.updated_at = now.clone();
         attempt.gate_output_tail = status.output_tail;
-        attempt.gate_elapsed_ms = Some(status.elapsed_ms);
         attempt.gate_last_progress_ms_ago = status.last_progress_ms_ago;
         attempt.gate_progress = status.progress;
         record.updated_at = Some(now);
