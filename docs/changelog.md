@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.17] - 2026-10-24
+
+### Changed
+- Derive an agent-task's state from its outcome with one mapping (#15718 step 5)
+
 ## [0.433.16] - 2026-10-24
 
 ### Changed
