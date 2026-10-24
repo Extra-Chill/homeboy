@@ -1219,19 +1219,19 @@ discover() {
   ' "$state" "$snapshot" > "$state.next"
   mv "$state.next" "$state"
 }
-signal_owned() {
-  sig=$1
+alive() {
   discover
-  /usr/bin/awk 'FILENAME==ARGV[1] { current[$1]=$3 FS $4 FS $5 FS $6 FS $7; next }
+  live=$(/usr/bin/awk 'FILENAME==ARGV[1] { current[$1]=$3 FS $4 FS $5 FS $6 FS $7; next }
     { pid=$1; ident=$2 FS $3 FS $4 FS $5 FS $6; if (current[pid]==ident) print pid }
-  ' "$snapshot" "$state" | while read -r pid; do kill -"$sig" "$pid" 2>/dev/null || true; done
+  ' "$snapshot" "$state")
+  [ -n "$live" ]
 }
-for _ in 1 2 3 4 5 6 7 8; do signal_owned TERM; sleep .025; done
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do signal_owned KILL; sleep .025; done
-discover
-/usr/bin/awk 'FILENAME==ARGV[1] { current[$1]=$3 FS $4 FS $5 FS $6 FS $7; next }
-  { pid=$1; ident=$2 FS $3 FS $4 FS $5 FS $6; if (current[pid]==ident) exit 1 }
-' "$snapshot" "$state"
+for sig in TERM TERM TERM TERM TERM TERM TERM TERM KILL KILL KILL KILL KILL KILL KILL KILL KILL KILL KILL KILL KILL KILL KILL KILL; do
+  alive || exit 0
+  for pid in $live; do kill -"$sig" "$pid" 2>/dev/null || true; done
+  sleep .025
+done
+! alive
 "#,
         "\0"
     );
