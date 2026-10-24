@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.8] - 2026-10-23
+
+### Changed
+- Read .source-revision before probing git for runtime revisions
+- Resume, recover and adopt Cooks from the candidate commit (#16303 S2c)
+
 ## [0.433.7] - 2026-10-23
 
 ### Changed
