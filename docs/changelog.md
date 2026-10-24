@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.10] - 2026-10-24
+
+### Changed
+- Cook candidates are one immutable commit: stop producing and reading patch artifacts (#16303 S2d)
+
+### Fixed
+- validate trace assertions with the one contract type
+- advance derived Cook destinations past finished PRs and live foreign owners
+
 ## [0.433.9] - 2026-10-24
 
 ### Changed
