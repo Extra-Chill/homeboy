@@ -519,7 +519,7 @@ fn run_readiness_probe_with_gate(
     probe_timeout_ms: u64,
     mode: Option<&str>,
 ) -> std::result::Result<ProviderReadinessInvocationResult, String> {
-    crate::phase_timing::time_with_outcome(
+    homeboy_core::observation::phase_timing::time_with_outcome(
         "provider.readiness_probe",
         || {
             let _permit = acquire_probe_permit(gate, probe_deadline, probe_timeout_ms)
@@ -770,7 +770,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
     generated_fanout_context: bool,
     mode: Option<&str>,
 ) -> Result<ProviderReadinessInvocationResult> {
-    crate::phase_timing::time_with_outcome(
+    homeboy_core::observation::phase_timing::time_with_outcome(
         "admit.provider_readiness",
         || {
             ensure_readiness_deadline("probe", deadline_unix_ms)?;
@@ -931,12 +931,12 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
                 let probe_request_key = request_key.clone();
                 let probe_mode = mode.map(str::to_string);
                 let persistent_fanout = generated_fanout_context;
-                let timing = crate::phase_timing::current();
+                let timing = homeboy_core::observation::phase_timing::current();
                 drop(state);
                 let spawn_result = std::thread::Builder::new()
                     .name("provider-readiness-probe".to_string())
                     .spawn(move || {
-                        let _timing = crate::phase_timing::enter(timing);
+                        let _timing = homeboy_core::observation::phase_timing::enter(timing);
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             if persistent_fanout {
                                 run_durable_fanout_readiness_probe(
@@ -1264,8 +1264,11 @@ mod tests {
             root.path().join("observe.db"),
         )
         .unwrap();
-        let run_id = crate::phase_timing::test_run(&store);
-        let _timing = crate::phase_timing::for_run(&store, &run_id);
+        let run_id = store
+            .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
+            .unwrap()
+            .id;
+        let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
         for (classification, ready, retryable) in [
@@ -1300,7 +1303,10 @@ mod tests {
             );
         }
         // An unopenable timing store cannot change the actual readiness result.
-        let _broken = crate::phase_timing::enter(Some((root.path().to_path_buf(), run_id)));
+        let _broken = homeboy_core::observation::phase_timing::enter(Some((
+            root.path().to_path_buf(),
+            run_id,
+        )));
         assert!(
             readiness_verdict(&provider, &json!({"model":"ready"}), &mut test_cache())
                 .unwrap()

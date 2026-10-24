@@ -697,7 +697,7 @@ fn promote_with_provider_and_checkpoint_internal(
     let _timing = options
         .source_run_id
         .as_deref()
-        .map(|run_id| crate::phase_timing::for_run(observation_store, run_id));
+        .map(|run_id| homeboy_core::observation::phase_timing::for_run(observation_store, run_id));
     emit_promotion_progress(
         "apply",
         None,
@@ -1147,8 +1147,11 @@ mod declared_base_tests {
             repo.path().join("observe.db"),
         )
         .unwrap();
-        let run_id = crate::phase_timing::test_run(&store);
-        let _timing = crate::phase_timing::for_run(&store, &run_id);
+        let run_id = store
+            .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
+            .unwrap()
+            .id;
+        let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
         git(repo.path(), &["init", "-b", "main"]);
         git(
             repo.path(),
@@ -1695,7 +1698,7 @@ fn run_promotion_gates(
     let _timing = options
         .source_run_id
         .as_deref()
-        .map(|run_id| crate::phase_timing::for_run(observation_store, run_id));
+        .map(|run_id| homeboy_core::observation::phase_timing::for_run(observation_store, run_id));
     let operation = || {
         run_promotion_gates_inner(
             options,
@@ -1781,11 +1784,10 @@ fn run_promotion_gates_inner(
                     "hydration",
                     None,
                     Some(format!(
-                        "provider={} phase={} elapsed={}ms last-progress={}ms",
+                        "provider={} phase={} last-progress={}ms",
                         progress.provider_id,
                         progress.phase,
-                        progress.elapsed_ms,
-                        progress.last_progress_ms_ago.unwrap_or(progress.elapsed_ms),
+                        progress.last_progress_ms_ago.unwrap_or_default(),
                     )),
                 );
             }),
@@ -3313,7 +3315,7 @@ fn run_declared_base_git(
     phase: &str,
     timeout: Duration,
 ) -> Result<Output> {
-    crate::phase_timing::time_with_outcome(
+    homeboy_core::observation::phase_timing::time_with_outcome(
         &format!("resolve.git_base.{phase}"),
         || {
             let subphase = args.first().copied().unwrap_or(phase);
@@ -3807,7 +3809,6 @@ mod gate_setup_message_tests {
             ],
             cwd: String::new(),
             reason: "lockfile present".to_string(),
-            duration_ms: 12,
             termination,
             status: DependencyHydrationStatus::Failed,
             exit_code,

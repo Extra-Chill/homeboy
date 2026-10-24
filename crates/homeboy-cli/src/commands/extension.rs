@@ -540,8 +540,6 @@ pub struct ExtensionInventoryEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_cache_age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub readiness_probe_duration_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_follow_up_command: Option<String>,
@@ -638,8 +636,6 @@ pub struct ExtensionDetail {
     pub ready_detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_cache_age_seconds: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub readiness_probe_duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -848,12 +844,12 @@ fn extension_inventory_entry(
         .descriptor
         .expect("v1 catalog entry descriptor checked above");
     let readiness = readiness.unwrap_or_else(|| ExtensionApiReadinessStatus {
+        probe_duration_ms: None,
         state: ExtensionApiReadinessState::Unknown,
         ready: None,
         reason: Some("readiness_unavailable".to_string()),
         detail: Some("The v1 readiness service returned no status.".to_string()),
         cache_age_seconds: None,
-        probe_duration_ms: None,
         timeout_ms: None,
         follow_up_command: None,
     });
@@ -891,7 +887,6 @@ fn extension_inventory_entry(
         ready_reason: readiness.reason,
         ready_detail: readiness.detail,
         readiness_cache_age_seconds: readiness.cache_age_seconds,
-        readiness_probe_duration_ms: readiness.probe_duration_ms,
         readiness_timeout_ms: readiness.timeout_ms,
         readiness_follow_up_command: readiness.follow_up_command,
         linked: is_extension_linked(&manifest.id),
@@ -962,7 +957,6 @@ fn invalid_extension_inventory_entry(entry: ExtensionApiCatalogEntry) -> Extensi
         ready_reason: Some(category.clone()),
         ready_detail: Some(detail.clone()),
         readiness_cache_age_seconds: None,
-        readiness_probe_duration_ms: None,
         readiness_timeout_ms: None,
         readiness_follow_up_command: None,
         linked,
@@ -1343,7 +1337,6 @@ fn show_extension(
         ready_reason: ready_status.reason,
         ready_detail: ready_status.detail,
         readiness_cache_age_seconds: ready_status.cache_age_seconds,
-        readiness_probe_duration_ms: ready_status.probe_duration_ms,
         readiness_timeout_ms: ready_status.timeout_ms,
         readiness_follow_up_command: ready_status.follow_up_command,
         linked,
@@ -2891,7 +2884,6 @@ mod tests {
             ready_reason: None,
             ready_detail: None,
             readiness_cache_age_seconds: None,
-            readiness_probe_duration_ms: None,
             readiness_timeout_ms: None,
             readiness_follow_up_command: None,
             linked: true,
@@ -2956,7 +2948,6 @@ mod tests {
                 ready_reason: None,
                 ready_detail: None,
                 readiness_cache_age_seconds: None,
-                readiness_probe_duration_ms: None,
                 readiness_timeout_ms: None,
                 readiness_follow_up_command: None,
                 linked: false,
@@ -3010,7 +3001,6 @@ mod tests {
                 ready_reason: None,
                 ready_detail: None,
                 readiness_cache_age_seconds: None,
-                readiness_probe_duration_ms: None,
                 readiness_timeout_ms: None,
                 readiness_follow_up_command: None,
                 manifest_path: None,

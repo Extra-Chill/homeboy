@@ -72,8 +72,6 @@ pub struct ReadOnlyProbeDegradation {
     /// applied because the probe could not run at all (see
     /// [`REASON_PROBE_UNAVAILABLE`]); use `deadline_ms` for exact precision.
     pub timeout_seconds: u64,
-    /// The elapsed wall-clock time when the probe stopped, in milliseconds.
-    pub elapsed_ms: u128,
     /// The probe deadline, in milliseconds. Zero means the probe was
     /// unavailable before it could start.
     pub deadline_ms: u128,
@@ -140,6 +138,11 @@ pub fn record_probe_outcome(
     timeout: Duration,
     output: &homeboy_core::server::CommandOutput,
 ) -> bool {
+    homeboy_core::observation::phase_timing::finish(
+        &format!("resolve.readonly_probe.{probe}"),
+        started,
+        output.timed_out || !output.success,
+    );
     // `stderr_with_interruption` is Homeboy's own marker for a cancelled child;
     // matching it keeps cancellation distinguishable from a plain non-zero exit
     // without widening `CommandOutput`.
@@ -153,10 +156,9 @@ pub fn record_probe_outcome(
         REASON_PROBE_INTERRUPTED
     };
     let deadline_ms = timeout.as_millis();
-    let elapsed_ms = started.elapsed().as_millis();
     let detail = if output.timed_out {
         format!(
-            "read-only probe `{probe}` exceeded its {deadline_ms}ms bound and was terminated after {elapsed_ms}ms; the runner did not answer, so this result is partial. Set {READONLY_PROBE_TIMEOUT_ENV} to change the bound."
+            "read-only probe `{probe}` exceeded its {deadline_ms}ms bound and was terminated; the runner did not answer, so this result is partial. Set {READONLY_PROBE_TIMEOUT_ENV} to change the bound."
         )
     } else {
         format!("read-only probe `{probe}` was cancelled by the caller before the runner answered; this result is partial.")
@@ -166,7 +168,6 @@ pub fn record_probe_outcome(
         runner_id: runner_id.map(str::to_string),
         reason_code,
         timeout_seconds: timeout.as_secs().max(u64::from(!timeout.is_zero())),
-        elapsed_ms,
         deadline_ms,
         follow_up: runner_status_follow_up(runner_id),
         follow_up_action: None,
@@ -218,6 +219,17 @@ mod tests {
 
     #[test]
     fn a_timed_out_probe_is_recorded_with_an_operator_facing_reason() {
+        let timing_dir = tempfile::tempdir().unwrap();
+        let timing_store = homeboy_core::observation::ObservationStore::open_initialized_at(
+            timing_dir.path().join("timing.db"),
+        )
+        .unwrap();
+        let timing_run = timing_store
+            .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+            .unwrap();
+        let _timing =
+            homeboy_core::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+
         clear_degradations();
 
         let recorded = record_probe_outcome(
@@ -235,13 +247,19 @@ mod tests {
         assert_eq!(degradations[0].runner_id.as_deref(), Some("homeboy-lab"));
         assert_eq!(degradations[0].reason_code, REASON_PROBE_TIMEOUT);
         assert_eq!(degradations[0].timeout_seconds, 15);
-        assert!(degradations[0].elapsed_ms <= 100);
         assert_eq!(degradations[0].deadline_ms, 15_000);
         assert_eq!(
             degradations[0].follow_up,
             "homeboy runner status homeboy-lab --full"
         );
         assert!(degradations[0].detail.contains("partial"));
+        let spans = timing_store.phase_spans(&timing_run.id).unwrap().spans;
+        let span = spans
+            .iter()
+            .find(|span| span.id == "resolve.readonly_probe.runner_homeboy_identity")
+            .expect("persisted phase");
+        assert_eq!(span.status, homeboy_core::phase_timing::PhaseStatus::Failed);
+        assert!(span.duration_ms.is_some());
     }
 
     #[test]
@@ -310,7 +328,6 @@ mod tests {
         let degradation = take_degradations().pop().expect("degradation");
         assert_eq!(degradation.timeout_seconds, 1);
         assert_eq!(degradation.deadline_ms, 50);
-        assert!(degradation.elapsed_ms >= 12);
     }
 
     #[test]

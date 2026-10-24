@@ -34,7 +34,6 @@ fn hanging_category_returns_typed_partial_evidence_and_later_category_completes(
         categories[0]["continuation_command"],
         "homeboy cleanup --include repo-artifacts"
     );
-    assert!(categories[0]["elapsed_ms"].as_u64().unwrap_or(0) >= 100);
     assert!(categories[0]["last_progress"]
         .as_str()
         .is_some_and(|progress| progress.contains("repo_artifacts")));

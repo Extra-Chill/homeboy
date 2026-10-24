@@ -628,7 +628,7 @@ fn readiness_api_for_discovered(
             reason: status.reason,
             detail: status.detail,
             cache_age_seconds: status.cache_age_seconds,
-            probe_duration_ms: status.probe_duration_ms,
+            probe_duration_ms: None,
             timeout_ms: status.timeout_ms,
             follow_up_command: status.follow_up_command,
         }),

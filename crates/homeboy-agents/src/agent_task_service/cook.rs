@@ -5856,9 +5856,9 @@ fn run_cook_spine(
             homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
         })
         .ok();
-    let _timing = timing_store
-        .as_ref()
-        .map(|store| crate::phase_timing::for_run(store, &options.identity.initial_run_id));
+    let _timing = timing_store.as_ref().map(|store| {
+        homeboy_core::observation::phase_timing::for_run(store, &options.identity.initial_run_id)
+    });
     let startup_cook_id = options.identity.cook_id.clone();
     let startup_run_id = options.identity.initial_run_id.clone();
     run_cook_startup_phase(

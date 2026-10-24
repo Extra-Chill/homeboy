@@ -370,7 +370,6 @@ fn record_partial_peer_projection(runner_id: &str, reason_code: &'static str, de
         runner_id: Some(runner_id.to_string()),
         reason_code,
         timeout_seconds: 0,
-        elapsed_ms: 0,
         deadline_ms: 0,
         follow_up: follow_up_action.render_command(),
         follow_up_action: Some(follow_up_action),

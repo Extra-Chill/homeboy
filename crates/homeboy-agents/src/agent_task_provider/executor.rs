@@ -610,7 +610,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         request: AgentTaskRequest,
         context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
-        let _timing = crate::phase_timing::for_execution(&context);
+        let _timing = crate::agent_task_schedule::for_execution_timing(&context);
         let request = request_with_effective_provider_contract(&request, self.providers());
         let materialized = match context.lifecycle_store.as_ref() {
             Some(store) => {

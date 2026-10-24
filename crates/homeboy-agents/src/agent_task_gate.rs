@@ -2260,7 +2260,7 @@ fn run_gate_argv_with_supervision(
     package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
     declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
 ) -> Result<AgentTaskGateReport> {
-    crate::phase_timing::time_with_outcome(
+    homeboy_core::observation::phase_timing::time_with_outcome(
         "gate.command",
         || {
             run_gate_argv(
@@ -2614,7 +2614,7 @@ fn run_gate_argv_local(
         })
     });
 
-    crate::phase_timing::time("publish.gate_cargo_target", || {
+    homeboy_core::observation::phase_timing::time("publish.gate_cargo_target", || {
         selected_environment.finish_cargo_target()
     })?;
     let mut report = AgentTaskGateReport::new(
@@ -4372,7 +4372,7 @@ pub fn preflight_gate_toolchains(
     runtime_tmpdir: Option<&Path>,
     timeout: Duration,
 ) -> Result<()> {
-    crate::phase_timing::time("admit.gate_toolchains", || {
+    homeboy_core::observation::phase_timing::time("admit.gate_toolchains", || {
         if let Some(runner_id) = policy.lab_runner.as_deref() {
             return placement::preflight(
                 cwd,
@@ -6760,8 +6760,11 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("gate fixture");
             let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
-            let run_id = crate::phase_timing::test_run(&store);
-            let _timing = crate::phase_timing::for_run(&store, &run_id);
+            let run_id = store
+                .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
+                .unwrap()
+                .id;
+            let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
             let mut policy = AgentTaskGateEnvironmentPolicy::default();
             policy.shared_cargo_target = Some(true);
             policy
@@ -10071,8 +10074,11 @@ exit 2
             workspace.path().join("observe.db"),
         )
         .unwrap();
-        let run_id = crate::phase_timing::test_run(&store);
-        let _timing = crate::phase_timing::for_run(&store, &run_id);
+        let run_id = store
+            .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
+            .unwrap()
+            .id;
+        let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
         let tool = workspace.path().join("hung-tool");
         homeboy_test_support::write_executable(&tool, "#!/bin/sh\n/bin/sleep 30\n", 0o755)
             .expect("tool");

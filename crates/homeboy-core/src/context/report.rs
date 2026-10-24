@@ -130,8 +130,6 @@ pub struct ExtensionEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_cache_age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub readiness_probe_duration_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_follow_up_command: Option<String>,
@@ -315,7 +313,6 @@ fn build_report_at(
                 ready_reason: ready_status.reason,
                 ready_detail: ready_status.detail,
                 readiness_cache_age_seconds: ready_status.cache_age_seconds,
-                readiness_probe_duration_ms: ready_status.probe_duration_ms,
                 readiness_timeout_ms: ready_status.timeout_ms,
                 readiness_follow_up_command: ready_status.follow_up_command,
                 linked: is_extension_linked(&m.id),

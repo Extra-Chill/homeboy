@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::time::Instant;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -31,7 +30,6 @@ pub struct ValidationCommandRecord {
     pub status: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
-    pub elapsed_ms: Option<u128>,
     pub exit_code: Option<i32>,
     pub stdout_artifact: Option<String>,
     pub stderr_artifact: Option<String>,
@@ -50,7 +48,6 @@ pub struct ValidationProgressRecorder<'a> {
     run_dir: &'a RunDir,
     observation: Option<&'a ActiveObservation>,
     ledger: ValidationProgressLedger,
-    active_started: Option<Instant>,
 }
 
 impl ValidationProgressLedger {
@@ -75,7 +72,6 @@ impl ValidationProgressLedger {
                     status: "pending".to_string(),
                     started_at: None,
                     finished_at: None,
-                    elapsed_ms: None,
                     exit_code: None,
                     stdout_artifact: None,
                     stderr_artifact: None,
@@ -96,7 +92,6 @@ impl ValidationProgressLedger {
             command.status = "running".to_string();
             command.started_at = Some(Utc::now().to_rfc3339());
             command.finished_at = None;
-            command.elapsed_ms = None;
             command.exit_code = None;
         }
         self.recompute();
@@ -106,14 +101,12 @@ impl ValidationProgressLedger {
         &mut self,
         index: usize,
         exit_code: i32,
-        elapsed_ms: u128,
         stdout_artifact: Option<String>,
         stderr_artifact: Option<String>,
     ) {
         if let Some(command) = self.commands.get_mut(index) {
             command.status = if exit_code == 0 { "passed" } else { "failed" }.to_string();
             command.finished_at = Some(Utc::now().to_rfc3339());
-            command.elapsed_ms = Some(elapsed_ms);
             command.exit_code = Some(exit_code);
             command.stdout_artifact = stdout_artifact;
             command.stderr_artifact = stderr_artifact;
@@ -182,14 +175,12 @@ impl<'a> ValidationProgressRecorder<'a> {
             run_dir,
             observation,
             ledger: ValidationProgressLedger::new(commands),
-            active_started: None,
         };
         recorder.persist()?;
         Ok(recorder)
     }
 
     pub fn start(&mut self, index: usize) -> Result<()> {
-        self.active_started = Some(Instant::now());
         self.ledger.mark_started(index);
         self.persist()
     }
@@ -208,7 +199,6 @@ impl<'a> ValidationProgressRecorder<'a> {
             status: "pending".to_string(),
             started_at: None,
             finished_at: None,
-            elapsed_ms: None,
             exit_code: None,
             stdout_artifact: None,
             stderr_artifact: None,
@@ -226,18 +216,23 @@ impl<'a> ValidationProgressRecorder<'a> {
         stdout_artifact: Option<String>,
         stderr_artifact: Option<String>,
     ) -> Result<()> {
-        let elapsed_ms = self
-            .active_started
-            .take()
-            .map(|started| started.elapsed().as_millis())
-            .unwrap_or_default();
-        self.ledger.mark_finished(
-            index,
-            exit_code,
-            elapsed_ms,
-            stdout_artifact,
-            stderr_artifact,
-        );
+        if let Some((observation, started_at)) = self.observation.zip(
+            self.ledger
+                .commands
+                .get(index)
+                .and_then(|command| command.started_at.as_deref()),
+        ) {
+            if let Err(error) = observation.store().finish_run_phase(
+                observation.run_id(),
+                &format!("gate.validation.{index}"),
+                started_at,
+                exit_code != 0,
+            ) {
+                crate::log_status!("observe", "phase timing persistence failed: {}", error);
+            }
+        }
+        self.ledger
+            .mark_finished(index, exit_code, stdout_artifact, stderr_artifact);
         self.persist()
     }
 
@@ -358,7 +353,7 @@ mod tests {
         assert_eq!(ledger.active_command.as_ref().unwrap().command, "check one");
         assert_eq!(ledger.next_command.as_ref().unwrap().command, "check two");
 
-        ledger.mark_finished(0, 0, 25, Some("stdout.log".to_string()), None);
+        ledger.mark_finished(0, 0, Some("stdout.log".to_string()), None);
 
         assert_eq!(ledger.status, "pending");
         assert_eq!(ledger.completed_count, 1);
@@ -438,6 +433,10 @@ mod tests {
             assert_eq!(ledger.completed_count, 1);
             assert_eq!(ledger.next_command.as_ref().unwrap().command, "check two");
 
+            let spans = observation.store().phase_spans(&run_id).unwrap().spans;
+            assert_eq!(spans[0].id, "gate.validation.0");
+            assert_eq!(spans[0].status, crate::phase_timing::PhaseStatus::Ok);
+            assert!(spans[0].duration_ms.is_some());
             observation.finish(RunStatus::Pass, None);
             run_dir.cleanup();
         });
