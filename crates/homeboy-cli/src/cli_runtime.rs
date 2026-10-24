@@ -1723,30 +1723,12 @@ impl CliRuntime {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
         if crate::core::parsed_command_preflight::captured_result().is_none() {
-            let lab_readiness = if matches!(
-                preflight_input.lab_route,
-                crate::core::parsed_command_preflight::LabRouteIntent::Supported { .. }
-            ) {
-                cli.runner
-                    .as_deref()
-                    .map(crate::runner::lab_runner_readiness_for_admission)
-                    .unwrap_or_else(|| crate::runner::refresh_lab_runner_readiness_for_admission())
-                    .ok()
-            } else {
-                None
-            };
-            let selected_runner_id = matches!(
-                preflight_input.lab_route,
-                crate::core::parsed_command_preflight::LabRouteIntent::Supported { .. }
-            )
-            .then(|| {
-                cli.runner.clone().or_else(|| {
-                    lab_readiness
-                        .as_ref()
-                        .and_then(|readiness| readiness.selected_runner_id.clone())
-                })
-            })
-            .flatten();
+            let (lab_readiness, selected_runner_id) = parsed_command_runner_evidence(
+                &cli,
+                &preflight_input,
+                live_lab_readiness,
+                crate::runner::lab_runner_wait_target,
+            );
             let result = match crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
                 normalized.clone(),
                 preflight_input.clone(),
@@ -3241,11 +3223,13 @@ fn preflight_hot_command_with_input(
     if let Some(hot_command) = resource_policy::hot_command_for_cli(cli) {
         if let Ok((resources, _)) = preflight() {
             let mut lab_readiness = if hot_command.lab_offload_supported {
-                cli.runner
-                    .as_deref()
-                    .map(crate::runner::lab_runner_readiness_for_admission)
-                    .unwrap_or_else(|| crate::runner::refresh_lab_runner_readiness_for_admission())
-                    .ok()
+                parsed_command_runner_evidence(
+                    cli,
+                    &preflight_input,
+                    live_lab_readiness,
+                    crate::runner::lab_runner_wait_target,
+                )
+                .0
             } else {
                 None
             };
@@ -3511,6 +3495,51 @@ fn should_refresh_terminal_lab_inventory(
         })
         && resource_policy::evaluate_with_runner_hint(hot_command, resources, lab_readiness)
             .is_some()
+}
+
+fn live_lab_readiness(
+    runner_id: Option<&str>,
+) -> crate::core::Result<crate::runner::runners::LabRunnerReadiness> {
+    runner_id
+        .map(crate::runner::lab_runner_readiness_for_admission)
+        .unwrap_or_else(crate::runner::refresh_lab_runner_readiness_for_admission)
+}
+
+fn parsed_command_runner_evidence(
+    cli: &Cli,
+    input: &crate::core::parsed_command_preflight::ParsedCommandPreflightInput,
+    refresh: impl FnOnce(
+        Option<&str>,
+    ) -> crate::core::Result<crate::runner::runners::LabRunnerReadiness>,
+    persisted_target: impl FnOnce() -> crate::core::Result<Option<String>>,
+) -> (
+    Option<crate::runner::runners::LabRunnerReadiness>,
+    Option<String>,
+) {
+    use crate::core::parsed_command_preflight::{LabRouteIntent, PlacementIntent};
+    if matches!(input.placement, PlacementIntent::Local)
+        || matches!(input.lab_route, LabRouteIntent::Unsupported)
+    {
+        return (None, None);
+    }
+    if matches!(input.lab_route, LabRouteIntent::ReadPolling) {
+        // Reads follow durable record ownership, not current capacity. Only an
+        // explicit Lab route needs a configured identity; ordinary polling is
+        // answered from the controller mirror without consulting any runner.
+        let selected = cli.runner.clone().or_else(|| {
+            matches!(input.placement, PlacementIntent::Lab)
+                .then(|| persisted_target().ok().flatten())
+                .flatten()
+        });
+        return (None, selected);
+    }
+    let readiness = refresh(cli.runner.as_deref()).ok();
+    let selected = cli.runner.clone().or_else(|| {
+        readiness
+            .as_ref()
+            .and_then(|value| value.selected_runner_id.clone())
+    });
+    (readiness, selected)
 }
 
 fn parsed_lab_readiness_snapshot(
@@ -4219,6 +4248,154 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    #[test]
+    fn read_polling_and_local_placement_never_refresh_runner_readiness() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        use crate::core::parsed_command_preflight::{
+            resolve_parsed_command_preflight, ParsedCommandPolicySnapshot,
+            ResourceAdmissionEvidence,
+        };
+        for args in [
+            vec!["homeboy", "--placement", "local", "bench"],
+            vec!["homeboy", "agent-task", "status", "run-123"],
+            vec!["homeboy", "agent-task", "list"],
+            vec!["homeboy", "agent-task", "logs", "run-123"],
+            vec!["homeboy", "agent-task", "diagnose", "run-123"],
+            vec![
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "inspect",
+                "--to-worktree",
+                "fixture@task",
+                "--verify",
+                "true",
+            ],
+            vec![
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "run",
+                "prompt",
+            ],
+            vec![
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "status",
+                "run-123",
+            ],
+            vec![
+                "homeboy",
+                "--runner",
+                "lab-a",
+                "agent-task",
+                "status",
+                "run-123",
+            ],
+            vec![
+                "homeboy",
+                "--placement",
+                "lab",
+                "agent-task",
+                "status",
+                "run-123",
+            ],
+        ] {
+            let cli = Cli::parse_from(&args);
+            let normalized: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            let input = resource_policy::parsed_command_preflight_input(&cli, &normalized);
+            let (readiness, selected) = parsed_command_runner_evidence(
+                &cli,
+                &input,
+                |_| panic!("must not refresh live readiness: {args:?}"),
+                || Ok(Some("lab-a".to_string())),
+            );
+            assert!(readiness.is_none());
+            let result = resolve_parsed_command_preflight(
+                normalized,
+                input,
+                ParsedCommandPolicySnapshot {
+                    resource_admission_evidence: ResourceAdmissionEvidence::Observed {
+                        pressure: crate::core::parsed_command_preflight::ResourceHeat::None,
+                    },
+                    resource_policy: None,
+                    lab_readiness: None,
+                    selected_runner_id: selected.clone(),
+                    generic_route: generic_route_policy_snapshot(&cli, selected),
+                    deferred_pressure_refusal: false,
+                    runner_admitted: false,
+                    auto_local_capacity_fallback: false,
+                },
+            )
+            .expect("read routing needs no workload admission evidence");
+            let explicit_lab = cli.placement != crate::cli_surface::Placement::Local
+                && (cli.runner.is_some() || cli.placement == crate::cli_surface::Placement::Lab);
+            assert_eq!(
+                result.selected_runner_id.as_deref(),
+                explicit_lab.then_some("lab-a"),
+                "{args:?}"
+            );
+            assert!(
+                result.generic_route_runner_id.is_none(),
+                "controller owns polling"
+            );
+        }
+    }
+
+    #[test]
+    fn placing_commands_keep_live_runner_admission() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        for args in [
+            vec!["homeboy", "bench"],
+            vec![
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "inspect",
+                "--to-worktree",
+                "fixture@task",
+                "--verify",
+                "true",
+            ],
+            vec!["homeboy", "agent-task", "run", "prompt"],
+            vec![
+                "homeboy",
+                "--runner",
+                "lab-a",
+                "agent-task",
+                "run",
+                "prompt",
+            ],
+        ] {
+            let cli = Cli::parse_from(&args);
+            let normalized: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            let input = resource_policy::parsed_command_preflight_input(&cli, &normalized);
+            let mut refreshed = false;
+            let (readiness, selected) = parsed_command_runner_evidence(
+                &cli,
+                &input,
+                |runner| {
+                    refreshed = true;
+                    assert_eq!(runner, cli.runner.as_deref());
+                    Ok(lab_readiness(
+                        crate::runner::runners::LabRunnerReadinessState::ConnectedReady,
+                    ))
+                },
+                || panic!("placing commands require live evidence"),
+            );
+            assert!(refreshed);
+            assert!(readiness.is_some());
+            assert!(selected.is_some());
+        }
+    }
 
     #[test]
     fn empty_admission_requirements_avoid_runner_lookup() {
