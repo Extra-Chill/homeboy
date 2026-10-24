@@ -71,7 +71,8 @@ fn workspace_materializer_builds_git_bundle_checkout_command() {
         command.contains("/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git")
     );
     assert!(command.contains("+HEAD:refs/homeboy/"));
-    assert!(command.contains("git clone --reference-if-able \"$cache\" \"$bundle\" \"$tmp\""));
+    assert!(command
+        .contains("git clone --no-checkout --reference-if-able \"$cache\" \"$bundle\" \"$tmp\""));
     assert!(command.contains("repack -a -d -q && rm -f \"$tmp/.git/objects/info/alternates\""));
     assert!(command.contains("update-ref refs/homeboy-retain/0 def456"));
     assert!(command.contains("remote set-url origin https://github.com/Extra-Chill/homeboy.git"));

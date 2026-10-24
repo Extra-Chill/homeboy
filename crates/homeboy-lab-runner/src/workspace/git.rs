@@ -9,7 +9,7 @@ use super::control::WorkspaceControl;
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
 use super::types::ControllerGitBundleProvenance;
 use super::types::GitSnapshot;
-use super::util::{ssh_args, ssh_client_for_runner, verify_valid_git_representation};
+use super::util::{ssh_args, ssh_client_for_runner};
 
 #[cfg(test)]
 pub(super) fn git_snapshot(
@@ -143,6 +143,7 @@ pub(super) fn materialize_git_controlled(
 }
 
 pub(super) struct ControllerGitBundleMaterializationRequest<'a> {
+    pub metadata_only: bool,
     pub local_path: &'a Path,
     pub remote_path: &'a str,
     pub head: &'a str,
@@ -257,6 +258,7 @@ fn install_from_object_cache(
         request.changed_since_base,
         request.allow_dirty_lab_workspace,
         object_cache,
+        request.metadata_only,
     );
     homeboy_core::observation::phase_timing::time(
         "stage.lab.source_materialization.runner_apply_verify",
@@ -464,6 +466,7 @@ fn transfer_git_bundle(
             object_cache,
             prerequisites,
             retain: &retain,
+            metadata_only: request.metadata_only,
         },
     );
     // Installation consumes the stream and verifies its digest on the runner;
@@ -532,6 +535,7 @@ pub(super) fn materialize_git_snapshot_controlled(
     let provenance = materialize_git_bundle_controlled(
         runner,
         ControllerGitBundleMaterializationRequest {
+            metadata_only: true,
             local_path,
             remote_path,
             head: &head,
@@ -551,42 +555,7 @@ pub(super) fn materialize_git_snapshot_controlled(
         control,
     )?;
     control.checkpoint()?;
-    verify_materialized_snapshot_git_representation(runner, remote_path)?;
     Ok(Some(provenance))
-}
-
-fn verify_materialized_snapshot_git_representation(
-    runner: &Runner,
-    remote_path: &str,
-) -> Result<()> {
-    match runner.kind {
-        RunnerKind::Local => verify_valid_git_representation(Path::new(remote_path)),
-        RunnerKind::Ssh => {
-            let (_server, client) = ssh_client_for_runner(runner)?;
-            if client.is_local {
-                return verify_valid_git_representation(Path::new(remote_path));
-            }
-            let inside = super::snapshot::synthetic_checkout_value(
-                runner,
-                remote_path,
-                "rev-parse --is-inside-work-tree",
-            )?;
-            if inside != "true" {
-                return Err(Error::validation_invalid_argument(
-                    "workspace",
-                    "snapshot-git workspace .git representation is not a Git work tree",
-                    Some(remote_path.to_string()),
-                    None,
-                ));
-            }
-            super::snapshot::synthetic_checkout_value(
-                runner,
-                remote_path,
-                "rev-parse --verify -q HEAD",
-            )
-            .map(|_| ())
-        }
-    }
 }
 
 /// Resolve the exact object closure locally before `git bundle` can invoke a
@@ -1104,6 +1073,7 @@ fn materialize_git_bundle_piped_controlled(
 /// How one bundle relates to the runner's object cache.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BundleTransfer<'a> {
+    pub metadata_only: bool,
     /// Digest the runner verifies before Git reads the transfer.
     pub sha256: &'a str,
     pub object_cache: &'a str,
@@ -1124,6 +1094,7 @@ pub(crate) fn git_bundle_install_command(
     transfer: BundleTransfer<'_>,
 ) -> String {
     WorkspaceMaterializer::new(remote_path)
+        .metadata_only(transfer.metadata_only)
         .with_bundle_file(transfer.object_cache)
         .capture_owner()
         .op(WorkspaceMaterializationOperation::EnsureParent)
@@ -1145,27 +1116,13 @@ pub(crate) fn git_bundle_install_command(
             borrow_cache: !transfer.prerequisites.is_empty(),
             retain: transfer.retain.to_vec(),
         })
-        .op(WorkspaceMaterializationOperation::SetGitOrigin(
-            remote_url.to_string(),
-        ))
-        .op(WorkspaceMaterializationOperation::CheckoutGitRef {
-            head: head.to_string(),
-            branch: branch.map(str::to_string),
-        })
-        .op(WorkspaceMaterializationOperation::ResetAndCleanGit {
-            head: head.to_string(),
-        })
-        .op(WorkspaceMaterializationOperation::GuardCleanGitWorkspace {
-            allow_dirty: allow_dirty_lab_workspace,
-        })
-        .op(WorkspaceMaterializationOperation::AtomicReplaceTemp)
-        .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
-            remote_url: remote_url.to_string(),
-            head: head.to_string(),
-            changed_since_base: changed_since_base.map(str::to_string),
-        })
-        .restore_owner()
-        .command()
+        .finish_git_install(
+            remote_url,
+            head,
+            branch,
+            changed_since_base,
+            allow_dirty_lab_workspace,
+        )
 }
 
 /// Install `head` into a fresh workspace straight from the runner's object
@@ -1178,8 +1135,10 @@ pub(crate) fn git_object_cache_install_command(
     changed_since_base: Option<&str>,
     allow_dirty_lab_workspace: bool,
     object_cache: &str,
+    metadata_only: bool,
 ) -> String {
     WorkspaceMaterializer::new(remote_path)
+        .metadata_only(metadata_only)
         .with_bundle_file(object_cache)
         .capture_owner()
         .op(WorkspaceMaterializationOperation::EnsureParent)
@@ -1189,7 +1148,25 @@ pub(crate) fn git_object_cache_install_command(
         .op(WorkspaceMaterializationOperation::CloneObjectCacheToTemp {
             head: head.to_string(),
         })
-        .op(WorkspaceMaterializationOperation::SetGitOrigin(
+        .finish_git_install(
+            remote_url,
+            head,
+            branch,
+            changed_since_base,
+            allow_dirty_lab_workspace,
+        )
+}
+
+impl WorkspaceMaterializer {
+    fn finish_git_install(
+        self,
+        remote_url: &str,
+        head: &str,
+        branch: Option<&str>,
+        changed_since_base: Option<&str>,
+        allow_dirty_lab_workspace: bool,
+    ) -> String {
+        self.op(WorkspaceMaterializationOperation::SetGitOrigin(
             remote_url.to_string(),
         ))
         .op(WorkspaceMaterializationOperation::CheckoutGitRef {
@@ -1210,6 +1187,7 @@ pub(crate) fn git_object_cache_install_command(
         })
         .restore_owner()
         .command()
+    }
 }
 
 pub(super) fn materialize_git_command(

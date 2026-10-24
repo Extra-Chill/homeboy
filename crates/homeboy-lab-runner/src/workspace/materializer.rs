@@ -63,6 +63,7 @@ pub(super) struct WorkspaceMaterializer {
     capture_owner: bool,
     restore_owner: bool,
     operations: Vec<WorkspaceMaterializationOperation>,
+    metadata_only: bool,
 }
 
 impl WorkspaceMaterializer {
@@ -73,6 +74,7 @@ impl WorkspaceMaterializer {
             capture_owner: false,
             restore_owner: false,
             operations: Vec::new(),
+            metadata_only: false,
         }
     }
 
@@ -80,6 +82,11 @@ impl WorkspaceMaterializer {
     /// object cache for this source remote.
     pub(super) fn with_bundle_file(mut self, object_cache: &str) -> Self {
         self.bundle = Some(object_cache.to_string());
+        self
+    }
+
+    pub(super) fn metadata_only(mut self, enabled: bool) -> Self {
+        self.metadata_only = enabled;
         self
     }
 
@@ -119,6 +126,22 @@ impl WorkspaceMaterializer {
 
         let mut commands = Vec::new();
         for operation in &self.operations {
+            if self.metadata_only {
+                match operation {
+                    WorkspaceMaterializationOperation::CheckoutGitRef { head, branch } => {
+                        let target = branch.as_ref().map_or_else(
+                            || format!("git -C \"$tmp\" update-ref --no-deref HEAD {}", shell::quote_arg(head)),
+                            |branch| format!("git -C \"$tmp\" update-ref {reference} {head} && git -C \"$tmp\" symbolic-ref HEAD {reference}", reference = shell::quote_arg(&format!("refs/heads/{branch}")), head = shell::quote_arg(head)),
+                        );
+                        commands.push(target);
+                        continue;
+                    }
+                    WorkspaceMaterializationOperation::ResetAndCleanGit { .. }
+                    | WorkspaceMaterializationOperation::GuardCleanGitWorkspace { .. }
+                    | WorkspaceMaterializationOperation::VerifyGitBaseline { .. } => continue,
+                    _ => {}
+                }
+            }
             commands.push(operation.shell());
         }
         if self.restore_owner {
@@ -164,16 +187,12 @@ impl WorkspaceMaterializationOperation {
                 refspec = shell::quote_arg(&format!("+HEAD:refs/homeboy/{head}")),
                 first_evicted = ref_limit + 1,
             ),
-            // The copied closure is walked before the workspace is installed,
-            // so a damaged cache fails here and never replaces `$dest`.
-            // Retained commits are pinned by temporary refs only for the copy;
-            // a bundle clone leaves them unreferenced, so the copy does too.
-            // A complete transfer never borrows: it must succeed even when the
-            // cache is damaged, which is exactly when it is the fallback.
+            // Complete bundles never borrow from a possibly damaged cache.
+            // Thin clones pin retained commits while copying their closure.
             Self::CloneBundleToTemp {
                 borrow_cache: false,
                 ..
-            } => "git clone \"$bundle\" \"$tmp\"".to_string(),
+            } => "git clone --no-checkout \"$bundle\" \"$tmp\"".to_string(),
             Self::CloneBundleToTemp { retain, .. } => {
                 let pins = retain
                     .iter()
@@ -186,7 +205,7 @@ impl WorkspaceMaterializationOperation {
                     })
                     .collect::<String>();
                 format!(
-                    "git clone --reference-if-able \"$cache\" \"$bundle\" \"$tmp\" && if [ -f \"$tmp/.git/objects/info/alternates\" ]; then true{pins} && git -C \"$tmp\" repack -a -d -q && rm -f \"$tmp/.git/objects/info/alternates\" && git -C \"$tmp\" rev-list --objects --all >/dev/null && {{ git -C \"$tmp\" for-each-ref --format='%(refname)' refs/homeboy-retain/ | while IFS= read -r ref; do git -C \"$tmp\" update-ref -d \"$ref\"; done; }}; fi"
+                    "git clone --no-checkout --reference-if-able \"$cache\" \"$bundle\" \"$tmp\" && if [ -f \"$tmp/.git/objects/info/alternates\" ]; then true{pins} && git -C \"$tmp\" repack -a -d -q && rm -f \"$tmp/.git/objects/info/alternates\" && git -C \"$tmp\" rev-list --objects --all >/dev/null && {{ git -C \"$tmp\" for-each-ref --format='%(refname)' refs/homeboy-retain/ | while IFS= read -r ref; do git -C \"$tmp\" update-ref -d \"$ref\"; done; }}; fi"
                 )
             }
             Self::CloneObjectCacheToTemp { head } => format!(

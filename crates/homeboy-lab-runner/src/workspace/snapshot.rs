@@ -2969,7 +2969,7 @@ pub(super) fn snapshot_install_command(remote_path: &str) -> String {
 pub(super) fn snapshot_overlay_install_command(remote_path: &str) -> String {
     let remote_path = shell::quote_arg(remote_path);
     format!(
-        "dest={remote_path}; tmp=\"${{dest}}.overlay.$$\"; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && trap 'rm -rf \"$tmp\"' EXIT && tar -C \"$tmp\" -xf - && find \"$dest\" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {{}} + && cp -a \"$tmp\"/. \"$dest\"/"
+        "dest={remote_path}; tmp=\"${{dest}}.overlay.$$\"; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && trap 'rm -rf \"$tmp\"' EXIT && tar -C \"$tmp\" -xf - && find \"$dest\" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {{}} + && cp -a \"$tmp\"/. \"$dest\"/ && git -C \"$dest\" read-tree HEAD && test \"$(git -C \"$dest\" rev-parse --is-inside-work-tree)\" = true && git -C \"$dest\" rev-parse --verify -q HEAD >/dev/null"
     )
 }
 
