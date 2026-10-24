@@ -985,6 +985,15 @@ pub(crate) fn promote_or_load_attempt_in_store(
     options: &CookRequest,
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
+    let timing_store = lifecycle_store
+        .open_observation_initialized()
+        .map_err(|error| {
+            homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
+        })
+        .ok();
+    let _recovery = timing_store
+        .as_ref()
+        .map(|store| store.run_phase_guard(run_id, "promote.recover.candidate"));
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
         if promotion.status != AgentTaskPromotionStatus::VerificationPending {
             if promotion.provenance.get("replacement_gate_proof").is_some() {
@@ -3870,6 +3879,15 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     // candidate, not a replacement candidate. Recover the source promotion so
     // an exact `--recover <remediation>` cannot hide that applied promotion.
     let run_id = substantive_source_for_empty_remediation(&recipe, &run_id).unwrap_or(run_id);
+    let timing_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        .and_then(|store| store.open_observation_initialized())
+        .map_err(|error| {
+            homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
+        })
+        .ok();
+    let _execution = timing_store
+        .as_ref()
+        .map(|store| store.run_phase_guard(&run_id, "promote.recover.finalization"));
     if persisted_promotion_for_attempt(&run_id)?.is_some_and(|promotion| {
         promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
             && promotion.changed_files.is_empty()
@@ -6108,6 +6126,7 @@ pub(crate) fn cook_report_with_stores(
     lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     input: CookReportInput<'_>,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let _finalization = homeboy_core::observation::phase_timing::guard("mission.finalization");
     let CookReportInput {
         cook_id,
         status,

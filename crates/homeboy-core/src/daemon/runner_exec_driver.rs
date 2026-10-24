@@ -266,6 +266,15 @@ pub(crate) fn execute_exec(
     require_child_identity_acknowledgement: bool,
     child_started: Option<ExecChildStarted>,
 ) -> Result<DaemonExecOutput> {
+    let timing_store = crate::observation::ObservationStore::open_initialized()
+        .map_err(|error| {
+            crate::log_status!("observe", "phase timing persistence failed: {}", error);
+        })
+        .ok();
+    let identity = execution_context.assertion();
+    let _execution = timing_store
+        .as_ref()
+        .map(|store| store.run_phase_guard(&identity.controller_run_id, "runner.execution"));
     active_driver().execute(
         prepared,
         execution_context,

@@ -17,6 +17,7 @@ pub struct RunPhaseGuard<'a> {
     run_id: String,
     phase: String,
     started_at: String,
+    _context: super::phase_timing::Scope,
 }
 
 impl Drop for RunPhaseGuard<'_> {
@@ -35,6 +36,7 @@ impl Drop for RunPhaseGuard<'_> {
 impl ObservationStore {
     pub fn run_phase_guard(&self, run_id: &str, phase: &str) -> RunPhaseGuard<'_> {
         RunPhaseGuard {
+            _context: super::phase_timing::for_run(self, run_id),
             store: self,
             run_id: run_id.into(),
             phase: phase.into(),
@@ -62,6 +64,8 @@ impl ObservationStore {
         operation: impl FnOnce() -> Result<T>,
         failed: impl FnOnce(&T) -> bool,
     ) -> Result<T> {
+        // A run-aware execution boundary also owns the context of all leaves.
+        let _context = super::phase_timing::for_run(self, run_id);
         let started = chrono::Utc::now();
         let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::with_version(
             crate::build_identity::current().version,
