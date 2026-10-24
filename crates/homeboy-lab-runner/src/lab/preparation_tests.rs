@@ -1004,7 +1004,7 @@ fn concurrent_unreachable_health_handoffs_connect_once() {
 
 #[test]
 fn compatible_reconnect_wait_reuses_the_owner_session_without_a_second_tunnel() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,

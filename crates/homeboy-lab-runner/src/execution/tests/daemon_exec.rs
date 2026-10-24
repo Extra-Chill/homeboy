@@ -133,6 +133,9 @@ fn direct_submission(command: Vec<&str>, submission_key: &str) -> serde_json::Va
 
 #[test]
 fn direct_staging_replays_one_execution() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_driver();
     crate::runner_staging_store::register_runner_staging_provider();
     let _home = create_lab_local_runner();
@@ -185,6 +188,9 @@ fn direct_staging_replays_one_execution() {
 
 #[test]
 fn typed_daemon_exec_uses_canonical_submission_without_scalar_execution_fields() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_driver();
     let _home = create_lab_local_runner();
     let store = JobStore::default();
@@ -226,6 +232,9 @@ fn typed_daemon_exec_uses_canonical_submission_without_scalar_execution_fields()
 
 #[test]
 fn typed_daemon_exec_rejects_submitted_authority_before_owner_registration() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     let _home = create_lab_local_runner();
     let store = JobStore::default();
     let mut payload = direct_submission(vec!["sh", "-c", "printf no"], "typed-authority");
@@ -255,6 +264,9 @@ fn typed_daemon_exec_rejects_submitted_authority_before_owner_registration() {
 
 #[test]
 fn typed_daemon_exec_rejects_inline_secret_before_execution() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_driver();
     let _home = create_lab_local_runner();
     let store = JobStore::default();
@@ -283,6 +295,9 @@ fn typed_daemon_exec_rejects_inline_secret_before_execution() {
 
 #[test]
 fn direct_staging_concurrent_replays_preserve_source_mutations_and_environment() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_driver();
     crate::register_runner_staging_provider();
     let _home = create_lab_local_runner();
@@ -350,6 +365,9 @@ fn direct_staging_concurrent_replays_preserve_source_mutations_and_environment()
 
 #[test]
 fn direct_staging_preserves_nonzero_child_failure() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_driver();
     crate::register_runner_staging_provider();
     let _home = create_lab_local_runner();
@@ -444,6 +462,9 @@ fn direct_staging_cancels_through_the_job_endpoint_and_reaps_the_child() {
 
 #[test]
 fn daemon_exec_does_not_require_runner_config_on_daemon_host() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_driver();
     let _home = HomeGuard::new();
     let store = JobStore::default();
@@ -495,6 +516,9 @@ fn daemon_exec_does_not_require_runner_config_on_daemon_host() {
 
 #[test]
 fn exec_applies_request_env_to_daemon_command() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_driver();
     let _home = create_lab_local_runner();
     let store = JobStore::default();
@@ -555,6 +579,9 @@ fn exec_applies_request_env_to_daemon_command() {
 
 #[test]
 fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_driver();
     let _home = HomeGuard::new();
     let _config = homeboy_core::test_support::EnvVarGuard::set(
@@ -664,6 +691,9 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
 
 #[test]
 fn exec_failed_command_marks_job_failed_after_result_event() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_driver();
     let _home = create_lab_local_runner();
     let store = JobStore::default();
@@ -729,6 +759,9 @@ fn exec_failed_command_marks_job_failed_after_result_event() {
 
 #[test]
 fn exec_capture_patch_records_remote_delta_artifact() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_driver();
     let _home = create_lab_local_runner();
     let workspace = tempfile::tempdir().expect("workspace");

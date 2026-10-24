@@ -1602,13 +1602,13 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use homeboy_core::{server, test_support};
+    use homeboy_core::server;
 
     use std::time::Instant;
 
     #[test]
     fn bounded_status_records_a_timed_out_remote_daemon_probe() {
-        test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let daemon = home.path().join("slow-homeboy");
             homeboy_test_support::write_executable(&daemon, "#!/bin/sh\nsleep 1\n", 0o755)
                 .expect("write slow remote Homeboy shim");

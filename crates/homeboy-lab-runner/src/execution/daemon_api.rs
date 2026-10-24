@@ -238,7 +238,6 @@ fn daemon_api_session_for_path(
 mod tests {
     use super::*;
     use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
-    use homeboy_core::test_support;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -270,7 +269,7 @@ mod tests {
 
     #[test]
     fn daemon_api_routes_persisted_a_and_b_job_operations_to_their_generation() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a");
             let b = session("lease-b", "daemon-b");
             crate::generation_store::record_job("runner-a", &a, "job-a").expect("record A job");

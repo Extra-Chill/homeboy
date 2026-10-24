@@ -78,15 +78,15 @@ fn workspace_snapshot_scan_skips_a_child_removed_during_atomic_promotion() {
     let original_path = std::env::var_os("PATH").expect("PATH");
     let mut paths = vec![shim_root.path().to_path_buf()];
     paths.extend(std::env::split_paths(&original_path));
-    std::env::set_var("PATH", std::env::join_paths(paths).expect("PATH value"));
+    // Scope the fault-injection base64 to this scan, never sibling tests.
     let output = std::process::Command::new("sh")
+        .env("PATH", std::env::join_paths(paths).expect("PATH value"))
         .args([
             "-c",
             &workspace_snapshot_scan_command(&root.path().display().to_string()),
         ])
         .output()
         .expect("run snapshot scan");
-    std::env::set_var("PATH", original_path);
 
     assert!(
         output.status.success(),
@@ -130,15 +130,14 @@ fn workspace_snapshot_scan_fails_when_its_root_disappears() {
     let original_path = std::env::var_os("PATH").expect("PATH");
     let mut paths = vec![shim_root.path().to_path_buf()];
     paths.extend(std::env::split_paths(&original_path));
-    std::env::set_var("PATH", std::env::join_paths(paths).expect("PATH value"));
     let output = std::process::Command::new("sh")
+        .env("PATH", std::env::join_paths(paths).expect("PATH value"))
         .args([
             "-c",
             &workspace_snapshot_scan_command(&root.path().display().to_string()),
         ])
         .output()
         .expect("run snapshot scan");
-    std::env::set_var("PATH", original_path);
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr)
@@ -154,7 +153,7 @@ fn shell_quote(path: &std::path::Path) -> String {
 
 #[test]
 fn workspace_snapshots_render_metadata_for_synced_workspace() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("blocks-engine@figma-fixture");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -222,7 +221,7 @@ fn workspace_snapshots_render_metadata_for_synced_workspace() {
 
 #[test]
 fn stale_truncated_metadata_does_not_block_current_workspace_sync() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         create_local_runner("lab-local-stale-metadata", runner_root.path());
         let stale_checkout = runner_root.path().join("_lab_workspaces/stale-unrelated");
@@ -265,7 +264,7 @@ fn stale_truncated_metadata_does_not_block_current_workspace_sync() {
 
 #[test]
 fn ssh_snapshot_listing_preserves_entries_and_isolates_invalid_metadata() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_ssh_runner("lab-ssh-snapshots", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -309,7 +308,7 @@ fn ssh_snapshot_listing_preserves_entries_and_isolates_invalid_metadata() {
 
 #[test]
 fn workspace_snapshots_filters_by_repo_ref_commit_and_run() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         create_local_runner("lab-local-filter", runner_root.path());
         let first = git_source("homeboy@one", "feature/one", "one\n");
@@ -367,7 +366,7 @@ fn workspace_snapshots_filters_by_repo_ref_commit_and_run() {
 
 #[test]
 fn clean_snapshot_reuse_preserves_exact_source_provenance_without_git_materialization() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         create_local_runner("lab-local-reuse", runner_root.path());
         let source = git_source("homeboy@partial-clone", "fix/reuse", "source\n");
@@ -414,7 +413,7 @@ fn clean_snapshot_reuse_preserves_exact_source_provenance_without_git_materializ
 
 #[test]
 fn clean_snapshot_reuse_ignores_legacy_metadata_without_a_lease() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         create_local_runner("lab-local-legacy-reuse", runner_root.path());
         let source = git_source("homeboy@legacy-reuse", "fix/legacy-reuse", "source\n");
@@ -458,7 +457,7 @@ fn clean_snapshot_reuse_ignores_legacy_metadata_without_a_lease() {
 /// once per child instead of once per repository (#14684).
 #[test]
 fn same_repository_and_commit_share_prepared_source_cache_across_worktrees() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lab-local-prepared-cache-worktree", runner_root.path());
         let source = git_source(
@@ -538,7 +537,7 @@ fn same_repository_and_commit_share_prepared_source_cache_across_worktrees() {
 
 #[test]
 fn same_commit_prepared_source_cache_creates_private_job_views() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lab-local-prepared-cache", runner_root.path());
         let source = git_source("homeboy@prepared-cache", "fix/prepared-cache", "source\n");
@@ -621,7 +620,7 @@ fn same_commit_prepared_source_cache_creates_private_job_views() {
 
 #[test]
 fn prepared_source_cache_retains_a_bounded_completed_working_set() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lab-local-prepared-cache-retention", runner_root.path());
         let source = git_source(
@@ -818,7 +817,7 @@ fn prepared_source_cache_rechecks_for_a_concurrent_publisher_after_locking() {
 
 #[test]
 fn incremental_snapshots_reuse_unchanged_content_and_reconcile_deltas() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lab-local-incremental", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -869,7 +868,7 @@ fn incremental_snapshots_reuse_unchanged_content_and_reconcile_deltas() {
 
 #[test]
 fn incremental_snapshots_materialize_unchanged_content_without_transfer() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lab-local-unchanged", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -909,14 +908,17 @@ fn incremental_snapshots_materialize_unchanged_content_without_transfer() {
 
 #[test]
 fn incremental_snapshot_falls_back_to_full_transport_for_large_compatible_seed() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lab-local-large-incremental", runner_root.path());
         let source = tempfile::tempdir().expect("source");
         fs::create_dir_all(source.path().join("files")).expect("source directory");
-        for index in 0..2_254 {
+        // Exceed the command-byte preflight with long paths, not thousands
+        // of redundant files/copies competing for the shared temp filesystem.
+        let relative = |index| format!("files/{}-retained-{index:04}.txt", "x".repeat(160));
+        for index in 0..128 {
             fs::write(
-                source.path().join(format!("files/retained-{index:04}.txt")),
+                source.path().join(relative(index)),
                 format!("seed-{index}\n"),
             )
             .expect("seed file");
@@ -930,7 +932,7 @@ fn incremental_snapshot_falls_back_to_full_transport_for_large_compatible_seed()
         )
         .expect("large seed snapshot");
 
-        fs::write(source.path().join("files/retained-0000.txt"), "updated\n").expect("small delta");
+        fs::write(source.path().join(relative(0)), "updated\n").expect("small delta");
         let (second, _) = sync_workspace(
             "lab-local-large-incremental",
             sync_options(
@@ -945,34 +947,27 @@ fn incremental_snapshot_falls_back_to_full_transport_for_large_compatible_seed()
             .snapshot_transfer
             .expect("transfer accounting");
         assert_eq!(transfer.reused.files, 0);
-        assert_eq!(transfer.transferred.files, 2_254);
-        assert_eq!(transfer.final_size.files, 2_254);
+        assert_eq!(transfer.transferred.files, 128);
+        assert_eq!(transfer.final_size.files, 128);
         assert_eq!(
-            fs::read_to_string(
-                std::path::Path::new(&second.remote_path).join("files/retained-0000.txt")
-            )
-            .expect("updated file"),
+            fs::read_to_string(std::path::Path::new(&second.remote_path).join(relative(0)))
+                .expect("updated file"),
             "updated\n"
         );
         assert_eq!(
-            fs::read_to_string(
-                std::path::Path::new(&second.remote_path).join("files/retained-2253.txt")
-            )
-            .expect("retained file"),
-            "seed-2253\n"
+            fs::read_to_string(std::path::Path::new(&second.remote_path).join(relative(127)))
+                .expect("retained file"),
+            "seed-127\n"
         );
-        for index in 0..2_254 {
+        for index in 0..128 {
             let expected = if index == 0 {
                 "updated\n".to_string()
             } else {
                 format!("seed-{index}\n")
             };
             assert_eq!(
-                fs::read_to_string(
-                    std::path::Path::new(&second.remote_path)
-                        .join(format!("files/retained-{index:04}.txt"))
-                )
-                .expect("exact fallback content"),
+                fs::read_to_string(std::path::Path::new(&second.remote_path).join(relative(index)))
+                    .expect("exact fallback content"),
                 expected
             );
         }
@@ -1007,7 +1002,7 @@ fn incremental_prepare_preflight_rejects_quote_heavy_manifest_before_command_con
 
 #[test]
 fn incremental_snapshot_refuses_seed_when_effective_excludes_change() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lab-local-exclude-change", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -1051,7 +1046,7 @@ fn incremental_snapshot_refuses_seed_when_effective_excludes_change() {
 
 #[test]
 fn incremental_snapshot_falls_back_when_seed_manifest_is_corrupt() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lab-local-corrupt-manifest", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -1095,7 +1090,7 @@ fn incremental_snapshot_falls_back_when_seed_manifest_is_corrupt() {
 
 #[test]
 fn incremental_snapshot_refuses_seed_from_another_source_path() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lab-local-incompatible", runner_root.path());
         let first = tempfile::tempdir().expect("first source");

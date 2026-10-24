@@ -1194,7 +1194,7 @@ mod tests {
 
     #[test]
     fn typed_run_plan_lifecycle_mirror_uses_workload_event_without_stdout_parsing() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
             let plan_path = temp.path().join("plan.json");
             fs::write(
@@ -1253,7 +1253,7 @@ mod tests {
 
     #[test]
     fn typed_run_plan_lifecycle_preserves_completed_noop_and_remote_evidence() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
             let plan_path = temp.path().join("plan.json");
             fs::write(
@@ -1350,7 +1350,7 @@ mod tests {
 
     #[test]
     fn typed_run_plan_lifecycle_persists_remapped_provider_model_for_publication() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
             let plan_path = temp.path().join("plan.json");
             let plan = AgentTaskPlan::new(
@@ -1477,7 +1477,7 @@ mod tests {
 
     #[test]
     fn legacy_run_plan_lifecycle_branch_uses_argv_and_stdout_only_without_typed_workload() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
             let plan_path = temp.path().join("plan.json");
             fs::write(

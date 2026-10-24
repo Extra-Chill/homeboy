@@ -2070,7 +2070,7 @@ mod tests {
 
     #[test]
     fn stage_materializes_rig_package_and_nested_component_as_distinct_sources() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let rig_package = tempfile::tempdir().expect("rig package");
             let component_checkout = tempfile::tempdir().expect("component checkout");
             let component_path = component_checkout.path().join("projects/plugins/jetpack");
@@ -2253,7 +2253,7 @@ mod tests {
 
     #[test]
     fn final_remote_command_forwards_rig_component_bench_extension() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let rigs_dir = home.path().join(".config/homeboy/rigs");
             std::fs::create_dir_all(&rigs_dir).expect("rigs dir");
             std::fs::write(
@@ -2309,7 +2309,7 @@ mod tests {
 
     #[test]
     fn final_remote_command_forwards_rig_bench_env_provider_extension() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let rigs_dir = home.path().join(".config/homeboy/rigs");
             std::fs::create_dir_all(&rigs_dir).expect("rigs dir");
             std::fs::write(
@@ -2389,7 +2389,7 @@ mod tests {
 
     #[test]
     fn runner_command_plan_for_primary_rig_adds_env_provider_extension_and_remaps_settings() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let primary = home.path().join("primary-static-site-importer");
             let rig_dir = primary.join("rigs/static-site-importer-fixture-matrix");
             std::fs::create_dir_all(&rig_dir).expect("primary rig dir");
@@ -2484,7 +2484,7 @@ mod tests {
 
     #[test]
     fn runner_command_plan_for_primary_fuzz_rig_adds_workload_and_component_extensions() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let primary = home.path().join("primary-homeboy-rigs");
             let rig_dir = primary.join("rigs/jetpack-api-route-inventory");
             std::fs::create_dir_all(&rig_dir).expect("primary rig dir");
@@ -2567,7 +2567,7 @@ mod tests {
 
     #[test]
     fn runner_command_plan_for_primary_fuzz_rig_preserves_campaign_workload() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let primary = home.path().join("primary-homeboy-rigs");
             let rig_dir = primary.join("rigs/jetpack-api-route-inventory");
             std::fs::create_dir_all(&rig_dir).expect("primary rig dir");
@@ -2911,7 +2911,7 @@ mod tests {
 
     #[test]
     fn declared_rig_path_inputs_stage_passthrough_flags_and_settings() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let primary = home.path().join("primary-static-site-importer");
             let rig_dir = primary.join("rigs/static-site-importer-fixture-matrix");
             let fixture_root = home.path().join("fixtures/sites");
@@ -3295,7 +3295,10 @@ mod tests {
 
     #[test]
     fn retry_stage_routes_changed_since_private_source_through_controller_bundle() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        if crate::test_support::isolated_process() {
+            return;
+        }
+        crate::test_support::with_isolated_home(|_| {
             let source = tempfile::tempdir().expect("source checkout");
             let runner_root = tempfile::tempdir().expect("runner workspace root");
             git(source.path(), &["init"]);
@@ -3419,7 +3422,10 @@ mod tests {
 
     #[test]
     fn review_test_stage_degrades_missing_controller_closure_to_full_scope_snapshot() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        if crate::test_support::isolated_process() {
+            return;
+        }
+        crate::test_support::with_isolated_home(|_| {
             let source = tempfile::tempdir().expect("nested component checkout");
             let runner_root = tempfile::tempdir().expect("runner workspace root");
             git(source.path(), &["init"]);
@@ -3583,7 +3589,7 @@ mod tests {
 
     #[test]
     fn managed_worktree_staging_preserves_cook_attempt_identity_through_daemon_acceptance() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let repository = tempfile::tempdir().expect("repository");
             let worktree_parent = tempfile::tempdir().expect("worktree parent");
             let runner_root = tempfile::tempdir().expect("runner workspace root");

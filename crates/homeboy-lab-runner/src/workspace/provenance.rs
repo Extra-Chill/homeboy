@@ -1647,6 +1647,9 @@ mod tests {
     }
     #[test]
     fn filesystem_snapshot_dispatches_providers_and_harvests_only_changed_candidates() {
+        if crate::test_support::isolated_process() {
+            return;
+        }
         let _home = homeboy_core::test_support::HomeGuard::new();
         crate::register_lab_workspace_provenance_provider();
 
@@ -1705,6 +1708,9 @@ mod tests {
 
     #[test]
     fn multi_workspace_cook_uses_the_remapped_workspace_provenance() {
+        if crate::test_support::isolated_process() {
+            return;
+        }
         let _home = homeboy_core::test_support::HomeGuard::new();
         crate::register_lab_workspace_provenance_provider();
         let primary = tempfile::tempdir().expect("primary workspace");
@@ -1844,7 +1850,7 @@ mod tests {
 
     #[test]
     fn snapshot_git_cook_harvest_ignores_excluded_tracked_context_but_fails_closed_on_drift() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             crate::register_lab_workspace_provenance_provider();
             let source = tempfile::tempdir().expect("source");
             let runner_root = tempfile::tempdir().expect("runner root");

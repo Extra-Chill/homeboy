@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn failed_read_only_terminal_snapshot_retains_evidence_and_releases_generation_capacity() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let session = direct_session();
             let job_id = uuid::Uuid::new_v4();
             generation_store::record_job("runner-a", &session, &job_id.to_string())
@@ -673,7 +673,7 @@ mod tests {
 
     #[test]
     fn cancelled_exact_attempt_releases_observer_pin_with_queued_retry() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             use homeboy_agents::agent_task_lifecycle::{
                 self, AgentTaskLifecycleStore, AgentTaskRunState,
             };

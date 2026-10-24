@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn consumer_copies_omit_consumer_excludes_on_miss_and_hit_but_the_entry_keeps_them() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let parent = tempfile::tempdir().expect("parent");
             let (source, component) = checkout(parent.path(), "block-plugin");
             fs::write(source.join(".gitignore"), "built.txt\nblocks/\n").expect("gitignore");
@@ -691,7 +691,7 @@ mod tests {
 
     #[test]
     fn second_prepare_of_same_source_and_config_is_a_cache_hit() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let parent = tempfile::tempdir().expect("parent");
             let (source, component) = checkout(parent.path(), "shared-runtime");
             let counter = Arc::new(AtomicUsize::new(0));
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn consumer_writes_do_not_leak_into_the_cache_entry() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let parent = tempfile::tempdir().expect("parent");
             let (source, component) = checkout(parent.path(), "shared-runtime");
             let counter = Arc::new(AtomicUsize::new(0));
@@ -741,7 +741,7 @@ mod tests {
 
     #[test]
     fn source_changes_are_cache_misses() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let parent = tempfile::tempdir().expect("parent");
             let (source, component) = checkout(parent.path(), "shared-runtime");
             let counter = Arc::new(AtomicUsize::new(0));
@@ -771,7 +771,7 @@ mod tests {
 
     #[test]
     fn config_changes_are_cache_misses() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let parent = tempfile::tempdir().expect("parent");
             let (source, component) = checkout(parent.path(), "shared-runtime");
             let counter = Arc::new(AtomicUsize::new(0));
@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn failed_build_publishes_nothing_and_is_retried() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let parent = tempfile::tempdir().expect("parent");
             let (source, component) = checkout(parent.path(), "shared-runtime");
 
@@ -834,7 +834,7 @@ mod tests {
 
     #[test]
     fn concurrent_prepares_of_one_key_build_once() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let parent = tempfile::tempdir().expect("parent");
             let (source, component) = checkout(parent.path(), "shared-runtime");
             let counter = Arc::new(AtomicUsize::new(0));
@@ -886,7 +886,7 @@ mod tests {
 
     #[test]
     fn disabled_cache_always_builds() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let _disabled = EnvVarGuard::set(CACHE_DISABLE_ENV, "0");
             let parent = tempfile::tempdir().expect("parent");
             let (source, component) = checkout(parent.path(), "shared-runtime");
@@ -905,7 +905,7 @@ mod tests {
 
     #[test]
     fn eviction_keeps_newest_entries_per_component() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let parent = tempfile::tempdir().expect("parent");
             let (source, component) = checkout(parent.path(), "shared-runtime");
             let (other_source, other) = checkout(parent.path(), "other-runtime");
@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn non_git_sources_are_still_keyed_by_content() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let parent = tempfile::tempdir().expect("parent");
             let source = parent.path().join("plain");
             fs::create_dir_all(&source).expect("plain dir");

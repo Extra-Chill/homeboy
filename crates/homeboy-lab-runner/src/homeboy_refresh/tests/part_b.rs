@@ -53,7 +53,7 @@ fn materialized_identity_requires_commit_and_matching_source_sha() {
 
 #[test]
 fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{
                 "id": "lab-local",
@@ -153,7 +153,7 @@ fn merge_refresh_patch(runner_id: &str, homeboy_path: &str) -> serde_json::Value
 
 #[test]
 fn refresh_patch_deletes_a_homeboy_synthesized_path_for_ssh_runners() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let controller = tempfile::tempdir().expect("controller home");
         let ctl_home = controller.path().join("ctl-home");
         let workspace = controller.path().join("w");
@@ -196,7 +196,7 @@ fn refresh_patch_deletes_a_homeboy_synthesized_path_for_ssh_runners() {
 
 #[test]
 fn consecutive_refreshes_never_accumulate_homeboy_binary_path_dirs() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let controller = tempfile::tempdir().expect("controller home");
         let ctl_home = controller.path().join("ctl-home");
         let workspace = controller.path().join("w");
@@ -239,7 +239,7 @@ fn consecutive_refreshes_never_accumulate_homeboy_binary_path_dirs() {
 
 #[test]
 fn refresh_patch_preserves_an_operator_path_without_homeboy_managed_entries() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let controller = tempfile::tempdir().expect("controller home");
         let workspace = controller.path().join("w");
         let operator_path = "/opt/tools/bin:/usr/local/bin:/usr/bin:/bin";
@@ -515,7 +515,7 @@ fn ssh_source_snapshot_plan_builds_natively_without_cross_compilation() {
     // `build_runner_source_snapshot` stages through `tempfile::tempdir()`, which
     // honours the process-global `TMPDIR`. Hold the isolation guard so a
     // neighbouring test cannot retire that root mid-archive (#14362).
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source");
         std::fs::write(
             source.path().join("Cargo.toml"),
@@ -566,7 +566,7 @@ fn ssh_source_snapshot_plan_builds_natively_without_cross_compilation() {
 
 #[test]
 fn ssh_source_snapshot_script_preserves_dirty_provenance_and_rejects_malformed_input() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let fixture = tempfile::tempdir().expect("fixture");
         let source = fixture.path().join("source");
         std::fs::create_dir_all(&source).expect("source directory");
@@ -780,7 +780,7 @@ fn refresh_patch_updates_the_selected_binary_and_control_plane_environment() {
 
 #[test]
 fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
             false,
@@ -816,7 +816,7 @@ fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
 
 #[test]
 fn controller_binary_selection_reports_fresh_main_control_plane_fields() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
             false,
@@ -950,7 +950,7 @@ fn promotion_failure_names_the_exact_selected_executable_mutation() {
 
 #[test]
 fn equivalent_refresh_waiter_reloads_the_owner_selection_after_promotion_handoff() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let fixture = tempfile::tempdir().expect("fixture");
         let selected = fixture.path().join("homeboy");
         std::fs::write(
@@ -1009,7 +1009,7 @@ fn equivalent_refresh_waiter_reloads_the_owner_selection_after_promotion_handoff
 
 #[test]
 fn divergent_refresh_candidate_is_rejected_while_owner_keeps_selection() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab","kind":"local","homeboy_path":"/stable"}"#,
             false,
@@ -1048,7 +1048,7 @@ fn divergent_refresh_candidate_is_rejected_while_owner_keeps_selection() {
 
 #[test]
 fn strict_ancestor_refresh_candidate_is_rejected_while_owner_keeps_selection() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab","kind":"local","homeboy_path":"/stable"}"#,
             false,
@@ -1306,7 +1306,7 @@ fn candidate_reconnect_retry_executes_the_materialized_controller_not_ambient_ho
 
 #[test]
 fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let fixture = tempfile::tempdir().expect("fixture");
         let binary = fixture.path().join("homeboy");
         let commit = homeboy_product_identity::build_identity()
@@ -1759,7 +1759,7 @@ fn contending_refreshes_cannot_let_an_old_materialized_request_replace_new_selec
 
 #[test]
 fn ssh_bootstrap_select_promotes_without_materialized_source_sha() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
             false,
@@ -1800,7 +1800,7 @@ fn ssh_bootstrap_select_promotes_without_materialized_source_sha() {
 
 #[test]
 fn ssh_bootstrap_transport_failure_leaves_config_unchanged() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
             false,
@@ -1825,7 +1825,7 @@ fn ssh_bootstrap_transport_failure_leaves_config_unchanged() {
 
 #[test]
 fn ssh_bootstrap_identity_mismatch_leaves_config_unchanged() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
             false,
@@ -1894,7 +1894,7 @@ fn materialized_refresh_requires_an_immutable_binary_hash_and_path() {
 
 #[test]
 fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
                         r#"{"id":"lab-local","kind":"local","homeboy_path":"/old","env":{"OLD":"1"},"resources":{"dev_sync":{"old":true}}}"#, false).expect("runner");
         let plan = ssh_bootstrap_plan();

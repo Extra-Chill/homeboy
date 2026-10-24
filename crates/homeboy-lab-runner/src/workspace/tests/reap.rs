@@ -46,7 +46,7 @@ fn sync_local_workspace(runner_id: &str, runner_root: &Path) -> String {
 
 #[test]
 fn reap_run_workspace_removes_checkout_and_artifact_sibling() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-reap", runner_root.path());
 
@@ -71,7 +71,7 @@ fn reap_run_workspace_removes_checkout_and_artifact_sibling() {
 
 #[test]
 fn reap_run_workspace_refuses_paths_outside_lab_workspaces() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         create_local_runner("lab-local-reap-guard", runner_root.path());
 
@@ -96,7 +96,7 @@ fn reap_run_workspace_refuses_paths_outside_lab_workspaces() {
 
 #[test]
 fn materialized_workspace_reaps_on_success_under_default_policy() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-mat-success", runner_root.path());
         assert!(Path::new(&remote_path).exists());
@@ -120,7 +120,7 @@ fn materialized_workspace_reaps_on_success_under_default_policy() {
 
 #[test]
 fn controller_tunnel_loss_during_live_workload_retains_workspace_for_reconciliation() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-tunnel-loss", runner_root.path());
         let live_workload = Path::new(&remote_path).join("live-workload");
@@ -174,7 +174,7 @@ fn controller_tunnel_loss_during_live_workload_retains_workspace_for_reconciliat
 
 #[test]
 fn pre_dispatch_failure_reaps_workspace_under_delete_on_terminal_policy() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-pre-dispatch", runner_root.path());
 
@@ -198,7 +198,7 @@ fn pre_dispatch_failure_reaps_workspace_under_delete_on_terminal_policy() {
 
 #[test]
 fn materialized_workspace_preserves_on_failure_under_explicit_debug_policy() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-mat-failure", runner_root.path());
 
@@ -222,7 +222,7 @@ fn materialized_workspace_preserves_on_failure_under_explicit_debug_policy() {
 
 #[test]
 fn terminal_evidence_records_retained_outcome_owner_location_and_reclaim_command() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         for (outcome, expected_owner) in [
             (WorkspaceTerminalOutcome::Failure, "runner.workspace"),
@@ -271,7 +271,7 @@ fn terminal_evidence_records_retained_outcome_owner_location_and_reclaim_command
 
 #[test]
 fn preserve_on_failure_keeps_cancelled_workspace_for_ttl_reclamation() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-mat-cancelled", runner_root.path());
 
@@ -298,7 +298,7 @@ fn preserve_on_failure_keeps_cancelled_workspace_for_ttl_reclamation() {
 
 #[test]
 fn preserve_on_failure_keeps_workspace_when_unwinding_from_panic() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-mat-panic", runner_root.path());
 
@@ -327,7 +327,7 @@ fn preserve_on_failure_keeps_workspace_when_unwinding_from_panic() {
 
 #[test]
 fn delete_on_terminal_keeps_workspace_when_unwinding_from_panic() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-mat-default-panic", runner_root.path());
 
@@ -353,7 +353,7 @@ fn delete_on_terminal_keeps_workspace_when_unwinding_from_panic() {
 
 #[test]
 fn materialized_workspace_preserve_disarms_reap_even_on_success() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-mat-detach", runner_root.path());
 
@@ -384,7 +384,7 @@ fn delete_always_workspace_preserved_on_retryable_admission_failure_is_not_reape
     // already-staged rig install/sync + snapshots survive for a retry to resume
     // — even under DeleteAlways. Proves preserve() disarms the reap the offload
     // path would otherwise perform.
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-mat-retry", runner_root.path());
 
@@ -409,7 +409,7 @@ fn delete_always_workspace_preserved_on_retryable_admission_failure_is_not_reape
 
 #[test]
 fn job_runtime_cleanup_reaps_success_failure_and_cancellation_without_touching_runner_defaults() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let defaults = runner_root
             .path()
@@ -461,7 +461,7 @@ fn job_runtime_cleanup_reaps_success_failure_and_cancellation_without_touching_r
 
 #[test]
 fn concurrent_same_ref_jobs_keep_the_remaining_job_workspace_after_peer_reap() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("same-ref-source");

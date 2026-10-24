@@ -162,7 +162,7 @@ fn terminal_runner_job() -> Job {
 
 #[test]
 fn controller_terminal_metadata_uses_exact_visual_artifact_shape_and_validates_bytes() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let prior_public_base = std::env::var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL").ok();
         std::env::set_var(
             "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL",
@@ -234,7 +234,7 @@ fn controller_terminal_metadata_uses_exact_visual_artifact_shape_and_validates_b
 
 #[test]
 fn controller_terminal_metadata_keeps_fetch_fallback_without_public_origin() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let prior_public_base = std::env::var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL").ok();
         std::env::remove_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL");
         let store = ObservationStore::open_initialized().expect("store");
@@ -266,7 +266,7 @@ fn controller_terminal_metadata_keeps_fetch_fallback_without_public_origin() {
 
 #[test]
 fn controller_terminal_metadata_keeps_verified_bytes_when_public_alias_returns_404() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let public_url = serve_public_alias(404);
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
@@ -618,7 +618,7 @@ fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
 
 #[test]
 fn direct_failure_mirror_projects_bounded_typed_diagnostics_without_artifacts() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let mut job = terminal_runner_job();
         job.status = JobStatus::Failed;
         let mirrored = mirror_daemon_evidence(
@@ -676,7 +676,7 @@ fn explicit_generic_runner_exec_run_skips_missing_remote_run_projection() {
     // A completed daemon job can echo that ID even though no runner `/runs/<id>`
     // exists; the terminal mirror must retain the controller record rather than
     // fail on that expected 404 before declared artifacts can reconcile.
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let job = terminal_runner_job();
         let run_id = "runner-exec-controller-owned-11725";
         homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
@@ -720,7 +720,7 @@ fn explicit_generic_runner_exec_run_skips_missing_remote_run_projection() {
 fn explicit_agent_task_run_skips_missing_remote_run_projection() {
     // #13263: agent-task results echo their controller lifecycle ID as the
     // durable run ID. That identity is not a runner `/runs/<id>` observation.
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let job = terminal_runner_job();
         let run_id = "agent-task-controller-owned-13263";
         let command = vec![
@@ -1008,7 +1008,7 @@ fn runner_exec_explicit_run_id_overrides_inferred_name() {
 
 #[test]
 fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
         let lifecycle_store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
         let command = vec![
@@ -1095,7 +1095,7 @@ fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
 
 #[test]
 fn transport_retry_lab_mirror_requires_and_preserves_the_controller_agent_task() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
         let lifecycle_store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
         let run_id = "agent-task-cook-attempt-1-transport-retry";
@@ -1705,7 +1705,7 @@ fn terminal_mirroring_imports_only_the_submitted_overlapping_job_run_and_artifac
 
 #[test]
 fn remote_artifacts_preserve_controller_ownership_and_terminal_projection() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
         let lifecycle = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("lifecycle");
         let runner = ssh_runner();
@@ -1851,7 +1851,7 @@ fn remote_artifacts_preserve_controller_ownership_and_terminal_projection() {
 
 #[test]
 fn terminal_mirroring_withholds_output_when_declared_run_projection_is_missing() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
         let run_ids = vec![
             "concurrent-run-a".to_string(),
@@ -2112,7 +2112,7 @@ fn terminal_mirroring_rejects_url_only_declared_artifacts() {
 
 #[test]
 fn direct_result_refresh_treats_preterminal_absence_as_pending() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let mut job = terminal_runner_job();
         job.status = JobStatus::Running;
         job.finished_at_ms = None;
@@ -2145,7 +2145,7 @@ fn direct_result_refresh_treats_preterminal_absence_as_pending() {
 
 #[test]
 fn legacy_terminal_artifacts_use_the_controller_runner_run_and_survive_runner_disconnect() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
         let mut job = terminal_runner_job();
         let bytes = b"legacy terminal evidence";
@@ -2431,7 +2431,7 @@ fn failed_refresh_preserves_a_concurrent_synthetic_winner() {
 
 #[test]
 fn terminal_mirroring_rejects_unrelated_missing_run_projections() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
         let run_ids = vec!["expected-run".to_string()];
         let job = terminal_runner_job();

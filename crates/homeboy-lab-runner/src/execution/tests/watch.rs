@@ -126,7 +126,7 @@ impl Drop for ReleaseBlockedWorkload {
 
 #[test]
 fn watch_follow_reproduces_the_daemon_event_log_and_reports_promotion_once() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         allow_unauthenticated_loopback_broker();
         let run_id = "cook-13881-watch-follow";
         homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
@@ -245,7 +245,7 @@ fn watch_follow_reproduces_the_daemon_event_log_and_reports_promotion_once() {
 
 #[test]
 fn watch_follow_resumes_a_dropped_connection_without_losing_events() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         allow_unauthenticated_loopback_broker();
         let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
         let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);

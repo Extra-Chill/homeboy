@@ -621,7 +621,7 @@ fn review_test_args(source: &std::path::Path) -> Vec<String> {
 /// `secret_env` refs; no controller value crosses (#15938).
 #[test]
 fn component_test_secret_env_declares_component_names_as_runner_deferred() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
         write_component_test_secret_fixture(home.path(), source.path());
         let args = review_test_args(source.path());
@@ -675,7 +675,7 @@ fn component_test_secret_env_declares_component_names_as_runner_deferred() {
 /// command whose contract does not declare it — keeps yielding no names.
 #[test]
 fn component_test_secret_env_requires_declared_source() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
         write_component_test_secret_fixture(home.path(), source.path());
         let args = review_test_args(source.path());
@@ -690,7 +690,7 @@ fn component_test_secret_env_requires_declared_source() {
 
 #[test]
 fn component_test_secret_env_yields_no_names_for_unresolvable_component() {
-    homeboy_core::test_support::with_isolated_home(|_home| {
+    crate::test_support::with_isolated_home(|_home| {
         let args = vec![
             "homeboy".to_string(),
             "review".to_string(),
@@ -714,7 +714,7 @@ fn component_test_secret_env_yields_no_names_for_unresolvable_component() {
 /// erroneously declares the source: no `test` subcommand, no names.
 #[test]
 fn declared_component_test_secret_env_ignores_non_test_commands() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
         write_component_test_secret_fixture(home.path(), source.path());
         let args = vec![

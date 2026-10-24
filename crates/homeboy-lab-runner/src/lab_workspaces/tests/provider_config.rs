@@ -46,7 +46,7 @@ fn init_task_worktree(source: &Path, worktree: &Path, branch: &str) {
 #[cfg(unix)]
 #[test]
 fn json_extra_workspace_input_materializes_delimiter_paths() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let controller = tempfile::tempdir().expect("controller");
         let runner_root = tempfile::tempdir().expect("runner root");
         let primary = tempfile::tempdir().expect("primary workspace");
@@ -430,7 +430,7 @@ fn agent_task_run_plan_file_path_syncs_containing_checkout() {
 
 #[test]
 fn agent_task_plan_config_linked_worktree_remains_git_backed_for_provider_start() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let controller = tempfile::tempdir().expect("controller");
         let runner_root = tempfile::tempdir().expect("runner root");
         let primary = controller.path().join("primary");
@@ -887,7 +887,7 @@ fn declared_path_inputs_preserve_early_late_alias_and_json_subpaths() {
 
 #[test]
 fn path_setting_workspace_ref_resolves_to_controller_path_and_syncs_workspace() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let store = homeboy_core::paths::homeboy_data()
             .expect("homeboy data")
             .join("task-worktrees");
@@ -949,7 +949,7 @@ fn path_setting_workspace_ref_resolves_to_controller_path_and_syncs_workspace() 
 
 #[test]
 fn path_setting_workspace_ref_resolves_inside_setting_json() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let store = homeboy_core::paths::homeboy_data()
             .expect("homeboy data")
             .join("task-worktrees");
@@ -1001,7 +1001,7 @@ fn path_setting_workspace_ref_resolves_inside_setting_json() {
 
 #[test]
 fn path_setting_workspace_ref_resolves_adopted_workspace() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let source = home.path().join("primary");
         let workspace = home.path().join("external-workspace");
         let nested = workspace.join("fixtures/input.json");
@@ -1064,7 +1064,7 @@ fn path_setting_workspace_ref_resolves_adopted_workspace() {
 
 #[test]
 fn path_setting_workspace_ref_missing_adopted_path_fails_locally() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let workspace = home.path().join("external-workspace");
         std::fs::create_dir_all(&workspace).expect("workspace dir");
         worktree::adopt(worktree::WorktreeAdoptOptions {
@@ -1093,7 +1093,7 @@ fn path_setting_workspace_ref_missing_adopted_path_fails_locally() {
 
 #[test]
 fn path_setting_workspace_ref_missing_handle_fails_locally() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let args = vec![
             "homeboy".to_string(),
             "trace".to_string(),
@@ -1112,7 +1112,7 @@ fn path_setting_workspace_ref_missing_handle_fails_locally() {
 
 #[test]
 fn path_setting_workspace_ref_removed_record_is_not_resolvable() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let store = homeboy_core::paths::homeboy_data()
             .expect("homeboy data")
             .join("task-worktrees");
@@ -1174,7 +1174,7 @@ fn workspace_ref_provenance_is_recorded_on_mapping_entry() {
 
 #[test]
 fn rig_component_path_env_extra_workspaces_syncs_existing_component_path() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let source = home.path().join("primary");
         std::fs::create_dir_all(&source).expect("source path");
         let component_path = home.path().join("Developer/plugin/includes");
@@ -1197,7 +1197,7 @@ fn rig_component_path_env_extra_workspaces_syncs_existing_component_path() {
 
 #[test]
 fn rig_component_path_env_extra_workspaces_rejects_missing_component_path() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let missing = home.path().join("missing-plugin");
 
         let err = rig_component_path_env_extra_workspaces_from_entries(

@@ -191,7 +191,7 @@ fn empty_overlay_list_is_a_no_op_and_leaves_mapping_unchanged() {
 
 #[test]
 fn skips_declared_overlay_dependency_hydration_only_when_opted_out() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_workspace_root = tempfile::tempdir().expect("runner workspace root");
         crate::create(
             &serde_json::json!({

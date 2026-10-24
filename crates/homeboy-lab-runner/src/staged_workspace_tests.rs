@@ -14,7 +14,7 @@ fn staged_cook_attestation_binds_materialized_git_identity_and_rejects_later_dri
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let repository = home.path().join("repository");
         let source = home.path().join("controller-worktree");
         let runner = home.path().join("runner-workspace");

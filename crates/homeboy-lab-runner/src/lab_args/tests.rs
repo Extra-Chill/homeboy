@@ -84,7 +84,7 @@ mod lab_source_path_tests {
 
     #[test]
     fn lab_source_path_uses_agent_task_loop_to_worktree() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let store = homeboy_core::paths::homeboy_data()
                 .expect("homeboy data")
                 .join("task-worktrees");
@@ -1018,7 +1018,7 @@ mod provider_config_default_injection_tests {
 
     #[test]
     fn injects_default_provider_config_for_agent_task_cook() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             defaults::save_config(&defaults::HomeboyConfig {
                 settings: HashMap::from([
                     ("provider".to_string(), serde_json::json!("example-oauth")),
@@ -1058,7 +1058,7 @@ mod provider_config_default_injection_tests {
 
     #[test]
     fn injected_default_provider_config_is_remappable() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             defaults::save_config(&defaults::HomeboyConfig {
                 settings: HashMap::from([(
                     "provider_plugin_paths".to_string(),
@@ -1103,7 +1103,7 @@ mod provider_config_default_injection_tests {
 
     #[test]
     fn explicit_provider_config_prevents_default_injection() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             defaults::save_config(&defaults::HomeboyConfig {
                 settings: HashMap::from([(
                     "provider_plugin_paths".to_string(),
@@ -1540,8 +1540,8 @@ mod run_plan_remap_tests {
 
 mod prompt_files_tests {
     use super::*;
+    use crate::test_support::with_isolated_home;
     use homeboy_agents::agent_task_prompts;
-    use homeboy_core::test_support::with_isolated_home;
 
     #[test]
     fn inline_agent_task_prompt_files_reads_absolute_prompt_file() {

@@ -9,7 +9,7 @@ use crate::workspace::types::{
 
 #[test]
 fn prepared_workspace_update_applies_delta_retains_assets_and_rotates_lease() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("prepared-update", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -81,7 +81,7 @@ fn prepared_workspace_update_applies_delta_retains_assets_and_rotates_lease() {
 
 #[test]
 fn workspace_ref_resolution_is_exact_and_reports_typed_recovery() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("workspace-ref", runner_root.path());
         create_local_runner("other-runner", runner_root.path());
@@ -134,7 +134,7 @@ fn workspace_ref_resolution_is_exact_and_reports_typed_recovery() {
 #[cfg(target_os = "macos")]
 #[test]
 fn workspace_ref_resolution_accepts_macos_var_alias() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         let canonical_root = runner_root.path().canonicalize().expect("canonical root");
         let alias_root = std::path::Path::new("/").join(
@@ -167,7 +167,7 @@ fn workspace_ref_resolution_accepts_macos_var_alias() {
 fn workspace_ref_resolution_does_not_follow_symlinked_snapshot() {
     use std::os::unix::fs::symlink;
 
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("workspace-ref-symlink", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -189,7 +189,7 @@ fn workspace_ref_resolution_does_not_follow_symlinked_snapshot() {
 
 #[test]
 fn workspace_ref_rejects_expired_source_drift_and_metadata_redirection() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("workspace-ref-safety", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -242,7 +242,7 @@ fn workspace_ref_rejects_expired_source_drift_and_metadata_redirection() {
 
 #[test]
 fn ssh_prepared_workspace_update_resolves_fresh_lease_without_projecting_large_root() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_ssh_runner("prepared-update-ssh", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -297,7 +297,7 @@ fn ssh_prepared_workspace_update_resolves_fresh_lease_without_projecting_large_r
 
 #[test]
 fn prepared_workspace_update_rejects_relative_runner_root() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"relative-update","kind":"local","workspace_root":"relative"}"#,
             false,
@@ -320,7 +320,7 @@ fn prepared_workspace_update_rejects_relative_runner_root() {
 
 #[test]
 fn duplicate_snapshot_identities_target_their_own_opaque_workspace_lease() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("duplicate-identities", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -358,7 +358,7 @@ fn duplicate_snapshot_identities_target_their_own_opaque_workspace_lease() {
 
 #[test]
 fn prepared_workspace_update_rejects_changed_git_branch_lineage() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lineage-update", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -388,7 +388,7 @@ fn prepared_workspace_update_rejects_changed_git_branch_lineage() {
 
 #[test]
 fn competing_prepared_workspace_updates_allow_exactly_one_promotion() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("competing-update", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -422,21 +422,22 @@ fn competing_prepared_workspace_updates_allow_exactly_one_promotion() {
                     RunnerWorkspaceUpdateOptions { path, lease },
                 )
             });
-            let successes = [
+            let results = [
                 first.join().expect("first thread"),
                 second.join().expect("second thread"),
-            ]
-            .into_iter()
-            .filter(Result::is_ok)
-            .count();
-            assert_eq!(successes, 1, "one lease holder must win the promotion");
+            ];
+            let successes = results.iter().filter(|result| result.is_ok()).count();
+            assert_eq!(
+                successes, 1,
+                "one lease holder must win the promotion: {results:?}"
+            );
         });
     });
 }
 
 #[test]
 fn locked_prepared_workspace_rejects_update_without_mutating_live_state() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("locked-update", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -465,7 +466,7 @@ fn locked_prepared_workspace_rejects_update_without_mutating_live_state() {
 
 #[test]
 fn prepared_workspace_metadata_hydrates_execution_source_snapshot() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("execution-provenance", runner_root.path());
         let source = tempfile::tempdir().expect("source");
@@ -562,7 +563,7 @@ fn prepared_workspace_metadata_hydrates_execution_source_snapshot() {
 
 #[test]
 fn prepared_workspace_update_quotes_runner_workspace_paths() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let parent = tempfile::tempdir().expect("runner parent");
         let marker = parent.path().join("injected");
         let runner_root = parent.path().join("runner root; touch injected");

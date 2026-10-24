@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn persisted_status_keeps_the_session_state_observed_during_selection() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let (port, server) = serve_health("lease-live", 42, Duration::from_millis(700));
             let mut session = session_for_health_endpoint(port, "lease-live", 42);
             session.controller_id = Some(controller_id());

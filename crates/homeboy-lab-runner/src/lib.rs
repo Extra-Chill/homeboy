@@ -1861,7 +1861,6 @@ fn validate_server_runner(server_id: &str, runner: &ServerRunner) -> Result<()> 
 mod tests {
     use super::*;
     use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
-    use homeboy_core::test_support;
 
     #[test]
     fn wait_target_is_the_preferred_runner_or_the_only_runner() {
@@ -2567,7 +2566,7 @@ mod tests {
 
     #[test]
     fn runner_registry_persists_local_runner() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let spec = r#"{
                 "id": "lab-local",
                 "kind": "local",
@@ -2598,7 +2597,7 @@ mod tests {
 
     #[test]
     fn builtin_local_runner_does_not_require_registry_entry() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let runner = load("local").expect("load local runner");
 
             assert_eq!(runner.id, "local");
@@ -2610,7 +2609,7 @@ mod tests {
 
     #[test]
     fn runner_lookup_and_list_resolve_current_lab_execution_context() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let execution_runner = homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
             let previous = std::env::var_os(execution_runner);
             std::env::set_var(execution_runner, "homeboy-lab");
@@ -2631,7 +2630,7 @@ mod tests {
 
     #[test]
     fn runner_registry_persists_trust_policy() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let spec = r#"{
                 "id": "lab-local",
                 "kind": "local",
@@ -2669,7 +2668,7 @@ mod tests {
 
     #[test]
     fn runner_registry_persists_explicit_homeboy_convergence_policy() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             create(
                 r#"{"id":"lab-local","kind":"local","policy":{"allow_homeboy_convergence":true}}"#,
                 false,
@@ -2683,7 +2682,7 @@ mod tests {
 
     #[test]
     fn ssh_runner_requires_existing_server() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let spec = r#"{
                 "id": "remote-lab",
                 "kind": "ssh",
@@ -2698,7 +2697,7 @@ mod tests {
 
     #[test]
     fn ssh_runner_is_server_capability() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             server::create(
                 r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"user"}"#,
                 false,
@@ -2735,7 +2734,7 @@ mod tests {
 
     #[test]
     fn runner_load_keeps_exact_runner_id_first() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             create_ssh_runner("lab");
             create_ssh_runner("homeboy-lab");
 
@@ -2747,7 +2746,7 @@ mod tests {
 
     #[test]
     fn runner_load_resolves_lab_alias_to_single_ssh_runner() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             create_ssh_runner("homeboy-lab");
 
             let runner = load("lab").expect("lab alias resolves to only configured Lab runner");
@@ -2759,7 +2758,7 @@ mod tests {
 
     #[test]
     fn runner_load_resolves_lab_alias_to_configured_preferred_runner() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             create_ssh_runner("backup-lab");
             create_ssh_runner("homeboy-lab");
             defaults::save_config(&defaults::HomeboyConfig {
@@ -2780,7 +2779,7 @@ mod tests {
 
     #[test]
     fn runner_load_suggests_single_matching_runner() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             create_ssh_runner("homeboy-lab");
 
             let err = load("labx").expect_err("unknown runner id returns suggestions");
@@ -2794,7 +2793,7 @@ mod tests {
 
     #[test]
     fn runner_load_rejects_ambiguous_lab_alias_with_runner_list() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             create_ssh_runner("homeboy-lab");
             create_ssh_runner("backup-lab");
 
@@ -2965,7 +2964,7 @@ mod tests {
 
     #[test]
     fn runner_settings_validation_rejects_zero_for_both_config_shapes() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let local_err = create(
                 r#"{"id":"lab-local","kind":"local","concurrency_limit":0}"#,
                 false,
@@ -2992,7 +2991,7 @@ mod tests {
 
     #[test]
     fn runner_create_update_and_bulk_import_reject_printable_secret_env() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let create_error = create(
                 r#"{"id":"secret-local","kind":"local","env":{"PI_API_KEY":"secret-value"}}"#,
                 false,
@@ -3039,7 +3038,7 @@ mod tests {
 
     #[test]
     fn config_save_enforces_runner_secret_env_invariant_and_allows_false_positive() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let mut runner = Runner {
                 id: "local".to_string(),
                 kind: RunnerKind::Local,
@@ -3086,7 +3085,7 @@ mod tests {
 
     #[test]
     fn ssh_runner_id_must_match_server_id() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             server::create(
                 r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"user"}"#,
                 false,
@@ -3111,7 +3110,7 @@ mod tests {
 
     #[test]
     fn runner_set_updates_fields() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             create(
                 r#"{"id":"lab-local","kind":"local","workspace_root":"/tmp/a"}"#,
                 false,
@@ -3184,7 +3183,7 @@ mod tests {
 
     #[test]
     fn runner_secret_env_refs_resolve_from_configured_homeboy_secret() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             homeboy_agents::agent_task_secrets::set_config_secret(
                 "HOMEBOY_DUMMY_CONFIGURED_SECRET",
                 "dummy-configured-secret",

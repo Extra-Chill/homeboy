@@ -67,7 +67,7 @@ fn provider_agent_dir_staging_plan_keeps_portable_executable_scripts() {
 #[cfg(unix)]
 #[test]
 fn provider_agent_dir_staging_copies_portable_config_and_omits_mach_o_bin() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let controller = tempfile::tempdir().expect("controller");
         let runner_root = tempfile::tempdir().expect("runner root");
         let primary = tempfile::tempdir().expect("primary workspace");
@@ -133,7 +133,7 @@ fn provider_agent_dir_staging_copies_portable_config_and_omits_mach_o_bin() {
 #[cfg(unix)]
 #[test]
 fn provider_agent_dir_staging_leaves_non_provider_workspaces_untouched() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let controller = tempfile::tempdir().expect("controller");
         let runner_root = tempfile::tempdir().expect("runner root");
         let primary = tempfile::tempdir().expect("primary workspace");

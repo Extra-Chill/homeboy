@@ -503,7 +503,7 @@ mod tests {
         // before the workload starts. Materializing a real git checkout must
         // seed a synthetic git checkout on the runner so the materialized path
         // is a valid git work tree with a committed HEAD.
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let fixture = GitDependencyFixture::new();
             fixture.commit_file("initial.txt", "initial");
             fixture.push();

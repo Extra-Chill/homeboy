@@ -1025,7 +1025,7 @@ mod tests {
 
     #[test]
     fn endpoint_reuse_after_identity_probe_never_receives_stop() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let listener = TcpListener::bind("127.0.0.1:0").expect("reused listener");
             let address = listener.local_addr().expect("reused address");
             let mutations = Arc::new(std::sync::atomic::AtomicUsize::new(0));

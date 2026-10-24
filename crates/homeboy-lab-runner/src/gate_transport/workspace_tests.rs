@@ -38,7 +38,7 @@ fn metadata(remote_path: &str) -> serde_json::Value {
 
 #[test]
 fn completed_gate_releases_its_run_owned_workspace() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         let controller = tempfile::tempdir().expect("controller tmp");
         local_runner(runner_root.path());
@@ -76,7 +76,7 @@ fn completed_gate_releases_its_run_owned_workspace() {
 
 #[test]
 fn gate_without_terminal_outcome_retains_workspace_for_job_reconciliation() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         let controller = tempfile::tempdir().expect("controller tmp");
         local_runner(runner_root.path());
@@ -108,7 +108,7 @@ fn gate_without_terminal_outcome_retains_workspace_for_job_reconciliation() {
 
 #[test]
 fn gate_failing_before_job_admission_releases_its_workspace() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         let controller = tempfile::tempdir().expect("controller tmp");
         local_runner(runner_root.path());

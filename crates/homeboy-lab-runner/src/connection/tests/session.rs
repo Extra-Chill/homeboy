@@ -1613,7 +1613,7 @@ fn terminal_reconciliation_routes_direct_sessions_to_the_daemon() {
 
 #[test]
 fn routine_disconnect_probes_the_exact_live_daemon_tunnel_before_authoritative_stop() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let server = std::thread::spawn(move || {
@@ -1647,7 +1647,7 @@ fn routine_disconnect_probes_the_exact_live_daemon_tunnel_before_authoritative_s
 
 #[test]
 fn refresh_disconnect_refuses_remote_lease_drift_after_promotion_started() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
         let recorded = direct_ssh_session("lease-original");
         let mut replacement = direct_ssh_session("lease-replacement");
@@ -1671,7 +1671,7 @@ fn refresh_disconnect_refuses_remote_lease_drift_after_promotion_started() {
 
 #[test]
 fn refresh_disconnect_retains_a_rotated_tunnel_without_ssh_authority() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
         let recorded = direct_ssh_session("lease-stable");
         let mut rotated = recorded.clone();
@@ -1696,7 +1696,7 @@ fn refresh_disconnect_retains_a_rotated_tunnel_without_ssh_authority() {
 
 #[test]
 fn refresh_disconnect_refuses_remote_address_or_pid_drift() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
         let recorded = direct_ssh_session("lease-stable");
 
@@ -1760,7 +1760,7 @@ fn direct_ssh_tunnel_process_isolated_from_cook_command_cleanup() {
 
 #[test]
 fn connect_reports_local_runner_as_unsupported() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"lab-local","kind":"local"}"#, false).expect("create runner");
 
         let (report, exit_code) = connect("lab-local").expect("connect report");
@@ -1778,7 +1778,7 @@ fn connect_reports_local_runner_as_unsupported() {
 
 #[test]
 fn full_status_projection_leaves_large_shared_state_and_observation_db_unchanged() {
-    test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
         homeboy_core::observation::ObservationStore::open_initialized()
             .expect("initialize shared observation database");
@@ -1805,7 +1805,7 @@ fn full_status_projection_leaves_large_shared_state_and_observation_db_unchanged
 
 #[test]
 fn disconnected_generation_reconcile_action_passes_reconcile_preflight() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
         let mut session = direct_ssh_session("lease-stale");
         // The persisted stale generation has no local tunnel to probe. This
@@ -2087,7 +2087,7 @@ fn fixture_request_reader_times_out_without_a_request() {
 
 #[test]
 fn status_admission_uses_one_runner_observation_despite_stale_ledger() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         listener
             .set_nonblocking(true)

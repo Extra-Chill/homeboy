@@ -9,7 +9,6 @@ use std::sync::{
 };
 
 use super::*;
-use homeboy_core::test_support;
 
 #[cfg(unix)]
 struct FakeRecoveryOperations {
@@ -90,7 +89,7 @@ fn stale_recovery_session(lease: &str, pid: u32) -> RunnerSession {
 #[cfg(unix)]
 #[test]
 fn generation_recovery_deduplicates_two_jobs_to_one_physical_tunnel() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let operations = FakeRecoveryOperations::new([
             ("job-a".to_string(), stale_recovery_session("lease-a", 101)),
             ("job-b".to_string(), stale_recovery_session("lease-a", 102)),
@@ -120,7 +119,7 @@ fn generation_recovery_deduplicates_two_jobs_to_one_physical_tunnel() {
 #[cfg(unix)]
 #[test]
 fn generation_recovery_serializes_same_job_contention() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let operations = FakeRecoveryOperations::new([(
             "job-a".to_string(),
             stale_recovery_session("lease-a", 101),
@@ -150,7 +149,7 @@ fn generation_recovery_serializes_same_job_contention() {
 #[cfg(unix)]
 #[test]
 fn generation_recovery_allows_different_generations_to_progress() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let operations = FakeRecoveryOperations::new([
             ("job-a".to_string(), stale_recovery_session("lease-a", 101)),
             ("job-b".to_string(), stale_recovery_session("lease-b", 102)),
@@ -178,7 +177,7 @@ fn generation_recovery_allows_different_generations_to_progress() {
 #[cfg(unix)]
 #[test]
 fn failed_recovery_persistence_closes_only_the_new_tunnel() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let operations = Arc::new(FakeRecoveryOperations {
             jobs: std::sync::Mutex::new(HashMap::from([(
                 "job-a".to_string(),
@@ -316,7 +315,7 @@ fn reads_remote_active_job_count_from_daemon_freshness() {
 #[cfg(unix)]
 #[test]
 fn connect_fences_two_active_jobs_before_starting_a_new_daemon_generation() {
-    test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let ensure_running = home.path().join("ensure-running");
         homeboy_test_support::write_executable(&daemon, format!(
@@ -1148,7 +1147,7 @@ fn remote_leaseless_recovery_timeout_is_actionable() {
 #[cfg(unix)]
 #[test]
 fn runner_connect_persists_recovery_evidence_after_daemon_failure() {
-    test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let argv_path = home.path().join("recovery-argv");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -1346,7 +1345,7 @@ fn rejected_state_loss_refusal_is_retired_before_plain_connect_retries(
     legacy_replay: bool,
     transport_success: bool,
 ) {
-    test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let generation_count = home.path().join("daemon-generations");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -1506,7 +1505,7 @@ fn rejected_fresh_state_loss_envelope_is_retired_before_plain_connect_retries() 
 #[cfg(unix)]
 #[test]
 fn recovery_retry_reattaches_journaled_b_after_four_lost_health_requests() {
-    test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let generation_count = home.path().join("daemon-generations");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -1646,7 +1645,7 @@ esac
 #[cfg(unix)]
 #[test]
 fn normal_start_response_loss_replays_b_without_creating_c() {
-    test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let old_daemon = home.path().join("old-homeboy");
         let selected_daemon = home.path().join("selected-homeboy");
         let generation_count = home.path().join("daemon-generations");
@@ -1832,7 +1831,7 @@ esac
 #[cfg(unix)]
 #[test]
 fn explicit_candidate_reconciliation_supersedes_pending_ensure_running_replay() {
-    test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let ensure_running = home.path().join("ensure-running");
         let reconciliation_argv = home.path().join("reconciliation-argv");
@@ -2094,7 +2093,7 @@ fn with_idle_stale_replacement_shim(
     post_identity: &str,
     run: impl FnOnce(&SshClient, &str, &str, PathBuf),
 ) {
-    test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let marker = home.path().join("replacement-complete");
         let argv_path = home.path().join("replacement-argv");
@@ -2284,7 +2283,7 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
 #[cfg(unix)]
 #[test]
 fn stale_replacement_force_stop_rejects_a_success_envelope_without_stop_action() {
-    test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         homeboy_test_support::write_executable(
             &daemon,
@@ -2338,7 +2337,7 @@ fn unleased_candidate_reconciliation_requires_a_negotiated_contract() {
 #[cfg(unix)]
 #[test]
 fn rejected_ensure_running_refusal_is_retired_before_plain_connect_retries() {
-    test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let marker = home.path().join("ensure-running-attempted");
         let generation_count = home.path().join("daemon-generations");

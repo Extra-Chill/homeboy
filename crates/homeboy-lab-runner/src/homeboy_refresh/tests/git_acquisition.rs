@@ -614,7 +614,7 @@ fn hard_deadline_kills_term_resistant_fetch_and_descendants() {
 
 #[test]
 fn delayed_fetch_admits_local_cook_and_real_publication_is_fenced() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         assert!(
             homeboy_core::paths::runtime_promotion_dir()
                 .unwrap()
