@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.22] - 2026-10-24
+
+### Changed
+- Stop the macOS child-guard cleanup once no owned process is alive
+- Make an agent-task aggregate's status an AgentTaskRunState; delete AgentTaskAggregateStatus (#15718 step 5)
+
 ## [0.433.21] - 2026-10-24
 
 ### Changed
