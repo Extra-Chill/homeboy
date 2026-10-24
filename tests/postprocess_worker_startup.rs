@@ -157,7 +157,7 @@ fn scheduler_recovers_a_worker_killed_before_claim_creation() {
 
         let recovered = worker.join().expect("scheduler thread");
         assert_eq!(
-            recovered.status,
+            recovered.status(),
             AgentTaskAggregateStatus::Succeeded,
             "postprocess outcomes: {:#?}",
             recovered.outcomes
@@ -215,8 +215,8 @@ fn scheduler_restart_adopts_a_live_worker_without_reinvoking_helper() {
         let first = first.join().expect("first scheduler");
         let restarted = restarted.join().expect("restarted scheduler");
 
-        assert_eq!(first.status, AgentTaskAggregateStatus::Succeeded);
-        assert_eq!(restarted.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(first.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(restarted.status(), AgentTaskAggregateStatus::Succeeded);
         let versions = std::fs::read_dir(root.join("versions"))
             .expect("versions")
             .count();

@@ -103,7 +103,7 @@ fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
     assert_eq!(aggregate.totals.failed, 1);
     assert_eq!(aggregate.totals.succeeded, 0);
     assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
@@ -157,7 +157,7 @@ fn nested_terminal_state_failure_fails_succeeded_wrapper_outcome() {
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
     assert_eq!(aggregate.totals.failed, 1);
     assert_eq!(aggregate.totals.succeeded, 0);
     assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
@@ -189,7 +189,7 @@ fn nested_agent_result_failure_fails_succeeded_wrapper_outcome() {
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
     assert_eq!(aggregate.totals.failed, 1);
     assert_eq!(aggregate.totals.succeeded, 0);
     assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
@@ -212,7 +212,7 @@ fn missing_required_typed_artifacts_fails_succeeded_outcome() {
         "visual_parity_artifact",
     ]));
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
     assert_eq!(aggregate.totals.failed, 1);
     assert_eq!(aggregate.totals.succeeded, 0);
     assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
@@ -240,7 +240,7 @@ fn nested_executor_failure_context_wins_over_missing_required_artifacts() {
         "transcript",
     ]));
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
     let outcome = &aggregate.outcomes[0];
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
     assert_eq!(
@@ -294,7 +294,7 @@ fn empty_required_patch_artifact_is_valid_no_diff_evidence() {
 
     let aggregate = scheduler.run(plan_with_required_artifacts(&["patch"]));
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
     assert_eq!(aggregate.totals.succeeded, 1);
     assert_eq!(
         aggregate.outcomes[0].status,
@@ -330,7 +330,7 @@ fn empty_required_non_patch_typed_artifact_fails_with_operator_pointer() {
     );
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
     assert_eq!(aggregate.totals.failed, 1);
     assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
     assert_eq!(
@@ -430,7 +430,7 @@ fn incomplete_empty_executor_result_is_retryable_provider_failure() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
     assert_eq!(aggregate.totals.succeeded, 1);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert!(aggregate.events.iter().any(|event| {
@@ -446,7 +446,7 @@ fn incomplete_empty_executor_result_fails_when_retries_are_unavailable() {
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
     assert_eq!(aggregate.totals.failed, 1);
     assert_eq!(
         aggregate.outcomes[0].status,
@@ -516,10 +516,10 @@ fn candidate_commit_survives_policy_denial_and_missing_review_form_for_fresh_rev
     }));
     let outcomes = vec![denied.clone()];
     assert_eq!(
-        AgentTaskScheduleSupport::aggregate_status(&outcomes),
+        AgentTaskAggregateStatus::from_outcomes(&outcomes),
         AgentTaskAggregateStatus::PartialRecoverable
     );
-    let totals = AgentTaskScheduleSupport::totals(1, &outcomes);
+    let totals = AgentTaskAggregateTotals::from_outcomes(1, &outcomes);
     assert_eq!(totals.candidate_recoverable, 1);
     assert_eq!(totals.recoverable_candidates, 1);
     assert_eq!(totals.failed, 0);
@@ -593,7 +593,7 @@ fn incomplete_nested_outputs_executor_result_fails_when_retries_are_unavailable(
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
     assert_eq!(aggregate.totals.failed, 1);
     assert_eq!(
         aggregate.outcomes[0].status,

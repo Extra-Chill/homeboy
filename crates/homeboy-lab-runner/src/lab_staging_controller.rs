@@ -6043,19 +6043,24 @@ mod tests {
                 request.durable_agent_task_plan = plan.clone();
                 let run_id = &request.recipe.run_id;
                 let cook_id = "receipt-completion-cook";
+                // A succeeded aggregate is one whose outcomes succeeded.
+                let outcomes = vec![homeboy_agents::agent_task::AgentTaskOutcome {
+                    task_id: "cook-fixture".to_string(),
+                    status: homeboy_agents::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                    ..Default::default()
+                }];
                 let aggregate = AgentTaskAggregate {
                     schema: "homeboy/agent-task-aggregate/v1".to_string(),
                     plan_id: plan.plan_id.clone(),
-                    status: AgentTaskAggregateStatus::Succeeded,
-                    totals: Default::default(),
-                    outcomes: Vec::new(),
+                    totals: homeboy_agents::agent_task_scheduler::AgentTaskAggregateTotals::from_outcomes(1, &outcomes),
+                    outcomes,
                     events: Vec::new(),
                     artifact_lineage: Vec::new(),
                     child_runs: Vec::new(),
                     artifact_bindings: Vec::new(),
                     queue: Default::default(),
                 };
-                assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+                assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
                 homeboy_agents::agent_task_lifecycle::record_completed_run(
                     &plan,
                     &aggregate,

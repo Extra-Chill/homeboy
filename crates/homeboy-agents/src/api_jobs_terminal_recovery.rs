@@ -34,9 +34,8 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
     fn recovered_terminal_agent_task_job(&self, run_id: &str) -> Option<RecoveredTerminalJob> {
         let resolved_run_id = crate::agent_task_lifecycle::resolve_run_id(run_id).ok()?;
         let result = agent_task_service::persisted_terminal_run_result(&resolved_run_id).ok()??;
-        let status = match result.value.status {
-            AgentTaskAggregateStatus::Succeeded
-            | AgentTaskAggregateStatus::CandidateRecoverable => JobStatus::Succeeded,
+        let status = match result.value.status() {
+            AgentTaskAggregateStatus::Succeeded => JobStatus::Succeeded,
             AgentTaskAggregateStatus::Cancelled => JobStatus::Cancelled,
             AgentTaskAggregateStatus::PartialRecoverable
             | AgentTaskAggregateStatus::PartialFailure
@@ -223,15 +222,20 @@ mod tests {
             terminal_record.set_state_for_test(AgentTaskRunState::Succeeded);
             terminal_record.lifecycle =
                 RunLifecycleRecord::with_execution_state(RunExecutionState::Succeeded);
+            // The record says Succeeded, so the aggregate carries a succeeded outcome.
+            let outcomes = vec![crate::agent_task::AgentTaskOutcome {
+                task_id: "task".to_string(),
+                status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                ..Default::default()
+            }];
             store
                 .write_aggregate(
                     run_id,
                     &AgentTaskAggregate {
                         schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
                         plan_id: "plan".to_string(),
-                        status: AgentTaskAggregateStatus::Succeeded,
-                        totals: AgentTaskAggregateTotals::default(),
-                        outcomes: Vec::new(),
+                        totals: AgentTaskAggregateTotals::from_outcomes(1, &outcomes),
+                        outcomes,
                         events: Vec::new(),
                         artifact_lineage: Vec::new(),
                         child_runs: Vec::new(),

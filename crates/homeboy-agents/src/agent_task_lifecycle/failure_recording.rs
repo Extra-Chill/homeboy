@@ -187,59 +187,20 @@ fn record_interrupted_local_owner_locked(
                 .iter()
                 .any(crate::agent_task_evidence_discovery::is_actionable_patch_artifact)
     });
-    let (aggregate_status, ownership_state, run_cancelled) = if harvested {
-        (
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
-            "owner_dead",
-            false,
-        )
-    } else if has_failed {
-        (
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
-            "provider_failed",
-            false,
-        )
-    } else if has_cancelled {
-        (
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled,
-            "provider_cancelled",
-            true,
-        )
+    let ownership_state = if has_failed && !harvested {
+        "provider_failed"
+    } else if has_cancelled && !harvested {
+        "provider_cancelled"
     } else {
-        (
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled,
-            "owner_dead",
-            true,
-        )
+        "owner_dead"
     };
-    let failed = outcomes
-        .iter()
-        .filter(|outcome| {
-            matches!(
-                outcome.status,
-                AgentTaskOutcomeStatus::Failed | AgentTaskOutcomeStatus::Cancelled
-            )
-        })
-        .count();
-    let candidate_recoverable = outcomes
-        .iter()
-        .filter(|outcome| outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable)
-        .count();
-    let cancelled = outcomes
-        .iter()
-        .filter(|outcome| outcome.status == AgentTaskOutcomeStatus::Cancelled)
-        .count();
+    let run_cancelled =
+        crate::agent_task_scheduler::AgentTaskAggregateStatus::from_outcomes(&outcomes)
+            == crate::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled;
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
-        status: aggregate_status,
-        totals: AgentTaskAggregateTotals {
-            failed,
-            cancelled,
-            candidate_recoverable,
-            recoverable_candidates: candidate_recoverable,
-            ..AgentTaskAggregateTotals::default()
-        },
+        totals: AgentTaskAggregateTotals::from_outcomes(plan.tasks.len(), &outcomes),
         outcomes,
         events: plan
             .tasks
@@ -422,7 +383,10 @@ fn harvest_interrupted_owner_candidate(
         outcome.metadata["candidate_status"] = json!("harvested");
         return;
     }
-    outcome.status = AgentTaskOutcomeStatus::Failed;
+    // A cancelled owner stays cancelled: the aggregate status derives from it.
+    if outcome.status != AgentTaskOutcomeStatus::Cancelled {
+        outcome.status = AgentTaskOutcomeStatus::Failed;
+    }
     outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
     crate::agent_task_evidence_discovery::append_unique_evidence_refs(
         &mut outcome.evidence_refs,
@@ -603,8 +567,6 @@ fn record_pre_execution_failure_locked(
             .map(|record| (record, None));
     }
 
-    let task_count = plan.tasks.len();
-    let failed = task_count;
     let retryable = pre_execution_failure_is_retryable(error);
     let failure_classification = pre_execution_failure_classification(error);
     let candidate_adoption_recovery = candidate_adoption_recovery(phase, error);
@@ -613,15 +575,11 @@ fn record_pre_execution_failure_locked(
         .tasks
         .iter()
         .map(|task| build_pre_execution_failure_outcome(&record.run_id, task, phase, error))
-        .collect();
+        .collect::<Vec<_>>();
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
-        status: AgentTaskAggregateStatus::Failed,
-        totals: AgentTaskAggregateTotals {
-            failed,
-            ..AgentTaskAggregateTotals::default()
-        },
+        totals: AgentTaskAggregateTotals::from_outcomes(plan.tasks.len(), &outcomes),
         outcomes,
         events: plan
             .tasks
@@ -641,7 +599,7 @@ fn record_pre_execution_failure_locked(
         artifact_bindings: Vec::new(),
         queue: AgentTaskQueueStatus {
             max_concurrency: plan.options.max_concurrency,
-            completed: failed,
+            completed: plan.tasks.len(),
             ..AgentTaskQueueStatus::default()
         },
     };
@@ -1119,14 +1077,10 @@ pub fn record_pre_dispatch_failure_in_store(
         }],
     );
     submit_plan_in_store(lifecycle_store, &plan, Some(&run_id))?;
-    let aggregate = AgentTaskAggregate {
+    let mut aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
-        status: AgentTaskAggregateStatus::Failed,
-        totals: AgentTaskAggregateTotals {
-            failed: 1,
-            ..AgentTaskAggregateTotals::default()
-        },
+        totals: AgentTaskAggregateTotals::default(),
         outcomes: vec![AgentTaskOutcome {
             schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: task_id.clone(),
@@ -1179,6 +1133,7 @@ pub fn record_pre_dispatch_failure_in_store(
             ..AgentTaskQueueStatus::default()
         },
     };
+    aggregate.totals = AgentTaskAggregateTotals::from_outcomes(1, &aggregate.outcomes);
     record_run_aggregate_in_store(lifecycle_store, &run_id, &plan, &aggregate)
 }
 
@@ -3197,7 +3152,6 @@ mod tests {
         let mut aggregate = AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: "plan".to_string(),
-            status: AgentTaskAggregateStatus::Succeeded,
             totals: AgentTaskAggregateTotals::default(),
             outcomes: Vec::new(),
             events: Vec::new(),

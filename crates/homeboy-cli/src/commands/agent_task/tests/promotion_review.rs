@@ -899,7 +899,6 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
             &AgentTaskAggregate {
                 schema: "homeboy/agent-task-aggregate/v1".to_string(),
                 plan_id: plan.plan_id.clone(),
-                status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
                 totals: Default::default(),
                 outcomes: vec![AgentTaskOutcome {
                     schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
@@ -960,8 +959,6 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
             &AgentTaskAggregate {
                 schema: "homeboy/agent-task-aggregate/v1".to_string(),
                 plan_id: retry_plan.plan_id.clone(),
-                status:
-                    homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Succeeded,
                 totals: Default::default(),
                 outcomes: vec![AgentTaskOutcome {
                     schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),

@@ -63,7 +63,7 @@ fn runtime_retry_inherits_uncommitted_work_promotes_and_pushes_candidate_sha() {
         .with_run_id("retry-candidate")
         .run(plan);
     assert_eq!(
-        aggregate.status,
+        aggregate.status(),
         AgentTaskAggregateStatus::Succeeded,
         "{aggregate:#?}"
     );

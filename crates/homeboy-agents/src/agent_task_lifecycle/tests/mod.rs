@@ -7,8 +7,7 @@ use crate::agent_task::{
     AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    AGENT_TASK_AGGREGATE_SCHEMA,
+    AgentTaskAggregate, AgentTaskAggregateTotals, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use homeboy_core::api_jobs::{JobEventKind, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
@@ -300,7 +299,6 @@ pub(super) fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
     AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
-        status: AgentTaskAggregateStatus::Succeeded,
         totals: AgentTaskAggregateTotals {
             queued: 1,
             succeeded: 1,
@@ -325,6 +323,7 @@ pub(super) fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
     }
 }
 
+mod aggregate_status;
 mod cook_delivery_writer;
 mod durable_progress;
 mod handoff_and_proxy;

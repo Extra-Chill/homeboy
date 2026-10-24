@@ -84,7 +84,7 @@ mod plan_projection_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
         );
         assert_eq!(aggregate.totals.succeeded, 2);
@@ -121,7 +121,7 @@ mod plan_projection_tests {
         let observed = observed.lock().expect("observed requests");
         let request = observed.first().expect("request dispatched");
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
         assert_eq!(request.component_contracts.len(), 1);
         assert_eq!(
             request.component_contracts[0].slug.as_deref(),
@@ -205,7 +205,7 @@ mod plan_projection_tests {
             .find(|request| request.task_id == "design")
             .expect("design request dispatched");
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
         assert_eq!(aggregate.totals.succeeded, 2);
         assert_eq!(design.instructions, "Build design");
     }

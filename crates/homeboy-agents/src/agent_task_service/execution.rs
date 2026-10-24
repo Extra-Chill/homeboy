@@ -3303,21 +3303,26 @@ fn materialization_string(materialization: &Value, key: &str) -> Option<String> 
 #[cfg(test)]
 mod terminal_exit_code_tests {
     use super::*;
-    use crate::agent_task_scheduler::{AgentTaskAggregateStatus, AgentTaskAggregateTotals};
+    use crate::agent_task_scheduler::AgentTaskAggregateTotals;
 
     /// The aggregate a finished run that promoted nothing can carry: no
     /// failed, cancelled or timed-out outcome, one recoverable candidate.
     fn clean_tally_aggregate() -> AgentTaskAggregate {
+        use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+        let outcomes = [
+            AgentTaskOutcomeStatus::Succeeded,
+            AgentTaskOutcomeStatus::CandidateRecoverable,
+        ]
+        .map(|status| AgentTaskOutcome {
+            status,
+            ..Default::default()
+        })
+        .to_vec();
         AgentTaskAggregate {
             schema: String::new(),
             plan_id: "plan".to_string(),
-            status: AgentTaskAggregateStatus::Succeeded,
-            totals: AgentTaskAggregateTotals {
-                succeeded: 1,
-                candidate_recoverable: 1,
-                ..Default::default()
-            },
-            outcomes: Vec::new(),
+            totals: AgentTaskAggregateTotals::from_outcomes(outcomes.len(), &outcomes),
+            outcomes,
             events: Vec::new(),
             artifact_lineage: Vec::new(),
             child_runs: Vec::new(),

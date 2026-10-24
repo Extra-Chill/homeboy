@@ -658,15 +658,12 @@ fn seed_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
 
 fn review_form_aggregate(plan: &AgentTaskPlan) -> crate::agent_task_scheduler::AgentTaskAggregate {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    };
+    use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
     let form = test_review_form();
     let task = plan.tasks.first().expect("review form plan has one task");
     AgentTaskAggregate {
         schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
-        status: AgentTaskAggregateStatus::Succeeded,
         totals: AgentTaskAggregateTotals {
             succeeded: 1,
             ..Default::default()
@@ -689,9 +686,7 @@ fn review_form_aggregate(plan: &AgentTaskPlan) -> crate::agent_task_scheduler::A
 
 fn seed_timeout_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    };
+    use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
     let task = plan.tasks.first().expect("review form plan has one task");
     agent_task_lifecycle::record_run_aggregate(
@@ -700,7 +695,6 @@ fn seed_timeout_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
         &AgentTaskAggregate {
             schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Failed,
             totals: AgentTaskAggregateTotals {
                 failed: 1,
                 ..Default::default()
@@ -762,7 +756,6 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
         })
         .expect("persist rooted placement");
     let mut aggregate = review_form_aggregate(&plan);
-    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
     aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
     aggregate.outcomes[0].failure_classification =
         Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
@@ -891,7 +884,6 @@ fn provider_timeout_resume_is_not_offered_while_deferred_cleanup_is_pending() {
         .expect("index timeout run");
 
     let mut aggregate = review_form_aggregate(&plan);
-    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
     aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
     aggregate.outcomes[0].failure_classification =
         Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
@@ -1038,7 +1030,6 @@ fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
         .identity
         .initial_plan;
     let mut aggregate = review_form_aggregate(&plan);
-    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
     aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
     aggregate.outcomes[0].failure_classification =
         Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
@@ -1162,7 +1153,6 @@ fn earlier_startup_liveness_diagnostic_does_not_overwrite_later_terminal_failure
         .identity
         .initial_plan;
     let mut aggregate = review_form_aggregate(&plan);
-    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
     aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
     aggregate.outcomes[0].failure_classification =
         Some(crate::agent_task::AgentTaskFailureClassification::Stalled);
@@ -1218,9 +1208,7 @@ fn earlier_startup_liveness_diagnostic_does_not_overwrite_later_terminal_failure
 #[test]
 fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
     use crate::agent_task::{AgentTaskDiagnostic, AgentTaskOutcome, AgentTaskOutcomeStatus};
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    };
+    use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
     const SECRET: &str = "rotation-projection-secret";
     let attempts = serde_json::json!([
@@ -1232,7 +1220,6 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
     let aggregate = AgentTaskAggregate {
         schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: "rotation-projection".to_string(),
-        status: AgentTaskAggregateStatus::Failed,
         totals: AgentTaskAggregateTotals {
             failed: 1,
             ..Default::default()
@@ -1370,7 +1357,6 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
         }
     });
     let mut aggregate = review_form_aggregate(&plan);
-    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
     aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
     aggregate.outcomes[0].failure_classification =
         Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
@@ -1516,9 +1502,7 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
 
 fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    };
+    use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
     let task = plan.tasks.first().expect("candidate plan has one task");
     agent_task_lifecycle::record_run_aggregate(
@@ -1527,7 +1511,6 @@ fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
         &AgentTaskAggregate {
             schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
             totals: AgentTaskAggregateTotals {
                 succeeded: 1,
                 ..Default::default()
@@ -1578,9 +1561,7 @@ fn seed_substantive_candidate_aggregate(
     patch: &str,
 ) {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    };
+    use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
     let task = plan.tasks.first().expect("candidate plan has one task");
     let candidate = patch
@@ -1592,7 +1573,6 @@ fn seed_substantive_candidate_aggregate(
         &AgentTaskAggregate {
             schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
             totals: AgentTaskAggregateTotals {
                 succeeded: 1,
                 ..Default::default()
@@ -1643,9 +1623,7 @@ fn seed_candidate_commit_aggregate_in_store(
     candidate_repo: &std::path::Path,
 ) {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    };
+    use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
     let task = plan.tasks.first().expect("candidate plan has one task");
     let candidate = committed_fixture_candidate(candidate_repo, run_id);
@@ -1656,7 +1634,6 @@ fn seed_candidate_commit_aggregate_in_store(
             &AgentTaskAggregate {
                 schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
                 plan_id: plan.plan_id.clone(),
-                status: AgentTaskAggregateStatus::Succeeded,
                 totals: AgentTaskAggregateTotals {
                     succeeded: 1,
                     ..Default::default()
@@ -2286,7 +2263,6 @@ fn candidate_selection_uses_the_winner_for_review_form() {
         &crate::agent_task_scheduler::AgentTaskAggregate {
             schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id.clone(),
-            status: crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
             totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
                 succeeded: 1,
                 cancelled: 1,
@@ -3028,8 +3004,7 @@ fn seed_moving_base_attempt(
 ) -> (CookRequest, AgentTaskPromotionReport) {
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-        AgentTaskProgressEvent,
+        AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskProgressEvent,
     };
 
     let mut options = batch_cook_options(
@@ -3067,7 +3042,6 @@ fn seed_moving_base_attempt(
         &AgentTaskAggregate {
             schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: options.identity.initial_plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
             totals: AgentTaskAggregateTotals {
                 succeeded: 1,
                 ..Default::default()
@@ -3115,8 +3089,7 @@ fn seed_default_model_attempt(
     outcome: crate::agent_task::AgentTaskOutcome,
 ) -> CookRequest {
     use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-        AgentTaskProgressEvent,
+        AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskProgressEvent,
     };
 
     let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
@@ -3129,7 +3102,6 @@ fn seed_default_model_attempt(
         &AgentTaskAggregate {
             schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: options.identity.initial_plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
             totals: AgentTaskAggregateTotals {
                 succeeded: 1,
                 ..Default::default()
@@ -3624,7 +3596,6 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
             &AgentTaskAggregate {
                 schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
                 plan_id: options.identity.initial_plan.plan_id.clone(),
-                status: AgentTaskAggregateStatus::CandidateRecoverable,
                 totals: AgentTaskAggregateTotals::default(),
                 outcomes: vec![AgentTaskOutcome {
                     task_id: "provider".to_string(),
@@ -3714,9 +3685,7 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
 #[test]
 fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
     use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    };
+    use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repositories");
@@ -3833,7 +3802,6 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
             &AgentTaskAggregate {
                 schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
                 plan_id: options.identity.initial_plan.plan_id.clone(),
-                status: AgentTaskAggregateStatus::Succeeded,
                 totals: AgentTaskAggregateTotals {
                     succeeded: 1,
                     ..Default::default()
@@ -5520,7 +5488,7 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
         .run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             AgentTaskAggregateStatus::Succeeded,
             "{aggregate:?}"
         );
@@ -8189,9 +8157,7 @@ fn adoption_blocks_inherited_failure_when_candidate_package_artifact_differs_fro
 fn continuation_finalizes_applied_green_candidate_despite_recoverable_artifact_diagnostic() {
     homeboy_core::test_support::with_isolated_home(|_| {
         use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
-        use crate::agent_task_scheduler::{
-            AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-        };
+        use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
         let run_id = "cook-applied-recoverable-artifact";
         let mut options = batch_cook_options(
@@ -8217,7 +8183,6 @@ fn continuation_finalizes_applied_green_candidate_despite_recoverable_artifact_d
             &AgentTaskAggregate {
                 schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
                 plan_id: options.identity.initial_plan.plan_id.clone(),
-                status: AgentTaskAggregateStatus::PartialRecoverable,
                 totals: AgentTaskAggregateTotals {
                     succeeded: 1,
                     ..Default::default()
@@ -12094,12 +12059,23 @@ fn submit_terminal_lab_attempt(
         remote_command: &["homeboy".to_string(), "agent-task".to_string()],
     })
     .expect("accept Lab handoff");
+    let outcomes = plan
+        .tasks
+        .iter()
+        .map(|task| crate::agent_task::AgentTaskOutcome {
+            task_id: task.task_id.clone(),
+            status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
     let aggregate = crate::agent_task_scheduler::AgentTaskAggregate {
         schema: "homeboy/agent-task-aggregate/v1".to_string(),
         plan_id: plan.plan_id.clone(),
-        status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
-        totals: Default::default(),
-        outcomes: Vec::new(),
+        totals: crate::agent_task_scheduler::AgentTaskAggregateTotals::from_outcomes(
+            plan.tasks.len(),
+            &outcomes,
+        ),
+        outcomes,
         events: Vec::new(),
         artifact_lineage: Vec::new(),
         child_runs: Vec::new(),
@@ -15196,7 +15172,6 @@ fn detached_adoption_follow_up_failure_stays_non_green_and_skips_finalization() 
             &crate::agent_task_scheduler::AgentTaskAggregate {
                 schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
                 plan_id: plan.plan_id.clone(),
-                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
                 totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
                     failed: 1,
                     ..Default::default()
@@ -15702,7 +15677,6 @@ fn seed_timeout_gate_failed_cook(
     let mut aggregate = lifecycle_store
         .read_aggregate(&attempt_id)
         .expect("seeded aggregate");
-    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable;
     aggregate.totals.succeeded = 0;
     aggregate.totals.candidate_recoverable = 1;
     aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable;
@@ -19065,7 +19039,6 @@ fn with_corrected_gate_candidate_placement(
         );
         let store = test_lifecycle_store();
         let mut aggregate = store.read_aggregate(run_id).unwrap();
-        aggregate.status = AgentTaskAggregateStatus::CandidateRecoverable;
         aggregate.totals.succeeded = 0;
         aggregate.totals.recoverable_candidates = 1;
         aggregate.outcomes[0].status =
@@ -22436,8 +22409,6 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         .expect("link Cook attempt");
 
         let mut aggregate = review_form_aggregate(&options.identity.initial_plan);
-        aggregate.status =
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::CandidateRecoverable;
         aggregate.totals = crate::agent_task_scheduler::AgentTaskAggregateTotals {
             recoverable_candidates: 1,
             ..Default::default()
@@ -22455,6 +22426,9 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         )
         .expect("persist candidate-recoverable aggregate");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            // An all-candidate aggregate derives `PartialRecoverable`; the run
+            // reaches `CandidateRecoverable` through the Cook terminal state.
+            record.set_state_for_test(AgentTaskRunState::CandidateRecoverable);
             record
                 .lifecycle
                 .provider_runtime

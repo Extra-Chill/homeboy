@@ -70,7 +70,7 @@ mod timeout_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             AgentTaskAggregateStatus::Succeeded,
             "{aggregate:#?}"
         );
@@ -98,7 +98,7 @@ mod timeout_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
         assert_eq!(
             aggregate.outcomes[0].status,
             AgentTaskOutcomeStatus::Timeout
@@ -135,7 +135,7 @@ mod timeout_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed
         );
         assert_eq!(aggregate.totals.timed_out, 1);
@@ -187,7 +187,7 @@ mod timeout_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             AgentTaskAggregateStatus::PartialRecoverable,
             "a non-empty attempt diff is recoverable rather than discarded"
         );
@@ -407,7 +407,7 @@ mod timeout_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable
         );
         assert_eq!(aggregate.totals.candidate_recoverable, 1);
@@ -521,7 +521,7 @@ mod timeout_tests {
                 .expect("persisted aggregate");
 
             assert_eq!(
-                aggregate.status,
+                aggregate.status(),
                 crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
                 "{aggregate:#?}"
             );
@@ -631,7 +631,7 @@ mod timeout_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed
         );
         assert_eq!(aggregate.totals.succeeded, 0);
