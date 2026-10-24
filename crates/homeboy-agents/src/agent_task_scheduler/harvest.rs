@@ -4,116 +4,6 @@ use std::process::Command;
 
 use super::*;
 
-pub(super) fn harvest_committed_patch(
-    outcome: &mut AgentTaskOutcome,
-    running: &RunningTask,
-) -> Result<(), HarvestError> {
-    harvest_committed_patch_with_metadata(outcome, running, committed_change_metadata_for_range)
-}
-
-pub(super) fn harvest_uncommitted_patch(
-    outcome: &mut AgentTaskOutcome,
-    running: &RunningTask,
-) -> Result<(), HarvestError> {
-    let Some(base) = running.task_base_sha.as_deref() else {
-        return Ok(());
-    };
-    let Some(root) = running.request.workspace.root.as_deref().map(Path::new) else {
-        return Ok(());
-    };
-    persist_attempt_patch_artifacts(outcome, running, root)?;
-    if outcome.artifacts.iter().any(is_actionable_patch_artifact) {
-        return Ok(());
-    }
-    // Reconstruct the working-tree candidate without writing the attempt's live
-    // index. Timeout recovery can overlap a provider's final Git operation, and
-    // a linked worktree keeps that index lock in the source repository's
-    // administrative directory (#13448).
-    let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
-        command: "create attempt harvest Git index".to_string(),
-        cwd: root.to_path_buf(),
-        message: error.to_string(),
-    })?;
-    let index_path = index.path().display().to_string();
-    let index_env: &[(&str, &str)] = &[("GIT_INDEX_FILE", index_path.as_str())];
-    git_output_with_env(root, &["read-tree", "HEAD"], index_env)?;
-    let add_args = ["add", "--all", "--", "."];
-    git_output_with_env(root, &add_args, index_env)?;
-    let uncommitted_check_args = [
-        "diff",
-        "--cached",
-        "--binary",
-        "--full-index",
-        "--find-renames",
-        "HEAD",
-        "--",
-        ".",
-    ];
-    if git_output_raw_with_env(root, &uncommitted_check_args, index_env)?
-        .trim()
-        .is_empty()
-    {
-        return Ok(());
-    }
-    // If the provider committed before its final edits, preserve one complete
-    // candidate against the immutable task base. Otherwise this artifact would
-    // omit the commits while still claiming `base` as its application base, and
-    // committed harvest would skip it because a patch already exists.
-    let candidate_patch_args = [
-        "diff",
-        "--cached",
-        "--binary",
-        "--full-index",
-        "--find-renames",
-        base,
-        "--",
-        ".",
-    ];
-    let patch = git_output_raw_with_env(root, &candidate_patch_args, index_env)?;
-    let uncommitted_changed_args = ["diff", "--cached", "--name-only", base, "--", "."];
-    let changed_files = git_changed_files_with_env(root, &uncommitted_changed_args, index_env)?;
-    let path = attempt_patch_path(running, "uncommitted")?;
-    std::fs::write(&path, patch.as_bytes()).map_err(|error| HarvestError::ArtifactWrite {
-        path: path.clone(),
-        message: error.to_string(),
-    })?;
-    outcome.artifacts.push(AgentTaskArtifact {
-        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-        id: attempt_patch_id(running, "uncommitted-changes"),
-        kind: "patch".to_string(),
-        name: Some("uncommitted-changes.patch".to_string()),
-        label: Some("executor uncommitted changes".to_string()),
-        role: Some("patch".to_string()),
-        semantic_key: None,
-        path: Some(path.display().to_string()),
-        url: None,
-        mime: Some("text/x-patch".to_string()),
-        size_bytes: Some(patch.len() as u64),
-        sha256: Some(patch_sha256(&patch)),
-        metadata: serde_json::json!({
-            "change_source": "uncommitted_attempt_workspace",
-            "base_ref": base,
-            "run_id": running.run_id.as_deref(),
-            "task_id": &running.task_id,
-            "producer_attempt": running.attempt,
-            "provider_rotation_index": running.rotation_index,
-            "provider_backend": running.request.executor.backend,
-            "provider_model": running.request.executor.model(),
-            "attempt_workspace": running.request.workspace.attempt,
-            "source_provenance": running.source_provenance,
-            "changed_files": changed_files,
-        }),
-    });
-    bind_candidate_artifact_fingerprint(
-        outcome
-            .artifacts
-            .last_mut()
-            .expect("uncommitted patch artifact was attached"),
-        running,
-    );
-    Ok(())
-}
-
 /// Ref namespace that pins harvested candidates against garbage collection.
 pub(crate) const CANDIDATE_REF_PREFIX: &str = "refs/homeboy/candidates/";
 
@@ -146,8 +36,60 @@ fn harvest_candidate_commit_with_bundle(
     let Some(root) = running.request.workspace.root.as_deref().map(Path::new) else {
         return Ok(());
     };
-    if !git_is_repository(root)? || !git_is_ancestor(root, base, "HEAD")? {
+    let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
+    outcome.candidate = candidate_from_workspace(root, base, run_id)?;
+    let Some(candidate) = outcome.candidate.as_ref() else {
+        if outcome.status == AgentTaskOutcomeStatus::Succeeded {
+            crate::agent_task_provider::record_verified_unchanged_empty_attempt(outcome);
+        }
         return Ok(());
+    };
+    let candidate_sha = candidate.candidate_sha.clone();
+    if !outcome.metadata.is_object() {
+        outcome.metadata = serde_json::json!({});
+    }
+    outcome.metadata["source_provenance"] = serde_json::json!(running.source_provenance);
+    let candidate_ref = format!(
+        "{CANDIDATE_REF_PREFIX}{}",
+        homeboy_core::paths::sanitize_path_segment(run_id)
+    );
+    if bundle {
+        // The bundle is the Lab handback of the candidate (#16303).
+        let path = candidate_bundle_path(running)?;
+        let path_arg = path.display().to_string();
+        let exclude_base = format!("^{base}");
+        git_output(
+            root,
+            &["bundle", "create", &path_arg, &candidate_ref, &exclude_base],
+        )?;
+        let bytes = std::fs::read(&path).map_err(|error| HarvestError::ArtifactWrite {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+        outcome.artifacts.push(AgentTaskArtifact {
+            id: format!(
+                "{}-attempt-{}-candidate-bundle",
+                running.task_id, running.attempt
+            ),
+            kind: crate::agent_task_promotion::CANDIDATE_BUNDLE_ARTIFACT_KIND.to_string(),
+            path: Some(path_arg),
+            size_bytes: Some(bytes.len() as u64),
+            sha256: Some(patch_sha256(&bytes)),
+            metadata: serde_json::json!({ "candidate_sha": candidate_sha, "base_ref": base }),
+            ..AgentTaskArtifact::default()
+        });
+    }
+    Ok(())
+}
+
+/// Capture one owned worktree without touching its live index.
+pub(crate) fn candidate_from_workspace(
+    root: &Path,
+    base: &str,
+    run_id: &str,
+) -> Result<Option<crate::agent_task::AgentTaskCandidate>, HarvestError> {
+    if !git_is_repository(root)? || !git_is_ancestor(root, base, "HEAD")? {
+        return Ok(None);
     }
     let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
         command: "create candidate harvest Git index".to_string(),
@@ -160,7 +102,7 @@ fn harvest_candidate_commit_with_bundle(
     git_output_with_env(root, &["add", "--all", "--", "."], index_env)?;
     let tree = git_output_with_env(root, &["write-tree"], index_env)?;
     if tree == git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])? {
-        return Ok(());
+        return Ok(None);
     }
     let head = git_output(root, &["rev-parse", "HEAD^{commit}"])?;
     let date = format!(
@@ -186,41 +128,16 @@ fn harvest_candidate_commit_with_bundle(
         "homeboy: cook candidate",
     ];
     let candidate_sha = git_output_with_env(root, &commit_args, identity_env)?;
-    let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
     let candidate_ref = format!(
         "{CANDIDATE_REF_PREFIX}{}",
         homeboy_core::paths::sanitize_path_segment(run_id)
     );
     git_output(root, &["update-ref", &candidate_ref, &candidate_sha])?;
-    outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
+    Ok(Some(crate::agent_task::AgentTaskCandidate {
         base_sha: base.to_string(),
         candidate_sha: candidate_sha.clone(),
         tree_sha: tree,
-    });
-    if bundle {
-        // The bundle is the Lab handback of the candidate (#16303).
-        let path = attempt_patch_path(running, "candidate")?.with_extension("bundle");
-        let path_arg = path.display().to_string();
-        let exclude_base = format!("^{base}");
-        git_output(
-            root,
-            &["bundle", "create", &path_arg, &candidate_ref, &exclude_base],
-        )?;
-        let bytes = std::fs::read(&path).map_err(|error| HarvestError::ArtifactWrite {
-            path: path.clone(),
-            message: error.to_string(),
-        })?;
-        outcome.artifacts.push(AgentTaskArtifact {
-            id: attempt_patch_id(running, "candidate-bundle"),
-            kind: crate::agent_task_promotion::CANDIDATE_BUNDLE_ARTIFACT_KIND.to_string(),
-            path: Some(path_arg),
-            size_bytes: Some(bytes.len() as u64),
-            sha256: Some(patch_sha256(&bytes)),
-            metadata: serde_json::json!({ "candidate_sha": candidate_sha, "base_ref": base }),
-            ..AgentTaskArtifact::default()
-        });
-    }
-    Ok(())
+    }))
 }
 
 /// A deadline can interrupt an otherwise valid workspace diff before the
@@ -228,34 +145,7 @@ fn harvest_candidate_commit_with_bundle(
 /// durable artifact: it is recoverable evidence, never an implicitly complete
 /// provider result.
 pub(super) fn mark_timeout_workspace_candidates_incomplete(outcome: &mut AgentTaskOutcome) {
-    let mut recovered = 0;
-    for artifact in &mut outcome.artifacts {
-        if !is_actionable_patch_artifact(artifact)
-            || artifact
-                .metadata
-                .get("change_source")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|source| {
-                    !matches!(source, "uncommitted_attempt_workspace" | "local_commits")
-                })
-        {
-            continue;
-        }
-        if !artifact.metadata.is_object() {
-            artifact.metadata = serde_json::json!({});
-        }
-        let metadata = artifact
-            .metadata
-            .as_object_mut()
-            .expect("patch artifact metadata object");
-        metadata.insert("incomplete".to_string(), serde_json::json!(true));
-        metadata.insert(
-            "recovery_required".to_string(),
-            serde_json::json!(["fresh_review", "deterministic_gates"]),
-        );
-        recovered += 1;
-    }
-    if recovered == 0 {
+    if outcome.candidate.is_none() {
         return;
     }
     if !outcome.metadata.is_object() {
@@ -263,304 +153,20 @@ pub(super) fn mark_timeout_workspace_candidates_incomplete(outcome: &mut AgentTa
     }
     outcome.metadata["timeout_recovery"] = serde_json::json!({
         "incomplete": true,
-        "recoverable_candidate_count": recovered,
+        "recoverable_candidate_count": 1,
     });
-}
-
-fn persist_attempt_patch_artifacts(
-    outcome: &mut AgentTaskOutcome,
-    running: &RunningTask,
-    attempt_root: &Path,
-) -> Result<(), HarvestError> {
-    for (index, artifact) in outcome.artifacts.iter_mut().enumerate() {
-        if !is_actionable_patch_artifact(artifact) {
-            continue;
-        }
-        if !artifact.metadata.is_object() {
-            artifact.metadata = serde_json::json!({});
-        }
-        let Some(source) = artifact.path.as_deref().map(PathBuf::from) else {
-            patch_artifact_metadata(artifact, running, false);
-            continue;
-        };
-        if !source.starts_with(attempt_root) {
-            patch_artifact_metadata(artifact, running, false);
-            continue;
-        }
-        let contents = std::fs::read(&source).map_err(|error| HarvestError::ArtifactWrite {
-            path: source.clone(),
-            message: error.to_string(),
-        })?;
-        let path = attempt_patch_path(running, &format!("provider-{index}"))?;
-        std::fs::write(&path, &contents).map_err(|error| HarvestError::ArtifactWrite {
-            path: path.clone(),
-            message: error.to_string(),
-        })?;
-        artifact.path = Some(path.display().to_string());
-        artifact.size_bytes = Some(contents.len() as u64);
-        artifact.sha256 = Some(patch_sha256(&contents));
-        patch_artifact_metadata(artifact, running, true);
-    }
-    Ok(())
-}
-
-fn patch_artifact_metadata(
-    artifact: &mut AgentTaskArtifact,
-    running: &RunningTask,
-    copied_from_attempt_workspace: bool,
-) {
-    let metadata = artifact
-        .metadata
-        .as_object_mut()
-        .expect("patch artifact metadata object");
-    metadata.insert(
-        "source_provenance".to_string(),
-        serde_json::json!(running.source_provenance),
-    );
-    if copied_from_attempt_workspace {
-        metadata.extend(serde_json::Map::from_iter([
-            ("run_id".to_string(), serde_json::json!(running.run_id)),
-            ("task_id".to_string(), serde_json::json!(running.task_id)),
-            (
-                "producer_attempt".to_string(),
-                serde_json::json!(running.attempt),
-            ),
-            (
-                "change_source".to_string(),
-                serde_json::json!("attempt_workspace_artifact"),
-            ),
-            (
-                "provider_rotation_index".to_string(),
-                serde_json::json!(running.rotation_index),
-            ),
-            (
-                "provider_backend".to_string(),
-                serde_json::json!(running.request.executor.backend),
-            ),
-            (
-                "provider_model".to_string(),
-                serde_json::json!(running.request.executor.model()),
-            ),
-        ]));
-    }
-    attach_gate_feedback_baseline_metadata(&mut artifact.metadata, running);
-}
-
-fn harvest_committed_patch_with_metadata(
-    outcome: &mut AgentTaskOutcome,
-    running: &RunningTask,
-    collect_metadata: impl FnOnce(&Path, &str) -> Result<Vec<serde_json::Value>, HarvestError>,
-) -> Result<(), HarvestError> {
-    // Commits are the attempt's candidate whatever the provider reported, just
-    // like uncommitted edits. A declared-output miss, timeout, or provider
-    // failure must not discard a committed change set. (#15980)
-    if outcome
-        .artifacts
-        .iter()
-        .any(|artifact| is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact))
-    {
-        return Ok(());
-    }
-    let Some(base) = running.task_base_sha.as_deref() else {
-        return Ok(());
-    };
-    let Some(attempt_root) = running.request.workspace.root.as_deref().map(Path::new) else {
-        return Ok(());
-    };
-
-    // Resolve the harvest root resiliently: prefer the attempt scratch workspace,
-    // but fall back to the durable source workspace when the attempt directory has
-    // been reaped (e.g. multi-attempt cook lifecycle). A missing or non-repo cwd
-    // is not fatal — it just means the attempt scratch is unavailable.
-    let attempt_is_repo = git_is_repository(attempt_root)?;
-    let mut root = if attempt_is_repo {
-        attempt_root
-    } else if let Some(source_root) = running
-        .source_workspace_root
-        .as_deref()
-        .map(Path::new)
-        .filter(|source_root| source_root != &attempt_root)
-    {
-        if git_is_repository(source_root)? {
-            source_root
-        } else {
-            return Ok(());
-        }
-    } else {
-        return Ok(());
-    };
-
-    let mut head = git_output(root, &["rev-parse", "HEAD"])?;
-    if head == base {
-        // When the attempt root was valid but had no new commits, check the
-        // durable source workspace for commits beyond base.
-        if root == attempt_root {
-            if let Some(source_root) = running
-                .source_workspace_root
-                .as_deref()
-                .map(Path::new)
-                .filter(|source_root| source_root != &attempt_root)
-            {
-                if git_is_repository(source_root)? {
-                    let source_head = git_output(source_root, &["rev-parse", "HEAD"])?;
-                    if source_head != base {
-                        root = source_root;
-                        head = source_head;
-                    } else {
-                        return Ok(());
-                    }
-                } else {
-                    return Ok(());
-                }
-            } else {
-                return Ok(());
-            }
-        } else {
-            return Ok(());
-        }
-    }
-    if !git_is_ancestor(root, base, "HEAD")? {
-        return Err(HarvestError::UnrelatedHead {
-            base: base.to_string(),
-            head,
-        });
-    }
-    let committed_patch_args = [
-        "diff",
-        "--binary",
-        "--full-index",
-        "--find-renames",
-        base,
-        "HEAD",
-        "--",
-        ".",
-    ];
-    let patch = git_output_raw(root, &committed_patch_args)?;
-    if patch.trim().is_empty() {
-        return Ok(());
-    }
-    let path = attempt_patch_path(running, &format!("committed-{head}"))?;
-    std::fs::write(&path, patch.as_bytes()).map_err(|error| HarvestError::ArtifactWrite {
-        path: path.clone(),
-        message: error.to_string(),
-    })?;
-    let range = format!("{base}..HEAD");
-    // Retain the patch before collecting optional commit metadata so a later
-    // Git failure cannot strand the recoverable artifact.
-    outcome.artifacts.push(committed_patch_artifact(
-        running,
-        &path,
-        &patch,
-        base,
-        &range,
-        Vec::new(),
-    ));
-    let commits = collect_metadata(root, &range)?;
-    let committed_changed_args = ["diff", "--name-only", base, "HEAD", "--", "."];
-    let changed_files = git_changed_files(root, &committed_changed_args)?;
-    outcome
-        .artifacts
-        .last_mut()
-        .expect("committed patch artifact was attached")
-        .metadata = serde_json::json!({
-        "change_source": "local_commits",
-        "artifact_provenance": "homeboy_generated_committed_patch",
-        "base_ref": base,
-        "commit_range": range,
-        "commits": commits,
-        "run_id": running.run_id.as_deref(),
-        "task_id": &running.task_id,
-        "producer_attempt": running.attempt,
-        "source_provenance": running.source_provenance,
-        "provider_rotation_index": running.rotation_index,
-        "provider_backend": running.request.executor.backend,
-        "provider_model": running.request.executor.model(),
-        "attempt_workspace": &running.request.workspace.attempt,
-        "changed_files": changed_files,
-    });
-    Ok(())
-}
-
-fn attach_gate_feedback_baseline_metadata(metadata: &mut serde_json::Value, running: &RunningTask) {
-    if running.request.metadata["cook_loop"]["kind"] == "deterministic-gate-feedback" {
-        metadata["gate_feedback_baseline"] = running.request.inputs["cook_loop"].clone();
-    }
-}
-
-fn committed_change_metadata_for_range(
-    cwd: &Path,
-    range: &str,
-) -> Result<Vec<serde_json::Value>, HarvestError> {
-    let output = git_output(
-        cwd,
-        &["log", "--reverse", "--format=%H%x1f%an%x1f%ae%x1f%s", range],
-    )?;
-    Ok(committed_change_metadata(&output))
-}
-
-fn git_changed_files(cwd: &Path, args: &[&str]) -> Result<Vec<String>, HarvestError> {
-    git_changed_files_with_env(cwd, args, &[])
-}
-
-fn git_changed_files_with_env(
-    cwd: &Path,
-    args: &[&str],
-    env: &[(&str, &str)],
-) -> Result<Vec<String>, HarvestError> {
-    Ok(git_output_with_env(cwd, args, env)?
-        .lines()
-        .filter(|path| !path.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
-}
-
-fn committed_patch_artifact(
-    running: &RunningTask,
-    path: &Path,
-    patch: &str,
-    base: &str,
-    range: &str,
-    commits: Vec<serde_json::Value>,
-) -> AgentTaskArtifact {
-    AgentTaskArtifact {
-        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-        id: attempt_patch_id(running, "committed-changes"),
-        kind: "patch".to_string(),
-        name: Some("committed-changes.patch".to_string()),
-        label: Some("executor committed changes".to_string()),
-        role: Some("patch".to_string()),
-        semantic_key: None,
-        path: Some(path.display().to_string()),
-        url: None,
-        mime: Some("text/x-patch".to_string()),
-        size_bytes: Some(patch.len() as u64),
-        sha256: Some(patch_sha256(patch)),
-        metadata: serde_json::json!({
-            "change_source": "local_commits",
-            "base_ref": base,
-            "commit_range": range,
-            "commits": commits,
-            "run_id": running.run_id,
-            "task_id": running.task_id,
-            "producer_attempt": running.attempt,
-            "source_provenance": running.source_provenance,
-            "provider_rotation_index": running.rotation_index,
-            "provider_backend": running.request.executor.backend,
-            "provider_model": running.request.executor.model(),
-        }),
-    }
 }
 
 fn patch_sha256(contents: impl AsRef<[u8]>) -> String {
     content_hash::sha256_hex(contents.as_ref())
 }
 
-fn attempt_patch_path(running: &RunningTask, kind: &str) -> Result<PathBuf, HarvestError> {
+fn candidate_bundle_path(running: &RunningTask) -> Result<PathBuf, HarvestError> {
     let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
     let root = super::artifact_root_for_running(running)?;
     let dir = root
         .join("agent-task")
-        .join("attempt-patches")
+        .join("candidate-bundles")
         .join(homeboy_core::paths::sanitize_path_segment(run_id))
         .join(homeboy_core::paths::sanitize_path_segment(&running.task_id));
     std::fs::create_dir_all(&dir).map_err(|error| HarvestError::ArtifactDirectory {
@@ -568,32 +174,9 @@ fn attempt_patch_path(running: &RunningTask, kind: &str) -> Result<PathBuf, Harv
         message: error.to_string(),
     })?;
     Ok(dir.join(format!(
-        "attempt-{}-{}-{}.patch",
-        running.attempt, kind, running.artifact_nonce
+        "attempt-{}-{}.bundle",
+        running.attempt, running.artifact_nonce
     )))
-}
-
-fn attempt_patch_id(running: &RunningTask, kind: &str) -> String {
-    format!(
-        "{}-attempt-{}-{kind}",
-        homeboy_core::paths::sanitize_path_segment(&running.task_id),
-        running.attempt
-    )
-}
-
-fn committed_change_metadata(output: &str) -> Vec<serde_json::Value> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split('\u{1f}');
-            Some(serde_json::json!({
-                "sha": fields.next()?,
-                "author_name": fields.next()?,
-                "author_email": fields.next()?,
-                "subject": fields.next()?,
-            }))
-        })
-        .collect()
 }
 
 fn git_is_ancestor(cwd: &Path, base: &str, head: &str) -> Result<bool, HarvestError> {
@@ -729,7 +312,7 @@ pub(crate) enum HarvestError {
     Adoption {
         message: String,
     },
-    CandidateBaselineMismatch {
+    CandidateTreeMismatch {
         message: String,
     },
     SnapshotInvalidated {
@@ -808,7 +391,7 @@ pub(super) fn committed_harvest_failure(
             format!("could not materialize explicitly adopted candidate: {message}"),
             serde_json::json!({ "error": message }),
         ),
-        HarvestError::CandidateBaselineMismatch { message } => (
+        HarvestError::CandidateTreeMismatch { message } => (
             "agent_task.gate_feedback_candidate_baseline_mismatch",
             format!("refusing gate-feedback retry candidate baseline: {message}"),
             serde_json::json!({ "error": message }),
@@ -1180,10 +763,7 @@ mod committed_harvest_tests {
             &HarvestExecutionContext::default(),
         )
         .expect_err("untracked unrelated dirt must fail closed");
-        assert!(matches!(
-            error,
-            HarvestError::CandidateBaselineMismatch { .. }
-        ));
+        assert!(matches!(error, HarvestError::CandidateTreeMismatch { .. }));
 
         std::fs::remove_file(workspace.join("extra.txt")).expect("remove extra");
         let error = prepare_committed_harvest(
@@ -1197,10 +777,7 @@ mod committed_harvest_tests {
             &HarvestExecutionContext::default(),
         )
         .expect_err("mismatched recorded diff must fail closed");
-        assert!(matches!(
-            error,
-            HarvestError::CandidateBaselineMismatch { .. }
-        ));
+        assert!(matches!(error, HarvestError::CandidateTreeMismatch { .. }));
 
         let mut ordinary =
             gate_feedback_request(&workspace, String::new(), &patch_artifact, &patch_sha256);
@@ -1208,124 +785,6 @@ mod committed_harvest_tests {
         let error = prepare_committed_harvest(&ordinary, None, &HarvestExecutionContext::default())
             .expect_err("ordinary dirty worktree remains refused");
         assert!(matches!(error, HarvestError::DirtyWorkspace { .. }));
-    }
-
-    #[test]
-    fn git_metadata_failure_after_patch_creation_preserves_the_patch_artifact() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir(&workspace).expect("workspace");
-        git(&workspace, &["init", "-b", "main"]);
-        git(&workspace, &["config", "user.email", "test@example.com"]);
-        git(&workspace, &["config", "user.name", "Homeboy Test"]);
-        std::fs::write(workspace.join("file.txt"), "base\n").expect("base file");
-        git(&workspace, &["add", "file.txt"]);
-        git(&workspace, &["commit", "-m", "base"]);
-        let base = git(&workspace, &["rev-parse", "HEAD"]);
-        std::fs::write(workspace.join("file.txt"), "committed change\n").expect("change");
-        git(&workspace, &["commit", "-am", "agent change"]);
-        let request = AgentTaskRequest {
-            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-            task_id: "task-1".to_string(),
-            group_key: None,
-            parent_plan_id: None,
-            executor: AgentTaskExecutor {
-                backend: "test".to_string(),
-                selector: None,
-                runtime_selection: None,
-                required_capabilities: Vec::new(),
-                secret_env: Vec::new(),
-                model: None,
-                config: serde_json::Value::Null,
-            },
-            instructions: String::new(),
-            inputs: serde_json::Value::Null,
-            source_refs: Vec::new(),
-            workspace: AgentTaskWorkspace {
-                root: Some(workspace.display().to_string()),
-                ..Default::default()
-            },
-            component_contracts: Vec::new(),
-            policy: AgentTaskPolicy::default(),
-            limits: AgentTaskLimits::default(),
-            expected_artifacts: Vec::new(),
-            artifact_declarations: Vec::new(),
-            output_declarations: Vec::new(),
-            runtime_tools: Vec::new(),
-            metadata: serde_json::Value::Null,
-        };
-        let running = RunningTask {
-            task_id: "task-1".to_string(),
-            request,
-            workspace_key: None,
-            executor_key: "test".to_string(),
-            model_key: None,
-            resource_units: 1,
-            exclusive_resource_keys: Vec::new(),
-            attempt: 1,
-            started_at: Instant::now(),
-            timeout_ms: None,
-            execution_deadline_unix_ms: None,
-            timeout_cancel_requested: false,
-            rotation_index: 0,
-            rotation_transitions_used: 0,
-            rotation_attempts: Vec::new(),
-            readiness_skips: Vec::new(),
-            provider_capacity_key: "test-capacity".to_string(),
-            candidate_artifacts: Vec::new(),
-            retry_attempts: Vec::new(),
-            source_workspace_root: None,
-            _attempt_workspace: None,
-            run_id: Some("committed-harvest-test".to_string()),
-            artifact_root: None,
-            artifact_nonce: "test-artifact".to_string(),
-            task_base_sha: Some(base),
-            source_provenance: None,
-            scratch: crate::controller_scratch::ControllerScratchAllocation {
-                path: temp.path().join("controller-scratch"),
-                lease_id: "test-lease-1".to_string(),
-                index_path: temp.path().join("resources.json"),
-            },
-            adoption: None,
-            join_handle: None,
-        };
-        let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
-        outcome.status = AgentTaskOutcomeStatus::Succeeded;
-        let error = harvest_committed_patch_with_metadata(&mut outcome, &running, |_, _| {
-            Err(HarvestError::Git {
-                command: "git log injected metadata failure".to_string(),
-                cwd: PathBuf::from("/test/workspace"),
-                message: "injected failure".to_string(),
-            })
-        })
-        .expect_err("metadata command fails after the real patch is attached");
-        let patch_path = outcome.artifacts[0].path.clone().expect("patch path");
-        assert!(Path::new(&patch_path).is_file());
-        let patch = std::fs::read_to_string(&patch_path).expect("read attached patch");
-        assert!(!patch.trim().is_empty());
-        assert!(patch.contains("diff --git a/file.txt b/file.txt"));
-        assert!(patch.contains("-base\n"));
-        assert!(patch.contains("+committed change"));
-        assert_eq!(
-            outcome.artifacts[0].size_bytes,
-            Some(patch.len() as u64),
-            "artifact size must match the written patch"
-        );
-        let failed = committed_harvest_failure(outcome, error);
-
-        assert_eq!(failed.status, AgentTaskOutcomeStatus::Failed);
-        assert_eq!(failed.artifacts[0].id, "task-1-attempt-1-committed-changes");
-        assert_eq!(
-            failed.artifacts[0].path.as_deref(),
-            Some(patch_path.as_str())
-        );
-        assert!(failed.evidence_refs.iter().any(|evidence| {
-            evidence.uri == "homeboy://agent-task/committed-harvest-preflight"
-        }));
-        assert!(failed.diagnostics.iter().any(|diagnostic| {
-            diagnostic.class == "agent_task.committed_harvest_git_failed"
-                && diagnostic.data["command"] == "git log injected metadata failure"
-        }));
     }
 
     #[test]
@@ -1431,64 +890,17 @@ mod committed_harvest_tests {
 
         let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
         outcome.status = AgentTaskOutcomeStatus::Succeeded;
-        harvest_uncommitted_patch(&mut outcome, &running).expect("harvest uncommitted patch");
-
-        assert!(
-            index_lock.exists(),
-            "harvest must not remove another owner's lock"
+        harvest_candidate_commit(&mut outcome, &running).expect("harvest candidate");
+        assert!(index_lock.exists());
+        assert_eq!(git(&workspace, &["diff", "--cached", "--name-only"]), "");
+        assert!(outcome.artifacts.is_empty());
+        let candidate = outcome.candidate.unwrap();
+        let diff = git(
+            &workspace,
+            &["diff", &candidate.base_sha, &candidate.candidate_sha],
         );
-        assert_eq!(
-            git(&workspace, &["diff", "--cached", "--name-only"]),
-            "",
-            "harvest must not stage candidate bytes in the linked-worktree index"
-        );
-
-        let patch_path = outcome.artifacts[0]
-            .path
-            .clone()
-            .expect("uncommitted patch path");
-        let patch = std::fs::read_to_string(&patch_path).expect("read patch");
-        assert!(
-            patch.contains("file.txt") && patch.contains("+provider change"),
-            "the provider commit must be captured: {patch}"
-        );
-        assert!(
-            patch.contains("late.txt") && patch.contains("+late provider change"),
-            "the provider's uncommitted edit must be captured: {patch}"
-        );
-        for key in [
-            "run_id",
-            "task_id",
-            "producer_attempt",
-            "base_ref",
-            "provider_backend",
-            "repository_identity",
-            "workspace_identity",
-        ] {
-            assert!(
-                outcome.artifacts[0].metadata.get(key).is_some_and(|value| {
-                    value.as_str().is_some_and(|value| !value.is_empty()) || value.is_u64()
-                }),
-                "harvested uncommitted patch is missing {key}: {:#?}",
-                outcome.artifacts[0].metadata
-            );
-        }
-        assert_eq!(
-            outcome.artifacts[0].metadata["run_id"],
-            "metadata-exclude-test"
-        );
-        assert_eq!(outcome.artifacts[0].metadata["task_id"], "task-1");
-        assert_eq!(outcome.artifacts[0].metadata["base_ref"], base);
-        git(&source, &["apply", "--check", &patch_path]);
-        git(&source, &["apply", &patch_path]);
-        assert_eq!(
-            std::fs::read_to_string(source.join("file.txt")).expect("applied committed edit"),
-            "provider change\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(source.join("late.txt")).expect("applied uncommitted edit"),
-            "late provider change\n"
-        );
+        assert!(diff.contains("+provider change"));
+        assert!(diff.contains("+late provider change"));
     }
 
     #[test]
@@ -1614,60 +1026,6 @@ mod committed_harvest_tests {
         std::env::remove_var(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV);
     }
 
-    #[test]
-    fn committed_harvest_falls_back_to_source_when_attempt_scratch_is_reaped() {
-        let temp = tempfile::tempdir().expect("tempdir");
-
-        // Create the durable source workspace with a committed change past base.
-        let source = temp.path().join("source-workspace");
-        std::fs::create_dir(&source).expect("source workspace dir");
-        git(&source, &["init", "--quiet", "-b", "main"]);
-        git(&source, &["config", "user.email", "test@example.com"]);
-        git(&source, &["config", "user.name", "Homeboy Test"]);
-        std::fs::write(source.join("file.txt"), "base\n").expect("base file");
-        git(&source, &["add", "file.txt"]);
-        git(&source, &["commit", "--quiet", "-m", "base"]);
-        let base = git(&source, &["rev-parse", "HEAD"]);
-        std::fs::write(source.join("file.txt"), "agent change\n").expect("agent edit");
-        git(&source, &["commit", "--quiet", "-am", "agent change"]);
-
-        // Simulate a reaped attempt scratch workspace (path does not exist).
-        let reaped_scratch = temp.path().join("nonexistent-scratch-workspace");
-        assert!(!reaped_scratch.exists());
-
-        let running =
-            committed_harvest_running_task(temp.path(), &reaped_scratch, Some(&source), base);
-
-        let mut outcome = committed_harvest_preflight_outcome("reaped-task".to_string());
-        outcome.status = AgentTaskOutcomeStatus::Succeeded;
-
-        // The harvest must fall back to the durable source and produce the patch.
-        harvest_committed_patch_with_metadata(&mut outcome, &running, |cwd, range| {
-            committed_change_metadata_for_range(cwd, range)
-        })
-        .expect("harvest falls back to source workspace");
-
-        assert!(
-            !outcome.artifacts.is_empty(),
-            "a committed patch artifact must be produced"
-        );
-        let patch_artifact = &outcome.artifacts[0];
-        assert_eq!(patch_artifact.kind, "patch");
-        let patch_path = patch_artifact.path.as_ref().expect("patch path");
-        let patch = std::fs::read_to_string(patch_path).expect("read patch");
-        assert!(
-            patch.contains("agent change"),
-            "patch must contain the agent's change: {patch}"
-        );
-        assert!(
-            !outcome
-                .diagnostics
-                .iter()
-                .any(|d| d.class == "agent_task.committed_harvest_git_failed"),
-            "no harvest git failure diagnostic expected"
-        );
-    }
-
     fn committed_harvest_running_task(
         temp: &Path,
         attempt_root: &Path,
@@ -1768,19 +1126,14 @@ mod committed_harvest_tests {
         outcome.summary =
             Some("output 'review_form' did not satisfy its declared schema".to_string());
 
-        harvest_uncommitted_patch(&mut outcome, &running)
-            .and_then(|_| harvest_committed_patch(&mut outcome, &running))
-            .expect("harvest committed candidate");
-
-        let patch = outcome
-            .artifacts
-            .iter()
-            .find(|artifact| is_actionable_patch_artifact(artifact))
-            .expect("the committed change set must be materialized as a patch artifact");
-        assert_eq!(patch.metadata["change_source"], "local_commits");
-        let contents =
-            std::fs::read_to_string(patch.path.as_deref().expect("patch path")).expect("patch");
-        assert!(contents.contains("agent change"), "{contents}");
+        harvest_candidate_commit(&mut outcome, &running).expect("harvest candidate");
+        assert!(outcome.artifacts.is_empty());
+        let candidate = outcome.candidate.as_ref().unwrap();
+        assert!(git(
+            &workspace,
+            &["diff", &candidate.base_sha, &candidate.candidate_sha]
+        )
+        .contains("agent change"));
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
     }
 

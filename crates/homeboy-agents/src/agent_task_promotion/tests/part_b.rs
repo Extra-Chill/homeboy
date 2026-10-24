@@ -5,7 +5,7 @@ use super::super::apply::{
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::super::promote::{
-    normalize_promotion_patch, resume_promoted_patch, validate_artifact_content,
+    normalize_fixture_diff, resume_promoted_patch, validate_artifact_content,
 };
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::candidate_fixture::{
@@ -349,7 +349,7 @@ fn materialized_workspace_promotion_resume_rejects_extra_destination_changes() {
 #[test]
 fn validate_patch_rejects_empty_patch() {
     let err =
-        normalize_promotion_patch("\n\t", "repo@promoted-task").expect_err("empty patch rejected");
+        normalize_fixture_diff("\n\t", "repo@promoted-task").expect_err("empty patch rejected");
 
     assert!(err.message.contains("empty patch"));
 }
@@ -1985,7 +1985,7 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
         "current_diff": diff,
         "patch_artifact": {"id": report.patch_artifact.id, "kind": "patch", "path": evidence_path, "sha256": sha256_hex(diff)},
     });
-    crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
+    crate::agent_task_candidate_tree::validate_gate_feedback_candidate_baseline(
         &workspace,
         &feedback_baseline,
     )
@@ -1993,7 +1993,7 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
 
     std::fs::write(workspace.join("unrelated.txt"), "drift\n").expect("divergent dirt");
     assert!(
-        crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
+        crate::agent_task_candidate_tree::validate_gate_feedback_candidate_baseline(
             &workspace,
             &feedback_baseline,
         )

@@ -3733,7 +3733,7 @@ mod preview_tests {
     }
 
     #[test]
-    fn declared_evidence_reaches_reading_provider_and_changes_harvested_patch() {
+    fn declared_evidence_reaches_reading_provider_and_changes_candidate_commit() {
         crate::test_support::with_isolated_home(|_| {
             use homeboy::agents::agent_task_provider::{
                 AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
@@ -3825,12 +3825,14 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
                     outcome.summary.as_deref(),
                     Some(format!("{bytes}|tree-bytes").as_str())
                 );
-                let patch = outcome
-                    .artifacts
-                    .iter()
-                    .find(|artifact| artifact.kind == "patch")
-                    .expect("harvested candidate");
-                let patch = std::fs::read_to_string(patch.path.as_ref().unwrap()).unwrap();
+                let candidate = outcome.candidate.as_ref().expect("harvested candidate");
+                let diff = std::process::Command::new("git")
+                    .args(["diff", &candidate.base_sha, &candidate.candidate_sha])
+                    .current_dir(&workspace)
+                    .output()
+                    .unwrap();
+                assert!(diff.status.success());
+                let patch = String::from_utf8(diff.stdout).unwrap();
                 assert!(patch.contains("evidence-result.txt") && patch.contains(bytes));
                 assert!(!patch.contains("member.txt") && !patch.contains("value.txt"));
                 assert_eq!(std::fs::read_to_string(&source).unwrap(), bytes);

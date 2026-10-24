@@ -48,7 +48,7 @@ fn failure_context() -> AgentTaskCookFailureContext {
         latest_run_id: "run-1".to_string(),
         selected_run_id: None,
         selected_task_id: None,
-        selected_artifact_id: None,
+        selected_candidate_sha: None,
         promotion_provenance: None,
         durable_recipe_ref: "recipe".to_string(),
         lifecycle_state: "failed".to_string(),

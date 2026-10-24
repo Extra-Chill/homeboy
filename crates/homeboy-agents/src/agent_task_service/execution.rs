@@ -2560,7 +2560,7 @@ fn retryable_cook_attempt(
         && agent_task_lifecycle::select_cook_candidate_in_store(lifecycle_store, cook_id)
             .ok()
             .is_some_and(|selection| {
-                selection.run_id == source.run_id && selection.selected_artifact_id.is_none()
+                selection.run_id == source.run_id && selection.selected_candidate_sha.is_none()
             });
     let source_is_retryable =
         retryable_pre_execution_failure || failed_provider_without_candidate || acceptance_repair;
@@ -4001,13 +4001,12 @@ mod tests {
                     .is_string()
             );
             let aggregate = store.read_aggregate(run_id).expect("rooted aggregate");
-            let patch_path = aggregate.outcomes[0].artifacts[0]
-                .path
-                .as_deref()
-                .map(Path::new)
-                .expect("harvested patch path");
-            assert!(patch_path.starts_with(store.artifact_root()));
-            assert!(patch_path.exists());
+            assert!(aggregate.outcomes[0].candidate.is_some());
+            assert!(aggregate.outcomes[0]
+                .artifacts
+                .iter()
+                .filter_map(|artifact| artifact.path.as_deref())
+                .all(|path| Path::new(path).starts_with(store.artifact_root())));
             let scratch_index = store.data_root().join("controller-scratch/resources.json");
             let scratch = std::fs::read_to_string(scratch_index).expect("rooted scratch index");
             assert!(scratch.contains(run_id));

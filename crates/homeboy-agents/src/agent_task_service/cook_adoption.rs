@@ -1142,7 +1142,7 @@ fn reusable_applied_adoption_promotion(
         )));
     };
     Some(
-        crate::agent_task_candidate_baseline::validate_immutable_candidate_tree(
+        crate::agent_task_candidate_tree::validate_immutable_candidate_tree(
             std::path::Path::new(worktree_path),
             candidate_sha,
         )

@@ -8,7 +8,7 @@ pub(crate) struct NormalizedPromotionPatch {
     pub(crate) changed_files: Vec<String>,
 }
 
-pub(crate) fn normalize_promotion_patch(
+pub(crate) fn normalize_fixture_diff(
     patch: &str,
     target_workspace: &str,
 ) -> Result<NormalizedPromotionPatch> {

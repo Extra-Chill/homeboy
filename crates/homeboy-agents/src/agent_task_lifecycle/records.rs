@@ -447,12 +447,7 @@ pub struct AgentTaskCookLatestSubstantiveCandidate {
     pub run_id: String,
     pub attempt: u32,
     pub task_id: String,
-    pub artifact_id: String,
-    pub artifact_kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_size_bytes: Option<u64>,
+    pub candidate: crate::agent_task::AgentTaskCandidate,
     pub integrity: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promotion_provenance: Option<Value>,

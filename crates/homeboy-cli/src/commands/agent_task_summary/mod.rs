@@ -405,7 +405,7 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     }
     if matches!(raw_state, "candidate_recoverable" | "partial_recoverable") {
         if let Some(task) = string_value(payload, &["selected_candidate", "selected_task_id"]) {
-            let artifact = string_value(payload, &["selected_candidate", "selected_artifact_id"])
+            let artifact = string_value(payload, &["selected_candidate", "selected_candidate_sha"])
                 .unwrap_or("unknown");
             lines.push(format!(
                 "Retained candidate: task {task}, artifact {artifact}"

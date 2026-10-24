@@ -22,6 +22,10 @@ use crate::agent_task::{
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskTypedArtifact,
     AGENT_TASK_OUTCOME_SCHEMA,
 };
+use crate::agent_task_evidence_discovery::{
+    append_unique_artifacts, append_unique_evidence_refs, is_actionable_patch_artifact,
+    is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
+};
 pub use crate::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyAction, AgentTaskAdaptiveConcurrencyDecision,
     AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
@@ -39,10 +43,6 @@ pub use crate::agent_task_schedule::{
     AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
 };
 use crate::agent_task_timeout::timeout_with_grace;
-use crate::agent_task_timeout_artifacts::{
-    append_unique_artifacts, append_unique_evidence_refs, is_actionable_patch_artifact,
-    is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
-};
 #[cfg(test)]
 pub(crate) use attempt_workspace::set_snapshot_fence_test_hook;
 pub use attempt_workspace::HarvestExecutionContext;
@@ -50,17 +50,16 @@ use attempt_workspace::{
     prepare_attempt_workspace, prepare_committed_harvest, remap_workspace_config, AttemptWorkspace,
 };
 use candidate_adoption::{
-    attach_candidate_adoption_provenance, bind_candidate_artifact_fingerprint,
-    finalize_candidate_artifacts, select_candidate_adoption, validate_and_apply_candidate_adoption,
+    attach_candidate_adoption_provenance, select_candidate_adoption,
+    validate_and_apply_candidate_adoption,
 };
 pub use engine::*;
 use engine::{QuarantinedTask, ResourceWait, RunningTask, ScheduledTask};
 use harvest::mark_timeout_workspace_candidates_incomplete;
+pub(crate) use harvest::{candidate_from_workspace, git_output, HarvestError};
 use harvest::{
     committed_harvest_failure, committed_harvest_preflight_outcome, harvest_candidate_commit,
-    harvest_committed_patch, harvest_uncommitted_patch,
 };
-pub(crate) use harvest::{git_output, HarvestError};
 use outcome::event;
 pub use postprocess::run_postprocess_worker;
 use resources::{

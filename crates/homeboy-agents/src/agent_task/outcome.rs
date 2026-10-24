@@ -70,15 +70,7 @@ pub const HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: &str = "homeboy_empty_attempt_veri
 #[cfg(test)]
 use homeboy_core::redaction::RedactionPolicy;
 
-/// The one immutable commit an attempt produced (#16303). Homeboy harvests it
-/// from the attempt's final working tree and pins it under
-/// `refs/homeboy/candidates/<run_id>`; `tree_sha` is that commit's tree.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskCandidate {
-    pub base_sha: String,
-    pub candidate_sha: String,
-    pub tree_sha: String,
-}
+pub use homeboy_lab_contract::agent_task_outcome::AgentTaskCandidate;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskOutcome {

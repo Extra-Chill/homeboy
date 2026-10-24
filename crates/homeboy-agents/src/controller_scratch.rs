@@ -2082,61 +2082,18 @@ fn terminal_evidence_attempt_workspace_matches(
     {
         return false;
     }
-    let Some(id) = authorization
-        .get("patch_artifact_id")
-        .and_then(serde_json::Value::as_str)
-    else {
+    let Some(candidate) = authorization.get("candidate").cloned().and_then(|value| {
+        serde_json::from_value::<crate::agent_task::AgentTaskCandidate>(value).ok()
+    }) else {
         return false;
     };
-    let Some(expected_sha256) = authorization
-        .get("patch_sha256")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return false;
-    };
-    let Some(base) = authorization
-        .get("base_ref")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return false;
-    };
-    let Some(artifact) = evidence
-        .pointer("/outcome/artifacts")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|artifacts| {
-            artifacts.iter().find(|artifact| {
-                artifact.get("id").and_then(serde_json::Value::as_str) == Some(id)
-                    && artifact.get("kind").and_then(serde_json::Value::as_str) == Some("patch")
-                    && artifact.get("sha256").and_then(serde_json::Value::as_str)
-                        == Some(expected_sha256)
-                    && artifact
-                        .pointer("/metadata/run_id")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(resource.run_id.as_str())
-                    && artifact
-                        .pointer("/metadata/task_id")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(resource.task_id.as_str())
-                    && artifact
-                        .pointer("/metadata/producer_attempt")
-                        .and_then(serde_json::Value::as_u64)
-                        == Some(resource.attempt as u64)
-                    && artifact
-                        .pointer("/metadata/base_ref")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(base)
-            })
-        })
-    else {
-        return false;
-    };
-    let Some(path) = artifact.get("path").and_then(serde_json::Value::as_str) else {
-        return false;
-    };
-    let Ok(patch) = fs::read(path) else {
-        return false;
-    };
-    sha256(&patch) == expected_sha256 && workspace_matches_patch(workspace, base, &patch)
+    evidence.pointer("/outcome/candidate") == authorization.get("candidate")
+        && crate::agent_task_promotion::validate_candidate_commit(workspace, &candidate).is_ok()
+        && crate::agent_task_candidate_tree::validate_immutable_candidate_tree(
+            workspace,
+            &candidate.candidate_sha,
+        )
+        .is_ok()
 }
 
 /// Verify that a checkout contains only the supplied patch against its immutable
@@ -4965,46 +4922,19 @@ mod tests {
             .to_string();
         fs::write(worktree.join("candidate.txt"), "candidate\n").expect("candidate");
         run_git(&worktree, &["add", "candidate.txt"]);
-        let patch = git::run_git(
-            &worktree,
-            &[
-                "diff",
-                "--cached",
-                "--binary",
-                "--full-index",
-                "--find-renames",
-                "HEAD",
-                "--",
-                ".",
-            ],
-            "git diff cached",
-        )
-        .expect("patch");
-        let patch_path = root.path().join("candidate.patch");
-        fs::write(&patch_path, &patch).expect("persisted patch");
         let mut resource = resource(&lease, root.path());
         resource.attempt = 1;
+        let candidate = crate::agent_task_scheduler::candidate_from_workspace(
+            &worktree,
+            &base,
+            &resource.run_id,
+        )
+        .unwrap()
+        .unwrap();
         resource.terminal_evidence = Some(serde_json::json!({
-            "outcome": {
-                "artifacts": [{
-                    "id": "candidate",
-                    "kind": "patch",
-                    "path": patch_path,
-                    "sha256": sha256(patch.as_bytes()),
-                    "metadata": {
-                        "run_id": resource.run_id.clone(),
-                        "task_id": resource.task_id.clone(),
-                        "producer_attempt": 1,
-                        "base_ref": base.clone(),
-                    },
-                }],
-            },
+            "outcome": { "candidate": candidate },
             "compaction_authorization": {
-                "outcome": "authorized",
-                "reason": "provider_rotation",
-                "patch_artifact_id": "candidate",
-                "patch_sha256": sha256(patch.as_bytes()),
-                "base_ref": base.clone(),
+                "outcome": "authorized", "reason": "provider_rotation", "candidate": candidate,
             },
         }));
 

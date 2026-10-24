@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::agent_task::AgentTaskArtifact;
-use crate::agent_task_timeout_artifacts::is_patch_artifact_kind;
+use crate::agent_task_evidence_discovery::is_patch_artifact_kind;
 use homeboy_core::{Error, Result};
 
 use super::{
