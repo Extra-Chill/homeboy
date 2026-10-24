@@ -36,9 +36,8 @@ use super::snapshot::{
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 use super::snapshot::{
-    local_snapshot_stats_controlled, materialize_snapshot_incremental_controlled,
-    materialize_snapshot_with_scratch_controlled, snapshot_identity_controlled,
-    workspace_content_manifest_and_hash_controlled,
+    materialize_snapshot_incremental_controlled, materialize_snapshot_with_scratch_controlled,
+    snapshot_identity_and_stats_controlled, workspace_content_manifest_and_hash_controlled,
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
@@ -247,8 +246,8 @@ fn sync_workspace_in_roots_controlled(
 
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot | RunnerWorkspaceSyncMode::SnapshotGit => {
-            let snapshot =
-                snapshot_identity_controlled(&local_path, &excludes, &includes, control)?;
+            let (snapshot, stats) =
+                snapshot_identity_and_stats_controlled(&local_path, &excludes, &includes, control)?;
             let remote_path = temp::unique_name(
                 &deterministic_remote_path(
                     workspace_root,
@@ -272,8 +271,6 @@ fn sync_workspace_in_roots_controlled(
                 &includes,
                 workspace_cleanliness,
             );
-            let stats =
-                local_snapshot_stats_controlled(&local_path, &excludes, &includes, control)?;
             let content_manifest = workspace_content_manifest_and_hash_controlled(
                 &local_path,
                 &excludes,
@@ -990,7 +987,8 @@ fn materialize_git_fallback_filesystem_snapshot(
     _closure_error: &Error,
     control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
-    let snapshot = snapshot_identity_controlled(local_path, excludes, includes, control)?;
+    let (snapshot, stats) =
+        snapshot_identity_and_stats_controlled(local_path, excludes, includes, control)?;
     let remote_path = temp::unique_name(
         &deterministic_remote_path(
             workspace_root,
@@ -1000,7 +998,6 @@ fn materialize_git_fallback_filesystem_snapshot(
         ),
         "",
     );
-    let stats = local_snapshot_stats_controlled(local_path, excludes, includes, control)?;
     let content_manifest = workspace_content_manifest_and_hash_controlled(
         local_path,
         excludes,
@@ -1647,20 +1644,25 @@ fn compatible_incremental_snapshot(
     controller_manifest: &super::snapshot::WorkspaceContentManifest,
     control: &WorkspaceControl,
 ) -> Result<Option<(RunnerWorkspaceSnapshotEntry, SnapshotManifestDelta)>> {
-    let snapshots = workspace_snapshots_for_source(runner, local_path, control)?;
-    let local_path = local_path.display().to_string();
-    Ok(snapshots.into_iter().find_map(|snapshot| {
-        (snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.as_str()
-            && snapshot.local_path == local_path
-            && snapshot.snapshot_excludes == excludes)
-            .then(|| {
-                let manifest = snapshot.content_manifest.clone()?;
-                snapshot_manifest_delta(controller_manifest, &manifest)
-                    .ok()
-                    .map(|delta| (snapshot, delta))
-            })
-            .flatten()
-    }))
+    homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.delta_computation",
+        || {
+            let snapshots = workspace_snapshots_for_source(runner, local_path, control)?;
+            let local_path = local_path.display().to_string();
+            Ok(snapshots.into_iter().find_map(|snapshot| {
+                (snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.as_str()
+                    && snapshot.local_path == local_path
+                    && snapshot.snapshot_excludes == excludes)
+                    .then(|| {
+                        let manifest = snapshot.content_manifest.clone()?;
+                        snapshot_manifest_delta(controller_manifest, &manifest)
+                            .ok()
+                            .map(|delta| (snapshot, delta))
+                    })
+                    .flatten()
+            }))
+        },
+    )
 }
 
 fn is_runner_git_auth_or_network_failure(error: &Error) -> bool {
@@ -2790,7 +2792,10 @@ fn write_metadata_and_sync_validation_dependencies(
     control: &WorkspaceControl,
 ) -> Result<Vec<RunnerValidationDependencySyncOutput>> {
     control.checkpoint()?;
-    write_workspace_metadata(runner, metadata)?;
+    homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.record_writes",
+        || write_workspace_metadata(runner, metadata),
+    )?;
     control.checkpoint()?;
     sync_validation_dependency_workspaces(
         runner,
@@ -4979,6 +4984,118 @@ fn local_git_state(local_path: &Path) -> LocalGitState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fused_identity_stats_match_standalone_walk() {
+        use crate::workspace::{snapshot, WorkspaceControl};
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("nested")).unwrap();
+        std::fs::write(source.path().join("nested/input"), "payload").unwrap();
+        std::fs::write(source.path().join("excluded"), "not transported").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("nested/input", source.path().join("link")).unwrap();
+        let excludes = vec!["excluded".to_string()];
+        let control = WorkspaceControl::default();
+        let (identity, stats) = snapshot::snapshot_identity_and_stats_controlled(
+            source.path(),
+            &excludes,
+            &[],
+            &control,
+        )
+        .unwrap();
+        let expected =
+            snapshot::local_snapshot_stats_controlled(source.path(), &excludes, &[], &control)
+                .unwrap();
+        assert_eq!(stats.files, expected.files);
+        assert_eq!(stats.bytes, expected.bytes);
+        assert_eq!(
+            identity,
+            snapshot::snapshot_identity_controlled(source.path(), &excludes, &[], &control)
+                .unwrap()
+        );
+        std::fs::write(source.path().join("nested/input"), "changed").unwrap();
+        assert_ne!(
+            identity,
+            snapshot::snapshot_identity_controlled(source.path(), &excludes, &[], &control)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn source_materialization_subspans_are_persisted_for_real_sync() {
+        use crate::workspace::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
+        use homeboy_core::{
+            config::ConfigEntity,
+            observation::{phase_timing, NewRunRecord, ObservationStore},
+        };
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let roots = context.path_roots();
+        let source = tempfile::tempdir().unwrap();
+        let runner_root = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("file.txt"), "source\n").unwrap();
+        let runner: crate::Runner = serde_json::from_value(serde_json::json!({
+            "id": "timed", "kind": "local", "workspace_root": runner_root.path()
+        }))
+        .unwrap();
+        std::fs::create_dir_all(<crate::Runner as ConfigEntity>::config_dir_in_root(
+            roots.config(),
+        ))
+        .unwrap();
+        std::fs::write(
+            <crate::Runner as ConfigEntity>::config_path_in_root(roots.config(), "timed"),
+            serde_json::to_vec(&runner).unwrap(),
+        )
+        .unwrap();
+        let timing_root = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(timing_root.path().join("timing.db")).unwrap();
+        let run = store
+            .start_run(NewRunRecord::builder("test").build())
+            .unwrap();
+        let _scope = phase_timing::for_run(&store, &run.id);
+        for _ in 0..2 {
+            super::sync_workspace_in_roots(
+                &roots,
+                "timed",
+                RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
+                    run_isolation_token: None,
+                },
+            )
+            .unwrap();
+        }
+        let reopened = ObservationStore::open_initialized_at(store.database_path()).unwrap();
+        let spans = reopened.phase_spans(&run.id).unwrap().spans;
+        for name in [
+            "snapshot_build_hash",
+            "content_manifest_hash",
+            "snapshot_input_manifest",
+            "snapshot_stage_build",
+            "snapshot_stability_verify",
+            "delta_computation",
+            "transfer_apply_verify",
+            "record_writes",
+        ] {
+            let id = format!("stage.lab.source_materialization.{name}");
+            let span = spans
+                .iter()
+                .find(|span| span.id == id)
+                .unwrap_or_else(|| panic!("missing {id}"));
+            assert!(span.duration_ms.is_some(), "{id}");
+            assert_eq!(
+                span.status,
+                homeboy_core::phase_timing::PhaseStatus::Ok,
+                "{id}"
+            );
+        }
+    }
+
     use super::{
         is_runner_git_auth_or_network_failure, retry_idempotent_ssh_operation,
         runner_workspace_disk_is_critical, snapshot_capacity_error,
