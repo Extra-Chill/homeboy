@@ -133,28 +133,32 @@ pub fn classify_worktree_destination(
     Ok(DestinationFreshness::Fresh)
 }
 
-/// Classify a local branch that exists without a destination worktree. A
-/// missing branch is unclassified: creation starts it from the base.
+/// The ref worktree creation would adopt for `branch`: the local branch,
+/// else its origin head. One git spawn; `None` when neither exists.
+pub fn adoptable_branch_ref(source: &Path, branch: &str) -> Option<String> {
+    let local = format!("refs/heads/{branch}");
+    let remote = format!("refs/remotes/origin/{branch}");
+    let refs = git::output_optional(
+        source,
+        &["for-each-ref", "--format=%(refname)", &local, &remote],
+    )?;
+    let refs: Vec<&str> = refs.lines().collect();
+    [local, remote]
+        .into_iter()
+        .find(|reference| refs.contains(&reference.as_str()))
+}
+
+/// Classify the local branch, or origin-only branch, creation would adopt.
+/// Only a branch absent from both is unclassified and starts from the base.
 pub fn classify_local_branch(
     source: &Path,
     handle: &str,
     branch: &str,
     base: &str,
 ) -> Result<DestinationFreshness> {
-    let reference = format!("refs/heads/{branch}");
-    if git::output_optional(
-        source,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{reference}^{{commit}}"),
-        ],
-    )
-    .is_none()
-    {
+    let Some(reference) = adoptable_branch_ref(source, branch) else {
         return Ok(DestinationFreshness::Unclassified);
-    }
+    };
     let Some((base_ref, base_sha)) = remote_base(source, base) else {
         return Ok(DestinationFreshness::Unclassified);
     };
@@ -189,7 +193,7 @@ pub fn classify_component_branch(
 ) -> Result<DestinationFreshness> {
     let classification = classify_local_branch(source, handle, branch, base)?;
     if !matches!(classification, DestinationFreshness::Unclassified) {
-        // Only an existing local branch can be someone's PR head to preserve.
+        // An existing local or origin branch can be someone's PR head.
         super::convergence::require_issue_destination_without_pr(source, branch)?;
     }
     Ok(classification)
@@ -229,7 +233,7 @@ pub fn refuse_stale_derived_destination(
 
 /// A destination is refused for history this Cook did not create: commits
 /// ahead of the base, another branch, or a detached HEAD.
-fn refuse_foreign_history(classification: DestinationFreshness) -> Result<()> {
+pub(super) fn refuse_foreign_history(classification: DestinationFreshness) -> Result<()> {
     match classification {
         DestinationFreshness::Stale(stale)
             if stale

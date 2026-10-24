@@ -3623,20 +3623,30 @@ fn derived_generations_follow_pr_state() {
         );
         for state in ["MERGED", "CLOSED", "OPEN"] {
             homeboy_test_support::write_executable(&bin.join("gh"), &format!(
-                "#!/bin/sh\ncase \"$*\" in *--state\\ all*--head\\ fix/issue-1-fixture\\ *) printf '[{{\"state\":\"{state}\"}}]' ;; *--state\\ open*) printf '[{{\"url\":\"https://github.com/example/fixture/pull/2\"}}]' ;; *) printf '[]' ;; esac\n"
+                "#!/bin/sh\ncase \"$*\" in *--state\\ all*--head\\ fix/issue-1-fixture\\ *) printf '[{{\"state\":\"{state}\",\"url\":\"https://github.com/example/fixture/pull/2\"}}]' ;; *) printf '[]' ;; esac\n"
             ), 0o755).unwrap();
             let result = super::super::run::next_live_derived_cook_branch(
                 "fixture",
                 "fix/issue-1-fixture",
                 Some(primary.path()),
                 None,
-            );
+            )
+            .unwrap();
             if state == "OPEN" {
-                let error = result.unwrap_err();
-                assert!(error.message.contains("existing PR work"));
-                assert!(error.to_string().contains("PR"));
+                // The open PR owns the generation: Cook adopts it as rework.
+                assert_eq!(
+                    result,
+                    (
+                        "fix/issue-1-fixture".to_string(),
+                        Some("https://github.com/example/fixture/pull/2".to_string())
+                    )
+                );
             } else {
-                assert_eq!(result.unwrap(), "fix/issue-1-fixture-2", "{state}");
+                assert_eq!(
+                    result,
+                    ("fix/issue-1-fixture-2".to_string(), None),
+                    "{state}"
+                );
             }
         }
     });
@@ -3677,7 +3687,7 @@ fn derived_generation_separates_live_owners_but_reuses_same_run() {
                     Some(owner)
                 )
                 .unwrap(),
-                expected
+                (expected.to_string(), None)
             );
         }
     });

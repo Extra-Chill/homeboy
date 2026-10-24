@@ -702,7 +702,11 @@ pub(crate) fn preview_cook(
     ) {
         record_preview_phase(&mut progress, "base_preparation");
         let preparation = with_preview_heartbeat(&mut progress, "base_preparation", || {
-            homeboy::agents::agent_task_service::prepare_cook_workspace_base(Path::new(path), base)
+            homeboy::agents::agent_task_service::prepare_cook_workspace_base(
+                Path::new(path),
+                base,
+                args.dispatch.task_url.as_deref(),
+            )
         })?;
         args.prepared_base_sha = preparation.base_sha.clone();
         serde_json::to_value(preparation)
@@ -6329,17 +6333,39 @@ pub(crate) fn resolve_cook_destination(
     // Resolve the requested branch before task discovery. An explicit --head is
     // authoritative through candidate reuse, provisioning, and finalization.
     let handle_repository = cook_component_id(&args).unwrap_or(repo).to_string();
-    let head = match args.head.clone() {
-        Some(head) => head,
+    // Admission resolved the repository once (#16365); only an unregistered
+    // checkout falls back to the requested path.
+    let requested = cook_provision_repository(&args);
+    let source_checkout = repository
+        .map(|repository| repository.source_checkout.as_path())
+        .or_else(|| {
+            requested
+                .as_deref()
+                .map(Path::new)
+                .filter(|path| path.is_dir())
+        });
+    let (head, open_pr) = match args.head.clone() {
+        Some(head) => (head, None),
         None => next_live_derived_cook_branch(
             &handle_repository,
             &derived_cook_branch(&task_url)?,
-            repository.map(|repo| repo.source_checkout.as_path()),
+            source_checkout,
             args.attempt_run_id
                 .as_deref()
                 .or(args.dispatch.run_id.as_deref()),
         )?,
     };
+    // An issue-derived destination heading an open PR is that PR's rework.
+    if let Some(url) = open_pr {
+        args.dispatch.task_url = Some(url.clone());
+        resolve_cook_pull_request(&mut args).map_err(|error| {
+            let mut route = homeboy::core::worktree::convergence::pr_route(&head, Some(&url));
+            route.message = format!("Could not resolve the destination's open PR: {}; rerun with --task-url {url} and GitHub access before provider execution", error.message);
+            route
+        })?;
+        resolve_cook_base(&mut args, repository)?;
+        return Ok(args);
+    }
     let handle = format!("{handle_repository}@{}", slugify_cook_branch(&head));
     args.to_worktree = Some(handle.clone());
     let derived = args.head.is_none();
@@ -6542,6 +6568,16 @@ mod cook_pull_request_ref_tests {
             linked.to_str().unwrap(),
         ]);
 
+        run_git(&[
+            "-C",
+            linked.to_str().unwrap(),
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "PR work",
+        ]);
+        let pr_head =
+            homeboy::core::git::run_git(&linked, &["rev-parse", "HEAD"], "PR head").unwrap();
         let bin = tempfile::tempdir().expect("fake gh bin");
         let gh = bin.path().join("gh");
         homeboy_test_support::write_executable(
@@ -6628,6 +6664,51 @@ mod cook_pull_request_ref_tests {
                 assert_eq!(resolved.base.as_deref(), Some("release"));
                 assert_eq!(resolved.head.as_deref(), Some("feature"));
             }
+            run_git(&["branch", "fix/issue-7-repo"]);
+            run_git(&[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ]);
+            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
+            let mut issue = parse(&[]);
+            issue.dispatch.task_url = Some("https://github.com/example/repo/issues/7".into());
+            let resolved = {
+                let mut input = issue.clone();
+                let repository =
+                    crate::commands::agent_task::run::resolve_cook_repository(&mut input)
+                        .expect("repository");
+                resolve_cook_destination(input, repository.as_ref())
+            }
+            .expect("issue adopts canonical PR");
+            assert_eq!(
+                resolved.dispatch.task_url.as_deref(),
+                Some("https://github.com/example/repo/pull/1895")
+            );
+            assert_eq!(resolved.head.as_deref(), Some("feature"));
+            assert_eq!(resolved.base.as_deref(), Some("release"));
+            assert_eq!(resolved.to_worktree.as_deref(), Some("repository@feature"));
+            assert_eq!(
+                homeboy::core::git::run_git(&linked, &["rev-parse", "HEAD"], "preserved PR head")
+                    .unwrap(),
+                pr_head
+            );
+            std::fs::write(&gh, "#!/bin/sh\nexit 1\n").unwrap();
+            let error = {
+                let mut input = issue;
+                let repository =
+                    crate::commands::agent_task::run::resolve_cook_repository(&mut input)
+                        .expect("repository");
+                resolve_cook_destination(input, repository.as_ref())
+            }
+            .expect_err("lookup fails closed");
+            assert!(error.message.contains("--task-url https://github.com/"));
+            std::fs::write(
+                &gh,
+                "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
+            )
+            .unwrap();
             for extra in [
                 vec!["--head", "other"],
                 vec!["--base", "other"],
@@ -7504,14 +7585,16 @@ const MAX_DERIVED_COOK_GENERATIONS: u32 = 50;
 /// every later cook on the same issue ("is no longer active"). Multi-phase
 /// work on one issue is normal, so a derived destination advances to the next
 /// generation (`-2`, `-3`, ...) instead. Finished PRs and destinations owned
-/// by another live run also retire a generation. Explicit `--to-worktree` and
-/// `--head` never reach this path and remain authoritative.
+/// by another live run also retire a generation. A generation headed by an
+/// open PR is returned with that PR's URL so the cook adopts PR rework.
+/// Explicit `--to-worktree` and `--head` never reach this path.
 pub(super) fn next_live_derived_cook_branch(
     repository: &str,
     base: &str,
     source_checkout: Option<&Path>,
     run_id: Option<&str>,
-) -> homeboy::core::Result<String> {
+) -> homeboy::core::Result<(String, Option<String>)> {
+    use homeboy::core::worktree::convergence::PrHistory;
     for generation in 1..=MAX_DERIVED_COOK_GENERATIONS {
         let branch = if generation == 1 {
             base.to_string()
@@ -7532,21 +7615,15 @@ pub(super) fn next_live_derived_cook_branch(
         });
         if let Some(path) = path.filter(|path| {
             record.is_some()
-                || homeboy::core::git::output_optional(
-                    path,
-                    &["show-ref", "--verify", &format!("refs/heads/{branch}")],
-                )
-                .is_some()
+                || homeboy::core::worktree::stale_destination::adoptable_branch_ref(path, &branch)
+                    .is_some()
         }) {
-            if homeboy::core::worktree::convergence::branch_has_finished_pr_without_open_pr(
-                path, &branch,
-            )? {
-                continue;
+            match homeboy::core::worktree::convergence::pr_history(path, &branch, None)? {
+                PrHistory::Finished => continue,
+                // An open PR owns its rework, even when another run owns the record.
+                PrHistory::Open(url) => return Ok((branch, Some(url))),
+                PrHistory::None => {}
             }
-            // Open PRs must route to rework even when another run owns the record.
-            homeboy::core::worktree::convergence::require_issue_destination_without_pr(
-                path, &branch,
-            )?;
         }
         let retired = match record {
             Some(record)
@@ -7570,7 +7647,7 @@ pub(super) fn next_live_derived_cook_branch(
             _ => false,
         };
         if !retired {
-            return Ok(branch);
+            return Ok((branch, None));
         }
     }
     Err(homeboy::core::Error::validation_invalid_argument(

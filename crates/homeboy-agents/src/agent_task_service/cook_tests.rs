@@ -5652,7 +5652,7 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             "the local origin tracking ref remains stale while the remote advances"
         );
 
-        let preparation = prepare_cook_workspace_base(&destination, "main")
+        let preparation = prepare_cook_workspace_base(&destination, "main", None)
             .expect("preview preparation resolves the authoritative base");
         assert_eq!(
             preparation.base_sha.as_deref(),
@@ -5672,6 +5672,55 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             !destination_has_observed_base(),
             "preview preparation must not mutate the candidate object database"
         );
+
+        // A PR head with its own commits may lag the pin: preparation must
+        // preserve it rather than directing its own rework back to itself.
+        git(
+            &destination,
+            &["commit", "--allow-empty", "-m", "PR candidate"],
+        );
+        let pr_head = git(&destination, &["rev-parse", "HEAD"]);
+        let bin = tempfile::tempdir().unwrap();
+        let gh = bin.path().join("gh");
+        homeboy_test_support::write_executable(
+            &gh,
+            "#!/bin/sh\nprintf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/42\"}]'\n",
+            0o755,
+        )
+        .unwrap();
+        {
+            let _path = homeboy_core::test_support::EnvVarGuard::set(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.path().display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            );
+            let rework = prepare_cook_workspace_base(
+                &destination,
+                "main",
+                Some("https://github.com/example/repo/pull/42"),
+            )
+            .expect("diverged PR rework is admitted");
+            assert!(rework.topology.is_none());
+            assert_eq!(git(&destination, &["rev-parse", "HEAD"]), pr_head);
+            for state in ["closed", "merged"] {
+                std::fs::write(&gh, "#!/bin/sh\nprintf '[]'\n").unwrap();
+                let error = prepare_cook_workspace_base(
+                    &destination,
+                    "main",
+                    Some("https://github.com/example/repo/pull/42"),
+                )
+                .expect_err(state);
+                assert_eq!(
+                    error.details["destination_convergence"]["pr_url"],
+                    serde_json::Value::Null
+                );
+            }
+        }
+        // Restore the behind-only fixture for the existing pin contract test.
+        git(&destination, &["reset", "--hard", "HEAD~1"]);
 
         let dispatches = Arc::new(AtomicUsize::new(0));
         let mut options = batch_cook_options(
@@ -5720,7 +5769,7 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         );
 
         std::fs::write(destination.join("uncommitted.txt"), "user drift\n").unwrap();
-        let dirty = preflight_cook_workspace_base_ancestry(&destination, "main", false)
+        let dirty = preflight_cook_workspace_base_ancestry(&destination, "main", false, None)
             .expect_err("dirty destination remains blocked");
         assert_eq!(
             dirty.details["workspace_base_ancestry"]["direction"],
@@ -5733,7 +5782,7 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         let stray = destination.join(".homeboy/evidence/issue/context.json");
         std::fs::create_dir_all(stray.parent().expect("stray parent")).unwrap();
         std::fs::write(&stray, "{\"issue\":13276}\n").unwrap();
-        let dirty = preflight_cook_workspace_base_ancestry(&destination, "main", false)
+        let dirty = preflight_cook_workspace_base_ancestry(&destination, "main", false, None)
             .expect_err("no in-tree path is excluded from cleanliness admission");
         assert_eq!(
             dirty.details["workspace_base_ancestry"]["direction"],
@@ -5745,7 +5794,7 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         git(&destination, &["add", "candidate.txt"]);
         git(&destination, &["commit", "-m", "candidate"]);
 
-        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", false)
+        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", false, None)
             .expect_err("diverged destination is rejected before provider execution");
         assert_eq!(
             diverged.details["workspace_base_ancestry"]["direction"],
@@ -5840,7 +5889,7 @@ fn diverged_workspace_base_ancestry_preflight_is_deterministic_not_transport_ret
         git(&destination, &["add", "candidate-only.txt"]);
         git(&destination, &["commit", "-m", "candidate"]);
 
-        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", false)
+        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", false, None)
             .expect_err("diverged destination is rejected before provider execution");
         assert_eq!(diverged.code.as_str(), "validation.invalid_argument");
         assert_eq!(
@@ -5942,7 +5991,7 @@ fn workspace_base_ancestry_preflight_preserves_provider_owned_non_origin_targets
     git(&["add", "provider.txt"]);
     git(&["commit", "-m", "provider base"]);
 
-    preflight_cook_workspace_base_ancestry(workspace.path(), "main", false)
+    preflight_cook_workspace_base_ancestry(workspace.path(), "main", false, None)
         .expect("a provider-owned Git workspace without origin has no remote base to converge");
 }
 

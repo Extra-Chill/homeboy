@@ -8509,6 +8509,12 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
                 &options.finalization.base,
                 &prepared_base,
                 adopted_dirty_candidate,
+                options
+                    .identity
+                    .initial_plan
+                    .tasks
+                    .first()
+                    .and_then(|task| task.workspace.task_url.as_deref()),
             )
             .map(|snapshot| snapshot.map(CookWorkspaceBaseValidation::Snapshot));
         }
@@ -8559,6 +8565,12 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
             &resolved,
             adopted_dirty_candidate,
             issue_owned,
+            options
+                .identity
+                .initial_plan
+                .tasks
+                .first()
+                .and_then(|task| task.workspace.task_url.as_deref()),
         )?;
         return Ok(Some(CookWorkspaceBaseValidation::Convergence(
             serde_json::json!({
@@ -8570,8 +8582,18 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
             }),
         )));
     }
-    preflight_cook_workspace_base_ancestry(target, base, adopted_dirty_candidate)
-        .map(|snapshot| snapshot.map(CookWorkspaceBaseValidation::Snapshot))
+    preflight_cook_workspace_base_ancestry(
+        target,
+        base,
+        adopted_dirty_candidate,
+        options
+            .identity
+            .initial_plan
+            .tasks
+            .first()
+            .and_then(|task| task.workspace.task_url.as_deref()),
+    )
+    .map(|snapshot| snapshot.map(CookWorkspaceBaseValidation::Snapshot))
 }
 
 /// A candidate diff is meaningful only when its destination contains the
@@ -8584,6 +8606,7 @@ fn preflight_cook_workspace_base_ancestry(
     target: &Path,
     base: &str,
     adopted_dirty_candidate: bool,
+    task_url: Option<&str>,
 ) -> Result<Option<Value>> {
     // A provider-owned Git destination can intentionally have no origin. When
     // origin is configured, resolve its authoritative base directly instead of
@@ -8618,6 +8641,7 @@ fn preflight_cook_workspace_base_ancestry(
         &declared_base,
         &resolved_base,
         adopted_dirty_candidate,
+        task_url,
     )
 }
 
@@ -8663,7 +8687,11 @@ fn materialize_prepared_cook_base(target: &Path, base_sha: &str) -> Result<Strin
 /// Resolve one authoritative Cook base and classify the destination against
 /// that same immutable identity. Preview serializes the SHA into replay so
 /// execution cannot refresh the branch to a different candidate contract.
-pub fn prepare_cook_workspace_base(target: &Path, base: &str) -> Result<CookBasePreparation> {
+pub fn prepare_cook_workspace_base(
+    target: &Path,
+    base: &str,
+    task_url: Option<&str>,
+) -> Result<CookBasePreparation> {
     let origin = std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(target)
@@ -8719,6 +8747,7 @@ pub fn prepare_cook_workspace_base(target: &Path, base: &str) -> Result<CookBase
         &resolved.base,
         &resolved.sha,
         false,
+        task_url,
     )?;
     Ok(CookBasePreparation {
         schema: "homeboy/cook-base-preparation/v1",
@@ -8759,6 +8788,7 @@ fn preflight_cook_workspace_resolved_base_ancestry(
     declared_base: &str,
     resolved_base: &str,
     adopted_dirty_candidate: bool,
+    task_url: Option<&str>,
 ) -> Result<Option<Value>> {
     let AgentTaskPromotionCandidate::Git { fingerprint } =
         candidate_fingerprint(target.to_string_lossy().as_ref())?
@@ -8845,6 +8875,9 @@ fn preflight_cook_workspace_resolved_base_ancestry(
         &["symbolic-ref", "--short", "HEAD"],
         "identify existing candidate branch",
     )?;
+    if homeboy_core::worktree::convergence::is_pr_rework(target, branch.trim(), task_url)? {
+        return Ok(None);
+    }
     homeboy_core::worktree::convergence::require_issue_destination_without_pr(
         target,
         branch.trim(),
