@@ -4298,6 +4298,19 @@ impl StageExecutionAdapter {
     where
         F: FnMut(&LabStagingCheckpoint) -> Result<()>,
     {
+        // Bind the run's timing context so sub-phases timed inside staging
+        // operations (source materialization, hydration) reach the run timeline.
+        let _timing = homeboy_core::observation::store::database_path()
+            .map_err(|error| {
+                homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error)
+            })
+            .ok()
+            .map(|path| {
+                homeboy_core::observation::phase_timing::enter(Some((
+                    path,
+                    request.recipe.run_id.clone(),
+                )))
+            });
         // The controller process owns materialization after the initiating Cook
         // returns. Keep the generic runtime-generation admission barrier until
         // the runner job is durably bound, so a concurrent refresh cannot swap
@@ -5901,6 +5914,10 @@ mod tests {
             cancellation: &LabStagingCancellationToken,
         ) -> Result<(String, String)> {
             self.record("workspace");
+            homeboy_core::observation::phase_timing::time(
+                "stage.lab.source_materialization.fixture_probe",
+                || Ok(()),
+            )?;
             if self.cancel_during_workspace.swap(false, Ordering::SeqCst) {
                 cancellation.cancel();
                 let mut error = Error::internal_unexpected("workspace construction cancelled");
@@ -7003,6 +7020,10 @@ mod tests {
             assert!(completed.phase_started_at.is_none());
             let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
             let spans = store.phase_spans(&request.recipe.run_id).unwrap().spans;
+            // Sub-phases timed inside staging operations share the run timeline.
+            assert!(spans
+                .iter()
+                .any(|span| span.id == "stage.lab.source_materialization.fixture_probe"));
             for phase in [
                 "workspace",
                 "runtime",
