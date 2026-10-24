@@ -766,7 +766,6 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
         && matches!(
             record.state(),
             AgentTaskRunState::Succeeded
-                | AgentTaskRunState::PartialRecoverable
                 | AgentTaskRunState::PartialFailure
                 | AgentTaskRunState::Failed
                 | AgentTaskRunState::Cancelled

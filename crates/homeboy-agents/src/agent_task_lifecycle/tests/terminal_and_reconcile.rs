@@ -1505,7 +1505,7 @@ fn scoped_reconcile_repairs_authoritative_terminal_runner_projection_idempotentl
         assert_eq!(report.reconciled, 0);
 
         let terminal = reconcile_status(run_id).expect("authoritative aggregate imported");
-        assert_eq!(terminal.state(), AgentTaskRunState::PartialRecoverable);
+        assert_eq!(terminal.state(), AgentTaskRunState::CandidateRecoverable);
         assert_eq!(terminal.runner_id(), Some("homeboy-lab"));
         assert_eq!(
             terminal.runner_job_id(),
@@ -1524,7 +1524,7 @@ fn scoped_reconcile_repairs_authoritative_terminal_runner_projection_idempotentl
             reconcile_status(run_id)
                 .expect("terminal state retained")
                 .state(),
-            AgentTaskRunState::PartialRecoverable
+            AgentTaskRunState::CandidateRecoverable
         );
     });
 }
@@ -2926,7 +2926,7 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
         }
 
         let record = reconcile_status("detached-run").expect("status");
-        assert_eq!(record.state(), AgentTaskRunState::PartialRecoverable);
+        assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
         assert_eq!(record.metadata["runner_id"], "local");
         assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
         assert_eq!(

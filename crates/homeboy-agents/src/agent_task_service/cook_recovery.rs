@@ -868,7 +868,7 @@ pub(crate) fn cook_recovery_status(record: &agent_task_lifecycle::AgentTaskRunRe
         State::Queued => "queued",
         State::Running => "running",
         State::Succeeded => "succeeded",
-        State::CandidateRecoverable | State::PartialRecoverable => "candidate_recoverable",
+        State::CandidateRecoverable => "candidate_recoverable",
         State::PartialFailure | State::Failed => "failed",
         State::Cancelled => "cancelled",
     }

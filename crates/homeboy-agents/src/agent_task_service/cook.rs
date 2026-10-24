@@ -7487,7 +7487,6 @@ fn run_cook_spine(
             record.state(),
             agent_task_lifecycle::AgentTaskRunState::Succeeded
                 | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-                | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
         ) && (adopted_continuation.is_none() || record.candidate_adoption.is_none())
             && !review_form_continuation
         {
@@ -8164,7 +8163,6 @@ fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRe
         record.state(),
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialFailure
             | agent_task_lifecycle::AgentTaskRunState::Failed
             | agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -10114,7 +10112,7 @@ mod cook_deadline_tests {
                 "schema": "homeboy/agent-task-run/v1",
                 "run_id": "run-terminal-child",
                 "plan_id": "plan",
-                "state": "partial_recoverable",
+                "state": "candidate_recoverable",
                 "submitted_at": "2026-01-01T00:00:00Z",
                 "plan_path": "/plan",
                 "metadata": { "runner_pid": std::process::id() }
@@ -10146,7 +10144,7 @@ mod cook_deadline_tests {
                 "schema": "homeboy/agent-task-run/v1",
                 "run_id": "run-terminal-gate",
                 "plan_id": "plan",
-                "state": "partial_recoverable",
+                "state": "candidate_recoverable",
                 "submitted_at": "2026-01-01T00:00:00Z",
                 "plan_path": "/plan",
                 "metadata": {
@@ -10192,7 +10190,7 @@ mod cook_deadline_tests {
                 "schema": "homeboy/agent-task-run/v1",
                 "run_id": "run-terminal-child-gate-owner",
                 "plan_id": "plan",
-                "state": "partial_recoverable",
+                "state": "candidate_recoverable",
                 "submitted_at": "2026-01-01T00:00:00Z",
                 "plan_path": "/plan",
                 "metadata": {

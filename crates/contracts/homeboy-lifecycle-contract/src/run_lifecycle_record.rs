@@ -117,19 +117,18 @@ impl Default for RunExecutionLifecycle {
 
 /// The generic execution state carried by [`RunLifecycleRecord`].
 ///
-/// # Recoverable states are distinct from partial failure
+/// # A recoverable state is distinct from partial failure
 ///
-/// `CandidateRecoverable` and `PartialRecoverable` used to collapse into
-/// `PartialFailure` on the way in from `AgentTaskRunState`. They are not the
-/// same situation: a recoverable run stopped holding something a consumer can
-/// still act on — a promotable candidate, or partial work that can be resumed —
+/// `CandidateRecoverable` used to collapse into `PartialFailure` on the way in
+/// from `AgentTaskRunState`. They are not the same situation: a recoverable
+/// run stopped holding a promotable candidate a consumer can still act on,
 /// whereas `PartialFailure` is the terminal, unsuccessful, nothing-left-to-do
 /// case. Collapsing them meant a consumer reading only the serialized record
 /// (an `activity` listing, an HTTP response, a chat-plane message) could not
 /// tell "there is a candidate waiting to be promoted" from "this partially
 /// failed", because both arrived as the same string.
 ///
-/// All three remain terminal and unsuccessful. The distinction is *what an
+/// Both remain terminal and unsuccessful. The distinction is *what an
 /// operator or orchestrator can do next*, not whether the run is finished.
 ///
 /// # Unknown is the tolerance hatch
@@ -147,8 +146,6 @@ pub enum RunExecutionState {
     Succeeded,
     /// Stopped, unsuccessful, but a promotable candidate survived.
     CandidateRecoverable,
-    /// Stopped, unsuccessful, but the partial work can be resumed.
-    PartialRecoverable,
     PartialFailure,
     Failed,
     Cancelled,
@@ -411,24 +408,20 @@ mod run_execution_state_compatibility_tests {
         }
     }
 
-    /// The variants added by #6761, pinned to their wire strings. These are
-    /// now persisted, so changing them is a durable-format break.
+    /// The variant added by #6761, pinned to its wire string. It is
+    /// persisted, so changing it is a durable-format break.
     #[test]
     fn recoverable_states_have_stable_wire_labels() {
-        for (label, state) in [
-            (
-                "candidate_recoverable",
-                RunExecutionState::CandidateRecoverable,
-            ),
-            ("partial_recoverable", RunExecutionState::PartialRecoverable),
-        ] {
-            assert_eq!(
-                serde_json::to_value(state).expect("serialize"),
-                serde_json::json!(label)
-            );
-            let parsed: RunExecutionState = serde_json::from_value(label.into()).expect("parse");
-            assert_eq!(parsed, state);
-        }
+        let (label, state) = (
+            "candidate_recoverable",
+            RunExecutionState::CandidateRecoverable,
+        );
+        assert_eq!(
+            serde_json::to_value(state).expect("serialize"),
+            serde_json::json!(label)
+        );
+        let parsed: RunExecutionState = serde_json::from_value(label.into()).expect("parse");
+        assert_eq!(parsed, state);
     }
 
     /// The tolerance hatch, and the reason adding a variant here is safe from

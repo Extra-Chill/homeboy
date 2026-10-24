@@ -3005,16 +3005,12 @@ fn run_state_bridges_one_to_one_onto_execution_state() {
         (AgentTaskRunState::Queued, RunExecutionState::Queued),
         (AgentTaskRunState::Running, RunExecutionState::Running),
         (AgentTaskRunState::Succeeded, RunExecutionState::Succeeded),
-        // These two were the exception the test name claimed did not exist:
-        // both mapped to `PartialFailure` until #6761, so the bridge was 8->6,
-        // not one-to-one. Listed explicitly now that they carry through.
+        // This was the exception the test name claimed did not exist: it
+        // mapped to `PartialFailure` until #6761, so the bridge was not
+        // one-to-one. Listed explicitly now that it carries through.
         (
             AgentTaskRunState::CandidateRecoverable,
             RunExecutionState::CandidateRecoverable,
-        ),
-        (
-            AgentTaskRunState::PartialRecoverable,
-            RunExecutionState::PartialRecoverable,
         ),
         (
             AgentTaskRunState::PartialFailure,
@@ -3397,6 +3393,51 @@ fn list_records_skips_malformed_observation_records() {
         lifecycle_store.write_record(&records[0]).is_err(),
         "listing must leave the injected write failure unconsumed"
     );
+}
+
+/// `partial_recoverable` is a retired run state with no compatibility reader
+/// (#15718). A store still holding one such record keeps listing and reading
+/// every other run; only the retired record itself fails to read.
+#[test]
+fn a_retired_partial_recoverable_record_does_not_hide_other_runs() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    for run_id in ["current-run", "retired-run"] {
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+            .expect("submitted");
+    }
+    let observation_store = lifecycle_store
+        .open_observation_initialized()
+        .expect("observation store");
+    let mut retired = observation_store
+        .get_run("retired-run")
+        .expect("read row")
+        .expect("retired row");
+    retired.metadata_json["agent_task_run"]["state"] = json!("partial_recoverable");
+    observation_store
+        .upsert_imported_run(&retired)
+        .expect("retired record stored");
+
+    let records = list_records_in_store(&lifecycle_store).expect("records listed");
+
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["current-run"]
+    );
+    assert_eq!(
+        lifecycle_store
+            .read_record("current-run")
+            .expect("current run reads")
+            .state(),
+        AgentTaskRunState::Queued
+    );
+    assert!(lifecycle_store.read_record("retired-run").is_err());
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

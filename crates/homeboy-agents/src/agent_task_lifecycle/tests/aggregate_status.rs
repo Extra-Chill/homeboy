@@ -217,7 +217,7 @@ fn derived_status_is_the_run_state_the_store_records_for_every_outcome_mix() {
         (
             "all-candidate-recoverable",
             &[CandidateRecoverable, CandidateRecoverable],
-            AgentTaskRunState::PartialRecoverable,
+            AgentTaskRunState::CandidateRecoverable,
         ),
         (
             "any-cancelled",

@@ -403,7 +403,7 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     if let Some(artifact) = first_artifact {
         lines.push(format!("First artifact: {artifact}"));
     }
-    if matches!(raw_state, "candidate_recoverable" | "partial_recoverable") {
+    if raw_state == "candidate_recoverable" {
         if let Some(task) = string_value(payload, &["selected_candidate", "selected_task_id"]) {
             let artifact = string_value(payload, &["selected_candidate", "selected_candidate_sha"])
                 .unwrap_or("unknown");
@@ -1602,7 +1602,7 @@ mod tests {
     fn cook_summary_renders_replayable_promotion_and_unavailable_remediation() {
         let replayable = json!({
             "run_id": "cook-timeout-attempt-1",
-            "state": "partial_recoverable",
+            "state": "candidate_recoverable",
             "promotion_replay": {
                 "available": true,
                 "command": "homeboy agent-task promote cook-timeout-attempt-1 --dry-run"
@@ -1615,7 +1615,7 @@ mod tests {
 
         let unavailable = json!({
             "run_id": "cook-timeout-attempt-1",
-            "state": "partial_recoverable",
+            "state": "candidate_recoverable",
             "promotion_replay": {
                 "available": false,
                 "reason": "aggregate key agent_task_aggregate is missing",
@@ -1868,7 +1868,7 @@ mod tests {
     fn review_summary_keeps_a_pre_apply_candidate_out_of_the_promoted_outcome() {
         let payload = json!({
             "run_id": "retained-candidate",
-            "state": "partial_recoverable",
+            "state": "candidate_recoverable",
             "canonical_candidate": {
                 "schema": "homeboy/agent-task-candidate/v1",
                 "state": "apply_ready",
@@ -1950,7 +1950,7 @@ mod tests {
         .collect::<Vec<_>>();
         let review = json!({
             "run_id": "selection-required",
-            "state": "partial_recoverable",
+            "state": "candidate_recoverable",
             "record": { "metadata": { "provider_executions_consumed": 3 } },
             "aggregate": { "outcomes": [{ "task_id": "cook", "artifacts": candidates }] },
             "aggregate_review": { "summary": { "apply_candidates": 3, "failed": 0 } },

@@ -28,7 +28,7 @@ fn status_leaves_every_lifecycle_state_byte_identical() {
     with_isolated_home(|_| {
         let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
         let fixtures = seed_status_purity_fixtures_for_test().expect("seed fixtures");
-        assert!(fixtures.len() >= 11, "{fixtures:?}");
+        assert!(fixtures.len() >= 10, "{fixtures:?}");
 
         for fixture in &fixtures {
             let before = durable_state_for_test(&store);

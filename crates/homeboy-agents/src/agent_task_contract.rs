@@ -332,14 +332,11 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             ]),
             run_state: enum_values(&RUN_STATES),
             // An aggregate's status is the terminal run state it derives
-            // (`AgentTaskRunState::from_outcomes`). `CandidateRecoverable` is a
-            // run state Cook delivery sets; outcomes never derive it.
+            // (`AgentTaskRunState::from_outcomes`).
             aggregate_status: enum_values(
                 &RUN_STATES
                     .into_iter()
-                    .filter(|state| {
-                        state.is_terminal() && *state != AgentTaskRunState::CandidateRecoverable
-                    })
+                    .filter(|state| state.is_terminal())
                     .collect::<Vec<_>>(),
             ),
             outcome_status: agent_task_outcome_statuses(),
@@ -466,12 +463,11 @@ fn string_vec(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
 }
 
-const RUN_STATES: [AgentTaskRunState; 8] = [
+const RUN_STATES: [AgentTaskRunState; 7] = [
     AgentTaskRunState::Queued,
     AgentTaskRunState::Running,
     AgentTaskRunState::Succeeded,
     AgentTaskRunState::CandidateRecoverable,
-    AgentTaskRunState::PartialRecoverable,
     AgentTaskRunState::PartialFailure,
     AgentTaskRunState::Failed,
     AgentTaskRunState::Cancelled,

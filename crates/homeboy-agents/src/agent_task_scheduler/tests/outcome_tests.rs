@@ -518,7 +518,7 @@ fn candidate_commit_survives_policy_denial_and_missing_review_form_for_fresh_rev
     let outcomes = vec![denied.clone()];
     assert_eq!(
         AgentTaskRunState::from_outcomes(&outcomes),
-        AgentTaskRunState::PartialRecoverable
+        AgentTaskRunState::CandidateRecoverable
     );
     let totals = AgentTaskAggregateTotals::from_outcomes(1, &outcomes);
     assert_eq!(totals.candidate_recoverable, 1);

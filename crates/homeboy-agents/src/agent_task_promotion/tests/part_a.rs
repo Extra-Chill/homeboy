@@ -93,7 +93,7 @@ fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
         VALID_PATCH.len(),
     ))
     .expect("aggregate JSON");
-    source["status"] = Value::String("partial_recoverable".to_string());
+    source["status"] = Value::String("candidate_recoverable".to_string());
     source["outcomes"][0]["status"] = Value::String("candidate_recoverable".to_string());
     source["outcomes"][0]["artifacts"][0]["metadata"] = serde_json::json!({
         "executor_artifact_finalized": true,

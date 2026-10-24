@@ -1915,7 +1915,6 @@ fn terminal_observation_status(
     let status = match state {
         AgentTaskRunState::Succeeded => "pass",
         AgentTaskRunState::CandidateRecoverable
-        | AgentTaskRunState::PartialRecoverable
         | AgentTaskRunState::PartialFailure
         | AgentTaskRunState::Failed
         | AgentTaskRunState::Cancelled => "fail",

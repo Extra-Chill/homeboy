@@ -4475,7 +4475,6 @@ pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
         AgentTaskRunState::Running => ControlPlaneRunState::Running,
         AgentTaskRunState::Succeeded => ControlPlaneRunState::Succeeded,
         AgentTaskRunState::CandidateRecoverable => ControlPlaneRunState::CandidateRecoverable,
-        AgentTaskRunState::PartialRecoverable => ControlPlaneRunState::PartialRecoverable,
         AgentTaskRunState::PartialFailure => ControlPlaneRunState::PartialFailure,
         AgentTaskRunState::Failed => ControlPlaneRunState::Failed,
         AgentTaskRunState::Cancelled => ControlPlaneRunState::Cancelled,
@@ -5177,10 +5176,7 @@ fn candidate(
             state: promotion_label(candidate.promotion),
         });
     }
-    if matches!(
-        record.state(),
-        AgentTaskRunState::CandidateRecoverable | AgentTaskRunState::PartialRecoverable
-    ) {
+    if matches!(record.state(), AgentTaskRunState::CandidateRecoverable) {
         return record
             .artifact_refs
             .iter()

@@ -3463,7 +3463,6 @@ fn run_status(state: AgentTaskRunState) -> &'static str {
         AgentTaskRunState::Queued | AgentTaskRunState::Running => RunStatus::Running.as_str(),
         AgentTaskRunState::Succeeded => RunStatus::Pass.as_str(),
         AgentTaskRunState::CandidateRecoverable => RunStatus::Fail.as_str(),
-        AgentTaskRunState::PartialRecoverable => RunStatus::Fail.as_str(),
         AgentTaskRunState::PartialFailure | AgentTaskRunState::Failed => RunStatus::Fail.as_str(),
         AgentTaskRunState::Cancelled => RunStatus::Skipped.as_str(),
     }

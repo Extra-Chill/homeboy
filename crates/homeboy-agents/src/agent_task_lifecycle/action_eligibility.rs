@@ -32,9 +32,7 @@ pub fn lifecycle_action_eligibility(
     };
     let promotion = if matches!(
         record.state(),
-        AgentTaskRunState::Succeeded
-            | AgentTaskRunState::CandidateRecoverable
-            | AgentTaskRunState::PartialRecoverable
+        AgentTaskRunState::Succeeded | AgentTaskRunState::CandidateRecoverable
     ) {
         indeterminate("promotion requires a target worktree and candidate preflight")
     } else {
@@ -392,7 +390,6 @@ mod tests {
             AgentTaskRunState::Running,
             AgentTaskRunState::Succeeded,
             AgentTaskRunState::CandidateRecoverable,
-            AgentTaskRunState::PartialRecoverable,
             AgentTaskRunState::PartialFailure,
             AgentTaskRunState::Failed,
             AgentTaskRunState::Cancelled,
@@ -427,9 +424,7 @@ mod tests {
             }
             if matches!(
                 state,
-                AgentTaskRunState::Succeeded
-                    | AgentTaskRunState::CandidateRecoverable
-                    | AgentTaskRunState::PartialRecoverable
+                AgentTaskRunState::Succeeded | AgentTaskRunState::CandidateRecoverable
             ) {
                 assert_eq!(
                     decision(&report, ControlPlaneAction::Promote),
