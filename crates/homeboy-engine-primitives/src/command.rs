@@ -2882,18 +2882,9 @@ fn process_group_has_non_zombie_member(pgid: u32) -> io::Result<bool> {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn descendant_pids(root_pid: u32) -> io::Result<Vec<u32>> {
-    // Process-tree cleanup is controller infrastructure, not workload code. It
-    // must remain available when a caller replaces the ambient PATH.
-    let output = Command::new("ps")
-        .env("PATH", "/usr/bin:/bin")
-        .args(["-axo", "pid=,ppid="])
-        .output()?;
-    let parents: Vec<(u32, u32)> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
-        })
+    let parents: Vec<(u32, u32)> = unix_process_snapshot()?
+        .iter()
+        .map(|process| (process.pid, process.parent_pid))
         .collect();
     Ok(walk_descendant_pids(root_pid, &parents))
 }
@@ -2921,13 +2912,13 @@ fn walk_descendant_pids(root_pid: u32, parents: &[(u32, u32)]) -> Vec<u32> {
 struct UnixProcessIdentity {
     pid: u32,
     parent_pid: u32,
-    started_at: String,
-    /// Cumulative CPU time in centiseconds from `ps time=`, when readable.
-    cpu_centis: Option<u64>,
+    started_at: (u64, u64), // Kernel start time: seconds and microseconds.
+    /// Cumulative CPU time in kernel clock units, when readable.
+    cpu_time: Option<u64>,
 }
 
 /// Sample CPU progress of `root_pid`'s descendants (excluding the root), keyed
-/// by `(pid, lstart-derived identity)` so a reused PID is never progress.
+/// by `(pid, kernel start time)` so a reused PID is never progress.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn unix_descendant_activity(root_pid: u32, snapshot: &[UnixProcessIdentity]) -> DescendantActivity {
     use std::hash::{Hash, Hasher};
@@ -2941,79 +2932,84 @@ fn unix_descendant_activity(root_pid: u32, snapshot: &[UnixProcessIdentity]) -> 
         let Some(process) = snapshot.iter().find(|process| process.pid == pid) else {
             continue;
         };
-        let Some(cpu_centis) = process.cpu_centis else {
+        let Some(cpu_time) = process.cpu_time else {
             continue;
         };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         process.started_at.hash(&mut hasher);
         activity
             .counters
-            .insert((pid, hasher.finish()), [cpu_centis, 0, 0]);
+            .insert((pid, hasher.finish()), [cpu_time, 0, 0]);
     }
     activity
 }
 
-/// Parse `ps time=` output (`[[dd-]hh:]mm:ss.cc`) into centiseconds.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn parse_ps_cpu_time(text: &str) -> Option<u64> {
-    let (days, clock) = match text.split_once('-') {
-        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
-        None => (0, text),
-    };
-    let parts: Vec<&str> = clock.split(':').collect();
-    let (hours, minutes, seconds) = match parts.as_slice() {
-        [minutes, seconds] => (0, *minutes, *seconds),
-        [hours, minutes, seconds] => (hours.parse::<u64>().ok()?, *minutes, *seconds),
-        _ => return None,
-    };
-    let minutes = minutes.parse::<u64>().ok()?;
-    let (whole, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
-    let whole = whole.parse::<u64>().ok()?;
-    if !fraction.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    let centis = format!("{:0<2}", fraction.get(..2).unwrap_or(fraction))
-        .parse::<u64>()
-        .ok()?;
-    let total_seconds = ((days * 24 + hours) * 60 + minutes) * 60 + whole;
-    total_seconds.checked_mul(100)?.checked_add(centis)
-}
-
 #[cfg(all(unix, not(target_os = "linux")))]
 fn unix_process_snapshot() -> io::Result<Vec<UnixProcessIdentity>> {
-    let output = Command::new("ps")
-        .env("PATH", "/usr/bin:/bin")
-        .args(["-axo", "pid=,ppid=,lstart=,time="])
-        .output()?;
-    parse_unix_process_snapshot(output)
-}
+    #[cfg(not(target_os = "macos"))]
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "process snapshots require macOS libproc",
+    ));
 
-#[cfg(all(unix, not(target_os = "linux")))]
-fn parse_unix_process_snapshot(
-    output: std::process::Output,
-) -> io::Result<Vec<UnixProcessIdentity>> {
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "process identity discovery failed ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let fields = line.split_whitespace().collect::<Vec<_>>();
-            if fields.len() < 7 {
-                return None;
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let count = libc::proc_listallpids(std::ptr::null_mut(), 0);
+        if count <= 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Leave room for processes born between sizing and filling the list.
+        let mut pids = vec![0i32; count as usize + 128];
+        loop {
+            let read = libc::proc_listallpids(
+                pids.as_mut_ptr().cast(),
+                std::mem::size_of_val(pids.as_slice()) as i32,
+            );
+            if read <= 0 {
+                return Err(io::Error::last_os_error());
             }
-            Some(UnixProcessIdentity {
-                pid: fields[0].parse().ok()?,
-                parent_pid: fields[1].parse().ok()?,
-                started_at: fields[2..7].join(" "),
-                cpu_centis: fields.get(7).and_then(|time| parse_ps_cpu_time(time)),
+            if (read as usize) < pids.len() {
+                pids.truncate(read as usize);
+                break;
+            }
+            pids.resize(pids.len() * 2, 0);
+        }
+        Ok(pids
+            .into_iter()
+            .filter(|pid| *pid > 0)
+            .filter_map(|pid| {
+                let mut bsd: libc::proc_bsdinfo = std::mem::zeroed();
+                let size = std::mem::size_of_val(&bsd) as i32;
+                if libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    (&mut bsd as *mut libc::proc_bsdinfo).cast(),
+                    size,
+                ) != size
+                {
+                    // A process may exit (or be inaccessible) during enumeration.
+                    return None;
+                }
+                let mut task: libc::proc_taskinfo = std::mem::zeroed();
+                let size = std::mem::size_of_val(&task) as i32;
+                let cpu_time = (libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTASKINFO,
+                    0,
+                    (&mut task as *mut libc::proc_taskinfo).cast(),
+                    size,
+                ) == size)
+                    .then(|| task.pti_total_user.saturating_add(task.pti_total_system));
+                Some(UnixProcessIdentity {
+                    pid: pid as u32,
+                    parent_pid: bsd.pbi_ppid,
+                    started_at: (bsd.pbi_start_tvsec, bsd.pbi_start_tvusec),
+                    cpu_time,
+                })
             })
-        })
-        .collect())
+            .collect())
+    }
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -4343,26 +4339,32 @@ mod tests {
         }
     }
 
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(target_os = "macos")]
     #[test]
-    fn descendant_cpu_time_parser_accepts_every_ps_time_shape() {
-        assert_eq!(parse_ps_cpu_time("0:00.01"), Some(1));
-        assert_eq!(
-            parse_ps_cpu_time("12:34.56"),
-            Some((12 * 60 + 34) * 100 + 56)
-        );
-        assert_eq!(
-            parse_ps_cpu_time("1:02:03.04"),
-            Some(((60 + 2) * 60 + 3) * 100 + 4)
-        );
-        assert_eq!(
-            parse_ps_cpu_time("2-01:02:03.04"),
-            Some((((2 * 24 + 1) * 60 + 2) * 60 + 3) * 100 + 4)
-        );
-        assert_eq!(parse_ps_cpu_time("0:05"), Some(500));
-        for invalid in ["", "12", "a:00.01", "0:00.x1", "1:2:3:4.00"] {
-            assert_eq!(parse_ps_cpu_time(invalid), None, "{invalid}");
-        }
+    fn live_child_snapshot_has_parent_and_monotonic_cpu_time() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("10")
+            .spawn()
+            .expect("spawn live child");
+        let sample = || {
+            unix_process_snapshot()
+                .expect("snapshot")
+                .into_iter()
+                .find(|process| process.pid == child.id())
+                .expect("live child entry")
+        };
+        let before = sample();
+        thread::sleep(Duration::from_millis(100));
+        let after = sample();
+        child.kill().expect("stop child");
+        child.wait().expect("reap child");
+        assert_eq!(before.parent_pid, std::process::id());
+        assert_eq!(after.parent_pid, std::process::id());
+        assert!(owned_identity_matches(&before, &after));
+        assert!(after.cpu_time.expect("CPU time") >= before.cpu_time.expect("CPU time"));
+        let mut reused = after;
+        reused.started_at.1 += 1;
+        assert!(!owned_identity_matches(&before, &reused));
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]
@@ -4427,37 +4429,6 @@ mod tests {
             before.counters,
             after.counters
         );
-    }
-
-    #[cfg(all(unix, not(target_os = "linux")))]
-    #[test]
-    fn process_snapshot_failure_keeps_observer_exit_status_with_empty_stderr() {
-        use std::os::unix::process::ExitStatusExt;
-
-        // A killed observer emits no stderr, exactly the failure shape retained
-        // by the failed Cook staging attempt. Never accept its partial snapshot.
-        let output = Command::new("/bin/sh")
-            .args([
-                "-c",
-                "printf '1 0 Thu Jan 1 00:00:00 2026\\n'; kill -TERM $$",
-            ])
-            .output()
-            .expect("run interrupted observer");
-        assert_eq!(output.status.signal(), Some(libc::SIGTERM));
-        assert!(output.stderr.is_empty());
-        let error = parse_unix_process_snapshot(output).expect_err("reject failed observation");
-        assert!(error
-            .to_string()
-            .contains("process identity discovery failed"));
-        assert!(error.to_string().contains("signal: 15"), "{error}");
-
-        let output = Command::new("/bin/sh")
-            .args(["-c", "printf 'observer denied\\n' >&2; exit 7"])
-            .output()
-            .expect("run failed observer");
-        let error = parse_unix_process_snapshot(output).expect_err("reject failed observation");
-        assert!(error.to_string().contains("exit status: 7"), "{error}");
-        assert!(error.to_string().contains("observer denied"), "{error}");
     }
 
     #[test]
