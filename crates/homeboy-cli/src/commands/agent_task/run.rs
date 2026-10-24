@@ -6332,37 +6332,38 @@ pub(crate) fn resolve_cook_destination(
     // Resolve the requested branch before task discovery. An explicit --head is
     // authoritative through candidate reuse, provisioning, and finalization.
     let handle_repository = cook_component_id(&args).unwrap_or(repo).to_string();
-    let head = match args.head.clone() {
-        Some(head) => head,
-        None => {
-            next_live_derived_cook_branch(&handle_repository, &derived_cook_branch(&task_url)?)?
-        }
+    // Admission resolved the repository once (#16365); only an unregistered
+    // checkout falls back to the requested path.
+    let requested = cook_provision_repository(&args);
+    let source_checkout = repository
+        .map(|repository| repository.source_checkout.as_path())
+        .or_else(|| {
+            requested
+                .as_deref()
+                .map(Path::new)
+                .filter(|path| path.is_dir())
+        });
+    let (head, open_pr) = match args.head.clone() {
+        Some(head) => (head, None),
+        None => next_live_derived_cook_branch(
+            &handle_repository,
+            &derived_cook_branch(&task_url)?,
+            source_checkout,
+            args.attempt_run_id
+                .as_deref()
+                .or(args.dispatch.run_id.as_deref()),
+        )?,
     };
-    if args.head.is_none() {
-        // Admission resolved the repository once (#16365); only an
-        // unregistered checkout falls back to the requested path.
-        let requested = cook_provision_repository(&args);
-        let path = repository
-            .map(|repository| repository.source_checkout.as_path())
-            .or_else(|| {
-                requested
-                    .as_deref()
-                    .map(Path::new)
-                    .filter(|path| path.is_dir())
-            });
-        let handle = format!("{handle_repository}@{}", slugify_cook_branch(&head));
-        if let Some(url) = homeboy::core::worktree::convergence::derived_open_pull_request(
-            path, &handle, &head, &task_url,
-        )? {
-            args.dispatch.task_url = Some(url.clone());
-            resolve_cook_pull_request(&mut args).map_err(|error| {
-                let mut route = homeboy::core::worktree::convergence::pr_route(&head, Some(&url));
-                route.message = format!("Could not resolve the destination's open PR: {}; rerun with --task-url {url} and GitHub access before provider execution", error.message);
-                route
-            })?;
-            resolve_cook_base(&mut args, repository)?;
-            return Ok(args);
-        }
+    // An issue-derived destination heading an open PR is that PR's rework.
+    if let Some(url) = open_pr {
+        args.dispatch.task_url = Some(url.clone());
+        resolve_cook_pull_request(&mut args).map_err(|error| {
+            let mut route = homeboy::core::worktree::convergence::pr_route(&head, Some(&url));
+            route.message = format!("Could not resolve the destination's open PR: {}; rerun with --task-url {url} and GitHub access before provider execution", error.message);
+            route
+        })?;
+        resolve_cook_base(&mut args, repository)?;
+        return Ok(args);
     }
     let handle = format!("{handle_repository}@{}", slugify_cook_branch(&head));
     args.to_worktree = Some(handle.clone());
@@ -6663,7 +6664,13 @@ mod cook_pull_request_ref_tests {
                 assert_eq!(resolved.head.as_deref(), Some("feature"));
             }
             run_git(&["branch", "fix/issue-7-repo"]);
-            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in *list*) printf '[{\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
+            run_git(&[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ]);
+            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
             let mut issue = parse(&[]);
             issue.dispatch.task_url = Some("https://github.com/example/repo/issues/7".into());
             let resolved = {
@@ -7576,10 +7583,17 @@ const MAX_DERIVED_COOK_GENERATIONS: u32 = 50;
 /// cook's destination is removed or finalized its terminal record would block
 /// every later cook on the same issue ("is no longer active"). Multi-phase
 /// work on one issue is normal, so a derived destination advances to the next
-/// generation (`-2`, `-3`, ...) instead. An active or absent destination is
-/// reused as before, and an explicitly named `--to-worktree` or `--head` never
-/// reaches this path, so naming a retired destination still fails. (#15408)
-fn next_live_derived_cook_branch(repository: &str, base: &str) -> homeboy::core::Result<String> {
+/// generation (`-2`, `-3`, ...) instead. Finished PRs and destinations owned
+/// by another live run also retire a generation. A generation headed by an
+/// open PR is returned with that PR's URL so the cook adopts PR rework.
+/// Explicit `--to-worktree` and `--head` never reach this path.
+pub(super) fn next_live_derived_cook_branch(
+    repository: &str,
+    base: &str,
+    source_checkout: Option<&Path>,
+    run_id: Option<&str>,
+) -> homeboy::core::Result<(String, Option<String>)> {
+    use homeboy::core::worktree::convergence::PrHistory;
     for generation in 1..=MAX_DERIVED_COOK_GENERATIONS {
         let branch = if generation == 1 {
             base.to_string()
@@ -7587,12 +7601,52 @@ fn next_live_derived_cook_branch(repository: &str, base: &str) -> homeboy::core:
             format!("{base}-{generation}")
         };
         let handle = format!("{repository}@{}", slugify_cook_branch(&branch));
-        let retired = homeboy::core::worktree::resolve_workspace_ref_if_present(&handle)?
-            .is_some_and(|record| {
-                record.state() != &homeboy::core::worktree::TaskWorktreeState::Active
-            });
+        let record = homeboy::core::worktree::resolve_workspace_ref_if_present(&handle)?;
+        let path = source_checkout.or_else(|| {
+            record.as_ref().map(|record| match record {
+                homeboy::core::worktree::WorkspaceRefRecord::Task(record) => {
+                    Path::new(&record.source_checkout)
+                }
+                homeboy::core::worktree::WorkspaceRefRecord::Adopted(record) => {
+                    Path::new(&record.path)
+                }
+            })
+        });
+        if let Some(path) = path.filter(|path| {
+            record.is_some()
+                || homeboy::core::worktree::stale_destination::adoptable_branch_ref(path, &branch)
+                    .is_some()
+        }) {
+            match homeboy::core::worktree::convergence::pr_history(path, &branch, None)? {
+                PrHistory::Finished => continue,
+                // An open PR owns its rework, even when another run owns the record.
+                PrHistory::Open(url) => return Ok((branch, Some(url))),
+                PrHistory::None => {}
+            }
+        }
+        let retired = match record {
+            Some(record)
+                if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active =>
+            {
+                true
+            }
+            Some(homeboy::core::worktree::WorkspaceRefRecord::Task(record)) => match record
+                .run_id
+                .as_deref()
+                .filter(|owner| Some(*owner) != run_id)
+            {
+                Some(owner) => {
+                    let store =
+                        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                    store.record_exists_readonly(owner)?
+                        && !store.read_record(owner)?.state().is_terminal()
+                }
+                None => false,
+            },
+            _ => false,
+        };
         if !retired {
-            return Ok(branch);
+            return Ok((branch, None));
         }
     }
     Err(homeboy::core::Error::validation_invalid_argument(

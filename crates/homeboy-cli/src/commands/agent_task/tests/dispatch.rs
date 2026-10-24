@@ -3593,3 +3593,102 @@ fn derived_destination_advances_past_a_retired_issue_worktree() {
         );
     });
 }
+
+#[test]
+fn derived_generations_follow_pr_state() {
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().unwrap();
+        init_runtime_component_checkout(primary.path());
+        assert!(std::process::Command::new("git")
+            .args(["branch", "fix/issue-1-fixture"])
+            .current_dir(primary.path())
+            .status()
+            .unwrap()
+            .success());
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/fixture.git",
+            ])
+            .current_dir(primary.path())
+            .output()
+            .unwrap();
+        let bin = primary.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        );
+        for state in ["MERGED", "CLOSED", "OPEN"] {
+            homeboy_test_support::write_executable(&bin.join("gh"), &format!(
+                "#!/bin/sh\ncase \"$*\" in *--state\\ all*--head\\ fix/issue-1-fixture\\ *) printf '[{{\"state\":\"{state}\",\"url\":\"https://github.com/example/fixture/pull/2\"}}]' ;; *) printf '[]' ;; esac\n"
+            ), 0o755).unwrap();
+            let result = super::super::run::next_live_derived_cook_branch(
+                "fixture",
+                "fix/issue-1-fixture",
+                Some(primary.path()),
+                None,
+            )
+            .unwrap();
+            if state == "OPEN" {
+                // The open PR owns the generation: Cook adopts it as rework.
+                assert_eq!(
+                    result,
+                    (
+                        "fix/issue-1-fixture".to_string(),
+                        Some("https://github.com/example/fixture/pull/2".to_string())
+                    )
+                );
+            } else {
+                assert_eq!(
+                    result,
+                    ("fix/issue-1-fixture-2".to_string(), None),
+                    "{state}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn derived_generation_separates_live_owners_but_reuses_same_run() {
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().unwrap();
+        init_runtime_component_checkout(primary.path());
+        register_component(
+            "fixture",
+            primary.path(),
+            "https://github.com/example/fixture.git",
+        );
+        homeboy::agents::agent_task_lifecycle::submit_plan(&test_plan(), Some("live-owner"))
+            .unwrap();
+        homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+            component_id: "fixture".into(),
+            branch: "fix/issue-1-fixture".into(),
+            from: None,
+            task_url: None,
+            run_id: Some("live-owner".into()),
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+            source_path: None,
+        })
+        .unwrap();
+        for (owner, expected) in [
+            ("other-run", "fix/issue-1-fixture-2"),
+            ("live-owner", "fix/issue-1-fixture"),
+        ] {
+            assert_eq!(
+                super::super::run::next_live_derived_cook_branch(
+                    "fixture",
+                    "fix/issue-1-fixture",
+                    Some(primary.path()),
+                    Some(owner)
+                )
+                .unwrap(),
+                (expected.to_string(), None)
+            );
+        }
+    });
+}

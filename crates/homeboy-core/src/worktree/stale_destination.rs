@@ -135,7 +135,7 @@ pub fn classify_worktree_destination(
 
 /// The ref worktree creation would adopt for `branch`: the local branch,
 /// else its origin head. One git spawn; `None` when neither exists.
-pub(crate) fn adoptable_branch_ref(source: &Path, branch: &str) -> Option<String> {
+pub fn adoptable_branch_ref(source: &Path, branch: &str) -> Option<String> {
     let local = format!("refs/heads/{branch}");
     let remote = format!("refs/remotes/origin/{branch}");
     let refs = git::output_optional(

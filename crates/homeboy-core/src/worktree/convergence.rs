@@ -4,68 +4,41 @@ use std::path::Path;
 
 use crate::{git, Error, Result};
 
-/// Preserve candidate history by routing it through PR rework, never reset it.
-/// Local-only repositories have no PR service to query.
-pub fn require_issue_destination_without_pr(path: &Path, branch: &str) -> Result<()> {
-    let Some(origin) = git::output_optional(path, &["remote", "get-url", "origin"]) else {
-        return Ok(());
-    };
-    if !origin.contains("github.com") {
-        return Ok(());
-    }
-    if let Some(url) = open_pull_request(path, branch, None)? {
-        return Err(pr_route(branch, Some(&url)));
-    }
-    Ok(())
+/// A destination branch's PR history, from one `gh pr list --state all`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrHistory {
+    /// No PR, or no GitHub origin to ask.
+    None,
+    /// Exactly one open PR heads the branch; it owns every rework.
+    Open(String),
+    /// Only merged or closed PRs: the branch's generation is retired.
+    Finished,
 }
 
-/// Resolve the actual destination before consulting GitHub. Managed records
-/// can live in a different source clone from the requested repository.
-pub fn derived_open_pull_request(
-    repository: Option<&Path>,
-    handle: &str,
-    branch: &str,
-    issue_url: &str,
-) -> Result<Option<String>> {
-    let managed = match super::resolve_workspace_ref_if_present(handle)? {
-        Some(super::WorkspaceRefRecord::Task(record))
-            if record.state == super::TaskWorktreeState::Active =>
-        {
-            [record.worktree_path, record.source_checkout]
-                .into_iter()
-                .map(std::path::PathBuf::from)
-                .find(|path| path.is_dir())
+/// The one PR lookup for destination admission. Without an explicit GitHub
+/// `owner/repo`, local-only and non-GitHub origins have no PR service. Query
+/// failures are admission errors, never evidence a branch is free or retired.
+pub fn pr_history(path: &Path, branch: &str, repository: Option<&str>) -> Result<PrHistory> {
+    if repository.is_none() {
+        let Some(origin) = git::output_optional(path, &["remote", "get-url", "origin"]) else {
+            return Ok(PrHistory::None);
+        };
+        if !origin.contains("github.com") {
+            return Ok(PrHistory::None);
         }
-        _ => None,
-    };
-    let Some(path) = managed
-        .as_deref()
-        .or(repository)
-        .filter(|path| path.is_dir())
-    else {
-        return Ok(None);
-    };
-    if managed.is_none() && super::stale_destination::adoptable_branch_ref(path, branch).is_none() {
-        return Ok(None);
     }
-    open_pull_request(path, branch, Some(issue_url))
-}
-
-/// Canonical open-PR lookup for destination admission and issue-to-PR adoption.
-/// An explicit issue URL supplies repository authority even in local mirrors.
-pub fn open_pull_request(
-    path: &Path,
-    branch: &str,
-    issue_url: Option<&str>,
-) -> Result<Option<String>> {
     let mut command = std::process::Command::new("gh");
     command.args([
-        "pr", "list", "--state", "open", "--head", branch, "--json", "url",
+        "pr",
+        "list",
+        "--state",
+        "all",
+        "--head",
+        branch,
+        "--json",
+        "state,url",
     ]);
-    if let Some(repository) = issue_url
-        .and_then(|url| url.strip_prefix("https://github.com/"))
-        .and_then(|url| url.split_once("/issues/").map(|(repo, _)| repo))
-    {
+    if let Some(repository) = repository {
         command.args(["--repo", repository]);
     }
     let output = command
@@ -77,22 +50,42 @@ pub fn open_pull_request(
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }
-    parse_open_pr(&output.stdout)
+    parse_pr_history(&output.stdout)
 }
 
-fn parse_open_pr(response: &[u8]) -> Result<Option<String>> {
-    let prs: serde_json::Value =
+/// Preserve candidate history by routing it through PR rework, never reset it.
+pub fn require_issue_destination_without_pr(path: &Path, branch: &str) -> Result<()> {
+    match pr_history(path, branch, None)? {
+        PrHistory::Open(url) => Err(pr_route(branch, Some(&url))),
+        _ => Ok(()),
+    }
+}
+
+fn parse_pr_history(response: &[u8]) -> Result<PrHistory> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "UPPERCASE")]
+    enum State {
+        Open,
+        Closed,
+        Merged,
+    }
+    #[derive(serde::Deserialize)]
+    struct PullRequest {
+        state: State,
+        url: String,
+    }
+    let prs: Vec<PullRequest> =
         serde_json::from_slice(response).map_err(|error| infrastructure(error.to_string()))?;
-    match prs.as_array().map(Vec::as_slice) {
-        Some([]) => Ok(None),
-        Some([pr]) => pr["url"]
-            .as_str()
-            .filter(|url| url.contains("/pull/"))
-            .map(|url| Some(url.to_string()))
-            .ok_or_else(|| infrastructure("invalid open PR URL".into())),
-        _ => Err(infrastructure(
-            "ambiguous or invalid PR list response".into(),
-        )),
+    let open: Vec<&PullRequest> = prs
+        .iter()
+        .filter(|pr| matches!(pr.state, State::Open))
+        .collect();
+    match open.as_slice() {
+        [] if prs.is_empty() => Ok(PrHistory::None),
+        [] => Ok(PrHistory::Finished),
+        [pr] if pr.url.contains("/pull/") => Ok(PrHistory::Open(pr.url.clone())),
+        [_] => Err(infrastructure("invalid open PR URL".into())),
+        _ => Err(infrastructure("ambiguous open PRs for one branch".into())),
     }
 }
 
@@ -100,10 +93,15 @@ fn parse_open_pr(response: &[u8]) -> Result<Option<String>> {
 /// Use the same source-HEAD/base snapshot semantics as ahead-only candidates;
 /// never reset, force-push, or route a PR's rework back to itself.
 pub fn is_pr_rework(path: &Path, branch: &str, task_url: Option<&str>) -> Result<bool> {
-    let Some(task_url) = task_url.filter(|url| url.contains("/pull/")) else {
+    // The PR URL names its repository, so mirrors need no GitHub origin.
+    let Some((task_url, repository)) = task_url.and_then(|url| {
+        url.strip_prefix("https://github.com/")?
+            .split_once("/pull/")
+            .map(|(repository, _)| (url, repository))
+    }) else {
         return Ok(false);
     };
-    Ok(open_pull_request(path, branch, None)?.as_deref() == Some(task_url))
+    Ok(pr_history(path, branch, Some(repository))? == PrHistory::Open(task_url.to_string()))
 }
 
 pub fn pr_route(branch: &str, url: Option<&str>) -> Error {
@@ -262,6 +260,33 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[test]
+    fn pr_history_classifies_states_and_fails_closed() {
+        let pr = |state: &str, n: u32| serde_json::json!({ "state": state, "url": format!("https://github.com/o/r/pull/{n}") });
+        let parse = |prs: serde_json::Value| parse_pr_history(prs.to_string().as_bytes());
+        assert_eq!(parse(serde_json::json!([])).unwrap(), PrHistory::None);
+        for state in ["MERGED", "CLOSED"] {
+            assert_eq!(
+                parse(serde_json::json!([pr(state, 1)])).unwrap(),
+                PrHistory::Finished
+            );
+        }
+        assert_eq!(
+            parse(serde_json::json!([pr("MERGED", 1), pr("OPEN", 2)])).unwrap(),
+            PrHistory::Open("https://github.com/o/r/pull/2".into())
+        );
+        assert!(parse(serde_json::json!([pr("OPEN", 1), pr("OPEN", 2)])).is_err());
+        for response in [
+            b"not json".as_slice(),
+            b"{}",
+            b"[{}]",
+            br#"[{"state":"UNKNOWN","url":"https://github.com/o/r/pull/1"}]"#,
+            br#"[{"state":"OPEN","url":"https://github.com/o/r/issues/1"}]"#,
+        ] {
+            assert!(parse_pr_history(response).is_err());
+        }
+    }
+
     struct Fixture {
         _root: tempfile::TempDir,
         source: PathBuf,
@@ -350,7 +375,7 @@ mod tests {
             let bin = f._root.path().join("bin");
             std::fs::create_dir(&bin).unwrap();
             let gh = bin.join("gh");
-            std::fs::write(&gh, "#!/bin/sh\nprintf '[{\"url\":\"https://github.com/Extra-Chill/homeboy/pull/42\"}]'\n").unwrap();
+            std::fs::write(&gh, "#!/bin/sh\nprintf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/Extra-Chill/homeboy/pull/42\"}]'\n").unwrap();
             std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
             let _path = crate::test_support::EnvVarGuard::set(
                 "PATH",

@@ -5766,7 +5766,7 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         let gh = bin.path().join("gh");
         homeboy_test_support::write_executable(
             &gh,
-            "#!/bin/sh\nprintf '[{\"url\":\"https://github.com/example/repo/pull/42\"}]'\n",
+            "#!/bin/sh\nprintf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/42\"}]'\n",
             0o755,
         )
         .unwrap();
