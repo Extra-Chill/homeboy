@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.14] - 2026-10-24
+
+### Changed
+- Time Lab source materialization sub-phases and drop the redundant sizing traversal
+
 ## [0.433.13] - 2026-10-24
 
 ### Changed
