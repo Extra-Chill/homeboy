@@ -45,16 +45,7 @@ pub fn derived_open_pull_request(
     else {
         return Ok(None);
     };
-    if managed.is_none()
-        && ![
-            format!("refs/heads/{branch}"),
-            format!("refs/remotes/origin/{branch}"),
-        ]
-        .iter()
-        .any(|reference| {
-            git::output_optional(path, &["rev-parse", "--verify", "--quiet", reference]).is_some()
-        })
-    {
+    if managed.is_none() && super::stale_destination::adoptable_branch_ref(path, branch).is_none() {
         return Ok(None);
     }
     open_pull_request(path, branch, Some(issue_url))

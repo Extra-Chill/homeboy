@@ -1274,6 +1274,19 @@ impl AgentTaskExecutorAdapter for CountingCookExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         self.executions.fetch_add(1, Ordering::SeqCst);
+        if let Some(patch) = &self.patch_path {
+            let root = request
+                .workspace
+                .root
+                .as_deref()
+                .expect("candidate workspace");
+            assert!(Command::new("git")
+                .args(["apply", patch])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success());
+        }
         AgentTaskOutcome {
             task_id: request.task_id,
             status: AgentTaskOutcomeStatus::Succeeded,
@@ -1434,7 +1447,8 @@ fn goal_and_prompt_remain_a_valid_single_source_cook_shape() {
         "--no-finalize".to_string(),
     ]);
 
-    validate_cook_request(&args).expect("goal plus prompt is one valid Cook source");
+    validate_cook_request_with_provenance(&args, None, None)
+        .expect("goal plus prompt is one valid Cook source");
 }
 
 #[test]
@@ -1454,12 +1468,13 @@ fn cook_preflight_scans_at_file_content_not_its_absolute_source_path() {
         "--no-finalize".to_string(),
     ]);
 
-    validate_cook_request(&args).expect("absolute @file source is not provider evidence");
+    validate_cook_request_with_provenance(&args, None, None)
+        .expect("absolute @file source is not provider evidence");
 
     std::fs::write(file.path(), "Read /private/evidence.json before editing.\n")
         .expect("rewrite prompt");
-    let error =
-        validate_cook_request(&args).expect_err("absolute path in prompt content is evidence");
+    let error = validate_cook_request_with_provenance(&args, None, None)
+        .expect_err("absolute path in prompt content is evidence");
     assert_eq!(error.details["field"], "prompt");
     assert!(error.message.contains("undeclared absolute evidence path"));
 }
@@ -1483,7 +1498,8 @@ fn cook_preflight_rejects_contradictory_retry_budget_with_corrected_command() {
         "1".to_string(),
     ]);
 
-    let error = validate_cook_request(&args).expect_err("unfunded retry intent fails preflight");
+    let error = validate_cook_request_with_provenance(&args, None, None)
+        .expect_err("unfunded retry intent fails preflight");
     assert_eq!(error.details["field"], "max-provider-executions");
     assert!(
         error
@@ -1533,7 +1549,7 @@ fn cook_preflight_rejects_execution_caps_that_remove_configured_rotations() {
             "1".to_string(),
         ]);
 
-        let error = validate_cook_request(&args)
+        let error = validate_cook_request_with_provenance(&args, None, None)
             .expect_err("an execution cap cannot remove configured fallbacks");
         assert_eq!(error.details["field"], "max-provider-executions");
         assert!(error.message.contains("--max-provider-executions 3"));
@@ -2071,7 +2087,7 @@ fn persist_recipe_only_cook(cook_id: &str, run_id: &str) {
 
 /// Same Cook continuation arguments `recover` builds for a continuation step.
 fn cook_continue_args(id: &str) -> CookContinueArgs {
-    let mut args = super::super::recover::continuation_args(id, false, None, &Default::default());
+    let mut args = super::super::recover::continuation_args(id, false, &Default::default());
     args.full = true;
     args
 }
@@ -2087,11 +2103,9 @@ impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookR
         &self,
         run_id: &str,
         rearm: bool,
-        artifact_id: Option<&str>,
         overrides: &homeboy::agents::agent_task_service::CookRecoveryOverrides,
     ) -> homeboy::core::Result<(Value, i32)> {
-        let mut args =
-            super::super::recover::continuation_args(run_id, rearm, artifact_id, overrides);
+        let mut args = super::super::recover::continuation_args(run_id, rearm, overrides);
         args.full = true;
         continue_cook_with(args, self.executor.clone(), |_| Ok(None))
     }
@@ -2100,12 +2114,10 @@ impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookR
         &self,
         run_id: &str,
         rearm: bool,
-        artifact_id: Option<&str>,
     ) -> homeboy::core::Result<(Value, i32)> {
         super::super::run::preflight_continue_cook(super::super::recover::continuation_args(
             run_id,
             rearm,
-            artifact_id,
             &Default::default(),
         ))
     }
@@ -2342,7 +2354,7 @@ fn status_and_continuation_materialize_recipe_only_attempt_without_provider_work
 }
 
 #[test]
-fn continuation_preflight_rejects_legacy_terminal_candidate_without_model_provenance() {
+fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
     with_temp_home(|| {
         let cook_id = "cook-legacy-null-model";
         let run_id = "cook-legacy-null-model-attempt-1";
@@ -2465,16 +2477,19 @@ fn continuation_preflight_rejects_legacy_terminal_candidate_without_model_proven
         assert_eq!(report["selected_artifact"]["artifact_id"], "retained-patch");
         assert_eq!(
             report["continuation_command"],
-            format!("homeboy --placement local agent-task recover {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task recover {run_id}")
         );
         assert_eq!(
             report["failure_context"]["next_action"]["command"],
-            format!("homeboy --placement local agent-task recover {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task recover {run_id}")
         );
-        assert!(report["failure_context"]["diagnostic"]["message"]
-            .as_str()
-            .expect("concrete blocker")
-            .contains("no concrete executed model"));
+        assert!(
+            report["failure_context"]["diagnostic"]["message"]
+                .as_str()
+                .expect("concrete blocker")
+                .contains("non-recoverable: outcome has no immutable candidate"),
+            "{report:#}"
+        );
         assert_eq!(report["evidence_refs"][0]["run_id"], run_id);
         assert!(!report.to_string().contains("<run-id>"));
         assert_eq!(
@@ -2494,7 +2509,7 @@ fn continuation_preflight_rejects_legacy_terminal_candidate_without_model_proven
         );
         assert!(probe["admission"]["phases"]
             .to_string()
-            .contains("no concrete executed model"));
+            .contains("non-recoverable: outcome has no immutable candidate"));
         assert_eq!(
             filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
             before
@@ -2555,12 +2570,12 @@ fn continuation_preflight_rejects_legacy_terminal_candidate_without_model_proven
         assert_eq!(bounded["run_id"], run_id);
         assert_eq!(
             bounded["actionable"]["next_action"]["command"],
-            format!("homeboy --placement local agent-task recover {run_id} --artifact-id retained-patch")
+            format!("homeboy --placement local agent-task recover {run_id}")
         );
         assert!(bounded["actionable"]["blocker"]
             .as_str()
             .expect("bounded concrete blocker")
-            .contains("no concrete executed model"));
+            .contains("non-recoverable: outcome has no immutable candidate"));
         assert_eq!(bounded["evidence_refs"][0]["run_id"], run_id);
         assert!(!bounded.to_string().contains("<run-id>"));
         assert_eq!(
@@ -2578,7 +2593,7 @@ fn continuation_preflight_rejects_legacy_terminal_candidate_without_model_proven
             .expect("blocked")["message"]
             .as_str()
             .expect("message")
-            .contains("no concrete executed model"));
+            .contains("non-recoverable: outcome has no immutable candidate"));
     });
 }
 
@@ -6363,7 +6378,8 @@ fn cook_preflight_rejects_reviewer_unsafe_verify_file_and_names_the_token() {
         .snapshot_file_inputs()
         .expect("snapshot gate file");
 
-    let error = validate_cook_request(&args).expect_err("unsafe public gate is rejected");
+    let error = validate_cook_request_with_provenance(&args, None, None)
+        .expect_err("unsafe public gate is rejected");
 
     assert_eq!(error.details["field"], "verification");
     let problem = error.details["problem"].as_str().expect("problem text");
@@ -6382,7 +6398,8 @@ fn cook_preflight_rejects_reviewer_unsafe_verify_file_and_names_the_token() {
     args.gates
         .snapshot_file_inputs()
         .expect("snapshot clean gate file");
-    validate_cook_request(&args).expect("reviewer-safe gate is admitted");
+    validate_cook_request_with_provenance(&args, None, None)
+        .expect("reviewer-safe gate is admitted");
 }
 
 #[test]
@@ -6849,8 +6866,12 @@ fn cook_without_gate_and_finalizing_reports_actionable_gate_error() {
             .expect("create linked worktree")
             .success());
 
-        let error = validate_cook_request(&gate_requirement_cook_args(&target, false, false))
-            .expect_err("finalizing cook without a gate is rejected");
+        let error = validate_cook_request_with_provenance(
+            &gate_requirement_cook_args(&target, false, false),
+            None,
+            None,
+        )
+        .expect_err("finalizing cook without a gate is rejected");
 
         assert_eq!(error.details["field"], "verify");
         assert!(

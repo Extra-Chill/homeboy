@@ -1422,7 +1422,6 @@ fn review_promotion_candidates(
     review: &crate::agent_tasks::AgentTaskAggregateReport,
     record: &AgentTaskRunRecord,
     cook_contract: Option<&(String, Value)>,
-    observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Vec<Value> {
     review
         .apply_candidates
@@ -1438,44 +1437,10 @@ fn review_promotion_candidates(
                 })
         }))
         .flat_map(|candidate| {
-            let artifact_ids = aggregate
-                .outcomes
-                .iter()
+            let artifact_ids = aggregate.outcomes.iter()
                 .find(|outcome| outcome.task_id == candidate.task_id)
-                .filter(|outcome| {
-                    outcome.status
-                        == crate::agent_tasks::AgentTaskOutcomeStatus::CandidateRecoverable
-                })
-                .and_then(|outcome| {
-                    crate::agent_task_promotion::canonical_recoverable_patch_artifacts_in_observation_store(
-                        outcome,
-                        &crate::agent_task_promotion::AgentTaskPromotionRequest {
-                            source: "{}".to_string(),
-                            source_run_id: Some(run_id.to_string()),
-                            source_path: None,
-                            source_worktree_path: None,
-                            base_ref: None,
-                            task_base_sha: None,
-                            candidate_ref: None,
-                            to_worktree: "<managed-worktree>".to_string(),
-                            task_id: Some(candidate.task_id.clone()),
-                            artifact_id: None,
-                            dry_run: true,
-                            gates: Default::default(),
-                            provider_invocation: None,
-                            repository_integrity_evidence: None,
-                        },
-                        observation_store,
-                    )
-                    .ok()
-                    .map(|canonical| {
-                        canonical
-                            .artifacts
-                            .into_iter()
-                            .map(|artifact| artifact.id)
-                            .collect::<Vec<_>>()
-                    })
-                })
+                .and_then(|outcome| outcome.candidate.as_ref())
+                .map(|candidate| vec![candidate.candidate_sha.clone()])
                 .unwrap_or_else(|| candidate.artifact_ids.clone());
             let selection_required = artifact_ids.len() > 1;
             artifact_ids.into_iter().map(move |artifact_id| {
@@ -1614,11 +1579,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
             crate::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
         });
         let cook_contract = review_cook_contract(&self.lookup.store, run_id)?;
-        let observation_store =
-            homeboy_core::observation::ObservationStore::open_initialized_for_lifecycle_in_roots(
-                self.lookup.store.roots(),
-            )
-            .map_err(map_lifecycle_error)?;
         let promotion_candidates = aggregate
             .as_ref()
             .zip(aggregate_review.as_ref())
@@ -1630,7 +1590,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     review,
                     record,
                     cook_contract.as_ref(),
-                    &observation_store,
                 )
             })
             .unwrap_or_default();

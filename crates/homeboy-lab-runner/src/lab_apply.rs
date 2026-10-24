@@ -12,11 +12,43 @@ use super::{
     RunnerExecOutput, RunnerWorkspaceApplyOutput,
 };
 
-/// The narrow mutation contract for a portable promotion handback. Runner
-/// capture observes a whole workspace, so promotion only accepts the files the
-/// provider declared in its promotion report.
-pub(super) struct PromotionPatchIntent {
-    pub(super) changed_files: Vec<String>,
+pub(super) fn apply_lab_candidate(exec: &RunnerExecOutput) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_str(&exec.stdout)
+        .map_err(|e| Error::internal_json(e.to_string(), None))?;
+    let report = value.get("data").unwrap_or(&value);
+    if !matches!(report["status"].as_str(), Some("applied" | "gate_failed")) {
+        return Ok(());
+    }
+    let candidate = serde_json::from_value(report["provenance"]["candidate_commit"].clone())
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "source.candidate",
+                "non-recoverable: Lab promotion has no immutable candidate",
+                None,
+                None,
+            )
+            .with_retryable(false)
+        })?;
+    let run_id = report["source"]["run_id"]
+        .as_str()
+        .ok_or_else(|| Error::internal_unexpected("Lab candidate has no run id"))?;
+    // The run-plan handback already fetched and verified this candidate. Never
+    // resolve a runner-only SHA here; promotion is only materialization.
+    let root = exec
+        .source_snapshot
+        .as_ref()
+        .and_then(|s| s.local_path.as_deref())
+        .ok_or_else(|| Error::internal_unexpected("Lab candidate has no destination"))?;
+    homeboy_agents::agent_task_promotion::verify_candidate_ref(
+        std::path::Path::new(root),
+        run_id,
+        &candidate,
+    )?;
+    homeboy_agents::agent_task_promotion::materialize_candidate_tree(
+        std::path::Path::new(root),
+        &candidate,
+    )?;
+    Ok(())
 }
 
 pub(super) fn apply_lab_offload_patch(
@@ -69,42 +101,6 @@ pub(super) fn apply_lab_offload_patch(
     apply_change_artifact(artifact, false).map(Some)
 }
 
-pub(super) fn apply_lab_promotion_patch(
-    exec_output: &RunnerExecOutput,
-    intent: &PromotionPatchIntent,
-) -> Result<Option<RunnerWorkspaceApplyOutput>> {
-    let captured_files = exec_output
-        .patch
-        .as_ref()
-        .and_then(|patch| patch.get("modified_files"))
-        .and_then(|files| files.as_array())
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|file| file.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let mut expected = intent.changed_files.clone();
-    let mut captured = captured_files;
-    expected.sort();
-    captured.sort();
-    if captured != expected {
-        return Err(Error::validation_invalid_argument(
-            "promotion_handoff.patch",
-            format!(
-                "runner capture modified files outside the promotion intent; expected {:?}, captured {:?}",
-                expected, captured
-            ),
-            None,
-            Some(vec![
-                "Promotion handback refuses dependency hydration, verification, or other side effects outside the declared patch files.".to_string(),
-            ]),
-        ));
-    }
-    apply_lab_offload_patch(exec_output)
-}
-
 fn read_lab_patch_artifact(path: &str) -> Result<String> {
     let local_path = if is_retrievable_runner_artifact(path) {
         // Internal: the patch is read once and applied; the operator never sees
@@ -129,6 +125,77 @@ fn read_lab_patch_artifact(path: &str) -> Result<String> {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn candidate_handback_uses_verified_ref_not_runner_patch_or_changed_files() {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init"]);
+        git(repo.path(), &["config", "user.email", "t@t"]);
+        git(repo.path(), &["config", "user.name", "T"]);
+        std::fs::write(repo.path().join("file"), "base").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        let output = |args: &[&str]| {
+            homeboy_core::git::run_git(repo.path(), args, "test")
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        let base = output(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("file"), "candidate").unwrap();
+        std::fs::write(repo.path().join("new"), "new").unwrap();
+        git(repo.path(), &["add", "."]);
+        let tree = output(&["write-tree"]);
+        let sha = output(&["commit-tree", &tree, "-p", &base, "-m", "candidate"]);
+        git(repo.path(), &["reset", "--hard", "HEAD"]);
+        git(
+            repo.path(),
+            &["update-ref", "refs/homeboy/candidates/run-1", &sha],
+        );
+        let mut exec = RunnerExecOutput {
+            variant: "exec",
+            command: "runner.exec",
+            runner_id: "lab".to_string(),
+            dry_run: false,
+            mode: super::super::RunnerExecMode::Daemon,
+            argv: vec!["homeboy".to_string(), "refactor".to_string()],
+            remote_cwd: "/srv/homeboy/_lab_workspaces/repo-abc".to_string(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            runner_job: None,
+            job_id: None,
+            job_events: None,
+            mirror_run_id: None,
+            patch: None,
+            mutation_artifacts: None,
+            artifacts: Vec::new(),
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
+            metrics: None,
+            capture: None,
+            execution_record: None,
+            runner_result: None,
+            handoff: None,
+            diagnostics: None,
+        };
+        exec.source_snapshot = Some(homeboy_core::source_snapshot::collect_local(
+            "lab",
+            repo.path(),
+            Some("/runner"),
+            "lab_offload",
+        ));
+        exec.stdout = serde_json::json!({"status":"gate_failed", "source":{"run_id":"run-1"}, "provenance":{"candidate_commit":{"base_sha":base,"candidate_sha":sha,"tree_sha":tree}}, "changed_files":[]}).to_string();
+        apply_lab_candidate(&exec).unwrap();
+        assert_eq!(output(&["write-tree"]), tree);
+        assert_eq!(output(&["rev-parse", "HEAD"]), base);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("new")).unwrap(),
+            "new"
+        );
+    }
 
     #[test]
     fn apply_lab_offload_patch_writes_runner_patch_to_local_source() {
@@ -268,136 +335,6 @@ mod tests {
             std::fs::read_to_string(repo.path().join("homeboy.json")).expect("manifest"),
             "{\"id\":\"demo\",\"baselines\":{\"audit\":{\"known_fingerprints\":[\"abc\"]}}}\n"
         );
-    }
-
-    #[test]
-    fn promotion_handoff_applies_only_the_declared_target_delta() {
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        git(repo.path(), &["init"]);
-        git(repo.path(), &["config", "user.email", "test@example.com"]);
-        git(repo.path(), &["config", "user.name", "Test User"]);
-        std::fs::write(repo.path().join("promoted.txt"), "before\n").expect("seed promoted");
-        std::fs::write(repo.path().join("verify-side-effect.txt"), "before\n")
-            .expect("seed side effect");
-        git(repo.path(), &["add", "."]);
-        git(repo.path(), &["commit", "-m", "base"]);
-        let snapshot = homeboy_core::source_snapshot::collect_local(
-            "lab",
-            repo.path(),
-            Some("/runner/workspace"),
-            "lab",
-        );
-        let artifact_dir = tempfile::tempdir().expect("artifact tempdir");
-        let patch_path = artifact_dir.path().join("patch.diff");
-        std::fs::write(
-            &patch_path,
-            "diff --git a/promoted.txt b/promoted.txt\n--- a/promoted.txt\n+++ b/promoted.txt\n@@ -1 +1 @@\n-before\n+after\n",
-        )
-        .expect("patch");
-        let exec_output = RunnerExecOutput {
-            variant: "exec",
-            command: "runner.exec",
-            runner_id: "lab".to_string(),
-            dry_run: false,
-            mode: super::super::RunnerExecMode::Daemon,
-            argv: vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "promote".to_string(),
-            ],
-            remote_cwd: "/runner/workspace".to_string(),
-            exit_code: 1,
-            stdout: "{\"data\":{\"status\":\"gate_failed\"}}".to_string(),
-            stderr: String::new(),
-            source_snapshot: Some(snapshot),
-            job: None,
-            runner_job: None,
-            job_id: None,
-            job_events: None,
-            mirror_run_id: None,
-            patch: Some(serde_json::json!({
-                "modified_files": ["promoted.txt"],
-                "patch_artifact_path": patch_path.display().to_string(),
-            })),
-            mutation_artifacts: None,
-            artifacts: Vec::new(),
-            promoted_outputs: Vec::new(),
-            structured_summaries: Vec::new(),
-            metrics: None,
-            capture: None,
-            execution_record: None,
-            runner_result: None,
-            handoff: None,
-            diagnostics: None,
-        };
-
-        apply_lab_promotion_patch(
-            &exec_output,
-            &PromotionPatchIntent {
-                changed_files: vec!["promoted.txt".to_string()],
-            },
-        )
-        .expect("gate-failed promotion handback")
-        .expect("patch applied");
-        assert_eq!(
-            std::fs::read_to_string(repo.path().join("promoted.txt")).unwrap(),
-            "after\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(repo.path().join("verify-side-effect.txt")).unwrap(),
-            "before\n"
-        );
-    }
-
-    #[test]
-    fn promotion_handoff_refuses_verification_or_dependency_side_effects() {
-        let exec_output = RunnerExecOutput {
-            patch: Some(serde_json::json!({
-                "modified_files": ["promoted.txt", "dependency-side-effect.txt"],
-            })),
-            ..runner_exec_output_fixture()
-        };
-
-        let error = apply_lab_promotion_patch(
-            &exec_output,
-            &PromotionPatchIntent {
-                changed_files: vec!["promoted.txt".to_string()],
-            },
-        )
-        .expect_err("extra runner changes rejected");
-        assert!(error.message.contains("outside the promotion intent"));
-    }
-
-    fn runner_exec_output_fixture() -> RunnerExecOutput {
-        RunnerExecOutput {
-            variant: "exec",
-            command: "runner.exec",
-            runner_id: "lab".to_string(),
-            dry_run: false,
-            mode: super::super::RunnerExecMode::Daemon,
-            argv: Vec::new(),
-            remote_cwd: "/runner/workspace".to_string(),
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-            source_snapshot: None,
-            job: None,
-            runner_job: None,
-            job_id: None,
-            job_events: None,
-            mirror_run_id: None,
-            patch: None,
-            mutation_artifacts: None,
-            artifacts: Vec::new(),
-            promoted_outputs: Vec::new(),
-            structured_summaries: Vec::new(),
-            metrics: None,
-            capture: None,
-            execution_record: None,
-            runner_result: None,
-            handoff: None,
-            diagnostics: None,
-        }
     }
 
     use homeboy_core::test_support::run_git_command as git;

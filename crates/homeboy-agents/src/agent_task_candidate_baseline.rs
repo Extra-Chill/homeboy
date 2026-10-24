@@ -1,179 +1,40 @@
-use homeboy_engine_primitives::content_hash;
 use std::path::Path;
 use std::process::Command;
 
+use homeboy_core::{Error, Result};
 use serde_json::Value;
 
-use homeboy_core::{Error, Result};
-
-/// Verify that a dirty worktree is exactly the gate-feedback candidate described
-/// by its durable promotion artifact, without mutating its real Git index.
+/// Authenticate a continuation against its immutable candidate, never patch evidence.
 pub(crate) fn validate_gate_feedback_candidate_baseline(
     root: &Path,
     baseline: &Value,
 ) -> Result<String> {
-    if baseline.get("schema").and_then(Value::as_str)
-        == Some("homeboy/agent-task-promotion-chain-baseline/v1")
-    {
-        return validate_promotion_chain_baseline(root, baseline);
-    }
-    let cook_loop = baseline;
-    let artifact = cook_loop
-        .get("patch_artifact")
-        .and_then(Value::as_object)
-        .ok_or_else(|| invalid("recorded patch artifact is not an object"))?;
-    let path = artifact
-        .get("path")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-        .map(str::to_string);
-    let expected_sha256 = artifact
-        .get("sha256")
-        .and_then(Value::as_str)
-        .filter(|sha256| !sha256.is_empty())
-        .ok_or_else(|| invalid("recorded patch artifact has no sha256"))?;
-    let patch = if let Some(reference) = artifact.get("controller_artifact") {
-        let run_id = reference
-            .get("run_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("controller artifact reference has no run id"))?;
-        let task_id = reference
-            .get("task_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("controller artifact reference has no task id"))?;
-        let artifact_id = reference
-            .get("logical_artifact_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("controller artifact reference has no logical artifact id"))?;
-        let kind = reference
-            .get("kind")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("controller artifact reference has no kind"))?;
-        let reference_sha256 = reference
-            .get("sha256")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("controller artifact reference has no sha256"))?;
-        if reference_sha256 != expected_sha256 {
-            return Err(invalid(
-                "controller artifact reference sha256 conflicts with the baseline patch artifact",
-            ));
-        }
-        let record_id = reference.get("record_id").and_then(Value::as_str);
-        let (_, bytes) = crate::agent_task_lifecycle::verified_controller_artifact_projection(
-            run_id,
-            task_id,
-            artifact_id,
-            kind,
-            expected_sha256,
-            record_id,
-        )?
-        .ok_or_else(|| invalid("controller artifact mirror is missing"))?;
-        bytes
-    } else {
-        let path = path.ok_or_else(|| invalid("recorded patch artifact has no path"))?;
-        std::fs::read(path)
-            .map_err(|error| invalid(&format!("recorded patch artifact is unreadable: {error}")))?
-    };
-    if content_hash::sha256_hex(&patch) != expected_sha256 {
-        return Err(invalid(
-            "recorded patch artifact sha256 does not match its content",
-        ));
-    }
-    let patch = String::from_utf8(patch)
-        .map_err(|error| invalid(&format!("recorded patch artifact is not UTF-8: {error}")))?;
-    verify_patch_is_present(root, &patch)?;
-    let current_diff = cook_loop
-        .get("current_diff")
-        .and_then(Value::as_str)
-        .filter(|diff| !diff.trim().is_empty())
-        .ok_or_else(|| invalid("gate-feedback candidate has no complete current diff"))?;
-    let current_diff = format!("{}\n", current_diff.trim_end_matches('\n'));
-    if patch_tree(root, &current_diff)? != workspace_tree(root)? {
-        return Err(invalid(
-            "recorded current diff does not match the promoted candidate worktree state",
-        ));
-    }
-    validate_tracked_promotion(root, cook_loop)?;
-    Ok(current_diff)
+    let candidate: crate::agent_task::AgentTaskCandidate = serde_json::from_value(
+        baseline
+            .get("candidate_commit")
+            .cloned()
+            .unwrap_or(Value::Null),
+    )
+    .map_err(|_| invalid("non-recoverable: baseline has no immutable candidate; run a new Cook"))?;
+    crate::agent_task_promotion::validate_candidate_commit(root, &candidate)?;
+    validate_immutable_candidate_tree(root, &candidate.candidate_sha)?;
+    git(
+        root,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            &candidate.base_sha,
+            &candidate.candidate_sha,
+        ],
+    )
+    .map(|diff| format!("{}\n", diff.trim_end_matches('\n')))
 }
 
-/// A Cook continuation supplies this claim to core's provider preflight. Keep
-/// the integration-specific proof here while core remains responsible for the
-/// generic dirty-worktree admission decision.
-fn validate_tracked_promotion(root: &Path, baseline: &Value) -> Result<()> {
-    let Some(tracked) = baseline.get("tracked_promotion") else {
-        return Ok(());
-    };
-    let expected_path = tracked
-        .get("target_path")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-        .ok_or_else(|| invalid("tracked promotion has no destination path"))?;
-    let expected_path = std::fs::canonicalize(expected_path).map_err(|error| {
-        invalid(&format!(
-            "tracked promotion destination is unavailable: {error}"
-        ))
-    })?;
-    let actual_path = std::fs::canonicalize(root)
-        .map_err(|error| invalid(&format!("candidate worktree is unavailable: {error}")))?;
-    if actual_path != expected_path {
-        return Err(invalid(
-            "tracked promotion destination differs from the provider-resolved worktree",
-        ));
-    }
-    let expected_branch = tracked
-        .get("branch")
-        .and_then(Value::as_str)
-        .filter(|branch| !branch.is_empty())
-        .ok_or_else(|| invalid("tracked promotion has no destination branch"))?;
-    if git(root, &["branch", "--show-current"])? != expected_branch {
-        return Err(invalid(
-            "tracked promotion destination branch differs from the recorded branch",
-        ));
-    }
-    let expected_candidate = tracked
-        .get("candidate")
-        .cloned()
-        .ok_or_else(|| invalid("tracked promotion has no candidate fingerprint"))?;
-    let expected_candidate = serde_json::from_value(expected_candidate)
-        .map_err(|_| invalid("tracked promotion candidate fingerprint is invalid"))?;
-    let actual_candidate =
-        crate::agent_task_promotion::candidate_fingerprint(actual_path.to_string_lossy().as_ref())?;
-    if actual_candidate != expected_candidate {
-        return Err(invalid(
-            "tracked promotion destination differs from the exact candidate fingerprint",
-        ));
-    }
-    let expected_paths = tracked
-        .get("changed_files")
-        .and_then(Value::as_array)
-        .ok_or_else(|| invalid("tracked promotion has no changed-file list"))?
-        .iter()
-        .map(Value::as_str)
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| invalid("tracked promotion changed-file list is invalid"))?;
-    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
-        actual_candidate
-    else {
-        return Err(invalid("tracked promotion candidate is not a Git worktree"));
-    };
-    if fingerprint.changed_files != expected_paths {
-        return Err(invalid(
-            "tracked promotion changed-file list differs from the exact candidate",
-        ));
-    }
-    Ok(())
-}
-
-/// Validate a committed adoption candidate when an interrupted pre-provider
-/// attempt has no dirty-worktree diff to replay.
 pub(crate) fn validate_immutable_candidate_tree(root: &Path, candidate_sha: &str) -> Result<()> {
-    if !valid_git_object_id(candidate_sha) {
+    if !matches!(candidate_sha.len(), 40 | 64)
+        || !candidate_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return Err(invalid("adopted candidate has no valid immutable commit"));
     }
     let expected_tree = git(root, &["rev-parse", &format!("{candidate_sha}^{{tree}}")])?;
@@ -185,80 +46,7 @@ pub(crate) fn validate_immutable_candidate_tree(root: &Path, candidate_sha: &str
     Ok(())
 }
 
-/// A follow-up candidate is allowed to reuse a dirty destination only when its
-/// complete tree is the controller-verified source tree used to cook that
-/// candidate. This works for materialized snapshots whose HEAD is synthetic.
-fn validate_promotion_chain_baseline(root: &Path, baseline: &Value) -> Result<String> {
-    let expected_tree = baseline
-        .get("source_tree")
-        .and_then(Value::as_str)
-        .filter(|tree| valid_git_object_id(tree))
-        .ok_or_else(|| invalid("promotion-chain baseline has no valid source tree"))?;
-    let prior_artifact = baseline
-        .pointer("/prior_patch_artifact/sha256")
-        .and_then(Value::as_str)
-        .filter(|sha256| valid_sha256(sha256))
-        .ok_or_else(|| invalid("promotion-chain baseline has no valid prior patch artifact"))?;
-    let actual_tree = workspace_tree(root)?;
-    if actual_tree != expected_tree {
-        return Err(invalid(
-            "promotion-chain destination differs from the follow-up source snapshot",
-        ));
-    }
-    Ok(format!("promotion-chain:{prior_artifact}:{actual_tree}"))
-}
-
-fn valid_sha256(value: &str) -> bool {
-    content_hash::is_sha256_hex(value)
-}
-
-fn valid_git_object_id(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn verify_patch_is_present(root: &Path, patch: &str) -> Result<()> {
-    let patch_file = tempfile::NamedTempFile::new().map_err(|error| invalid(&error.to_string()))?;
-    std::fs::write(patch_file.path(), patch).map_err(|error| invalid(&error.to_string()))?;
-    let output = Command::new("git")
-        .args([
-            "apply",
-            "--reverse",
-            "--check",
-            "--binary",
-            &patch_file.path().display().to_string(),
-        ])
-        .current_dir(root)
-        .output()
-        .map_err(|error| invalid(&error.to_string()))?;
-    if !output.status.success() {
-        return Err(invalid(&format!(
-            "recorded patch artifact is not present in the candidate worktree: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-fn patch_tree(root: &Path, patch: &str) -> Result<String> {
-    let index = tempfile::NamedTempFile::new().map_err(|error| invalid(&error.to_string()))?;
-    let patch_file = tempfile::NamedTempFile::new().map_err(|error| invalid(&error.to_string()))?;
-    std::fs::write(patch_file.path(), patch).map_err(|error| invalid(&error.to_string()))?;
-    let index_path = index.path().display().to_string();
-    git_with_index(root, &["read-tree", "HEAD"], &index_path)?;
-    git_with_index(
-        root,
-        &[
-            "apply",
-            "--cached",
-            "--binary",
-            &patch_file.path().display().to_string(),
-        ],
-        &index_path,
-    )?;
-    git_with_index(root, &["write-tree"], &index_path)
-}
-
-fn workspace_tree(root: &Path) -> Result<String> {
+pub(crate) fn workspace_tree(root: &Path) -> Result<String> {
     let index = tempfile::NamedTempFile::new().map_err(|error| invalid(&error.to_string()))?;
     let index_path = index.path().display().to_string();
     git_with_index(root, &["read-tree", "HEAD"], &index_path)?;
@@ -267,25 +55,20 @@ fn workspace_tree(root: &Path) -> Result<String> {
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|error| invalid(&error.to_string()))?;
-    if !output.status.success() {
-        return Err(invalid(&format!(
-            "candidate baseline Git operation failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    run_git(root, args, None)
 }
 
 fn git_with_index(root: &Path, args: &[&str], index_path: &str) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .env("GIT_INDEX_FILE", index_path)
-        .current_dir(root)
+    run_git(root, args, Some(index_path))
+}
+
+fn run_git(root: &Path, args: &[&str], index: Option<&str>) -> Result<String> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(root);
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", index);
+    }
+    let output = command
         .output()
         .map_err(|error| invalid(&error.to_string()))?;
     if !output.status.success() {
@@ -309,203 +92,59 @@ fn invalid(message: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
+    use serde_json::json;
+
+    fn candidate_repo() -> (tempfile::TempDir, Value) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git(root, &["init", "-b", "main"]).unwrap();
+        git(root, &["config", "user.name", "Homeboy Test"]).unwrap();
+        git(root, &["config", "user.email", "test@example.test"]).unwrap();
+        std::fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        git(root, &["add", "."]).unwrap();
+        git(root, &["commit", "-m", "base"]).unwrap();
+        let base = git(root, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(root.join("tracked.txt"), "candidate\n").unwrap();
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+        git(root, &["add", "."]).unwrap();
+        git(root, &["commit", "-m", "candidate"]).unwrap();
+        let sha = git(root, &["rev-parse", "HEAD"]).unwrap();
+        let tree = git(root, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        (
+            temp,
+            json!({"candidate_commit":{"base_sha":base,"candidate_sha":sha,"tree_sha":tree}}),
+        )
+    }
 
     #[test]
     fn immutable_candidate_tree_accepts_exact_commit_and_rejects_dirty_state() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        git(temp.path(), &["init", "-b", "main"]);
-        git(temp.path(), &["config", "user.name", "Homeboy Test"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "homeboy@example.test"],
-        );
-        std::fs::write(temp.path().join("tracked.txt"), "candidate\n").expect("candidate file");
-        git(temp.path(), &["add", "tracked.txt"]);
-        git(temp.path(), &["commit", "-m", "candidate"]);
-        let candidate_sha = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_string();
-
-        validate_immutable_candidate_tree(temp.path(), &candidate_sha)
-            .expect("exact committed candidate");
-        std::fs::write(temp.path().join("tracked.txt"), "diverged\n").expect("dirty candidate");
-        assert!(validate_immutable_candidate_tree(temp.path(), &candidate_sha).is_err());
+        let (temp, baseline) = candidate_repo();
+        let sha = baseline["candidate_commit"]["candidate_sha"]
+            .as_str()
+            .unwrap();
+        validate_immutable_candidate_tree(temp.path(), sha).unwrap();
+        std::fs::write(temp.path().join("tracked.txt"), "drift\n").unwrap();
+        assert!(validate_immutable_candidate_tree(temp.path(), sha).is_err());
     }
 
     #[test]
-    fn layered_remediation_uses_complete_current_diff() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        git(temp.path(), &["init", "-b", "main"]);
-        git(temp.path(), &["config", "user.name", "Homeboy Test"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "homeboy@example.test"],
-        );
-        std::fs::write(temp.path().join("tracked.txt"), "one\n").expect("base file");
-        git(temp.path(), &["add", "tracked.txt"]);
-        git(temp.path(), &["commit", "-m", "base"]);
-
-        std::fs::write(temp.path().join("tracked.txt"), "three\n").expect("candidate file");
-        std::fs::write(temp.path().join("untracked.txt"), "candidate\n")
-            .expect("untracked candidate file");
-        git(temp.path(), &["add", "-N", "untracked.txt"]);
-        let current_diff = git(temp.path(), &["diff", "--binary"]);
-        let remediation = "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-two\n+three\n";
-        let artifacts = tempfile::tempdir().expect("artifact tempdir");
-        let artifact = artifacts.path().join("remediation.patch");
-        std::fs::write(&artifact, remediation).expect("remediation artifact");
-        let transported_diff = current_diff.trim_end_matches('\n');
-        let cook_loop = serde_json::json!({
-            "current_diff": transported_diff,
-            "patch_artifact": {
-                "path": artifact,
-                "sha256": format!("{:x}", Sha256::digest(remediation.as_bytes()))
-            }
-        });
-
-        assert_eq!(
-            validate_gate_feedback_candidate_baseline(temp.path(), &cook_loop)
-                .expect("layered candidate baseline"),
-            current_diff
-        );
+    fn layered_remediation_uses_complete_candidate_commit() {
+        let (temp, baseline) = candidate_repo();
+        let diff = validate_gate_feedback_candidate_baseline(temp.path(), &baseline).unwrap();
+        assert!(diff.contains("new.txt"));
+        assert!(diff.contains("candidate"));
+        std::fs::write(temp.path().join("unrelated.txt"), "drift\n").unwrap();
+        assert!(validate_gate_feedback_candidate_baseline(temp.path(), &baseline).is_err());
     }
 
     #[test]
-    fn promotion_chain_accepts_only_the_exact_source_tree() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        git(temp.path(), &["init", "-b", "main"]);
-        git(temp.path(), &["config", "user.name", "Homeboy Test"]);
-        git(
+    fn patch_carried_baselines_are_non_recoverable() {
+        let (temp, _) = candidate_repo();
+        let error = validate_gate_feedback_candidate_baseline(
             temp.path(),
-            &["config", "user.email", "homeboy@example.test"],
-        );
-        std::fs::write(temp.path().join("tracked.txt"), "base\n").expect("base file");
-        git(temp.path(), &["add", "tracked.txt"]);
-        git(temp.path(), &["commit", "-m", "base"]);
-        std::fs::write(temp.path().join("tracked.txt"), "v1\n").expect("v1 file");
-        let source_tree = workspace_tree(temp.path()).expect("v1 tree");
-        let baseline = serde_json::json!({
-            "schema": "homeboy/agent-task-promotion-chain-baseline/v1",
-            "source_tree": source_tree,
-            "prior_patch_artifact": { "sha256": "a".repeat(64) }
-        });
-
-        assert!(validate_gate_feedback_candidate_baseline(temp.path(), &baseline).is_ok());
-
-        std::fs::write(temp.path().join("tracked.txt"), "base\n").expect("clean base file");
-        let error = validate_gate_feedback_candidate_baseline(temp.path(), &baseline)
-            .expect_err("clean base cannot accept a delta requiring v1");
-        assert!(error
-            .message
-            .contains("differs from the follow-up source snapshot"));
-
-        std::fs::write(temp.path().join("tracked.txt"), "v1\n").expect("restore v1 file");
-        std::fs::write(temp.path().join("unrelated.txt"), "drift\n").expect("drift file");
-        let error = validate_gate_feedback_candidate_baseline(temp.path(), &baseline)
-            .expect_err("unrelated dirty content rejected");
-        assert!(error
-            .message
-            .contains("differs from the follow-up source snapshot"));
-    }
-
-    #[test]
-    fn controller_mirror_survives_runner_cleanup_and_rejects_hash_mismatch() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let workspace = temp.path().join("workspace");
-            std::fs::create_dir(&workspace).expect("workspace");
-            git(&workspace, &["init", "-b", "main"]);
-            git(&workspace, &["config", "user.name", "Homeboy Test"]);
-            git(
-                &workspace,
-                &["config", "user.email", "homeboy@example.test"],
-            );
-            std::fs::write(workspace.join("tracked.txt"), "old\n").expect("base file");
-            git(&workspace, &["add", "tracked.txt"]);
-            git(&workspace, &["commit", "-m", "base"]);
-            std::fs::write(workspace.join("tracked.txt"), "new\n").expect("candidate file");
-            let patch = git(&workspace, &["diff", "--binary"]);
-            let sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
-            let runner = temp.path().join("lab-workspace.patch");
-            std::fs::write(&runner, &patch).expect("runner patch");
-
-            let store = homeboy_core::observation::ObservationStore::open_initialized()
-                .expect("observation store");
-            store
-                .upsert_imported_run(&homeboy_core::observation::RunRecord {
-                    id: "lab-run".to_string(),
-                    kind: "agent-task".to_string(),
-                    started_at: "2026-07-24T00:00:00Z".to_string(),
-                    finished_at: Some("2026-07-24T00:00:01Z".to_string()),
-                    status: "pass".to_string(),
-                    metadata_json: serde_json::json!({}),
-                    ..Default::default()
-                })
-                .expect("record run");
-            let projection = store
-                .record_artifact_with_id(
-                    "lab-run",
-                    "patch",
-                    &runner,
-                    "controller-mirror",
-                    serde_json::json!({
-                        "agent_task": {
-                            "task_id": "follow-up",
-                            "logical_artifact_id": "patch"
-                        }
-                    }),
-                )
-                .expect("mirror patch");
-            std::fs::remove_file(&runner).expect("Lab cleanup");
-            let baseline = serde_json::json!({
-                "current_diff": patch,
-                "patch_artifact": {
-                    "id": "patch",
-                    "kind": "patch",
-                    "sha256": sha256,
-                    "controller_artifact": {
-                        "schema": "homeboy/controller-artifact-reference/v1",
-                        "run_id": "lab-run",
-                        "task_id": "follow-up",
-                        "logical_artifact_id": "patch",
-                        "kind": "patch",
-                        "sha256": sha256,
-                        "record_id": "controller-mirror"
-                    }
-                }
-            });
-
-            let mut missing = baseline.clone();
-            missing["patch_artifact"]["controller_artifact"]["run_id"] =
-                serde_json::json!("missing-lab-run");
-            let error = validate_gate_feedback_candidate_baseline(&workspace, &missing)
-                .expect_err("missing controller mirror fails closed");
-            assert!(error
-                .message
-                .contains("controller artifact mirror is missing"));
-            validate_gate_feedback_candidate_baseline(&workspace, &baseline)
-                .expect("controller mirror resolves after Lab cleanup");
-            validate_gate_feedback_candidate_baseline(&workspace, &baseline)
-                .expect("retry/resume resolves the same mirror identity");
-
-            std::fs::write(&projection.path, "different bytes").expect("alter mirror");
-            let error = validate_gate_feedback_candidate_baseline(&workspace, &baseline)
-                .expect_err("altered mirror fails closed");
-            assert!(error.message.contains("hash mismatch"));
-        });
-    }
-
-    fn git(root: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git command");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).to_string()
+            &json!({"patch_artifact":{"path":"missing.patch"}}),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("non-recoverable"));
     }
 }

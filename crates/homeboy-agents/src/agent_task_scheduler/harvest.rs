@@ -128,6 +128,16 @@ pub(super) fn harvest_candidate_commit(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
 ) -> Result<(), HarvestError> {
+    let on_runner = crate::agent_task_lifecycle::execution_runner_id().is_some();
+    harvest_candidate_commit_with_bundle(outcome, running, on_runner)
+}
+
+/// `bundle`: a Lab runner hands the candidate back as the commit itself.
+fn harvest_candidate_commit_with_bundle(
+    outcome: &mut AgentTaskOutcome,
+    running: &RunningTask,
+    bundle: bool,
+) -> Result<(), HarvestError> {
     // Only Homeboy's harvest may assert a candidate.
     outcome.candidate = None;
     let Some(base) = running.task_base_sha.as_deref() else {
@@ -184,9 +194,32 @@ pub(super) fn harvest_candidate_commit(
     git_output(root, &["update-ref", &candidate_ref, &candidate_sha])?;
     outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
         base_sha: base.to_string(),
-        candidate_sha,
+        candidate_sha: candidate_sha.clone(),
         tree_sha: tree,
     });
+    if bundle {
+        // The bundle is the Lab handback of the candidate (#16303).
+        let path = attempt_patch_path(running, "candidate")?.with_extension("bundle");
+        let path_arg = path.display().to_string();
+        let exclude_base = format!("^{base}");
+        git_output(
+            root,
+            &["bundle", "create", &path_arg, &candidate_ref, &exclude_base],
+        )?;
+        let bytes = std::fs::read(&path).map_err(|error| HarvestError::ArtifactWrite {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+        outcome.artifacts.push(AgentTaskArtifact {
+            id: attempt_patch_id(running, "candidate-bundle"),
+            kind: crate::agent_task_promotion::CANDIDATE_BUNDLE_ARTIFACT_KIND.to_string(),
+            path: Some(path_arg),
+            size_bytes: Some(bytes.len() as u64),
+            sha256: Some(patch_sha256(&bytes)),
+            metadata: serde_json::json!({ "candidate_sha": candidate_sha, "base_ref": base }),
+            ..AgentTaskArtifact::default()
+        });
+    }
     Ok(())
 }
 
@@ -1074,6 +1107,16 @@ mod committed_harvest_tests {
         let current_diff = std::fs::read_to_string(&patch_artifact).expect("complete current diff");
         let mut request =
             gate_feedback_request(&workspace, current_diff, &patch_artifact, &patch_sha256);
+        let base = git(&workspace, &["rev-parse", "HEAD"]);
+        git(&workspace, &["add", "-A"]);
+        let tree = git(&workspace, &["write-tree"]);
+        let candidate = git(
+            &workspace,
+            &["commit-tree", &tree, "-p", &base, "-m", "candidate"],
+        );
+        git(&workspace, &["reset", "--mixed", &base]);
+        request.inputs["cook_loop"]["candidate_commit"] =
+            serde_json::json!({"base_sha":base,"candidate_sha":candidate,"tree_sha":tree});
 
         let preflight =
             prepare_committed_harvest(&request, None, &HarvestExecutionContext::default())
@@ -1822,6 +1865,64 @@ mod committed_harvest_tests {
             ),
             "untracked"
         );
+    }
+
+    #[test]
+    fn timed_out_runner_harvest_bundles_dirty_candidate_for_a_base_only_controller() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        let controller = temp.path().join("controller");
+        git(
+            temp.path(),
+            &["clone", "-q", workspace.to_str().unwrap(), "controller"],
+        );
+        std::fs::write(workspace.join("file.txt"), "agent change\n").expect("dirty");
+        std::fs::write(workspace.join("new.txt"), "untracked\n").expect("untracked");
+        let running = committed_harvest_running_task(temp.path(), &workspace, None, base);
+        let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+
+        outcome.status = AgentTaskOutcomeStatus::Timeout;
+        outcome.failure_classification =
+            Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
+        harvest_candidate_commit_with_bundle(&mut outcome, &running, true).expect("harvest");
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+
+        let candidate = outcome.candidate.clone().expect("dirty attempt candidate");
+        let bundle = outcome
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.kind == crate::agent_task_promotion::CANDIDATE_BUNDLE_ARTIFACT_KIND
+            })
+            .expect("runner harvest returns the candidate bundle artifact");
+        let path = Path::new(bundle.path.as_deref().expect("bundle path"));
+        let bytes = std::fs::read(path).expect("bundle bytes");
+        assert_eq!(bundle.size_bytes, Some(bytes.len() as u64));
+        assert_eq!(
+            bundle.sha256.as_deref(),
+            Some(patch_sha256(&bytes).as_str())
+        );
+        let local_ref = crate::agent_task_promotion::fetch_candidate_bundle(
+            &controller,
+            path,
+            "reaped-harvest-test",
+            &candidate,
+        )
+        .expect("base-only controller fetches the candidate");
+        assert_eq!(
+            git(&controller, &["rev-parse", &local_ref]),
+            candidate.candidate_sha
+        );
+        let tree = git(
+            &controller,
+            &["rev-parse", &format!("{local_ref}^{{tree}}")],
+        );
+        assert_eq!(tree, candidate.tree_sha);
+        crate::agent_task_promotion::materialize_candidate_tree(&controller, &candidate)
+            .expect("materialize");
+        git(&controller, &["add", "--all"]);
+        assert_eq!(git(&controller, &["write-tree"]), candidate.tree_sha);
+        assert_eq!(git(&controller, &["rev-parse", "HEAD"]), candidate.base_sha);
     }
 
     #[test]

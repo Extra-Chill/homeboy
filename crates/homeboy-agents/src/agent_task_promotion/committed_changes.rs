@@ -1,5 +1,4 @@
-use homeboy_engine_primitives::content_hash;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::{json, Value};
@@ -13,8 +12,7 @@ pub(crate) struct CommittedChangesPatch {
     pub(crate) candidate: String,
     pub(crate) historical_task_base: Option<String>,
     pub(crate) adoption_merge: Option<AdoptionMergeProof>,
-    pub(crate) patch_path: PathBuf,
-    pub(crate) sha256: String,
+    pub(crate) tree_sha: String,
     pub(crate) commit_range: String,
     pub(crate) commits: Vec<Value>,
 }
@@ -94,43 +92,23 @@ pub(crate) fn committed_changes_patch(
     if changed_files.is_empty() {
         return Ok(None);
     }
-    let patch = git_stdout(
+    let tree_sha = git_stdout(
         worktree_path,
-        &[
-            "diff",
-            "--binary",
-            "--full-index",
-            "--find-renames",
-            &base_ref,
-            &candidate,
-        ],
-    )?;
-    if patch.trim().is_empty() {
-        return Ok(None);
-    }
+        &["rev-parse", &format!("{candidate}^{{tree}}")],
+    )?
+    .trim()
+    .to_string();
     let commit_range = format!("{base_ref}..{candidate}");
     let commits = committed_change_evidence(worktree_path, &commit_range)?;
     if commits.is_empty() {
         return Ok(None);
     }
-    let sha256 = content_hash::sha256_hex(patch.as_bytes());
-    let patch_path = committed_changes_patch_path(options, &sha256)?;
-    std::fs::write(&patch_path, patch.as_bytes()).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!(
-                "write committed changes promotion patch {}",
-                patch_path.display()
-            )),
-        )
-    })?;
     Ok(Some(CommittedChangesPatch {
         base_ref,
         candidate,
         historical_task_base,
         adoption_merge,
-        patch_path,
-        sha256,
+        tree_sha,
         commit_range,
         commits,
     }))
@@ -339,26 +317,6 @@ fn resolve_candidate(cwd: &Path, requested: Option<&str>) -> Result<String> {
             None,
         )
     })
-}
-
-fn committed_changes_patch_path(
-    options: &AgentTaskPromotionRequest,
-    sha256: &str,
-) -> Result<PathBuf> {
-    if let Some(parent) = options.source_path.as_deref().and_then(Path::parent) {
-        return Ok(parent.join(format!("committed-changes-{sha256}.patch")));
-    }
-    let dir = std::env::temp_dir().join("homeboy-agent-task-promotions");
-    std::fs::create_dir_all(&dir).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!(
-                "create committed changes promotion artifact directory {}",
-                dir.display()
-            )),
-        )
-    })?;
-    Ok(dir.join(format!("committed-changes-{sha256}.patch")))
 }
 
 fn resolve_committed_changes_base(

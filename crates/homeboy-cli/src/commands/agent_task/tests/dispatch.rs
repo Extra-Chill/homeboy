@@ -97,6 +97,11 @@ fn explicit_repo_identity_resolution_does_not_hydrate_unrelated_components() {
             "--cwd",
             checkout.path().to_str().expect("UTF-8 checkout path"),
             Some("fixture"),
+            &vec![
+                homeboy::core::component::inventory::registered_primary_by_id("fixture")
+                    .unwrap()
+                    .unwrap(),
+            ],
         )
         .expect("resolve explicit repository identity");
 
@@ -115,18 +120,26 @@ fn explicit_unregistered_repo_is_proven_by_the_workspace_remote() {
             "https://github.com/example/fixture.git",
         );
 
-        let resolved = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "fixture".to_string(),
-            "--cwd".to_string(),
-            checkout.path().display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let resolved = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "fixture".to_string(),
+                "--cwd".to_string(),
+                checkout.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("resolve explicit repository identity from its remote");
 
         assert_eq!(resolved.dispatch.repo.as_deref(), Some("fixture"));
@@ -138,8 +151,8 @@ fn explicit_unregistered_repo_is_proven_by_the_workspace_remote() {
         );
         assert_eq!(identity["component_registered"], false);
 
-        let stale_component =
-            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+        let stale_component = {
+            let mut input = cook_args_from_cli(vec![
                 "homeboy".to_string(),
                 "agent-task".to_string(),
                 "cook".to_string(),
@@ -152,8 +165,15 @@ fn explicit_unregistered_repo_is_proven_by_the_workspace_remote() {
                 "--cwd".to_string(),
                 checkout.path().display().to_string(),
                 "--no-finalize".to_string(),
-            ]))
-            .expect_err("an explicit stale component remains invalid");
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
+        .expect_err("an explicit stale component remains invalid");
         assert!(
             stale_component
                 .details
@@ -221,21 +241,29 @@ fn existing_pr_cook_resolution_uses_canonical_refs_for_preview_and_update() {
             ),
         );
 
-        let resolved = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".into(),
-            "agent-task".into(),
-            "cook".into(),
-            "--prompt".into(),
-            "update the existing pull request".into(),
-            "--repo".into(),
-            "fixture".into(),
-            "--cwd".into(),
-            linked.display().to_string(),
-            "--task-url".into(),
-            "https://github.com/example/repo/pull/1895".into(),
-            "--preview".into(),
-            "--no-finalize".into(),
-        ]))
+        let resolved = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".into(),
+                "agent-task".into(),
+                "cook".into(),
+                "--prompt".into(),
+                "update the existing pull request".into(),
+                "--repo".into(),
+                "fixture".into(),
+                "--cwd".into(),
+                linked.display().to_string(),
+                "--task-url".into(),
+                "https://github.com/example/repo/pull/1895".into(),
+                "--preview".into(),
+                "--no-finalize".into(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("resolve existing PR Cook request");
 
         assert_eq!(resolved.base.as_deref(), Some("release"));
@@ -297,16 +325,24 @@ fn cwd_only_unregistered_repo_fails_without_hydrating_unrelated_components() {
         );
 
         let started = std::time::Instant::now();
-        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--cwd".to_string(),
-            checkout.path().display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let error = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--cwd".to_string(),
+                checkout.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect_err("unregistered cwd requires an explicit repository identity");
 
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
@@ -343,18 +379,26 @@ fn add_remote(path: &std::path::Path, name: &str, remote_url: &str) {
 #[test]
 fn cook_derives_issue_destination_and_preserves_explicit_override() {
     with_isolated_home(|_| {
-        let derived = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the issue".to_string(),
-            "--repo".to_string(),
-            "homeboy".to_string(),
-            "--task-url".to_string(),
-            "https://github.com/Extra-Chill/homeboy/issues/11225".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let derived = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the issue".to_string(),
+                "--repo".to_string(),
+                "homeboy".to_string(),
+                "--task-url".to_string(),
+                "https://github.com/Extra-Chill/homeboy/issues/11225".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("derive Cook destination");
         assert_eq!(
             derived.to_worktree.as_deref(),
@@ -369,32 +413,49 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
             "homeboy"
         );
 
-        let suffixed = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the issue".to_string(),
-            "--repo".to_string(),
-            "homeboy".to_string(),
-            "--task-url".to_string(),
-            "https://github.com/Extra-Chill/homeboy/issues/11225?source=cook#details".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let suffixed = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the issue".to_string(),
+                "--repo".to_string(),
+                "homeboy".to_string(),
+                "--task-url".to_string(),
+                "https://github.com/Extra-Chill/homeboy/issues/11225?source=cook#details"
+                    .to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("derive Cook destination from suffixed issue URL");
         assert_eq!(suffixed.to_worktree, derived.to_worktree);
         assert_eq!(suffixed.head, derived.head);
 
-        let explicit = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the issue".to_string(),
-            "--to-worktree".to_string(),
-            "homeboy@caller-selected".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let explicit = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the issue".to_string(),
+                "--to-worktree".to_string(),
+                "homeboy@caller-selected".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("preserve explicit destination");
         assert_eq!(
             explicit.to_worktree.as_deref(),
@@ -459,18 +520,26 @@ fn cook_repository_selection_skips_unrelated_portable_git_enrichment() {
             "target-alias",
             "https://github.com/example/importer.git",
         ] {
-            let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--prompt".to_string(),
-                "targeted lookup".to_string(),
-                "--repo".to_string(),
-                selector.to_string(),
-                "--to-worktree".to_string(),
-                target.path().display().to_string(),
-                "--no-finalize".to_string(),
-            ]))
+            let args = {
+                let mut input = cook_args_from_cli(vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                    "--prompt".to_string(),
+                    "targeted lookup".to_string(),
+                    "--repo".to_string(),
+                    selector.to_string(),
+                    "--to-worktree".to_string(),
+                    target.path().display().to_string(),
+                    "--no-finalize".to_string(),
+                ]);
+                match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                    Ok(repository) => {
+                        super::super::run::resolve_cook_destination(input, repository.as_ref())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             .expect("repository selection must not inspect unrelated registrations");
 
             assert!(
@@ -509,22 +578,30 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
             .expect("create linked worktree");
         assert!(status.success(), "create linked worktree");
 
-        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--cwd".to_string(),
-            destination.display().to_string(),
-            "--to-worktree".to_string(),
-            "inferred@fix-inferred".to_string(),
-            "--task-url".to_string(),
-            "https://github.com/example/inferred/issues/13947".to_string(),
-            "--backend".to_string(),
-            "fixture".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let args = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--cwd".to_string(),
+                destination.display().to_string(),
+                "--to-worktree".to_string(),
+                "inferred@fix-inferred".to_string(),
+                "--task-url".to_string(),
+                "https://github.com/example/inferred/issues/13947".to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("infer repository from linked worktree cwd");
         assert_eq!(args.dispatch.repo.as_deref(), Some("inferred"));
         assert_eq!(
@@ -537,7 +614,7 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
         );
 
         let plan =
-            super::super::run::compile_cook_plan(&args, json!({ "path": destination }), None)
+            super::super::run::compile_cook_plan(&args, json!({ "path": destination }), None, None)
                 .expect("compile Cook plan");
         assert_eq!(
             plan.metadata["cook_repository_identity"],
@@ -548,8 +625,8 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
             "compatibility_fallback"
         );
 
-        let inferred_from_worktree =
-            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+        let inferred_from_worktree = {
+            let mut input = cook_args_from_cli(vec![
                 "homeboy".to_string(),
                 "agent-task".to_string(),
                 "cook".to_string(),
@@ -560,8 +637,15 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
                 "--backend".to_string(),
                 "fixture".to_string(),
                 "--no-finalize".to_string(),
-            ]))
-            .expect("infer repository from linked worktree destination");
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
+        .expect("infer repository from linked worktree destination");
         assert_eq!(
             inferred_from_worktree.dispatch.repo.as_deref(),
             Some("inferred")
@@ -574,20 +658,28 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
             "--to-worktree:git-remote:origin"
         );
 
-        let mismatch = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "other".to_string(),
-            "--cwd".to_string(),
-            destination.display().to_string(),
-            "--to-worktree".to_string(),
-            destination.display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let mismatch = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "other".to_string(),
+                "--cwd".to_string(),
+                destination.display().to_string(),
+                "--to-worktree".to_string(),
+                destination.display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect_err("explicit repository must still match the linked worktree");
         assert!(mismatch.message.contains("does not match"), "{mismatch:?}");
     });
@@ -603,18 +695,26 @@ fn repo_only_cook_persists_configured_repository_identity_for_deferred_lookup() 
             "https://token:secret@github.com/example/expected.git",
         );
 
-        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "expected".to_string(),
-            "--to-worktree".to_string(),
-            "fixture@expected".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let args = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "expected".to_string(),
+                "--to-worktree".to_string(),
+                "fixture@expected".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("bind configured repository identity");
 
         let identity = args.repository_identity.expect("repository identity");
@@ -630,18 +730,26 @@ fn repo_only_cook_persists_configured_repository_identity_for_deferred_lookup() 
 #[test]
 fn repo_only_cook_without_registered_component_persists_requested_repository_expectation() {
     with_isolated_home(|_| {
-        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "unidentified".to_string(),
-            "--to-worktree".to_string(),
-            "fixture@unidentified".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let args = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "unidentified".to_string(),
+                "--to-worktree".to_string(),
+                "fixture@unidentified".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("repo-only Cook remains compatible without component registration");
 
         let identity = args.repository_identity.expect("repository expectation");
@@ -676,8 +784,25 @@ fn repo_only_cook_preview_preserves_an_unregistered_repository_path_for_native_c
             "--no-finalize".to_string(),
         ]);
         super::super::run::bind_cook_preview_lifecycle(&mut args);
-        let (args, preview) = super::super::run::resolve_cook_preview_destination(args)
-            .expect("preview unregistered repository path");
+        let (args, preview) = {
+            let mut input = args;
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => crate::commands::agent_task::run::resolve_cook_destination(
+                    input,
+                    repository.as_ref(),
+                )
+                .and_then(|args| {
+                    crate::commands::agent_task::run::provision_cook_destination(
+                        &args,
+                        repository.as_ref(),
+                        true,
+                    )
+                    .map(|provision| (args, provision))
+                }),
+                Err(error) => Err(error),
+            }
+        }
+        .expect("preview unregistered repository path");
 
         assert_eq!(
             args.dispatch.repo.as_deref(),
@@ -735,48 +860,72 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
             .expect("create linked destination")
             .success());
 
-        let issue = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "blocks-engine".to_string(),
-            "--task-url".to_string(),
-            "https://github.com/example/blocks-engine/issues/12844".to_string(),
-            "--base".to_string(),
-            "trunk".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let issue = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "blocks-engine".to_string(),
+                "--task-url".to_string(),
+                "https://github.com/example/blocks-engine/issues/12844".to_string(),
+                "--base".to_string(),
+                "trunk".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("normalize issue repository alias");
-        let cwd = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "blocks-engine".to_string(),
-            "--cwd".to_string(),
-            checkout.path().display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let cwd = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "blocks-engine".to_string(),
+                "--cwd".to_string(),
+                checkout.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("normalize cwd repository alias");
-        let worktree = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "blocks-engine".to_string(),
-            "--to-worktree".to_string(),
-            destination.display().to_string(),
-            "--backend".to_string(),
-            "fixture".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let worktree = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "blocks-engine".to_string(),
+                "--to-worktree".to_string(),
+                destination.display().to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("normalize worktree repository alias");
 
         for args in [&issue, &cwd, &worktree] {
@@ -808,6 +957,7 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
         let plan = super::super::run::compile_cook_plan(
             &worktree,
             json!({ "action": "existing", "path": destination }),
+            None,
             None,
         )
         .expect("compile normalized durable plan");
@@ -841,18 +991,26 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
             "php-transformer"
         );
 
-        let component_id = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "php-transformer".to_string(),
-            "--to-worktree".to_string(),
-            "php-transformer@component-id".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let component_id = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "php-transformer".to_string(),
+                "--to-worktree".to_string(),
+                "php-transformer@component-id".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("normalize configured component id");
         let identity = component_id
             .repository_identity
@@ -893,20 +1051,28 @@ fn cook_keeps_root_repository_for_an_explicit_subdirectory_component() {
             "https://github.com/example/unrelated.git",
         );
 
-        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "blocks-engine".to_string(),
-            "--component".to_string(),
-            "php-transformer".to_string(),
-            "--cwd".to_string(),
-            component_path.display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let args = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "blocks-engine".to_string(),
+                "--component".to_string(),
+                "php-transformer".to_string(),
+                "--cwd".to_string(),
+                component_path.display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("resolve explicit subdirectory component");
 
         assert_eq!(args.dispatch.repo.as_deref(), Some("blocks-engine"));
@@ -920,22 +1086,30 @@ fn cook_keeps_root_repository_for_an_explicit_subdirectory_component() {
             "git://github.com/example/blocks-engine"
         );
 
-        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "blocks-engine".to_string(),
-            "--component".to_string(),
-            "unrelated".to_string(),
-            "--cwd".to_string(),
-            component_path.display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let error = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "blocks-engine".to_string(),
+                "--component".to_string(),
+                "unrelated".to_string(),
+                "--cwd".to_string(),
+                component_path.display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect_err("unrelated component must remain fail-closed");
-        assert!(error.message.contains("belongs to repository"));
+        assert!(error.message.contains("belongs to repository"), "{error:?}");
     });
 }
 
@@ -953,20 +1127,28 @@ fn cook_replay_preserves_exact_component_when_repository_has_multiple_components
         register_component("component-b", &second, remote);
 
         for component in ["component-a", "component-b"] {
-            let resolved = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--prompt".to_string(),
-                "implement the fix".to_string(),
-                "--repo".to_string(),
-                component.to_string(),
-                "--task-url".to_string(),
-                "https://github.com/example/shared-repository/issues/12844".to_string(),
-                "--base".to_string(),
-                "main".to_string(),
-                "--no-finalize".to_string(),
-            ]))
+            let resolved = {
+                let mut input = cook_args_from_cli(vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                    "--prompt".to_string(),
+                    "implement the fix".to_string(),
+                    "--repo".to_string(),
+                    component.to_string(),
+                    "--task-url".to_string(),
+                    "https://github.com/example/shared-repository/issues/12844".to_string(),
+                    "--base".to_string(),
+                    "main".to_string(),
+                    "--no-finalize".to_string(),
+                ]);
+                match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                    Ok(repository) => {
+                        super::super::run::resolve_cook_destination(input, repository.as_ref())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             .expect("resolve exact component");
             assert_eq!(resolved.dispatch.repo.as_deref(), Some("shared-repository"));
             assert_eq!(resolved.component.as_deref(), Some(component));
@@ -978,26 +1160,42 @@ fn cook_replay_preserves_exact_component_when_repository_has_multiple_components
             assert!(replay
                 .windows(2)
                 .any(|args| args == ["--component", component]));
-            let replayed = super::super::run::resolve_cook_destination(cook_args_from_cli(replay))
-                .expect("replay exact component");
+            let replayed = {
+                let mut input = cook_args_from_cli(replay);
+                match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                    Ok(repository) => {
+                        super::super::run::resolve_cook_destination(input, repository.as_ref())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            .expect("replay exact component");
             assert_eq!(replayed.dispatch.repo, resolved.dispatch.repo);
             assert_eq!(replayed.component, resolved.component);
         }
 
-        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "shared-repository".to_string(),
-            "--task-url".to_string(),
-            "https://github.com/example/shared-repository/issues/12844".to_string(),
-            "--base".to_string(),
-            "main".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let error = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "shared-repository".to_string(),
+                "--task-url".to_string(),
+                "https://github.com/example/shared-repository/issues/12844".to_string(),
+                "--base".to_string(),
+                "main".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect_err("canonical repository remains ambiguous without a component");
         assert!(error
             .message
@@ -1090,22 +1288,30 @@ fn cook_resolves_omitted_base_from_workspace_upstream_for_standard_and_custom_br
                 .success());
             register_component("fixture", source.path(), &component_remote);
 
-            let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--prompt".to_string(),
-                "resolve base".to_string(),
-                "--workspace".to_string(),
-                source.path().display().to_string(),
-                "--to-worktree".to_string(),
-                source.path().display().to_string(),
-                "--repo".to_string(),
-                "fixture".to_string(),
-                "--backend".to_string(),
-                "fixture".to_string(),
-                "--no-finalize".to_string(),
-            ]))
+            let args = {
+                let mut input = cook_args_from_cli(vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                    "--prompt".to_string(),
+                    "resolve base".to_string(),
+                    "--workspace".to_string(),
+                    source.path().display().to_string(),
+                    "--to-worktree".to_string(),
+                    source.path().display().to_string(),
+                    "--repo".to_string(),
+                    "fixture".to_string(),
+                    "--backend".to_string(),
+                    "fixture".to_string(),
+                    "--no-finalize".to_string(),
+                ]);
+                match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                    Ok(repository) => {
+                        super::super::run::resolve_cook_destination(input, repository.as_ref())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             .expect("resolve workspace upstream");
             assert_eq!(args.base.as_deref(), Some(branch));
             assert_eq!(
@@ -1194,11 +1400,16 @@ fn cook_rejects_ambiguous_repository_identity_across_destination_forms() {
                     _ => unreachable!(),
                 }
                 command.push("--no-finalize".to_string());
-                let error =
-                    super::super::run::resolve_cook_destination(cook_args_from_cli(command))
-                        .expect_err(
-                            "ambiguous configured identity must reject before provisioning",
-                        );
+                let error = {
+                    let mut input = cook_args_from_cli(command);
+                    match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                        Ok(repository) => {
+                            super::super::run::resolve_cook_destination(input, repository.as_ref())
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                .expect_err("ambiguous configured identity must reject before provisioning");
                 assert!(error
                     .message
                     .contains("matches multiple configured component identities"));
@@ -1240,20 +1451,28 @@ fn cook_exact_component_slug_disambiguates_shared_monorepo_remote() {
             });
         }
 
-        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--repo".to_string(),
-            "wp-build".to_string(),
-            "--cwd".to_string(),
-            checkout.path().display().to_string(),
-            "--to-worktree".to_string(),
-            checkout.path().display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let args = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--repo".to_string(),
+                "wp-build".to_string(),
+                "--cwd".to_string(),
+                checkout.path().display().to_string(),
+                "--to-worktree".to_string(),
+                checkout.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("exact component slug must disambiguate its shared monorepo remote");
 
         assert_eq!(args.dispatch.repo.as_deref(), Some("wp-build"));
@@ -1315,18 +1534,26 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback
             .success());
         register_component("fixture", source.path(), component_remote);
 
-        let metadata = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "resolve metadata".to_string(),
-            "--repo".to_string(),
-            "fixture".to_string(),
-            "--to-worktree".to_string(),
-            "fixture@missing".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let metadata = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "resolve metadata".to_string(),
+                "--repo".to_string(),
+                "fixture".to_string(),
+                "--to-worktree".to_string(),
+                "fixture@missing".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("resolve repository metadata");
         assert_eq!(metadata.base.as_deref(), Some("trunk"));
         assert_eq!(
@@ -1337,8 +1564,14 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback
         let mut mismatch = metadata;
         mismatch.base = Some("main".to_string());
         mismatch.base_resolution = Some(json!({ "base": "main", "source": "explicit" }));
-        let error = super::super::run::provision_cook_destination(&mismatch)
-            .expect_err("invalid base must fail before provisioning");
+        let error = super::super::run::provision_cook_destination(
+            &mismatch,
+            crate::commands::agent_task::run::resolve_cook_repository(&mut mismatch.clone())
+                .unwrap()
+                .as_ref(),
+            false,
+        )
+        .expect_err("invalid base must fail before provisioning");
         assert_eq!(error.details["field"], "base");
         assert!(error.details["tried"].as_array().is_some_and(|replays| {
             replays.iter().any(|replay| {
@@ -1367,18 +1600,26 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback
             ])
         );
 
-        let fallback = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "fallback".to_string(),
-            "--repo".to_string(),
-            "unavailable".to_string(),
-            "--to-worktree".to_string(),
-            "unavailable@missing".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let fallback = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "fallback".to_string(),
+                "--repo".to_string(),
+                "unavailable".to_string(),
+                "--to-worktree".to_string(),
+                "unavailable@missing".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("fall back without metadata");
         assert_eq!(fallback.base.as_deref(), Some("main"));
         assert_eq!(
@@ -1472,18 +1713,26 @@ fn cook_rejects_ambiguous_or_mismatching_workspace_repository_identity() {
             "https://github.com/example/two.git",
         );
 
-        let ambiguous = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--workspace".to_string(),
-            workspace.path().display().to_string(),
-            "--to-worktree".to_string(),
-            workspace.path().display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let ambiguous = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--workspace".to_string(),
+                workspace.path().display().to_string(),
+                "--to-worktree".to_string(),
+                workspace.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect_err("multiple configured remotes are ambiguous");
         assert!(
             ambiguous
@@ -1506,20 +1755,28 @@ fn cook_rejects_ambiguous_or_mismatching_workspace_repository_identity() {
             "origin",
             "https://github.com/example/one.git",
         );
-        let mismatch = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--workspace".to_string(),
-            mismatch_workspace.path().display().to_string(),
-            "--to-worktree".to_string(),
-            mismatch_workspace.path().display().to_string(),
-            "--repo".to_string(),
-            "other".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let mismatch = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--workspace".to_string(),
+                mismatch_workspace.path().display().to_string(),
+                "--to-worktree".to_string(),
+                mismatch_workspace.path().display().to_string(),
+                "--repo".to_string(),
+                "other".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect_err("explicit repo must match workspace identity");
         assert!(
             mismatch.message.contains("does not match"),
@@ -1540,18 +1797,26 @@ fn cook_rejects_ambiguous_or_mismatching_workspace_repository_identity() {
 fn cook_requires_repo_for_an_explicit_non_git_workspace() {
     with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
-        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--cwd".to_string(),
-            workspace.path().display().to_string(),
-            "--to-worktree".to_string(),
-            workspace.path().display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let error = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--cwd".to_string(),
+                workspace.path().display().to_string(),
+                "--to-worktree".to_string(),
+                workspace.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect_err("non-Git workspace cannot infer a repository");
         assert_eq!(
             error.details["args"][0],
@@ -1571,18 +1836,26 @@ fn cook_requires_repo_for_an_explicit_git_workspace_without_a_configured_mapping
             "https://github.com/example/unconfigured.git",
         );
 
-        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--cwd".to_string(),
-            workspace.path().display().to_string(),
-            "--to-worktree".to_string(),
-            workspace.path().display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let error = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--cwd".to_string(),
+                workspace.path().display().to_string(),
+                "--to-worktree".to_string(),
+                workspace.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect_err("unmapped Git workspace cannot infer a repository");
 
         assert_eq!(
@@ -1613,22 +1886,30 @@ fn cook_rejects_conflicting_workspace_and_cwd_even_with_an_explicit_repo() {
         register_component("two", cwd.path(), "https://github.com/example/two.git");
 
         for repo in ["one", "two"] {
-            let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--prompt".to_string(),
-                "implement the fix".to_string(),
-                "--workspace".to_string(),
-                workspace.path().display().to_string(),
-                "--cwd".to_string(),
-                cwd.path().display().to_string(),
-                "--to-worktree".to_string(),
-                workspace.path().display().to_string(),
-                "--repo".to_string(),
-                repo.to_string(),
-                "--no-finalize".to_string(),
-            ]))
+            let error = {
+                let mut input = cook_args_from_cli(vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                    "--prompt".to_string(),
+                    "implement the fix".to_string(),
+                    "--workspace".to_string(),
+                    workspace.path().display().to_string(),
+                    "--cwd".to_string(),
+                    cwd.path().display().to_string(),
+                    "--to-worktree".to_string(),
+                    workspace.path().display().to_string(),
+                    "--repo".to_string(),
+                    repo.to_string(),
+                    "--no-finalize".to_string(),
+                ]);
+                match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                    Ok(repository) => {
+                        super::super::run::resolve_cook_destination(input, repository.as_ref())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             .expect_err("explicit repo cannot select a conflicting checkout");
             assert!(error
                 .message
@@ -1671,20 +1952,28 @@ fn cook_rejects_destination_with_a_different_repository_identity() {
         // while the destination is resolved, before any plan is compiled.
         // Both checkouts were supplied by the caller, so naming both remotes
         // is what lets them see which one to correct.
-        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--workspace".to_string(),
-            workspace.path().display().to_string(),
-            "--to-worktree".to_string(),
-            destination.path().display().to_string(),
-            "--backend".to_string(),
-            "fixture".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let error = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--workspace".to_string(),
+                workspace.path().display().to_string(),
+                "--to-worktree".to_string(),
+                destination.path().display().to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect_err("destination remote must match Cook repository identity");
         assert!(error
             .message
@@ -1714,18 +2003,26 @@ fn cook_infers_an_ssh_scheme_remote_and_redacts_credentials_from_provenance() {
             "https://github.com/example/secure.git",
         );
 
-        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "implement the fix".to_string(),
-            "--cwd".to_string(),
-            workspace.path().display().to_string(),
-            "--to-worktree".to_string(),
-            workspace.path().display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let args = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--cwd".to_string(),
+                workspace.path().display().to_string(),
+                "--to-worktree".to_string(),
+                workspace.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("infer ssh remote");
         assert_eq!(args.dispatch.repo.as_deref(), Some("secure"));
         assert_eq!(
@@ -1740,8 +2037,8 @@ fn cook_infers_an_ssh_scheme_remote_and_redacts_credentials_from_provenance() {
             .status()
             .expect("set credentialed fixture remote");
         assert!(status.success(), "set credentialed fixture remote");
-        let credentialed_args =
-            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+        let credentialed_args = {
+            let mut input = cook_args_from_cli(vec![
                 "homeboy".to_string(),
                 "agent-task".to_string(),
                 "cook".to_string(),
@@ -1752,8 +2049,15 @@ fn cook_infers_an_ssh_scheme_remote_and_redacts_credentials_from_provenance() {
                 "--to-worktree".to_string(),
                 workspace.path().display().to_string(),
                 "--no-finalize".to_string(),
-            ]))
-            .expect("infer credentialed remote without persisting its credential");
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
+        .expect("infer credentialed remote without persisting its credential");
         assert!(!credentialed_args
             .repository_identity
             .expect("identity")
@@ -1781,8 +2085,14 @@ fn cook_provisioning_rejects_an_unresolved_destination_without_panicking() {
             "--no-finalize".to_string(),
         ]);
 
-        let error = super::super::run::provision_cook_destination(&args)
-            .expect_err("an unresolved destination must fail closed");
+        let error = super::super::run::provision_cook_destination(
+            &args,
+            crate::commands::agent_task::run::resolve_cook_repository(&mut args.clone())
+                .unwrap()
+                .as_ref(),
+            false,
+        )
+        .expect_err("an unresolved destination must fail closed");
 
         assert_eq!(
             error.details["args"][0],
@@ -1821,9 +2131,12 @@ fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
         )
         .expect_err("queue-only cook must fail before resolving its worktree");
 
-        assert!(error
-            .message
-            .contains("cannot queue its controller-owned lifecycle"));
+        assert!(
+            error
+                .message
+                .contains("cannot queue its controller-owned lifecycle"),
+            "{error:?}"
+        );
         assert!(!homeboy::agents::agent_task_service::recipe_exists("cook-queue-only").unwrap());
     });
 }
@@ -1852,8 +2165,9 @@ fn cook_rejects_non_cli_no_finalize_authorization_before_provisioning() {
     let mut provenance = compiled.provenance;
     provenance.set("no_finalize", ArgumentSource::Configuration);
 
-    let error = super::super::run::validate_cook_request_with_provenance(&cook, Some(&provenance))
-        .expect_err("configuration cannot authorize finalization suppression");
+    let error =
+        super::super::run::validate_cook_request_with_provenance(&cook, Some(&provenance), None)
+            .expect_err("configuration cannot authorize finalization suppression");
 
     assert!(error.message.contains("explicitly authorized"));
 }
@@ -2072,20 +2386,28 @@ fn cook_cwd_uses_native_managed_handle_before_recipe_admission() {
             .success());
         homeboy::core::worktree::record_active_for_test("fixture@native-cook-cwd", &cwd);
 
-        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "use native cwd".to_string(),
-            "--cwd".to_string(),
-            cwd.display().to_string(),
-            "--repo".to_string(),
-            "fixture".to_string(),
-            "--task-url".to_string(),
-            "https://github.com/example/fixture/issues/14188".to_string(),
-            "--no-finalize".to_string(),
-        ]))
+        let args = {
+            let mut input = cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "use native cwd".to_string(),
+                "--cwd".to_string(),
+                cwd.display().to_string(),
+                "--repo".to_string(),
+                "fixture".to_string(),
+                "--task-url".to_string(),
+                "https://github.com/example/fixture/issues/14188".to_string(),
+                "--no-finalize".to_string(),
+            ]);
+            match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                Ok(repository) => {
+                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                }
+                Err(error) => Err(error),
+            }
+        }
         .expect("resolve native explicit CWD");
         assert_eq!(args.to_worktree.as_deref(), Some("fixture@native-cook-cwd"));
     });
@@ -2127,7 +2449,7 @@ fn cook_rejects_mismatched_cwd_and_destination() {
             "--no-finalize".to_string(),
         ]);
 
-        let error = super::super::run::provision_cook_destination(&args)
+        let error = super::super::run::provision_cook_destination(&args, None, false)
             .expect_err("mismatched worktrees must fail");
         assert_eq!(error.details["field"], "to_worktree");
         assert!(error
@@ -3157,13 +3479,21 @@ fn derived_destination_refuses_a_stale_leftover_branch_but_explicit_head_is_auth
             .map(str::to_string)
             .to_vec();
             argv.extend(extra.iter().map(|arg| arg.to_string()));
-            super::super::run::resolve_cook_destination(cook_args_from_cli(argv))
+            {
+                let mut input = cook_args_from_cli(argv);
+                match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                    Ok(repository) => {
+                        super::super::run::resolve_cook_destination(input, repository.as_ref())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
         };
 
         let error = resolve(&[]).expect_err("a stale derived destination is refused");
         assert!(
-            error.message.contains("Closed PR work"),
-            "names the commits ahead: {}",
+            error.message.contains("existing PR work"),
+            "names the existing PR work: {}",
             error.message
         );
         assert_eq!(
@@ -3193,20 +3523,28 @@ fn derived_destination_advances_past_a_retired_issue_worktree() {
             "https://github.com/example/fixture.git",
         );
         let derive = || {
-            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--prompt".to_string(),
-                "phase two".to_string(),
-                "--repo".to_string(),
-                "fixture".to_string(),
-                "--task-url".to_string(),
-                "https://github.com/example/fixture/issues/77".to_string(),
-                "--base".to_string(),
-                "main".to_string(),
-                "--no-finalize".to_string(),
-            ]))
+            {
+                let mut input = cook_args_from_cli(vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                    "--prompt".to_string(),
+                    "phase two".to_string(),
+                    "--repo".to_string(),
+                    "fixture".to_string(),
+                    "--task-url".to_string(),
+                    "https://github.com/example/fixture/issues/77".to_string(),
+                    "--base".to_string(),
+                    "main".to_string(),
+                    "--no-finalize".to_string(),
+                ]);
+                match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
+                    Ok(repository) => {
+                        super::super::run::resolve_cook_destination(input, repository.as_ref())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             .expect("resolve derived destination")
         };
 

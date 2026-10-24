@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,10 +29,8 @@ use crate::agent_task_finalization::{
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
-    candidate_fingerprint, canonical_recoverable_patch_artifacts,
-    canonical_recoverable_patch_artifacts_in_observation_store,
-    preflight_recoverable_candidate_promotion_in_observation_store,
-    promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
+    candidate_fingerprint, promote_with_checkpoint_in_observation_store,
+    resume_promoted_patch_in_observation_store,
     resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionCandidate,
     AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionStatus,
 };
@@ -643,10 +641,7 @@ pub(crate) fn promote_attempt_in_store(
 ) -> Result<AgentTaskPromotionReport> {
     let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
     let selected_task_id = selected_candidate_task_id_in_store(lifecycle_store, run_id)?;
-    let artifact_id = match continuation_artifact_id_in_store(lifecycle_store, run_id)? {
-        Some(artifact_id) => Some(artifact_id),
-        None => canonical_cook_patch_artifact_id_in_store(lifecycle_store, options, run_id)?,
-    };
+    let artifact_id = None;
     let repository_integrity_evidence =
         admitted_repository_integrity_evidence(lifecycle_store, run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
@@ -875,9 +870,6 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         provider_invocation: options.provider_transport.provider_invocation.clone(),
         repository_integrity_evidence: None,
     };
-    let observation_store = lifecycle_store.open_observation_readonly()?;
-    if outcome.candidate.is_some()
-        || outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable
     {
         if outcome.candidate.is_none()
             && (outcome.is_verified_unchanged_attempt()
@@ -905,29 +897,6 @@ pub fn preflight_cook_promotion_for_observation_in_store(
             "execution_only_checks": ["promotion_target_resolution", "candidate_materialization", "verification_gates"],
         }));
     }
-    let artifact = preflight_recoverable_candidate_promotion_in_observation_store(
-        &promotion_options,
-        &observation_store,
-    )?;
-    Ok(json!({
-        "behavior": "promote_new",
-        "artifact_id": artifact.id,
-        "execution_only_checks": ["promotion_target_resolution", "patch_apply", "verification_gates"],
-        "candidate_fingerprint": {
-            "schema": "homeboy/agent-task-recoverable-candidate-fingerprint/v1",
-            "kind": "recoverable_patch",
-            "artifact_id": artifact.id,
-            "sha256": artifact.sha256,
-            "size_bytes": artifact.size_bytes,
-            "run_id": artifact.metadata.get("run_id"),
-            "task_id": artifact.metadata.get("task_id"),
-            "producer_attempt": artifact.metadata.get("producer_attempt"),
-            "base_ref": artifact.metadata.get("base_ref"),
-            "provider_backend": artifact.metadata.get("provider_backend"),
-            "repository_identity": artifact.metadata.get("repository_identity"),
-            "workspace_identity": artifact.metadata.get("workspace_identity"),
-        }
-    }))
 }
 
 fn persisted_promotion_execution_only_checks(
@@ -983,373 +952,6 @@ mod preflight_report_tests {
         assert!(verification.contains(&"verification_gates"));
         assert!(!verification.contains(&"finalization"));
     }
-}
-
-pub(crate) fn canonical_cook_patch_artifact_id_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    options: &CookRequest,
-    run_id: &str,
-) -> Result<Option<String>> {
-    let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
-    let task_id = selected_candidate_task_id_in_store(lifecycle_store, run_id)?;
-    let aggregate = lifecycle_store.read_aggregate(run_id)?;
-    let Some(outcome) = aggregate
-        .outcomes
-        .iter()
-        .find(|outcome| task_id.as_deref().is_none_or(|id| outcome.task_id == id))
-    else {
-        return Ok(None);
-    };
-    if outcome.candidate.is_some() {
-        return Ok(None);
-    }
-    let promotion_options = AgentTaskPromotionRequest {
-        source,
-        source_run_id: Some(run_id.to_string()),
-        source_path,
-        source_worktree_path: component_workspace_path(options)?
-            .or_else(|| options.workspace.source_worktree_path.clone()),
-        base_ref: Some(options.finalization.base.clone()),
-        task_base_sha: cook_candidate_base_sha(options),
-        candidate_ref: None,
-        to_worktree: options.workspace.to_worktree.clone(),
-        task_id,
-        artifact_id: None,
-        dry_run: false,
-        gates: options.gates.clone(),
-        provider_invocation: options.provider_transport.provider_invocation.clone(),
-        repository_integrity_evidence: None,
-    };
-    let observation_store = lifecycle_store.open_observation_initialized()?;
-    let canonical = canonical_recoverable_patch_artifacts_in_observation_store(
-        outcome,
-        &promotion_options,
-        &observation_store,
-    )?;
-    match canonical.artifacts.as_slice() {
-        [] => Ok(None),
-        [artifact] => Ok(Some(artifact.id.clone())),
-        artifacts => {
-            let (choices, comparison) = cook_candidate_comparison(
-                outcome,
-                artifacts,
-                &canonical.patch_contents,
-                canonical.omitted_candidate_count,
-                canonical.omitted_patch_bytes,
-                options,
-                run_id,
-            );
-            Err(Error::new(
-                homeboy_core::ErrorCode::ValidationInvalidArgument,
-                "Cook found distinct canonical patch candidates; select one before promotion",
-                json!({
-                    "field": "artifact_id",
-                    "state": "selection_required",
-                    "selection_required": true,
-                    "choices": choices,
-                    "comparison": comparison,
-                }),
-            ))
-        }
-    }
-}
-
-const CANDIDATE_FILE_LIMIT: usize = 12;
-const CANDIDATE_EVIDENCE_LIMIT: usize = 6;
-const CANDIDATE_DIAGNOSTIC_LIMIT: usize = 6;
-const CANDIDATE_JSON_BYTES_LIMIT: usize = 2048;
-
-/// Project only facts present in canonical patch bytes and durable outcome
-/// evidence. This deliberately does not infer behavior from generated prose.
-fn cook_candidate_comparison(
-    outcome: &crate::agent_task::AgentTaskOutcome,
-    artifacts: &[crate::agent_task::AgentTaskArtifact],
-    patches: &BTreeMap<String, String>,
-    omitted_candidate_count: usize,
-    omitted_patch_bytes: u64,
-    options: &CookRequest,
-    run_id: &str,
-) -> (Vec<Value>, Value) {
-    let summaries = artifacts
-        .iter()
-        .map(|artifact| {
-            let patch = patches
-                .get(&artifact.id)
-                .map(String::as_str)
-                .unwrap_or_default();
-            let stats = patch_stats(patch);
-            let (test_evidence, omitted_test_evidence_count) = bounded_test_evidence(artifact);
-            let mut risk_flags = patch_risk_flags(patch, &stats.all_files);
-            if test_evidence.is_empty() {
-                risk_flags.push("missing_test_evidence".to_string());
-            }
-            CandidateSummary {
-                artifact,
-                all_files: stats.all_files,
-                file_count: stats.file_count,
-                insertions: stats.insertions,
-                deletions: stats.deletions,
-                test_evidence,
-                risk_flags,
-                omitted_test_evidence_count,
-            }
-        })
-        .collect::<Vec<_>>();
-    let common_files = summaries
-        .iter()
-        .map(|summary| summary.all_files.clone())
-        .reduce(|left, right| left.intersection(&right).cloned().collect())
-        .unwrap_or_default();
-    let recommendation = deterministic_recommendation(&summaries);
-    let choices = summaries
-        .iter()
-        .map(|summary| {
-            let unique_files = summary
-                .all_files
-                .iter()
-                .filter(|file| !common_files.contains(*file))
-                .cloned()
-                .collect::<Vec<_>>();
-            let rationale = recommendation.as_ref().and_then(|recommended| {
-                (recommended == &summary.artifact.id).then_some(
-                    "Only candidate with recorded test evidence and no artifact-derived risk flags.",
-                )
-            });
-            json!({
-                "artifact_id": summary.artifact.id,
-                "sha256": summary.artifact.sha256,
-                "patch_artifact": {
-                    "path": summary.artifact.path,
-                    "url": summary.artifact.url,
-                },
-                "provider": summary.artifact.metadata.get("provider_backend"),
-                "model": outcome.selected_model(),
-                "attempt": summary.artifact.metadata.get("producer_attempt"),
-                "changed_files": preview(&summary.all_files),
-                "changed_file_count": summary.file_count,
-                "changed_files_omitted_count": summary.file_count.saturating_sub(CANDIDATE_FILE_LIMIT),
-                "line_stats": { "insertions": summary.insertions, "deletions": summary.deletions },
-                "diff_summary": format!(
-                    "{} file(s), {} insertion(s), {} deletion(s)",
-                    summary.file_count, summary.insertions, summary.deletions
-                ),
-                "test_evidence": summary.test_evidence,
-                "test_evidence_omitted_count": summary.omitted_test_evidence_count,
-                "overlap": {
-                    "shared_changed_files": preview(&common_files),
-                    "shared_changed_files_omitted_count": common_files.len().saturating_sub(CANDIDATE_FILE_LIMIT),
-                },
-                "differences": {
-                    "unique_changed_files": preview(&unique_files.into_iter().collect()),
-                    "unique_changed_files_omitted_count": summary.file_count.saturating_sub(common_files.len()).saturating_sub(CANDIDATE_FILE_LIMIT),
-                },
-                "risk_flags": summary.risk_flags,
-                "recommendation": rationale.map(|rationale| json!({ "rationale": rationale })),
-                "command": cook_promotion_command(options, run_id, &outcome.task_id, &summary.artifact.id),
-            })
-        })
-        .collect();
-    let (shared_evidence, omitted_evidence_count) = bounded_shared_evidence(outcome);
-    let (shared_diagnostics, omitted_diagnostic_count) = bounded_diagnostics(outcome);
-    (
-        choices,
-        json!({
-            "shared_outcome_evidence": shared_evidence,
-            "shared_outcome_evidence_omitted_count": omitted_evidence_count,
-            "shared_outcome_diagnostics": shared_diagnostics,
-            "shared_outcome_diagnostics_omitted_count": omitted_diagnostic_count,
-            "omitted_candidate_count": omitted_candidate_count,
-            "omitted_patch_bytes": omitted_patch_bytes,
-        }),
-    )
-}
-
-struct CandidateSummary<'a> {
-    artifact: &'a crate::agent_task::AgentTaskArtifact,
-    all_files: BTreeSet<String>,
-    file_count: usize,
-    insertions: usize,
-    deletions: usize,
-    test_evidence: Vec<Value>,
-    risk_flags: Vec<String>,
-    omitted_test_evidence_count: usize,
-}
-
-struct PatchStats {
-    all_files: BTreeSet<String>,
-    file_count: usize,
-    insertions: usize,
-    deletions: usize,
-}
-
-fn patch_stats(patch: &str) -> PatchStats {
-    let mut all_files = BTreeSet::new();
-    let mut insertions = 0;
-    let mut deletions = 0;
-    for line in patch.lines() {
-        if let Some(path) = line
-            .strip_prefix("diff --git a/")
-            .and_then(|line| line.split_once(" b/").map(|(_, path)| path))
-        {
-            all_files.insert(path.to_string());
-        } else if line.starts_with('+') && !line.starts_with("+++") {
-            insertions += 1;
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            deletions += 1;
-        }
-    }
-    let file_count = all_files.len();
-    PatchStats {
-        all_files,
-        file_count,
-        insertions,
-        deletions,
-    }
-}
-
-fn bounded_test_evidence(artifact: &crate::agent_task::AgentTaskArtifact) -> (Vec<Value>, usize) {
-    let evidence = artifact
-        .metadata
-        .get("test_evidence")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .cloned()
-        .collect::<Vec<_>>();
-    bounded_json_values(evidence, CANDIDATE_EVIDENCE_LIMIT)
-}
-
-fn bounded_shared_evidence(outcome: &crate::agent_task::AgentTaskOutcome) -> (Vec<Value>, usize) {
-    bounded_json_values(
-        outcome.evidence_refs.iter().map(|evidence| {
-            json!({ "kind": evidence.kind, "uri": evidence.uri, "label": evidence.label })
-        }).collect(),
-        CANDIDATE_EVIDENCE_LIMIT,
-    )
-}
-
-fn bounded_diagnostics(outcome: &crate::agent_task::AgentTaskOutcome) -> (Vec<Value>, usize) {
-    bounded_json_values(
-        outcome
-            .diagnostics
-            .iter()
-            .map(|diagnostic| json!({ "class": diagnostic.class, "message": diagnostic.message }))
-            .collect(),
-        CANDIDATE_DIAGNOSTIC_LIMIT,
-    )
-}
-
-fn bounded_json_values(values: Vec<Value>, limit: usize) -> (Vec<Value>, usize) {
-    let omitted = values.len().saturating_sub(limit);
-    (
-        values
-            .into_iter()
-            .take(limit)
-            .map(bounded_json_value)
-            .collect(),
-        omitted,
-    )
-}
-
-fn bounded_json_value(value: Value) -> Value {
-    let bytes = serde_json::to_vec(&value).unwrap_or_default();
-    (bytes.len() <= CANDIDATE_JSON_BYTES_LIMIT)
-        .then_some(value)
-        .unwrap_or_else(|| {
-            json!({
-                "omitted": "json_value_exceeds_byte_limit",
-                "size_bytes": bytes.len(),
-            })
-        })
-}
-
-fn preview(files: &BTreeSet<String>) -> Vec<String> {
-    files.iter().take(CANDIDATE_FILE_LIMIT).cloned().collect()
-}
-
-fn patch_risk_flags(patch: &str, files: &BTreeSet<String>) -> Vec<String> {
-    let mut flags = BTreeSet::new();
-    if files.iter().any(|file| {
-        file.starts_with(".github/workflows/")
-            || file.ends_with("/Dockerfile")
-            || file == "Dockerfile"
-    }) {
-        flags.insert("security_sensitive_automation_change");
-    }
-    if patch
-        .lines()
-        .any(|line| line.starts_with("new file mode 100755"))
-    {
-        flags.insert("new_executable_file");
-    }
-    if patch.lines().any(|line| {
-        line.starts_with('+')
-            && !line.starts_with("+++")
-            && ["-----BEGIN", "AKIA", "password=", "secret=", "token="]
-                .iter()
-                .any(|pattern| line.contains(pattern))
-    }) {
-        flags.insert("sensitive_literal_pattern_added");
-    }
-    flags.into_iter().map(str::to_string).collect()
-}
-
-fn deterministic_recommendation(summaries: &[CandidateSummary<'_>]) -> Option<String> {
-    let eligible = summaries
-        .iter()
-        .filter(|summary| !summary.test_evidence.is_empty() && summary.risk_flags.is_empty())
-        .collect::<Vec<_>>();
-    (eligible.len() == 1).then(|| eligible[0].artifact.id.clone())
-}
-
-/// Render an explicit promotion command from Cook's durable execution contract.
-/// Every gate and provider field is included so a manual choice cannot silently
-/// fall back to CLI defaults that differ from the original Cook.
-pub(crate) fn cook_promotion_command(
-    options: &CookRequest,
-    run_id: &str,
-    task_id: &str,
-    artifact_id: &str,
-) -> String {
-    quote_args(&cook_promotion_argv(options, run_id, task_id, artifact_id))
-}
-
-/// The exact CLI argv required to reproduce Cook's promotion contract.
-pub(crate) fn cook_promotion_argv(
-    options: &CookRequest,
-    run_id: &str,
-    task_id: &str,
-    artifact_id: &str,
-) -> Vec<String> {
-    let mut command = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "promote".to_string(),
-        run_id.to_string(),
-        "--to-worktree".to_string(),
-        options.workspace.to_worktree.clone(),
-        "--base".to_string(),
-        options.finalization.base.clone(),
-        "--task-id".to_string(),
-        task_id.to_string(),
-        "--artifact-id".to_string(),
-        artifact_id.to_string(),
-    ];
-    crate::agent_task_gate::append_promotion_gate_argv(&mut command, &options.gates);
-    if let Some(invocation) = &options.provider_transport.provider_invocation {
-        for argument in &invocation.argv {
-            command.push(format!("--provider-argv={argument}"));
-        }
-    }
-    command
-}
-
-/// Cook only promotes the candidate selected by the scheduler. A single-task
-/// aggregate has no selection projection and retains the historical behavior.
-pub(crate) fn selected_candidate_task_id(run_id: &str) -> Result<Option<String>> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    selected_candidate_task_id_in_store(&lifecycle_store, run_id)
 }
 
 pub(crate) fn selected_candidate_task_id_in_store(
@@ -1426,6 +1028,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                 )
             })?;
             let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
+            let source = bind_persisted_promotion_artifact(source, &promotion)?;
             let observation_store = lifecycle_store.open_observation_initialized()?;
             let resumed = resume_promoted_patch_in_observation_store(
                 AgentTaskPromotionRequest {
@@ -1474,22 +1077,6 @@ pub(crate) fn promote_or_load_attempt_in_store(
         })?,
     )?;
     Ok(promotion)
-}
-
-fn continuation_artifact_id_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<Option<String>> {
-    let record = lifecycle_store.read_record(run_id)?;
-    let Some(route) = record.metadata.get("cook_continue_route") else {
-        return Ok(None);
-    };
-    let artifact_id = route
-        .get("artifact_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .map(str::to_string);
-    Ok(artifact_id)
 }
 
 pub(crate) fn persisted_promotion_for_attempt(
@@ -1663,15 +1250,13 @@ pub fn record_replacement_gate_proof(
         accept_inherited_failures,
     )?;
     validate_legacy_replacement_candidate_checkout(run_id, &original, &replacement)?;
-    let expected_candidate = canonical_candidate_fingerprint(original.provenance.get("candidate"));
-    let observed_candidate =
-        canonical_candidate_fingerprint(replacement.provenance.get("candidate"));
+    let expected_candidate = original.provenance.get("candidate_commit").cloned();
+    let observed_candidate = replacement.provenance.get("candidate_commit").cloned();
     let same_candidate = observed_candidate == expected_candidate;
     let drifted = serde_json::json!({
         "run_id": replacement.source.run_id.as_deref() != Some(run_id),
         "target": replacement.target.worktree != original.target.worktree || replacement.target.path != original.target.path,
         "worktree": replacement.to_worktree != original.to_worktree,
-        "artifact": replacement.patch_artifact.id != original.patch_artifact.id || replacement.patch_artifact.kind != original.patch_artifact.kind || replacement.patch_artifact.sha256 != original.patch_artifact.sha256,
         "changed_files": replacement.changed_files != original.changed_files,
         "verified_base": replacement.verified_base != original.verified_base,
         "candidate": !same_candidate,
@@ -1792,15 +1377,11 @@ pub(super) fn validate_replacement_promotion_in_store(
                         && original.target.worktree == promotion.target.worktree
                         && original.target.path == promotion.target.path
                         && original.to_worktree == promotion.to_worktree
-                        && original.patch_artifact.id == promotion.patch_artifact.id
-                        && original.patch_artifact.kind == promotion.patch_artifact.kind
-                        && original.patch_artifact.sha256 == promotion.patch_artifact.sha256
                         && original.changed_files == promotion.changed_files
                         && original.verified_base == promotion.verified_base
-                        && canonical_candidate_fingerprint(original.provenance.get("candidate"))
-                            == canonical_candidate_fingerprint(
-                                promotion.provenance.get("candidate"),
-                            )
+                        && original.provenance.get("candidate_commit").is_some()
+                        && original.provenance.get("candidate_commit")
+                            == promotion.provenance.get("candidate_commit")
                 },
             )
     });
@@ -2419,32 +2000,20 @@ fn bind_persisted_promotion_artifact(
     } else {
         &mut source_value
     };
-    let artifacts = outcome
-        .get_mut("artifacts")
-        .and_then(Value::as_array_mut)
+    let candidate = promotion
+        .provenance
+        .get("candidate_commit")
+        .filter(|candidate| !candidate.is_null())
         .ok_or_else(|| {
             Error::validation_invalid_argument(
-                "promotion.source.artifacts",
-                "replacement gate source outcome has no artifact inventory",
-                Some(promotion.source.task_id.clone()),
+                "promotion.candidate_commit",
+                "non-recoverable: checkpoint has no immutable candidate; run a new Cook",
+                None,
                 None,
             )
+            .with_retryable(false)
         })?;
-    if !artifacts.iter().any(|artifact| {
-        artifact.get("id").and_then(Value::as_str) == Some(promotion.patch_artifact.id.as_str())
-    }) {
-        artifacts.push(json!({
-            "id": promotion.patch_artifact.id,
-            "kind": promotion.patch_artifact.kind,
-            "path": promotion.patch_artifact.path,
-            "sha256": promotion.patch_artifact.sha256,
-            "metadata": {
-                "actionable": true,
-                "role": "patch",
-                "source": "persisted_promotion",
-            },
-        }));
-    }
+    outcome["candidate"] = candidate.clone();
     serde_json::to_string(&source_value)
         .map_err(|error| Error::internal_json(error.to_string(), None))
 }
@@ -2789,6 +2358,31 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
     let regate = tree != verified.tree;
     let json_error = |error: serde_json::Error| Error::internal_json(error.to_string(), None);
     let mut caught_up = serde_json::to_value(promotion).map_err(json_error)?;
+    let candidate_sha = git_output(
+        path,
+        &[
+            "-c",
+            "user.name=Homeboy",
+            "-c",
+            "user.email=homeboy@localhost",
+            "commit-tree",
+            &tree,
+            "-p",
+            &fresh_base,
+            "-m",
+            "homeboy: rebased candidate",
+        ],
+    )?;
+    git_output(
+        path,
+        &[
+            "update-ref",
+            &format!("refs/homeboy/candidates/{run_id}"),
+            &candidate_sha,
+        ],
+    )?;
+    caught_up["provenance"]["candidate_commit"] =
+        json!({"base_sha":fresh_base,"candidate_sha":candidate_sha,"tree_sha":tree});
     caught_up["verified_base"] = json!({ "base": options.finalization.base, "sha": fresh_base });
     caught_up["provenance"]["candidate"] =
         serde_json::to_value(candidate_fingerprint(path)?).map_err(json_error)?;
@@ -5938,7 +5532,7 @@ fn cook_attempt_execution_in_store(
         .filter(|form| form.validate().is_ok()),
         tool,
         model,
-        review_form_only: task.inputs["cook_loop"]["review_form_required"] == true,
+        review_form_only: crate::agent_task_cook_loop::request_is_review_form_only(task),
     })
 }
 
@@ -7190,12 +6784,6 @@ pub(crate) fn cook_failure_context_with_stores(
                 blocking_claim.is_some(),
                 continuation_admitted,
                 exact_checkpoint_candidate_mismatch(&diagnostic),
-                ambiguous_promotion_artifact_ids(
-                    lifecycle_store,
-                    record_run_id,
-                    promotion_diagnostic.as_ref(),
-                    &recipe,
-                ),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Completed),
                 agent_incomplete_reason(lifecycle_store, record_run_id).as_deref(),
@@ -7600,101 +7188,6 @@ fn timeout_worktree_path(
         })
 }
 
-/// Artifact IDs are durable controller metadata. Expose them only when the
-/// promotion claim proves selection was the blocker, so a recovery command is
-/// executable rather than a replay of the known-invalid promotion.
-fn ambiguous_promotion_artifact_ids(
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
-    run_id: &str,
-    diagnostic: Option<&Value>,
-    recipe: &super::AgentTaskCookRecipe,
-) -> Vec<String> {
-    let is_ambiguous_selection = diagnostic.is_some_and(|diagnostic| {
-        diagnostic.pointer("/details/field").and_then(Value::as_str) == Some("artifact_id")
-            && diagnostic
-                .get("message")
-                .and_then(Value::as_str)
-                .is_some_and(|message| {
-                    message.contains("multiple patch artifacts")
-                        || message.contains("distinct actionable patches")
-                        || message.contains("distinct canonical patch candidates")
-                })
-    });
-    if !is_ambiguous_selection {
-        return Vec::new();
-    }
-    let aggregate = lifecycle_store
-        .map(|store| store.read_aggregate(run_id))
-        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(run_id));
-    let Ok(aggregate) = aggregate else {
-        return Vec::new();
-    };
-    let Some(outcome) = aggregate.selected_outcome().or_else(|| {
-        (aggregate.outcomes.len() == 1)
-            .then(|| aggregate.outcomes.first())
-            .flatten()
-    }) else {
-        return Vec::new();
-    };
-    if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
-        return outcome
-            .artifacts
-            .iter()
-            .filter(|artifact| {
-                crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
-            })
-            .map(|artifact| artifact.id.clone())
-            .collect();
-    }
-    if !recipe
-        .attempts
-        .iter()
-        .any(|attempt| attempt.run_id == run_id)
-    {
-        return Vec::new();
-    }
-    let Ok(recipe_options) = super::reconstruct_options(recipe) else {
-        return Vec::new();
-    };
-    let source = lifecycle_store
-        .map(|store| promotion_source_in_store(store, run_id))
-        .unwrap_or_else(|| promotion_source(run_id));
-    let Ok((source, source_path)) = source else {
-        return Vec::new();
-    };
-    canonical_recoverable_patch_artifacts(
-        outcome,
-        &AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some(run_id.to_string()),
-            source_path,
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: recipe_options.workspace.to_worktree,
-            task_id: lifecycle_store
-                .map(|store| selected_candidate_task_id_in_store(store, run_id))
-                .unwrap_or_else(|| selected_candidate_task_id(run_id))
-                .ok()
-                .flatten(),
-            artifact_id: None,
-            dry_run: false,
-            gates: crate::agent_task_gate::VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-    )
-    .map(|canonical| {
-        canonical
-            .artifacts
-            .into_iter()
-            .map(|artifact| artifact.id)
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
 /// The `incomplete_reason` of the attempt's recorded review form when the agent
 /// declared the task incomplete. Unreadable evidence yields `None`, leaving the
 /// step to the remaining recovery facts.
@@ -7894,7 +7387,6 @@ fn cook_recovery_actions(
     blocking_claim: bool,
     retry_admitted: bool,
     exact_checkpoint_candidate_mismatch: bool,
-    ambiguous_artifact_ids: Vec<String>,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
 ) -> CookRecoveryActions {
     cook_recovery_actions_with_prefix(
@@ -7904,7 +7396,6 @@ fn cook_recovery_actions(
         blocking_claim,
         retry_admitted,
         exact_checkpoint_candidate_mismatch,
-        ambiguous_artifact_ids,
         false,
         false,
         None,
@@ -7922,7 +7413,6 @@ fn cook_recovery_actions_with_prefix(
     blocking_claim: bool,
     retry_admitted: bool,
     exact_checkpoint_candidate_mismatch: bool,
-    ambiguous_artifact_ids: Vec<String>,
     continuation_rearm_required: bool,
     continuation_completed: bool,
     agent_incomplete_reason: Option<&str>,
@@ -7940,7 +7430,6 @@ fn cook_recovery_actions_with_prefix(
             blocking_claim,
             retry_admitted,
             exact_checkpoint_candidate_mismatch,
-            ambiguous_artifact_ids: &ambiguous_artifact_ids,
             continuation_rearm_required,
             continuation_completed,
             run_id,
@@ -8053,7 +7542,6 @@ mod recovery_action_tests {
                 false,
                 retry_available,
                 exact_checkpoint_candidate_mismatch,
-                Vec::new(),
                 None,
             );
             let actions = recovery
@@ -8112,7 +7600,6 @@ mod recovery_action_tests {
             false,
             true,
             true,
-            Vec::new(),
             None,
         );
 
@@ -8155,7 +7642,6 @@ mod recovery_action_tests {
                 false,
                 admitted,
                 false,
-                Vec::new(),
                 None,
             )
             .legal_actions
@@ -8174,7 +7660,6 @@ mod recovery_action_tests {
             false,
             true,
             false,
-            Vec::new(),
             None,
         )
         .legal_actions)
@@ -8215,7 +7700,7 @@ mod recovery_action_tests {
     }
 
     #[test]
-    fn ambiguous_artifact_selection_advertises_only_selector_continuations() {
+    fn patch_evidence_does_not_select_a_recovery_candidate() {
         let recovery = cook_recovery_actions(
             "promotion_failed",
             "ambiguous-attempt-1",
@@ -8223,7 +7708,6 @@ mod recovery_action_tests {
             false,
             false,
             false,
-            vec!["first-patch".to_string(), "second-patch".to_string()],
             None,
         );
 
@@ -8236,8 +7720,7 @@ mod recovery_action_tests {
             vec![
                 "homeboy agent-task status ambiguous-attempt-1",
                 "homeboy agent-task diagnose ambiguous-attempt-1",
-                "homeboy agent-task recover ambiguous-attempt-1 --artifact-id first-patch",
-                "homeboy agent-task recover ambiguous-attempt-1 --artifact-id second-patch",
+                "homeboy agent-task recover ambiguous-attempt-1",
             ]
         );
     }
@@ -8251,7 +7734,6 @@ mod recovery_action_tests {
             false,
             false,
             false,
-            vec!["canonical-patch".to_string()],
             None,
         );
         assert_eq!(

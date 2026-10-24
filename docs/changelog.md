@@ -4,6 +4,26 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.9] - 2026-10-24
+
+### Changed
+- own the setgid fixture with the caller's group so it holds on macOS
+- Resolve the cook repository identity once during admission
+- Lab returns the Cook candidate as a git bundle; controller fetches and verifies it (#16303 S2a)
+
+## [0.433.8] - 2026-10-23
+
+### Changed
+- Read .source-revision before probing git for runtime revisions
+- Resume, recover and adopt Cooks from the candidate commit (#16303 S2c)
+
+## [0.433.7] - 2026-10-23
+
+### Changed
+- make mirrored-run polling incremental and reuse the caller's store
+- Retire LabOffloadOverhead, deploy phase_history timing and StatusTiming onto phase spans
+- Make run.phase_spans authoritative for Lab and release timings
+
 ## [0.433.6] - 2026-10-23
 
 ### Changed

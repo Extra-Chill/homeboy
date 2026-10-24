@@ -193,9 +193,8 @@ pub mod lifecycle {
         record_pre_execution_failure_in_store, record_unmaterialized_cook_admission_in_store,
         register_acceptance_verifier, register_acceptance_verifier_from_config,
         reserve_detached_cook_handoff_materialization_in_store,
-        resolve_detached_cook_materializing_attempt_in_store, resolve_promotion_patch_artifact_id,
-        run_record_exists_resolved_in_store, runner_diagnostic_probe,
-        runner_pinned_runtime_for_mutation,
+        resolve_detached_cook_materializing_attempt_in_store, run_record_exists_resolved_in_store,
+        runner_diagnostic_probe, runner_pinned_runtime_for_mutation,
         transition_execution_placement_for_continuation_in_store, AgentTaskAcceptanceVerdict,
         AgentTaskArtifactRef, AgentTaskDurableReadUnavailable, AgentTaskLifecycleStore,
         AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure, AgentTaskRunRecord,
@@ -222,10 +221,10 @@ pub mod lifecycle {
 /// Promotion reports and entry point.
 pub mod promotion {
     pub use super::super::agent_task_promotion::{
-        canonical_recoverable_patch_artifacts, promote, AgentTaskPromotionArtifactRef,
-        AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionReport,
-        AgentTaskPromotionRequest, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-        AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase, PromotionProgressCallback,
+        promote, AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
+        AgentTaskPromotionNotification, AgentTaskPromotionReport, AgentTaskPromotionRequest,
+        AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
+        AgentTaskPromotionVerifiedBase, PromotionProgressCallback,
     };
 }
 

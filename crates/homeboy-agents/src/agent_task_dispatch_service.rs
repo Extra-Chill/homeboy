@@ -563,7 +563,10 @@ pub struct AgentTaskDispatchCommand {
 pub fn resolve_dispatch_request(
     command: AgentTaskDispatchCommand,
 ) -> Result<AgentTaskDispatchRequest> {
-    resolve_dispatch_request_with_default(command, default_backend_for_component)
+    resolve_dispatch_request_with_default(command, |id| {
+        let component = id.and_then(|id| homeboy_core::component::load(id).ok());
+        default_backend_for_component(component.as_ref())
+    })
 }
 
 /// Resolve the provider policy the controller passes to an execution boundary.

@@ -10,6 +10,11 @@
 //! - [`apply`]: native workspace mutation and the serialized Lab adapter.
 
 mod apply;
+pub(crate) mod candidate_bundle;
+pub use candidate_bundle::{
+    fetch_candidate_bundle, materialize_candidate_tree, verify_candidate_ref, CandidateBundleError,
+    CANDIDATE_BUNDLE_ARTIFACT_KIND,
+};
 mod committed_changes;
 pub(crate) use committed_changes::resolve_candidate_revision;
 mod fingerprint;
@@ -26,17 +31,14 @@ pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
 pub(crate) use promote::capture_declared_base;
 pub(crate) use promote::gate_setup_outcome_failure;
 pub(crate) use promote::{active_gate_supervision, with_gate_supervision};
-pub use promote::{canonical_recoverable_patch_artifacts, CanonicalRecoverablePatchArtifacts};
-pub(crate) use promote::{
-    canonical_recoverable_patch_artifacts_in_observation_store,
-    preflight_recoverable_candidate_promotion_in_observation_store,
-    promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
-    resume_promoted_patch_replacement_gates_in_observation_store, validate_candidate_commit,
-};
 pub(crate) use promote::{emit_promotion_progress, emit_promotion_progress_with_output};
 pub use promote::{
     promote, promote_with_checkpoint, resume_promoted_patch, with_promotion_progress,
     PromotionProgress, PromotionProgressCallback,
+};
+pub(crate) use promote::{
+    promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
+    resume_promoted_patch_replacement_gates_in_observation_store, validate_candidate_commit,
 };
 pub use run_plan_projection::mirror_agent_task_run_plan_aggregate;
 pub use types::{
@@ -47,4 +49,4 @@ pub use types::{
 };
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

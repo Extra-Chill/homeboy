@@ -10,10 +10,9 @@ use super::super::cook_adoption::{
 use super::super::cook_baseline::git_output;
 use super::super::cook_pre_execution::recover_recipe_attempt_with_stores;
 use super::super::cook_promotion::{
-    bind_report_to_stores, canonical_cook_patch_artifact_id_in_store,
-    canonical_cook_recovery_run_id, catch_up_cook_candidate_to_base_in_store,
-    cook_candidate_base_sha, cook_finalization_options, cook_finalization_options_with_stores,
-    cook_promotion_argv, cook_report, finalize_cook_pr_with_backend,
+    bind_report_to_stores, canonical_cook_recovery_run_id,
+    catch_up_cook_candidate_to_base_in_store, cook_candidate_base_sha, cook_finalization_options,
+    cook_finalization_options_with_stores, cook_report, finalize_cook_pr_with_backend,
     finalize_cook_pr_with_backend_with_stores, finalize_or_load_cook_pr_with_backend,
     finalize_or_load_cook_pr_with_backend_with_stores, mark_replacement_gate_execution_started,
     persist_manual_finalization_intent, persist_manual_finalization_receipt,
@@ -1758,506 +1757,6 @@ fn seed_patch_alias_aggregate_in_store(
         .expect("persist candidate aggregate");
 }
 
-#[test]
-fn cook_selects_successful_rotated_patch_and_collapses_equivalent_aliases() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("candidate artifacts");
-        let cook_id = "cook-canonical-rotated-alias";
-        let timed_out = "cook-canonical-rotated-alias-attempt-1";
-        let successful = "cook-canonical-rotated-alias-attempt-2";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.identity.initial_run_id = timed_out.to_string();
-        persist_initial_recipe(&options).unwrap();
-        super::super::record_recipe_attempt(cook_id, 2, successful, &options.identity.initial_plan)
-            .unwrap();
-        for (attempt, run_id) in [(1, timed_out), (2, successful)] {
-            agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
-                .unwrap();
-            agent_task_lifecycle::record_cook_attempt_in_store(
-                &test_lifecycle_store(),
-                cook_id,
-                attempt,
-                run_id,
-            )
-            .unwrap();
-        }
-        seed_timeout_review_form_aggregate(timed_out, &options.identity.initial_plan);
-        let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
-        seed_patch_alias_aggregate(
-            successful,
-            &options.identity.initial_plan,
-            &[
-                ("patch", &temp.path().join("patch"), patch),
-                ("provider-alias", &temp.path().join("alias"), patch),
-            ],
-        );
-
-        assert_eq!(
-            canonical_cook_patch_artifact_id_in_store(
-                &test_lifecycle_store(),
-                &options,
-                successful
-            )
-            .unwrap(),
-            Some("patch".to_string())
-        );
-    });
-}
-
-#[test]
-fn cook_requires_selection_for_distinct_canonical_patches_before_promotion() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("candidate artifacts");
-        let cook_id = "cook-canonical-distinct";
-        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        let mut options = options;
-        options.gates.private_verify = vec!["private gate".to_string()];
-        agent_task_lifecycle::submit_plan(
-            &options.identity.initial_plan,
-            Some(&options.identity.initial_run_id),
-        )
-        .unwrap();
-        seed_patch_alias_aggregate(
-            &options.identity.initial_run_id,
-            &options.identity.initial_plan,
-            &[
-                (
-                    "patch-a",
-                    &temp.path().join("a"),
-                    "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+one\n",
-                ),
-                (
-                    "patch-b",
-                    &temp.path().join("b"),
-                    "diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-old\n+two\n",
-                ),
-            ],
-        );
-        let error = canonical_cook_patch_artifact_id_in_store(
-            &test_lifecycle_store(),
-            &options,
-            &options.identity.initial_run_id,
-        )
-        .expect_err("distinct candidates require a choice");
-        assert_eq!(error.details["state"], "selection_required");
-        assert_eq!(error.details["choices"].as_array().unwrap().len(), 2);
-        assert!(error.details["choices"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("--private-verify"));
-    });
-}
-
-#[test]
-fn cook_selection_comparison_projects_three_distinct_candidates_from_patch_artifacts() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("candidate artifacts");
-        let options = batch_cook_options(
-            "cook-semantic-candidates",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        agent_task_lifecycle::submit_plan(
-            &options.identity.initial_plan,
-            Some(&options.identity.initial_run_id),
-        )
-        .expect("submit candidate plan");
-        seed_patch_alias_aggregate(
-            &options.identity.initial_run_id,
-            &options.identity.initial_plan,
-            &[
-                (
-                    "patch-a",
-                    &temp.path().join("a"),
-                    "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+one\n",
-                ),
-                (
-                    "patch-b",
-                    &temp.path().join("b"),
-                    "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+two\n",
-                ),
-                (
-                    "patch-c",
-                    &temp.path().join("c"),
-                    "diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml\n--- a/.github/workflows/test.yml\n+++ b/.github/workflows/test.yml\n@@ -1 +1 @@\n-old\n+token=fixture\n",
-                ),
-            ],
-        );
-
-        let error = canonical_cook_patch_artifact_id_in_store(
-            &test_lifecycle_store(),
-            &options,
-            &options.identity.initial_run_id,
-        )
-        .expect_err("distinct candidates require a choice");
-        let choices = error.details["choices"]
-            .as_array()
-            .expect("comparison choices");
-        assert_eq!(choices.len(), 3);
-        let patch_a = choices
-            .iter()
-            .find(|choice| choice["artifact_id"] == "patch-a")
-            .expect("patch a comparison");
-        let patch_b = choices
-            .iter()
-            .find(|choice| choice["artifact_id"] == "patch-b")
-            .expect("patch b comparison");
-        let patch_c = choices
-            .iter()
-            .find(|choice| choice["artifact_id"] == "patch-c")
-            .expect("patch c comparison");
-        assert_eq!(patch_a["changed_files"], serde_json::json!(["src/lib.rs"]));
-        assert_eq!(
-            patch_a["line_stats"],
-            serde_json::json!({ "insertions": 1, "deletions": 1 })
-        );
-        assert_eq!(
-            patch_a["diff_summary"],
-            "1 file(s), 1 insertion(s), 1 deletion(s)"
-        );
-        assert_eq!(
-            patch_a["overlap"]["shared_changed_files"],
-            serde_json::json!([]),
-            "all three candidates must share a file before it is reported as common"
-        );
-        assert!(patch_a["risk_flags"]
-            .as_array()
-            .expect("risk flags")
-            .contains(&serde_json::json!("missing_test_evidence")));
-        assert!(patch_b["risk_flags"]
-            .as_array()
-            .expect("risk flags")
-            .contains(&serde_json::json!("missing_test_evidence")));
-        assert!(patch_c["risk_flags"]
-            .as_array()
-            .expect("risk flags")
-            .contains(&serde_json::json!("security_sensitive_automation_change")));
-        assert!(patch_c["risk_flags"]
-            .as_array()
-            .expect("risk flags")
-            .contains(&serde_json::json!("sensitive_literal_pattern_added")));
-        for choice in choices {
-            assert!(choice["patch_artifact"]["path"].is_string());
-            assert!(choice["provider"].is_string());
-            assert!(choice["attempt"].is_number());
-            assert!(choice["test_evidence"].is_array());
-            assert!(choice.get("diagnostics").is_none());
-            assert!(choice["command"]
-                .as_str()
-                .expect("promotion command")
-                .contains("--artifact-id"));
-        }
-        assert!(error.details["comparison"]["shared_outcome_diagnostics"].is_array());
-    });
-}
-
-#[test]
-fn cook_selection_risks_use_files_beyond_the_preview_limit() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("candidate artifacts");
-        let options = batch_cook_options(
-            "cook-preview-risk",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        agent_task_lifecycle::submit_plan(
-            &options.identity.initial_plan,
-            Some(&options.identity.initial_run_id),
-        )
-        .unwrap();
-        let mut late_security = String::new();
-        for index in 0..12 {
-            late_security.push_str(&format!("diff --git a/src/{index}.rs b/src/{index}.rs\n--- a/src/{index}.rs\n+++ b/src/{index}.rs\n@@ -1 +1 @@\n-old\n+new\n"));
-        }
-        late_security.push_str("diff --git a/zz/Dockerfile b/zz/Dockerfile\n--- a/zz/Dockerfile\n+++ b/zz/Dockerfile\n@@ -1 +1 @@\n-old\n+new\n");
-        seed_patch_alias_aggregate(
-            &options.identity.initial_run_id,
-            &options.identity.initial_plan,
-            &[
-                (
-                    "safe",
-                    &temp.path().join("safe"),
-                    "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
-                ),
-                ("late-risk", &temp.path().join("late-risk"), &late_security),
-            ],
-        );
-        let error = canonical_cook_patch_artifact_id_in_store(
-            &test_lifecycle_store(),
-            &options,
-            &options.identity.initial_run_id,
-        )
-        .unwrap_err();
-        let candidate = error.details["choices"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|choice| choice["artifact_id"] == "late-risk")
-            .unwrap();
-        assert_eq!(candidate["changed_file_count"], 13);
-        assert_eq!(candidate["changed_files_omitted_count"], 1);
-        assert!(candidate["risk_flags"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("security_sensitive_automation_change")));
-    });
-}
-
-#[test]
-fn cook_selection_candidate_evidence_does_not_bless_other_candidates() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("candidate artifacts");
-        let options = batch_cook_options(
-            "cook-evidence-attribution",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        agent_task_lifecycle::submit_plan(
-            &options.identity.initial_plan,
-            Some(&options.identity.initial_run_id),
-        )
-        .unwrap();
-        let metadata = |test_evidence: Value| {
-            serde_json::json!({
-                "producer_attempt": 2, "base_ref": "main", "provider_backend": "fixture", "test_evidence": test_evidence,
-            })
-        };
-        seed_patch_alias_aggregate_with_metadata(
-            &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-            &options.identity.initial_run_id,
-            &options.identity.initial_plan,
-            &[
-                (
-                    "a",
-                    &temp.path().join("a"),
-                    "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+one\n",
-                    metadata(serde_json::json!([{ "command": "cargo test", "exit_code": 0 }])),
-                ),
-                (
-                    "b",
-                    &temp.path().join("b"),
-                    "diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-old\n+two\n",
-                    metadata(serde_json::json!([])),
-                ),
-            ],
-            Vec::new(),
-        );
-        let error = canonical_cook_patch_artifact_id_in_store(
-            &test_lifecycle_store(),
-            &options,
-            &options.identity.initial_run_id,
-        )
-        .unwrap_err();
-        let choices = error.details["choices"].as_array().unwrap();
-        let a = choices
-            .iter()
-            .find(|choice| choice["artifact_id"] == "a")
-            .unwrap();
-        let b = choices
-            .iter()
-            .find(|choice| choice["artifact_id"] == "b")
-            .unwrap();
-        assert!(a["recommendation"].is_object());
-        assert!(b["test_evidence"].as_array().unwrap().is_empty());
-        assert!(b["recommendation"].is_null());
-    });
-}
-
-#[test]
-fn cook_selection_bounds_candidate_inventory_and_oversized_diagnostics() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("candidate artifacts");
-        let options = batch_cook_options(
-            "cook-bounded-inventory",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        agent_task_lifecycle::submit_plan(
-            &options.identity.initial_plan,
-            Some(&options.identity.initial_run_id),
-        )
-        .unwrap();
-        let patches = (0..18)
-            .map(|index| {
-                let id = format!("candidate-{index:02}");
-                let path = temp.path().join(&id);
-                let patch = format!(
-                    "diff --git a/{id} b/{id}\n--- a/{id}\n+++ b/{id}\n@@ -1 +1 @@\n-old\n+new\n"
-                );
-                (
-                    id,
-                    path,
-                    patch,
-                    serde_json::json!({ "producer_attempt": 2, "provider_backend": "fixture" }),
-                )
-            })
-            .collect::<Vec<_>>();
-        let refs = patches
-            .iter()
-            .map(|(id, path, patch, metadata)| {
-                (
-                    id.as_str(),
-                    path.as_path(),
-                    patch.as_str(),
-                    metadata.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        seed_patch_alias_aggregate_with_metadata(
-            &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-            &options.identity.initial_run_id,
-            &options.identity.initial_plan,
-            &refs,
-            vec![crate::agent_task::AgentTaskDiagnostic {
-                class: "fixture".to_string(),
-                message: "x".repeat(4096),
-                data: Value::Null,
-            }],
-        );
-        let error = canonical_cook_patch_artifact_id_in_store(
-            &test_lifecycle_store(),
-            &options,
-            &options.identity.initial_run_id,
-        )
-        .unwrap_err();
-        assert_eq!(error.details["choices"].as_array().unwrap().len(), 16);
-        assert_eq!(error.details["comparison"]["omitted_candidate_count"], 2);
-        assert_eq!(
-            error.details["comparison"]["shared_outcome_diagnostics"][0]["omitted"],
-            "json_value_exceeds_byte_limit"
-        );
-    });
-}
-
-#[test]
-fn cook_selection_command_shell_round_trips_the_full_promotion_contract() {
-    use std::collections::BTreeMap;
-
-    let mut options = batch_cook_options(
-        "cook shell contract",
-        Arc::new(AcceptedDetachedAttemptDispatcher),
-    );
-    options.workspace.to_worktree = "repo@candidate worktree".to_string();
-    options.finalization.base = "release branch".to_string();
-    options.provider_transport.provider_invocation =
-        Some(homeboy_core::command_invocation::CommandInvocation {
-            argv: vec![
-                "provider tool".to_string(),
-                "--prompt=fix 'quoted' value".to_string(),
-            ],
-            ..Default::default()
-        });
-    options.gates = crate::agent_task_gate::VerifyGateOptions {
-        verify: vec!["cargo test --package 'space name'".to_string()],
-        private_verify: vec!["private gate --token '$SAFE'".to_string()],
-        gate_environment: crate::agent_task_gate::AgentTaskGateEnvironmentPolicy {
-            mode: crate::agent_task_gate::AgentTaskGateEnvironmentMode::Replace,
-            variables: BTreeMap::from([("MESSAGE".to_string(), "hello world".to_string())]),
-            preserve: BTreeMap::from([("TOOL_HOME".to_string(), "HOME/.tool path".to_string())]),
-            extension_inputs: vec![serde_json::from_value(serde_json::json!({
-                "id": "extension input",
-                "source": "/tmp/input with spaces",
-            }))
-            .unwrap()],
-            ..Default::default()
-        },
-        gate_package_artifacts: vec![serde_json::from_value(serde_json::json!({
-            "id": "package artifact",
-            "environment": {"name": "PACKAGE_PATH", "default": "/tmp/package with spaces"},
-            "required_paths": [{"path": "artifact file.json"}],
-            "remediation": {"command": "install --with spaces"},
-        }))
-        .unwrap()],
-        gate_toolchains: vec![crate::agent_task_gate::AgentTaskGateToolchainRequirement {
-            command: "tool with spaces".to_string(),
-            probe_arguments: vec!["probe".to_string(), "--format=json".to_string()],
-        }],
-        ..Default::default()
-    };
-
-    let expected = cook_promotion_argv(&options, "run id", "task id", "patch id");
-    let rendered = super::super::cook_promotion::cook_promotion_command(
-        &options, "run id", "task id", "patch id",
-    );
-    let output = Command::new("sh")
-        .args(["-c", &format!("set -- {rendered}; printf '%s\\0' \"$@\"")])
-        .output()
-        .expect("execute rendered command through POSIX shell");
-    assert!(output.status.success());
-    let actual = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|argument| !argument.is_empty())
-        .map(|argument| String::from_utf8(argument.to_vec()).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(actual, expected);
-    assert!(actual
-        .windows(2)
-        .any(|args| args == ["--verify", "cargo test --package 'space name'"]));
-    assert!(actual
-        .windows(2)
-        .any(|args| args == ["--private-verify", "private gate --token '$SAFE'"]));
-    assert!(actual
-        .windows(2)
-        .any(|args| args == ["--gate-env", "MESSAGE=hello world"]));
-    assert!(actual.contains(&"--provider-argv=provider tool".to_string()));
-    assert!(actual.contains(&"--provider-argv=--prompt=fix 'quoted' value".to_string()));
-    let toolchain_spec = actual
-        .windows(2)
-        .find(|args| args[0] == "--gate-toolchain-spec")
-        .map(|args| {
-            serde_json::from_str::<crate::agent_task_gate::AgentTaskGateToolchainRequirement>(
-                &args[1],
-            )
-            .unwrap()
-        })
-        .expect("non-default toolchain probe is rendered as an exact JSON contract");
-    assert_eq!(toolchain_spec.probe_arguments, ["probe", "--format=json"]);
-}
-
-fn canonical_selection_side_effects(
-    promotions: Arc<AtomicUsize>,
-    selected_artifact: Arc<Mutex<Option<String>>>,
-) -> CookSideEffects<'static> {
-    CookSideEffects::for_test(
-        move |_, options, run_id| {
-            promotions.fetch_add(1, Ordering::SeqCst);
-            let artifact = canonical_cook_patch_artifact_id_in_store(
-                &test_lifecycle_store(),
-                options,
-                run_id,
-            )?;
-            *selected_artifact.lock().unwrap() = artifact;
-            Ok(promotion(run_id))
-        },
-        |_, _, _| unreachable!("canonical selection stops before moving-base recovery"),
-        |_, _, _, _| unreachable!("no-finalize Cook must not finalize"),
-    )
-}
-
-fn selection_required_side_effects() -> CookSideEffects<'static> {
-    CookSideEffects::for_test(
-        |lifecycle_store, _, run_id| {
-            let aggregate = lifecycle_store.read_aggregate(run_id)?;
-            let choices = aggregate
-                .outcomes
-                .iter()
-                .flat_map(|outcome| outcome.artifacts.iter())
-                .map(|artifact| serde_json::json!({ "artifact_id": artifact.id }))
-                .collect::<Vec<_>>();
-            assert_eq!(choices.len(), 2, "rooted aggregate has distinct candidates");
-            Err(homeboy_core::Error::new(
-                homeboy_core::ErrorCode::ValidationInvalidArgument,
-                "Cook found distinct canonical patch candidates; select one before promotion",
-                serde_json::json!({
-                    "field": "artifact_id",
-                    "state": "selection_required",
-                    "selection_required": true,
-                    "choices": choices,
-                }),
-            ))
-        },
-        |_, _, _| unreachable!("selection-required Cook must not recover a moving base"),
-        |_, _, _, _| unreachable!("selection-required Cook must not finalize"),
-    )
-}
-
 fn no_change_side_effects(
     promotions: Arc<AtomicUsize>,
     finalizations: Arc<AtomicUsize>,
@@ -2589,228 +2088,6 @@ fn finalizing_patch_cook_refuses_verified_blocked_verdict_with_selectable_candid
     });
 }
 
-#[test]
-fn cook_promotes_the_rotated_success_after_a_retained_timeout_with_aliases_collapsed() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().unwrap();
-        let cook_id = "cook-full-rotated-alias";
-        let timed_out = "cook-full-rotated-alias-attempt-1";
-        let successful = "cook-full-rotated-alias-attempt-2";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.retry_policy.max_attempts = 2;
-        persist_initial_recipe(&options).unwrap();
-        super::super::record_recipe_attempt(cook_id, 2, successful, &options.identity.initial_plan)
-            .unwrap();
-        for (attempt, run_id) in [(1, timed_out), (2, successful)] {
-            agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
-                .unwrap();
-            agent_task_lifecycle::record_cook_attempt_in_store(
-                &test_lifecycle_store(),
-                cook_id,
-                attempt,
-                run_id,
-            )
-            .unwrap();
-        }
-        seed_timeout_review_form_aggregate(timed_out, &options.identity.initial_plan);
-        let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
-        seed_patch_alias_aggregate(
-            successful,
-            &options.identity.initial_plan,
-            &[
-                ("patch", &temp.path().join("patch"), patch),
-                ("provider-alias", &temp.path().join("alias"), patch),
-            ],
-        );
-        let mut resumed_options = options.clone();
-        resumed_options.identity.initial_run_id = successful.to_string();
-        let promotions = Arc::new(AtomicUsize::new(0));
-        let selected_artifact = Arc::new(Mutex::new(None));
-        let result = run_cook(CookContext {
-            side_effects: Some(canonical_selection_side_effects(
-                Arc::clone(&promotions),
-                Arc::clone(&selected_artifact),
-            )),
-            ..CookContext::new(resumed_options, Arc::new(UnusedExecutor))
-        })
-        .unwrap();
-        assert_eq!(result.value.status, "green_no_finalize");
-        assert_eq!(promotions.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            *selected_artifact.lock().unwrap(),
-            Some("patch".to_string())
-        );
-    });
-}
-
-#[test]
-fn cook_persists_selection_required_before_promotion_or_gates() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().unwrap();
-        let cook_id = "cook-full-selection-required";
-        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        persist_initial_recipe(&options).unwrap();
-        agent_task_lifecycle::submit_plan(
-            &options.identity.initial_plan,
-            Some(&options.identity.initial_run_id),
-        )
-        .unwrap();
-        agent_task_lifecycle::record_cook_attempt_in_store(
-            &test_lifecycle_store(),
-            cook_id,
-            1,
-            &options.identity.initial_run_id,
-        )
-        .unwrap();
-        seed_patch_alias_aggregate(
-            &options.identity.initial_run_id,
-            &options.identity.initial_plan,
-            &[
-                (
-                    "patch-a",
-                    &temp.path().join("a"),
-                    "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+one\n",
-                ),
-                (
-                    "patch-b",
-                    &temp.path().join("b"),
-                    "diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-old\n+two\n",
-                ),
-            ],
-        );
-        let promotions = Arc::new(AtomicUsize::new(0));
-        let result = run_cook(CookContext {
-            side_effects: Some(canonical_selection_side_effects(
-                Arc::clone(&promotions),
-                Arc::new(Mutex::new(None)),
-            )),
-            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
-        })
-        .unwrap();
-        let record =
-            agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id).unwrap();
-        assert_eq!(result.value.status, "selection_required");
-        assert_eq!(promotions.load(Ordering::SeqCst), 1);
-        assert!(record.metadata["cook_delivery"]["artifacts"]["promotion"].is_null());
-        assert_eq!(
-            record.metadata["cook_selection_required"]["state"],
-            "selection_required"
-        );
-        assert_eq!(
-            record.metadata["cook_selection_required"]["choices"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-    });
-}
-
-#[test]
-fn cook_selection_required_metadata_uses_supplied_lifecycle_store() {
-    let _ambient_context = homeboy_core::test_support::HomeGuard::new();
-    let supplied_context = homeboy_core::test_support::HermeticTestContext::new();
-    let ambient_store =
-        AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
-    let recipe_store = CookRecipeStore::new(supplied_context.path_roots());
-    let supplied_store = AgentTaskLifecycleStore::new(supplied_context.path_roots());
-    let temp = tempfile::tempdir().expect("candidate artifacts");
-    let cook_id = "same-selection-required-cook";
-    let run_id = "same-selection-required-run";
-    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-    options.identity.initial_run_id = run_id.to_string();
-
-    recipe_store
-        .persist_initial_recipe(&options)
-        .expect("persist supplied recipe");
-    for store in [&ambient_store, &supplied_store] {
-        store
-            .submit_plan_with_runtime_admission(&options.identity.initial_plan, run_id, |_| {
-                Ok(serde_json::json!({}))
-            })
-            .expect("seed lifecycle record");
-    }
-    supplied_store
-        .record_cook_attempt(cook_id, 1, run_id)
-        .expect("record supplied Cook attempt");
-    seed_patch_alias_aggregate_in_store(
-        &supplied_store,
-        run_id,
-        &options.identity.initial_plan,
-        &[
-            (
-                "patch-a",
-                &temp.path().join("a"),
-                "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+one\n",
-            ),
-            (
-                "patch-b",
-                &temp.path().join("b"),
-                "diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-old\n+two\n",
-            ),
-        ],
-    );
-    supplied_store
-        .mutate_record(run_id, |record| {
-            crate::agent_task_service::set_cook_delivery_artifact_for_test(
-                &mut record.metadata,
-                "/promotion",
-                serde_json::json!({ "status": "verification_pending" }),
-            );
-            true
-        })
-        .expect("seed rooted verification-pending continuation");
-    ambient_store
-        .record_metadata_value(
-            run_id,
-            "controller_admission",
-            serde_json::json!({
-                "state": "none",
-                "owner": null,
-                "position": null,
-                "requested_at_ms": null,
-                "wait_duration_ms": null,
-            }),
-        )
-        .expect("seed ambient runtime-promotion projection");
-    let ambient_before = ambient_store
-        .read_record(run_id)
-        .expect("read untouched root");
-
-    let result = run_cook_spine(
-        &recipe_store,
-        &supplied_store,
-        options,
-        Arc::new(UnusedExecutor),
-        &mut selection_required_side_effects(),
-        None,
-        CookMode::Resume,
-    )
-    .expect("Cook reports selection-required promotion failure");
-
-    let supplied_record = supplied_store
-        .read_record(run_id)
-        .expect("read supplied root");
-    let ambient_record = ambient_store
-        .read_record(run_id)
-        .expect("read untouched root");
-    assert_eq!(result.value.status, "selection_required");
-    assert_eq!(
-        supplied_record.metadata["cook_selection_required"]["state"],
-        "selection_required"
-    );
-    assert!(supplied_record
-        .metadata
-        .get("cook_controller_failure")
-        .is_some());
-    assert_eq!(ambient_record.metadata, ambient_before.metadata);
-    assert_eq!(ambient_record.updated_at, ambient_before.updated_at);
-}
-
-/// Run a verification-pending Cook resume whose promotion claim is held by
-/// `owner` (a separate process). `live_owner` keeps it running; otherwise it is
-/// reaped first, so the claim records a dead owner.
-#[cfg(unix)]
 fn resume_cook_behind_foreign_promotion_claim(
     live_owner: bool,
 ) -> (
@@ -4706,7 +3983,7 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
         .unwrap();
-        assert_eq!(report.value.status, "review_ready");
+        assert_eq!(report.value.status, "review_ready", "{:#?}", report.value);
         assert_eq!(finalization_calls.load(Ordering::SeqCst), 1);
         let caught_up = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
         assert_eq!(
@@ -8552,10 +7829,9 @@ fn adoption_accepts_an_identical_immutable_baseline_failure_when_explicitly_auth
             crate::agent_task_gate::AgentTaskGateStatus::Succeeded
         );
         assert_eq!(
-            promotion.provenance["candidate"]["fingerprint"]["head"],
-            git_output(&fixture.target, &["rev-parse", "HEAD"])
-                .expect("native direct target head"),
-            "native direct promotion retains the target commit and authenticates the candidate as a patch"
+            promotion.provenance["candidate_checkout"]["commit"],
+            promotion.provenance["candidate_commit"]["candidate_sha"],
+            "gates authenticate the adopted immutable commit"
         );
         assert!(
             promotion.deterministic_gates[0]
@@ -8892,7 +8168,7 @@ fn adoption_rejects_a_baseline_component_symlink_escape_before_external_gate_exe
         let error = fixture
             .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
             .expect_err("baseline symlink escape must reject adoption");
-        assert_eq!(error.details["field"], "promotion_provider.patch");
+        assert_eq!(error.details["field"], "gate_workspace");
         assert!(
             !external.join("gate-ran").exists(),
             "external gate must not execute"
@@ -17251,7 +16527,8 @@ fn first_attempt_named_as_cook_id_reads_its_own_substantive_aggregate() {
             &options.identity.initial_plan,
         );
         assert_eq!(
-            super::super::selected_candidate_task_id(cook_id).unwrap(),
+            super::super::selected_candidate_task_id_in_store(&test_lifecycle_store(), cook_id)
+                .unwrap(),
             Some(options.identity.initial_plan.tasks[0].task_id.clone())
         );
         assert_eq!(
@@ -18459,7 +17736,7 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
                         "gate_results": [],
                         "operator_notification": {"status": "completed", "message": "complete"},
                         "verified_base": {"base": "main", "sha": target_head},
-                        "provenance": {"worktree_path": provenance_worktree}
+                        "provenance": {"worktree_path": provenance_worktree, "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(std::path::Path::new(&provenance_worktree), &target_head, run_id)}
                     }))
                     .expect("no-change promotion fixture");
                 lifecycle_store.record_promotion(
@@ -18975,6 +18252,42 @@ fn record_tracked_promotion_continuation_in_stores(
     else {
         panic!("fixture target is a Git worktree");
     };
+    let index = tempfile::NamedTempFile::new().unwrap();
+    let index_path = index.path().display().to_string();
+    let run_git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .env("GIT_INDEX_FILE", &index_path)
+            .current_dir(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    run_git(&["read-tree", "HEAD"]);
+    run_git(&["add", "-A"]);
+    let tree_sha = run_git(&["write-tree"]);
+    let candidate_sha = run_git(&[
+        "commit-tree",
+        &tree_sha,
+        "-p",
+        &fingerprint.head,
+        "-m",
+        "candidate",
+    ]);
+    run_git(&[
+        "update-ref",
+        &format!(
+            "refs/homeboy/candidates/{}",
+            options.identity.initial_run_id
+        ),
+        &candidate_sha,
+    ]);
+    let immutable = serde_json::json!({"base_sha":fingerprint.head,"candidate_sha":candidate_sha,"tree_sha":tree_sha});
     checkpoint["to_worktree"] = serde_json::json!(options.workspace.to_worktree);
     checkpoint["target"] = serde_json::json!({
         "worktree": options.workspace.to_worktree,
@@ -18991,6 +18304,7 @@ fn record_tracked_promotion_continuation_in_stores(
     checkpoint["changed_files"] = serde_json::json!(fingerprint.changed_files);
     checkpoint["provenance"] = serde_json::json!({
         "post_apply": true,
+        "candidate_commit": immutable,
         "candidate": candidate,
         "worktree_path": target,
         "gate_feedback_baseline": {
@@ -19385,7 +18699,6 @@ impl crate::agent_task_service::CookRecoveryPerformer for ReplacementOnlyRecover
         &self,
         run_id: &str,
         _rearm: bool,
-        _artifact_id: Option<&str>,
         _overrides: &crate::agent_task_service::CookRecoveryOverrides,
     ) -> Result<(serde_json::Value, i32)> {
         panic!("replacement recovery must not continue {run_id}")
@@ -19395,7 +18708,6 @@ impl crate::agent_task_service::CookRecoveryPerformer for ReplacementOnlyRecover
         &self,
         run_id: &str,
         _rearm: bool,
-        _artifact_id: Option<&str>,
     ) -> Result<(serde_json::Value, i32)> {
         panic!("replacement recovery must not preflight continuation of {run_id}")
     }
@@ -19530,8 +18842,9 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             gate_log.display()
         );
         let reviewer_gate = "test \"$(cat \"$(git rev-parse --show-toplevel)/figma-transformer/tracked.txt\")\" = promoted".to_string();
-        let unavailable_patch = patch_path.with_extension("unavailable");
-        std::fs::rename(&patch_path, &unavailable_patch).expect("hide promotion artifact");
+        let candidate_ref = "refs/homeboy/candidates/run-verify-replacement";
+        let candidate_sha = git_output(&target, &["rev-parse", candidate_ref]).unwrap();
+        git_output(&target, &["update-ref", "-d", candidate_ref]).unwrap();
         verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
@@ -19542,13 +18855,14 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             "Chris approved corrected gate evidence".to_string(),
             None,
         )
-        .expect_err("artifact preflight fails before shell execution");
+        .expect_err("missing candidate ref fails before shell execution");
         assert!(!replacement_gate_execution_started(
             &test_lifecycle_store(),
             "run-verify-replacement"
         )
         .expect("read replacement gate fence"));
-        std::fs::rename(&unavailable_patch, &patch_path).expect("restore promotion artifact");
+        git_output(&target, &["update-ref", candidate_ref, &candidate_sha]).unwrap();
+        std::fs::remove_file(&patch_path).expect("patch evidence is not a continuation input");
         mark_replacement_gate_execution_started(&test_lifecycle_store(), "run-verify-replacement")
             .expect("persist interrupted replacement execution");
         agent_task_lifecycle::rewrite_record_for_test("run-verify-replacement", |record| {
@@ -19631,7 +18945,11 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             serde_json::from_value(result).expect("typed replacement proof");
 
         assert_eq!(replacement.status, AgentTaskPromotionStatus::GateFailed);
-        assert_eq!(replacement.patch_artifact.id, "committed-changes");
+        assert_eq!(replacement.patch_artifact.id, candidate_sha);
+        assert!(replacement.deterministic_gates.iter().all(|gate| gate
+            .candidate_checkout
+            .as_ref()
+            .is_none_or(|checkout| checkout.commit == candidate_sha)));
         assert_eq!(
             replacement.provenance["candidate"]["fingerprint"]["target_path"],
             serde_json::json!(std::fs::canonicalize(&target)
@@ -19739,6 +19057,9 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
     });
 }
 
+#[path = "cook_tests/candidate_continuation.rs"]
+mod candidate_continuation;
+
 fn with_corrected_gate_candidate(
     test: impl FnOnce(CookRequest, PathBuf, AgentTaskPromotionReport),
 ) {
@@ -19829,6 +19150,12 @@ fn with_corrected_gate_candidate_placement(
         aggregate.totals.recoverable_candidates = 1;
         aggregate.outcomes[0].status =
             crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable;
+        let checkpoint = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
+        aggregate.outcomes[0].candidate = Some(
+            serde_json::from_value(checkpoint.provenance["candidate_commit"].clone()).unwrap(),
+        );
+        aggregate.outcomes[0].artifacts.clear();
+        std::fs::remove_file(&patch_path).unwrap();
         store
             .record_run_aggregate(run_id, &options.identity.initial_plan, &aggregate)
             .unwrap();
@@ -20010,8 +19337,11 @@ fn corrected_gate_guided_continuation_publishes_without_provider_redispatch_and_
 
 #[test]
 fn corrected_gate_adoption_reuses_proof_instead_of_original_declaration() {
-    with_corrected_gate_candidate(|options, target, replacement| {
-        let candidate = git_output(&target, &["rev-parse", "HEAD"]).unwrap();
+    with_corrected_gate_candidate(|options, _target, replacement| {
+        let candidate = replacement.provenance["candidate_commit"]["candidate_sha"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let mut backend = CaptureBackend {
             hydrate_run_id: Some(options.identity.initial_run_id.clone()),
             ..Default::default()
@@ -20740,7 +20070,7 @@ fn persisted_follow_up_intent_recovers_before_submission_without_allocating_a_tw
             "to_worktree":"fixture@target", "target":{"worktree":"fixture@target","head":head},
             "patch_artifact":{"id":"candidate","kind":"patch","path":artifact.path(),"sha256":digest},
             "changed_files":["tracked"],"command_evidence":[],"deterministic_gates":[],"gate_results":[],
-            "provenance":{"worktree_path":workspace.path()},"operator_notification":{"status":"blocked","message":"red"}
+            "provenance":{"worktree_path":workspace.path(), "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(workspace.path(), &head, &source)},"operator_notification":{"status":"blocked","message":"red"}
         })).unwrap();
         let mut request = options.identity.initial_plan.tasks[0].clone();
         request.task_id = "bound-gate-fix".into();
@@ -24504,7 +23834,7 @@ fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate
             "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
             "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path}, "changed_files":["candidate.bin", "candidate.sh"],
             "command_evidence":[], "deterministic_gates":[], "gate_results":[],
-            "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
+            "provenance":{"worktree_path":root, "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(root, &target_head, "first-run")}, "operator_notification":{"status":"blocked","message":"red"}
         })).unwrap();
     let baseline =
         materialize_follow_up_baseline(&report, "first-run", "candidate-task").expect("baseline");
@@ -24531,16 +23861,12 @@ fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate
     assert_eq!(baseline.capability.bound_task_id(), "candidate-task");
     assert_eq!(
         baseline.artifact_provenance()["source_patch_artifact_sha256"],
-        sha2::Sha256::digest(std::fs::read(&patch_path).unwrap())
-            .to_vec()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
+        report.provenance["candidate_commit"]["candidate_sha"]
     );
 }
 
 #[test]
-fn follow_up_baseline_accepts_verified_no_changes_empty_patch_and_rejects_bad_digest() {
+fn follow_up_baseline_accepts_unchanged_commit_and_rejects_patch_only_records() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().join("repo");
     std::fs::create_dir(&root).unwrap();
@@ -24578,7 +23904,7 @@ fn follow_up_baseline_accepts_verified_no_changes_empty_patch_and_rejects_bad_di
         "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
         "patch_artifact":{"id":"candidate","kind":"patch","path":"","sha256":sha256},
         "changed_files":[], "command_evidence":[], "deterministic_gates":[], "gate_results":[],
-        "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
+        "provenance":{"worktree_path":root, "candidate_commit": (sha256 == empty_sha256).then(|| crate::agent_task_promotion::tests::candidate_snapshot::snapshot(&root, &target_head, "first-run"))}, "operator_notification":{"status":"blocked","message":"red"}
     })).unwrap()
     };
 
@@ -24586,8 +23912,8 @@ fn follow_up_baseline_accepts_verified_no_changes_empty_patch_and_rejects_bad_di
         materialize_follow_up_baseline(&report(empty_sha256), "first-run", "candidate-task")
             .expect("empty verified no-change baseline");
     assert_eq!(
-        git_output(&baseline.path, &["rev-parse", "HEAD"]).unwrap(),
-        target_head
+        git_output(&baseline.path, &["rev-parse", "HEAD^{tree}"]).unwrap(),
+        git_output(&root, &["rev-parse", "HEAD^{tree}"]).unwrap()
     );
     assert!(git_output(&baseline.path, &["status", "--porcelain"])
         .unwrap()
@@ -24601,7 +23927,7 @@ fn follow_up_baseline_accepts_verified_no_changes_empty_patch_and_rejects_bad_di
         Err(error) => error,
     };
     assert!(
-        error.message.contains("durable sha256"),
+        error.message.contains("non-recoverable"),
         "unexpected error: {}",
         error.message
     );
@@ -24672,7 +23998,7 @@ fn follow_up_baseline_combines_adopted_candidate_with_overlapping_provider_delta
         "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
         "patch_artifact":{"id":"provider-delta","kind":"patch","path":patch_path},
         "changed_files":["candidate.txt"], "command_evidence":[], "deterministic_gates":[], "gate_results":[],
-        "provenance":{"worktree_path":root, "gate_feedback_baseline":{"current_diff":complete_candidate}},
+        "provenance":{"worktree_path":root, "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(root, &target_head, "first-run"), "gate_feedback_baseline":{"current_diff":complete_candidate}},
         "operator_notification":{"status":"completed","message":"applied"}
     }))
     .unwrap();
@@ -25521,7 +24847,7 @@ fn re_materialize_follow_up_baseline_recovers_after_worktree_deletion() {
         "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
         "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
         "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path},
-        "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
+        "provenance":{"worktree_path":root, "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(root, &target_head, "first-run")}, "operator_notification":{"status":"blocked","message":"red"}
     }))
     .unwrap();
     let baseline =

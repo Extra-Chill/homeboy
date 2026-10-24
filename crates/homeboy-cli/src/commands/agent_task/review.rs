@@ -324,7 +324,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             .as_ref()
             .map(|reference| reference.artifact_id.clone()),
     )?;
-    let (mut raw, mut source_path) = read_promotion_source(source_spec)?;
+    let (raw, source_path) = read_promotion_source(source_spec)?;
     let source_run_id = match source_path.as_deref() {
         Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
         None => None,
@@ -355,28 +355,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         task_id.as_deref(),
         requested_artifact_id.as_deref(),
     )?;
-    let artifact_id = if let Some(run_id) = source_run_id.as_deref() {
-        requested_artifact_id
-            .as_deref()
-            .map(|artifact_id| {
-                agent_task_lifecycle::resolve_promotion_patch_artifact_id(
-                    run_id,
-                    task_id.as_deref(),
-                    artifact_id,
-                )
-            })
-            .transpose()?
-    } else {
-        requested_artifact_id
-    };
-    if let Some(run_id) = source_run_id.as_deref() {
-        agent_task_lifecycle::materialize_recovered_patch_artifact(
-            run_id,
-            task_id.as_deref(),
-            artifact_id.as_deref(),
-        )?;
-        (raw, source_path) = read_promotion_source(run_id)?;
-    }
+    let artifact_id = None;
     let promotion_request = agent_task_service::AgentTaskPromotionRequest {
         source: raw,
         source_run_id: source_run_id.clone(),

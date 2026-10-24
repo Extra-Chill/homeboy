@@ -424,7 +424,12 @@ fn agent_task_provider_selection_from_args(
 
     let backend = match backend.filter(|backend| !backend.trim().is_empty()) {
         Some(backend) => Some(backend),
-        None => default_backend_for_component(repo.as_deref())?,
+        None => {
+            let component = repo
+                .as_deref()
+                .and_then(|id| homeboy_core::component::load(id).ok());
+            default_backend_for_component(component.as_ref())?
+        }
     };
 
     let runtime_identity = resolved_provider_policy

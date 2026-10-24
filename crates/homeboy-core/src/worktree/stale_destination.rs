@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::component::{self, TargetSpec};
 use crate::error::{Error, Result};
 use crate::git;
 
@@ -134,6 +133,21 @@ pub fn classify_worktree_destination(
     Ok(DestinationFreshness::Fresh)
 }
 
+/// The ref worktree creation would adopt for `branch`: the local branch,
+/// else its origin head. One git spawn; `None` when neither exists.
+pub(crate) fn adoptable_branch_ref(source: &Path, branch: &str) -> Option<String> {
+    let local = format!("refs/heads/{branch}");
+    let remote = format!("refs/remotes/origin/{branch}");
+    let refs = git::output_optional(
+        source,
+        &["for-each-ref", "--format=%(refname)", &local, &remote],
+    )?;
+    let refs: Vec<&str> = refs.lines().collect();
+    [local, remote]
+        .into_iter()
+        .find(|reference| refs.contains(&reference.as_str()))
+}
+
 /// Classify the local branch, or origin-only branch, creation would adopt.
 /// Only a branch absent from both is unclassified and starts from the base.
 pub fn classify_local_branch(
@@ -142,27 +156,9 @@ pub fn classify_local_branch(
     branch: &str,
     base: &str,
 ) -> Result<DestinationFreshness> {
-    // Match worktree creation's local-first, then origin adoption authority.
-    let local = format!("refs/heads/{branch}");
-    let reference =
-        if git::output_optional(source, &["rev-parse", "--verify", "--quiet", &local]).is_some() {
-            local
-        } else {
-            format!("refs/remotes/origin/{branch}")
-        };
-    if git::output_optional(
-        source,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{reference}^{{commit}}"),
-        ],
-    )
-    .is_none()
-    {
+    let Some(reference) = adoptable_branch_ref(source, branch) else {
         return Ok(DestinationFreshness::Unclassified);
-    }
+    };
     let Some((base_ref, base_sha)) = remote_base(source, base) else {
         return Ok(DestinationFreshness::Unclassified);
     };
@@ -190,29 +186,15 @@ pub fn classify_local_branch(
 /// worktree creation would adopt it. Unresolvable components are unclassified
 /// so creation reports its own, more specific error.
 pub fn classify_component_branch(
-    component_id: &str,
+    source: &Path,
     handle: &str,
     branch: &str,
     base: &str,
 ) -> Result<DestinationFreshness> {
-    let Ok(target) = component::resolve_target(TargetSpec {
-        component_id: Some(component_id),
-        path_override: None,
-        project: None,
-        capability: None,
-        allow_synthetic: true,
-        accept_bare_directory: true,
-        ..TargetSpec::default()
-    }) else {
-        return Ok(DestinationFreshness::Unclassified);
-    };
-    let Ok(source) = super::queue_ops::source_checkout_for_worktree(&target) else {
-        return Ok(DestinationFreshness::Unclassified);
-    };
-    let classification = classify_local_branch(&source, handle, branch, base)?;
+    let classification = classify_local_branch(source, handle, branch, base)?;
     if !matches!(classification, DestinationFreshness::Unclassified) {
         // An existing local or origin branch can be someone's PR head.
-        super::convergence::require_issue_destination_without_pr(&source, branch)?;
+        super::convergence::require_issue_destination_without_pr(source, branch)?;
     }
     Ok(classification)
 }
@@ -223,7 +205,7 @@ pub fn classify_component_branch(
 /// during preview. Uncommitted changes alone are left to Cook admission, which
 /// owns reuse of a Cook's own in-progress candidate.
 pub fn refuse_stale_derived_destination(
-    component_id: &str,
+    source: Option<&Path>,
     handle: &str,
     branch: &str,
     base: &str,
@@ -241,7 +223,10 @@ pub fn refuse_stale_derived_destination(
             classify_worktree_destination(Path::new(&record.worktree_path), handle, branch, base)?
         }
         Some(_) => DestinationFreshness::Unclassified,
-        None => classify_component_branch(component_id, handle, branch, base)?,
+        None => match source {
+            Some(source) => classify_component_branch(source, handle, branch, base)?,
+            None => DestinationFreshness::Unclassified,
+        },
     };
     refuse_foreign_history(classification)
 }
