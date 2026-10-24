@@ -7905,10 +7905,10 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         .and_then(|repo| repo.as_ref())
         .map(|repo| &repo.component);
     let retained_gate_contract = args.gates.has_retained_contract();
-    apply_component_verify_gates(&mut args, retained_gate_contract, component)?;
     args.dispatch.cook.resolve_provider_profile();
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
+    apply_component_verify_gates(&mut args, retained_gate_contract, component)?;
     validate_cook_request_with_provenance(&args, provenance, component)?;
     confirm_model_override(&mut args)?;
     let repository = repository_result?;

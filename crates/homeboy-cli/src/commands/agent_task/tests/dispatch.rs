@@ -3682,3 +3682,79 @@ fn derived_generation_separates_live_owners_but_reuses_same_run() {
         }
     });
 }
+
+/// Lab admission replays inline `--verify` gates as staged `--verify-file`
+/// inputs. A component that declares lint adds a controller gate with inline
+/// provenance; that must happen after the file inputs are snapshotted, or the
+/// snapshot mistakes it for a retained replay contract and refuses the Cook.
+#[test]
+fn component_lint_gate_is_added_after_file_gates_are_snapshotted() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        homeboy::core::component::write_standalone_component_config(
+            &homeboy::core::component::Component {
+                id: "linted".to_string(),
+                local_path: workspace.path().display().to_string(),
+                scripts: Some(homeboy::core::component::ComponentScriptsConfig {
+                    lint: vec!["true".to_string()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("register component");
+        let target_root = tempfile::tempdir().expect("target root");
+        let target = target_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/linted",
+                target.to_str().expect("target path"),
+                "HEAD"
+            ])
+            .current_dir(workspace.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
+        let gate = target_root.path().join("gate.sh");
+        std::fs::write(&gate, "cargo test\n").expect("write gate file");
+        let cook = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "Implement the targeted repair".to_string(),
+            "--repo".to_string(),
+            "linted".to_string(),
+            "--cwd".to_string(),
+            target.display().to_string(),
+            "--to-worktree".to_string(),
+            target.display().to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--verify-file".to_string(),
+            gate.display().to_string(),
+            "--run-id".to_string(),
+            "cook-linted-file-gate".to_string(),
+        ]);
+
+        run_cook_with_executor_and_dispatcher(
+            cook,
+            Arc::new(CapturingExecutor::default()),
+            Some(Arc::new(RecipeOnlyDispatcher)),
+        )
+        .expect("file gates and the component lint gate admit together");
+
+        let recipe = homeboy::agents::agent_task_service::load_recipe("cook-linted-file-gate")
+            .expect("durable cook recipe");
+        let gates = serde_json::to_string(&recipe.attempts[0].plan).expect("plan json");
+        assert!(gates.contains("cargo test"), "file gate retained: {gates}");
+        assert!(
+            gates.contains("homeboy review lint linted --path ."),
+            "component lint gate added: {gates}"
+        );
+    });
+}
