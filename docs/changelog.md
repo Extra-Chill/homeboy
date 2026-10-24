@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.16] - 2026-10-24
+
+### Changed
+- Replace macOS process snapshots with in-process libproc enumeration
+- Cook preview no longer inventories worktree cleanup to word a capacity hint
+
 ## [0.433.15] - 2026-10-24
 
 ### Changed
