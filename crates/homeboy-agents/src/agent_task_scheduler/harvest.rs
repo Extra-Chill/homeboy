@@ -19,7 +19,28 @@ pub(super) fn harvest_candidate_commit(
     running: &RunningTask,
 ) -> Result<(), HarvestError> {
     let on_runner = crate::agent_task_lifecycle::execution_runner_id().is_some();
-    harvest_candidate_commit_with_bundle(outcome, running, on_runner)
+    let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::new();
+    let result = timer.time("promote.harvest", || {
+        harvest_candidate_commit_with_bundle(outcome, running, on_runner)
+    });
+    if let Some(run_id) = running.run_id.as_deref() {
+        let report = timer.into_report();
+        let persist = (|| -> homeboy_core::Result<()> {
+            let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+            store.record_phase_spans(
+                run_id,
+                &format!(
+                    "harvest:{}:{}:{}",
+                    running.task_id, running.attempt, report.spans[0].started_at
+                ),
+                &report,
+            )
+        })();
+        if let Err(error) = persist {
+            homeboy_core::log_status!("observe", "harvest timing persistence failed: {}", error);
+        }
+    }
+    result
 }
 
 /// `bundle`: a Lab runner hands the candidate back as the commit itself.

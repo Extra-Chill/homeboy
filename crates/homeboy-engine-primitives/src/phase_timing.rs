@@ -16,6 +16,7 @@
 //! changing any existing structured-output shape: a `PhaseTimingReport` is only
 //! materialized when a caller explicitly reads or persists it.
 
+use chrono::{SecondsFormat, Utc};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -85,9 +86,8 @@ pub struct PhaseSpan {
     pub status: PhaseStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<f64>,
-    /// Milliseconds from the workflow's origin. Old reports default to zero.
-    #[serde(default)]
-    pub start_offset_ms: f64,
+    /// Absolute start on the shared run timeline (RFC 3339, milliseconds).
+    pub started_at: String,
     /// Version of the executable recording the span (not the primitive crate).
     #[serde(default)]
     pub homeboy_version: String,
@@ -99,7 +99,7 @@ impl PhaseSpan {
             id: id.into(),
             status,
             duration_ms: duration.map(duration_to_millis),
-            start_offset_ms: 0.0,
+            started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             homeboy_version: String::new(),
         }
     }
@@ -140,7 +140,6 @@ impl PhaseTimingReport {
 #[derive(Debug, Clone)]
 pub struct PhaseTimer {
     spans: Vec<PhaseSpan>,
-    origin: Instant,
     homeboy_version: String,
 }
 
@@ -148,7 +147,6 @@ impl Default for PhaseTimer {
     fn default() -> Self {
         Self {
             spans: Vec::new(),
-            origin: Instant::now(),
             homeboy_version: homeboy_product_identity::product_version().to_string(),
         }
     }
@@ -169,11 +167,9 @@ impl PhaseTimer {
 
     fn record(&mut self, id: impl Into<String>, status: PhaseStatus, duration: Option<Duration>) {
         let mut span = PhaseSpan::new(id, status, duration);
-        span.start_offset_ms = duration_to_millis(
-            self.origin
-                .elapsed()
-                .saturating_sub(duration.unwrap_or_default()),
-        );
+        span.started_at = (Utc::now()
+            - chrono::Duration::from_std(duration.unwrap_or_default()).unwrap_or_default())
+        .to_rfc3339_opts(SecondsFormat::Millis, true);
         span.homeboy_version = self.homeboy_version.clone();
         self.spans.push(span);
     }
@@ -396,22 +392,29 @@ mod tests {
     }
 
     #[test]
-    fn spans_carry_start_offset_and_version() {
+    fn spans_carry_absolute_start_and_version() {
         let mut timer = PhaseTimer::with_version("9.9.9");
         timer.time_ok(PHASE_ADMIT, || std::thread::sleep(Duration::from_millis(2)));
         timer.time_ok(sub_phase(PHASE_STAGE, "transfer"), || ());
         let report = timer.into_report();
         assert_eq!(report.spans[0].homeboy_version, "9.9.9");
-        assert!(report.spans[1].start_offset_ms >= report.spans[0].duration_ms.unwrap());
+        assert!(report.spans[1].started_at >= report.spans[0].started_at);
         assert_eq!(owner_phase(&report.spans[1].id), PHASE_STAGE);
     }
 
     #[test]
-    fn legacy_spans_without_offset_still_parse() {
-        let span: PhaseSpan =
-            serde_json::from_str(r#"{"id":"execute","status":"ok","duration_ms":1.0}"#).unwrap();
-        assert_eq!(span.start_offset_ms, 0.0);
-        assert!(span.homeboy_version.is_empty());
+    fn spans_require_absolute_start() {
+        assert!(serde_json::from_str::<PhaseSpan>(
+            r#"{"id":"execute","status":"ok","duration_ms":1.0}"#
+        )
+        .is_err());
+        let mut timer = PhaseTimer::new();
+        timer.record_ok("execute", Duration::from_secs(1));
+        let span = &timer.report().spans[0];
+        assert!(span.started_at.ends_with('Z'));
+        assert_eq!(span.started_at.split('.').nth(1).unwrap().len(), 4);
+        let wire = serde_json::to_value(span).unwrap();
+        assert!(wire.get("start_offset_ms").is_none());
     }
 
     #[test]

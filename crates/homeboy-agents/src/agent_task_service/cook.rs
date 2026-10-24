@@ -3282,6 +3282,20 @@ pub(crate) fn dispatch_cook_follow_up(
     remediation_category_usage: &mut ExecutionBudgetUsage,
 ) -> Result<CookFollowUpDispatch> {
     let (recipe_store, lifecycle_store) = stores;
+    let timing = match lifecycle_store.open_observation_initialized() {
+        Ok(store) => Some(store),
+        Err(error) => {
+            homeboy_core::log_status!(
+                "observe",
+                "retry scheduling timing persistence failed: {}",
+                error
+            );
+            None
+        }
+    };
+    let _schedule_phase = timing
+        .as_ref()
+        .map(|store| store.run_phase_guard(source_run_id, "terminal.schedule_next_attempt"));
     validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
     let _driver = recipe_store
         .try_acquire_cook_driver(cook_id)?
@@ -7671,6 +7685,22 @@ fn run_cook_spine(
             ControlFlow::Break(report) => return Ok(report),
         };
 
+        // Keep post-gate feedback, failure recording and successor dispatch on
+        // the timeline even when an early return terminalizes the attempt.
+        let terminal_timing = match lifecycle_store.open_observation_initialized() {
+            Ok(store) => Some(store),
+            Err(error) => {
+                homeboy_core::log_status!(
+                    "observe",
+                    "terminal timing persistence failed: {}",
+                    error
+                );
+                None
+            }
+        };
+        let _terminal_phase = terminal_timing
+            .as_ref()
+            .map(|store| store.run_phase_guard(&run_id, "terminal.decision"));
         let review_form = review_form_from_aggregate(&aggregate)?;
         let intentional_no_change = intentional_no_change_from_aggregate(&aggregate);
         let previous_failure_set = delivery

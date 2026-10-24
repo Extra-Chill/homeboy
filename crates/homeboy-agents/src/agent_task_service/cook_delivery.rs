@@ -1042,6 +1042,20 @@ fn compare_failed_gates_to_verified_base(
     if !promotion.status.gate_failed() {
         return Ok(());
     }
+    let timing = match lifecycle_store.open_observation_initialized() {
+        Ok(store) => Some(store),
+        Err(error) => {
+            homeboy_core::log_status!(
+                "observe",
+                "gate replay timing persistence failed: {}",
+                error
+            );
+            None
+        }
+    };
+    let _replay_phase = timing
+        .as_ref()
+        .map(|store| store.run_phase_guard(run_id, "gate.replay"));
     let base_sha = promotion
         .verified_base
         .as_ref()

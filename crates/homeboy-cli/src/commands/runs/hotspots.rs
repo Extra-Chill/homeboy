@@ -21,6 +21,9 @@ use super::{CmdResult, RunsOutput};
 
 #[derive(Args, Clone, Debug, Default)]
 pub struct RunsHotspotsArgs {
+    /// Report timeline coverage and largest unattributed gaps for positional run ids.
+    #[arg(long)]
+    pub coverage: bool,
     /// Aggregate durable phase spans for this run kind instead of fuzz artifacts.
     #[arg(long)]
     pub kind: Option<String>,
@@ -57,6 +60,8 @@ pub struct RunsHotspotsArgs {
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct RunsHotspotsOutput {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub coverage: Vec<homeboy::core::observation::PhaseCoverage>,
     pub command: &'static str,
     pub run_ids: Vec<String>,
     pub inspected_artifact_count: usize,
@@ -113,6 +118,44 @@ pub(crate) fn runs_hotspots(
     args: RunsHotspotsArgs,
 ) -> CmdResult<RunsOutput> {
     let limit = args.limit.clamp(1, 500);
+    if args.coverage {
+        if args.run_ids.is_empty()
+            || !args.baseline_runs.is_empty()
+            || !args.candidate_runs.is_empty()
+            || args.kind.is_some()
+            || args.component.is_some()
+            || args.homeboy_version.is_some()
+            || args.baseline_version.is_some()
+            || args.candidate_version.is_some()
+        {
+            return Err(Error::validation_invalid_argument(
+                "coverage",
+                "coverage requires positional run ids and cannot be combined with cohort filters",
+                None,
+                None,
+            ));
+        }
+        let coverage = args
+            .run_ids
+            .iter()
+            .map(|id| store.phase_coverage(id, limit))
+            .collect::<homeboy::core::Result<Vec<_>>>()?;
+        return Ok((
+            RunsOutput::Hotspots(RunsHotspotsOutput {
+                coverage,
+                command: "runs.hotspots",
+                run_ids: args.run_ids,
+                inspected_artifact_count: 0,
+                matched_artifact_count: 0,
+                skipped_artifact_count: 0,
+                skipped_artifacts: vec![],
+                hotspots: vec![],
+                phase_hotspots: None,
+                cohort_comparison: None,
+            }),
+            0,
+        ));
+    }
     if args.kind.is_some()
         || args.component.is_some()
         || args.homeboy_version.is_some()
@@ -161,6 +204,7 @@ pub(crate) fn runs_hotspots(
                 hotspots: vec![],
                 cohort_comparison: None,
                 phase_hotspots: Some(phases),
+                coverage: vec![],
             }),
             0,
         ));
@@ -185,6 +229,7 @@ pub(crate) fn runs_hotspots(
             skipped_artifacts: loaded.skipped,
             hotspots,
             phase_hotspots: None,
+            coverage: vec![],
             cohort_comparison,
         }),
         0,
@@ -854,6 +899,40 @@ mod tests {
             artifact_kind: "fuzz_result_envelope".to_string(),
             json,
         }
+    }
+
+    #[test]
+    fn coverage_reads_run_spans_without_fuzz_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(dir.path().join("coverage.sqlite")).unwrap();
+        let run = store
+            .start_run(NewRunRecord::builder("agent-task").build())
+            .unwrap();
+        store
+            .time_run_phase(&run.id, "terminal.record", || {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                Ok(())
+            })
+            .unwrap();
+        store.finish_run(&run.id, RunStatus::Pass, None).unwrap();
+        let (output, exit) = runs_hotspots(
+            &store,
+            RunsHotspotsArgs {
+                coverage: true,
+                run_ids: vec![run.id],
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        let RunsOutput::Hotspots(output) = output else {
+            panic!("hotspots output expected")
+        };
+        assert_eq!(output.coverage.len(), 1);
+        assert!(output.coverage[0].covered_ms >= 4.0);
+        assert_eq!(output.inspected_artifact_count, 0);
     }
 
     fn sample_run(kind: &str, component_id: &str, rig_id: &str) -> NewRunRecord {
