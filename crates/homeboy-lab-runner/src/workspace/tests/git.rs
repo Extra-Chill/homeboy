@@ -636,6 +636,7 @@ fn controller_git_bundle_transfers_only_commits_missing_from_runner_cache() {
             crate::workspace::git::materialize_git_bundle_controlled(
                 &runner,
                 crate::workspace::git::ControllerGitBundleMaterializationRequest {
+                    metadata_only: false,
                     local_path: source.path(),
                     remote_path: destination,
                     head,
@@ -969,6 +970,7 @@ fn git_bundle_materialization_disables_lazy_fetches() {
         Some("def456"),
         false,
         BundleTransfer {
+            metadata_only: false,
             sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             object_cache: "/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git",
             prerequisites: &[],
@@ -994,6 +996,7 @@ fn git_bundle_materialization_rejects_digest_mismatch_before_clone() {
         None,
         false,
         BundleTransfer {
+            metadata_only: false,
             sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             object_cache: "/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git",
             prerequisites: &[],
@@ -1115,6 +1118,7 @@ fn git_bundle_materialization_failure_before_install_leaves_destination_absent()
             None,
             allow_dirty,
             BundleTransfer {
+                metadata_only: false,
                 sha256: &homeboy_engine_primitives::content_hash::sha256_hex(&bytes),
                 object_cache: &root.path().join("cache.git").display().to_string(),
                 prerequisites: &[],
@@ -1679,6 +1683,7 @@ fn assert_hung_promisor_transport_stopped(cancel: bool, batched: bool) {
         let result = crate::workspace::git::materialize_git_bundle_controlled(
             &runner,
             crate::workspace::git::ControllerGitBundleMaterializationRequest {
+                metadata_only: false,
                 local_path: fixture.source.path(),
                 remote_path: &destination_text,
                 head: &fixture.head,
@@ -1748,4 +1753,164 @@ fn promisor_configured_transport_batch_deadline_reaps_hung_descendant() {
 #[test]
 fn promisor_configured_transport_batch_cancellation_reaps_hung_descendant() {
     assert_hung_promisor_transport_stopped(true, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_git_installs_only_metadata_then_preserves_dirty_tree() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "-b", "main"]);
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test"]);
+        for name in ["modified", "deleted", "executable"] {
+            fs::write(source.path().join(name), name).unwrap();
+        }
+        symlink("modified", source.path().join("link")).unwrap();
+        git(source.path(), &["add", "."]);
+        git(source.path(), &["commit", "-m", "base"]);
+        let head = git_output(source.path(), &["rev-parse", "HEAD"]).unwrap();
+        fs::write(source.path().join("modified"), "dirty bytes").unwrap();
+        fs::remove_file(source.path().join("deleted")).unwrap();
+        fs::write(source.path().join("added"), "added bytes").unwrap();
+        git(source.path(), &["add", "added"]);
+        fs::write(source.path().join("untracked"), "untracked bytes").unwrap();
+        fs::set_permissions(
+            source.path().join("executable"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::remove_file(source.path().join("link")).unwrap();
+        symlink("untracked", source.path().join("link")).unwrap();
+        crate::create(
+            &format!(
+                r#"{{"id":"metadata-only","kind":"local","workspace_root":"{}"}}"#,
+                root.path().display()
+            ),
+            false,
+        )
+        .unwrap();
+        let runner = crate::load("metadata-only").unwrap();
+        let dest = root.path().join("workspace");
+        let remote = dest.to_str().unwrap();
+        let control = crate::workspace::WorkspaceControl::default();
+        let install = super::super::git::git_object_cache_install_command(
+            remote,
+            &head,
+            Some("main"),
+            "homeboy-controller-bundle",
+            None,
+            false,
+            "cache",
+            true,
+        );
+        assert!(!install.contains("checkout"));
+        assert!(!install.contains("reset --hard"));
+        assert!(!install.contains("clean -"));
+        super::super::git::materialize_git_bundle_controlled(
+            &runner,
+            super::super::git::ControllerGitBundleMaterializationRequest {
+                metadata_only: true,
+                local_path: source.path(),
+                remote_path: remote,
+                head: &head,
+                branch: Some("main"),
+                remote_url: "homeboy-controller-bundle",
+                changed_since_base: None,
+                git_fetch_refs: &[],
+                allow_dirty_lab_workspace: false,
+            },
+            &control,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_dir(&dest).unwrap().count(),
+            1,
+            "no worktree before overlay"
+        );
+        // Compare against the former checkout + overlay result: the base index,
+        // not the controller's staged index, defines the runner's dirty status.
+        let expected = root.path().join("old-result");
+        git(
+            root.path(),
+            &[
+                "clone",
+                source.path().to_str().unwrap(),
+                expected.to_str().unwrap(),
+            ],
+        );
+        super::super::snapshot::materialize_snapshot_overlay_controlled(
+            &runner,
+            source.path(),
+            expected.to_str().unwrap(),
+            &[".git".into()],
+            &control,
+        )
+        .unwrap();
+        let shim = root.path().join("bin");
+        fs::create_dir(&shim).unwrap();
+        let commands = root.path().join("commands");
+        homeboy_test_support::write_executable(
+            &shim.join("bash"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec /bin/bash \"$@\"\n",
+                commands.display()
+            ),
+            0o755,
+        )
+        .unwrap();
+        let original_path = std::env::var("PATH").unwrap();
+        std::env::set_var("PATH", format!("{}:{original_path}", shim.display()));
+        super::super::git::materialize_git_snapshot_controlled(
+            &runner,
+            source.path(),
+            remote,
+            &[".git".into()],
+            &[],
+            &control,
+        )
+        .unwrap();
+        std::env::set_var("PATH", original_path);
+        let runner_commands = fs::read_to_string(commands)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains(remote))
+            .count();
+        assert_eq!(
+            runner_commands, 2,
+            "cache install + overlay; formerly four with separate Git probes"
+        );
+        assert_eq!(
+            git_output(&dest, &["status", "--porcelain"]).unwrap(),
+            git_output(&expected, &["status", "--porcelain"]).unwrap()
+        );
+        assert_eq!(git_output(&dest, &["rev-parse", "HEAD"]).unwrap(), head);
+        for name in ["modified", "added", "untracked", "executable"] {
+            assert_eq!(
+                fs::read(dest.join(name)).unwrap(),
+                fs::read(source.path().join(name)).unwrap()
+            );
+        }
+        assert!(!dest.join("deleted").exists());
+        assert_eq!(
+            fs::read_link(dest.join("link")).unwrap(),
+            Path::new("untracked")
+        );
+        assert_ne!(
+            fs::metadata(dest.join("executable"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        // Apply + Git representation verification now share a single command,
+        // rather than apply plus two independent SSH verification commands.
+        let overlay = super::super::snapshot::snapshot_overlay_install_command(remote);
+        assert!(overlay.contains("read-tree HEAD"));
+        assert!(overlay.contains("rev-parse --is-inside-work-tree"));
+        assert!(overlay.contains("rev-parse --verify -q HEAD"));
+    });
 }

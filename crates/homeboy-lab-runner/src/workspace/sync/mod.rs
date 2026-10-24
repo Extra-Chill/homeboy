@@ -575,6 +575,7 @@ fn sync_workspace_in_roots_controlled(
                 materialize_git_bundle_controlled(
                     &runner,
                     ControllerGitBundleMaterializationRequest {
+                        metadata_only: false,
                         local_path: &local_path,
                         remote_path: &remote_path,
                         head: &git.head,
@@ -615,6 +616,7 @@ fn sync_workspace_in_roots_controlled(
                             materialize_git_bundle_controlled(
                                 &runner,
                                 ControllerGitBundleMaterializationRequest {
+                                    metadata_only: false,
                                     local_path: &local_path,
                                     remote_path: &remote_path,
                                     head: &git.head,
