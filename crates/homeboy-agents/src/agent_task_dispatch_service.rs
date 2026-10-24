@@ -558,15 +558,22 @@ pub struct AgentTaskDispatchCommand {
     pub core: DispatchCoreInputs,
 }
 
+impl AgentTaskDispatchCommand {
+    /// The registered component this command names, if any.
+    pub fn declared_component(&self) -> Option<homeboy_core::component::Component> {
+        let id = self.component.as_deref().or(self.repo.as_deref())?;
+        homeboy_core::component::load(id).ok()
+    }
+}
+
 /// Resolve a typed dispatch request from command-surface inputs, applying the
-/// declared default-backend policy when `--backend` is absent.
+/// declared default-backend policy from the caller-resolved component when
+/// `--backend` is absent. `None` uses extension and global policy only.
 pub fn resolve_dispatch_request(
     command: AgentTaskDispatchCommand,
+    component: Option<&homeboy_core::component::Component>,
 ) -> Result<AgentTaskDispatchRequest> {
-    resolve_dispatch_request_with_default(command, |id| {
-        let component = id.and_then(|id| homeboy_core::component::load(id).ok());
-        default_backend_for_component(component.as_ref())
-    })
+    resolve_dispatch_request_with_default(command, |_| default_backend_for_component(component))
 }
 
 /// Resolve the provider policy the controller passes to an execution boundary.
@@ -588,8 +595,9 @@ pub fn controller_resolved_execution_policy(
 pub fn resolve_cook_initial_provider_route_with_catalog(
     command: AgentTaskDispatchCommand,
     catalog: &AgentTaskProviderCatalog,
+    component: Option<&homeboy_core::component::Component>,
 ) -> Result<AgentTaskInitialProviderRoute> {
-    let request = resolve_dispatch_request(command)?;
+    let request = resolve_dispatch_request(command, component)?;
     let policy = request
         .core
         .resolved_provider_policy
@@ -799,11 +807,9 @@ pub fn resolve_dispatch_request_with_default(
     command: AgentTaskDispatchCommand,
     default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
 ) -> Result<AgentTaskDispatchRequest> {
-    resolve_dispatch_request_with_default_and_config(
-        command,
-        default_backend,
-        config_default_backend,
-    )
+    resolve_dispatch_request_with_sources(command, default_backend, config_default_backend, || {
+        AgentTaskProviderCatalog::discover().backends()
+    })
 }
 
 /// Resolve a dispatch request against one observed provider catalog.
@@ -886,8 +892,8 @@ fn missing_default_backend_error(available_backends: &[String]) -> Error {
     error
 }
 
-/// Resolution core that also takes the Homeboy-config default resolver so tests
-/// can drive deterministic source classification (#5685).
+/// Inject configuration defaults for deterministic source-classification tests.
+#[cfg(test)]
 fn resolve_dispatch_request_with_default_and_config(
     command: AgentTaskDispatchCommand,
     default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
@@ -1016,7 +1022,8 @@ pub fn run_dispatch_command_with_provider_catalog(
     executor: SharedAgentTaskExecutor,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<(Value, i32)> {
-    let request = resolve_dispatch_request(command)?;
+    let component = command.declared_component();
+    let request = resolve_dispatch_request(command, component.as_ref())?;
     let result = dispatch_with_provider_catalog(request, executor, catalog)?;
     Ok((command_json_value(result.value)?, result.exit_code))
 }
@@ -1184,11 +1191,14 @@ mod tests {
             core.resolved_provider_policy.as_mut().unwrap().model =
                 Some("configured-model".to_string());
             core.acknowledge_model_override = true;
-            let mut request = resolve_dispatch_request(AgentTaskDispatchCommand {
-                prompt: Some("use the configured policy".to_string()),
-                core,
-                ..Default::default()
-            })
+            let mut request = resolve_dispatch_request(
+                AgentTaskDispatchCommand {
+                    prompt: Some("use the configured policy".to_string()),
+                    core,
+                    ..Default::default()
+                },
+                None,
+            )
             .expect("resolve inherited model");
             assert!(
                 request.model.is_none(),
@@ -1806,6 +1816,45 @@ mod tests {
         assert_eq!(selection.backend, "pi");
         assert_eq!(selection.source, BackendSelectionSource::Config);
         assert!(!selection.overrides_default);
+    }
+
+    #[test]
+    fn cook_route_uses_the_supplied_component_without_reloading_by_id() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let component = homeboy_core::component::Component {
+                id: "unregistered-cook-component".to_string(),
+                extensions: Some(std::collections::HashMap::from([(
+                    "policy".to_string(),
+                    homeboy_core::component::ScopedExtensionConfig {
+                        settings: std::collections::HashMap::from([(
+                            "agent_task".to_string(),
+                            serde_json::json!({"default_backend": "supplied-component-backend"}),
+                        )]),
+                        ..Default::default()
+                    },
+                )])),
+                ..Default::default()
+            };
+            assert!(homeboy_core::component::load(&component.id).is_err());
+            let command = AgentTaskDispatchCommand {
+                repo: Some("owning-repository".to_string()),
+                component: Some(component.id.clone()),
+                model: Some("fixed-model".to_string()),
+                ..Default::default()
+            };
+            let request = resolve_dispatch_request(command.clone(), Some(&component))
+                .expect("resolve the supplied component policy");
+            assert_eq!(request.backend, "supplied-component-backend");
+            assert_eq!(request.repo.as_deref(), Some("owning-repository"));
+            assert_eq!(request.component.as_deref(), Some(component.id.as_str()));
+            let route = resolve_cook_initial_provider_route_with_catalog(
+                command,
+                &AgentTaskProviderCatalog::discover(),
+                Some(&component),
+            )
+            .expect("resolve Cook route without a registered component");
+            assert_eq!(route.backend, "supplied-component-backend");
+        });
     }
 
     #[test]

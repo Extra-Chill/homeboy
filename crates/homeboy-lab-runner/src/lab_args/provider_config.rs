@@ -207,7 +207,8 @@ pub(crate) fn inject_agent_task_resolved_provider_policy_in_args(
         Some(dispatch) => dispatch,
         None => return Ok(args.to_vec()),
     };
-    let request = resolve_dispatch_request(dispatch)?;
+    let component = dispatch.declared_component();
+    let request = resolve_dispatch_request(dispatch, component.as_ref())?;
     let policy =
         homeboy_agents::agent_task_dispatch_service::controller_resolved_execution_policy(&request);
     let encoded = serde_json::to_string(&policy).map_err(|error| {

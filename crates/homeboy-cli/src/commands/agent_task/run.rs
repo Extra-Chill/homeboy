@@ -668,14 +668,9 @@ pub(crate) fn preview_cook(
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance, component)?;
-    let preview_request = dispatch_service::resolve_dispatch_request_with_default(
+    let preview_request = dispatch_service::resolve_dispatch_request(
         resolved_dispatch_args_for_cook(&args)?.into(),
-        |id| {
-            let fallback = id
-                .filter(|_| component.is_none())
-                .and_then(|id| homeboy::core::component::load(id).ok());
-            provider::default_backend_for_component(component.or(fallback.as_ref()))
-        },
+        component,
     )?;
     dispatch_service::require_model_override_acknowledgement(&preview_request)?;
     let repository = repository_result?;
@@ -789,7 +784,11 @@ pub(crate) fn preview_cook(
             .cloned(),
     )?;
     record_preview_phase(&mut progress, "provider_preflight");
-    preflight_cook_provider_credentials(&args)?;
+    preflight_cook_provider_credentials(
+        dispatch_command_for_cook(&args, dispatch_args_for_cook(&args)),
+        &provider::AgentTaskProviderCatalog::discover(),
+        component,
+    )?;
 
     // Preview binds evidence to the same resolved workspace, but only projects
     // its read-only paths. Cook alone performs the later secure copy.
@@ -7672,21 +7671,13 @@ pub(crate) fn record_cook_provision(plan: &mut AgentTaskPlan, provision: Value) 
 /// A backend that cannot be resolved at all is left to the resolution
 /// validators; this only speaks about credentials.
 pub(crate) fn preflight_cook_provider_credentials(
-    args: &AgentTaskCookArgs,
-) -> homeboy::core::Result<()> {
-    let catalog = provider::AgentTaskProviderCatalog::discover();
-    preflight_cook_provider_credentials_with_catalog(
-        dispatch_command_for_cook(args, dispatch_args_for_cook(args)),
-        &catalog,
-    )
-}
-
-pub(crate) fn preflight_cook_provider_credentials_with_catalog(
     dispatch: dispatch_service::AgentTaskDispatchCommand,
     catalog: &provider::AgentTaskProviderCatalog,
+    component: Option<&homeboy::core::component::Component>,
 ) -> homeboy::core::Result<()> {
-    let route =
-        dispatch_service::resolve_cook_initial_provider_route_with_catalog(dispatch, &catalog)?;
+    let route = dispatch_service::resolve_cook_initial_provider_route_with_catalog(
+        dispatch, catalog, component,
+    )?;
     provider::preflight_provider_credentials_for_backend(
         catalog.providers(),
         &route.backend,
@@ -7738,14 +7729,9 @@ pub(crate) fn validate_cook_request_with_provenance(
     // unrelated prompt, evidence, and gate inputs so Cook reports the blocker
     // an operator must fix first.
     let mut dispatch = dispatch_args_for_cook(args);
-    let request = dispatch_service::resolve_dispatch_request_with_default(
+    let request = dispatch_service::resolve_dispatch_request(
         dispatch_command_for_cook(args, dispatch.clone()),
-        |id| {
-            let fallback = id
-                .filter(|_| component.is_none())
-                .and_then(|id| homeboy::core::component::load(id).ok());
-            provider::default_backend_for_component(component.or(fallback.as_ref()))
-        },
+        component,
     )?;
     if args.goal.is_some() && !args.dispatch.tasks.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -8007,8 +7993,10 @@ pub(crate) fn require_model_override_acknowledgement_for_cook(
     if args.dispatch.acknowledge_model_override {
         return Ok(());
     }
-    let dispatch = resolved_dispatch_args_for_cook(args)?;
-    let request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
+    let dispatch: dispatch_service::AgentTaskDispatchCommand =
+        resolved_dispatch_args_for_cook(args)?.into();
+    let component = dispatch.declared_component();
+    let request = dispatch_service::resolve_dispatch_request(dispatch, component.as_ref())?;
     dispatch_service::require_model_override_acknowledgement(&request)
 }
 
@@ -9034,14 +9022,9 @@ pub(crate) fn compile_cook_plan(
         &evidence,
         &projected_paths,
     )?;
-    let mut request = dispatch_service::resolve_dispatch_request_with_default(
+    let mut request = dispatch_service::resolve_dispatch_request(
         dispatch_command_for_cook(args, dispatch),
-        |id| {
-            let fallback = id
-                .filter(|_| component.is_none())
-                .and_then(|id| homeboy::core::component::load(id).ok());
-            provider::default_backend_for_component(component.or(fallback.as_ref()))
-        },
+        component,
     )?;
     let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
