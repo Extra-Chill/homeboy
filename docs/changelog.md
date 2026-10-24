@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.20] - 2026-10-24
+
+### Changed
+- Name the PR a diverged Cook destination does not head
+- Upgrades release their remote runner drains on every terminal path and take over drains from terminal owners
+- Isolate lab-runner tests that mutate process-global state; fix the workspace update lock race
+
 ## [0.433.19] - 2026-10-24
 
 ### Changed
