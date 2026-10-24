@@ -294,7 +294,11 @@ impl AgentTaskTransition {
                     "project_aggregate",
                     "an aggregate projection",
                 )?;
-                Ok((*prepared, Some(*aggregate), true))
+                Ok((
+                    keep_committed_cancellation(&stored, *prepared),
+                    Some(*aggregate),
+                    true,
+                ))
             }
             Self::CommitRecord { prepared } => {
                 validate_prepared_terminal_record(
@@ -303,7 +307,11 @@ impl AgentTaskTransition {
                     "commit_record",
                     "a terminal record commit",
                 )?;
-                Ok((*prepared, stored_aggregate, false))
+                Ok((
+                    keep_committed_cancellation(&stored, *prepared),
+                    stored_aggregate,
+                    false,
+                ))
             }
             Self::Annotate { prepared } => {
                 validate_identity(&prepared, &stored, "an annotation")?;
@@ -331,6 +339,27 @@ impl AgentTaskTransition {
             }
         }
     }
+}
+
+/// A cancelled run's provenance is its immutable `run.cancelled` receipt. A
+/// prepared record decided before that commit (a runner projection minting its
+/// own timestamp, a rebased aggregate) re-commits the cancellation it already
+/// has, so it keeps the stored cause instead of colliding with the receipt.
+fn keep_committed_cancellation(
+    stored: &AgentTaskRunRecord,
+    mut prepared: AgentTaskRunRecord,
+) -> AgentTaskRunRecord {
+    if stored.state() != AgentTaskRunState::Cancelled
+        || prepared.state() != AgentTaskRunState::Cancelled
+    {
+        return prepared;
+    }
+    if let Some(provenance) = stored.metadata.get("cancellation_provenance") {
+        prepared
+            .ensure_metadata_object()
+            .insert("cancellation_provenance".to_string(), provenance.clone());
+    }
+    prepared
 }
 
 fn validate_identity(

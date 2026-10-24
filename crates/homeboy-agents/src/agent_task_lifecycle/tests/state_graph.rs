@@ -172,3 +172,62 @@ fn a_finished_run_is_still_reprojected_from_later_evidence() {
         .expect("written");
     assert_eq!(reprojected.state(), AgentTaskRunState::Succeeded);
 }
+
+/// Two writers that both saw the run live can each decide it was cancelled.
+/// The second commit carries its own provenance, which used to collide with
+/// the first's immutable `run.cancelled` receipt and fail the operator's
+/// cancel after the run was already cancelled.
+#[test]
+fn a_second_cancellation_commit_keeps_the_first_cause() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    store.write_controller_plan(RUN_ID, &plan).unwrap();
+    let mut record: AgentTaskRunRecord = serde_json::from_value(json!({
+        "schema": crate::agent_task_lifecycle::records::schemas::RUN,
+        "run_id": RUN_ID,
+        "plan_id": plan.plan_id,
+        "state": "queued",
+        "submitted_at": "2026-10-20T00:00:00Z",
+        "plan_path": store.controller_plan_path(RUN_ID).display().to_string(),
+    }))
+    .unwrap();
+    record.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Queued);
+    set_run_state(&mut record, AgentTaskRunState::Running);
+    store.write_record(&record).unwrap();
+    let running = store.read_record(RUN_ID).unwrap();
+    let cancelled_by = |actor: &str| {
+        let mut prepared = running.clone();
+        set_run_state(&mut prepared, AgentTaskRunState::Cancelled);
+        prepared.ensure_metadata_object().insert(
+            "cancellation_provenance".to_string(),
+            json!({ "actor": actor, "reason": format!("cancelled by {actor}") }),
+        );
+        prepared
+    };
+
+    let first = store
+        .transition(
+            RUN_ID,
+            running.revision,
+            AgentTaskTransition::CommitRecord {
+                prepared: Box::new(cancelled_by("controller")),
+            },
+        )
+        .expect("first cancellation");
+    let second = store
+        .transition(
+            RUN_ID,
+            first.revision,
+            AgentTaskTransition::CommitRecord {
+                prepared: Box::new(cancelled_by("runner")),
+            },
+        )
+        .expect("a second cancellation commit is not an idempotency conflict");
+
+    assert_eq!(second.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(
+        second.metadata["cancellation_provenance"]["actor"],
+        json!("controller")
+    );
+}
