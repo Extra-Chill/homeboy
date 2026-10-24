@@ -8,8 +8,8 @@ use crate::{
         AGENT_TASK_ARTIFACT_SCHEMA,
     },
     agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
-        AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
+        AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskPlan, AgentTaskProgressEvent,
+        AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
     },
 };
 use homeboy_core::run_lifecycle_record::{
@@ -2602,7 +2602,6 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
         let aggregate = AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
             totals: AgentTaskAggregateTotals {
                 succeeded: 1,
                 ..Default::default()
@@ -2668,7 +2667,6 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
         let aggregate = AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
             totals: AgentTaskAggregateTotals {
                 succeeded: 2,
                 skipped: 1,

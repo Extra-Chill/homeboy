@@ -50,9 +50,7 @@ pub fn mirror_agent_task_run_plan_aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_tasks::scheduler::{
-        AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
-    };
+    use crate::agent_tasks::scheduler::{AgentTaskAggregateTotals, AgentTaskPlan};
 
     #[test]
     fn detached_projection_retries_from_controller_plan_after_runner_staging_is_removed() {
@@ -67,7 +65,6 @@ mod tests {
             let aggregate = AgentTaskAggregate {
                 schema: "homeboy/agent-task-aggregate/v1".to_string(),
                 plan_id: "runner-staged-plan".to_string(),
-                status: AgentTaskAggregateStatus::Failed,
                 totals: AgentTaskAggregateTotals {
                     failed: 1,
                     ..Default::default()
@@ -119,7 +116,6 @@ mod tests {
             let aggregate = AgentTaskAggregate {
                 schema: "homeboy/agent-task-aggregate/v1".to_string(),
                 plan_id: "runner-staged-plan".to_string(),
-                status: AgentTaskAggregateStatus::Failed,
                 totals: Default::default(),
                 outcomes: Vec::new(),
                 events: Vec::new(),

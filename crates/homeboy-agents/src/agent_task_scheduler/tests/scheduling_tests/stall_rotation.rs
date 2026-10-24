@@ -168,7 +168,7 @@ mod stall_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
         let attempts = aggregate.outcomes[0]
             .metadata
             .pointer("/provider_rotation/attempts")
@@ -249,7 +249,7 @@ mod stall_rotation_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             AgentTaskAggregateStatus::Succeeded,
             "{aggregate:#?}"
         );
@@ -294,7 +294,7 @@ mod stall_rotation_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             AgentTaskAggregateStatus::Succeeded,
             "{aggregate:#?}"
         );
@@ -346,7 +346,7 @@ mod stall_rotation_tests {
             "no rotation configured; never dispatches a second attempt"
         );
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             AgentTaskAggregateStatus::PartialRecoverable,
             "{aggregate:#?}"
         );
@@ -375,7 +375,7 @@ mod stall_rotation_tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_ne!(
-            aggregate.status,
+            aggregate.status(),
             AgentTaskAggregateStatus::Succeeded,
             "a stall must never silently look like success"
         );

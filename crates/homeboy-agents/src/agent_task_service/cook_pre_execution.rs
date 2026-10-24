@@ -1114,7 +1114,6 @@ mod tests {
             };
             let aggregate = crate::agent_task_scheduler::AgentTaskAggregate {
                 plan_id: plan.plan_id.clone(),
-                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
                 totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
                     failed: 1,
                     ..Default::default()

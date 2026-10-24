@@ -299,7 +299,7 @@ fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
     ))
     .run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
     let executed: Value = serde_json::from_slice(&std::fs::read(marker).expect("execution marker"))
         .expect("execution identity");
     assert_eq!(executed["model"], "ready-model");
@@ -493,7 +493,7 @@ fn scheduler_rotates_from_an_incapable_plan_level_primary_to_a_capable_fallback(
     ))
     .run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
     assert_eq!(
         aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],
         1
@@ -948,7 +948,7 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
     let attempts = aggregate.outcomes[0]
         .metadata
         .pointer("/provider_rotation/attempts")

@@ -14,8 +14,8 @@ use crate::agent_task::{
 };
 use crate::agent_task_provider::{role_aliases_for_provider, AgentTaskProviderRoleAliases};
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
-    AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
+    AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskPlan, AgentTaskProgressEvent,
+    AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use homeboy_core::run_lifecycle_record::{
     ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,

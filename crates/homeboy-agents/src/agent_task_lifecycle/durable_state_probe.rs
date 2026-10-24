@@ -263,21 +263,17 @@ fn purity_aggregate(
     plan: &crate::agent_task_scheduler::AgentTaskPlan,
 ) -> crate::agent_task_scheduler::AgentTaskAggregate {
     use crate::agent_task_scheduler::*;
+    let outcomes = vec![crate::agent_task::AgentTaskOutcome {
+        task_id: "task-a".to_string(),
+        status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+        summary: Some("ok".to_string()),
+        ..Default::default()
+    }];
     AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
-        status: AgentTaskAggregateStatus::Succeeded,
-        totals: AgentTaskAggregateTotals {
-            queued: 1,
-            succeeded: 1,
-            ..AgentTaskAggregateTotals::default()
-        },
-        outcomes: vec![crate::agent_task::AgentTaskOutcome {
-            task_id: "task-a".to_string(),
-            status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
-            summary: Some("ok".to_string()),
-            ..Default::default()
-        }],
+        totals: AgentTaskAggregateTotals::from_outcomes(plan.tasks.len(), &outcomes),
+        outcomes,
         events: vec![AgentTaskProgressEvent {
             task_id: "task-a".to_string(),
             state: AgentTaskState::Succeeded,

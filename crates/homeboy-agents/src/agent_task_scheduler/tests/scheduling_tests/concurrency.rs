@@ -143,7 +143,7 @@ pub(super) mod concurrency_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
         );
         assert_eq!(aggregate.totals.queued, 0);
@@ -264,7 +264,7 @@ pub(super) mod concurrency_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialFailure
         );
         assert_eq!(aggregate.totals.succeeded, 2);
@@ -296,7 +296,7 @@ pub(super) mod concurrency_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
         );
         assert!(max_seen.load(Ordering::SeqCst) <= 1);
@@ -323,7 +323,7 @@ pub(super) mod concurrency_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
         );
         assert!(max_seen.load(Ordering::SeqCst) <= 1);
@@ -354,7 +354,7 @@ pub(super) mod concurrency_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             AgentTaskAggregateStatus::Succeeded,
             "{aggregate:#?}"
         );
@@ -394,7 +394,7 @@ pub(super) mod concurrency_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
         assert_eq!(aggregate.totals.succeeded, 2);
         assert_eq!(max_seen.load(Ordering::SeqCst), 1);
         assert!(aggregate
@@ -444,7 +444,7 @@ pub(super) mod concurrency_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             AgentTaskAggregateStatus::Succeeded,
             "{aggregate:#?}"
         );
@@ -490,7 +490,7 @@ pub(super) mod concurrency_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
         assert!(aggregate
             .outcomes
             .iter()
@@ -532,7 +532,7 @@ pub(super) mod concurrency_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
         assert_eq!(aggregate.totals.succeeded, 3);
         assert_eq!(aggregate.queue.max_concurrency, 3);
         assert_eq!(max_seen.load(Ordering::SeqCst), 1);
@@ -812,7 +812,7 @@ pub(super) mod concurrency_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
         assert_eq!(max_seen.load(Ordering::SeqCst), 0);
         assert!(aggregate.outcomes[0].diagnostics.iter().any(|diagnostic| {
             diagnostic.class == "agent_task.committed_harvest_dirty_workspace"
@@ -943,7 +943,7 @@ pub(super) mod concurrency_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         let workspaces = workspaces.lock().expect("workspaces");
         assert_eq!(workspaces.len(), 2);
@@ -1035,7 +1035,7 @@ pub(super) mod concurrency_tests {
 
             assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts, "{name}");
             assert_eq!(
-                aggregate.status,
+                aggregate.status(),
                 AgentTaskAggregateStatus::PartialRecoverable,
                 "{name}"
             );
@@ -1078,7 +1078,7 @@ pub(super) mod concurrency_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
         assert!(aggregate.outcomes[0].artifacts.is_empty());
     }
 }

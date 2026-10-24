@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-use crate::agent_task::{AgentTaskComponentContract, AgentTaskOutcome, AgentTaskRequest};
+use crate::agent_task::{
+    AgentTaskComponentContract, AgentTaskFailureClassification, AgentTaskOutcome,
+    AgentTaskOutcomeStatus, AgentTaskRequest,
+};
 use homeboy_core::plan::{
     HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepDependencyKind, PlanStepStatus,
 };
@@ -410,12 +413,15 @@ mod plan {
 mod aggregate {
     use super::*;
 
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    /// `status` is not stored: it is a function of `outcomes` (see
+    /// [`AgentTaskAggregate::status`]). Serialization emits the derived value
+    /// under `status`; deserialization ignores any stored `status`.
+    #[derive(Debug, Clone, Deserialize, PartialEq)]
     pub struct AgentTaskAggregate {
         #[serde(default = "defaults::aggregate_schema")]
         pub schema: String,
         pub plan_id: String,
-        pub status: AgentTaskAggregateStatus,
+        /// Written only through [`AgentTaskAggregateTotals::from_outcomes`].
         pub totals: AgentTaskAggregateTotals,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub outcomes: Vec<AgentTaskOutcome>,
@@ -431,7 +437,41 @@ mod aggregate {
         pub queue: AgentTaskQueueStatus,
     }
 
+    impl Serialize for AgentTaskAggregate {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut out = serializer.serialize_struct("AgentTaskAggregate", 10)?;
+            out.serialize_field("schema", &self.schema)?;
+            out.serialize_field("plan_id", &self.plan_id)?;
+            out.serialize_field("status", &self.status())?;
+            out.serialize_field("totals", &self.totals)?;
+            macro_rules! non_empty {
+                ($($field:ident),*) => {$(
+                    if self.$field.is_empty() {
+                        out.skip_field(stringify!($field))?;
+                    } else {
+                        out.serialize_field(stringify!($field), &self.$field)?;
+                    }
+                )*};
+            }
+            non_empty!(
+                outcomes,
+                events,
+                artifact_lineage,
+                child_runs,
+                artifact_bindings
+            );
+            out.serialize_field("queue", &self.queue)?;
+            out.end()
+        }
+    }
+
     impl AgentTaskAggregate {
+        /// Derived from the outcomes; see [`AgentTaskAggregateStatus::from_outcomes`].
+        pub fn status(&self) -> AgentTaskAggregateStatus {
+            AgentTaskAggregateStatus::from_outcomes(&self.outcomes)
+        }
+
         /// Candidate aggregates record their controller decision on the winner.
         /// Consumers must use this rather than outcome order, which is completion
         /// order and can include cancelled or deferred siblings.
@@ -495,12 +535,78 @@ mod aggregate {
     #[serde(rename_all = "snake_case")]
     pub enum AgentTaskAggregateStatus {
         Succeeded,
-        /// Backward-compatible aggregate projection for older durable records.
-        CandidateRecoverable,
         PartialRecoverable,
         PartialFailure,
         Failed,
         Cancelled,
+    }
+
+    impl AgentTaskAggregateStatus {
+        /// The single definition of an aggregate's status. Any cancelled
+        /// outcome cancels the run; a run whose outcomes are all recoverable
+        /// candidates is `PartialRecoverable`; otherwise a recoverable
+        /// candidate counts as not failed. An aggregate with no outcomes has
+        /// no succeeded work and is `Failed`.
+        pub fn from_outcomes(outcomes: &[AgentTaskOutcome]) -> Self {
+            use AgentTaskOutcomeStatus::{Cancelled, CandidateRecoverable, NoOp, Succeeded};
+            if outcomes.iter().any(|outcome| outcome.status == Cancelled) {
+                return Self::Cancelled;
+            }
+            if !outcomes.is_empty()
+                && outcomes
+                    .iter()
+                    .all(|outcome| outcome.status == CandidateRecoverable)
+            {
+                return Self::PartialRecoverable;
+            }
+            let failed = outcomes
+                .iter()
+                .any(|outcome| !matches!(outcome.status, Succeeded | NoOp | CandidateRecoverable));
+            let succeeded = outcomes
+                .iter()
+                .any(|outcome| matches!(outcome.status, Succeeded | NoOp));
+            match (succeeded, failed) {
+                (true, false) => Self::Succeeded,
+                (true, true) => Self::PartialFailure,
+                _ => Self::Failed,
+            }
+        }
+    }
+
+    impl AgentTaskAggregateTotals {
+        /// The single definition of aggregate totals: `queued` is the planned
+        /// task count not yet represented by an outcome.
+        pub fn from_outcomes(total_tasks: usize, outcomes: &[AgentTaskOutcome]) -> Self {
+            let mut totals = Self {
+                queued: total_tasks.saturating_sub(outcomes.len()),
+                ..Self::default()
+            };
+            for outcome in outcomes {
+                match outcome.status {
+                    AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
+                        totals.succeeded += 1
+                    }
+                    AgentTaskOutcomeStatus::CandidateRecoverable => {
+                        totals.candidate_recoverable += 1;
+                        totals.recoverable_candidates += 1;
+                    }
+                    AgentTaskOutcomeStatus::Timeout => totals.timed_out += 1,
+                    AgentTaskOutcomeStatus::Cancelled => totals.cancelled += 1,
+                    AgentTaskOutcomeStatus::Failed
+                        if outcome.failure_classification
+                            == Some(AgentTaskFailureClassification::PolicyDenied)
+                            && outcome
+                                .diagnostics
+                                .iter()
+                                .any(|diagnostic| diagnostic.class == "backpressure") =>
+                    {
+                        totals.blocked += 1
+                    }
+                    _ => totals.failed += 1,
+                }
+            }
+            totals
+        }
     }
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

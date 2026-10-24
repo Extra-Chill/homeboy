@@ -6815,9 +6815,7 @@ mod tests {
     fn terminal_resume_is_not_delegated_to_the_admitting_runtime() {
         crate::test_support::with_isolated_home(|_| {
             use homeboy::agents::agent_tasks::lifecycle::AgentTaskRunState;
-            use homeboy::agents::agent_tasks::scheduler::{
-                AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskPlan,
-            };
+            use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
             use homeboy::agents::agent_tasks::{AgentTaskOutcome, AgentTaskOutcomeStatus};
 
             let run_id = "terminal-resume-15732";
@@ -6833,7 +6831,6 @@ mod tests {
             let aggregate = AgentTaskAggregate {
                 schema: "homeboy/agent-task-aggregate/v1".to_string(),
                 plan_id: plan.plan_id.clone(),
-                status: AgentTaskAggregateStatus::Succeeded,
                 totals: Default::default(),
                 outcomes: vec![AgentTaskOutcome {
                     task_id,

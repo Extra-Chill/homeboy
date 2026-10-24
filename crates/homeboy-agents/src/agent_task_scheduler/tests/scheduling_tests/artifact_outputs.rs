@@ -25,7 +25,7 @@ fn runtime_bundle_artifacts_materialize_required_typed_artifacts() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
     assert_eq!(aggregate.totals.succeeded, 1);
     let outcome = &aggregate.outcomes[0];
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
@@ -66,7 +66,7 @@ fn binds_artifacts_to_generic_child_run_ids_for_durable_fanout() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
     assert_eq!(aggregate.child_runs.len(), 2);
     let mut child_runs = aggregate.child_runs.clone();
     child_runs.sort_by(|left, right| left.task_id.cmp(&right.task_id));

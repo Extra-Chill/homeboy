@@ -10,9 +10,9 @@ use crate::agent_task_lifecycle;
 use crate::agent_task_lifecycle::{reconcile_status as lifecycle_status, AgentTaskRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry,
-    AgentTaskProviderRotationPolicy, AgentTaskScheduler, AgentTaskState,
+    AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskExecutionContext,
+    AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
+    AgentTaskScheduler, AgentTaskState,
 };
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::run_lifecycle_record::RunExecutionState;
@@ -5188,7 +5188,6 @@ fn aggregate_with_outcome(metadata: Value) -> AgentTaskAggregate {
     AgentTaskAggregate {
         schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: "service-plan".to_string(),
-        status: AgentTaskAggregateStatus::Succeeded,
         totals: AgentTaskAggregateTotals {
             succeeded: 1,
             ..Default::default()

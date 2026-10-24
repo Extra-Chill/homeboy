@@ -180,8 +180,8 @@ pub(crate) fn reconcile_deferred_candidate_in_store(
     }
 
     let plan = lifecycle_store.read_controller_plan(&run_id)?;
-    aggregate.status = aggregate_status(&aggregate.outcomes);
-    aggregate.totals = aggregate_totals(plan.tasks.len(), &aggregate.outcomes);
+    aggregate.totals =
+        AgentTaskAggregateTotals::from_outcomes(plan.tasks.len(), &aggregate.outcomes);
     let aggregate_path = lifecycle_store
         .aggregate_path(&run_id)
         .display()
@@ -267,57 +267,6 @@ impl DeferredCandidateLock {
     }
 }
 
-fn aggregate_status(outcomes: &[AgentTaskOutcome]) -> AgentTaskAggregateStatus {
-    if outcomes
-        .iter()
-        .any(|outcome| outcome.status == AgentTaskOutcomeStatus::Cancelled)
-    {
-        return AgentTaskAggregateStatus::Cancelled;
-    }
-    if outcomes
-        .iter()
-        .any(|outcome| outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable)
-    {
-        return AgentTaskAggregateStatus::PartialRecoverable;
-    }
-    let succeeded = outcomes.iter().any(|outcome| {
-        matches!(
-            outcome.status,
-            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
-        )
-    });
-    let failed = outcomes.iter().any(|outcome| {
-        !matches!(
-            outcome.status,
-            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
-        )
-    });
-    match (succeeded, failed) {
-        (true, false) => AgentTaskAggregateStatus::Succeeded,
-        (true, true) => AgentTaskAggregateStatus::PartialFailure,
-        _ => AgentTaskAggregateStatus::Failed,
-    }
-}
-
-fn aggregate_totals(total_tasks: usize, outcomes: &[AgentTaskOutcome]) -> AgentTaskAggregateTotals {
-    let mut totals = AgentTaskAggregateTotals {
-        queued: total_tasks.saturating_sub(outcomes.len()),
-        ..Default::default()
-    };
-    for outcome in outcomes {
-        match outcome.status {
-            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
-                totals.succeeded += 1
-            }
-            AgentTaskOutcomeStatus::Timeout => totals.timed_out += 1,
-            AgentTaskOutcomeStatus::Cancelled => totals.cancelled += 1,
-            AgentTaskOutcomeStatus::CandidateRecoverable => totals.recoverable_candidates += 1,
-            _ => totals.failed += 1,
-        }
-    }
-    totals
-}
-
 /// Restore the terminal aggregate only when one persisted executor outcome maps
 /// exactly to the run's one planned task.
 pub fn recover_single_task_aggregate_from_executor_outcome_in_store(
@@ -347,8 +296,7 @@ pub fn recover_single_task_aggregate_from_executor_outcome_in_store(
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
-        status: aggregate_status(&outcomes),
-        totals: aggregate_totals(plan.tasks.len(), &outcomes),
+        totals: AgentTaskAggregateTotals::from_outcomes(plan.tasks.len(), &outcomes),
         events: events_for_outcomes(&outcomes),
         outcomes,
         artifact_lineage: Vec::new(),

@@ -8,8 +8,7 @@ use crate::agent_task::{
     AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    AGENT_TASK_AGGREGATE_SCHEMA,
+    AgentTaskAggregate, AgentTaskAggregateTotals, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use homeboy_core::test_support::with_isolated_home;
 use sha2::Digest;
@@ -142,7 +141,6 @@ fn retained_terminal_run(record: &AgentTaskRunRecord) -> homeboy_core::observati
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: record.plan_id.clone(),
-        status: AgentTaskAggregateStatus::Failed,
         totals: AgentTaskAggregateTotals {
             failed: 1,
             ..Default::default()
@@ -2746,7 +2744,6 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
         let aggregate = AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Failed,
             totals: AgentTaskAggregateTotals {
                 failed: 1,
                 ..AgentTaskAggregateTotals::default()
@@ -3043,7 +3040,6 @@ fn failed_provider_run_exposes_workflow_evidence_refs() {
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
-        status: AgentTaskAggregateStatus::Failed,
         totals: AgentTaskAggregateTotals {
             queued: 1,
             failed: 1,
@@ -3510,7 +3506,6 @@ fn status_filters_empty_uri_artifact_refs() {
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
-        status: AgentTaskAggregateStatus::Succeeded,
         totals: AgentTaskAggregateTotals {
             queued: 1,
             succeeded: 1,

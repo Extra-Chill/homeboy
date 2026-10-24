@@ -4,8 +4,7 @@
 use super::*;
 use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcomeStatus};
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    AGENT_TASK_AGGREGATE_SCHEMA,
+    AgentTaskAggregate, AgentTaskAggregateTotals, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use homeboy_core::api_jobs::{JobEvent, JobEventKind};
 use homeboy_core::test_support::with_isolated_home;
@@ -42,7 +41,6 @@ fn deferred_cleanup_missing_descriptor_is_persisted_as_actionable_diagnosis() {
         .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
         .expect("submit run");
     let mut aggregate = succeeded_aggregate(&plan);
-    aggregate.status = AgentTaskAggregateStatus::Failed;
     aggregate.outcomes[0].status = AgentTaskOutcomeStatus::Timeout;
     aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
         schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
@@ -2149,7 +2147,6 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
         let aggregate = AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: "remote-plan".to_string(),
-            status: AgentTaskAggregateStatus::Failed,
             totals: AgentTaskAggregateTotals {
                 failed: 1,
                 ..AgentTaskAggregateTotals::default()

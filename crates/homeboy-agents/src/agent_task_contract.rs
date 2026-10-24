@@ -344,7 +344,6 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             ]),
             aggregate_status: enum_values(&[
                 AgentTaskAggregateStatus::Succeeded,
-                AgentTaskAggregateStatus::CandidateRecoverable,
                 AgentTaskAggregateStatus::PartialRecoverable,
                 AgentTaskAggregateStatus::PartialFailure,
                 AgentTaskAggregateStatus::Failed,
