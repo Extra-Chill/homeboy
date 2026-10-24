@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.15] - 2026-10-24
+
+### Changed
+- Derive agent-task aggregate status and totals from outcomes with one definition (#15718 step 5)
+
 ## [0.433.14] - 2026-10-24
 
 ### Changed
