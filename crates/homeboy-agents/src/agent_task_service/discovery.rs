@@ -9,6 +9,7 @@ use homeboy_core::api_jobs::{JobStatus, JobStore};
 use homeboy_core::observation::RunCursor;
 use homeboy_engine_primitives::content_hash;
 use std::collections::{BTreeMap, BTreeSet};
+use uuid::Uuid;
 // `agent-task active` treats a `Running` record that has gone this long without
 // an `updated_at` heartbeat as suspect even when its owner process/runner-job
 // liveness cannot be disproven (#5682). Shared with `activity` so the two
@@ -458,15 +459,10 @@ pub fn discover_runs_page(
         AgentTaskDiscoverySearchStatus::Complete
     };
     let now = chrono::Utc::now();
+    let live = (filter == AgentTaskDiscoveryFilter::Active).then(live_supervisor_jobs);
     let runs = records
         .into_iter()
-        .map(|page_record| {
-            discovery_run(
-                page_record.record,
-                filter == AgentTaskDiscoveryFilter::Active,
-                now,
-            )
-        })
+        .map(|page_record| discovery_run(page_record.record, live.as_ref(), now))
         .collect::<Vec<_>>();
     // The page cursor bounds storage reads, but selectors apply after that read.
     // Do not present malformed rows from the physical page as health of the
@@ -622,7 +618,10 @@ fn discovery_report(
     let total = records.len();
 
     let now = chrono::Utc::now();
-    let liveness_summary = is_active.then(|| liveness_summary_for_records(&records, now));
+    let live = is_active.then(live_supervisor_jobs);
+    let liveness_summary = live
+        .as_ref()
+        .map(|l| liveness_summary_for_records(&records, now, l));
 
     // `latest` is always a single run; only `all`/`active` honor a limit cap.
     let effective_limit = match filter {
@@ -642,7 +641,7 @@ fn discovery_report(
 
     let runs: Vec<_> = records
         .into_iter()
-        .map(|record| discovery_run(record, is_active, now))
+        .map(|record| discovery_run(record, live.as_ref(), now))
         .collect();
 
     let truncated = end < total;
@@ -798,13 +797,14 @@ fn parse_submitted_after(value: &str) -> Result<chrono::DateTime<chrono::Utc>> {
 fn liveness_summary_for_records(
     records: &[AgentTaskRunRecord],
     now: chrono::DateTime<chrono::Utc>,
+    live: &BTreeSet<Uuid>,
 ) -> AgentTaskLivenessSummary {
     let mut summary = AgentTaskLivenessSummary {
         reconcile_command: "homeboy agent-task active --reconcile --dry-run",
         ..Default::default()
     };
     for record in records {
-        let liveness = liveness_for_record(record, now);
+        let liveness = classify_liveness(record, now, live);
         match liveness {
             AgentTaskLiveness::Active => summary.active += 1,
             AgentTaskLiveness::Stale => summary.stale += 1,
@@ -819,12 +819,12 @@ fn liveness_summary_for_records(
 }
 
 /// Classify one record with the same ownership rules used by active discovery
-/// and controller-upgrade admission.
+/// and controller-upgrade admission; a pass shares one supervisor read (#16402).
 pub fn liveness_for_record(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskLiveness {
-    classify_liveness(record, age_minutes(record.updated_at.as_deref(), now), now)
+    classify_liveness(record, now, &live_supervisor_jobs())
 }
 
 /// Read-only controller-upgrade admission derived from the same liveness model
@@ -842,7 +842,8 @@ pub(crate) fn controller_upgrade_admission_for_records(
         .filter(|record| !is_fixture_runner_record(record))
         .cloned()
         .collect::<Vec<_>>();
-    let summary = liveness_summary_for_records(&records, now);
+    let live = live_supervisor_jobs();
+    let summary = liveness_summary_for_records(&records, now, &live);
     let mut parent_by_attempt = BTreeMap::new();
     let mut invalid_handoff_parents = BTreeSet::new();
     for record in &records {
@@ -892,7 +893,7 @@ pub(crate) fn controller_upgrade_admission_for_records(
         // It owns no executable work, so it cannot safely block that upgrade.
         .filter(|record| !is_unmaterialized_runtime_convergence_blocker(record))
         .filter_map(|record| {
-            let liveness = liveness_for_record(record, now);
+            let liveness = classify_liveness(record, now, &live);
             let runner_unverified = record.runner_job_id().is_some()
                 && matches!(
                     liveness,
@@ -1081,8 +1082,8 @@ pub fn register_controller_upgrade_admission_provider() {
 
 fn classify_liveness(
     record: &AgentTaskRunRecord,
-    last_update_age_minutes: Option<i64>,
     now: chrono::DateTime<chrono::Utc>,
+    live: &BTreeSet<Uuid>,
 ) -> AgentTaskLiveness {
     // A detached Cook parent has no executable task or owner until its child
     // and supervisor are durably attached. It is an active admission record,
@@ -1114,7 +1115,7 @@ fn classify_liveness(
     // A local Cook retry owns a queued lifecycle reservation before its child
     // begins provider execution. Its current daemon job is the authoritative
     // owner, so test it before generic queued-record staleness.
-    if live_local_cook_retry_supervisor(record) {
+    if live_local_cook_retry_supervisor(record, live) {
         return AgentTaskLiveness::Active;
     }
     // Worktree lookup and materialization are controller-owned even when the
@@ -1179,8 +1180,8 @@ fn classify_liveness(
         return AgentTaskLiveness::Stale;
     }
 
-    let stale_by_age =
-        last_update_age_minutes.is_some_and(|age| age >= RUNNING_HEARTBEAT_STALE_MINUTES);
+    let stale_by_age = age_minutes(record.updated_at.as_deref(), now)
+        .is_some_and(|age| age >= RUNNING_HEARTBEAT_STALE_MINUTES);
 
     let has_owner_signal =
         record.metadata.get("runner_pid").is_some() || record.runner_id().is_some();
@@ -1201,7 +1202,33 @@ fn durable_queued_retry_is_live(record: &AgentTaskRunRecord) -> bool {
             .is_some_and(|run_id| !run_id.is_empty())
 }
 
-fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord) -> bool {
+/// Queued or running controller step jobs of a fresh daemon's current lease.
+fn live_supervisor_jobs() -> BTreeSet<Uuid> {
+    let lease = homeboy_core::daemon::read_status()
+        .ok()
+        .filter(|daemon| daemon.reachable && daemon.fresh)
+        .and_then(|daemon| daemon.state.map(|state| state.lease_id));
+    let store = homeboy_core::paths::observation_db()
+        .ok()
+        .and_then(|path| JobStore::open_without_reconciliation(path).ok());
+    let operation = ["controller.", homeboy_core::daemon::step_job::STEP_JOB_TYPE].concat();
+    lease
+        .zip(store)
+        .map_or_else(BTreeSet::new, |(lease, store)| {
+            store
+                .list()
+                .into_iter()
+                .filter(|job| {
+                    job.operation == operation
+                        && job.daemon_lease_id.as_deref() == Some(lease.as_str())
+                        && matches!(job.status, JobStatus::Queued | JobStatus::Running)
+                })
+                .map(|job| job.id)
+                .collect()
+        })
+}
+
+fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord, live: &BTreeSet<Uuid>) -> bool {
     let supervisor = &record.metadata["local_cook_supervisor"];
     if supervisor["job_type"].as_str() != Some(homeboy_core::daemon::step_job::STEP_JOB_TYPE) {
         return false;
@@ -1209,37 +1236,10 @@ fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord) -> bool {
     let Some(job_id) = supervisor["job_id"].as_str() else {
         return false;
     };
-    let Ok(job_id) = uuid::Uuid::parse_str(job_id) else {
+    let Ok(job_id) = Uuid::parse_str(job_id) else {
         return false;
     };
-    let Ok(daemon) = homeboy_core::daemon::read_status() else {
-        return false;
-    };
-    let Some(lease) = daemon.state.map(|state| state.lease_id) else {
-        return false;
-    };
-    if !daemon.reachable || !daemon.fresh {
-        return false;
-    }
-    let Ok(path) = homeboy_core::paths::observation_db() else {
-        return false;
-    };
-    let Ok(store) = JobStore::open_without_reconciliation(path) else {
-        return false;
-    };
-    let Ok(job) = store.get(job_id) else {
-        return false;
-    };
-    // Controller jobs retain their transport namespace in durable storage.
-    // The retry metadata carries the submitted job type, not that stored
-    // operation name, so compare against the authoritative controller form.
-    job.operation
-        == format!(
-            "controller.{}",
-            homeboy_core::daemon::step_job::STEP_JOB_TYPE
-        )
-        && job.daemon_lease_id.as_deref() == Some(lease.as_str())
-        && matches!(job.status, JobStatus::Queued | JobStatus::Running)
+    live.contains(&job_id)
 }
 
 fn live_local_cook_retry_child(record: &AgentTaskRunRecord) -> bool {
@@ -1301,7 +1301,7 @@ fn age_minutes(timestamp: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> O
 
 fn discovery_run(
     record: AgentTaskRunRecord,
-    classify: bool,
+    live: Option<&BTreeSet<Uuid>>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskDiscoveryRun {
     let plan = agent_task_lifecycle::load_controller_plan(&record.run_id).ok();
@@ -1319,7 +1319,7 @@ fn discovery_run(
     let last_update = record.updated_at.clone();
     let last_update_age_minutes = age_minutes(last_update.as_deref(), now);
     let source = run_source(&record);
-    let liveness = classify.then(|| classify_liveness(&record, last_update_age_minutes, now));
+    let liveness = live.map(|live| classify_liveness(&record, now, live));
     let stale_reason = metadata_string(
         &record.metadata,
         agent_task_lifecycle::METADATA_KEY_STALE_RUNNING_REASON,
@@ -1515,18 +1515,18 @@ mod tests {
             "recovery_failures": 0,
         }));
         assert_eq!(
-            classify_liveness(&valid, Some(10), now),
+            classify_liveness(&valid, now, &BTreeSet::new()),
             AgentTaskLiveness::Active
         );
 
         assert_eq!(
-            classify_liveness(&valid, Some(10), now + chrono::Duration::days(1)),
+            classify_liveness(&valid, now + chrono::Duration::days(1), &BTreeSet::new()),
             AgentTaskLiveness::Active
         );
 
         let invalid = queued_record(json!({}));
         assert_eq!(
-            classify_liveness(&invalid, Some(10), now),
+            classify_liveness(&invalid, now, &BTreeSet::new()),
             AgentTaskLiveness::Stale
         );
     }
@@ -1539,13 +1539,13 @@ mod tests {
         let mut retry = queued_record(json!({}));
         retry.metadata["retry_of"] = json!("source-attempt");
         assert_eq!(
-            classify_liveness(&retry, Some(10), now),
+            classify_liveness(&retry, now, &BTreeSet::new()),
             AgentTaskLiveness::Active
         );
 
         retry.metadata["queue_quarantine"] = json!({ "reason": "operator hold" });
         assert_eq!(
-            classify_liveness(&retry, Some(10), now),
+            classify_liveness(&retry, now, &BTreeSet::new()),
             AgentTaskLiveness::Active
         );
     }
@@ -1629,6 +1629,43 @@ mod tests {
         assert!(
             !matches_discovery_options(&queued, &options, None),
             "a bounded page may have no matches while its keyset continuation still points to later rows"
+        );
+    }
+
+    #[test]
+    fn one_live_supervisor_read_judges_every_record_of_a_pass() {
+        let now = chrono::Utc::now();
+        let job_id = uuid::Uuid::new_v4();
+        let record = |index: usize| -> AgentTaskRunRecord {
+            serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": format!("cook-{index}"),
+                "plan_id": "plan",
+                "state": "queued",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "plan_path": "plan.json",
+                "metadata": {
+                    "cook_id": "cook",
+                    "local_cook_supervisor": {
+                        "job_id": job_id.to_string(),
+                        "job_type": homeboy_core::daemon::step_job::STEP_JOB_TYPE,
+                    },
+                },
+            }))
+            .expect("supervisor record")
+        };
+        let records = (0..64).map(record).collect::<Vec<_>>();
+        let live = BTreeSet::from([job_id]);
+        let summary = liveness_summary_for_records(&records, now, &live);
+        assert_eq!(
+            summary.active, 64,
+            "every record shares the one observed supervisor"
+        );
+        let summary = liveness_summary_for_records(&records, now, &BTreeSet::new());
+        assert_eq!(
+            summary.active, 0,
+            "an empty observation confirms no supervisor"
         );
     }
 }
