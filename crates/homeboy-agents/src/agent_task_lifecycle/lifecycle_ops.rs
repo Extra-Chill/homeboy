@@ -193,17 +193,6 @@ pub(crate) fn reconcile_deferred_candidate_in_store(
     Ok(true)
 }
 
-fn candidate_artifact_url(run_id: &str, task_id: &str, artifact_id: &str) -> String {
-    use homeboy_core::execution_contract::encode_uri_component;
-
-    format!(
-        "homeboy://agent-task/run/{}/artifacts#task={}&artifact={}",
-        encode_uri_component(run_id),
-        encode_uri_component(task_id),
-        encode_uri_component(artifact_id),
-    )
-}
-
 struct DeferredCandidateLock {
     #[allow(dead_code)] // Retains the advisory lock until this guard drops.
     file: File,
@@ -2913,7 +2902,9 @@ where
             .expect("submission metadata is an object")
             .extend(submission_metadata);
     }
-    if let Ok(job_id) = std::env::var("HOMEBOY_LOCAL_COOK_SUPERVISOR_JOB_ID") {
+    if let Ok(job_id) =
+        std::env::var(homeboy_core::daemon::step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV)
+    {
         if !job_id.trim().is_empty() {
             metadata["local_cook_supervisor"] = json!({
                 "state": "supervising",
@@ -7865,7 +7856,7 @@ fn substantive_candidate_from_aggregate(
     aggregate: &AgentTaskAggregate,
     promotion: Option<Value>,
 ) -> Option<AgentTaskCookLatestSubstantiveCandidate> {
-    let (task_id, _) = substantive_candidate_in_aggregate(run_id, aggregate)?;
+    let (task_id, _) = substantive_candidate_in_aggregate(aggregate)?;
     let outcome = aggregate
         .outcomes
         .iter()
@@ -7919,13 +7910,10 @@ fn substantive_candidate_in_store(
     let Ok(aggregate) = aggregate else {
         return None;
     };
-    substantive_candidate_in_aggregate(run_id, &aggregate)
+    substantive_candidate_in_aggregate(&aggregate)
 }
 
-fn substantive_candidate_in_aggregate(
-    run_id: &str,
-    aggregate: &AgentTaskAggregate,
-) -> Option<(String, String)> {
+fn substantive_candidate_in_aggregate(aggregate: &AgentTaskAggregate) -> Option<(String, String)> {
     let outcome = aggregate.selected_outcome().or_else(|| {
         (aggregate.outcomes.len() == 1)
             .then(|| aggregate.outcomes.first())

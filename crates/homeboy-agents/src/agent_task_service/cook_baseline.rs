@@ -8,7 +8,6 @@
 //! build them from a source root or a prior promotion. The private `git_output`
 //! helpers live here because this cluster is their only user.
 
-use homeboy_engine_primitives::content_hash;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
@@ -42,7 +41,6 @@ pub struct DerivedCookBaselineCapability {
     canonical_path: PathBuf,
     commit: String,
     tree: String,
-    artifact_sha256: String,
     source_run_id: String,
     source_task_id: String,
     bound_task_id: String,
@@ -71,21 +69,12 @@ impl DerivedCookBaselineCapability {
         self.parent_snapshot.as_ref()
     }
 
-    pub(crate) fn artifact_provenance(&self) -> Value {
-        serde_json::json!({
-            "source_run_id": self.source_run_id,
-            "source_task_id": self.source_task_id,
-            "source_patch_artifact_sha256": self.artifact_sha256,
-        })
-    }
-
     /// Evidence derived from the controller-validated capability. It is not
     /// authorization for remote workspace or snapshot verification.
     pub fn verified_baseline_provenance(&self) -> Value {
         serde_json::json!({
             "source_run_id": self.source_run_id,
             "source_task_id": self.source_task_id,
-            "promoted_patch_artifact_sha256": self.artifact_sha256,
             "baseline_commit": self.commit,
             "baseline_tree": self.tree,
             "parent_snapshot_identity": self.parent_snapshot.as_ref().and_then(|snapshot| {
@@ -102,10 +91,6 @@ impl DerivedCookBaselineCapability {
 impl CookFollowUpBaseline {
     pub(crate) fn capability(&self) -> &DerivedCookBaselineCapability {
         &self.capability
-    }
-
-    pub(crate) fn artifact_provenance(&self) -> Value {
-        self.capability.artifact_provenance()
     }
 
     /// A lifecycle retry persists this controller-materialized checkout for a
@@ -130,7 +115,6 @@ pub fn test_derived_cook_baseline_capability(
             .expect("test baseline path canonicalizes"),
         commit,
         tree,
-        artifact_sha256: "test-artifact-sha256".to_string(),
         source_run_id: "test-source-run".to_string(),
         source_task_id: task_id.to_string(),
         bound_task_id: task_id.to_string(),
@@ -248,8 +232,7 @@ pub(crate) fn materialize_initial_candidate_baseline(
         capability: DerivedCookBaselineCapability {
             canonical_path,
             commit,
-            tree: tree.clone(),
-            artifact_sha256: content_hash::sha256_hex(tree.as_bytes()),
+            tree,
             source_run_id: source_run_id.to_string(),
             source_task_id: task_id.to_string(),
             bound_task_id: task_id.to_string(),
@@ -719,7 +702,6 @@ fn materialize_follow_up_baseline_at(
         .with_retryable(false)
     })?;
     crate::agent_task_promotion::validate_candidate_commit(&source_root, &immutable)?;
-    let artifact_sha256 = immutable.candidate_sha.clone();
     let index = tempfile::NamedTempFile::new().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -782,7 +764,6 @@ fn materialize_follow_up_baseline_at(
             canonical_path: path,
             commit: String::new(),
             tree: String::new(),
-            artifact_sha256,
             source_run_id: source_run_id.to_string(),
             source_task_id: promotion.source.task_id.clone(),
             bound_task_id: bound_task_id.to_string(),

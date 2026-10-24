@@ -78,8 +78,13 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
     std::fs::write(workspace.join("src.txt"), "old\n").expect("source");
     git(&workspace, &["add", "src.txt"]);
     git(&workspace, &["commit", "-m", "initial"]);
-    let patch = temp.path().join("changes.patch");
-    std::fs::write(&patch, PATCH).expect("patch");
+    // The Cook candidate is one immutable commit on the task base (#16303).
+    let base = git_output(&workspace, &["rev-parse", "HEAD"]);
+    std::fs::write(workspace.join("src.txt"), "new\n").expect("candidate edit");
+    git(&workspace, &["commit", "-am", "candidate"]);
+    let candidate_sha = git_output(&workspace, &["rev-parse", "HEAD"]);
+    let tree_sha = git_output(&workspace, &["rev-parse", "HEAD^{tree}"]);
+    git(&workspace, &["reset", "--hard", &base]);
 
     let helper = temp.path().join("bind_socket");
     // Gate toolchain preflight probes this command with `--version` in the same
@@ -103,7 +108,8 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
         "schema": "homeboy/agent-task-outcome/v1",
         "task_id": "socket-gate",
         "status": "succeeded",
-        "artifacts": [{ "schema": "homeboy/agent-task-artifact/v1", "id": "patch", "kind": "patch", "path": patch }]
+        "candidate": { "base_sha": base, "candidate_sha": candidate_sha, "tree_sha": tree_sha },
+        "artifacts": []
     })
     .to_string();
 
@@ -112,10 +118,10 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
             source,
             source_run_id: Some(run_id.clone()),
             source_path: None,
-            source_worktree_path: None,
+            source_worktree_path: Some(workspace.clone()),
             repository_integrity_evidence: None,
             base_ref: None,
-            task_base_sha: None,
+            task_base_sha: Some(base.clone()),
             candidate_ref: None,
             to_worktree: workspace.display().to_string(),
             task_id: None,

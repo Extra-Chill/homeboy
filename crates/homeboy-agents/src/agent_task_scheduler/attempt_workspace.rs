@@ -435,7 +435,7 @@ pub(super) fn prepare_committed_harvest(
         Some(baseline)
     } else {
         Some(
-            verified_preexisting_cook_baseline(root, request, context)
+            verified_preexisting_cook_baseline(request, context)
                 .unwrap_or_else(|| verified_gate_feedback_baseline(root, request, &status))?,
         )
     };
@@ -564,7 +564,6 @@ fn verified_initial_cook_candidate_baseline(
 /// snapshot. Accept it only when the controller-issued baseline evidence is
 /// also present in the authenticated Lab metadata and reproduces this tree.
 fn verified_preexisting_cook_baseline(
-    root: &Path,
     request: &AgentTaskRequest,
     context: &HarvestExecutionContext,
 ) -> Option<Result<crate::agent_task::AgentTaskCandidate, HarvestError>> {
@@ -609,7 +608,11 @@ fn verified_preexisting_cook_baseline(
             status: "Cook baseline contract has no baseline tree".to_string(),
         }));
     };
-    Some(Err(HarvestError::DirtyWorkspace { status: format!("non-recoverable: dirty Lab snapshot has no immutable candidate ({expected_tree}); run a new Cook") }))
+    Some(Err(HarvestError::DirtyWorkspace {
+        status: format!(
+            "non-recoverable: dirty Lab snapshot has no immutable candidate ({expected_tree}); run a new Cook"
+        ),
+    }))
 }
 
 fn verified_gate_feedback_baseline(

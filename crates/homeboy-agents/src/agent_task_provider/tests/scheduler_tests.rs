@@ -1695,10 +1695,12 @@ fn fixture_backend_produces_deterministic_smoke_artifacts() {
     assert_eq!(aggregate.totals.succeeded, 1);
     let outcome = &aggregate.outcomes[0];
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert!(outcome
+    // The fixture edits the attempt workspace like a real provider; it reports
+    // no patch artifact (#16303).
+    assert!(!outcome
         .artifacts
         .iter()
-        .any(|artifact| artifact.kind == "patch" && artifact.size_bytes.unwrap_or_default() > 0));
+        .any(|artifact| artifact.kind == "patch"));
     assert!(outcome
         .artifacts
         .iter()

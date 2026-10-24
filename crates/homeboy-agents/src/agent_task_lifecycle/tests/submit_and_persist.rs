@@ -3019,6 +3019,12 @@ fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root(
     // distinguish "read the store I was handed" from "read whatever the process
     // environment points at" (#7505). No environment is mutated here: both
     // roots come from `HermeticTestContext::path_roots()`.
+    // Submission reads the supervising Cook's own job id from the process; a
+    // gate that runs this suite under a local Cook inherits one, so pin it absent.
+    let _env = homeboy_core::test_support::env_lock();
+    let _supervisor = homeboy_core::test_support::EnvVarGuard::unset(
+        homeboy_core::daemon::step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV,
+    );
     let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
     let empty_context = homeboy_core::test_support::HermeticTestContext::new();
     assert_ne!(seeded_context.data_dir(), empty_context.data_dir());

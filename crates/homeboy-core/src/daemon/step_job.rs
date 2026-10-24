@@ -44,6 +44,12 @@ const STEP_EXIT_SCHEMA: &str = "homeboy/step-exit/v1";
 /// The daemon job id, injected into every step child so the child can bind
 /// its own durable records to the job that supervises it.
 pub const STEP_JOB_ID_ENV: &str = "HOMEBOY_STEP_JOB_ID";
+/// The step job supervising a local Cook. Set by the bound step child in place
+/// of [`STEP_JOB_ID_ENV`] and read when that Cook's attempt materializes. It is
+/// private to the supervising process: children it spawns (step jobs, gates)
+/// must not inherit it, or a nested submission is stamped with a supervisor
+/// that does not own it.
+pub const LOCAL_COOK_SUPERVISOR_JOB_ID_ENV: &str = "HOMEBOY_LOCAL_COOK_SUPERVISOR_JOB_ID";
 /// Exact path of the supervising daemon job store.
 pub const STEP_JOB_STORE_ENV: &str = "HOMEBOY_STEP_JOB_STORE";
 /// Combined stdout/stderr of the child, below the job's artifact directory.

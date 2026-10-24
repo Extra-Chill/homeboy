@@ -1577,7 +1577,7 @@ fn seed_substantive_candidate_aggregate(
     patch_path: &std::path::Path,
     patch: &str,
 ) {
-    use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     };
@@ -1623,61 +1623,32 @@ fn seed_substantive_candidate_aggregate(
     .expect("persist candidate aggregate");
 }
 
-fn seed_patch_alias_aggregate(
+/// Seed a succeeded attempt whose harvested result is one immutable candidate
+/// commit created in a fresh fixture repository at `candidate_repo`. No patch
+/// artifact is recorded: the candidate commit is the only result.
+fn seed_candidate_commit_aggregate(
     run_id: &str,
     plan: &AgentTaskPlan,
-    patches: &[(&str, &std::path::Path, &str)],
+    candidate_repo: &std::path::Path,
 ) {
-    let patches = patches
-        .iter()
-        .map(|(id, path, patch)| {
-            (
-                *id,
-                *path,
-                *patch,
-                serde_json::json!({
-                    "producer_attempt": 2,
-                    "base_ref": "main",
-                    "provider_backend": "fixture",
-                }),
-            )
-        })
-        .collect::<Vec<_>>();
     let lifecycle_store =
         AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
-    seed_patch_alias_aggregate_with_metadata(&lifecycle_store, run_id, plan, &patches, Vec::new());
+    seed_candidate_commit_aggregate_in_store(&lifecycle_store, run_id, plan, candidate_repo);
 }
 
-fn seed_patch_alias_aggregate_with_metadata(
+fn seed_candidate_commit_aggregate_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     plan: &AgentTaskPlan,
-    patches: &[(&str, &std::path::Path, &str, Value)],
-    diagnostics: Vec<crate::agent_task::AgentTaskDiagnostic>,
+    candidate_repo: &std::path::Path,
 ) {
-    use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     };
 
     let task = plan.tasks.first().expect("candidate plan has one task");
-    let artifacts = patches
-        .iter()
-        .map(|(id, path, patch, metadata)| {
-            std::fs::write(path, patch).expect("write candidate patch");
-            AgentTaskArtifact {
-                id: (*id).to_string(),
-                kind: "patch".to_string(),
-                path: Some(path.display().to_string()),
-                size_bytes: Some(patch.len() as u64),
-                sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
-                    patch.as_bytes(),
-                )),
-                metadata: metadata.clone(),
-                ..Default::default()
-            }
-        })
-        .collect();
+    let candidate = committed_fixture_candidate(candidate_repo, run_id);
     lifecycle_store
         .record_run_aggregate(
             run_id,
@@ -1693,73 +1664,9 @@ fn seed_patch_alias_aggregate_with_metadata(
                 outcomes: vec![AgentTaskOutcome {
                     task_id: task.task_id.clone(),
                     status: AgentTaskOutcomeStatus::Succeeded,
-                    artifacts,
-                    diagnostics,
                     outputs: test_review_form_outputs(),
                     metadata: serde_json::json!({ "model": task.executor.model() }),
-                    ..Default::default()
-                }],
-                events: Vec::new(),
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            },
-        )
-        .expect("persist candidate aggregate");
-}
-
-fn seed_patch_alias_aggregate_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    plan: &AgentTaskPlan,
-    patches: &[(&str, &std::path::Path, &str)],
-) {
-    use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    };
-
-    let task = plan.tasks.first().expect("candidate plan has one task");
-    let artifacts = patches
-        .iter()
-        .map(|(id, path, patch)| {
-            std::fs::write(path, patch).expect("write candidate patch");
-            AgentTaskArtifact {
-                id: (*id).to_string(),
-                kind: "patch".to_string(),
-                path: Some(path.display().to_string()),
-                size_bytes: Some(patch.len() as u64),
-                sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
-                    patch.as_bytes(),
-                )),
-                metadata: serde_json::json!({
-                    "producer_attempt": 2,
-                    "base_ref": "main",
-                    "provider_backend": "fixture",
-                }),
-                ..Default::default()
-            }
-        })
-        .collect();
-    lifecycle_store
-        .record_run_aggregate(
-            run_id,
-            plan,
-            &AgentTaskAggregate {
-                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-                plan_id: plan.plan_id.clone(),
-                status: AgentTaskAggregateStatus::Succeeded,
-                totals: AgentTaskAggregateTotals {
-                    succeeded: 1,
-                    ..Default::default()
-                },
-                outcomes: vec![AgentTaskOutcome {
-                    task_id: task.task_id.clone(),
-                    status: AgentTaskOutcomeStatus::Succeeded,
-                    artifacts,
-                    outputs: test_review_form_outputs(),
-                    metadata: serde_json::json!({ "model": task.executor.model() }),
+                    candidate: Some(candidate),
                     ..Default::default()
                 }],
                 events: Vec::new(),
@@ -2132,15 +2039,11 @@ fn resume_cook_behind_foreign_promotion_claim(
     lifecycle_store
         .record_cook_attempt(cook_id, 1, &run_id)
         .expect("record Cook attempt");
-    seed_patch_alias_aggregate_in_store(
+    seed_candidate_commit_aggregate_in_store(
         &lifecycle_store,
         &run_id,
         &options.identity.initial_plan,
-        &[(
-            "patch",
-            &temp.path().join("patch"),
-            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+one\n",
-        )],
+        &temp.path().join("candidate-repo"),
     );
     lifecycle_store
         .mutate_record(&run_id, |record| {
@@ -18764,11 +18667,10 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             .parent()
             .expect("candidate parent")
             .join("candidate.patch");
-        let patch = std::fs::read_to_string(&patch_path).expect("read candidate patch");
-        seed_patch_alias_aggregate(
+        seed_candidate_commit_aggregate(
             "run-verify-replacement",
             &options.identity.initial_plan,
-            &[("patch", &patch_path, &patch)],
+            &patch_path.with_extension("repo"),
         );
         let mut failed = serde_json::to_value(
             persisted_promotion_for_attempt("run-verify-replacement")
@@ -19107,11 +19009,10 @@ fn with_corrected_gate_candidate_placement(
         record_tracked_promotion_continuation(&options, &target);
         let run_id = &options.identity.initial_run_id;
         let patch_path = temp.path().join("candidate.patch");
-        let patch = std::fs::read_to_string(&patch_path).unwrap();
-        seed_patch_alias_aggregate(
+        seed_candidate_commit_aggregate(
             run_id,
             &options.identity.initial_plan,
-            &[("patch", &patch_path, &patch)],
+            &patch_path.with_extension("repo"),
         );
         let store = test_lifecycle_store();
         let mut aggregate = store.read_aggregate(run_id).unwrap();
@@ -19866,18 +19767,11 @@ fn promotion_claim_and_replay_isolate_identical_ids_across_lifecycle_stores() {
         store
             .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(serde_json::json!({})))
             .unwrap();
-        let patch_path = store.run_dir(run_id).join("candidate.patch");
-        seed_patch_alias_aggregate_with_metadata(
+        seed_candidate_commit_aggregate_in_store(
             store,
             run_id,
             &plan,
-            &[(
-                "candidate",
-                patch_path.as_path(),
-                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
-                Value::Null,
-            )],
-            Vec::new(),
+            &store.run_dir(run_id).join("candidate-repo"),
         );
         let mut rooted_promotion = promotion(run_id);
         rooted_promotion.patch_artifact.id = artifact_id.to_string();
@@ -22505,6 +22399,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         let candidate = committed_fixture_candidate(&target.path().join("candidate-repo"), run_id);
         aggregate.outcomes[0].artifacts = Vec::new();
         aggregate.outcomes[0].candidate = Some(candidate.clone());
+        let selected_candidate_sha = candidate.candidate_sha.clone();
         agent_task_lifecycle::record_run_aggregate(
             run_id,
             &options.identity.initial_plan,
@@ -22643,7 +22538,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         );
         assert_eq!(
             intent["manual_candidate_binding"]["selection"]["selected_candidate_sha"],
-            "candidate"
+            selected_candidate_sha.as_str()
         );
         assert_eq!(
             intent["manual_candidate_binding"]["candidate"]["head"],
@@ -22962,14 +22857,10 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
             run_id,
         )
         .unwrap();
-        seed_patch_alias_aggregate(
+        seed_candidate_commit_aggregate(
             run_id,
             &options.identity.initial_plan,
-            &[(
-                "patch",
-                &target.path().join("candidate.patch"),
-                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
-            )],
+            &target.path().join("candidate-repo"),
         );
         let mut adopted = promotion(run_id);
         adopted.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
@@ -23068,14 +22959,10 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
             run_id,
         )
         .expect("link recipe attempt");
-        seed_patch_alias_aggregate(
+        seed_candidate_commit_aggregate(
             run_id,
             &options.identity.initial_plan,
-            &[(
-                "patch",
-                &target.path().join("candidate.patch"),
-                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
-            )],
+            &target.path().join("candidate-repo"),
         );
 
         let mut resumed = promotion_with_existing_path(run_id, target.path());
@@ -23368,14 +23255,10 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
         )
         .expect("link retry attempt");
-        seed_patch_alias_aggregate(
+        seed_candidate_commit_aggregate(
             run_id,
             &options.identity.initial_plan,
-            &[(
-                "patch",
-                &target.path().join("candidate.patch"),
-                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
-            )],
+            &target.path().join("candidate-repo"),
         );
 
         let mut failed = promotion_with_existing_path(run_id, target.path());
@@ -23823,8 +23706,12 @@ fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate
     assert!(!baseline.capability.tree().is_empty());
     assert_eq!(baseline.capability.bound_task_id(), "candidate-task");
     assert_eq!(
-        baseline.artifact_provenance()["source_patch_artifact_sha256"],
+        baseline.capability.commit(),
         report.provenance["candidate_commit"]["candidate_sha"]
+    );
+    assert_eq!(
+        baseline.capability.tree(),
+        report.provenance["candidate_commit"]["tree_sha"]
     );
 }
 

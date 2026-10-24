@@ -179,11 +179,13 @@ fn repository_cleanliness_fixture_cook_leaves_only_the_provider_edit() {
     );
 
     // The source checkout is untouched; the task checkout holds exactly the
-    // provider's intended edit and nothing else.
+    // provider's intended edit and nothing else. Promotion materializes the
+    // candidate commit's tree into the index and worktree (#16303), so the
+    // edit is staged rather than a loose worktree patch.
     failures.extend(offending_paths(&fixture.repo, &[], &rendered));
     failures.extend(offending_paths(
         &task_worktree,
-        &[format!(" M {SOURCE_FILE}")],
+        &[format!("M  {SOURCE_FILE}")],
         &rendered,
     ));
     let edited = std::fs::read_to_string(task_worktree.join(SOURCE_FILE)).unwrap_or_default();

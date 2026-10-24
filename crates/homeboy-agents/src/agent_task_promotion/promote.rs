@@ -522,12 +522,18 @@ fn resume_promoted_patch_admission(
             .with_retryable(false));
     }
     validate_candidate_commit(target_path, commit)?;
-    if crate::agent_task_candidate_tree::workspace_tree(target_path)? != commit.tree_sha {
-        git_output(
-            target_path,
-            &["read-tree", "--reset", "-u", &commit.candidate_sha],
-        )?;
-        git_output(target_path, &["clean", "-fd"])?;
+    // The checkpoint attests that the destination holds exactly this
+    // candidate tree. A destination edited since then is a different
+    // candidate: refuse before any gate runs instead of resetting it, and
+    // name the replacement fork as the recovery (#16303).
+    let destination_tree = crate::agent_task_candidate_tree::workspace_tree(target_path)?;
+    if destination_tree != commit.tree_sha {
+        return Err(CandidateTreeMismatch {
+            candidate_sha: commit.candidate_sha.clone(),
+            candidate_tree: commit.tree_sha.clone(),
+            destination_tree,
+        }
+        .into_resume_error());
     }
     let changed_files = git_output(
         target_path,
@@ -2624,6 +2630,28 @@ impl std::fmt::Display for CandidateTreeMismatch {
 }
 
 impl std::error::Error for CandidateTreeMismatch {}
+
+impl CandidateTreeMismatch {
+    /// A post-apply resume whose destination no longer holds the checkpointed
+    /// candidate tree. The checkpoint cannot be resumed until the destination
+    /// is the candidate again; the legal recovery is a replacement fork.
+    pub(crate) fn into_resume_error(self) -> Error {
+        Error::new(
+            homeboy_core::ErrorCode::ValidationInvalidArgument,
+            format!("promotion resume refused: {self}"),
+            json!({
+                "field": "promotion.candidate.tree_sha",
+                "kind": "candidate_tree_mismatch",
+                "candidate_sha": self.candidate_sha,
+                "candidate_tree": self.candidate_tree,
+                "destination_tree": self.destination_tree,
+                "recovery": { "action": "fork_replacement" },
+            }),
+        )
+        .with_retryable(false)
+        .with_source(self)
+    }
+}
 
 impl From<CandidateTreeMismatch> for Error {
     fn from(mismatch: CandidateTreeMismatch) -> Self {

@@ -284,13 +284,7 @@ pub(crate) fn prepare_execution_intent(
         )
     };
     env.public_env.retain(|name, _| {
-        ![
-            "HOMEBOY_LOCAL_COOK_SUPERVISOR_JOB_ID",
-            "HOMEBOY_COOK_STARTUP_LAUNCHER_ID",
-            "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME",
-            "HOMEBOY_AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON",
-        ]
-        .contains(&name.as_str())
+        !crate::agent_task_gate::COOK_SUPERVISOR_PRIVATE_ENV_VARS.contains(&name.as_str())
     });
     let step = StepJobRequest::new(
         &id,

@@ -7,8 +7,6 @@ pub(super) use crate::agent_task::{
     expand_agent_task_matrix, AgentTaskArtifact, AgentTaskMatrixAggregate, AgentTaskMatrixAxis,
     AgentTaskTypedArtifact, AGENT_TASK_ARTIFACT_SCHEMA,
 };
-pub(super) use crate::agent_task_scheduler::attempt_workspace::fingerprint;
-pub(super) use crate::agent_task_scheduler::harvest::git_output_raw;
 pub(super) use crate::agent_task_scheduler::*;
 pub(super) use serde_json::{json, Value};
 pub(super) use std::collections::HashMap;
