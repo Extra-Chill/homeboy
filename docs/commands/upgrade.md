@@ -143,6 +143,9 @@ homeboy upgrade --skip-runners
 - `elapsed_seconds`: Bounded elapsed time for the recorded phase
 - `controller` / `extensions` / `runners`: Independent component statuses
 - `note`: Present when a running record's owner process is no longer alive
+- `remote_drains`: Runner reservations still awaiting confirmed release
+- `release_drains_command`: `homeboy upgrade release-drains <id>` retries release for a terminal operation; live owners cannot be released
+- `drain_takeovers`: Recorded compare-and-swap requests, naming the previous owner, its terminal store status, and runner
 
 Status reads reconcile an upgrade record whose owner has exited to
 a non-success interrupted terminal state, projecting any pending binary
@@ -154,6 +157,13 @@ resumption. A queued worker is not reported as successful completion. Admission
 is fenced on the controller and selected connected SSH runners while existing
 Cooks finish. Unsupported or unreachable runner drain endpoints fail closed
 before binaries are replaced.
+
+Remote reservations are persisted before network requests and released on terminal
+completion, failure, interruption, and owner-exit reconciliation. Terminal status
+reads retry outstanding releases; unreachable runners remain listed for recovery.
+A new upgrade may explicitly take over a remote reservation only when its previous
+owner is a known terminal upgrade in the controller store. Unknown or live owners
+are refused; the runner compares the previous token before replacing it.
 
 `homeboy upgrade` data payload:
 

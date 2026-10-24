@@ -54,6 +54,12 @@ pub struct UpgradeOperationStatus {
     /// post-install verification prevents convergence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<UpgradeOperationFailure>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_drains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_drains_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drain_takeovers: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +280,26 @@ impl UpgradeOperation {
         self.persist_durable()
     }
 
+    pub(super) fn reserve_remote_drains(
+        &mut self,
+        runners: &[String],
+        runs: &[String],
+    ) -> Result<()> {
+        self.metadata["remote_drains"] = json!(runners);
+        self.persist_durable()?;
+        for runner in runners {
+            super::runner_upgrade_provider::with_runner_upgrade(|provider| {
+                provider.set_upgrade_drain(
+                    std::slice::from_ref(runner),
+                    self.id().expect("durable upgrade"),
+                    runs,
+                    false,
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn set_phase_durable(&mut self, phase: &str) -> Result<()> {
         emit_upgrade_phase(phase);
         self.metadata["phase"] = json!(phase);
@@ -458,6 +484,7 @@ impl UpgradeOperation {
         merge_elapsed_seconds(&mut self.metadata, self.started.elapsed().as_secs());
         if let Some(run) = observation.store().get_run(observation.run_id())? {
             merge_elapsed_from_metadata(&mut self.metadata, &run.metadata_json);
+            merge_drain_metadata(&mut self.metadata, &run.metadata_json);
         }
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_progress_write) {
@@ -499,6 +526,7 @@ impl UpgradeOperation {
                 ))
             })?;
         merge_latest_monotonic_progress(&mut self.metadata, &run.metadata_json);
+        merge_drain_metadata(&mut self.metadata, &run.metadata_json);
         merge_elapsed_seconds(&mut self.metadata, self.started.elapsed().as_secs());
         if self.pending_terminal.is_none() {
             let intent_id = format!("upgrade-terminal:{}", observation.run_id());
@@ -542,6 +570,7 @@ impl UpgradeOperation {
                 Ok(Some(run)) if terminal_run_matches(&run, &intent) => {
                     self.finished = true;
                     self.pending_terminal = None;
+                    let _ = super::release_upgrade_drains(observation.run_id());
                     return Ok(());
                 }
                 Ok(Some(_)) => {
@@ -551,6 +580,7 @@ impl UpgradeOperation {
                     Ok(Some(run)) if terminal_run_matches(&run, &intent) => {
                         self.finished = true;
                         self.pending_terminal = None;
+                        let _ = super::release_upgrade_drains(observation.run_id());
                         return Ok(());
                     }
                     Ok(Some(run)) if run.status == RunStatus::Running.as_str() => {
@@ -723,7 +753,11 @@ pub fn load_upgrade_operation_status(id: Option<&str>) -> Result<UpgradeOperatio
                 )
             })?,
     };
-    let run = reconcile_dead_upgrade_owner(&store, run)?;
+    let mut run = reconcile_dead_upgrade_owner(&store, run)?;
+    if run.kind == UPGRADE_OPERATION_KIND && run.status != RunStatus::Running.as_str() {
+        let _ = super::release_upgrade_drains(&run.id);
+        run = store.get_run(&run.id)?.unwrap_or(run);
+    }
     status_from_run(&run)
 }
 
@@ -945,6 +979,14 @@ fn patch_metadata(run_id: &str, patch: impl FnOnce(&mut Value)) -> Result<()> {
         })
 }
 
+fn merge_drain_metadata(target: &mut Value, source: &Value) {
+    for key in ["remote_drains", "drain_takeovers"] {
+        if let Some(value) = source.get(key) {
+            target[key] = value.clone();
+        }
+    }
+}
+
 fn merge_component_fields(target: &mut Value, source: &Value) {
     for key in ["controller", "extensions", "runners"] {
         if let Some(value) = source.get(key) {
@@ -1056,6 +1098,14 @@ fn status_from_run(run: &RunRecord) -> Result<UpgradeOperationStatus> {
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok()),
         failure: failure_from_metadata(&metadata, &run.status),
+        remote_drains: serde_json::from_value(metadata["remote_drains"].clone())
+            .unwrap_or_default(),
+        release_drains_command: metadata["remote_drains"]
+            .as_array()
+            .filter(|runners| !runners.is_empty())
+            .map(|_| format!("homeboy upgrade release-drains {}", run.id)),
+        drain_takeovers: serde_json::from_value(metadata["drain_takeovers"].clone())
+            .unwrap_or_default(),
     })
 }
 
@@ -1314,6 +1364,7 @@ pub(crate) fn freeze_prior_pending_replacements(current_operation_id: &str) -> R
             &expected_metadata,
         )?;
         accept_freeze_cas_result(&store, &run.id, frozen)?;
+        let _ = super::release_upgrade_drains(&run.id);
     }
     Ok(())
 }

@@ -74,13 +74,28 @@ pub fn begin_upgrade_drain(
 pub fn remote_upgrade_drain(request: &serde_json::Value) -> Result<()> {
     let root = paths::runtime_promotion_dir()?;
     fs::create_dir_all(&root).map_err(io("create remote drain directory"))?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join("remote-drain.lock"))
+        .map_err(io("open remote drain lock"))?;
+    FileExt::lock_exclusive(&lock).map_err(io("lock remote drain"))?;
     let token = request["operation_id"]
         .as_str()
         .filter(|id| !id.is_empty())
         .ok_or_else(|| Error::internal_unexpected("drain operation identity missing"))?;
     if let Some(current) = active_drain()? {
-        if current.operation_id != token {
-            return Err(Error::validation_invalid_argument(
+        // Releasing an obsolete token is idempotent: never disturb its successor.
+        if request["resume"] == true && current.operation_id != token {
+            return Ok(());
+        }
+        if current.operation_id != token
+            && (request["previous_operation_id"].as_str() != Some(current.operation_id.as_str())
+                || current.expires_at_ms.is_none())
+        {
+            let mut error = Error::validation_invalid_argument(
                 "upgrade_drain",
                 "another operation owns runner drain",
                 None,
@@ -88,7 +103,9 @@ pub fn remote_upgrade_drain(request: &serde_json::Value) -> Result<()> {
                     "homeboy upgrade status {}",
                     current.operation_id
                 )]),
-            ));
+            );
+            error.details["drain_owner"] = serde_json::json!(current.operation_id);
+            return Err(error);
         }
         // A shared runner can live on the controller host. Its remote control
         // must not replace the process-owned fence with an expiring record.
@@ -118,6 +135,11 @@ pub fn remote_upgrade_drain(request: &serde_json::Value) -> Result<()> {
         runners: Vec::new(),
     };
     crate::engine::local_files::write_json_file(&path, &record)
+}
+
+/// Read-only remote ownership inventory for controller recovery of older runs.
+pub fn remote_upgrade_drain_owner() -> Result<Option<String>> {
+    Ok(active_drain()?.map(|record| record.operation_id))
 }
 
 fn active_drain() -> Result<Option<DrainRecord>> {
@@ -212,6 +234,30 @@ pub fn ensure_upgrade_drain_admission(run_id: Option<&str>, runner: Option<&str>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_promotion_remote_drain_takeover_compares_owner_and_release_is_token_scoped() {
+        crate::test_support::with_isolated_home(|_| {
+            remote_upgrade_drain(&serde_json::json!({"operation_id": "old", "runs": []})).unwrap();
+            let error =
+                remote_upgrade_drain(&serde_json::json!({"operation_id": "new", "runs": []}))
+                    .unwrap_err();
+            assert_eq!(error.details["drain_owner"], "old");
+            assert!(remote_upgrade_drain(&serde_json::json!({"operation_id": "new", "previous_operation_id": "wrong", "runs": []})).is_err());
+            remote_upgrade_drain(&serde_json::json!({"operation_id": "new", "previous_operation_id": "old", "runs": []})).unwrap();
+            remote_upgrade_drain(&serde_json::json!({"operation_id": "old", "resume": true}))
+                .unwrap();
+            assert_eq!(
+                remote_upgrade_drain_owner().unwrap().as_deref(),
+                Some("new")
+            );
+            remote_upgrade_drain(&serde_json::json!({"operation_id": "new", "resume": true}))
+                .unwrap();
+            assert!(remote_upgrade_drain_owner().unwrap().is_none());
+            let _local = begin_upgrade_drain("local", vec![], vec![]).unwrap();
+            assert!(remote_upgrade_drain(&serde_json::json!({"operation_id": "new", "previous_operation_id": "local", "runs": []})).is_err());
+        });
+    }
+
     #[test]
     fn runtime_promotion_competing_upgrade_hint_is_read_only_and_executable() {
         crate::test_support::with_isolated_home(|_| {

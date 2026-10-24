@@ -1,4 +1,5 @@
 //! One admission window for controller and selected runner promotion (#16056).
+use super::remote_drains::release_upgrade_drains;
 use super::{
     admission::with_controller_upgrade_admission, operation::UpgradeOperation,
     runner_upgrade_provider::with_runner_upgrade,
@@ -29,22 +30,14 @@ pub(super) struct FleetDrainGuard {
     local: Option<UpgradeDrainGuard>,
     runners: Vec<String>,
     operation: String,
-    runs: Vec<String>,
 }
 impl FleetDrainGuard {
     pub(super) fn resume(&mut self) -> Result<()> {
-        with_runner_upgrade(|provider| {
-            provider.set_upgrade_drain(&self.runners, &self.operation, &self.runs, true)
-        })?;
+        release_upgrade_drains(&self.operation)?;
         self.local.take();
         with_runner_upgrade(|provider| provider.verify_upgrade_admission(&self.runners))?;
         self.runners.clear();
         Ok(())
-    }
-}
-impl Drop for FleetDrainGuard {
-    fn drop(&mut self) {
-        let _ = self.resume();
     }
 }
 
@@ -180,11 +173,8 @@ pub(super) fn drain(
         local: Some(guard),
         runners: runners.clone(),
         operation: operation.id().expect("durable upgrade").to_string(),
-        runs,
     };
-    with_runner_upgrade(|provider| {
-        provider.set_upgrade_drain(&runners, &guard.operation, &guard.runs, false)
-    })?;
+    operation.reserve_remote_drains(&runners, &runs)?;
     operation.set_phase_durable("draining_controller_and_runners")?;
     let started = Instant::now();
     let mut cancelled = BTreeSet::new();
