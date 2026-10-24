@@ -13,6 +13,7 @@ homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario 
 homeboy runs compare --kind bench --from-run <run-id> --to-run <run-id> [--metric <name>]
 homeboy runs compare --kind fuzz --from-run <run-id> --to-run <run-id> [--hotspot-policy <advisory|blocking|off>]
 homeboy runs hotspots <run-id>... [--limit <count>]
+homeboy runs hotspots --coverage <run-id>... [--limit <count>]
 homeboy runs hotspots --baseline-run <run-id> --candidate-run <run-id> [--limit <count>]
 homeboy runs show <run-id> [--format json|--json]
 homeboy runs dossier <run-id> [--format json|--json]
@@ -157,6 +158,16 @@ With `--from-run <baseline-run-id> --to-run <candidate-run-id>`, `runs compare` 
 
 - `--kind bench` compares the numeric metrics recorded in two benchmark runs. It refuses runs with a different shared benchmark context (settings, scenarios, workloads, iterations, runs, concurrency) and reports both run IDs, component state, the shared context, metric deltas (every metric either run recorded, or those selected with `--metric`), missing metrics, and a Markdown table under `reports.markdown`.
 - `--kind fuzz` compares the persisted fuzz result envelope artifacts of two runs. It resolves `fuzz_result_envelope` artifacts from the observation store, folds in related persisted fuzz hotspot/observation artifacts for hotspot analysis, and returns the same `homeboy/fuzz-compare/v1` payload as `homeboy fuzz compare` without requiring local file paths. `--hotspot-policy` sets whether hotspot regressions block.
+
+`homeboy runs hotspots --coverage <run-id>...` reads durable `run.phase_spans`
+events and reports wall time (`wall_ms`), union-covered time (`covered_ms`),
+`covered_percentage`, and the largest unattributed `gaps`, with preceding and
+following span ids. Intervals are clipped to the run window and overlaps count
+only once. For active runs the window ends now; completed runs use `finished_at`.
+Spans carry absolute RFC 3339 millisecond `started_at` timestamps, including
+across processes; timer-relative offsets are no longer supported. Coverage
+requires newly recorded spans, not event creation times. Waiting is attributed
+separately as `promote.wait`, not acquisition work.
 
 `homeboy runs hotspots <run-id>...` ranks generic fuzz hotspots from persisted fuzz artifacts. It reads typed `homeboy/fuzz-hotspot-set/v1` artifacts directly, ranks typed `homeboy/fuzz-observation-set/v1` artifacts into hotspot points, and falls back to generic finding or coverage-gap signals only when typed hotspot data is absent:
 

@@ -57,21 +57,7 @@ impl Drop for OffloadObservation {
         let Some(run_id) = &self.run_id else { return };
         let result = (|| -> homeboy_core::Result<()> {
             let store = ObservationStore::open_initialized()?;
-            let mut report = self.timer.report();
-            if let Some(run) = store.get_run(run_id)? {
-                if let Ok(origin) = chrono::DateTime::parse_from_rfc3339(&run.started_at) {
-                    let offset = self
-                        .started_at
-                        .signed_duration_since(origin)
-                        .num_microseconds()
-                        .unwrap_or(0)
-                        .max(0) as f64
-                        / 1000.0;
-                    for span in &mut report.spans {
-                        span.start_offset_ms += offset;
-                    }
-                }
-            }
+            let report = self.timer.report();
             store.record_phase_spans(
                 run_id,
                 &format!(

@@ -29,6 +29,7 @@ pub(crate) fn apply_aggregate_transition_in_store(
     {
         let controller_plan = lifecycle_store.read_controller_plan(&record.run_id)?;
         crate::agent_task_promotion::candidate_bundle::fetch_run_candidates(
+            lifecycle_store,
             record,
             &controller_plan,
             aggregate,
