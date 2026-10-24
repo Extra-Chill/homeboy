@@ -28,6 +28,47 @@ pub fn require_issue_destination_without_pr(path: &Path, branch: &str) -> Result
     require_no_open_pr(branch, &output.stdout)
 }
 
+/// Finished PR history retires a derived generation, but an open PR always
+/// takes precedence. Query failures are admission errors, not retirement evidence.
+pub fn branch_has_finished_pr_without_open_pr(path: &Path, branch: &str) -> Result<bool> {
+    let Some(origin) = git::output_optional(path, &["remote", "get-url", "origin"]) else {
+        return Ok(false);
+    };
+    if !origin.contains("github.com") {
+        return Ok(false);
+    }
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr", "list", "--state", "all", "--head", branch, "--json", "state",
+        ])
+        .current_dir(path)
+        .output()
+        .map_err(|error| infrastructure(error.to_string()))?;
+    if !output.status.success() {
+        return Err(infrastructure(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    finished_pr_without_open_pr(&output.stdout)
+}
+
+fn finished_pr_without_open_pr(response: &[u8]) -> Result<bool> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "UPPERCASE")]
+    enum State {
+        Open,
+        Closed,
+        Merged,
+    }
+    #[derive(serde::Deserialize)]
+    struct PullRequest {
+        state: State,
+    }
+    let prs: Vec<PullRequest> =
+        serde_json::from_slice(response).map_err(|error| infrastructure(error.to_string()))?;
+    Ok(!prs.is_empty() && !prs.iter().any(|pr| matches!(pr.state, State::Open)))
+}
+
 fn require_no_open_pr(branch: &str, response: &[u8]) -> Result<()> {
     let prs: serde_json::Value =
         serde_json::from_slice(response).map_err(|error| infrastructure(error.to_string()))?;
@@ -187,6 +228,28 @@ pub fn retry_fetch<T>(mut fetch: impl FnMut() -> Result<T>) -> Result<T> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn finished_pr_history_requires_valid_states_and_no_open_pr() {
+        for state in ["MERGED", "CLOSED"] {
+            assert!(finished_pr_without_open_pr(
+                serde_json::to_string(&serde_json::json!([{ "state": state }]))
+                    .unwrap()
+                    .as_bytes()
+            )
+            .unwrap());
+        }
+        assert!(!finished_pr_without_open_pr(br#"[{"state":"MERGED"},{"state":"OPEN"}]"#).unwrap());
+        assert!(!finished_pr_without_open_pr(b"[]").unwrap());
+        for response in [
+            b"not json".as_slice(),
+            b"{}",
+            b"[{}]",
+            br#"[{"state":"UNKNOWN"}]"#,
+        ] {
+            assert!(finished_pr_without_open_pr(response).is_err());
+        }
+    }
 
     struct Fixture {
         _root: tempfile::TempDir,

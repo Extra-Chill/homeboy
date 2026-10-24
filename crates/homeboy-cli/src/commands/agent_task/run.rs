@@ -6330,9 +6330,14 @@ pub(crate) fn resolve_cook_destination(
     let handle_repository = cook_component_id(&args).unwrap_or(repo).to_string();
     let head = match args.head.clone() {
         Some(head) => head,
-        None => {
-            next_live_derived_cook_branch(&handle_repository, &derived_cook_branch(&task_url)?)?
-        }
+        None => next_live_derived_cook_branch(
+            &handle_repository,
+            &derived_cook_branch(&task_url)?,
+            repository.map(|repo| repo.source_checkout.as_path()),
+            args.attempt_run_id
+                .as_deref()
+                .or(args.dispatch.run_id.as_deref()),
+        )?,
     };
     let handle = format!("{handle_repository}@{}", slugify_cook_branch(&head));
     args.to_worktree = Some(handle.clone());
@@ -7497,10 +7502,15 @@ const MAX_DERIVED_COOK_GENERATIONS: u32 = 50;
 /// cook's destination is removed or finalized its terminal record would block
 /// every later cook on the same issue ("is no longer active"). Multi-phase
 /// work on one issue is normal, so a derived destination advances to the next
-/// generation (`-2`, `-3`, ...) instead. An active or absent destination is
-/// reused as before, and an explicitly named `--to-worktree` or `--head` never
-/// reaches this path, so naming a retired destination still fails. (#15408)
-fn next_live_derived_cook_branch(repository: &str, base: &str) -> homeboy::core::Result<String> {
+/// generation (`-2`, `-3`, ...) instead. Finished PRs and destinations owned
+/// by another live run also retire a generation. Explicit `--to-worktree` and
+/// `--head` never reach this path and remain authoritative.
+pub(super) fn next_live_derived_cook_branch(
+    repository: &str,
+    base: &str,
+    source_checkout: Option<&Path>,
+    run_id: Option<&str>,
+) -> homeboy::core::Result<String> {
     for generation in 1..=MAX_DERIVED_COOK_GENERATIONS {
         let branch = if generation == 1 {
             base.to_string()
@@ -7508,10 +7518,56 @@ fn next_live_derived_cook_branch(repository: &str, base: &str) -> homeboy::core:
             format!("{base}-{generation}")
         };
         let handle = format!("{repository}@{}", slugify_cook_branch(&branch));
-        let retired = homeboy::core::worktree::resolve_workspace_ref_if_present(&handle)?
-            .is_some_and(|record| {
-                record.state() != &homeboy::core::worktree::TaskWorktreeState::Active
-            });
+        let record = homeboy::core::worktree::resolve_workspace_ref_if_present(&handle)?;
+        let path = source_checkout.or_else(|| {
+            record.as_ref().map(|record| match record {
+                homeboy::core::worktree::WorkspaceRefRecord::Task(record) => {
+                    Path::new(&record.source_checkout)
+                }
+                homeboy::core::worktree::WorkspaceRefRecord::Adopted(record) => {
+                    Path::new(&record.path)
+                }
+            })
+        });
+        if let Some(path) = path.filter(|path| {
+            record.is_some()
+                || homeboy::core::git::output_optional(
+                    path,
+                    &["show-ref", "--verify", &format!("refs/heads/{branch}")],
+                )
+                .is_some()
+        }) {
+            if homeboy::core::worktree::convergence::branch_has_finished_pr_without_open_pr(
+                path, &branch,
+            )? {
+                continue;
+            }
+            // Open PRs must route to rework even when another run owns the record.
+            homeboy::core::worktree::convergence::require_issue_destination_without_pr(
+                path, &branch,
+            )?;
+        }
+        let retired = match record {
+            Some(record)
+                if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active =>
+            {
+                true
+            }
+            Some(homeboy::core::worktree::WorkspaceRefRecord::Task(record)) => match record
+                .run_id
+                .as_deref()
+                .filter(|owner| Some(*owner) != run_id)
+            {
+                Some(owner) => {
+                    let store =
+                        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                    store.record_exists_readonly(owner)?
+                        && !store.read_record(owner)?.state().is_terminal()
+                }
+                None => false,
+            },
+            _ => false,
+        };
         if !retired {
             return Ok(branch);
         }
