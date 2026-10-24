@@ -119,8 +119,12 @@ pub(crate) fn parsed_command_preflight_input(
         .command
         .lab_contract()
         .map_or(LabRouteIntent::Unsupported, |contract| {
-            LabRouteIntent::Supported {
-                automatic: matches!(contract.portability, LabCommandPortability::Portable),
+            if contract.routing_policy.read_only_polling {
+                LabRouteIntent::ReadPolling
+            } else {
+                LabRouteIntent::Supported {
+                    automatic: matches!(contract.portability, LabCommandPortability::Portable),
+                }
             }
         });
     let deferred_workload = if matches!(

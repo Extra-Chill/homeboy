@@ -125,7 +125,11 @@ pub enum RunnerNormalization {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LabRouteIntent {
     Unsupported,
-    Supported { automatic: bool },
+    Supported {
+        automatic: bool,
+    },
+    /// Route an existing record read; runner capacity does not admit new work.
+    ReadPolling,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,7 +243,10 @@ pub fn resolve_parsed_command_preflight(
     policy: ParsedCommandPolicySnapshot,
 ) -> crate::Result<ParsedCommandPreflightResult> {
     if policy.generic_route.command_supports_lab
-        && !matches!(input.lab_route, LabRouteIntent::Supported { .. })
+        && !matches!(
+            input.lab_route,
+            LabRouteIntent::Supported { .. } | LabRouteIntent::ReadPolling
+        )
     {
         return Err(crate::Error::validation_invalid_argument(
             "generic_route",
@@ -278,8 +285,9 @@ pub fn resolve_parsed_command_preflight(
                         .iter()
                         .any(|runner| Some(runner) == policy.selected_runner_id.as_ref())
             }));
-    let preferred_runner_inadmissible =
-        policy.selected_runner_id.is_some() && !selected_runner_admitted;
+    let preferred_runner_inadmissible = policy.selected_runner_id.is_some()
+        && !selected_runner_admitted
+        && !matches!(input.lab_route, LabRouteIntent::ReadPolling);
     // Split-placement Cook keeps its durable admission on the controller but
     // requires an admitted Lab runner for the provider attempt. Do not let its
     // preview silently choose local when execution will reject the same stale
