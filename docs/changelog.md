@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.9] - 2026-10-24
+
+### Changed
+- own the setgid fixture with the caller's group so it holds on macOS
+- Resolve the cook repository identity once during admission
+- Lab returns the Cook candidate as a git bundle; controller fetches and verifies it (#16303 S2a)
+
 ## [0.433.8] - 2026-10-23
 
 ### Changed
