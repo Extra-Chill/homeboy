@@ -1141,7 +1141,7 @@ fn reusable_applied_adoption_promotion(
             None,
         )));
     };
-    let Some(mut baseline) = promotion.provenance.get("gate_feedback_baseline").cloned() else {
+    let Some(baseline) = promotion.provenance.get("gate_feedback_baseline").cloned() else {
         return Some(Err(Error::validation_invalid_argument(
             "cook_delivery.artifacts.promotion",
             "applied candidate adoption has no authenticated gate-feedback baseline",
@@ -1162,16 +1162,6 @@ fn reusable_applied_adoption_promotion(
             .map(|_| promotion),
         );
     }
-    // Bind the checkpoint's complete candidate diff to its promoted artifact.
-    baseline["patch_artifact"] = match serde_json::to_value(&promotion.patch_artifact) {
-        Ok(artifact) => artifact,
-        Err(error) => {
-            return Some(Err(Error::internal_json(
-                error.to_string(),
-                Some("serialize persisted promotion artifact baseline".to_string()),
-            )));
-        }
-    };
     Some(
         crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
             std::path::Path::new(worktree_path),

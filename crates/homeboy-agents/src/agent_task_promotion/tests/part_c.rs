@@ -1,9 +1,7 @@
 //! Split partition of tests (see mod.rs for shared setup).
 #![cfg(test)]
 
-use super::super::promote::{
-    normalize_promotion_patch, promote, promote_with_provider, select_patch_artifact,
-};
+use super::super::promote::{normalize_promotion_patch, promote, promote_with_provider};
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::{
@@ -292,53 +290,6 @@ fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
     );
     assert_eq!(error.details["reason"], "base_not_ancestor");
     assert_eq!(git_stdout(&repo, &["status", "--porcelain"]), "");
-}
-
-#[test]
-fn select_patch_artifact_requires_unambiguous_patch() {
-    let outcome = AgentTaskOutcome {
-        task_id: "task-1".to_string(),
-        status: AgentTaskOutcomeStatus::Succeeded,
-        artifacts: vec![
-            AgentTaskArtifact {
-                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                id: "patch-a".to_string(),
-                kind: "patch".to_string(),
-                name: None,
-                label: None,
-                role: None,
-                semantic_key: None,
-                path: Some("a.patch".to_string()),
-                url: None,
-                mime: None,
-                size_bytes: None,
-                sha256: None,
-                metadata: Value::Null,
-            },
-            AgentTaskArtifact {
-                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                id: "patch-b".to_string(),
-                kind: "diff".to_string(),
-                name: None,
-                label: None,
-                role: None,
-                semantic_key: None,
-                path: Some("b.patch".to_string()),
-                url: None,
-                mime: None,
-                size_bytes: None,
-                sha256: None,
-                metadata: Value::Null,
-            },
-        ],
-        ..Default::default()
-    };
-
-    let err = select_patch_artifact(&outcome, None).expect_err("ambiguous patch rejected");
-    assert!(err.message.contains("multiple patch artifacts"));
-
-    let artifact = select_patch_artifact(&outcome, Some("patch-b")).expect("selected patch");
-    assert_eq!(artifact.id, "patch-b");
 }
 
 #[test]

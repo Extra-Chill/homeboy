@@ -3672,12 +3672,13 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
                     outcome.summary.as_deref(),
                     Some(format!("{bytes}|tree-bytes").as_str())
                 );
-                let patch = outcome
-                    .artifacts
-                    .iter()
-                    .find(|artifact| artifact.kind == "patch")
-                    .expect("harvested candidate");
-                let patch = std::fs::read_to_string(patch.path.as_ref().unwrap()).unwrap();
+                let candidate = outcome.candidate.as_ref().expect("harvested candidate");
+                let patch = std::process::Command::new("git")
+                    .args(["diff", &candidate.base_sha, &candidate.candidate_sha])
+                    .current_dir(&workspace)
+                    .output()
+                    .unwrap();
+                let patch = String::from_utf8(patch.stdout).unwrap();
                 assert!(patch.contains("evidence-result.txt") && patch.contains(bytes));
                 assert!(!patch.contains("member.txt") && !patch.contains("value.txt"));
                 assert_eq!(std::fs::read_to_string(&source).unwrap(), bytes);

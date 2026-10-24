@@ -1234,8 +1234,7 @@ impl AgentTaskScheduler {
                             });
                         }
                     }
-                    if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
-                        .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
+                    if let Err(error) = harvest_committed_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_candidate_commit(&mut outcome, &running_task))
                     {
                         outcome = committed_harvest_failure(outcome, error);
@@ -1288,10 +1287,9 @@ impl AgentTaskScheduler {
                     // that patch into the next provider.
                     let candidate_ready_for_convergence = outcome.failure_classification
                         != Some(AgentTaskFailureClassification::Stalled)
-                        && outcome
-                            .artifacts
-                            .iter()
-                            .any(is_fingerprinted_actionable_patch_artifact);
+                        && (outcome.candidate.is_some()
+                            || (outcome.artifacts.iter())
+                                .any(is_fingerprinted_actionable_patch_artifact));
                     let rotation_takes_over = !candidate_ready_for_convergence
                         && AgentTaskScheduleSupport::rotation_policy_for_request(
                             &running_task.request,
@@ -1319,7 +1317,8 @@ impl AgentTaskScheduler {
                         // result proves the provider no longer owns the checkout.
                         // Harvest above is therefore race-free.
                         super::mark_timeout_workspace_candidates_incomplete(&mut outcome);
-                        let recovered = outcome.artifacts.iter().any(is_actionable_patch_artifact);
+                        let recovered = outcome.candidate.is_some()
+                            || outcome.artifacts.iter().any(is_actionable_patch_artifact);
                         outcome.status = if recovered && !rotation_takes_over {
                             AgentTaskOutcomeStatus::CandidateRecoverable
                         } else {
@@ -1499,6 +1498,32 @@ impl AgentTaskScheduler {
                                 );
                                 let entry = &policy.entries[running_task.rotation_index];
                                 let adoption = match entry.adoption.as_ref() {
+                                    Some(template) if outcome.candidate.is_some() => {
+                                        let candidate =
+                                            outcome.candidate.as_ref().expect("candidate");
+                                        match select_candidate_commit_adoption(
+                                            template,
+                                            candidate,
+                                            &running_task,
+                                        ) {
+                                            Ok(adoption) => Some(adoption),
+                                            Err(message) => {
+                                                let mut outcome = outcome;
+                                                outcome.diagnostics.push(AgentTaskDiagnostic {
+                                                    class: "agent_task.candidate_adoption"
+                                                        .to_string(),
+                                                    message,
+                                                    data: serde_json::Value::Null,
+                                                });
+                                                record_completed_outcome(
+                                                    &mut completed_by_task,
+                                                    &mut outcomes,
+                                                    outcome,
+                                                );
+                                                continue;
+                                            }
+                                        }
+                                    }
                                     Some(template) => {
                                         let mut candidate_artifacts =
                                             running_task.candidate_artifacts.clone();
@@ -2136,6 +2161,7 @@ fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> 
         "summary": outcome.summary,
         "diagnostics": outcome.diagnostics,
         "artifacts": outcome.artifacts,
+        "candidate": outcome.candidate,
         "evidence_refs": outcome.evidence_refs,
     })
 }

@@ -21,9 +21,8 @@ use super::super::cook_promotion::{
     preflight_cook_promotion_in_store, prepare_manual_finalization_identity,
     promote_attempt_in_store, promote_or_load_attempt_in_store, promotion_executed_model_in_store,
     record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_cook_pr_with_backend_and_review_form, replacement_gate_execution_started,
-    selected_candidate_task_id_in_store, verify_replacement_gates, AgentTaskSuppliedReviewForm,
-    BaseCatchUp, CookReportInput,
+    recover_cook_pr_with_backend_and_review_form, selected_candidate_task_id_in_store,
+    verify_replacement_gates, AgentTaskSuppliedReviewForm, BaseCatchUp, CookReportInput,
 };
 use super::super::execution_step::execution_step_fixtures::{
     current_intent, kill_test_child_at_marker, step_harness, terminal_delivery, QueuedRunTransport,
@@ -4596,6 +4595,7 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
             crate::agent_task_promotion::candidate_fingerprint(destination.to_str().unwrap())
                 .unwrap();
         let verified_base = git_output(&destination, &["rev-parse", "HEAD"]).unwrap();
+        let candidate_commit = commit_worktree_candidate(&destination);
 
         std::fs::create_dir(&advance).unwrap();
         git(
@@ -4675,7 +4675,7 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
                     workflow: None,
                     follow_up: None,
                     metadata: serde_json::json!({ "model": "fixture-model" }),
-                    candidate: None,
+                    candidate: Some(candidate_commit.clone()),
                 }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
@@ -4696,7 +4696,7 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
                 "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-c", "true"], "exit_code": 0}],
                 "gate_results": [{"id": "gate", "name": "true", "kind": "command", "status": "passed"}],
                 "verified_base": {"base": "main", "sha": verified_base},
-                "provenance": {"worktree_path": destination, "candidate": candidate},
+                "provenance": {"worktree_path": destination, "candidate": candidate, "candidate_commit": candidate_commit},
                 "operator_notification": {"status": "completed", "message": "green"}
             }))
             .unwrap();
@@ -4719,7 +4719,7 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
         .unwrap();
-        assert_eq!(report.value.status, "review_ready");
+        assert_eq!(report.value.status, "review_ready", "{:#?}", report.value);
         assert_eq!(finalization_calls.load(Ordering::SeqCst), 1);
         let caught_up = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
         assert_eq!(
@@ -18891,6 +18891,48 @@ fn record_tracked_promotion_continuation(options: &CookRequest, target: &std::pa
     );
 }
 
+/// Record the checkpointed candidate commit on the run's durable outcome.
+fn bind_checkpoint_candidate_to_aggregate(run_id: &str, plan: &AgentTaskPlan) {
+    let store = test_lifecycle_store();
+    let mut aggregate = store.read_aggregate(run_id).unwrap();
+    aggregate.outcomes[0].candidate = serde_json::from_value(
+        persisted_promotion_for_attempt(run_id)
+            .unwrap()
+            .unwrap()
+            .provenance["candidate_commit"]
+            .clone(),
+    )
+    .unwrap();
+    store
+        .record_run_aggregate(run_id, plan, &aggregate)
+        .unwrap();
+}
+
+/// The candidate commit of a dirty worktree, built in a temporary index.
+fn commit_worktree_candidate(worktree: &std::path::Path) -> crate::agent_task::AgentTaskCandidate {
+    let index = tempfile::NamedTempFile::new().expect("candidate index");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .env("GIT_INDEX_FILE", index.path())
+            .current_dir(worktree)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let base_sha = git(&["rev-parse", "HEAD"]);
+    git(&["read-tree", "HEAD"]);
+    git(&["add", "--all"]);
+    let tree_sha = git(&["write-tree"]);
+    let candidate_sha = git(&["commit-tree", &tree_sha, "-p", &base_sha, "-m", "candidate"]);
+    crate::agent_task::AgentTaskCandidate {
+        base_sha,
+        candidate_sha,
+        tree_sha,
+    }
+}
+
 fn record_tracked_promotion_continuation_in_stores(
     recipe_store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -18951,20 +18993,34 @@ fn record_tracked_promotion_continuation_in_stores(
         "branch": "cook-candidate",
         "head": fingerprint.head
     });
+    let candidate_commit = commit_worktree_candidate(target);
+    let delta = Command::new("git")
+        .args([
+            "diff",
+            "--binary",
+            &candidate_commit.base_sha,
+            &candidate_commit.candidate_sha,
+        ])
+        .current_dir(target)
+        .output()
+        .expect("candidate delta");
+    let delta = String::from_utf8_lossy(&delta.stdout);
     checkpoint["patch_artifact"] = serde_json::json!({
-        "id": "patch",
-        "kind": "patch",
-        "path": patch_path,
-        "sha256": format!("{:x}", sha2::Sha256::digest(patch.as_bytes())),
+        "id": candidate_commit.candidate_sha,
+        "kind": "candidate_commit",
+        "path": "",
+        "sha256": format!("{:x}", sha2::Sha256::digest(delta.trim().as_bytes())),
     });
     checkpoint["changed_files"] = serde_json::json!(fingerprint.changed_files);
     checkpoint["provenance"] = serde_json::json!({
         "post_apply": true,
         "candidate": candidate,
+        "candidate_commit": candidate_commit,
         "worktree_path": target,
         "gate_feedback_baseline": {
             "schema": "homeboy/agent-task-gate-feedback-baseline/v1",
-            "current_diff": patch
+            "current_diff": patch,
+            "candidate_commit": candidate_commit,
         }
     });
     lifecycle_store
@@ -19457,6 +19513,10 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             &options.identity.initial_plan,
             &[("patch", &patch_path, &patch)],
         );
+        bind_checkpoint_candidate_to_aggregate(
+            "run-verify-replacement",
+            &options.identity.initial_plan,
+        );
         let mut failed = serde_json::to_value(
             persisted_promotion_for_attempt("run-verify-replacement")
                 .expect("read failed promotion")
@@ -19466,7 +19526,6 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
         failed["source"]["task_id"] =
             serde_json::json!(options.identity.initial_plan.tasks[0].task_id.clone());
         failed["status"] = serde_json::json!("verification_pending");
-        failed["patch_artifact"]["id"] = serde_json::json!("committed-changes");
         failed["verified_base"]["sha"] =
             serde_json::json!(
                 git_output(&source, &["rev-parse", "HEAD"]).expect("resolve fixture base")
@@ -19499,25 +19558,6 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             gate_log.display()
         );
         let reviewer_gate = "test \"$(cat \"$(git rev-parse --show-toplevel)/figma-transformer/tracked.txt\")\" = promoted".to_string();
-        let unavailable_patch = patch_path.with_extension("unavailable");
-        std::fs::rename(&patch_path, &unavailable_patch).expect("hide promotion artifact");
-        verify_replacement_gates(
-            "cook-verify-replacement",
-            VerifyGateOptions {
-                verify: vec![reviewer_gate.clone()],
-                accept_inherited_failures: true,
-                ..Default::default()
-            },
-            "Chris approved corrected gate evidence".to_string(),
-            None,
-        )
-        .expect_err("artifact preflight fails before shell execution");
-        assert!(!replacement_gate_execution_started(
-            &test_lifecycle_store(),
-            "run-verify-replacement"
-        )
-        .expect("read replacement gate fence"));
-        std::fs::rename(&unavailable_patch, &patch_path).expect("restore promotion artifact");
         mark_replacement_gate_execution_started(&test_lifecycle_store(), "run-verify-replacement")
             .expect("persist interrupted replacement execution");
         agent_task_lifecycle::rewrite_record_for_test("run-verify-replacement", |record| {
@@ -19582,7 +19622,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             &ReplacementOnlyRecoveryPerformer,
         )
         .expect("recover performs replacement gates");
-        assert_eq!(recovered_exit_code, 0);
+        assert_eq!(recovered_exit_code, 0, "{recovered:#?}");
         assert_eq!(
             recovered.step,
             crate::agent_task_service::CookRecoveryStep::ReplaceGates
@@ -19600,7 +19640,11 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             serde_json::from_value(result).expect("typed replacement proof");
 
         assert_eq!(replacement.status, AgentTaskPromotionStatus::GateFailed);
-        assert_eq!(replacement.patch_artifact.id, "committed-changes");
+        assert_eq!(
+            replacement.patch_artifact.id,
+            replacement.provenance["candidate_commit"]["candidate_sha"]
+        );
+        assert_eq!(replacement.patch_artifact.kind, "candidate_commit");
         assert_eq!(
             replacement.provenance["candidate"]["fingerprint"]["target_path"],
             serde_json::json!(std::fs::canonicalize(&target)
@@ -19798,6 +19842,14 @@ fn with_corrected_gate_candidate_placement(
         aggregate.totals.recoverable_candidates = 1;
         aggregate.outcomes[0].status =
             crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable;
+        aggregate.outcomes[0].candidate = serde_json::from_value(
+            persisted_promotion_for_attempt(run_id)
+                .unwrap()
+                .unwrap()
+                .provenance["candidate_commit"]
+                .clone(),
+        )
+        .unwrap();
         store
             .record_run_aggregate(run_id, &options.identity.initial_plan, &aggregate)
             .unwrap();

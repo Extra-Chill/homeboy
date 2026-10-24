@@ -107,7 +107,8 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
         .expect("candidate is promoted without a public artifact path");
 
         assert_eq!(result.status, AgentTaskPromotionStatus::Applied);
-        assert_eq!(result.patch_artifact.id, artifact_id);
+        assert_eq!(result.patch_artifact.id, candidate.candidate_sha);
+        assert_eq!(result.patch_artifact.kind, "candidate_commit");
         assert_eq!(
             result.provenance["candidate_commit"]["candidate_sha"],
             candidate.candidate_sha
@@ -307,10 +308,7 @@ fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
     )
     .expect("dry-run promotion report");
 
-    assert_eq!(
-        report.patch_artifact.id,
-        "task-1-attempt-1-committed-changes"
-    );
+    assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
 }
 
 #[test]
@@ -439,6 +437,14 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         repository_integrity_evidence: None,
     };
     let checkpoint = serde_json::to_value(&checkpoints[0]).expect("checkpoint value");
+    assert_eq!(
+        checkpoint["provenance"]["candidate_commit"],
+        serde_json::to_value(&candidate).expect("candidate JSON"),
+        "the checkpoint records the candidate commit"
+    );
+    // A crash between apply and gates leaves no patch file to re-read: the
+    // destination is re-admitted by the candidate tree alone (#16303).
+    std::fs::remove_file(temp.path().join("changes.patch")).expect("remove provider patch");
     let resumed = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
         .expect("resume exact applied candidate");
     assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
@@ -446,9 +452,11 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     std::fs::write(worktree_path.join("src/lib.rs"), "tampered\n").expect("tamper candidate");
     let mismatch = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
         .expect_err("modified candidate rejected");
-    assert!(mismatch
-        .message
-        .contains("differs from the exact checkpointed"));
+    assert!(mismatch.message.contains(&format!(
+        "records tree {}, but promotion found tree",
+        candidate.tree_sha
+    )));
+    assert_eq!(mismatch.details["reason"], "tree_mismatch");
     assert_eq!(
         mismatch
             .details
@@ -460,9 +468,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     std::fs::write(worktree_path.join("extra.rs"), "extra\n").expect("add extra candidate file");
     let extra = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
         .expect_err("extra candidate change rejected");
-    assert!(extra
-        .message
-        .contains("differs from the exact checkpointed"));
+    assert_eq!(extra.details["reason"], "tree_mismatch");
     assert_eq!(
         extra
             .details

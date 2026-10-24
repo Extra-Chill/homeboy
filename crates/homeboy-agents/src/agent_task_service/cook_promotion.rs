@@ -1405,9 +1405,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                     // A resumed verification must retain the scheduler-selected
                     // candidate rather than falling back to aggregate outcome order.
                     task_id: selected_candidate_task_id_in_store(lifecycle_store, run_id)?,
-                    // The checkpoint already authenticated this exact artifact;
-                    // retain its identity rather than selecting an equivalent alias.
-                    artifact_id: Some(promotion.patch_artifact.id.clone()),
+                    artifact_id: None,
                     dry_run: false,
                     gates: options.gates.clone(),
                     provider_invocation: options.provider_transport.provider_invocation.clone(),
@@ -2250,8 +2248,7 @@ fn verify_replacement_gates_owned(
         .provenance
         .pointer("/resume_contract/inputs")
         .or_else(|| original.provenance.pointer("/resume_inputs"));
-    let (source, source_path) = promotion_source(&run_id)?;
-    let source = bind_persisted_promotion_artifact(source, &original)?;
+    let (source, source_path) = promotion_source(run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
     let original_value = serde_json::to_value(&original)
@@ -2283,7 +2280,7 @@ fn verify_replacement_gates_owned(
                     .map(str::to_string),
                 to_worktree: original.to_worktree.clone(),
                 task_id: Some(original.source.task_id.clone()),
-                artifact_id: Some(original.patch_artifact.id.clone()),
+                artifact_id: None,
                 dry_run: false,
                 gates,
                 provider_invocation: None,
@@ -2350,67 +2347,6 @@ fn verify_replacement_gates_owned(
         Some(external_authorization),
         accept_inherited_failures,
     )
-}
-
-fn bind_persisted_promotion_artifact(
-    source: String,
-    promotion: &AgentTaskPromotionReport,
-) -> Result<String> {
-    let mut source_value: Value = serde_json::from_str(&source).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("deserialize replacement gate promotion source".to_string()),
-        )
-    })?;
-    let outcome = if let Some(outcomes) = source_value
-        .get_mut("outcomes")
-        .and_then(Value::as_array_mut)
-    {
-        outcomes
-            .iter_mut()
-            .find(|outcome| {
-                outcome.get("task_id").and_then(Value::as_str)
-                    == Some(promotion.source.task_id.as_str())
-            })
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "promotion.source.task_id",
-                    "replacement gate source aggregate has no outcome for the persisted promotion",
-                    Some(promotion.source.task_id.clone()),
-                    None,
-                )
-            })?
-    } else {
-        &mut source_value
-    };
-    let artifacts = outcome
-        .get_mut("artifacts")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "promotion.source.artifacts",
-                "replacement gate source outcome has no artifact inventory",
-                Some(promotion.source.task_id.clone()),
-                None,
-            )
-        })?;
-    if !artifacts.iter().any(|artifact| {
-        artifact.get("id").and_then(Value::as_str) == Some(promotion.patch_artifact.id.as_str())
-    }) {
-        artifacts.push(json!({
-            "id": promotion.patch_artifact.id,
-            "kind": promotion.patch_artifact.kind,
-            "path": promotion.patch_artifact.path,
-            "sha256": promotion.patch_artifact.sha256,
-            "metadata": {
-                "actionable": true,
-                "role": "patch",
-                "source": "persisted_promotion",
-            },
-        }));
-    }
-    serde_json::to_string(&source_value)
-        .map_err(|error| Error::internal_json(error.to_string(), None))
 }
 
 pub(crate) fn replacement_gate_execution_started(
@@ -2761,6 +2697,40 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
         "source_verified_base": prior_base,
         "resolved_base": fresh_base,
         "regated": regate,
+    });
+    // Rebasing produces a new candidate commit linked to the prior one;
+    // resume admits the destination by its tree (#16303).
+    let candidate_sha = git_output(
+        path,
+        &[
+            "-c",
+            "user.name=Homeboy",
+            "-c",
+            "user.email=homeboy@localhost",
+            "commit-tree",
+            &tree,
+            "-p",
+            &fresh_base,
+            "-m",
+            "homeboy: rebased cook candidate",
+        ],
+    )?;
+    let candidate_ref = format!(
+        "{}{}-rebased",
+        crate::agent_task_scheduler::CANDIDATE_REF_PREFIX,
+        homeboy_core::paths::sanitize_path_segment(run_id)
+    );
+    git_output(path, &["update-ref", &candidate_ref, &candidate_sha])?;
+    caught_up["provenance"]["base_catch_up"]["source_candidate_commit"] = promotion
+        .provenance
+        .pointer("/base_catch_up/source_candidate_commit")
+        .filter(|candidate| !candidate.is_null())
+        .unwrap_or(&promotion.provenance["candidate_commit"])
+        .clone();
+    caught_up["provenance"]["candidate_commit"] = json!({
+        "base_sha": fresh_base,
+        "candidate_sha": candidate_sha,
+        "tree_sha": tree,
     });
     if regate {
         caught_up["status"] = json!("verification_pending");

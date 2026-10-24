@@ -682,7 +682,7 @@ fn verified_gate_feedback_baseline(
         "source_run_id",
         "source_task_id",
         "source_patch_task_id",
-        "patch_artifact",
+        "candidate_commit",
         "failed_gates",
         "next_attempt",
         "to_worktree",

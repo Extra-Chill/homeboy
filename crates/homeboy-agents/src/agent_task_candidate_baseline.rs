@@ -6,8 +6,10 @@ use serde_json::Value;
 
 use homeboy_core::{Error, Result};
 
-/// Verify that a dirty worktree is exactly the gate-feedback candidate described
-/// by its durable promotion artifact, without mutating its real Git index.
+/// Verify that a dirty worktree is exactly the gate-feedback candidate commit
+/// recorded by its promotion, without mutating its real Git index. A baseline
+/// that names only a patch artifact predates candidate commits and is refused
+/// (#16303).
 pub(crate) fn validate_gate_feedback_candidate_baseline(
     root: &Path,
     baseline: &Value,
@@ -18,82 +20,31 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
         return validate_promotion_chain_baseline(root, baseline);
     }
     let cook_loop = baseline;
-    let artifact = cook_loop
-        .get("patch_artifact")
-        .and_then(Value::as_object)
-        .ok_or_else(|| invalid("recorded patch artifact is not an object"))?;
-    let path = artifact
-        .get("path")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-        .map(str::to_string);
-    let expected_sha256 = artifact
-        .get("sha256")
-        .and_then(Value::as_str)
-        .filter(|sha256| !sha256.is_empty())
-        .ok_or_else(|| invalid("recorded patch artifact has no sha256"))?;
-    let patch = if let Some(reference) = artifact.get("controller_artifact") {
-        let run_id = reference
-            .get("run_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("controller artifact reference has no run id"))?;
-        let task_id = reference
-            .get("task_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("controller artifact reference has no task id"))?;
-        let artifact_id = reference
-            .get("logical_artifact_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("controller artifact reference has no logical artifact id"))?;
-        let kind = reference
-            .get("kind")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("controller artifact reference has no kind"))?;
-        let reference_sha256 = reference
-            .get("sha256")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("controller artifact reference has no sha256"))?;
-        if reference_sha256 != expected_sha256 {
-            return Err(invalid(
-                "controller artifact reference sha256 conflicts with the baseline patch artifact",
-            ));
-        }
-        let record_id = reference.get("record_id").and_then(Value::as_str);
-        let (_, bytes) = crate::agent_task_lifecycle::verified_controller_artifact_projection(
-            run_id,
-            task_id,
-            artifact_id,
-            kind,
-            expected_sha256,
-            record_id,
-        )?
-        .ok_or_else(|| invalid("controller artifact mirror is missing"))?;
-        bytes
-    } else {
-        let path = path.ok_or_else(|| invalid("recorded patch artifact has no path"))?;
-        std::fs::read(path)
-            .map_err(|error| invalid(&format!("recorded patch artifact is unreadable: {error}")))?
-    };
-    if content_hash::sha256_hex(&patch) != expected_sha256 {
+    let candidate: crate::agent_task::AgentTaskCandidate = cook_loop
+        .get("candidate_commit")
+        .filter(|candidate| !candidate.is_null())
+        .cloned()
+        .and_then(|candidate| serde_json::from_value(candidate).ok())
+        .ok_or_else(|| {
+            let mut error = invalid(
+                "gate-feedback baseline records no candidate commit; baselines written before candidate commits are not resumable",
+            );
+            error.details["recoverable"] = serde_json::json!(false);
+            error
+        })?;
+    let actual_tree = workspace_tree(root)?;
+    if actual_tree != candidate.tree_sha {
         return Err(invalid(
-            "recorded patch artifact sha256 does not match its content",
+            "candidate worktree differs from the recorded candidate commit tree",
         ));
     }
-    let patch = String::from_utf8(patch)
-        .map_err(|error| invalid(&format!("recorded patch artifact is not UTF-8: {error}")))?;
-    verify_patch_is_present(root, &patch)?;
     let current_diff = cook_loop
         .get("current_diff")
         .and_then(Value::as_str)
         .filter(|diff| !diff.trim().is_empty())
         .ok_or_else(|| invalid("gate-feedback candidate has no complete current diff"))?;
     let current_diff = format!("{}\n", current_diff.trim_end_matches('\n'));
-    if patch_tree(root, &current_diff)? != workspace_tree(root)? {
+    if patch_tree(root, &current_diff)? != actual_tree {
         return Err(invalid(
             "recorded current diff does not match the promoted candidate worktree state",
         ));
@@ -216,29 +167,6 @@ fn valid_git_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn verify_patch_is_present(root: &Path, patch: &str) -> Result<()> {
-    let patch_file = tempfile::NamedTempFile::new().map_err(|error| invalid(&error.to_string()))?;
-    std::fs::write(patch_file.path(), patch).map_err(|error| invalid(&error.to_string()))?;
-    let output = Command::new("git")
-        .args([
-            "apply",
-            "--reverse",
-            "--check",
-            "--binary",
-            &patch_file.path().display().to_string(),
-        ])
-        .current_dir(root)
-        .output()
-        .map_err(|error| invalid(&error.to_string()))?;
-    if !output.status.success() {
-        return Err(invalid(&format!(
-            "recorded patch artifact is not present in the candidate worktree: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
 fn patch_tree(root: &Path, patch: &str) -> Result<String> {
     let index = tempfile::NamedTempFile::new().map_err(|error| invalid(&error.to_string()))?;
     let patch_file = tempfile::NamedTempFile::new().map_err(|error| invalid(&error.to_string()))?;
@@ -309,7 +237,6 @@ fn invalid(message: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
 
     #[test]
     fn immutable_candidate_tree_accepts_exact_commit_and_rejects_dirty_state() {
@@ -349,16 +276,21 @@ mod tests {
             .expect("untracked candidate file");
         git(temp.path(), &["add", "-N", "untracked.txt"]);
         let current_diff = git(temp.path(), &["diff", "--binary"]);
-        let remediation = "diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n@@ -1 +1 @@\n-two\n+three\n";
-        let artifacts = tempfile::tempdir().expect("artifact tempdir");
-        let artifact = artifacts.path().join("remediation.patch");
-        std::fs::write(&artifact, remediation).expect("remediation artifact");
+        let base_sha = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        let tree_sha = workspace_tree(temp.path()).expect("candidate tree");
+        let candidate_sha = git(
+            temp.path(),
+            &["commit-tree", &tree_sha, "-p", &base_sha, "-m", "candidate"],
+        )
+        .trim()
+        .to_string();
         let transported_diff = current_diff.trim_end_matches('\n');
         let cook_loop = serde_json::json!({
             "current_diff": transported_diff,
-            "patch_artifact": {
-                "path": artifact,
-                "sha256": format!("{:x}", Sha256::digest(remediation.as_bytes()))
+            "candidate_commit": {
+                "base_sha": base_sha,
+                "candidate_sha": candidate_sha,
+                "tree_sha": tree_sha,
             }
         });
 
@@ -367,6 +299,18 @@ mod tests {
                 .expect("layered candidate baseline"),
             current_diff
         );
+
+        let mut patch_only = cook_loop.clone();
+        patch_only["candidate_commit"] = Value::Null;
+        patch_only["patch_artifact"] = serde_json::json!({ "path": "remediation.patch" });
+        let error = validate_gate_feedback_candidate_baseline(temp.path(), &patch_only)
+            .expect_err("patch-only baseline refused");
+        assert_eq!(error.details["recoverable"], false);
+
+        std::fs::write(temp.path().join("unrelated.txt"), "drift\n").expect("drift");
+        let error = validate_gate_feedback_candidate_baseline(temp.path(), &cook_loop)
+            .expect_err("drifted tree refused");
+        assert!(error.message.contains("recorded candidate commit tree"));
     }
 
     #[test]
@@ -405,93 +349,6 @@ mod tests {
         assert!(error
             .message
             .contains("differs from the follow-up source snapshot"));
-    }
-
-    #[test]
-    fn controller_mirror_survives_runner_cleanup_and_rejects_hash_mismatch() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let workspace = temp.path().join("workspace");
-            std::fs::create_dir(&workspace).expect("workspace");
-            git(&workspace, &["init", "-b", "main"]);
-            git(&workspace, &["config", "user.name", "Homeboy Test"]);
-            git(
-                &workspace,
-                &["config", "user.email", "homeboy@example.test"],
-            );
-            std::fs::write(workspace.join("tracked.txt"), "old\n").expect("base file");
-            git(&workspace, &["add", "tracked.txt"]);
-            git(&workspace, &["commit", "-m", "base"]);
-            std::fs::write(workspace.join("tracked.txt"), "new\n").expect("candidate file");
-            let patch = git(&workspace, &["diff", "--binary"]);
-            let sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
-            let runner = temp.path().join("lab-workspace.patch");
-            std::fs::write(&runner, &patch).expect("runner patch");
-
-            let store = homeboy_core::observation::ObservationStore::open_initialized()
-                .expect("observation store");
-            store
-                .upsert_imported_run(&homeboy_core::observation::RunRecord {
-                    id: "lab-run".to_string(),
-                    kind: "agent-task".to_string(),
-                    started_at: "2026-07-24T00:00:00Z".to_string(),
-                    finished_at: Some("2026-07-24T00:00:01Z".to_string()),
-                    status: "pass".to_string(),
-                    metadata_json: serde_json::json!({}),
-                    ..Default::default()
-                })
-                .expect("record run");
-            let projection = store
-                .record_artifact_with_id(
-                    "lab-run",
-                    "patch",
-                    &runner,
-                    "controller-mirror",
-                    serde_json::json!({
-                        "agent_task": {
-                            "task_id": "follow-up",
-                            "logical_artifact_id": "patch"
-                        }
-                    }),
-                )
-                .expect("mirror patch");
-            std::fs::remove_file(&runner).expect("Lab cleanup");
-            let baseline = serde_json::json!({
-                "current_diff": patch,
-                "patch_artifact": {
-                    "id": "patch",
-                    "kind": "patch",
-                    "sha256": sha256,
-                    "controller_artifact": {
-                        "schema": "homeboy/controller-artifact-reference/v1",
-                        "run_id": "lab-run",
-                        "task_id": "follow-up",
-                        "logical_artifact_id": "patch",
-                        "kind": "patch",
-                        "sha256": sha256,
-                        "record_id": "controller-mirror"
-                    }
-                }
-            });
-
-            let mut missing = baseline.clone();
-            missing["patch_artifact"]["controller_artifact"]["run_id"] =
-                serde_json::json!("missing-lab-run");
-            let error = validate_gate_feedback_candidate_baseline(&workspace, &missing)
-                .expect_err("missing controller mirror fails closed");
-            assert!(error
-                .message
-                .contains("controller artifact mirror is missing"));
-            validate_gate_feedback_candidate_baseline(&workspace, &baseline)
-                .expect("controller mirror resolves after Lab cleanup");
-            validate_gate_feedback_candidate_baseline(&workspace, &baseline)
-                .expect("retry/resume resolves the same mirror identity");
-
-            std::fs::write(&projection.path, "different bytes").expect("alter mirror");
-            let error = validate_gate_feedback_candidate_baseline(&workspace, &baseline)
-                .expect_err("altered mirror fails closed");
-            assert!(error.message.contains("hash mismatch"));
-        });
     }
 
     fn git(root: &Path, args: &[&str]) -> String {

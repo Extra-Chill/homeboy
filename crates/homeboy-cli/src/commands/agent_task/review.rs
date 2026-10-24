@@ -273,22 +273,23 @@ fn compact_apply_candidate(value: &Value) -> Option<Value> {
     }))
 }
 
+/// A promoted Cook candidate is its commit: review shows the commit and its
+/// `base..candidate` diff, never a patch artifact (#16303).
 fn compact_selected_candidate(promotion: &Value) -> Value {
-    let artifact = promotion
-        .get("patch_artifact")
-        .or_else(|| promotion.get("patch"))
-        .map(|artifact| compact_fields(artifact, &["id", "kind", "path", "sha256"]));
-    let size_bytes = artifact
-        .as_ref()
-        .and_then(|artifact| artifact.get("path"))
-        .and_then(Value::as_str)
-        .and_then(|path| std::fs::metadata(path).ok())
-        .map(|metadata| metadata.len());
+    let candidate = promotion
+        .pointer("/provenance/candidate_commit")
+        .filter(|candidate| candidate.is_object());
+    let diff = candidate.and_then(|candidate| {
+        let repository = promotion.pointer("/target/path")?.as_str()?;
+        let base = candidate.get("base_sha")?.as_str()?;
+        let head = candidate.get("candidate_sha")?.as_str()?;
+        git_output(repository, &["diff", base, head]).ok()
+    });
     serde_json::json!({
         "status": promotion.get("status"),
         "task_id": promotion.pointer("/source/task_id").or_else(|| promotion.get("task_id")),
-        "artifact": artifact,
-        "size_bytes": size_bytes,
+        "candidate_commit": candidate,
+        "diff": diff,
         "changed_files": promotion.get("changed_files"),
     })
 }
@@ -355,26 +356,9 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         task_id.as_deref(),
         requested_artifact_id.as_deref(),
     )?;
-    let artifact_id = if let Some(run_id) = source_run_id.as_deref() {
-        requested_artifact_id
-            .as_deref()
-            .map(|artifact_id| {
-                agent_task_lifecycle::resolve_promotion_patch_artifact_id(
-                    run_id,
-                    task_id.as_deref(),
-                    artifact_id,
-                )
-            })
-            .transpose()?
-    } else {
-        requested_artifact_id
-    };
+    let artifact_id = requested_artifact_id;
     if let Some(run_id) = source_run_id.as_deref() {
-        agent_task_lifecycle::materialize_recovered_patch_artifact(
-            run_id,
-            task_id.as_deref(),
-            artifact_id.as_deref(),
-        )?;
+        agent_task_lifecycle::materialize_recovered_candidate_bundle(run_id, task_id.as_deref())?;
         (raw, source_path) = read_promotion_source(run_id)?;
     }
     let promotion_request = agent_task_service::AgentTaskPromotionRequest {
@@ -3381,27 +3365,43 @@ mod tests {
     }
 
     #[test]
-    fn compact_review_preserves_one_target_applied_candidate_fingerprint() {
-        let patch = tempfile::NamedTempFile::new().expect("patch");
-        std::fs::write(patch.path(), "x".repeat(7_635)).expect("write patch");
+    fn compact_review_shows_the_base_to_candidate_diff_without_a_patch_artifact() {
+        let repo = tempfile::tempdir().expect("repository");
+        let path = repo.path().to_str().expect("repository path");
+        let git = |args: &[&str]| super::git_output(path, args).expect("git");
+        git(&["init", "--quiet", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Homeboy Test"]);
+        std::fs::write(repo.path().join("a.rs"), "old\n").expect("base file");
+        git(&["add", "a.rs"]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let base_sha = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("a.rs"), "new\n").expect("candidate file");
+        git(&["add", "a.rs"]);
+        let tree_sha = git(&["write-tree"]);
+        let candidate_sha = git(&["commit-tree", &tree_sha, "-p", &base_sha, "-m", "candidate"]);
+        git(&["reset", "--quiet", "--hard", &base_sha]);
         let value = compact_review(
             serde_json::json!({
                 "schema": "homeboy/control-plane-run-review/v1",
-                "run": "agent-task-11805",
-                "resource": { "run": "agent-task-11805", "state": "succeeded" },
+                "run": "agent-task-16303",
+                "resource": { "run": "agent-task-16303", "state": "succeeded" },
                 "evidence": {
                     "record": {
                         "metadata": homeboy::agents::agent_task_service::cook_delivery_metadata_for_test(serde_json::json!({
                             "promotion": {
                                 "status": "applied",
                                 "source": { "task_id": "task-1" },
-                                "patch_artifact": {
-                                    "id": "candidate",
-                                    "kind": "patch",
-                                    "path": patch.path(),
+                                "target": { "path": path },
+                                "changed_files": ["a.rs"],
+                                "provenance": {
+                                    "post_apply": true,
+                                    "candidate_commit": {
+                                        "base_sha": base_sha,
+                                        "candidate_sha": candidate_sha,
+                                        "tree_sha": tree_sha,
+                                    }
                                 },
-                                "changed_files": ["a.rs", "b.rs", "c.rs"],
-                                "provenance": { "post_apply": true, "candidate": { "head": "candidate-head" } },
                                 "deterministic_gates": [{
                                     "name": "cargo test",
                                     "status": "succeeded",
@@ -3419,14 +3419,15 @@ mod tests {
             false,
         );
 
-        assert_eq!(value["selected_candidate"]["artifact"]["id"], "candidate");
-        assert_eq!(value["selected_candidate"]["size_bytes"], 7_635);
-        assert_eq!(
-            value["selected_candidate"]["changed_files"]
-                .as_array()
-                .map(Vec::len),
-            Some(3)
+        let selected = &value["selected_candidate"];
+        assert_eq!(selected["candidate_commit"]["candidate_sha"], candidate_sha);
+        let diff = selected["diff"].as_str().expect("base..candidate diff");
+        assert!(diff.contains("-old") && diff.contains("+new"), "{diff}");
+        assert!(
+            selected.get("artifact").is_none(),
+            "no patch artifact is shown"
         );
+        assert_eq!(selected["changed_files"], serde_json::json!(["a.rs"]));
         assert_eq!(value["gates"][0]["name"], "cargo test");
         assert!(value.get("record").is_none());
         assert!(value.get("logs").is_none());

@@ -25,8 +25,7 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
         let run_id = "recovered-lab-run";
         let task_id = "implement";
         let artifact_id = "patch";
-        let projected_path =
-            record_controller_projection(run_id, task_id, artifact_id, VALID_PATCH);
+        record_controller_projection(run_id, task_id, artifact_id, VALID_PATCH);
         let source = recovered_runner_aggregate(
             task_id,
             artifact_id,
@@ -65,10 +64,7 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
             )
             .expect("recovered aggregate promotes from controller projection");
 
-            assert_eq!(
-                report.patch_artifact.path,
-                projected_path.display().to_string()
-            );
+            assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
             assert_eq!(
                 std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
                 "new\n"
@@ -556,7 +552,7 @@ fn promote_dry_run_validates_provider_request_without_applying() {
 
     assert_eq!(report.status, AgentTaskPromotionStatus::DryRun);
     assert_eq!(report.source.task_id, "task-1");
-    assert_eq!(report.patch_artifact.id, "patch");
+    assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
     assert_eq!(git_stdout(&repo, &["status", "--porcelain"]), "");
     assert!(report.deterministic_gates.is_empty());
@@ -637,7 +633,7 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
 
     // Changed files come from the commit, never from sandbox patch headers.
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
-    assert_eq!(report.patch_artifact.id, "patch");
+    assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
     assert_eq!(
         std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
         "new\n"

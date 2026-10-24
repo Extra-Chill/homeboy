@@ -7,8 +7,7 @@ use super::super::apply::{
 use super::super::promote::{
     canonical_recoverable_patch_artifacts_in_observation_store, normalize_promotion_patch,
     promote_with_provider, promote_with_provider_and_checkpoint,
-    promote_with_provider_in_observation_store, resume_promoted_patch, select_patch_artifact,
-    validate_artifact_content,
+    promote_with_provider_in_observation_store, resume_promoted_patch, validate_artifact_content,
 };
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
@@ -23,7 +22,7 @@ use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
@@ -192,38 +191,6 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
             "fetch_and_reconcile"
         );
 
-        let remote_id = "runner-patch-reference";
-        store
-            .import_artifact(&homeboy_core::observation::ArtifactRecord {
-                id: remote_id.to_string(),
-                run_id: run_id.to_string(),
-                kind: "patch".to_string(),
-                artifact_type: "remote_file".to_string(),
-                path: "runner-artifact://homeboy-lab/recovered-typed-lab-run/patch".to_string(),
-                url: None,
-                public_url: None,
-                viewer_url: None,
-                viewer_links: Vec::new(),
-                sha256: Some(sha256_hex(VALID_PATCH)),
-                size_bytes: Some(VALID_PATCH.len() as i64),
-                mime: Some("text/x-patch".to_string()),
-                metadata_json: serde_json::json!({
-                    "agent_task": {
-                        "task_id": task_id,
-                        "logical_artifact_id": artifact_id,
-                    }
-                }),
-                created_at: "2026-07-16T00:00:01Z".to_string(),
-            })
-            .expect("remote patch reference");
-        let selected_id = crate::agent_task_lifecycle::resolve_promotion_patch_artifact_id(
-            run_id,
-            Some(task_id),
-            remote_id,
-        )
-        .expect("persisted remote record resolves to the logical patch id");
-        assert_eq!(selected_id, artifact_id);
-
         let temp = tempfile::tempdir().expect("promotion tempdir");
         let repo = candidate_destination(temp.path());
         let candidate = harvest_patch_candidate(&repo, VALID_PATCH);
@@ -242,7 +209,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                 candidate_ref: None,
                 to_worktree: repo.display().to_string(),
                 task_id: Some(task_id.to_string()),
-                artifact_id: Some(selected_id),
+                artifact_id: Some(artifact_id.to_string()),
                 dry_run: false,
                 gates: VerifyGateOptions::default(),
                 provider_invocation: None,
@@ -252,9 +219,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
             &store,
         )
         .expect("promote recovered controller projection");
-        assert_ne!(report.patch_artifact.path, patch.path);
-        assert!(Path::new(&report.patch_artifact.path).is_file());
-        assert_eq!(report.patch_artifact.id, artifact_id);
+        assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
         assert_eq!(
             std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
             "new\n"
@@ -1054,20 +1019,6 @@ fn validate_artifact_content_rejects_sha_mismatch() {
 }
 
 #[test]
-fn review_only_patch_cannot_be_selected_for_promotion() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (_, source) = write_patch_source(&temp);
-    let mut outcome: AgentTaskOutcome = serde_json::from_str(&source).expect("outcome JSON");
-    outcome.artifacts[0].size_bytes = Some(128);
-    outcome.artifacts[0].metadata = serde_json::json!({ "review_only": true });
-
-    let error = select_patch_artifact(&outcome, Some("patch"))
-        .expect_err("review-only external patch must not be selectable");
-
-    assert!(error.message.contains("no matching patch artifact"));
-}
-
-#[test]
 fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1080,10 +1031,10 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
     std::fs::write(target.join("src/lib.rs"), "old\n").expect("base");
     git(&target, &["add", "."]);
     git(&target, &["commit", "-m", "base"]);
+    let candidate = harvest_patch_candidate(&target, VALID_PATCH);
     std::fs::write(target.join("src/lib.rs"), "new\n").expect("apply candidate");
-    git(&target, &["add", "."]);
-    git(&target, &["commit", "-m", "candidate plus gate correction"]);
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &candidate);
     let options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some("run-8307".to_string()),
@@ -1112,9 +1063,9 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         "source": { "task_id": "task-1" },
         "to_worktree": "repo@fix-8307",
         "target": { "worktree": "repo@fix-8307", "path": target },
-        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
         "verified_base": { "base": "main", "sha": "checkpointed-base" },
         "provenance": {
+            "candidate_commit": candidate,
             "resume_contract": {
                 "inputs": { "base_ref": "main", "task_base_sha": null, "candidate_ref": null },
                 "gates": serde_json::to_value(&options.gates).expect("gate contract")
@@ -1125,10 +1076,9 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
     let report = resume_promoted_patch(options, &target, &previous).expect("resume proof");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(
-        report.command_evidence[0].command,
-        vec!["git", "apply", "--reverse", "--check", "-"]
-    );
+    assert!(report.command_evidence.is_empty());
+    assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
+    assert_eq!(report.changed_files, vec!["src/lib.rs".to_string()]);
     assert_eq!(report.gate_results.len(), 2);
     assert_eq!(
         report.gate_results[0].status,
@@ -1152,47 +1102,29 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
     assert_eq!(report.provenance["resumed_post_apply_promotion"], true);
 }
 
+/// A checkpoint written before candidate commits names only a patch artifact.
+/// Resume has no compatibility reader for it (#16303).
 #[test]
-fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
+fn patch_only_post_apply_checkpoint_fails_non_recoverably() {
     let _home = gate_home();
-    // #9400 regression sequence: review selected a Cook artifact for a trunk
-    // repository, a legacy generated promote command defaulted to main after
-    // applying it, then the corrected review command resumes the exact target.
     let temp = tempfile::tempdir().expect("tempdir");
-    let remote = temp.path().join("origin.git");
     let target = temp.path().join("target");
-    git(
-        temp.path(),
-        &[
-            "init",
-            "--bare",
-            "--initial-branch=trunk",
-            remote.to_str().unwrap(),
-        ],
-    );
     std::fs::create_dir(&target).expect("target");
-    git(&target, &["init", "--initial-branch=trunk"]);
+    git(&target, &["init", "-b", "main"]);
     git(&target, &["config", "user.email", "test@example.com"]);
     git(&target, &["config", "user.name", "Test"]);
     std::fs::create_dir_all(target.join("src")).expect("src");
     std::fs::write(target.join("src/lib.rs"), "old\n").expect("base");
     git(&target, &["add", "."]);
     git(&target, &["commit", "-m", "base"]);
-    git(
-        &target,
-        &["remote", "add", "origin", remote.to_str().unwrap()],
-    );
-    git(&target, &["push", "-u", "origin", "trunk"]);
     std::fs::write(target.join("src/lib.rs"), "new\n").expect("legacy applied patch");
-    let candidate = crate::agent_task_promotion::candidate_fingerprint(target.to_str().unwrap())
-        .expect("legacy candidate");
     let (source_path, source) = write_patch_source(&temp);
     let options = AgentTaskPromotionRequest {
         source,
-        source_run_id: Some("cook-9400-attempt-1".to_string()),
+        source_run_id: Some("cook-legacy-attempt-1".to_string()),
         source_path: Some(source_path),
         source_worktree_path: None,
-        base_ref: Some("trunk".to_string()),
+        base_ref: Some("main".to_string()),
         task_base_sha: None,
         candidate_ref: None,
         to_worktree: "fixture@target".to_string(),
@@ -1206,32 +1138,23 @@ fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
     let checkpoint = serde_json::json!({
         "schema": "homeboy/agent-task-promotion-report/v1",
         "status": "verification_pending",
-        "source_run_id": "cook-9400-attempt-1",
+        "source_run_id": "cook-legacy-attempt-1",
         "source": { "task_id": "task-1" },
         "to_worktree": "fixture@target",
         "target": { "worktree": "fixture@target", "path": target },
         "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
-        "provenance": {
-            "post_apply": true,
-            "candidate": candidate,
-            "resume_contract": {
-                "inputs": { "base_ref": "main", "task_base_sha": null, "candidate_ref": null },
-                "gates": serde_json::to_value(&options.gates).expect("gate contract"),
-            },
-        },
+        "provenance": { "post_apply": true },
     });
 
-    let resumed = resume_promoted_patch(options.clone(), &target, &checkpoint)
-        .expect("corrected trunk command resumes the legacy checkpoint");
-    assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(resumed.verified_base.expect("corrected base").base, "trunk");
-
-    std::fs::write(target.join("unrelated.rs"), "conflict\n").expect("conflicting edit");
     let error = resume_promoted_patch(options, &target, &checkpoint)
-        .expect_err("conflicting target edits fail closed");
-    assert!(error
-        .message
-        .contains("differs from the exact checkpointed"));
+        .expect_err("patch-only checkpoint is refused");
+
+    assert_eq!(
+        error.details["field"],
+        "promotion.provenance.candidate_commit"
+    );
+    assert_eq!(error.details["recoverable"], false);
+    assert!(error.message.contains("records no candidate commit"));
 }
 
 #[test]
@@ -1247,11 +1170,13 @@ fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
     std::fs::write(target.join("src/lib.rs"), "old\n").expect("base");
     git(&target, &["add", "."]);
     git(&target, &["commit", "-m", "base"]);
+    let candidate_commit = harvest_patch_candidate(&target, VALID_PATCH);
     std::fs::write(target.join("src/lib.rs"), "new\n").expect("apply candidate");
     let candidate =
         crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())
             .expect("candidate fingerprint");
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &candidate_commit);
     let options = |rerun_completed_gates| AgentTaskPromotionRequest {
         source: source.clone(),
         source_run_id: Some("run-9392".to_string()),
@@ -1279,8 +1204,7 @@ fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
         "source": { "task_id": "task-1" },
         "to_worktree": "repo@fix-9392",
         "target": { "worktree": "repo@fix-9392", "path": target },
-        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
-        "provenance": { "candidate": candidate },
+        "provenance": { "candidate": candidate, "candidate_commit": candidate_commit },
     });
 
     let rejected = resume_promoted_patch(options(false), &target, &previous)
@@ -2049,11 +1973,13 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
     std::fs::write(target.join("src/lib.rs"), "old\n").expect("base");
     git(&target, &["add", "."]);
     git(&target, &["commit", "-m", "base"]);
+    let candidate_commit = harvest_patch_candidate(&target, VALID_PATCH);
     std::fs::write(target.join("src/lib.rs"), "new\n").expect("apply candidate");
     let candidate =
         crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())
             .expect("candidate fingerprint");
     let (source_path, source) = write_patch_source(&temp);
+    let source = with_candidate(&source, &candidate_commit);
     let options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some("immutable-candidate-follow-up".to_string()),
@@ -2081,8 +2007,7 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
         "source": { "task_id": "task-1" },
         "to_worktree": "fixture@target",
         "target": { "worktree": "fixture@target", "path": target },
-        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
-        "provenance": { "candidate": candidate },
+        "provenance": { "candidate": candidate, "candidate_commit": candidate_commit },
     });
 
     let report = resume_promoted_patch(options.clone(), &target, &previous)
@@ -2164,7 +2089,7 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
 
     let feedback_baseline = serde_json::json!({
         "current_diff": baseline["current_diff"],
-        "patch_artifact": report.patch_artifact,
+        "candidate_commit": baseline["candidate_commit"],
     });
     crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
         &workspace,

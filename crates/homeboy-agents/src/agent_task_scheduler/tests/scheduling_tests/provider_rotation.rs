@@ -906,11 +906,14 @@ mod provider_rotation_tests {
             outcome.failure_classification,
             Some(AgentTaskFailureClassification::Timeout)
         );
-        assert!(outcome.artifacts.iter().any(|artifact| {
-            artifact.kind == "patch"
-                && artifact.metadata["producer_attempt"] == 1
-                && artifact.metadata["provider_rotation_index"] == 0
-        }));
+        assert!(
+            outcome.candidate.is_some(),
+            "the retained edit is a candidate commit"
+        );
+        assert!(!outcome
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "patch"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(outcome.metadata.pointer("/provider_rotation").is_none());
     }
