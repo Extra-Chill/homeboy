@@ -259,9 +259,9 @@ fn runner_extension_inventory(
         return Err("runner extension inventory did not report success".to_string());
     }
     let extensions = value
-        .pointer("/data/extensions")
+        .pointer("/data/entities")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "runner extension inventory did not contain data.extensions".to_string())?;
+        .ok_or_else(|| "runner extension inventory did not contain data.entities".to_string())?;
 
     let mut inventory = RunnerExtensionInventory {
         readable: Vec::new(),
@@ -576,7 +576,7 @@ mod manifest_preflight_tests {
             Ok(successful_output(
                 runner_id,
                 options.command,
-                r#"{"success":true,"data":{"extensions":[]}}"#,
+                r#"{"success":true,"data":{"entities":[]}}"#,
             ))
         };
 
@@ -598,7 +598,7 @@ mod manifest_preflight_tests {
             let stdout = match call_count {
                 0 => {
                     assert_eq!(options.command, ["homeboy", "extension", "list"]);
-                    r#"{"success":true,"data":{"extensions":[{"id":"runner-only"}]}}"#
+                    r#"{"success":true,"data":{"entities":[{"id":"runner-only"}]}}"#
                 }
                 1 => {
                     assert_eq!(
@@ -627,7 +627,7 @@ mod manifest_preflight_tests {
             Ok(successful_output(
                 runner_id,
                 options.command,
-                r#"{"success":true,"data":{"extensions":[{"id":"broken","error":"manifest_invalid","diagnostic":"invalid requires.homeboy"}]}}"#,
+                r#"{"success":true,"data":{"entities":[{"id":"broken","error":"manifest_invalid","diagnostic":"invalid requires.homeboy"}]}}"#,
             ))
         };
 
@@ -646,7 +646,7 @@ mod manifest_preflight_tests {
             let stdout = match call_count {
                 0 => {
                     assert_eq!(options.command, ["homeboy", "extension", "list"]);
-                    r#"{"success":true,"data":{"extensions":[{"id":"discord","error":"manifest_deserialize_incompatible","diagnostic":"The extension manifest does not match the supported schema."},{"id":"rust"}]}}"#
+                    r#"{"success":true,"data":{"entities":[{"id":"discord","error":"manifest_deserialize_incompatible","diagnostic":"The extension manifest does not match the supported schema."},{"id":"rust"}]}}"#
                 }
                 1 => {
                     assert_eq!(options.command, ["homeboy", "extension", "show", "rust"]);
@@ -680,7 +680,7 @@ mod manifest_preflight_tests {
             assert_eq!(runner_id, "lab-a");
             let stdout = if call_count % 2 == 0 {
                 assert_eq!(options.command, ["homeboy", "extension", "list"]);
-                r#"{"success":true,"data":{"extensions":[{"id":"rust"}]}}"#
+                r#"{"success":true,"data":{"entities":[{"id":"rust"}]}}"#
             } else {
                 assert_eq!(options.command, ["homeboy", "extension", "show", "rust"]);
                 manifests[call_count / 2]

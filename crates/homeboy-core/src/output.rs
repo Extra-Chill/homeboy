@@ -508,42 +508,24 @@ impl<T: Serialize, E: Serialize + Default> Default for EntityCrudOutput<T, E> {
 // Row-shaped list payloads
 // ============================================================================
 
-/// Rows of a `* list` command, serialized under the canonical `entities` key.
+/// Rows of a `* list` command, serialized under the `entities` key.
 ///
 /// Every row-shaped list command returns its rows under `data.entities` so one
-/// reader works across all of them (#14876). `project list` and
-/// `extension list` still mirror the same rows under their historical key
-/// because live callers read it (`wp-coding-agents` reads `data.projects`;
-/// the runner-upgrade preflight reads `data.extensions` from not-yet-upgraded
-/// runners). Every other list emits `entities` only (#15742).
-///
-/// **The legacy key is deprecated**; consumers must read `entities`. Removing
-/// the mirror is dropping `legacy_key` at the call site.
+/// reader works across all of them (#14876). Every list emits `entities` only
+/// (#15742, #16390); the retired per-command mirrors (`extensions`,
+/// `projects`) are gone.
 ///
 /// Embed with `#[serde(flatten)]`. `entities` is always emitted, including as
 /// `[]` when the list is empty, so absence is never a valid "no rows" answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityRows<T> {
     rows: Vec<T>,
-    legacy_key: Option<&'static str>,
 }
 
 impl<T> EntityRows<T> {
-    /// Rows under `entities` only.
+    /// Rows under `entities`.
     pub fn new(rows: Vec<T>) -> Self {
-        Self {
-            rows,
-            legacy_key: None,
-        }
-    }
-
-    /// Rows under `entities`, mirrored under the deprecated `legacy_key`.
-    pub fn with_legacy_key(rows: Vec<T>, legacy_key: &'static str) -> Self {
-        debug_assert_ne!(legacy_key, "entities");
-        Self {
-            rows,
-            legacy_key: Some(legacy_key),
-        }
+        Self { rows }
     }
 
     pub fn rows(&self) -> &[T] {
@@ -552,10 +534,6 @@ impl<T> EntityRows<T> {
 
     pub fn into_rows(self) -> Vec<T> {
         self.rows
-    }
-
-    pub fn legacy_key(&self) -> Option<&'static str> {
-        self.legacy_key
     }
 }
 
@@ -576,11 +554,8 @@ impl<T: Serialize> Serialize for EntityRows<T> {
     {
         use serde::ser::SerializeMap;
 
-        let mut map = serializer.serialize_map(Some(1 + usize::from(self.legacy_key.is_some())))?;
+        let mut map = serializer.serialize_map(Some(1))?;
         map.serialize_entry("entities", &self.rows)?;
-        if let Some(legacy_key) = self.legacy_key {
-            map.serialize_entry(legacy_key, &self.rows)?;
-        }
         map.end()
     }
 }
@@ -807,42 +782,32 @@ mod tests {
     }
 
     #[test]
-    fn entity_rows_mirror_rows_under_entities_and_legacy_key() {
+    fn entity_rows_emit_rows_only_under_entities() {
         let output = FlattenedRows {
             command: "example.list",
-            rows: EntityRows::with_legacy_key(
-                vec![json!({ "id": "a" }), json!({ "id": "b" })],
-                "examples",
-            ),
+            rows: EntityRows::new(vec![json!({ "id": "a" }), json!({ "id": "b" })]),
         };
 
         let value = serde_json::to_value(&output).expect("serialize");
 
         assert_eq!(value["command"], "example.list");
         assert_eq!(value["entities"], json!([{ "id": "a" }, { "id": "b" }]));
-        assert_eq!(value["entities"], value["examples"]);
+        assert!(value.get("examples").is_none(), "no mirror: {value}");
     }
 
     #[test]
     fn entity_rows_always_emit_entities_when_empty() {
-        let mirrored = serde_json::to_value(FlattenedRows {
-            command: "example.list",
-            rows: EntityRows::with_legacy_key(Vec::new(), "examples"),
-        })
-        .expect("serialize");
-        assert_eq!(mirrored["entities"], json!([]));
-        assert_eq!(mirrored["examples"], json!([]));
-
-        let canonical_only = serde_json::to_value(FlattenedRows {
+        let value = serde_json::to_value(FlattenedRows {
             command: "example.list",
             rows: EntityRows::new(Vec::new()),
         })
         .expect("serialize");
-        assert_eq!(canonical_only["entities"], json!([]));
+
+        assert_eq!(value["entities"], json!([]));
         assert_eq!(
-            canonical_only.as_object().expect("object").len(),
+            value.as_object().expect("object").len(),
             2,
-            "only command + entities: {canonical_only}"
+            "only command + entities: {value}"
         );
     }
 

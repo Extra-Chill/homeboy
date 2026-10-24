@@ -1,8 +1,8 @@
 //! Classifies every `* list` subcommand by its payload shape (#14876).
 //!
-//! Row-shaped registry lists return their rows under `data.entities` (legacy
-//! command-specific keys are only deprecated mirrors), so one reader works
-//! across all of them. Every other `list` is exempt for a recorded reason.
+//! Row-shaped registry lists return their rows under `data.entities`, so one
+//! reader works across all of them. Every other `list` is exempt for a
+//! recorded reason.
 //!
 //! Walking the real clap tree means a new `list` subcommand fails here until
 //! someone decides which side it belongs on, instead of silently inventing a

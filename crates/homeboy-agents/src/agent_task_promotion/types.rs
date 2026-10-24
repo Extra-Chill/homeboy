@@ -251,7 +251,6 @@ pub enum AgentTaskPromotionStatus {
     VerifiedNoChanges,
     /// A provider produced no patch and the pinned candidate workspace failed
     /// deterministic verification. The candidate remains available for repair.
-    #[serde(alias = "no_op_gate_failed")]
     NoChangesGateFailed,
     NoChanges,
 }
