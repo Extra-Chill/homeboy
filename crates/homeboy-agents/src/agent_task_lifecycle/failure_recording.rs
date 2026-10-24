@@ -2832,26 +2832,6 @@ pub fn verified_controller_artifact_projection_path_in_store(
 /// Resolve a controller-retained artifact by its durable logical identity. This
 /// is intentionally independent of the runner-reported path: Lab workspaces
 /// are disposable after their aggregate has been mirrored.
-pub(crate) fn verified_controller_artifact_projection(
-    run_id: &str,
-    task_id: &str,
-    logical_artifact_id: &str,
-    kind: &str,
-    expected_sha256: &str,
-    expected_record_id: Option<&str>,
-) -> Result<Option<(String, Vec<u8>)>> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    verified_controller_artifact_projection_in_store(
-        &store,
-        run_id,
-        task_id,
-        logical_artifact_id,
-        kind,
-        expected_sha256,
-        expected_record_id,
-    )
-}
-
 pub fn verified_controller_artifact_projection_in_store(
     store: &homeboy_core::observation::ObservationStore,
     run_id: &str,

@@ -197,14 +197,20 @@ mod timeout_tests {
             outcome.metadata["timeout_recovery"]["incomplete"],
             Value::Bool(true)
         );
-        let patch = outcome
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.metadata["change_source"] == "uncommitted_attempt_workspace")
-            .expect("harvested attempt-workspace diff");
-        assert_eq!(patch.metadata["incomplete"], Value::Bool(true));
+        assert!(
+            outcome.candidate.is_some(),
+            "the edit is one candidate commit"
+        );
+        assert!(
+            !outcome
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "patch"),
+            "a Cook attempt writes no patch artifact (#16303): {:#?}",
+            outcome.artifacts
+        );
         assert_eq!(
-            patch.metadata["recovery_required"],
+            outcome.metadata["timeout_recovery"]["recovery_required"],
             json!(["fresh_review", "deterministic_gates"])
         );
     }
@@ -253,31 +259,13 @@ mod timeout_tests {
                     .expect("persisted aggregate");
             let outcome = &aggregate.outcomes[0];
             assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
-            let patch = outcome
-                .artifacts
-                .iter()
-                .find(|artifact| {
-                    artifact.metadata["change_source"] == "uncommitted_attempt_workspace"
-                })
-                .expect("harvested attempt-workspace diff");
-            for key in [
-                "run_id",
-                "task_id",
-                "producer_attempt",
-                "base_ref",
-                "provider_backend",
-                "repository_identity",
-                "workspace_identity",
-            ] {
-                assert!(
-                    patch.metadata.get(key).is_some_and(|value| {
-                        value.as_str().is_some_and(|value| !value.is_empty()) || value.is_u64()
-                    }),
-                    "timeout uncommitted patch is missing {key}: {:#?}",
-                    patch.metadata
-                );
-            }
-            assert_eq!(patch.metadata["run_id"], "timeout-dirty-fingerprint");
+            assert!(
+                !outcome
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.kind == "patch"),
+                "a timed-out Cook attempt writes no patch artifact (#16303)"
+            );
             // The timed-out worktree is recorded as one candidate commit, and
             // promotion admits that commit rather than the patch (#16303).
             let candidate = outcome

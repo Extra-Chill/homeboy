@@ -558,7 +558,7 @@ fn build_follow_up_request(
             "retry_budget_remaining_after_dispatch": options.max_attempts.saturating_sub(next_attempt),
             "to_worktree": options.promotion_report.to_worktree,
             "changed_files": options.promotion_report.changed_files,
-            "patch_artifact": options.promotion_report.patch_artifact,
+            "candidate_commit": options.promotion_report.provenance.get("candidate_commit"),
             "failed_gates": agent_visible_failed_gates,
             "failure_set": failure_set(failed_gates),
             "failure_progression": failure_progression,

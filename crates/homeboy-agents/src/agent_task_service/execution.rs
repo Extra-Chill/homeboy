@@ -4001,13 +4001,15 @@ mod tests {
                     .is_string()
             );
             let aggregate = store.read_aggregate(run_id).expect("rooted aggregate");
-            let patch_path = aggregate.outcomes[0].artifacts[0]
-                .path
-                .as_deref()
-                .map(Path::new)
-                .expect("harvested patch path");
-            assert!(patch_path.starts_with(store.artifact_root()));
-            assert!(patch_path.exists());
+            let outcome = &aggregate.outcomes[0];
+            assert!(outcome.candidate.is_some(), "harvested candidate commit");
+            assert!(
+                !outcome
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.kind == "patch"),
+                "a Cook run produces no patch artifact"
+            );
             let scratch_index = store.data_root().join("controller-scratch/resources.json");
             let scratch = std::fs::read_to_string(scratch_index).expect("rooted scratch index");
             assert!(scratch.contains(run_id));

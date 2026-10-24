@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::agent_task::AgentTaskArtifact;
-use crate::agent_task_timeout_artifacts::is_patch_artifact_kind;
+use crate::agent_task::{AgentTaskArtifact, CANDIDATE_BUNDLE_ARTIFACT_KIND};
 use homeboy_core::{Error, Result};
 
 use super::{
@@ -13,32 +12,22 @@ use super::{
     verified_controller_artifact_projection_path,
 };
 
-/// Materialize recovered patch artifacts for a controller-side promotion.
+/// Materialize a recovered run's candidate commit bundle for a controller-side
+/// promotion: the commit is the candidate, never a patch (#16303).
 ///
 /// Controller-retained projections are authoritative for controller-local
 /// execution. Remote retrieval is only available to artifacts that retain a
 /// complete runner/job provenance binding.
-pub fn materialize_recovered_patch_artifact(
-    run_id: &str,
-    task_id: Option<&str>,
-    artifact_id: Option<&str>,
-) -> Result<bool> {
+pub fn materialize_recovered_candidate_bundle(run_id: &str, task_id: Option<&str>) -> Result<bool> {
     let mut record = reconcile_status(run_id)?;
     let mut aggregate = store::read_aggregate(&record.run_id)?;
-    let artifact_id = artifact_id
-        .map(|artifact_id| resolve_promotion_patch_artifact_id(run_id, task_id, artifact_id))
-        .transpose()?;
     let mut changed = false;
     for outcome in &mut aggregate.outcomes {
         if task_id.is_some_and(|expected| expected != outcome.task_id) {
             continue;
         }
         for artifact in &mut outcome.artifacts {
-            if artifact_id
-                .as_deref()
-                .is_some_and(|expected| expected != artifact.id)
-                || !is_patch_artifact_kind(&artifact.kind)
-            {
+            if artifact.kind != CANDIDATE_BUNDLE_ARTIFACT_KIND {
                 continue;
             }
             // A historical aggregate can retain a deleted producer path even
@@ -85,54 +74,6 @@ pub fn materialize_recovered_patch_artifact(
         )?;
     }
     Ok(changed)
-}
-
-/// Resolve a persisted artifact record id to the lifecycle artifact id used by
-/// promotion. The canonical runner ref uses that persisted id; friendly logical
-/// names remain metadata.
-pub fn resolve_promotion_patch_artifact_id(
-    run_id: &str,
-    task_id: Option<&str>,
-    artifact_id: &str,
-) -> Result<String> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    let mut logical_ids = store
-        .list_artifacts(run_id)?
-        .into_iter()
-        .filter(|artifact| is_patch_artifact_kind(&artifact.kind))
-        .filter(|artifact| {
-            task_id.is_none_or(|task_id| {
-                artifact
-                    .metadata_json
-                    .pointer("/agent_task/task_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(task_id)
-            })
-        })
-        .filter_map(|artifact| {
-            let logical_id = artifact
-                .metadata_json
-                .pointer("/agent_task/logical_artifact_id")
-                .and_then(serde_json::Value::as_str)?;
-            (artifact.id == artifact_id || logical_id == artifact_id)
-                .then(|| logical_id.to_string())
-        })
-        .collect::<Vec<_>>();
-    logical_ids.sort();
-    logical_ids.dedup();
-
-    match logical_ids.as_slice() {
-        [] => Ok(artifact_id.to_string()),
-        [logical_id] => Ok(logical_id.clone()),
-        _ => Err(Error::validation_invalid_argument(
-            "artifact_id",
-            format!(
-                "persisted artifact id '{artifact_id}' matches multiple logical patch artifacts for run '{run_id}'"
-            ),
-            Some(artifact_id.to_string()),
-            None,
-        )),
-    }
 }
 
 fn is_recovered_artifact(

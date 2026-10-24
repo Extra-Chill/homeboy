@@ -977,13 +977,9 @@ pub(super) mod concurrency_tests {
             retry.data["diagnostics"][0]["data"]["operation"],
             "write_file"
         );
-        assert_eq!(
-            retry.data["artifacts"][0]["id"],
-            "task-1-attempt-1-uncommitted-changes"
-        );
-        assert_eq!(
-            retry.data["artifacts"][0]["metadata"]["change_source"],
-            "uncommitted_attempt_workspace"
+        assert!(
+            retry.data["candidate"]["candidate_sha"].is_string(),
+            "the failed attempt's edit is retained as its candidate commit"
         );
     }
 
@@ -1048,25 +1044,16 @@ pub(super) mod concurrency_tests {
                 outcome.failure_classification,
                 Some(AgentTaskFailureClassification::Transient)
             );
-            for attempt in 1..=expected_attempts {
-                let patch = outcome
-                    .artifacts
-                    .iter()
-                    .find(|artifact| {
-                        artifact.id == format!("task-1-attempt-{attempt}-uncommitted-changes")
-                    })
-                    .expect("each failed attempt's patch remains available");
-                assert!(patch.size_bytes.is_some_and(|size| size > 0));
-                assert!(patch.sha256.is_some());
-                assert!(patch.metadata["base_ref"].is_string());
-            }
+            assert!(
+                outcome.candidate.is_some(),
+                "{name}: the failed attempt's edit is its candidate commit"
+            );
             let workspaces = workspaces.lock().expect("workspaces");
             if expected_attempts == 2 {
                 assert_ne!(workspaces[0], workspaces[1]);
                 assert!(outcome.diagnostics.iter().any(|diagnostic| {
                     diagnostic.class == "agent_task.retry_attempt"
-                        && diagnostic.data["artifacts"][0]["id"]
-                            == "task-1-attempt-1-uncommitted-changes"
+                        && diagnostic.data["candidate"]["candidate_sha"].is_string()
                 }));
             }
             assert_eq!(

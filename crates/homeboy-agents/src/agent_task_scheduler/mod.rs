@@ -50,17 +50,17 @@ use attempt_workspace::{
     prepare_attempt_workspace, prepare_committed_harvest, remap_workspace_config, AttemptWorkspace,
 };
 use candidate_adoption::{
-    attach_candidate_adoption_provenance, bind_candidate_artifact_fingerprint,
-    finalize_candidate_artifacts, select_candidate_adoption, validate_and_apply_candidate_adoption,
+    attach_candidate_adoption_provenance, finalize_candidate_artifacts, select_candidate_adoption,
+    select_candidate_commit_adoption, validate_and_apply_candidate_adoption,
 };
 pub use engine::*;
 use engine::{QuarantinedTask, ResourceWait, RunningTask, ScheduledTask};
 use harvest::mark_timeout_workspace_candidates_incomplete;
 use harvest::{
     committed_harvest_failure, committed_harvest_preflight_outcome, harvest_candidate_commit,
-    harvest_committed_patch, harvest_uncommitted_patch,
+    harvest_committed_patch,
 };
-pub(crate) use harvest::{git_output, HarvestError};
+pub(crate) use harvest::{git_output, HarvestError, CANDIDATE_REF_PREFIX};
 use outcome::event;
 pub use postprocess::run_postprocess_worker;
 use resources::{

@@ -79,6 +79,58 @@ pub(super) fn select_candidate_adoption(
     })
 }
 
+/// Rotation adoption of the producing attempt's candidate commit: the next
+/// provider receives `git diff base..candidate`, read from the commit (#16303).
+pub(super) fn select_candidate_commit_adoption(
+    template: &AgentTaskCandidateAdoption,
+    candidate: &crate::agent_task::AgentTaskCandidate,
+    running: &RunningTask,
+) -> Result<AgentTaskCandidateAdoption, String> {
+    let expected_base = running.task_base_sha.as_deref().unwrap_or_default();
+    if candidate.base_sha != expected_base {
+        return Err("candidate adoption base does not match the producing attempt".to_string());
+    }
+    let root =
+        (running.source_workspace_root.as_deref()).or(running.request.workspace.root.as_deref());
+    let repository_identity = canonical_repository_identity_for_root(root)
+        .or_else(|| local_repository_identity_for_root(root))
+        .ok_or_else(|| "candidate commit has no canonical repository provenance".to_string())?;
+    let output = Command::new("git")
+        .args(["diff", "--binary", "--full-index", "--find-renames"])
+        .args([&candidate.base_sha, &candidate.candidate_sha])
+        .current_dir(root.unwrap_or_default())
+        .output()
+        .map_err(|error| format!("read candidate commit: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "candidate commit is unavailable: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let content = String::from_utf8(output.stdout)
+        .map_err(|error| format!("candidate commit diff is not UTF-8: {error}"))?;
+    let workspace_identity = (running.source_provenance.as_ref())
+        .and_then(|value| value.get("workspace_snapshot_identity"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| repository_identity.clone(), str::to_string);
+    Ok(AgentTaskCandidateAdoption {
+        source_run_id: running.run_id.clone().unwrap_or_default(),
+        source_task_id: running.task_id.clone(),
+        source_attempt: running.attempt,
+        provider_backend: running.request.executor.backend.clone(),
+        provider_selector: running.request.executor.selector.clone(),
+        provider_model: running.request.executor.model().map(str::to_string),
+        task_base_sha: expected_base.to_string(),
+        repository_identity,
+        workspace_identity,
+        artifact_id: candidate.candidate_sha.clone(),
+        sha256: sha256(&content),
+        content: Some(content),
+        ..template.clone()
+    })
+}
+
 #[expect(
     clippy::result_large_err,
     reason = "scheduler returns the complete outcome for durable lifecycle recording"
@@ -173,10 +225,7 @@ pub(super) fn finalize_candidate_artifacts(outcome: &mut AgentTaskOutcome, runni
     }
 }
 
-pub(super) fn bind_candidate_artifact_fingerprint(
-    artifact: &mut AgentTaskArtifact,
-    running: &RunningTask,
-) {
+fn bind_candidate_artifact_fingerprint(artifact: &mut AgentTaskArtifact, running: &RunningTask) {
     let Some(run_id) = running.run_id.as_deref().filter(|id| !id.is_empty()) else {
         return;
     };

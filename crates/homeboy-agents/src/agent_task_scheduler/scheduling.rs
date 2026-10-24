@@ -497,8 +497,7 @@ impl AgentTaskScheduleSupport {
                         recovered.status = AgentTaskOutcomeStatus::Succeeded;
                         recovered.failure_classification = None;
                         let harvest = joined.and_then(|_| {
-                            super::harvest_uncommitted_patch(&mut recovered, &task)
-                                .and_then(|_| super::harvest_committed_patch(&mut recovered, &task))
+                            super::harvest_committed_patch(&mut recovered, &task)
                                 .and_then(|_| {
                                     super::harvest_candidate_commit(&mut recovered, &task)
                                 })
@@ -988,10 +987,11 @@ impl AgentTaskScheduleSupport {
                 | AgentTaskOutcomeStatus::NoOp
                 | AgentTaskOutcomeStatus::Cancelled
                 | AgentTaskOutcomeStatus::CandidateRecoverable
-        ) || !outcome
-            .artifacts
-            .iter()
-            .any(|artifact| is_base_bound_patch_candidate(outcome, artifact))
+        ) || outcome.candidate.is_none()
+            && !outcome
+                .artifacts
+                .iter()
+                .any(|artifact| is_base_bound_patch_candidate(outcome, artifact))
         {
             return;
         }
@@ -1072,7 +1072,8 @@ impl AgentTaskScheduleSupport {
 
         let actionable_patch = outcome.metadata.get("actionable").and_then(Value::as_bool)
             != Some(false)
-            && outcome.artifacts.iter().any(is_actionable_patch_artifact);
+            && (outcome.candidate.is_some()
+                || outcome.artifacts.iter().any(is_actionable_patch_artifact));
         if actionable_patch {
             outcome.status = AgentTaskOutcomeStatus::Succeeded;
             outcome.failure_classification = None;
