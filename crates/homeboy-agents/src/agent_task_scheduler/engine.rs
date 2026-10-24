@@ -358,8 +358,7 @@ impl AgentTaskScheduler {
                 return AgentTaskAggregate {
                     schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
                     plan_id: plan.plan_id,
-                    status: AgentTaskScheduleSupport::aggregate_status(&outcomes),
-                    totals: AgentTaskScheduleSupport::totals(total_tasks, &outcomes),
+                    totals: AgentTaskAggregateTotals::from_outcomes(total_tasks, &outcomes),
                     outcomes,
                     events: Vec::new(),
                     artifact_lineage: Vec::new(),
@@ -1760,8 +1759,7 @@ impl AgentTaskScheduler {
         AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id,
-            status: AgentTaskScheduleSupport::aggregate_status(&outcomes),
-            totals: AgentTaskScheduleSupport::totals(
+            totals: AgentTaskAggregateTotals::from_outcomes(
                 total_tasks + plan.postprocess_steps.len(),
                 &outcomes,
             ),

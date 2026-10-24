@@ -1480,7 +1480,6 @@ fn scoped_reconcile_repairs_authoritative_terminal_runner_projection_idempotentl
         .expect("daemon acceptance persists the runner identity before caller loss");
 
         let mut aggregate = succeeded_aggregate(&plan);
-        aggregate.status = AgentTaskAggregateStatus::PartialRecoverable;
         aggregate.totals.succeeded = 0;
         aggregate.totals.candidate_recoverable = 1;
         aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
@@ -2878,7 +2877,6 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
 
         let plan = test_plan();
         let mut aggregate = succeeded_aggregate(&plan);
-        aggregate.status = AgentTaskAggregateStatus::PartialRecoverable;
         aggregate.totals.succeeded = 0;
         aggregate.totals.candidate_recoverable = 1;
         aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
@@ -3413,7 +3411,6 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
         let aggregate = AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: "remote-plan".to_string(),
-            status: AgentTaskAggregateStatus::Failed,
             totals: AgentTaskAggregateTotals {
                 failed: 1,
                 ..AgentTaskAggregateTotals::default()
@@ -3704,7 +3701,6 @@ fn aggregate_source_loads_completed_run_without_path_spelunking() {
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
-        status: AgentTaskAggregateStatus::Succeeded,
         totals: AgentTaskAggregateTotals {
             queued: 1,
             succeeded: 1,
@@ -4722,7 +4718,7 @@ fn terminal_provider_cancellation_without_owner_converges_and_is_idempotent() {
         let aggregate = test_lifecycle_store()
             .read_aggregate("provider-cancelled-no-owner")
             .expect("interrupted-owner aggregate");
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Cancelled);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Cancelled);
     });
 }
 
@@ -5168,7 +5164,7 @@ fn dead_retry_launcher_persists_terminal_failure_under_strict_config_locking() {
             assert_eq!(failed.state(), AgentTaskRunState::Failed);
             assert_eq!(failed.metadata["pre_execution_failure"]["retryable"], true);
             assert_eq!(
-                store.read_aggregate(run_id).expect("aggregate").status,
+                store.read_aggregate(run_id).expect("aggregate").status(),
                 AgentTaskAggregateStatus::Failed
             );
             assert_eq!(

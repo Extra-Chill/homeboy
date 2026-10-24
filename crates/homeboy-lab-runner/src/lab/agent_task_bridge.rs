@@ -438,7 +438,7 @@ impl AgentTaskAggregateHandoffSummary {
     fn from_aggregate(aggregate: &AgentTaskAggregate) -> Self {
         Self {
             plan_id: aggregate.plan_id.clone(),
-            status: format!("{:?}", aggregate.status).to_lowercase(),
+            status: format!("{:?}", aggregate.status()).to_lowercase(),
             totals: aggregate.totals.clone(),
             outcome_count: aggregate.outcomes.len(),
         }
@@ -1427,7 +1427,6 @@ mod tests {
                         "aggregate": serde_json::to_value(AgentTaskAggregate {
                             schema: "homeboy/agent-task-aggregate/v1".to_string(),
                             plan_id: plan.plan_id.clone(),
-                            status: homeboy_agents::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
                             totals: AgentTaskAggregateTotals {
                                 succeeded: 1,
                                 ..Default::default()

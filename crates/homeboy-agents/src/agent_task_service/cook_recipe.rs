@@ -3844,8 +3844,7 @@ mod tests {
         AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
     };
     use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-        AgentTaskProgressEvent, AgentTaskState,
+        AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskProgressEvent, AgentTaskState,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4706,7 +4705,6 @@ mod tests {
         AgentTaskAggregate {
             schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
             totals: AgentTaskAggregateTotals {
                 queued: 1,
                 succeeded: 1,

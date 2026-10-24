@@ -884,7 +884,6 @@ fn status_returns_control_plane_run_for_a_cancelled_retry() {
         let aggregate = AgentTaskAggregate {
             schema: "homeboy/agent-task-aggregate/v1".to_string(),
             plan_id: plan.plan_id.clone(),
-            status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Succeeded,
             totals: Default::default(),
             outcomes: vec![AgentTaskOutcome {
                 task_id: task_id.clone(),
@@ -1021,34 +1020,33 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
         let plan = test_plan();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
         let aggregate = AgentTaskAggregate {
-                schema: "homeboy/agent-task-aggregate/v1".to_string(),
-                plan_id: plan.plan_id.clone(),
-                status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
-                totals: Default::default(),
-                outcomes: vec![AgentTaskOutcome {
-                    task_id: "candidate-task".to_string(),
-                    status: AgentTaskOutcomeStatus::CandidateRecoverable,
-                    artifacts: vec![AgentTaskArtifact {
-                        id: "patch".to_string(),
-                        kind: "patch".to_string(),
-                        path: Some("/durable/artifacts/patch.diff".to_string()),
-                        size_bytes: Some(17_000),
-                        sha256: Some("a".repeat(64)),
-                        url: Some(format!("homeboy://agent-task/run/{run_id}/artifacts#patch")),
-                        metadata: json!({
-                            "executor_artifact_finalized": true,
-                            "changed_files": ["src/lib.rs"],
-                        }),
-                        ..Default::default()
-                    }],
+            schema: "homeboy/agent-task-aggregate/v1".to_string(),
+            plan_id: plan.plan_id.clone(),
+            totals: Default::default(),
+            outcomes: vec![AgentTaskOutcome {
+                task_id: "candidate-task".to_string(),
+                status: AgentTaskOutcomeStatus::CandidateRecoverable,
+                artifacts: vec![AgentTaskArtifact {
+                    id: "patch".to_string(),
+                    kind: "patch".to_string(),
+                    path: Some("/durable/artifacts/patch.diff".to_string()),
+                    size_bytes: Some(17_000),
+                    sha256: Some("a".repeat(64)),
+                    url: Some(format!("homeboy://agent-task/run/{run_id}/artifacts#patch")),
+                    metadata: json!({
+                        "executor_artifact_finalized": true,
+                        "changed_files": ["src/lib.rs"],
+                    }),
                     ..Default::default()
                 }],
-                events: Vec::new(),
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            };
+                ..Default::default()
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        };
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
             .expect("persist recoverable aggregate");
 
@@ -1067,12 +1065,14 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
         )
         .expect("actual status payload renders");
 
+        // An aggregate whose outcomes are all recoverable candidates derives
+        // `partial_recoverable` (the scheduler rule, #15718).
         assert_eq!(exit_code, 0);
-        assert_eq!(value["state"], "candidate_recoverable");
+        assert_eq!(value["state"], "partial_recoverable");
         assert_eq!(value["candidate"]["state"], "patch_available");
         assert!(value.get("durable_candidate").is_none());
         assert!(
-            rendered.contains("Status: candidate_recoverable"),
+            rendered.contains("Status: partial_recoverable"),
             "{rendered}"
         );
         assert!(
@@ -2418,7 +2418,6 @@ fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
             &AgentTaskAggregate {
                 schema: "homeboy/agent-task-aggregate/v1".to_string(),
                 plan_id: plan.plan_id.clone(),
-                status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
                 totals: Default::default(),
                 outcomes: vec![AgentTaskOutcome {
                     task_id: "provider".to_string(),
@@ -4410,7 +4409,6 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
             &AgentTaskAggregate {
                 schema: "homeboy/agent-task-aggregate/v1".to_string(),
                 plan_id: observed_plan.plan_id.clone(),
-                status: homeboy::agents::agent_tasks::scheduler::AgentTaskAggregateStatus::Failed,
                 totals: Default::default(),
                 outcomes: vec![AgentTaskOutcome {
                     task_id: "task-a".to_string(),

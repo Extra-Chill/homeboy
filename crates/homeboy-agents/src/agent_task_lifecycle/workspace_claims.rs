@@ -1945,17 +1945,18 @@ mod tests {
 
     #[test]
     fn orphaned_run_is_terminal_only_by_its_aggregate_and_never_after_a_lab_handoff() {
-        use crate::agent_task_scheduler::{
-            AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-        };
+        use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+        use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
         with_isolated_home(|_| {
             let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
             let aggregate = |status| AgentTaskAggregate {
                 schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
                 plan_id: "plan".to_string(),
-                status,
                 totals: AgentTaskAggregateTotals::default(),
-                outcomes: Vec::new(),
+                outcomes: vec![AgentTaskOutcome {
+                    status,
+                    ..Default::default()
+                }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
                 child_runs: Vec::new(),
@@ -1964,12 +1965,12 @@ mod tests {
             };
             // Each run left an aggregate but has no lifecycle record.
             store
-                .write_aggregate("orphan-run", &aggregate(AgentTaskAggregateStatus::Failed))
+                .write_aggregate("orphan-run", &aggregate(AgentTaskOutcomeStatus::Failed))
                 .expect("orphan aggregate");
             store
                 .write_aggregate(
                     "handed-off-orphan",
-                    &aggregate(AgentTaskAggregateStatus::Succeeded),
+                    &aggregate(AgentTaskOutcomeStatus::Succeeded),
                 )
                 .expect("handed-off aggregate");
             fs::write(store.lab_handoff_lock_path("handed-off-orphan"), b"").expect("lock");

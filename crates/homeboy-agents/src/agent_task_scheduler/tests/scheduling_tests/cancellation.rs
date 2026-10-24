@@ -47,7 +47,7 @@ mod cancellation_tests {
         token.cancel();
         let aggregate = handle.join().expect("scheduler thread");
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Cancelled);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Cancelled);
         assert!(aggregate.totals.cancelled >= 2);
         assert!(cancel_calls
             .lock()

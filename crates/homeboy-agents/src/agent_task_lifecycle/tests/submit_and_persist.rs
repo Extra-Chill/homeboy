@@ -4453,7 +4453,6 @@ fn accepted_handoff_projects_a_remote_timeout_aggregate_even_when_daemon_transpo
     )
     .expect("accepted handoff");
     let mut aggregate = succeeded_aggregate(&test_plan());
-    aggregate.status = AgentTaskAggregateStatus::Failed;
     aggregate.totals = AgentTaskAggregateTotals {
         timed_out: 1,
         ..Default::default()
@@ -4497,10 +4496,10 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
         let patch = b"recoverable patch";
         let patch_sha256 = format!("{:x}", sha2::Sha256::digest(patch));
         let mut aggregate = succeeded_aggregate(&test_plan());
-        aggregate.status = AgentTaskAggregateStatus::CandidateRecoverable;
         aggregate.totals.succeeded = 0;
         aggregate.totals.candidate_recoverable = 1;
         aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        // One outcome, all recoverable candidates: the derived status is PartialRecoverable.
         aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
             schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
             id: "recoverable.patch".to_string(),
@@ -4526,7 +4525,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             store::read_record("agent-task-disconnected-child")
                 .expect("committed controller projection")
                 .state(),
-            AgentTaskRunState::CandidateRecoverable
+            AgentTaskRunState::PartialRecoverable
         );
         assert!(
             !store::aggregate_path(&record.run_id)
@@ -4537,8 +4536,8 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
         let durable = durable_local_read(&record.run_id).expect("committed durable pair");
         let durable_aggregate = durable.aggregate.expect("mirrored aggregate");
         assert_eq!(
-            durable_aggregate.status,
-            AgentTaskAggregateStatus::CandidateRecoverable
+            durable_aggregate.status(),
+            AgentTaskAggregateStatus::PartialRecoverable
         );
         let durable_patch = &durable_aggregate.outcomes[0].artifacts[0];
         assert_eq!(durable_patch.id, "recoverable.patch");
@@ -4564,10 +4563,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
                     .expect("committed artifacts"),
             )
         });
-        assert_eq!(
-            status_record.state(),
-            AgentTaskRunState::CandidateRecoverable
-        );
+        assert_eq!(status_record.state(), AgentTaskRunState::PartialRecoverable);
         assert!(
             log.events
                 .iter()
@@ -4577,7 +4573,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
         assert_eq!(artifacts.artifacts[0].id, "recoverable.patch");
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
-        assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(record.state(), AgentTaskRunState::PartialRecoverable);
         assert!(store::aggregate_path(&record.run_id)
             .expect("aggregate path")
             .exists());
@@ -4622,7 +4618,7 @@ fn terminal_projection_ignores_a_stale_aggregate_cache_after_commit() {
         let durable = durable_local_read(&record.run_id).expect("committed durable pair");
         assert_eq!(durable.record.state(), AgentTaskRunState::Succeeded);
         let aggregate = durable.aggregate.expect("mirrored aggregate");
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
         assert_eq!(aggregate.outcomes[0].summary.as_deref(), Some("ok"));
         assert_eq!(
             AgentTaskLifecycleStore::from_current_environment()
@@ -4649,16 +4645,14 @@ fn terminal_proxy_reconciliation_hydrates_persisted_dispatch_terminal_states() {
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-    for (run_id, aggregate_status, outcome_status, expected_state) in [
+    for (run_id, outcome_status, expected_state) in [
         (
             "agent-task-persisted-dispatch-failure",
-            AgentTaskAggregateStatus::Failed,
             AgentTaskOutcomeStatus::Failed,
             AgentTaskRunState::Failed,
         ),
         (
             "agent-task-persisted-dispatch-timeout",
-            AgentTaskAggregateStatus::Failed,
             AgentTaskOutcomeStatus::Timeout,
             AgentTaskRunState::Failed,
         ),
@@ -4676,7 +4670,6 @@ fn terminal_proxy_reconciliation_hydrates_persisted_dispatch_terminal_states() {
         )
         .expect("running proxy");
         let mut aggregate = succeeded_aggregate(&test_plan());
-        aggregate.status = aggregate_status;
         aggregate.outcomes[0].status = outcome_status;
         aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
             kind: "transcript".to_string(),
@@ -5034,37 +5027,43 @@ fn terminal_reconciliation_reuses_verified_directly_imported_artifact() {
 #[test]
 fn running_observation_projects_each_terminal_aggregate_state() {
     with_isolated_home(|_| {
+        // The aggregate status derives from the outcomes each case carries.
         let cases = [
             (
                 "terminal-success",
-                AgentTaskAggregateStatus::Succeeded,
-                AgentTaskOutcomeStatus::Succeeded,
+                vec![AgentTaskOutcomeStatus::Succeeded],
                 "succeeded",
             ),
             (
                 "terminal-failure",
-                AgentTaskAggregateStatus::Failed,
-                AgentTaskOutcomeStatus::Failed,
+                vec![AgentTaskOutcomeStatus::Failed],
                 "failed",
             ),
             (
                 "terminal-partial",
-                AgentTaskAggregateStatus::PartialFailure,
-                AgentTaskOutcomeStatus::Failed,
+                vec![
+                    AgentTaskOutcomeStatus::Succeeded,
+                    AgentTaskOutcomeStatus::Failed,
+                ],
                 "partial_failure",
             ),
             (
                 "terminal-cancelled",
-                AgentTaskAggregateStatus::Cancelled,
-                AgentTaskOutcomeStatus::Cancelled,
+                vec![AgentTaskOutcomeStatus::Cancelled],
                 "cancelled",
             ),
         ];
-        for (run_id, aggregate_status, outcome_status, terminal_state) in cases {
+        for (run_id, outcome_statuses, terminal_state) in cases {
             let plan = test_plan();
             let mut aggregate = succeeded_aggregate(&plan);
-            aggregate.status = aggregate_status;
-            aggregate.outcomes[0].status = outcome_status;
+            let template = aggregate.outcomes[0].clone();
+            aggregate.outcomes = outcome_statuses
+                .into_iter()
+                .map(|status| AgentTaskOutcome {
+                    status,
+                    ..template.clone()
+                })
+                .collect();
             submit_plan(&plan, Some(run_id)).expect("submit");
             mark_running(run_id).expect("running");
             record_run_aggregate(run_id, &plan, &aggregate).expect("terminal aggregate");
@@ -5190,7 +5189,6 @@ fn record_completed_run_exposes_logs_and_artifacts() {
         let aggregate = AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: plan.plan_id.clone(),
-            status: AgentTaskAggregateStatus::Succeeded,
             totals: AgentTaskAggregateTotals {
                 queued: 1,
                 succeeded: 1,

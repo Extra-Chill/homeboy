@@ -19,7 +19,7 @@ mod resource_budget_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
         );
         assert_eq!(aggregate.totals.succeeded, 4);
@@ -41,7 +41,7 @@ mod resource_budget_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed
         );
         assert_eq!(aggregate.totals.blocked, 1);
@@ -66,7 +66,7 @@ mod resource_budget_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
         assert_eq!(aggregate.totals.failed, 1);
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert_eq!(aggregate.queue.retry_budget_remaining, Some(0));

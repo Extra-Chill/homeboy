@@ -785,14 +785,14 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         let mut remediation_usage = Default::default();
         let aggregate = match lifecycle_store.read_aggregate(&record.run_id) {
             Ok(aggregate) => aggregate,
+            // No persisted aggregate means no outcomes, which derives `Failed`.
             Err(_) if recovery.is_some() => crate::agent_task_scheduler::AgentTaskAggregate {
                 schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
                 plan_id: plan.plan_id.clone(),
-                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
-                totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
-                    failed: 1,
-                    ..Default::default()
-                },
+                totals: crate::agent_task_scheduler::AgentTaskAggregateTotals::from_outcomes(
+                    plan.tasks.len(),
+                    &[],
+                ),
                 outcomes: Vec::new(),
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),

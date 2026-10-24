@@ -1494,7 +1494,7 @@ mod tests {
             assert_eq!(optional.status, AgentTaskOutcomeStatus::Succeeded);
             assert_eq!(optional.metadata["optional_failure"], true);
             assert_eq!(
-                AgentTaskScheduleSupport::aggregate_status(&outcomes),
+                AgentTaskAggregateStatus::from_outcomes(&outcomes),
                 AgentTaskAggregateStatus::Succeeded
             );
         });

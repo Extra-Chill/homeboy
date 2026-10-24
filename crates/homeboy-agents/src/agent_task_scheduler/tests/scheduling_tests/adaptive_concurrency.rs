@@ -68,10 +68,11 @@ mod adaptive_concurrency_tests {
         let adaptive = aggregate
             .queue
             .adaptive_concurrency
+            .clone()
             .expect("adaptive status");
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
         );
         assert_eq!(entered_before_release, 3);
@@ -102,10 +103,11 @@ mod adaptive_concurrency_tests {
         let adaptive = aggregate
             .queue
             .adaptive_concurrency
+            .clone()
             .expect("adaptive status");
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
         );
         assert!(max_seen.load(Ordering::SeqCst) <= 1);
@@ -139,10 +141,11 @@ mod adaptive_concurrency_tests {
         let adaptive = aggregate
             .queue
             .adaptive_concurrency
+            .clone()
             .expect("adaptive status");
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed
         );
         assert_eq!(aggregate.totals.blocked, 2);
@@ -173,10 +176,11 @@ mod adaptive_concurrency_tests {
         let adaptive = aggregate
             .queue
             .adaptive_concurrency
+            .clone()
             .expect("adaptive status");
 
         assert_eq!(
-            aggregate.status,
+            aggregate.status(),
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
         );
         assert_eq!(adaptive.effective_concurrency, 2);
