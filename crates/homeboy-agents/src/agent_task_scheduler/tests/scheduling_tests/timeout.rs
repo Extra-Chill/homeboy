@@ -443,30 +443,53 @@ mod timeout_tests {
         }));
     }
 
+    /// A provider that edits its attempt workspace and then outlives its
+    /// timeout leaves one immutable candidate commit, not a patch artifact:
+    /// the required runtime artifacts are reconciled and the harvested
+    /// candidate is bound to the task base.
     #[test]
-    fn timeout_after_writing_patch_reconciles_required_artifacts_and_authenticates_candidate() {
-        struct PatchThenTimeout;
+    fn timeout_after_editing_workspace_reconciles_required_artifacts_and_records_candidate_commit()
+    {
+        #[derive(Default)]
+        struct EditThenTimeout {
+            cancelled: std::sync::atomic::AtomicBool,
+        }
 
-        impl AgentTaskExecutorAdapter for PatchThenTimeout {
+        impl AgentTaskExecutorAdapter for EditThenTimeout {
+            fn cancel(&self, _task_id: &str) {
+                self.cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+
             fn execute(
                 &self,
                 request: AgentTaskRequest,
                 _context: AgentTaskExecutionContext,
             ) -> AgentTaskOutcome {
+                let root = request
+                    .workspace
+                    .root
+                    .as_deref()
+                    .expect("attempt workspace");
+                fs::write(std::path::Path::new(root).join("base.txt"), "new\n")
+                    .expect("edit workspace before timeout");
                 let artifact_root = request.metadata["artifact_root"]
                     .as_str()
                     .expect("artifact root");
                 fs::write(
-                    std::path::Path::new(artifact_root).join("fix.patch"),
-                    "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
-                )
-                .expect("write patch before timeout");
-                fs::write(
                     std::path::Path::new(artifact_root).join("transcript.log"),
-                    "patch written before provider timeout",
+                    "workspace edited before provider timeout",
                 )
                 .expect("write transcript before timeout");
-                thread::sleep(Duration::from_millis(25));
+                // Outlive the deadline, but return once cancellation is
+                // requested so the bounded grace (not deferred cleanup)
+                // harvests the workspace on a loaded machine too.
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while !self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                    && std::time::Instant::now() < deadline
+                {
+                    thread::sleep(Duration::from_millis(1));
+                }
                 AgentTaskOutcome {
                     task_id: request.task_id,
                     status: AgentTaskOutcomeStatus::Succeeded,
@@ -478,24 +501,29 @@ mod timeout_tests {
 
         homeboy_core::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
+            let workspace = temp.path().join("workspace");
+            init_git_workspace(&workspace);
+            let base_sha = git_stdout(&workspace, &["rev-parse", "HEAD"]);
             let artifact_root = temp.path().join("task-1-artifacts");
             fs::create_dir_all(&artifact_root).expect("artifact root");
-            let mut plan = plan_with_required_artifacts(&["patch", "agent_result", "transcript"]);
+            let mut plan = plan_with_required_artifacts(&["agent_result", "transcript"]);
+            plan.tasks[0].workspace.root = Some(workspace.display().to_string());
             plan.tasks[0].limits.timeout_ms = Some(1);
             plan.tasks[0].metadata = json!({ "artifact_root": artifact_root });
-            crate::agent_task_lifecycle::submit_plan(&plan, Some("timeout-patch-run"))
+            crate::agent_task_lifecycle::submit_plan(&plan, Some("timeout-candidate-run"))
                 .expect("submit run");
             crate::agent_task_service::run_submitted(
-                "timeout-patch-run".to_string(),
-                Arc::new(PatchThenTimeout),
+                "timeout-candidate-run".to_string(),
+                Arc::new(EditThenTimeout::default()),
             )
             .expect("run timed-out provider");
-            let aggregate = crate::agent_task_lifecycle::read_aggregate("timeout-patch-run")
+            let aggregate = crate::agent_task_lifecycle::read_aggregate("timeout-candidate-run")
                 .expect("persisted aggregate");
 
             assert_eq!(
                 aggregate.status,
-                crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable
+                crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
+                "{aggregate:#?}"
             );
             let outcome = &aggregate.outcomes[0];
             assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
@@ -505,22 +533,45 @@ mod timeout_tests {
                 .map(|artifact| artifact.name.as_str())
                 .collect::<Vec<_>>();
             typed.sort_unstable();
-            assert_eq!(typed, vec!["agent_result", "patch", "transcript"]);
-            let patch = outcome
+            assert_eq!(typed, vec!["agent_result", "transcript"]);
+            let candidate = outcome.candidate.as_ref().expect("candidate commit");
+            assert_eq!(candidate.base_sha, base_sha);
+            assert_ne!(candidate.candidate_sha, base_sha);
+            assert_eq!(
+                git_stdout(
+                    &workspace,
+                    &["show", &format!("{}:base.txt", candidate.candidate_sha)]
+                ),
+                "new"
+            );
+            assert_eq!(
+                git_stdout(
+                    &workspace,
+                    &[
+                        "rev-parse",
+                        &format!("{}^{{tree}}", candidate.candidate_sha)
+                    ]
+                ),
+                candidate.tree_sha
+            );
+            assert!(!outcome
                 .artifacts
                 .iter()
-                .find(|artifact| artifact.kind == "patch")
-                .expect("captured patch");
-            assert!(patch
-                .sha256
-                .as_deref()
-                .is_some_and(|sha256| !sha256.is_empty()));
-            assert_eq!(patch.metadata["task_id"], "task-1");
-            assert_eq!(patch.metadata["run_id"], "timeout-patch-run");
+                .any(|artifact| artifact.kind == "patch"));
             assert!(!outcome.diagnostics.iter().any(|diagnostic| {
                 diagnostic.class == "agent_task.required_typed_artifacts_missing"
             }));
         });
+    }
+
+    fn git_stdout(root: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     #[test]

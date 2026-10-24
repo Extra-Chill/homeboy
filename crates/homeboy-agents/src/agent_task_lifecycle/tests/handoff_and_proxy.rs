@@ -923,21 +923,19 @@ fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
         ]);
         let head = git(&["rev-parse", "HEAD"]);
         std::fs::write(repo.join("candidate.txt"), "candidate\n").expect("write candidate");
-        let patch = format!("{}\n", git(&["diff", "--binary"]));
-        let patch_path = temp.path().join("candidate.patch");
-        std::fs::write(&patch_path, &patch).expect("write patch artifact");
         let source_run = "cook-follow-up-source";
+        // One snapshot only: the durable promotion and the retry lineage must
+        // name the same immutable candidate commit.
         let candidate = crate::agent_task_promotion::tests::candidate_snapshot::snapshot(
             &repo, &head, source_run,
         );
-        let patch_sha = candidate.candidate_sha;
         let mut plan = test_plan();
         plan.tasks[0].inputs = json!({
             "cook_loop": {
                 "artifact_provenance": {
                     "source_run_id": source_run,
                     "source_task_id": "task-a",
-                    "source_patch_artifact_sha256": patch_sha,
+                    "source_patch_artifact_sha256": candidate.tree_sha,
                 }
             }
         });
@@ -952,15 +950,14 @@ fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
                 "to_worktree": "homeboy@test",
                 "target": {"worktree": "homeboy@test", "path": repo, "head": head},
                 "patch_artifact": {
-                    "id": "patch",
-                    "kind": "patch",
-                    "path": patch_path,
-                    "sha256": patch_sha,
+                    "id": candidate.candidate_sha,
+                    "kind": "candidate_commit",
+                    "path": "",
+                    "sha256": candidate.tree_sha,
                 },
                 "provenance": {
                     "worktree_path": repo,
-                    "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(&repo, &head, source_run),
-                    "gate_feedback_baseline": {"current_diff": patch},
+                    "candidate_commit": candidate,
                 },
                 "operator_notification": {"status": "completed", "message": "complete"},
             }),
@@ -986,8 +983,12 @@ fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
             source_run
         );
         assert_eq!(
-            restored_task.metadata["verified_cook_baseline"]["promoted_patch_artifact_sha256"],
-            patch_sha
+            restored_task.metadata["verified_cook_baseline"]["baseline_commit"],
+            candidate.candidate_sha
+        );
+        assert_eq!(
+            restored_task.metadata["verified_cook_baseline"]["baseline_tree"],
+            candidate.tree_sha
         );
 
         git(&["worktree", "remove", "--force", restored_root]);
@@ -3130,6 +3131,12 @@ fn status_marks_running_run_without_owner_as_stale() {
     // controller-runtime queue; `reconcile_status_in_store` reads its admission from this
     // store's own controller-runtime root, so the staleness classification and
     // the record it is persisted onto are projections of the same home.
+    // Submission reads the supervising Cook's own job id from the process; a
+    // gate that runs this suite under a local Cook inherits one, so pin it absent.
+    let _env = homeboy_core::test_support::env_lock();
+    let _supervisor = homeboy_core::test_support::EnvVarGuard::unset(
+        homeboy_core::daemon::step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV,
+    );
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());

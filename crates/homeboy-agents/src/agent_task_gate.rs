@@ -39,6 +39,17 @@ const PLAYWRIGHT_CACHE_SUBPATH: &str = if cfg!(target_os = "macos") {
     ".cache/ms-playwright"
 };
 
+/// Identity a Cook supervisor process holds for itself. A process it spawns --
+/// a step job or a deterministic gate -- is an ordinary invocation, so none of
+/// these may reach it: a gate running Homeboy (or Homeboy's own tests) would
+/// otherwise stamp its submissions with the supervisor's job.
+pub(crate) const COOK_SUPERVISOR_PRIVATE_ENV_VARS: &[&str] = &[
+    homeboy_core::daemon::step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV,
+    "HOMEBOY_COOK_STARTUP_LAUNCHER_ID",
+    "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME",
+    "HOMEBOY_AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON",
+];
+
 /// Temp-dir variables pinned to the invocation temp dir so every gate process
 /// — preflight probes included — shares one temporary root.
 const TMPDIR_ENV_VARS: &[&str] = &["TMPDIR", "TEMP", "TMP"];
@@ -2869,6 +2880,12 @@ impl SelectedGateEnvironment {
                 .sanitized
                 .iter()
                 .map(|variable| variable.name.clone())
+                .chain(
+                    COOK_SUPERVISOR_PRIVATE_ENV_VARS
+                        .iter()
+                        .filter(|name| !self.values.contains_key(**name))
+                        .map(|name| name.to_string()),
+                )
                 .collect(),
             set: self.values.clone(),
         }
@@ -10241,6 +10258,11 @@ exit 2
             ("HOMEBOY_CONFIG_ROOT", operator_root("config")),
             ("HOMEBOY_DATA_DIR", operator_root("data")),
             ("HOMEBOY_ARTIFACT_ROOT", operator_root("artifacts")),
+            // The supervising Cook's own identity (set by a bound step child).
+            (
+                homeboy_core::daemon::step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV,
+                "supervisor-job".to_string(),
+            ),
         ]
         .into_iter()
         .map(|(name, value)| (name.to_string(), value))
@@ -10289,6 +10311,12 @@ exit 2
                     gate_home.display()
                 );
             }
+            for name in COOK_SUPERVISOR_PRIVATE_ENV_VARS {
+                assert!(
+                    !effective.contains_key(*name),
+                    "{name} is the supervisor's own identity and must not reach a {mode:?} gate"
+                );
+            }
             for (name, value) in &effective {
                 if name.starts_with("HOMEBOY_") {
                     assert!(
@@ -10329,6 +10357,11 @@ exit 2
                 .sanitized
                 .iter()
                 .map(|variable| variable.name.clone())
+                .chain(
+                    COOK_SUPERVISOR_PRIVATE_ENV_VARS
+                        .iter()
+                        .map(|name| name.to_string()),
+                )
                 .collect();
             assert_eq!(setup.remove, sanitized);
         }

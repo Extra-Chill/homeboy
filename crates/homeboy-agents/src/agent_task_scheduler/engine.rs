@@ -1426,6 +1426,7 @@ impl AgentTaskScheduler {
                             running_task.source_workspace_root,
                             running_task.candidate_artifacts,
                             &outcome,
+                            true,
                         );
                         request.parent_plan_id = Some(plan.plan_id.clone());
                         let next_attempt = result.attempt + 1;
@@ -1534,6 +1535,7 @@ impl AgentTaskScheduler {
                                     running_task.source_workspace_root,
                                     running_task.candidate_artifacts,
                                     &outcome,
+                                    false,
                                 );
                                 if request.metadata["model_selection"]["requested"].is_null() {
                                     if !request.metadata.is_object() {
@@ -1786,6 +1788,7 @@ impl AgentTaskScheduler {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn persist_resolved_provider_model(
     outcome: &mut AgentTaskOutcome,
     request: &AgentTaskRequest,
@@ -2539,6 +2542,7 @@ fn reset_attempt_request(
     source_workspace_root: Option<String>,
     mut candidate_artifacts: Vec<AgentTaskArtifact>,
     outcome: &AgentTaskOutcome,
+    carry_candidate: bool,
 ) -> (AgentTaskRequest, Vec<AgentTaskArtifact>) {
     if let (Some(attempt_root), Some(source_root)) = (
         request.workspace.root.clone(),
@@ -2551,7 +2555,17 @@ fn reset_attempt_request(
         );
     }
     request.workspace.root = source_workspace_root;
-    if let (Some(attempt), Some(candidate)) = (
+    // A same-provider retry resumes from the previous attempt's candidate
+    // commit. A provider rotation never inherits implicitly: it starts from
+    // the base candidate tree unless its rotation entry opted into adoption,
+    // which the scheduler applies through the explicit adoption path.
+    if !carry_candidate {
+        if let Some(attempt) = request.workspace.attempt.as_mut() {
+            attempt.adoption = None;
+        }
+    }
+    if let (true, Some(attempt), Some(candidate)) = (
+        carry_candidate,
         request.workspace.attempt.as_mut(),
         outcome.candidate.as_ref(),
     ) {

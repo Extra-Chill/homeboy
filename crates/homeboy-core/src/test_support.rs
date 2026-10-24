@@ -1799,6 +1799,9 @@ fn with_isolated_home_guard<R>(home: HomeGuard, body: impl FnOnce(&TempDir) -> R
     let _runner_context = EnvVarGuard::unset(
         crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV,
     );
+    // Nor do they belong to the local Cook supervisor whose gate runs them.
+    let _cook_supervisor =
+        EnvVarGuard::unset(crate::daemon::step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV);
     body(&home.context.root)
 }
 

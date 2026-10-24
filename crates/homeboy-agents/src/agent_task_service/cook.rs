@@ -3728,9 +3728,9 @@ fn dispatch_bound_cook_follow_up(
             source_run_id,
             &follow_up_plan.tasks[0].task_id,
         )?;
+        // The bound plan already carries the promotion-derived lineage in
+        // `cook_loop.artifact_provenance`; the baseline only moves the root.
         follow_up_plan.tasks[0].workspace.root = Some(baseline.path.display().to_string());
-        follow_up_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] =
-            baseline.artifact_provenance();
         // Follow-up retries intentionally move into an authenticated baseline.
         // Refresh the durable execution attestation before this plan can be
         // persisted or handed to a local or detached provider.

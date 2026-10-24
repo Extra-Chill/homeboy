@@ -43,13 +43,17 @@ fn fixture_success_outcome(request: &AgentTaskRequest, artifact_root: &Path) -> 
         .get("changed_file")
         .and_then(Value::as_str)
         .unwrap_or("docs/agent-task-smoke.md");
-    let patch_path = artifact_root.join("changes.patch");
     let transcript_path = artifact_root.join("transcript.log");
     let result_path = artifact_root.join("agent-result.json");
-    let patch = format!(
-        "diff --git a/{changed_file} b/{changed_file}\n--- a/{changed_file}\n+++ b/{changed_file}\n@@ -1 +1 @@\n-before\n+after\n"
-    );
-    let _ = std::fs::write(&patch_path, patch);
+    // Like a real provider, edit the attempt workspace; Homeboy's harvest
+    // turns the edited tree into the candidate commit (#16303).
+    if let Some(root) = request.workspace.root.as_deref() {
+        let path = Path::new(root).join(changed_file);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, "after\n");
+    }
     let _ = std::fs::write(
         &transcript_path,
         "fixture provider completed successfully\n",
@@ -65,15 +69,12 @@ fn fixture_success_outcome(request: &AgentTaskRequest, artifact_root: &Path) -> 
         task_id: request.task_id.clone(),
         status: AgentTaskOutcomeStatus::Succeeded,
         summary: Some("fixture provider wrote deterministic smoke artifacts".to_string()),
-        artifacts: vec![
-            fixture_artifact("patch", "patch", &patch_path, Some("text/x-patch")),
-            fixture_artifact(
-                "agent-result",
-                "agent_result",
-                &result_path,
-                Some("application/json"),
-            ),
-        ],
+        artifacts: vec![fixture_artifact(
+            "agent-result",
+            "agent_result",
+            &result_path,
+            Some("application/json"),
+        )],
         evidence_refs: vec![AgentTaskEvidenceRef {
             kind: "transcript".to_string(),
             uri: transcript_path.display().to_string(),
@@ -81,8 +82,9 @@ fn fixture_success_outcome(request: &AgentTaskRequest, artifact_root: &Path) -> 
         }],
         diagnostics: vec![AgentTaskDiagnostic {
             class: "agent_task.fixture_success".to_string(),
-            message: "fixture provider generated patch, transcript, and result artifacts"
-                .to_string(),
+            message:
+                "fixture provider edited the workspace and wrote transcript and result artifacts"
+                    .to_string(),
             data: json!({ "artifact_root": artifact_root.display().to_string() }),
         }],
         metadata,
@@ -92,7 +94,7 @@ fn fixture_success_outcome(request: &AgentTaskRequest, artifact_root: &Path) -> 
         &result_path,
         serde_json::to_string_pretty(&outcome).unwrap_or_else(|_| "{}".to_string()),
     );
-    outcome.artifacts[1] = fixture_artifact(
+    outcome.artifacts[0] = fixture_artifact(
         "agent-result",
         "agent_result",
         &result_path,

@@ -33,11 +33,23 @@ fn harvest_candidate_commit_with_bundle(
     let Some(base) = running.task_base_sha.as_deref() else {
         return Ok(());
     };
-    let Some(root) = running.request.workspace.root.as_deref().map(Path::new) else {
+    let Some(attempt_root) = running.request.workspace.root.as_deref().map(Path::new) else {
         return Ok(());
     };
     let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
-    outcome.candidate = candidate_from_workspace(root, base, run_id)?;
+    let mut harvested_from_source = false;
+    let root = if git_is_repository(attempt_root)? {
+        outcome.candidate = candidate_from_workspace(attempt_root, base, run_id)?;
+        attempt_root
+    } else if let Some(source_root) = reaped_attempt_source_root(running, attempt_root)? {
+        // The attempt checkout was reaped (#15980). Its committed change set
+        // survives in the durable source workspace, so harvest it from there.
+        outcome.candidate = candidate_from_committed_head(source_root, base, run_id)?;
+        harvested_from_source = outcome.candidate.is_some();
+        source_root
+    } else {
+        return Ok(());
+    };
     let Some(candidate) = outcome.candidate.as_ref() else {
         if outcome.status == AgentTaskOutcomeStatus::Succeeded {
             crate::agent_task_provider::record_verified_unchanged_empty_attempt(outcome);
@@ -49,6 +61,14 @@ fn harvest_candidate_commit_with_bundle(
         outcome.metadata = serde_json::json!({});
     }
     outcome.metadata["source_provenance"] = serde_json::json!(running.source_provenance);
+    if harvested_from_source {
+        outcome.metadata["candidate_harvest_root"] = serde_json::json!({
+            "kind": "source_workspace",
+            "reason": "attempt_workspace_unavailable",
+            "attempt_root": attempt_root.display().to_string(),
+            "source_root": root.display().to_string(),
+        });
+    }
     let candidate_ref = format!(
         "{CANDIDATE_REF_PREFIX}{}",
         homeboy_core::paths::sanitize_path_segment(run_id)
@@ -82,15 +102,77 @@ fn harvest_candidate_commit_with_bundle(
     Ok(())
 }
 
+/// The durable source workspace that stands in for a reaped attempt
+/// checkout: only when it is a different path and still a Git repository.
+fn reaped_attempt_source_root<'a>(
+    running: &'a RunningTask,
+    attempt_root: &Path,
+) -> Result<Option<&'a Path>, HarvestError> {
+    let Some(source_root) = running
+        .source_workspace_root
+        .as_deref()
+        .map(Path::new)
+        .filter(|source_root| *source_root != attempt_root)
+    else {
+        return Ok(None);
+    };
+    Ok(git_is_repository(source_root)?.then_some(source_root))
+}
+
+/// Refuse a HEAD that no longer descends from the task base: its tree is not
+/// a change set against the base, and treating it as "no changes" would hide
+/// the rewrite.
+fn ensure_head_descends_from_base(root: &Path, base: &str) -> Result<String, HarvestError> {
+    let head = git_output(root, &["rev-parse", "HEAD^{commit}"])?;
+    if !git_is_ancestor(root, base, &head)? {
+        return Err(HarvestError::UnrelatedHead {
+            base: base.to_string(),
+            head,
+        });
+    }
+    Ok(head)
+}
+
+fn pin_candidate_ref(root: &Path, run_id: &str, candidate_sha: &str) -> Result<(), HarvestError> {
+    let candidate_ref = format!(
+        "{CANDIDATE_REF_PREFIX}{}",
+        homeboy_core::paths::sanitize_path_segment(run_id)
+    );
+    git_output(root, &["update-ref", &candidate_ref, candidate_sha])?;
+    Ok(())
+}
+
+/// Harvest only the committed change set of a workspace whose uncommitted
+/// state Homeboy does not own (the source workspace standing in for a reaped
+/// attempt checkout). The candidate is the HEAD commit itself.
+fn candidate_from_committed_head(
+    root: &Path,
+    base: &str,
+    run_id: &str,
+) -> Result<Option<crate::agent_task::AgentTaskCandidate>, HarvestError> {
+    let head = ensure_head_descends_from_base(root, base)?;
+    let tree = git_output(root, &["rev-parse", &format!("{head}^{{tree}}")])?;
+    if tree == git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])? {
+        return Ok(None);
+    }
+    pin_candidate_ref(root, run_id, &head)?;
+    Ok(Some(crate::agent_task::AgentTaskCandidate {
+        base_sha: base.to_string(),
+        candidate_sha: head,
+        tree_sha: tree,
+    }))
+}
+
 /// Capture one owned worktree without touching its live index.
 pub(crate) fn candidate_from_workspace(
     root: &Path,
     base: &str,
     run_id: &str,
 ) -> Result<Option<crate::agent_task::AgentTaskCandidate>, HarvestError> {
-    if !git_is_repository(root)? || !git_is_ancestor(root, base, "HEAD")? {
+    if !git_is_repository(root)? {
         return Ok(None);
     }
+    let head = ensure_head_descends_from_base(root, base)?;
     let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
         command: "create candidate harvest Git index".to_string(),
         cwd: root.to_path_buf(),
@@ -104,7 +186,6 @@ pub(crate) fn candidate_from_workspace(
     if tree == git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])? {
         return Ok(None);
     }
-    let head = git_output(root, &["rev-parse", "HEAD^{commit}"])?;
     let date = format!(
         "@{} +0000",
         git_output(root, &["log", "-1", "--format=%ct", &head])?
@@ -128,11 +209,7 @@ pub(crate) fn candidate_from_workspace(
         "homeboy: cook candidate",
     ];
     let candidate_sha = git_output_with_env(root, &commit_args, identity_env)?;
-    let candidate_ref = format!(
-        "{CANDIDATE_REF_PREFIX}{}",
-        homeboy_core::paths::sanitize_path_segment(run_id)
-    );
-    git_output(root, &["update-ref", &candidate_ref, &candidate_sha])?;
+    pin_candidate_ref(root, run_id, &candidate_sha)?;
     Ok(Some(crate::agent_task::AgentTaskCandidate {
         base_sha: base.to_string(),
         candidate_sha: candidate_sha.clone(),
@@ -352,7 +429,7 @@ pub(super) fn committed_harvest_failure(
     // must not replace the provider's actionable failure reason. Workspace
     // cleanliness and candidate-baseline violations remain fail-closed below.
     let preserve_execution_failure = outcome.status != AgentTaskOutcomeStatus::Succeeded
-        && !outcome.artifacts.iter().any(is_actionable_patch_artifact)
+        && outcome.candidate.is_none()
         && matches!(error, HarvestError::Git { .. });
     let (class, message, data) = match error {
         HarvestError::DirtyWorkspace { status } => (
@@ -1336,5 +1413,73 @@ mod committed_harvest_tests {
 
         assert_eq!(outcome.candidate, None);
         assert!(git(&workspace, &["for-each-ref", "refs/homeboy/candidates"]).is_empty());
+    }
+
+    #[test]
+    fn committed_harvest_falls_back_to_source_when_attempt_scratch_is_reaped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source, base) = candidate_attempt_repo(temp.path());
+        std::fs::write(source.join("file.txt"), "agent change\n").expect("agent edit");
+        git(&source, &["commit", "--quiet", "-am", "agent change"]);
+        let source_head = git(&source, &["rev-parse", "HEAD"]);
+        // Uncommitted source state is the operator's, never the candidate's.
+        std::fs::write(source.join("operator.txt"), "operator\n").expect("operator dirt");
+        let reaped_scratch = temp.path().join("reaped-attempt-workspace");
+        assert!(!reaped_scratch.exists());
+        let running = committed_harvest_running_task(
+            temp.path(),
+            &reaped_scratch,
+            Some(&source),
+            base.clone(),
+        );
+
+        let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        harvest_candidate_commit(&mut outcome, &running).expect("harvest falls back to source");
+
+        let candidate = outcome
+            .candidate
+            .clone()
+            .expect("source commit is the candidate");
+        assert_eq!(candidate.base_sha, base);
+        assert_eq!(candidate.candidate_sha, source_head);
+        assert_eq!(
+            candidate.tree_sha,
+            git(&source, &["rev-parse", &format!("{source_head}^{{tree}}")])
+        );
+        assert_eq!(
+            git(
+                &source,
+                &["rev-parse", "refs/homeboy/candidates/reaped-harvest-test"]
+            ),
+            source_head
+        );
+        assert!(git(
+            &source,
+            &["ls-tree", "--name-only", &candidate.candidate_sha]
+        )
+        .lines()
+        .all(|name| name != "operator.txt"));
+        assert_eq!(
+            outcome.metadata["candidate_harvest_root"]["kind"],
+            "source_workspace"
+        );
+        assert!(outcome.artifacts.is_empty(), "no patch artifact");
+    }
+
+    #[test]
+    fn reaped_attempt_with_no_source_commits_has_no_candidate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source, base) = candidate_attempt_repo(temp.path());
+        let not_a_repo = temp.path().join("plain-dir");
+        std::fs::create_dir(&not_a_repo).expect("plain dir");
+        let running = committed_harvest_running_task(temp.path(), &not_a_repo, Some(&source), base);
+
+        let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        harvest_candidate_commit(&mut outcome, &running).expect("harvest");
+
+        assert_eq!(outcome.candidate, None);
+        assert!(git(&source, &["for-each-ref", "refs/homeboy/candidates"]).is_empty());
     }
 }

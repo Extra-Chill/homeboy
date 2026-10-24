@@ -694,6 +694,7 @@ pub(super) mod concurrency_tests {
             .expect("controller scratch root")
             .join("resources.json");
         assert!(scratch_active_while_running.load(Ordering::SeqCst));
+        let recovered_candidate_sha;
         let cleanup_action = aggregate
             .outcomes
             .iter()
@@ -716,9 +717,12 @@ pub(super) mod concurrency_tests {
             )
             .expect("deferred cleanup JSON");
             if action["status"] == "candidate_recovered" {
-                assert!(action["candidate"]["candidate_sha"]
+                let sha = action["candidate"]["candidate_sha"]
                     .as_str()
-                    .is_some_and(|sha| sha.len() == 40));
+                    .expect("recovered candidate commit")
+                    .to_string();
+                assert_eq!(sha.len(), 40);
+                recovered_candidate_sha = Some(sha);
                 break;
             }
             assert!(
@@ -749,9 +753,15 @@ pub(super) mod concurrency_tests {
             std::thread::sleep(Duration::from_millis(2));
         };
         assert_eq!(scratch["terminal_reason"], "scheduler_timeout_completion");
-        assert!(scratch["terminal_evidence"]["outcome"]["artifacts"]
+        // Terminal evidence binds the recovered candidate commit, never a
+        // patch artifact.
+        assert_eq!(
+            scratch["terminal_evidence"]["outcome"]["candidate"]["candidate_sha"].as_str(),
+            recovered_candidate_sha.as_deref()
+        );
+        assert!(!scratch["terminal_evidence"]["outcome"]["artifacts"]
             .as_array()
-            .is_some_and(|artifacts| !artifacts.is_empty()));
+            .is_some_and(|artifacts| artifacts.iter().any(|artifact| artifact["kind"] == "patch")));
         assert!(
             !crate::agent_task_lifecycle::has_active_provider_execution_in_store(
                 &lifecycle_store,

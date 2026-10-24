@@ -1,6 +1,5 @@
 use super::store::read_plan_path;
 use super::*;
-use crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA;
 use homeboy_engine_primitives::content_hash;
 use sha2::Digest;
 use std::path::{Path, PathBuf};
@@ -8,7 +7,6 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 const HARVEST_GIT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_PATCH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_GIT_METADATA_BYTES: usize = 64 * 1024;
 
 const LAB_PRE_EXECUTION_CIRCUIT_SCHEMA: &str = "homeboy/lab-pre-execution-circuit/v1";
@@ -179,7 +177,6 @@ fn record_interrupted_local_owner_locked(
                 consumed,
                 in_flight,
                 &stop_reason,
-                &lifecycle_store.artifact_root(),
             )
         })
         .collect::<Vec<_>>();
@@ -336,7 +333,6 @@ fn build_interrupted_owner_outcome(
     consumed: usize,
     in_flight: bool,
     stop_reason: &str,
-    artifact_root: &Path,
 ) -> AgentTaskOutcome {
     let mut outcome = AgentTaskOutcome {
         schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
@@ -386,14 +382,13 @@ fn build_interrupted_owner_outcome(
         }),
         ..Default::default()
     };
-    harvest_interrupted_owner_candidate(run_id, task, artifact_root, &mut outcome);
+    harvest_interrupted_owner_candidate(run_id, task, &mut outcome);
     outcome
 }
 
 fn harvest_interrupted_owner_candidate(
     run_id: &str,
     task: &AgentTaskRequest,
-    artifact_root: &Path,
     outcome: &mut AgentTaskOutcome,
 ) {
     let discovery = crate::agent_task_evidence_discovery::TimeoutArtifactDiscovery::discover(task);
@@ -417,7 +412,7 @@ fn harvest_interrupted_owner_candidate(
         );
         outcome.diagnostics.extend(discovered.diagnostics);
     }
-    harvest_git_workspace_candidate(run_id, task, artifact_root, outcome);
+    harvest_git_workspace_candidate(run_id, task, outcome);
     let harvested = outcome.candidate.is_some();
     if harvested {
         outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
@@ -453,7 +448,6 @@ fn harvest_interrupted_owner_candidate(
 fn harvest_git_workspace_candidate(
     run_id: &str,
     task: &AgentTaskRequest,
-    artifact_root: &Path,
     outcome: &mut AgentTaskOutcome,
 ) {
     let Some(root) = task.workspace.root.as_deref().map(Path::new) else {
@@ -3077,42 +3071,6 @@ mod tests {
         assert_eq!(output.stdout, b"12345678");
     }
 
-    #[test]
-    fn interrupted_owner_never_publishes_oversized_patch_tail() {
-        let workspace = tempfile::tempdir().unwrap();
-        homeboy_core::test_support::run_git_fixture_command(workspace.path(), &["init", "-q"]);
-        homeboy_core::test_support::run_git_fixture_command(
-            workspace.path(),
-            &["config", "user.name", "Test"],
-        );
-        homeboy_core::test_support::run_git_fixture_command(
-            workspace.path(),
-            &["config", "user.email", "test@example.com"],
-        );
-        std::fs::write(workspace.path().join("tracked.txt"), "before\n").unwrap();
-        homeboy_core::test_support::run_git_fixture_command(workspace.path(), &["add", "."]);
-        homeboy_core::test_support::run_git_fixture_command(
-            workspace.path(),
-            &["commit", "-qm", "base"],
-        );
-        std::fs::write(
-            workspace.path().join("tracked.txt"),
-            vec![b'x'; MAX_PATCH_BYTES + 1],
-        )
-        .unwrap();
-        let artifacts = tempfile::tempdir().unwrap();
-        let mut outcome = AgentTaskOutcome::default();
-        harvest_git_workspace_candidate(
-            "oversized",
-            &interrupted_workspace_request(workspace.path()),
-            artifacts.path(),
-            &mut outcome,
-        );
-        assert!(outcome.artifacts.is_empty());
-        assert!(outcome.evidence_refs.is_empty());
-        assert_eq!(std::fs::read_dir(artifacts.path()).unwrap().count(), 0);
-    }
-
     fn interrupted_workspace_request(root: &Path) -> AgentTaskRequest {
         AgentTaskRequest {
             schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -3166,13 +3124,11 @@ mod tests {
         );
         std::fs::write(workspace.path().join("tracked.txt"), "after\n").expect("candidate edit");
         let before = std::fs::read(workspace.path().join("tracked.txt")).expect("read candidate");
-        let artifact_root = tempfile::tempdir().expect("artifact root");
         let mut outcome = AgentTaskOutcome::default();
 
         harvest_git_workspace_candidate(
             "run-1",
             &interrupted_workspace_request(workspace.path()),
-            artifact_root.path(),
             &mut outcome,
         );
 
@@ -3196,7 +3152,6 @@ mod tests {
     fn interrupted_owner_without_workspace_diff_stays_unavailable() {
         let workspace = tempfile::tempdir().expect("workspace");
         homeboy_core::test_support::run_git_fixture_command(workspace.path(), &["init", "-q"]);
-        let artifact_root = tempfile::tempdir().expect("artifact root");
         let mut outcome = AgentTaskOutcome {
             status: AgentTaskOutcomeStatus::Succeeded,
             ..Default::default()
@@ -3205,7 +3160,6 @@ mod tests {
         harvest_interrupted_owner_candidate(
             "run-2",
             &interrupted_workspace_request(workspace.path()),
-            artifact_root.path(),
             &mut outcome,
         );
 

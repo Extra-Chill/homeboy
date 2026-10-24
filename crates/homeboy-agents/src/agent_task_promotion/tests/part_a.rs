@@ -426,7 +426,7 @@ fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
 }
 
 #[test]
-fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
+fn post_apply_checkpoint_resume_refuses_candidate_tree_mismatch_without_gating() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let worktree_path = temp.path().join("managed-target");
@@ -459,6 +459,15 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
     );
     git(&worktree_path, &["push", "-u", "origin", "main"]);
     let (source_path, source) = write_patch_source(&temp);
+    // Every locally executed gate appends one byte, so the ledger proves
+    // whether a resume reached deterministic verification.
+    let gate_ledger = temp.path().join("gate-runs.log");
+    let gate = format!("printf x >> '{}'", gate_ledger.display());
+    let gate_runs = || {
+        std::fs::read(&gate_ledger)
+            .map(|runs| runs.len())
+            .unwrap_or(0)
+    };
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(worktree_path.clone()),
         verify_transport_error: true,
@@ -480,7 +489,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions {
-                verify: vec!["true".to_string()],
+                verify: vec![gate.clone()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
@@ -541,7 +550,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         artifact_id: None,
         dry_run: false,
         gates: VerifyGateOptions {
-            verify: vec!["true".to_string()],
+            verify: vec![gate.clone()],
             private_verify: Vec::new(),
             private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
             ..Default::default()
@@ -569,15 +578,40 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         .expect("resume exact applied candidate");
     assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
     assert!(provider.apply_calls.is_empty(), "resume must not reapply");
+    assert_eq!(gate_runs(), 1, "the exact candidate resume runs its gate");
 
+    // The destination drifts from the checkpointed candidate tree: resume
+    // refuses with the typed mismatch, names the fork, and gates nothing.
     std::fs::write(worktree_path.join("src/lib.rs"), "tampered\n").expect("tamper candidate");
-    let restored = resume_promoted_patch(options, &worktree_path, &checkpoint)
-        .expect("restore recorded candidate");
-    assert_eq!(restored.patch_artifact.id, sha);
+    let refused = resume_promoted_patch(options.clone(), &worktree_path, &checkpoint)
+        .expect_err("a drifted destination must not resume the checkpoint");
+    let mismatch = std::error::Error::source(&refused)
+        .and_then(|source| source.downcast_ref::<super::super::promote::CandidateTreeMismatch>())
+        .expect("typed candidate tree mismatch");
+    let candidate_tree = checkpoint["provenance"]["candidate_commit"]["tree_sha"]
+        .as_str()
+        .unwrap();
+    assert_eq!(mismatch.candidate_sha, sha);
+    assert_eq!(mismatch.candidate_tree, candidate_tree);
+    assert_ne!(mismatch.destination_tree, candidate_tree);
+    assert_eq!(refused.details["kind"], "candidate_tree_mismatch");
+    assert_eq!(refused.details["recovery"]["action"], "fork_replacement");
+    assert_eq!(refused.retryable, Some(false));
+    assert_eq!(gate_runs(), 1, "a refused resume must not run the gate");
     assert_eq!(
         std::fs::read_to_string(worktree_path.join("src/lib.rs")).unwrap(),
-        "new\n"
+        "tampered\n",
+        "refusal must not reset the operator's destination"
     );
+
+    // Once the destination is the candidate tree again, the same checkpoint
+    // resumes.
+    git(&worktree_path, &["checkout", "--", "."]);
+    let restored = resume_promoted_patch(options, &worktree_path, &checkpoint)
+        .expect("resume after the destination is the candidate again");
+    assert_eq!(restored.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(restored.patch_artifact.id, sha);
+    assert_eq!(gate_runs(), 2);
 }
 
 #[test]

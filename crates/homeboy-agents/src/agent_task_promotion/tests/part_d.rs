@@ -75,7 +75,6 @@ fn promotion_applies_verified_snapshot_when_source_artifact_is_replaced() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("promotion tempdir");
     let (source_path, source) = write_patch_source(&temp);
-    let artifact_path = temp.path().join("changes.patch");
     let mut provider = FakePromotionWorkspaceProvider {
         workspace_path: Some(temp.path().join("target")),
         ..Default::default()

@@ -43,7 +43,7 @@ const CHILD_DIAGNOSTIC_TEXT_CHARS: usize = 2_048;
 /// Test and operator override for the bounded handoff wait.
 const HANDOFF_TIMEOUT_ENV: &str = "HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS";
 /// The step job that supervises this Cook; read when its attempt materializes.
-const LOCAL_COOK_SUPERVISOR_JOB_ID_ENV: &str = "HOMEBOY_LOCAL_COOK_SUPERVISOR_JOB_ID";
+use step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV;
 const TEST_LOCAL_COOK_PAUSE_AFTER_CONTROLLER_START_PATH_ENV: &str =
     "HOMEBOY_TEST_LOCAL_COOK_PAUSE_AFTER_CONTROLLER_START_PATH";
 

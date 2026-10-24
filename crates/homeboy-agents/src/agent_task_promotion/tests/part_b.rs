@@ -1051,8 +1051,13 @@ fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
     assert_eq!(resumed.verified_base.expect("corrected base").base, "trunk");
 
     std::fs::write(target.join("unrelated.rs"), "conflict\n").expect("conflicting edit");
+    let refused = resume_promoted_patch(options.clone(), &target, &checkpoint)
+        .expect_err("a destination that is no longer the candidate tree is refused");
+    assert_eq!(refused.details["recovery"]["action"], "fork_replacement");
+    assert!(target.join("unrelated.rs").exists(), "refusal never cleans");
+    std::fs::remove_file(target.join("unrelated.rs")).expect("restore candidate tree");
     let report =
-        resume_promoted_patch(options, &target, &checkpoint).expect("candidate is rematerialized");
+        resume_promoted_patch(options, &target, &checkpoint).expect("candidate tree resumes");
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
 }
 
@@ -1914,8 +1919,12 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
         .stdout
         .starts_with(b"M  src/lib.rs"));
     std::fs::write(target.join("unrelated.txt"), "drift\n").expect("diverge target");
+    let refused = resume_promoted_patch(options.clone(), &target, &previous)
+        .expect_err("a drifted destination is refused, never reset");
+    assert_eq!(refused.details["recovery"]["action"], "fork_replacement");
+    std::fs::remove_file(target.join("unrelated.txt")).expect("restore candidate tree");
     let restored =
-        resume_promoted_patch(options, &target, &previous).expect("rematerialize candidate");
+        resume_promoted_patch(options, &target, &previous).expect("candidate tree resumes");
     assert_eq!(restored.patch_artifact.id, report.patch_artifact.id);
 }
 
