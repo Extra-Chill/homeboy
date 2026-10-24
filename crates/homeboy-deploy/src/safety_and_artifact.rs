@@ -604,6 +604,13 @@ mod tests {
         // because of machine state (#10126).
         homeboy_core::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("temp dir");
+            // BSD/macOS silently ignores setgid on a directory whose group the
+            // caller is not a member of, and the test temp root inherits
+            // `/tmp`'s `wheel` group there. Own the fixture tree with the
+            // caller's group, as a real deploy target is, so the assertion
+            // measures Homeboy's chmod rather than the host temp directory.
+            std::os::unix::fs::chown(temp.path(), None, Some(unsafe { libc::getegid() }))
+                .expect("own fixture group");
             let source = temp.path().join("source");
             let target = temp.path().join("plugins").join("sample-plugin");
             fs::create_dir_all(&source).expect("source dir");
