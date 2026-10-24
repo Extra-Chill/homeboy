@@ -1726,6 +1726,38 @@ pub enum AgentTaskRunState {
 }
 
 impl AgentTaskRunState {
+    /// The single definition of an aggregate's status, always a terminal
+    /// state. Any cancelled outcome cancels the run; a run whose outcomes are
+    /// all recoverable candidates is `PartialRecoverable`; otherwise a
+    /// recoverable candidate counts as not failed. An aggregate with no
+    /// outcomes has no succeeded work and is `Failed`.
+    pub fn from_outcomes(outcomes: &[crate::agent_task::AgentTaskOutcome]) -> Self {
+        use crate::agent_task::AgentTaskOutcomeStatus::{
+            Cancelled, CandidateRecoverable, NoOp, Succeeded,
+        };
+        if outcomes.iter().any(|outcome| outcome.status == Cancelled) {
+            return Self::Cancelled;
+        }
+        if !outcomes.is_empty()
+            && outcomes
+                .iter()
+                .all(|outcome| outcome.status == CandidateRecoverable)
+        {
+            return Self::PartialRecoverable;
+        }
+        let failed = outcomes
+            .iter()
+            .any(|outcome| !matches!(outcome.status, Succeeded | NoOp | CandidateRecoverable));
+        let succeeded = outcomes
+            .iter()
+            .any(|outcome| matches!(outcome.status, Succeeded | NoOp));
+        match (succeeded, failed) {
+            (true, false) => Self::Succeeded,
+            (true, true) => Self::PartialFailure,
+            _ => Self::Failed,
+        }
+    }
+
     /// Whether this is a terminal run state — the run has finished (successfully,
     /// with a recoverable candidate, partially, or by failure/cancellation) and
     /// will not transition further on its own.

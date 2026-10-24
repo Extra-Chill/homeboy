@@ -13,7 +13,6 @@ use homeboy_core::api_jobs::{
     DaemonLinkedDurableRunState, JobArtifactMetadata, JobStatus, RecoveredTerminalJob,
 };
 
-use crate::agent_task_scheduler::AgentTaskAggregateStatus;
 use crate::agent_task_service;
 
 struct AgentTaskTerminalRecoveryProviderImpl;
@@ -35,11 +34,9 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
         let resolved_run_id = crate::agent_task_lifecycle::resolve_run_id(run_id).ok()?;
         let result = agent_task_service::persisted_terminal_run_result(&resolved_run_id).ok()??;
         let status = match result.value.status() {
-            AgentTaskAggregateStatus::Succeeded => JobStatus::Succeeded,
-            AgentTaskAggregateStatus::Cancelled => JobStatus::Cancelled,
-            AgentTaskAggregateStatus::PartialRecoverable
-            | AgentTaskAggregateStatus::PartialFailure
-            | AgentTaskAggregateStatus::Failed => JobStatus::Failed,
+            crate::agent_task_lifecycle::AgentTaskRunState::Succeeded => JobStatus::Succeeded,
+            crate::agent_task_lifecycle::AgentTaskRunState::Cancelled => JobStatus::Cancelled,
+            _ => JobStatus::Failed,
         };
         let run_id = resolved_run_id;
         let artifacts = result

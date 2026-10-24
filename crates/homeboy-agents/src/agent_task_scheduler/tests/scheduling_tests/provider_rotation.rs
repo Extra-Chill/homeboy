@@ -2,6 +2,7 @@
 //! cancellation behavior.
 
 use super::shared::*;
+use crate::agent_task_lifecycle::AgentTaskRunState;
 
 mod provider_rotation_tests {
     use super::*;
@@ -434,7 +435,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(aggregate.totals.succeeded, 1);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let observed = observed.lock().expect("observed requests");
@@ -570,7 +571,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         let observed = observed.lock().expect("observed requests");
         assert_eq!(
             observed[1].executor.config["client_context"]["account"],
@@ -603,7 +604,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         let observed = observed.lock().expect("observed requests");
         assert_eq!(
             observed[1].metadata["provider_readiness_generated_fanout_context"],
@@ -649,10 +650,7 @@ mod provider_rotation_tests {
         .with_run_id(run_id)
         .run(plan);
 
-        assert_eq!(
-            aggregate.status(),
-            AgentTaskAggregateStatus::PartialRecoverable
-        );
+        assert_eq!(aggregate.status(), AgentTaskRunState::PartialRecoverable);
         assert_eq!(
             aggregate.outcomes[0].status,
             AgentTaskOutcomeStatus::CandidateRecoverable
@@ -682,10 +680,7 @@ mod provider_rotation_tests {
         }))
         .run(plan);
 
-        assert_eq!(
-            aggregate.status(),
-            AgentTaskAggregateStatus::PartialRecoverable
-        );
+        assert_eq!(aggregate.status(), AgentTaskRunState::PartialRecoverable);
         assert_eq!(
             aggregate.outcomes[0].status,
             AgentTaskOutcomeStatus::CandidateRecoverable
@@ -722,7 +717,7 @@ mod provider_rotation_tests {
         }))
         .run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             aggregate.outcomes[0].metadata["provider_rotation"]["attempts"]
@@ -759,7 +754,7 @@ mod provider_rotation_tests {
         }))
         .run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         let observed = observed.lock().expect("observed attempts");
         assert_eq!(observed.len(), 2);
         assert_eq!(observed[0].0, observed[1].0, "retry reuses one blob");
@@ -794,7 +789,7 @@ mod provider_rotation_tests {
         }))
         .run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(
             aggregate.outcomes[0].status,
             AgentTaskOutcomeStatus::Succeeded
@@ -896,7 +891,7 @@ mod provider_rotation_tests {
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskAggregateStatus::PartialRecoverable,
+            AgentTaskRunState::PartialRecoverable,
             "the retained timeout candidate must remain eligible for controller promotion: {aggregate:#?}"
         );
         assert_eq!(aggregate.totals.candidate_recoverable, 1);
@@ -951,7 +946,7 @@ mod provider_rotation_tests {
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskAggregateStatus::Succeeded,
+            AgentTaskRunState::Succeeded,
             "{aggregate:#?}"
         );
         let attempt = observed
@@ -979,7 +974,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(aggregate.outcomes[0]
             .metadata
@@ -1013,7 +1008,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         let observed = observed.lock().expect("observed requests");
         assert_eq!(
             observed[0].executor.model.as_deref(),
@@ -1042,7 +1037,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         let observed = observed.lock().expect("observed requests");
         assert_eq!(
             observed[0].executor.model.as_deref(),
@@ -1109,7 +1104,7 @@ mod provider_rotation_tests {
 
             assert_eq!(
                 aggregate.status(),
-                AgentTaskAggregateStatus::Succeeded,
+                AgentTaskRunState::Succeeded,
                 "classification {classification:?} should rotate"
             );
             assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -1166,7 +1161,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let observed = observed.lock().expect("observed requests");
         assert_eq!(
@@ -1278,7 +1273,7 @@ mod provider_rotation_tests {
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskAggregateStatus::Succeeded,
+            AgentTaskRunState::Succeeded,
             "{aggregate:#?}"
         );
         let observed = observed.lock().expect("observed requests");
@@ -1583,7 +1578,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         let observed = observed.lock().expect("observed requests");
         assert_eq!(observed.len(), 1);
         assert_eq!(
@@ -1741,7 +1736,7 @@ mod provider_rotation_tests {
         }))
         .run(admitted);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(
             *observed.lock().expect("observed models"),
             vec!["fallback".to_string(), "forward".to_string()]
@@ -1752,7 +1747,7 @@ mod provider_rotation_tests {
             observed: Arc::clone(&durable_observed),
         }))
         .run(plan);
-        assert_eq!(durable.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(durable.status(), AgentTaskRunState::Succeeded);
         assert_eq!(
             *durable_observed.lock().expect("durable observed models"),
             vec!["fallback".to_string(), "forward".to_string()]
@@ -1808,7 +1803,7 @@ mod provider_rotation_tests {
         }))
         .run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         let completed = completed.lock().expect("completed identities");
         assert_eq!(completed.len(), 8);
         assert!(completed.iter().all(|key| key.starts_with("reported-")));
@@ -1889,7 +1884,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             aggregate.outcomes[0].metadata["provider_rotation"]["attempts"][0]["status"],
@@ -1940,7 +1935,7 @@ mod provider_rotation_tests {
 
             assert_eq!(
                 aggregate.status(),
-                AgentTaskAggregateStatus::Failed,
+                AgentTaskRunState::Failed,
                 "classification {classification:?} must not rotate"
             );
             assert_eq!(
@@ -1973,7 +1968,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
         let observed = observed.lock().expect("observed requests");
         assert_eq!(observed.len(), 3);
         assert_eq!(observed[1].executor.backend, "fallback-backend-a");
@@ -2024,7 +2019,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let attempts = aggregate.outcomes[0]
             .metadata
@@ -2050,7 +2045,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         let observed = observed.lock().expect("observed requests");
         assert_eq!(observed[1].executor.backend, "request-fallback");
     }
@@ -2065,7 +2060,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             aggregate.outcomes[0].failure_classification,
@@ -2103,7 +2098,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(aggregate.totals.succeeded, 2);
 
         let observed = observed.lock().expect("observed requests");
@@ -2199,7 +2194,7 @@ mod provider_rotation_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
         // task-1 and task-2 between them pay to learn both the primary and
         // the fallback are capped; task-3 then has nowhere left to rotate to
         // and must not dispatch at all.

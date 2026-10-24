@@ -21,9 +21,7 @@ use crate::agent_task_provider::{
     AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
     RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA,
 };
-use crate::agent_task_schedule::{
-    AgentTaskAggregateStatus, AgentTaskManagedService, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
-};
+use crate::agent_task_schedule::{AgentTaskManagedService, AgentTaskState, AGENT_TASK_PLAN_SCHEMA};
 use crate::agent_tool_control_plane::AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA;
 use homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA;
 use homeboy_core::redaction::RedactionPolicy;
@@ -332,23 +330,18 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 AgentTaskState::TimedOut,
                 AgentTaskState::CandidateRecoverable,
             ]),
-            run_state: enum_values(&[
-                AgentTaskRunState::Queued,
-                AgentTaskRunState::Running,
-                AgentTaskRunState::Succeeded,
-                AgentTaskRunState::CandidateRecoverable,
-                AgentTaskRunState::PartialRecoverable,
-                AgentTaskRunState::PartialFailure,
-                AgentTaskRunState::Failed,
-                AgentTaskRunState::Cancelled,
-            ]),
-            aggregate_status: enum_values(&[
-                AgentTaskAggregateStatus::Succeeded,
-                AgentTaskAggregateStatus::PartialRecoverable,
-                AgentTaskAggregateStatus::PartialFailure,
-                AgentTaskAggregateStatus::Failed,
-                AgentTaskAggregateStatus::Cancelled,
-            ]),
+            run_state: enum_values(&RUN_STATES),
+            // An aggregate's status is the terminal run state it derives
+            // (`AgentTaskRunState::from_outcomes`). `CandidateRecoverable` is a
+            // run state Cook delivery sets; outcomes never derive it.
+            aggregate_status: enum_values(
+                &RUN_STATES
+                    .into_iter()
+                    .filter(|state| {
+                        state.is_terminal() && *state != AgentTaskRunState::CandidateRecoverable
+                    })
+                    .collect::<Vec<_>>(),
+            ),
             outcome_status: agent_task_outcome_statuses(),
             failure_classification: agent_task_failure_classifications(),
             workflow_step_status: enum_values(&[
@@ -472,6 +465,17 @@ fn agent_task_redacted_metadata_keys() -> Vec<String> {
 fn string_vec(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
 }
+
+const RUN_STATES: [AgentTaskRunState; 8] = [
+    AgentTaskRunState::Queued,
+    AgentTaskRunState::Running,
+    AgentTaskRunState::Succeeded,
+    AgentTaskRunState::CandidateRecoverable,
+    AgentTaskRunState::PartialRecoverable,
+    AgentTaskRunState::PartialFailure,
+    AgentTaskRunState::Failed,
+    AgentTaskRunState::Cancelled,
+];
 
 fn enum_values<T: Serialize>(variants: &[T]) -> Vec<String> {
     variants

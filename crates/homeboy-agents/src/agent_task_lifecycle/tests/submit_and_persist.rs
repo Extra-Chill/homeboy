@@ -6,8 +6,7 @@ use crate::agent_task::{
     AgentTaskArtifact, AgentTaskExecutionHandle, AgentTaskOutcomeStatus, AgentTaskSourceRef,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    AGENT_TASK_AGGREGATE_SCHEMA,
+    AgentTaskAggregate, AgentTaskAggregateTotals, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use fs4::fs_std::FileExt;
 use homeboy_core::test_support::with_isolated_home;
@@ -4537,7 +4536,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
         let durable_aggregate = durable.aggregate.expect("mirrored aggregate");
         assert_eq!(
             durable_aggregate.status(),
-            AgentTaskAggregateStatus::PartialRecoverable
+            AgentTaskRunState::PartialRecoverable
         );
         let durable_patch = &durable_aggregate.outcomes[0].artifacts[0];
         assert_eq!(durable_patch.id, "recoverable.patch");
@@ -4618,7 +4617,7 @@ fn terminal_projection_ignores_a_stale_aggregate_cache_after_commit() {
         let durable = durable_local_read(&record.run_id).expect("committed durable pair");
         assert_eq!(durable.record.state(), AgentTaskRunState::Succeeded);
         let aggregate = durable.aggregate.expect("mirrored aggregate");
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(aggregate.outcomes[0].summary.as_deref(), Some("ok"));
         assert_eq!(
             AgentTaskLifecycleStore::from_current_environment()

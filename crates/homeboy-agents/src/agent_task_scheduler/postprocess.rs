@@ -1323,6 +1323,7 @@ mod tests {
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
         AGENT_TASK_REQUEST_SCHEMA,
     };
+    use crate::agent_task_lifecycle::AgentTaskRunState;
     use homeboy_core::artifacts::{
         ArtifactPostprocessAction, ArtifactPostprocessPlan, ArtifactPostprocessRoot,
         ARTIFACT_POSTPROCESS_PLAN_SCHEMA,
@@ -1494,8 +1495,8 @@ mod tests {
             assert_eq!(optional.status, AgentTaskOutcomeStatus::Succeeded);
             assert_eq!(optional.metadata["optional_failure"], true);
             assert_eq!(
-                AgentTaskAggregateStatus::from_outcomes(&outcomes),
-                AgentTaskAggregateStatus::Succeeded
+                AgentTaskRunState::from_outcomes(&outcomes),
+                AgentTaskRunState::Succeeded
             );
         });
     }

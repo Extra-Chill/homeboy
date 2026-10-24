@@ -4,8 +4,8 @@
 use super::*;
 use crate::agent_task::{AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    AgentTaskExecutionBudget, AGENT_TASK_AGGREGATE_SCHEMA,
+    AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskExecutionBudget,
+    AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use crate::agent_task_service::{reconcile_run, reconcile_stale_active_runs};
 use homeboy_core::api_jobs::{JobEventKind, JobStore};
@@ -4718,7 +4718,7 @@ fn terminal_provider_cancellation_without_owner_converges_and_is_idempotent() {
         let aggregate = test_lifecycle_store()
             .read_aggregate("provider-cancelled-no-owner")
             .expect("interrupted-owner aggregate");
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Cancelled);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Cancelled);
     });
 }
 
@@ -5165,7 +5165,7 @@ fn dead_retry_launcher_persists_terminal_failure_under_strict_config_locking() {
             assert_eq!(failed.metadata["pre_execution_failure"]["retryable"], true);
             assert_eq!(
                 store.read_aggregate(run_id).expect("aggregate").status(),
-                AgentTaskAggregateStatus::Failed
+                AgentTaskRunState::Failed
             );
             assert_eq!(
                 store.read_record(run_id).expect("durable record").metadata["artifact_projection"]

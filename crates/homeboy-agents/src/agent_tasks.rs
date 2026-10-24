@@ -59,8 +59,8 @@ pub use super::agent_task_contract::agent_task_core_contract;
 // Plan/scheduler/execution context types are widely consumed and stay at the
 // facade root for ergonomics.
 pub use super::agent_task_schedule::{
-    AgentTaskAdaptiveConcurrencyPolicy, AgentTaskAggregate, AgentTaskAggregateStatus,
-    AgentTaskAggregateTotals, AgentTaskArtifactOutputDeclaration, AgentTaskArtifactPostprocessStep,
+    AgentTaskAdaptiveConcurrencyPolicy, AgentTaskAggregate, AgentTaskAggregateTotals,
+    AgentTaskArtifactOutputDeclaration, AgentTaskArtifactPostprocessStep,
     AgentTaskExecutionContext, AgentTaskPlan, AgentTaskResourceBudget, AgentTaskResourcePressure,
     AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
 };
@@ -287,9 +287,9 @@ pub mod provider {
 /// import location for callers that prefer the explicit grouping.
 pub mod scheduler {
     pub use super::super::agent_task_schedule::{
-        AgentTaskAdaptiveConcurrencyPolicy, AgentTaskAggregate, AgentTaskAggregateStatus,
-        AgentTaskAggregateTotals, AgentTaskArtifactOutputDeclaration, AgentTaskExecutionContext,
-        AgentTaskPlan, AgentTaskResourceBudget, AgentTaskResourcePressure, AgentTaskRetryPolicy,
+        AgentTaskAdaptiveConcurrencyPolicy, AgentTaskAggregate, AgentTaskAggregateTotals,
+        AgentTaskArtifactOutputDeclaration, AgentTaskExecutionContext, AgentTaskPlan,
+        AgentTaskResourceBudget, AgentTaskResourcePressure, AgentTaskRetryPolicy,
         AgentTaskScheduleOptions, AgentTaskState,
     };
     pub use super::super::agent_task_scheduler::{

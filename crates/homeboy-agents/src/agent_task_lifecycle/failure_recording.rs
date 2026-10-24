@@ -204,9 +204,7 @@ fn record_interrupted_local_owner_locked(
     } else {
         "owner_dead"
     };
-    let run_cancelled =
-        crate::agent_task_scheduler::AgentTaskAggregateStatus::from_outcomes(&outcomes)
-            == crate::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled;
+    let run_cancelled = AgentTaskRunState::from_outcomes(&outcomes) == AgentTaskRunState::Cancelled;
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
@@ -2898,7 +2896,7 @@ pub(crate) fn apply_aggregate_to_record(
     aggregate_path: String,
 ) {
     record.updated_at = Some(now_timestamp());
-    let terminal_state = run_state_for_aggregate(aggregate);
+    let terminal_state = aggregate.status();
     if record.state() != AgentTaskRunState::Cancelled {
         // A controller failure is durable terminal evidence. Never project an
         // aggregate as successful while that evidence remains attached.

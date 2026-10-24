@@ -2,6 +2,7 @@
 //! cancellation behavior.
 
 use super::shared::*;
+use crate::agent_task_lifecycle::AgentTaskRunState;
 
 mod timeout_tests {
     use super::super::concurrency::concurrency_tests::init_git_workspace;
@@ -71,7 +72,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskAggregateStatus::Succeeded,
+            AgentTaskRunState::Succeeded,
             "{aggregate:#?}"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -98,7 +99,7 @@ mod timeout_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
         assert_eq!(
             aggregate.outcomes[0].status,
             AgentTaskOutcomeStatus::Timeout
@@ -136,7 +137,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed
+            crate::agent_task_lifecycle::AgentTaskRunState::Failed
         );
         assert_eq!(aggregate.totals.timed_out, 1);
         assert_eq!(
@@ -188,7 +189,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskAggregateStatus::PartialRecoverable,
+            AgentTaskRunState::PartialRecoverable,
             "a non-empty attempt diff is recoverable rather than discarded"
         );
         let outcome = &aggregate.outcomes[0];
@@ -408,7 +409,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable
+            crate::agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
         );
         assert_eq!(aggregate.totals.candidate_recoverable, 1);
         assert_eq!(aggregate.totals.recoverable_candidates, 1);
@@ -522,7 +523,7 @@ mod timeout_tests {
 
             assert_eq!(
                 aggregate.status(),
-                crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
+                crate::agent_task_lifecycle::AgentTaskRunState::PartialRecoverable,
                 "{aggregate:#?}"
             );
             let outcome = &aggregate.outcomes[0];
@@ -632,7 +633,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed
+            crate::agent_task_lifecycle::AgentTaskRunState::Failed
         );
         assert_eq!(aggregate.totals.succeeded, 0);
         assert_eq!(aggregate.totals.timed_out, 1);

@@ -57,8 +57,8 @@ use crate::agent_task_finalization::{
 use crate::agent_task_lifecycle;
 use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
 use crate::agent_task_scheduler::{
-    AgentTaskAggregateStatus, AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry,
-    AgentTaskProviderRotationPolicy, AgentTaskScheduler, AgentTaskState,
+    AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
+    AgentTaskScheduler, AgentTaskState,
 };
 use homeboy_core::run_lifecycle_record::{
     ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
@@ -5489,7 +5489,7 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskAggregateStatus::Succeeded,
+            AgentTaskRunState::Succeeded,
             "{aggregate:?}"
         );
         let executed: serde_json::Value =

@@ -98,7 +98,7 @@ pub(crate) fn project_terminal_runner_record_in_store(
     })?;
     let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
     if aggregate.plan_id != record.plan_id
-        || super::conversion::run_state_for_aggregate(&aggregate) != remote.state()
+        || aggregate.status() != remote.state()
         || aggregate.outcomes.iter().any(|outcome| {
             !plan
                 .tasks
