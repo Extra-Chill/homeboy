@@ -74,15 +74,32 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
                     "runner {runner} has no connected drain endpoint"
                 ))
             })?;
-            crate::execution::daemon_api_post_json_for_session_with_timeout(
-                &session,
-                "/upgrade/drain",
-                &serde_json::json!({"operation_id": operation, "runs": runs, "resume": resume, "timeout_ms": 86_400_000}),
-                None,
-                std::time::Duration::from_secs(10),
-            )?;
+            let request = serde_json::json!({"operation_id": operation, "runs": runs, "resume": resume, "timeout_ms": 86_400_000});
+            let send = |request: &serde_json::Value| {
+                crate::execution::daemon_api_post_json_for_session_with_timeout(
+                    &session,
+                    "/upgrade/drain",
+                    request,
+                    None,
+                    std::time::Duration::from_secs(10),
+                )
+            };
+            homeboy_upgrade::upgrade::send_upgrade_drain(runner, operation, &request, send)?;
         }
         Ok(())
+    }
+
+    fn held_upgrade_drains(&self, operation: &str) -> Result<Vec<String>> {
+        let mut held = Vec::new();
+        for runner in self.drain_targets(&[])? {
+            let response = crate::execution::daemon_api_get(&runner, "/upgrade/drain")?;
+            let body =
+                crate::execution::canonical_daemon_body(&response, "upgrade drain inventory")?;
+            if body["operation_id"].as_str() == Some(operation) {
+                held.push(runner);
+            }
+        }
+        Ok(held)
     }
 
     fn verify_upgrade_admission(&self, targets: &[String]) -> Result<()> {

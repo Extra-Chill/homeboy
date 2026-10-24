@@ -2676,6 +2676,12 @@ where
                 Err(err) => error_response(404, err),
             }
         }
+        ("GET", "/upgrade/drain") => {
+            match crate::runtime_promotion::remote_upgrade_drain_owner() {
+                Ok(owner) => daemon_endpoint_response("upgrade.drain", json!({"operation_id": owner})),
+                Err(error) => error_response(400, error),
+            }
+        }
         ("POST", "/upgrade/drain") => {
             match with_daemon_job_admission(|| crate::runtime_promotion::remote_upgrade_drain(&body.unwrap_or(serde_json::Value::Null))) {
                 Ok(()) => daemon_endpoint_response("upgrade.drain", json!({"draining": true})),

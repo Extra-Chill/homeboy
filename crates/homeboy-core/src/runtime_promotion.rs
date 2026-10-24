@@ -20,8 +20,8 @@ use crate::paths;
 mod upgrade_drain;
 pub use upgrade_drain::{
     begin_upgrade_drain, ensure_runner_upgrade_drain_admission, ensure_upgrade_drain_admission,
-    ensure_upgrade_drain_request, remote_upgrade_drain, runner_is_draining,
-    upgrade_drain_operation, UpgradeDrainGuard,
+    ensure_upgrade_drain_request, remote_upgrade_drain, remote_upgrade_drain_owner,
+    runner_is_draining, upgrade_drain_operation, UpgradeDrainGuard,
 };
 
 const LEASE_DIR: &str = "promotion.lock";

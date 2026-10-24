@@ -71,6 +71,8 @@ pub enum UpgradeCommand {
         /// Operation id from a previous `homeboy upgrade`. Defaults to the latest upgrade run.
         id: Option<String>,
     },
+    /// Release remote drains retained by a terminal upgrade.
+    ReleaseDrains { id: String },
     /// Resume an admitted upgrade from its detached worker process.
     #[command(hide = true)]
     Continue { id: String },
@@ -82,6 +84,22 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         let json = serde_json::to_value(result)
             .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
         return Ok((json, 0));
+    }
+
+    if let Some(UpgradeCommand::ReleaseDrains { id }) = args.command.as_ref() {
+        let status = upgrade::load_upgrade_operation_status(Some(id))?;
+        if status.status == "running" {
+            return Err(homeboy::core::Error::internal_unexpected(
+                "cannot release a live upgrade's drains",
+            )
+            .into());
+        }
+        upgrade::release_upgrade_drains(id)?;
+        return Ok((
+            serde_json::to_value(upgrade::load_upgrade_operation_status(Some(id))?)
+                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
+            0,
+        ));
     }
 
     if let Some(UpgradeCommand::Continue { id }) = args.command.as_ref() {
