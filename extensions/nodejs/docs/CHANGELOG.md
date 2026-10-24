@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.8.2] - 2026-10-24
+
+### Fixed
+- write timeline and assertion fields in the shape core parses
+
 ## [3.8.1] - 2026-10-21
 
 ### Fixed
