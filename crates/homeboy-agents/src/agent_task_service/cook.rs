@@ -8912,7 +8912,7 @@ fn preflight_cook_workspace_resolved_base_ancestry(
         target,
         branch.trim(),
     )?;
-    let mut error = homeboy_core::worktree::convergence::pr_route(branch.trim(), None);
+    let mut error = homeboy_core::worktree::convergence::diverged_route(branch.trim(), task_url);
     error.details["workspace_base_ancestry"] = serde_json::json!({
         "schema": "homeboy/cook-workspace-base-ancestry/v1",
         "base": base,
