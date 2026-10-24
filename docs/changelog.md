@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.11] - 2026-10-24
+
+### Changed
+- Snapshot Cook file gates before adding component gates
+- Skip live Lab readiness probes for read-polling and local commands
+
 ## [0.433.10] - 2026-10-24
 
 ### Changed
