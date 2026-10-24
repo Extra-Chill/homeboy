@@ -301,17 +301,9 @@ impl DeployObservation {
             );
         }
         let mut report = timer.into_report();
-        if let Some(run) = self.store.get_run(&self.run_id)? {
-            if let Ok(origin) = chrono::DateTime::parse_from_rfc3339(&run.started_at) {
-                report.spans[0].start_offset_ms = self
-                    .phase_started_at
-                    .signed_duration_since(origin)
-                    .num_microseconds()
-                    .unwrap_or(0)
-                    .max(0) as f64
-                    / 1000.0;
-            }
-        }
+        report.spans[0].started_at = self
+            .phase_started_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.store.record_phase_spans(
             &self.run_id,
             &format!("deploy:{phase}:{}", self.phase_started_at.to_rfc3339()),

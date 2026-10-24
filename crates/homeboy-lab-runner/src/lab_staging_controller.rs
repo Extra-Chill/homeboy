@@ -7002,21 +7002,14 @@ mod tests {
                 .phases
                 .iter()
                 .any(|phase| phase.phase == "stage.lab.dependency_hydration"));
-            let run = store.get_run(&request.recipe.run_id).unwrap().unwrap();
-            let origin = chrono::DateTime::parse_from_rfc3339(&run.started_at).unwrap();
             let start = chrono::DateTime::parse_from_rfc3339(&original_start).unwrap();
             let hydration = spans
                 .iter()
                 .find(|span| span.id == "stage.lab.hydration")
                 .unwrap();
             assert_eq!(
-                hydration.start_offset_ms,
-                start
-                    .signed_duration_since(origin)
-                    .num_microseconds()
-                    .unwrap()
-                    .max(0) as f64
-                    / 1000.0
+                hydration.started_at,
+                start.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
             );
         });
     }

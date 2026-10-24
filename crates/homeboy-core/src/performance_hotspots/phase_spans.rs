@@ -105,7 +105,7 @@ pub fn phase_hotspots(
             {
                 continue;
             }
-            if !span.start_offset_ms.is_finite() || span.start_offset_ms < 0.0 {
+            if chrono::DateTime::parse_from_rfc3339(&span.started_at).is_err() {
                 continue;
             }
             has_spans = true;
@@ -195,7 +195,10 @@ mod tests {
         let spans = store.phase_spans(&run.id).unwrap();
         assert_eq!(spans.spans.len(), 1);
         assert_eq!(spans.spans[0].status, PhaseStatus::Failed);
-        assert!(spans.spans[0].start_offset_ms >= 2.0);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&spans.spans[0].started_at).unwrap()
+                >= chrono::DateTime::parse_from_rfc3339(&run.started_at).unwrap()
+        );
         store
             .time_run_phase_with_outcome(&run.id, "gate", || Ok(false), |success| !success)
             .unwrap();

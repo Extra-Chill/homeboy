@@ -1170,10 +1170,17 @@ fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence()
         ..Default::default()
     };
 
-    let report = promote_with_provider(
+    let store = homeboy_core::observation::ObservationStore::open_initialized_at(
+        temp.path().join("timing.sqlite"),
+    )
+    .unwrap();
+    let run = store
+        .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
+        .unwrap();
+    let report = promote_with_provider_in_observation_store(
         AgentTaskPromotionRequest {
             source,
-            source_run_id: Some("ordered-fail-fast".to_string()),
+            source_run_id: Some(run.id.clone()),
             source_path: Some(source_path),
             source_worktree_path: None,
             base_ref: None,
@@ -1194,9 +1201,18 @@ fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence()
             repository_integrity_evidence: None,
         },
         &mut provider,
+        &store,
     )
     .expect("failed gate produces promotion report");
-
+    let spans = store.phase_spans(&run.id).unwrap();
+    let promote = spans.span("promote").unwrap();
+    let gate = spans.span("gate").unwrap();
+    assert_eq!(
+        promote.status,
+        homeboy_engine_primitives::phase_timing::PhaseStatus::Failed
+    );
+    assert!(promote.duration_ms.unwrap() >= gate.duration_ms.unwrap());
+    assert!(promote.started_at <= gate.started_at);
     assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
     assert_eq!(provider.verify_calls.len(), 1, "broad gate was not invoked");
     assert!(!downstream_marker.exists(), "broad gate was not executed");

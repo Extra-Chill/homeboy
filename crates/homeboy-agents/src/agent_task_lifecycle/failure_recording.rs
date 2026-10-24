@@ -30,6 +30,16 @@ pub fn record_pre_execution_failure_in_store(
     error: &Error,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
+    let timing = match lifecycle_store.open_observation_initialized() {
+        Ok(store) => Some(store),
+        Err(error) => {
+            homeboy_core::log_status!("observe", "failure timing persistence failed: {}", error);
+            None
+        }
+    };
+    let _failure_phase = timing
+        .as_ref()
+        .map(|store| store.run_phase_guard(&run_id, "terminal.failure_recording"));
     // Cancellation and aggregate projection both own a terminal transition.
     // Re-read and arbitrate while holding the record/aggregate transaction lock
     // so a retry launcher failure cannot overwrite a cancellation winner.
@@ -1348,7 +1358,10 @@ pub fn record_remote_dispatch_failure_in_store(
     {
         let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
         crate::agent_task_promotion::candidate_bundle::fetch_run_candidates(
-            &record, &plan, &aggregate,
+            lifecycle_store,
+            &record,
+            &plan,
+            &aggregate,
         )?;
     }
     if needs_atomic_terminal_commit {

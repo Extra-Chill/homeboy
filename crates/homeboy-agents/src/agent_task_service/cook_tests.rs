@@ -19482,6 +19482,15 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
 
 #[test]
 fn baseline_comparison_is_persisted_before_feedback_finalization() {
+    baseline_comparison_finalization_fixture(true);
+}
+
+#[test]
+fn gate_failure_terminal_decision_is_read_back_from_store_without_publication() {
+    baseline_comparison_finalization_fixture(false);
+}
+
+fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("repository");
         let root = temp.path();
@@ -19512,7 +19521,7 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
         options.retry_policy.max_attempts = 1;
         options.identity.initial_plan.tasks[0].executor.model = Some("test/model".to_string());
         options.ai_disclosure.ai_model = Some("test/model".to_string());
-        options.gates.accept_inherited_failures = true;
+        options.gates.accept_inherited_failures = accept_inherited;
         options.gates.verify = vec!["cat failure >&2; exit 1".to_string()];
         options.identity.initial_plan.options.execution_budget =
             crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0);
@@ -19611,13 +19620,21 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
             ..CookContext::new(options, Arc::new(UnusedExecutor))
         })
         .unwrap();
-        assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
-        assert!(result
-            .value
-            .stop_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("accepted inherited baseline-red")));
-        assert_eq!(finalized.load(Ordering::SeqCst), 1);
+        if accept_inherited {
+            assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
+            assert!(result
+                .value
+                .stop_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("accepted inherited baseline-red")));
+        } else {
+            assert_eq!(result.value.status, "baseline_red", "{:#?}", result.value);
+            assert_eq!(result.exit_code, 1);
+        }
+        assert_eq!(
+            finalized.load(Ordering::SeqCst),
+            usize::from(accept_inherited)
+        );
         assert!(observer_calls.load(Ordering::SeqCst) >= 1);
         let record = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
         assert_eq!(record.metadata["provider_executions_consumed"], 1);
@@ -19631,8 +19648,25 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
         );
         assert_eq!(
             record.metadata["cook_progress"]["terminal_success"],
-            serde_json::json!(true),
+            serde_json::json!(accept_inherited),
             "the disconnected observer can reconnect to the terminal durable result"
+        );
+        let observation = test_lifecycle_store()
+            .open_observation_initialized()
+            .unwrap();
+        let spans = observation.phase_spans(&run_id).unwrap();
+        assert!(
+            spans.span("gate.replay").is_some(),
+            "baseline replay is durable"
+        );
+        assert!(
+            spans.span("terminal.decision").is_some(),
+            "post-gate finalization is durable"
+        );
+        assert_eq!(
+            spans.span("publish").is_some(),
+            accept_inherited,
+            "publication has its own boundary"
         );
         let persisted = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
         assert_eq!(persisted.status, AgentTaskPromotionStatus::GateFailed);

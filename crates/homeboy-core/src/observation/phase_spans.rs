@@ -11,11 +11,40 @@ use homeboy_engine_primitives::phase_timing::{
 use super::ObservationStore;
 use crate::{Error, Result};
 
+/// Best-effort scope timing, including early returns. Never changes domain results.
+pub struct RunPhaseGuard<'a> {
+    store: &'a ObservationStore,
+    run_id: String,
+    phase: String,
+    started_at: String,
+}
+
+impl Drop for RunPhaseGuard<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.store.finish_run_phase(
+            &self.run_id,
+            &self.phase,
+            &self.started_at,
+            std::thread::panicking(),
+        ) {
+            crate::log_status!("observe", "phase timing persistence failed: {}", error);
+        }
+    }
+}
+
 impl ObservationStore {
+    pub fn run_phase_guard(&self, run_id: &str, phase: &str) -> RunPhaseGuard<'_> {
+        RunPhaseGuard {
+            store: self,
+            run_id: run_id.into(),
+            phase: phase.into(),
+            started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        }
+    }
+
     /// Time an operation and append its outcome even when the operation fails.
     /// Persistence failure is reported separately and never masks a workflow
-    /// error. Offsets are relative to the durable run origin, including time
-    /// spent in other processes (Cook controller, Lab and provider workers).
+    /// error. Absolute timestamps share a timeline across controller and workers.
     pub fn time_run_phase<T>(
         &self,
         run_id: &str,
@@ -42,19 +71,7 @@ impl ObservationStore {
         if result.as_ref().is_ok_and(failed) {
             report.spans[0].status = homeboy_engine_primitives::phase_timing::PhaseStatus::Failed;
         }
-        if let Ok(Some(run)) = self.get_run(run_id) {
-            if let Ok(origin) = chrono::DateTime::parse_from_rfc3339(&run.started_at) {
-                let offset = started
-                    .signed_duration_since(origin)
-                    .num_microseconds()
-                    .unwrap_or(0)
-                    .max(0) as f64
-                    / 1000.0;
-                for span in &mut report.spans {
-                    span.start_offset_ms = offset;
-                }
-            }
-        }
+        report.spans[0].started_at = started.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         // Distinct executions are distinct samples; exactly-once delivery uses
         // the stable report identity below rather than a phase name alone.
         let identity = format!("{phase}:{}:{}", std::process::id(), started.to_rfc3339());
@@ -73,26 +90,17 @@ impl ObservationStore {
         started_at: &str,
         failed: bool,
     ) -> Result<()> {
-        let Some(run) = self.get_run(run_id)? else {
-            return Ok(());
-        };
         let parse = |value: &str| {
             chrono::DateTime::parse_from_rfc3339(value)
                 .map_err(|error| Error::internal_unexpected(error.to_string()))
         };
         let started = parse(started_at)?;
-        let origin = parse(&run.started_at)?;
-        let offset = started
-            .signed_duration_since(origin)
-            .num_microseconds()
-            .unwrap_or(0)
-            .max(0) as f64
-            / 1000.0;
+        let timestamp = started.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         if self
             .phase_spans(run_id)?
             .spans
             .iter()
-            .any(|span| span.id == phase && span.start_offset_ms == offset)
+            .any(|span| span.id == phase && span.started_at == timestamp)
         {
             return Ok(());
         }
@@ -109,7 +117,7 @@ impl ObservationStore {
             timer.record_ok(phase, duration);
         }
         let mut report = timer.into_report();
-        report.spans[0].start_offset_ms = offset;
+        report.spans[0].started_at = timestamp;
         self.record_phase_spans(run_id, &format!("{phase}:{started_at}"), &report)
     }
 
@@ -121,7 +129,7 @@ impl ObservationStore {
             .phase_spans(run_id)?
             .spans
             .iter()
-            .any(|span| span.id == phase && span.start_offset_ms == 0.0)
+            .any(|span| span.id == phase)
         {
             return Ok(());
         }
@@ -143,7 +151,7 @@ impl ObservationStore {
             timer.record_ok(phase, duration);
         }
         let mut report = timer.into_report();
-        report.spans[0].start_offset_ms = 0.0;
+        report.spans[0].started_at = origin.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.record_phase_spans(run_id, &format!("whole-run:{phase}"), &report)
     }
 
@@ -165,8 +173,7 @@ impl ObservationStore {
                 span.id.is_empty()
                     || span.id.len() > 128
                     || span.homeboy_version.len() > 128
-                    || !span.start_offset_ms.is_finite()
-                    || span.start_offset_ms < 0.0
+                    || chrono::DateTime::parse_from_rfc3339(&span.started_at).is_err()
                     || span
                         .duration_ms
                         .is_some_and(|ms| !ms.is_finite() || ms < 0.0)

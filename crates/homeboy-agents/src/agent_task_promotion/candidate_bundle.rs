@@ -142,6 +142,84 @@ pub fn materialize_candidate_tree(repo: &Path, candidate: &AgentTaskCandidate) -
 }
 
 pub(crate) fn fetch_run_candidates(
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
+    plan: &crate::agent_tasks::scheduler::AgentTaskPlan,
+    aggregate: &crate::agent_tasks::scheduler::AgentTaskAggregate,
+) -> Result<()> {
+    // Telemetry setup must not prevent candidate recovery.
+    let store = match lifecycle_store.open_observation_initialized() {
+        Ok(store) => Some(store),
+        Err(error) => {
+            homeboy_core::log_status!("observe", "candidate timing persistence failed: {}", error);
+            None
+        }
+    };
+    let operation = || fetch_run_candidates_internal(record, plan, aggregate);
+    match store {
+        Some(store) => {
+            // The remote observation ends at Lab terminal status, not when the
+            // controller finally picks up the candidate. Attribute that delay
+            // separately from acquisition work.
+            let wait = (|| -> Result<()> {
+                let spans = store.phase_spans(&record.run_id)?;
+                if spans.span("promote.acquire").is_some() {
+                    return Ok(());
+                }
+                let event_terminal = record
+                    .metadata
+                    .get("runner_job_events")
+                    .and_then(|events| {
+                        serde_json::from_value::<Vec<homeboy_core::api_jobs::JobEvent>>(
+                            events.clone(),
+                        )
+                        .ok()
+                    })
+                    .and_then(|events| {
+                        events
+                            .into_iter()
+                            .filter(|event| {
+                                event.kind == homeboy_core::api_jobs::JobEventKind::Result
+                            })
+                            .map(|event| event.timestamp_ms)
+                            .max()
+                    })
+                    .and_then(|ms| i64::try_from(ms).ok())
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .map(|time| time.fixed_offset());
+                let terminal = event_terminal.or_else(|| {
+                    spans
+                        .spans
+                        .iter()
+                        .filter(|span| span.id == "stage.lab.observe")
+                        .filter_map(|span| {
+                            let start =
+                                chrono::DateTime::parse_from_rfc3339(&span.started_at).ok()?;
+                            let duration = span.duration_ms?;
+                            Some(start + chrono::Duration::milliseconds(duration as i64))
+                        })
+                        .max()
+                });
+                if let Some(terminal) = terminal {
+                    store.finish_run_phase(
+                        &record.run_id,
+                        "promote.wait",
+                        &terminal.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        false,
+                    )?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = wait {
+                homeboy_core::log_status!("observe", "pickup timing persistence failed: {}", error);
+            }
+            store.time_run_phase(&record.run_id, "promote.acquire", operation)
+        }
+        None => operation(),
+    }
+}
+
+fn fetch_run_candidates_internal(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
     plan: &crate::agent_tasks::scheduler::AgentTaskPlan,
     aggregate: &crate::agent_tasks::scheduler::AgentTaskAggregate,
@@ -320,6 +398,15 @@ mod tests {
 
     #[test]
     fn timeout_aggregate_fetches_before_controller_terminal_projection() {
+        terminal_aggregate_fetch_fixture(false);
+    }
+
+    #[test]
+    fn lab_terminal_harvest_promote_spans_are_read_back_from_store() {
+        terminal_aggregate_fetch_fixture(true);
+    }
+
+    fn terminal_aggregate_fetch_fixture(promote: bool) {
         homeboy_core::test_support::with_isolated_home(|_| {
             use crate::agent_task_lifecycle as lifecycle;
             use crate::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
@@ -352,12 +439,20 @@ mod tests {
             let bytes = std::fs::read(&f.bundle).unwrap();
             use sha2::Digest;
             let checksum = format!("{:x}", sha2::Sha256::digest(&bytes));
-            let aggregate: AgentTaskAggregate = serde_json::from_value(serde_json::json!({
+            let mut aggregate: AgentTaskAggregate = serde_json::from_value(serde_json::json!({
                 "schema":"homeboy/agent-task-aggregate/v1", "plan_id":"timeout-plan", "status":"failed",
                 "totals":{"timed_out":1,"skipped":0}, "outcomes":[{"task_id":"task", "status":"timeout", "candidate":f.candidate,
                 "artifacts":[{"id":"bundle", "kind":"git_bundle", "path":f.bundle,"size_bytes":bytes.len(),"sha256":checksum}]}]
             })).unwrap();
+            if promote {
+                aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Succeeded;
+            }
             let store = lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+            let observation = store.open_observation_initialized().unwrap();
+            observation
+                .time_run_phase(&record.run_id, "stage.lab.observe", || Ok(()))
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
             // Use the authoritative transition, as detached terminal events do.
             super::super::super::agent_task_lifecycle::apply_aggregate_transition_in_store(
                 &store,
@@ -375,7 +470,40 @@ mod tests {
                 ),
                 f.candidate.candidate_sha
             );
-            assert_eq!(record.candidate, Some(f.candidate));
+            assert_eq!(record.candidate, Some(f.candidate.clone()));
+            if promote {
+                let mut provider = super::super::tests::FakePromotionWorkspaceProvider::default();
+                provider.workspace_path = Some(f.controller.clone());
+                let request = super::super::AgentTaskPromotionRequest {
+                    source: serde_json::to_string(&aggregate).unwrap(),
+                    source_run_id: Some(record.run_id.clone()),
+                    source_path: None,
+                    source_worktree_path: Some(f.controller.clone()),
+                    base_ref: None,
+                    task_base_sha: Some(f.candidate.base_sha.clone()),
+                    candidate_ref: None,
+                    to_worktree: "controller@candidate".into(),
+                    task_id: Some("task".into()),
+                    artifact_id: None,
+                    dry_run: false,
+                    gates: crate::agent_task_gate::VerifyGateOptions::default(),
+                    provider_invocation: None,
+                    repository_integrity_evidence: None,
+                };
+                super::super::promote::promote_with_provider_and_checkpoint_in_observation_store(
+                    request,
+                    &mut provider,
+                    &mut |_| Ok(()),
+                    &observation,
+                )
+                .unwrap();
+            }
+            let spans = observation.phase_spans(&record.run_id).unwrap();
+            if promote {
+                assert!(spans.span("promote").unwrap().is_ok());
+            }
+            assert!(spans.span("promote.wait").unwrap().duration_ms.unwrap() >= 4.0);
+            assert!(spans.span("promote.acquire").unwrap().is_ok());
         });
     }
 
@@ -388,7 +516,10 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let record = crate::agent_task_lifecycle::submit_plan(&plan, Some("run-1")).unwrap();
             let aggregate = serde_json::from_value(serde_json::json!({"plan_id":"plan", "status":"failed", "totals":{"skipped":0}, "outcomes":[{"task_id":"task", "status":"timeout", "candidate":f.candidate}]})).unwrap();
-            let error = fetch_run_candidates(&record, &plan, &aggregate).unwrap_err();
+            let store =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .unwrap();
+            let error = fetch_run_candidates(&store, &record, &plan, &aggregate).unwrap_err();
             assert_eq!(error.retryable, Some(false));
             assert!(error.message.contains("non-recoverable"));
             assert_eq!(error.details["run_id"], "run-1");

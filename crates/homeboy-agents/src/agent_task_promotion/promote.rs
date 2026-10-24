@@ -161,21 +161,7 @@ pub fn promote_with_checkpoint(
     // resolves once here and is passed down. The interior used to receive
     // `None` and re-resolve the environment partway through (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    let mut report = promote_with_provider_and_checkpoint_internal(
-        options,
-        &mut checkpoint,
-        &observation_store,
-    )?;
-    if let Some(runner_id) = crate::agent_task_lifecycle::execution_runner_id() {
-        report.provenance["lab_offload"] = json!({
-            "runner_id": runner_id,
-            "source_aggregate": report.source.path,
-            "source_artifact": report.patch_artifact.path,
-            "target_worktree": report.to_worktree,
-            "target_workspace": report.target.path,
-        });
-    }
-    Ok(report)
+    promote_with_checkpoint_in_observation_store(options, &observation_store, &mut checkpoint)
 }
 
 pub(crate) fn promote_with_checkpoint_in_observation_store(
@@ -223,15 +209,7 @@ pub fn resume_promoted_patch(
     // resolves once here and is passed down. The interior used to receive
     // `None` and re-resolve the environment partway through (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    resume_promoted_patch_internal(
-        options,
-        target_path,
-        previous,
-        &observation_store,
-        false,
-        None,
-        None,
-    )
+    resume_promoted_patch_in_observation_store(options, target_path, previous, &observation_store)
 }
 
 pub(crate) fn resume_promoted_patch_in_observation_store(
@@ -240,15 +218,25 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
-    resume_promoted_patch_internal(
-        options,
-        target_path,
-        previous,
-        observation_store,
-        false,
-        None,
-        None,
-    )
+    let run_id = options.source_run_id.clone();
+    let operation = || {
+        resume_promoted_patch_internal(
+            options,
+            target_path,
+            previous,
+            observation_store,
+            false,
+            None,
+            None,
+        )
+    };
+    if let Some(run_id) = run_id {
+        observation_store.time_run_phase_with_outcome(&run_id, "gate.replay", operation, |report| {
+            report.status.gate_failed()
+        })
+    } else {
+        operation()
+    }
 }
 
 /// Re-run corrected gates against an already-applied candidate while preserving
@@ -608,7 +596,7 @@ pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
     with_test_promotion_operations(provider, || {
-        promote_with_provider_and_checkpoint_internal(options, checkpoint, observation_store)
+        promote_with_checkpoint_in_observation_store(options, observation_store, checkpoint)
     })
 }
 
