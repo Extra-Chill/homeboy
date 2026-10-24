@@ -1017,6 +1017,7 @@ mod tests {
             ),
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: "snapshot-1".to_string(),
+            content: None,
             workspace_ref: "workspace:00000000-0000-0000-0000-000000000001".to_string(),
             prepared_workspace_lease: None,
             counts: ByteFileCounts { files: 1, bytes: 2 },

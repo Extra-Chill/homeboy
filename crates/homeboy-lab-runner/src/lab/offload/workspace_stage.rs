@@ -67,6 +67,7 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) path_materialization_plan: PathMaterializationPlan,
     pub(crate) source_snapshot: SourceSnapshot,
     pub(crate) workspace_snapshots: Vec<SourceSnapshot>,
+    pub(crate) synced_extra_workspaces: Vec<RunnerWorkspaceSyncOutput>,
     pub(crate) remapped_args: Vec<String>,
     pub(crate) agent_task_run_id: Option<String>,
     pub(crate) runner_required_extensions: Vec<String>,
@@ -784,6 +785,7 @@ fn prepare_lab_offload_workspace_stage_inner(
             path_materialization_plan,
             source_snapshot,
             workspace_snapshots,
+            synced_extra_workspaces,
             remapped_args,
             agent_task_run_id,
             runner_required_extensions,
@@ -2169,42 +2171,160 @@ mod tests {
                 None,
             )
             .expect("workspace stage");
-            let component_remote_root = stage
+            assert_rig_stage_paths(&stage);
+        });
+    }
+
+    #[test]
+    fn lab_materialization_hashes_primary_and_extra_once_and_reuses_metadata() {
+        crate::test_support::with_isolated_home(|_| {
+            use homeboy_core::observation::{phase_timing, NewRunRecord, ObservationStore};
+            let timing_root = tempfile::tempdir().unwrap();
+            let store = ObservationStore::open_initialized_at(timing_root.path().join("timing.db"))
+                .unwrap();
+            let run = store
+                .start_run(NewRunRecord::builder("test").build())
+                .unwrap();
+            let source = tempfile::tempdir().unwrap();
+            let extra = tempfile::tempdir().unwrap();
+            let runner_root = tempfile::tempdir().unwrap();
+            for root in [source.path(), extra.path()] {
+                std::fs::write(root.join("input.txt"), "materialized bytes\n").unwrap();
+                git(root, &["init"]);
+                git(root, &["config", "user.email", "test@example.com"]);
+                git(root, &["config", "user.name", "Test"]);
+                git(root, &["add", "."]);
+                git(root, &["commit", "-m", "source"]);
+            }
+            crate::create(&serde_json::json!({"id": "hash-once", "kind": "local", "workspace_root": runner_root.path()}).to_string(), false).unwrap();
+            let args = vec!["homeboy".to_string(), "fuzz".to_string(), "run".to_string()];
+            let request = LabOffloadRequest {
+                explicit_runner: Some("hash-once"),
+                ..LabOffloadRequest::for_test(&args)
+            };
+            let contract = LabOffloadCommand {
+                command: homeboy_core::lab_contract::LabCommandContract::portable(
+                    "fuzz",
+                    None,
+                    true,
+                    &[],
+                ),
+                required_extensions: Vec::new(),
+                required_capabilities: Vec::new(),
+                workload: None,
+            };
+            std::env::set_var(
+                "HOMEBOY_LAB_EXTRA_WORKSPACES_JSON",
+                serde_json::json!([extra.path()]).to_string(),
+            );
+            let scope = phase_timing::for_run(&store, &run.id);
+            let stage = prepare_lab_offload_workspace_stage(
+                &request,
+                LabWorkspaceStageCommand::from(&contract),
+                crate::lab_plan::base_lab_plan(Some(&contract)),
+                "hash-once",
+                source.path(),
+                &["homeboy".to_string()],
+                runner_root.path().to_str(),
+                None,
+                &args,
+                None,
+            )
+            .unwrap();
+            std::env::remove_var("HOMEBOY_LAB_EXTRA_WORKSPACES_JSON");
+            assert_eq!(stage.synced.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
+            // Attachment must be independent of controller filesystem access.
+            std::fs::remove_file(source.path().join("input.txt")).unwrap();
+            std::fs::remove_file(extra.path().join("input.txt")).unwrap();
+            let mut metadata = serde_json::json!({});
+            super::super::attach_lab_workspace_metadata(
+                &mut metadata,
+                super::super::LabWorkspaceMetadataInputs {
+                    source_snapshot: &stage.source_snapshot,
+                    workspace_snapshots: &stage.workspace_snapshots,
+                    legacy_path_materialization_plan: &stage.path_materialization_plan,
+                    primary_synced_workspace: &stage.synced,
+                    extra_synced_workspaces: &stage.synced_extra_workspaces,
+                },
+            )
+            .unwrap();
+            drop(scope);
+            let reopened = ObservationStore::open_initialized_at(store.database_path()).unwrap();
+            let spans = reopened.phase_spans(&run.id).unwrap().spans;
+            let hashing = spans
+                .iter()
+                .filter(|span| {
+                    span.id.ends_with("content_manifest_hash")
+                        || span.id.ends_with("snapshot_build_hash")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(hashing.len(), 2, "one hash for each root: {hashing:?}");
+            assert_eq!(stage.workspace_snapshots.len(), 2);
+            for entry in metadata["workspace_provenance"]["entries"]
+                .as_array()
+                .unwrap()
+            {
+                let path = Path::new(entry["remote_path"].as_str().unwrap());
+                let excludes = serde_json::from_value::<Vec<String>>(
+                    entry["source_snapshot"]["sync_excludes"].clone(),
+                )
+                .unwrap();
+                let independent = crate::workspace_content_hash(path, &excludes).unwrap();
+                assert_eq!(entry["workspace_verification"]["content_hash"], independent);
+                let manifest = crate::workspace_content_manifest_for_policy(
+                    path,
+                    &excludes,
+                    crate::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                )
+                .unwrap();
+                assert_eq!(
+                    entry["workspace_verification"]["content_manifest"],
+                    serde_json::to_value(manifest).unwrap()
+                );
+            }
+            assert_eq!(
+                metadata["workspace_verification"]["content_hash"],
+                crate::workspace_content_hash(Path::new(&stage.remote_cwd), &stage.synced.excludes)
+                    .unwrap()
+            );
+        });
+    }
+
+    fn assert_rig_stage_paths(stage: &LabOffloadWorkspaceStage) {
+        let component_remote_root = stage
+            .workspace_mapping
+            .iter()
+            .find(|entry| entry.role() == "rig_component_dependency")
+            .map(|entry| entry.remote_path().to_string())
+            .expect("component workspace mapping");
+        let component_remote_path = format!("{component_remote_root}/projects/plugins/jetpack");
+
+        assert!(Path::new(&component_remote_path)
+            .join("package.json")
+            .is_file());
+        assert!(
+            stage
+                .command
+                .windows(2)
+                .any(|pair| pair == ["--path", component_remote_path.as_str()]),
+            "remote command: {:?}; component mappings: {:?}; overrides: {:?}",
+            stage.command,
+            stage
                 .workspace_mapping
                 .iter()
-                .find(|entry| entry.role() == "rig_component_dependency")
-                .map(|entry| entry.remote_path().to_string())
-                .expect("component workspace mapping");
-            let component_remote_path = format!("{component_remote_root}/projects/plugins/jetpack");
-
-            assert!(Path::new(&component_remote_path)
-                .join("package.json")
-                .is_file());
-            assert!(
-                stage
-                    .command
-                    .windows(2)
-                    .any(|pair| pair == ["--path", component_remote_path.as_str()]),
-                "remote command: {:?}; component mappings: {:?}; overrides: {:?}",
-                stage.command,
-                stage
-                    .workspace_mapping
-                    .iter()
-                    .filter(|entry| entry.role() == "rig_component_dependency")
-                    .map(|entry| (entry.local_path(), entry.remote_path()))
-                    .collect::<Vec<_>>(),
-                stage.rig_component_path_overrides
-            );
-            assert!(stage.rig_component_path_overrides.contains(&(
-                "HOMEBOY_RIG_COMPONENT_PATH__JETPACK_API_ROUTE_INVENTORY__JETPACK".to_string(),
-                component_remote_path,
-            )));
-            assert!(stage.rig_component_path_overrides.contains(&(
-                "HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__JETPACK_API_ROUTE_INVENTORY__JETPACK"
-                    .to_string(),
-                component_remote_root,
-            )));
-        });
+                .filter(|entry| entry.role() == "rig_component_dependency")
+                .map(|entry| (entry.local_path(), entry.remote_path()))
+                .collect::<Vec<_>>(),
+            stage.rig_component_path_overrides
+        );
+        assert!(stage.rig_component_path_overrides.contains(&(
+            "HOMEBOY_RIG_COMPONENT_PATH__JETPACK_API_ROUTE_INVENTORY__JETPACK".to_string(),
+            component_remote_path,
+        )));
+        assert!(stage.rig_component_path_overrides.contains(&(
+            "HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__JETPACK_API_ROUTE_INVENTORY__JETPACK".to_string(),
+            component_remote_root,
+        )));
     }
 
     #[test]
@@ -3807,6 +3927,7 @@ mod tests {
             ),
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: "snapshot:primary".to_string(),
+            content: None,
             workspace_ref: "workspace:00000000-0000-0000-0000-000000000001".to_string(),
             prepared_workspace_lease: None,
             counts: crate::ByteFileCounts::default(),

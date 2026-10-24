@@ -111,6 +111,7 @@ fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
         ),
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: "snapshot:abc".to_string(),
+        content: None,
         workspace_ref: "workspace:00000000-0000-0000-0000-000000000001".to_string(),
         prepared_workspace_lease: None,
         counts: crate::ByteFileCounts {
@@ -167,6 +168,7 @@ fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
         ),
         sync_mode: RunnerWorkspaceSyncMode::Git,
         snapshot_identity: "abc123".to_string(),
+        content: None,
         workspace_ref: "workspace:00000000-0000-0000-0000-000000000002".to_string(),
         prepared_workspace_lease: None,
         counts: crate::ByteFileCounts::default(),
@@ -302,19 +304,21 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         Some(&remote_path.display().to_string()),
         None,
     );
-    let mut missing_source_path = snapshot.clone();
-    missing_source_path.local_path = None;
-    let error = attach_lab_workspace_metadata(
+    let mut missing_inventory = synced_workspace.clone();
+    missing_inventory.content = None;
+    assert!(attach_lab_workspace_metadata(
         &mut metadata,
         LabWorkspaceMetadataInputs {
-            source_snapshot: &missing_source_path,
-            workspace_snapshots: &[missing_source_path.clone()],
+            source_snapshot: &snapshot,
+            workspace_snapshots: std::slice::from_ref(&snapshot),
             legacy_path_materialization_plan: &path_materialization_plan,
-            primary_synced_workspace: &synced_workspace,
+            primary_synced_workspace: &missing_inventory,
+            extra_synced_workspaces: &[],
         },
     )
-    .expect_err("verification metadata requires the controller source path");
-    assert!(error.message.contains("requires a controller source path"));
+    .expect_err("missing sync inventory must not trigger a recompute")
+    .message
+    .contains("no content inventory"));
     attach_lab_workspace_metadata(
         &mut metadata,
         LabWorkspaceMetadataInputs {
@@ -322,6 +326,7 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
             workspace_snapshots: &[snapshot.clone()],
             legacy_path_materialization_plan: &path_materialization_plan,
             primary_synced_workspace: &synced_workspace,
+            extra_synced_workspaces: &[],
         },
     )
     .expect("build verifier metadata");
@@ -483,6 +488,16 @@ fn primary_synced_workspace(
         ),
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: "snapshot:verified".to_string(),
+        content: Some((
+            crate::workspace_content_manifest_for_policy(
+                Path::new(&local_path),
+                &["excluded.txt".to_string()],
+                crate::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+            )
+            .expect("source manifest"),
+            crate::workspace_content_hash(Path::new(&local_path), &["excluded.txt".to_string()])
+                .expect("source digest"),
+        )),
         workspace_ref: "workspace:00000000-0000-0000-0000-000000000003".to_string(),
         prepared_workspace_lease: None,
         counts: crate::ByteFileCounts::default(),
