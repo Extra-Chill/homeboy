@@ -206,13 +206,13 @@ function normalizeTraceEvent(source, event, data = {}, timestampMs = undefined) 
 	return stableJson(entry);
 }
 
-function normalizeTraceAssertion(id, status, message, data = undefined) {
+function normalizeTraceAssertion(id, status, message, details = undefined) {
 	const assertion = {
 		id: stringValue(id),
 		status: VALID_TRACE_ASSERTION_STATUSES.has(status) ? status : 'unknown',
 		message: stringValue(message),
 	};
-	if (data !== undefined) assertion.data = data;
+	if (details !== undefined) assertion.details = details;
 	return stableJson(assertion);
 }
 

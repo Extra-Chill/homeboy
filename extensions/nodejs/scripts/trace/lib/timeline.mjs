@@ -22,7 +22,8 @@ export class TraceRecorder {
     }
 
     timestampMs() {
-        return Math.round((performance.now() - this.start) * 1000) / 1000;
+        // Whole milliseconds: Homeboy core reads t_ms as an unsigned integer.
+        return Math.round(performance.now() - this.start);
     }
 
     async recordEvent(source, event, data = {}) {

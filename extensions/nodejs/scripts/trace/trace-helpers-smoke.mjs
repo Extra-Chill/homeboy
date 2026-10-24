@@ -33,7 +33,7 @@ try {
     assert.equal(passEnvelope.artifacts.find((artifact) => artifact.label === 'Metrics')?.path, 'metrics.json');
     assert.equal(passEnvelope.artifacts.find((artifact) => artifact.label === 'timeline')?.path, 'trace.jsonl');
     assert.equal(passEnvelope.timeline[0].data.token, '[Redacted]');
-    assert.equal(passEnvelope.assertions[0].data.password, '[Redacted]');
+    assert.equal(passEnvelope.assertions[0].details.password, '[Redacted]');
     assert.equal(passEnvelope.metrics.apiKey, '[Redacted]');
 
     const written = JSON.parse(await readFile(resultsFile, 'utf8'));
@@ -62,7 +62,7 @@ try {
     assert.equal(workloadEnvelope.timeline[0].source, 'fixture');
     assert.equal(workloadEnvelope.timeline[0].data.cookie, '[Redacted]');
     assert.equal(workloadEnvelope.artifacts.find((artifact) => artifact.label === 'Workload metrics')?.path, 'metrics.json');
-    assert.equal(workloadEnvelope.assertions.find((assertion) => assertion.id === 'workload-check-helper')?.data.authorization, '[Redacted]');
+    assert.equal(workloadEnvelope.assertions.find((assertion) => assertion.id === 'workload-check-helper')?.details.authorization, '[Redacted]');
 
     const snapshot = {
         page_url: 'https://example.test/wp-admin/site-editor.php',
