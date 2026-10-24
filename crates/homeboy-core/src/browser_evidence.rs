@@ -1,3 +1,4 @@
+use homeboy_extension_contract::TraceAssertion;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -189,25 +190,6 @@ pub(crate) struct TraceEvent {
     pub event: String,
     #[serde(default)]
     pub data: Map<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum TraceAssertionStatus {
-    Pass,
-    Fail,
-    Skip,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TraceAssertion {
-    pub id: String,
-    pub status: TraceAssertionStatus,
-    pub message: String,
-    #[serde(default)]
-    pub data: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

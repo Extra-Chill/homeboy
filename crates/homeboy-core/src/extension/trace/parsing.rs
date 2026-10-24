@@ -110,6 +110,19 @@ mod tests {
     }
 
     #[test]
+    fn trace_json_parser_keeps_assertion_details() {
+        let parsed = parse_trace_results_str(
+            r#"{"component_id":"studio","scenario_id":"x","status":"pass","timeline":[],"assertions":[{"id":"port-moved","status":"pass","message":"Moved off a taken port","details":{"port":8026}}],"artifacts":[]}"#,
+        )
+        .expect("assertion details should parse");
+
+        assert_eq!(
+            parsed.assertions[0].details,
+            Some(serde_json::json!({ "port": 8026 }))
+        );
+    }
+
+    #[test]
     fn trace_json_parser_rejects_invalid_status() {
         let err = parse_trace_results_str(
             r#"{"component_id":"studio","scenario_id":"x","status":"unknown","timeline":[],"assertions":[],"artifacts":[]}"#,
