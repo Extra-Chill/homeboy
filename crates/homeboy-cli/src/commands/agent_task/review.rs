@@ -2572,7 +2572,7 @@ fn resolve_provider_route_for(
         ..Default::default()
     };
     let route = match agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
-        command, catalog,
+        command, catalog, None,
     ) {
         Ok(route) => route,
         Err(error) => {
@@ -4427,14 +4427,16 @@ mod tests {
                 agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
                     agent_task_dispatch_service::AgentTaskDispatchCommand::default(),
                     &catalog,
+                    None,
                 )
                 .expect("resolve rotated Cook route");
             assert_eq!(route.backend, "fallback");
             assert_eq!(route.selector.as_deref(), Some("fallback.provider"));
             assert_eq!(route.model.as_deref(), Some("fallback-model"));
-            let error = super::super::run::preflight_cook_provider_credentials_with_catalog(
+            let error = super::super::run::preflight_cook_provider_credentials(
                 agent_task_dispatch_service::AgentTaskDispatchCommand::default(),
                 &catalog,
+                None,
             )
             .expect_err("injected fallback credential must be preflighted without rediscovery");
             assert!(error.message.contains(&credential), "{error}");

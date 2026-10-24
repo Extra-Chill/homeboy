@@ -2885,12 +2885,15 @@ pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
         &dispatch.tasks,
         dispatch.core.tasks_json.as_deref(),
     )?;
+    let component = dispatch.declared_component();
     let initial_route =
         agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
             dispatch.clone(),
             catalog,
+            component.as_ref(),
         )?;
-    let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch)?;
+    let request =
+        agent_task_dispatch_service::resolve_dispatch_request(dispatch, component.as_ref())?;
     // Preserve the early static rejection for a single route. Rotation plans
     // are checked as complete effective plans below so an unavailable primary
     // cannot hide a valid fallback. The in-tree test double is not a catalog
