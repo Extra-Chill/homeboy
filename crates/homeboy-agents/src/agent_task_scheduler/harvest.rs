@@ -1580,6 +1580,85 @@ mod committed_harvest_tests {
         assert_eq!(bundles(&outcome).len(), 1);
     }
 
+    /// A Cook candidate is its commit (#16303): harvesting a dirty attempt
+    /// through the scheduler path records `outcome.candidate` and writes no
+    /// patch artifact, neither in the outcome nor under the attempt-patches
+    /// directory.
+    #[test]
+    fn dirty_attempt_harvest_writes_no_patch_artifact() {
+        // Controller-side harvest: no Lab runner identity, so no bundle either.
+        let _lab_env = LAB_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Lab environment lock");
+        let _home = homeboy_core::test_support::home_env_guard();
+        let _runner = homeboy_core::test_support::EnvVarGuard::unset(
+            homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV,
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        std::fs::write(workspace.join("file.txt"), "agent change\n").expect("tracked edit");
+        std::fs::write(workspace.join("new.txt"), "untracked\n").expect("untracked");
+        let running = committed_harvest_running_task(temp.path(), &workspace, None, base.clone());
+        let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+
+        // The engine's post-provider harvest sequence.
+        harvest_committed_patch(&mut outcome, &running)
+            .and_then(|_| harvest_candidate_commit(&mut outcome, &running))
+            .expect("harvest");
+        finalize_candidate_artifacts(&mut outcome, &running);
+
+        let candidate = outcome.candidate.as_ref().expect("dirty attempt candidate");
+        assert_eq!(candidate.base_sha, base);
+        assert_eq!(candidate.tree_sha, final_worktree_tree(&workspace));
+        let patches: Vec<&AgentTaskArtifact> = outcome
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == "patch")
+            .collect();
+        assert!(patches.is_empty(), "patch artifacts recorded: {patches:?}");
+        let attempt_patches = artifact_root_for_running(&running)
+            .expect("artifact root")
+            .join("agent-task")
+            .join("attempt-patches");
+        let under_attempt_patches: Vec<&AgentTaskArtifact> = outcome
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| Path::new(path).starts_with(&attempt_patches))
+            })
+            .collect();
+        assert!(
+            under_attempt_patches.is_empty(),
+            "artifacts under {}: {under_attempt_patches:?}",
+            attempt_patches.display()
+        );
+        let mut written = Vec::new();
+        let mut pending = vec![attempt_patches.clone()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.expect("attempt-patches entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    written.push(path);
+                }
+            }
+        }
+        assert!(
+            written.is_empty(),
+            "files written under {}: {written:?}",
+            attempt_patches.display()
+        );
+    }
+
     #[test]
     fn committed_attempt_candidate_keeps_provider_commits() {
         let temp = tempfile::tempdir().expect("tempdir");
