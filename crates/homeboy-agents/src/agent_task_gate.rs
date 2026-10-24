@@ -740,8 +740,6 @@ pub struct AgentTaskGateCargoTargetEvidence {
     pub bytes_before: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_after: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elapsed_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2262,22 +2260,35 @@ fn run_gate_argv_with_supervision(
     package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
     declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
 ) -> Result<AgentTaskGateReport> {
-    run_gate_argv(
-        cwd,
-        index,
-        command_vec,
-        command,
-        visibility,
-        reveal_policy,
-        GateExecution {
-            runtime_tmpdir,
-            timeout: supervision.map(|supervision| supervision.timeout),
-            supervision,
-            baseline_timeout_diagnostic: false,
+    crate::phase_timing::time_with_outcome(
+        "gate.command",
+        || {
+            run_gate_argv(
+                cwd,
+                index,
+                command_vec,
+                command,
+                visibility,
+                reveal_policy,
+                GateExecution {
+                    runtime_tmpdir,
+                    timeout: supervision.map(|supervision| supervision.timeout),
+                    supervision,
+                    baseline_timeout_diagnostic: false,
+                },
+                gate_environment,
+                package_artifacts,
+                declared_plan,
+            )
         },
-        gate_environment,
-        package_artifacts,
-        declared_plan,
+        |report| {
+            matches!(
+                report.status,
+                AgentTaskGateStatus::Failed
+                    | AgentTaskGateStatus::Unavailable
+                    | AgentTaskGateStatus::Deferred
+            )
+        },
     )
 }
 
@@ -2423,7 +2434,6 @@ fn run_gate_argv_local(
             Some(format!("contain deterministic gate {command}")),
         )
     })?;
-    let target_started = Instant::now();
     let child = process.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -2604,7 +2614,9 @@ fn run_gate_argv_local(
         })
     });
 
-    selected_environment.finish_cargo_target(target_started.elapsed())?;
+    crate::phase_timing::time("publish.gate_cargo_target", || {
+        selected_environment.finish_cargo_target()
+    })?;
     let mut report = AgentTaskGateReport::new(
         format!("gate-{index}"),
         command_vec,
@@ -3080,20 +3092,18 @@ impl SelectedGateEnvironment {
             state: bytes_before.map(|bytes| if bytes == 0 { "miss" } else { "hit" }.to_string()),
             bytes_before,
             bytes_after: None,
-            elapsed_ms: None,
         });
         self._cargo_target = Some(target);
         Ok(())
     }
 
-    fn finish_cargo_target(&mut self, elapsed: Duration) -> Result<()> {
+    fn finish_cargo_target(&mut self) -> Result<()> {
         let (Some(target), Some(evidence)) =
             (&mut self._cargo_target, &mut self.report.cargo_target)
         else {
             return Ok(());
         };
         evidence.bytes_after = target.size_bytes().ok();
-        evidence.elapsed_ms = Some(elapsed.as_millis());
         target.publish()?;
         Ok(())
     }
@@ -4362,25 +4372,27 @@ pub fn preflight_gate_toolchains(
     runtime_tmpdir: Option<&Path>,
     timeout: Duration,
 ) -> Result<()> {
-    if let Some(runner_id) = policy.lab_runner.as_deref() {
-        return placement::preflight(
+    crate::phase_timing::time("admit.gate_toolchains", || {
+        if let Some(runner_id) = policy.lab_runner.as_deref() {
+            return placement::preflight(
+                cwd,
+                runner_id,
+                policy,
+                requirements,
+                package_artifacts,
+                timeout,
+            );
+        }
+        preflight_gate_toolchains_local(
             cwd,
-            runner_id,
             policy,
             requirements,
             package_artifacts,
+            runtime_tmpdir,
             timeout,
-        );
-    }
-    preflight_gate_toolchains_local(
-        cwd,
-        policy,
-        requirements,
-        package_artifacts,
-        runtime_tmpdir,
-        timeout,
-        false,
-    )
+            false,
+        )
+    })
 }
 
 pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOptions) -> Result<()> {
@@ -4477,7 +4489,6 @@ fn preflight_gate_toolchains_local(
         if started.is_some() && remaining.is_zero() {
             return Err(toolchain_preflight_error(
                 requirement,
-                elapsed.expect("started preflight deadline"),
                 timeout,
                 Duration::ZERO,
                 None,
@@ -4496,7 +4507,6 @@ fn preflight_gate_toolchains_local(
         let mut child = process.spawn().map_err(|error| {
             toolchain_preflight_error(
                 requirement,
-                elapsed.unwrap_or_default(),
                 timeout,
                 remaining,
                 None,
@@ -4518,7 +4528,6 @@ fn preflight_gate_toolchains_local(
         .map_err(|error| {
             toolchain_preflight_error(
                 requirement,
-                started.elapsed(),
                 timeout,
                 remaining,
                 None,
@@ -4542,7 +4551,6 @@ fn preflight_gate_toolchains_local(
             };
             return Err(toolchain_preflight_error(
                 requirement,
-                started.elapsed(),
                 timeout,
                 remaining,
                 Some(&output),
@@ -4709,7 +4717,6 @@ fn package_artifact_error(
 
 fn toolchain_preflight_error(
     requirement: &AgentTaskGateToolchainRequirement,
-    elapsed: Duration,
     timeout: Duration,
     probe_timeout: Duration,
     output: Option<&homeboy_core::engine::command::BoundedCommandOutput>,
@@ -4719,9 +4726,8 @@ fn toolchain_preflight_error(
     let mut error = Error::validation_invalid_argument(
         "gate_toolchains",
         format!(
-            "gate toolchain preflight failed for `{}` after {} ms (deadline {} ms): {reason}",
+            "gate toolchain preflight failed for `{}` (deadline {} ms): {reason}",
             requirement.command,
-            elapsed.as_millis(),
             timeout.as_millis(),
         ),
         Some(requirement.command.clone()),
@@ -4731,7 +4737,6 @@ fn toolchain_preflight_error(
     error.details["toolchain_preflight"] = json!({
         "command": requirement.command,
         "arguments": requirement.probe_arguments,
-        "elapsed_ms": elapsed.as_millis(),
         "timeout_ms": timeout.as_millis(),
         "probe_timeout_ms": probe_timeout.as_millis(),
         "timed_out": timed_out,
@@ -6754,6 +6759,9 @@ mod tests {
     fn isolated_cargo_targets_report_warm_cache_hits_and_distinct_allocations() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("gate fixture");
+            let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+            let run_id = crate::phase_timing::test_run(&store);
+            let _timing = crate::phase_timing::for_run(&store, &run_id);
             let mut policy = AgentTaskGateEnvironmentPolicy::default();
             policy.shared_cargo_target = Some(true);
             policy
@@ -6778,7 +6786,6 @@ mod tests {
             assert_eq!(first.state.as_deref(), Some("miss"));
             assert_eq!(first.bytes_before, Some(0));
             assert!(first.bytes_after.expect("target bytes") > 0);
-            assert!(first.elapsed_ms.is_some());
 
             let second = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
                 temp.path(),
@@ -6798,6 +6805,13 @@ mod tests {
             assert_eq!(second.state.as_deref(), Some("hit"));
             assert_ne!(first.identity, second.identity);
             assert_ne!(first.path, second.path);
+            let spans = store.phase_spans(&run_id).unwrap();
+            for phase in ["gate.command", "publish.gate_cargo_target"] {
+                assert_eq!(
+                    spans.spans.iter().filter(|span| span.id == phase).count(),
+                    2
+                );
+            }
         });
     }
 
@@ -10053,6 +10067,12 @@ exit 2
     #[test]
     fn toolchain_preflight_honors_a_100ms_limit() {
         let workspace = tempfile::tempdir().expect("workspace");
+        let store = homeboy_core::observation::ObservationStore::open_initialized_at(
+            workspace.path().join("observe.db"),
+        )
+        .unwrap();
+        let run_id = crate::phase_timing::test_run(&store);
+        let _timing = crate::phase_timing::for_run(&store, &run_id);
         let tool = workspace.path().join("hung-tool");
         homeboy_test_support::write_executable(&tool, "#!/bin/sh\n/bin/sleep 30\n", 0o755)
             .expect("tool");
@@ -10074,6 +10094,13 @@ exit 2
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(error.details["toolchain_preflight"]["timed_out"], true);
         assert_eq!(error.details["toolchain_preflight"]["timeout_ms"], 100);
+        let spans = store.phase_spans(&run_id).unwrap();
+        assert_eq!(spans.spans[0].id, "admit.gate_toolchains");
+        assert_eq!(
+            spans.spans[0].status,
+            homeboy_engine_primitives::phase_timing::PhaseStatus::Failed
+        );
+        assert!(spans.spans[0].duration_ms.unwrap() >= 100.0);
     }
 
     #[cfg(unix)]

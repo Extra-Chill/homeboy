@@ -694,6 +694,10 @@ fn promote_with_provider_and_checkpoint_internal(
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
+    let _timing = options
+        .source_run_id
+        .as_deref()
+        .map(|run_id| crate::phase_timing::for_run(observation_store, run_id));
     emit_promotion_progress(
         "apply",
         None,
@@ -1139,6 +1143,12 @@ mod declared_base_tests {
     #[test]
     fn declared_base_timeout_surfaces_subphase_stderr_and_budget() {
         let repo = tempfile::tempdir().expect("repo");
+        let store = homeboy_core::observation::ObservationStore::open_initialized_at(
+            repo.path().join("observe.db"),
+        )
+        .unwrap();
+        let run_id = crate::phase_timing::test_run(&store);
+        let _timing = crate::phase_timing::for_run(&store, &run_id);
         git(repo.path(), &["init", "-b", "main"]);
         git(
             repo.path(),
@@ -1171,9 +1181,13 @@ mod declared_base_tests {
         assert_eq!(preflight["phase"], "resolve");
         assert_eq!(preflight["subphase"], "ls-remote");
         assert_eq!(preflight["timeout_ms"], 800);
-        let elapsed_ms = preflight["elapsed_ms"].as_u64().expect("elapsed_ms");
-        assert!(elapsed_ms >= 300, "elapsed_ms={elapsed_ms}");
-        assert!(elapsed_ms < 3_000, "elapsed_ms={elapsed_ms}");
+        let spans = store.phase_spans(&run_id).unwrap();
+        assert_eq!(spans.spans[0].id, "resolve.git_base.resolve");
+        assert_eq!(
+            spans.spans[0].status,
+            homeboy_engine_primitives::phase_timing::PhaseStatus::Failed
+        );
+        assert!(spans.spans[0].duration_ms.unwrap() >= 800.0);
         assert_eq!(preflight["base_ref"], "main");
         assert_eq!(preflight["proxy_detected"], false);
         assert_eq!(preflight["proxy_forwarded"], false);
@@ -1239,10 +1253,6 @@ mod declared_base_tests {
         assert_eq!(error.retryable, Some(true));
         assert_eq!(error.details["git_base_preflight"]["timeout_ms"], 100);
         assert_eq!(error.details["git_base_preflight"]["subphase"], "ls-remote");
-        let elapsed_ms = error.details["git_base_preflight"]["elapsed_ms"]
-            .as_u64()
-            .expect("elapsed_ms");
-        assert!(elapsed_ms >= 100, "elapsed_ms={elapsed_ms}");
     }
 
     #[test]
@@ -1682,6 +1692,10 @@ fn run_promotion_gates(
     gate_workspace: Option<&Path>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PromotionGateRun> {
+    let _timing = options
+        .source_run_id
+        .as_deref()
+        .map(|run_id| crate::phase_timing::for_run(observation_store, run_id));
     let operation = || {
         run_promotion_gates_inner(
             options,
@@ -2565,14 +2579,8 @@ fn gate_setup_outcome_summary(outcome: &homeboy_core::deps::DependencyHydrationO
         Termination::SpawnFailed => format!(
             "`{command}` could not be started; install `{program}` where the Homeboy controller runs gates (or make it available on PATH)"
         ),
-        Termination::TimedOut => format!(
-            "`{command}` timed out after {}ms",
-            outcome.duration_ms
-        ),
-        Termination::NoProgress => format!(
-            "`{command}` stopped making progress after {}ms",
-            outcome.duration_ms
-        ),
+        Termination::TimedOut => format!("`{command}` timed out"),
+        Termination::NoProgress => format!("`{command}` stopped making progress"),
         Termination::Cancelled => format!("`{command}` was cancelled"),
         Termination::OutputValidationFailed => format!(
             "`{command}` finished but did not produce its declared outputs"
@@ -3118,11 +3126,6 @@ fn declared_base_git_timeout() -> Duration {
         .unwrap_or(DEFAULT_DECLARED_BASE_GIT_TIMEOUT)
 }
 
-struct DeclaredBaseGitObservation {
-    output: Output,
-    elapsed: Duration,
-}
-
 fn capture_declared_base_with_git_and_timeout(
     worktree_path: &Path,
     base_ref: Option<&str>,
@@ -3147,19 +3150,18 @@ fn capture_declared_base_with_git_and_timeout(
         "resolve",
         timeout,
     )?;
-    if !observed.output.status.success() {
+    if !observed.status.success() {
         return Err(declared_base_git_failure(
             worktree_path,
             base_ref,
             "resolve",
             "ls-remote",
-            &observed.output.stderr,
+            &observed.stderr,
             environment,
             timeout,
-            observed.elapsed,
         ));
     }
-    let sha = String::from_utf8_lossy(&observed.output.stdout)
+    let sha = String::from_utf8_lossy(&observed.stdout)
         .split_whitespace()
         .next()
         .filter(|sha| !sha.is_empty())
@@ -3196,16 +3198,15 @@ fn capture_declared_base_with_git_and_timeout(
             )
         },
     )?;
-    if !fetch.output.status.success() {
+    if !fetch.status.success() {
         return Err(declared_base_git_failure(
             worktree_path,
             base_ref,
             "fetch",
             "fetch",
-            &fetch.output.stderr,
+            &fetch.stderr,
             environment,
             timeout,
-            fetch.elapsed,
         ));
     }
     let output = run_declared_base_git(
@@ -3217,7 +3218,7 @@ fn capture_declared_base_with_git_and_timeout(
         "verify",
         timeout,
     )?;
-    if !output.output.status.success() {
+    if !output.status.success() {
         return Err(Error::validation_invalid_argument(
             "base_ref",
             format!("could not resolve declared base `{base_ref}` before promotion gates"),
@@ -3227,9 +3228,7 @@ fn capture_declared_base_with_git_and_timeout(
     }
     Ok(Some(AgentTaskPromotionVerifiedBase {
         base: base_ref.to_string(),
-        sha: String::from_utf8_lossy(&output.output.stdout)
-            .trim()
-            .to_string(),
+        sha: String::from_utf8_lossy(&output.stdout).trim().to_string(),
     }))
 }
 
@@ -3313,83 +3312,80 @@ fn run_declared_base_git(
     base_ref: &str,
     phase: &str,
     timeout: Duration,
-) -> Result<DeclaredBaseGitObservation> {
-    let subphase = args.first().copied().unwrap_or(phase);
-    let started = Instant::now();
-    let mut command = Command::new(git);
-    command
-        .args(args)
-        .current_dir(worktree_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .envs(environment.iter().map(|(key, value)| (key, value)));
-    homeboy_core::engine::command::isolate_process_tree(&mut command);
-    let mut child = command.spawn().map_err(|error| {
-        declared_base_transport_error(
-            worktree_path,
-            base_ref,
-            phase,
-            subphase,
-            format!("could not start Git base preflight: {error}"),
-            environment,
-            timeout,
-            started.elapsed(),
-            None,
-        )
-    })?;
-    let supervised = homeboy_core::engine::command::wait_with_bounded_output_supervised(
-        &mut child,
-        homeboy_core::engine::command::DEFAULT_CAPTURE_LIMIT_BYTES,
-        timeout,
-        DECLARED_BASE_GIT_HEARTBEAT,
-        || false,
-        |_, _| Ok(()),
+) -> Result<Output> {
+    crate::phase_timing::time_with_outcome(
+        &format!("resolve.git_base.{phase}"),
+        || {
+            let subphase = args.first().copied().unwrap_or(phase);
+            let mut command = Command::new(git);
+            command
+                .args(args)
+                .current_dir(worktree_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .envs(environment.iter().map(|(key, value)| (key, value)));
+            homeboy_core::engine::command::isolate_process_tree(&mut command);
+            let mut child = command.spawn().map_err(|error| {
+                declared_base_transport_error(
+                    worktree_path,
+                    base_ref,
+                    phase,
+                    subphase,
+                    format!("could not start Git base preflight: {error}"),
+                    environment,
+                    timeout,
+                    None,
+                )
+            })?;
+            let supervised = homeboy_core::engine::command::wait_with_bounded_output_supervised(
+                &mut child,
+                homeboy_core::engine::command::DEFAULT_CAPTURE_LIMIT_BYTES,
+                timeout,
+                DECLARED_BASE_GIT_HEARTBEAT,
+                || false,
+                |_, _| Ok(()),
+            )
+            .map_err(|error| {
+                declared_base_transport_error(
+                    worktree_path,
+                    base_ref,
+                    phase,
+                    subphase,
+                    format!("could not supervise Git base preflight: {error}"),
+                    environment,
+                    timeout,
+                    None,
+                )
+            })?;
+            if supervised.termination
+                != homeboy_core::engine::command::SupervisedCommandTermination::Completed
+            {
+                let stderr = redact_declared_base_git_diagnostic(&String::from_utf8_lossy(
+                    &supervised.output.stderr,
+                ));
+                let mut problem = format!(
+                    "Git base preflight `{subphase}` exceeded its deadline (budget {}ms)",
+                    timeout.as_millis()
+                );
+                if !stderr.is_empty() {
+                    problem = format!("{problem}: {stderr}");
+                }
+                return Err(declared_base_transport_error(
+                    worktree_path,
+                    base_ref,
+                    phase,
+                    subphase,
+                    problem,
+                    environment,
+                    timeout,
+                    Some(stderr.as_str()).filter(|value| !value.is_empty()),
+                ));
+            }
+            Ok(supervised.output.into_output())
+        },
+        |output| !output.status.success(),
     )
-    .map_err(|error| {
-        declared_base_transport_error(
-            worktree_path,
-            base_ref,
-            phase,
-            subphase,
-            format!("could not supervise Git base preflight: {error}"),
-            environment,
-            timeout,
-            started.elapsed(),
-            None,
-        )
-    })?;
-    let elapsed = started.elapsed();
-    if supervised.termination
-        != homeboy_core::engine::command::SupervisedCommandTermination::Completed
-    {
-        let stderr = redact_declared_base_git_diagnostic(&String::from_utf8_lossy(
-            &supervised.output.stderr,
-        ));
-        let mut problem = format!(
-            "Git base preflight `{subphase}` exceeded its deadline after {}ms (budget {}ms)",
-            elapsed.as_millis(),
-            timeout.as_millis()
-        );
-        if !stderr.is_empty() {
-            problem = format!("{problem}: {stderr}");
-        }
-        return Err(declared_base_transport_error(
-            worktree_path,
-            base_ref,
-            phase,
-            subphase,
-            problem,
-            environment,
-            timeout,
-            elapsed,
-            Some(stderr.as_str()).filter(|value| !value.is_empty()),
-        ));
-    }
-    Ok(DeclaredBaseGitObservation {
-        output: supervised.output.into_output(),
-        elapsed,
-    })
 }
 
 fn declared_base_git_failure(
@@ -3400,7 +3396,6 @@ fn declared_base_git_failure(
     stderr: &[u8],
     environment: &[(String, String)],
     timeout: Duration,
-    elapsed: Duration,
 ) -> Error {
     let stderr = redact_declared_base_git_diagnostic(&String::from_utf8_lossy(stderr));
     if is_git_transport_failure(&stderr) {
@@ -3412,7 +3407,6 @@ fn declared_base_git_failure(
             format!("Git base preflight `{subphase}` failed: {stderr}"),
             environment,
             timeout,
-            elapsed,
             Some(stderr.as_str()).filter(|value| !value.is_empty()),
         );
     }
@@ -3437,7 +3431,6 @@ fn declared_base_transport_error(
     problem: String,
     environment: &[(String, String)],
     timeout: Duration,
-    elapsed: Duration,
     stderr: Option<&str>,
 ) -> Error {
     let names = environment.iter().map(|(key, _)| key).collect::<Vec<_>>();
@@ -3456,7 +3449,6 @@ fn declared_base_transport_error(
         "phase": phase,
         "subphase": subphase,
         "timeout_ms": timeout.as_millis() as u64,
-        "elapsed_ms": elapsed.as_millis() as u64,
         "retry_disposition": "retryable_transport_failure",
         "required_environment": names,
         "proxy_detected": proxy_present,

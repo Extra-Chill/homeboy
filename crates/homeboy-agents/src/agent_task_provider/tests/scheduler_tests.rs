@@ -660,7 +660,6 @@ fn provider_external_sigterm_is_not_reported_as_empty_stdout() {
     assert_eq!(data["termination_initiator"], json!("external_sigterm"));
     assert_eq!(data["homeboy_initiated_termination"], json!(false));
     assert_eq!(data["likely_oom_kill"], json!(false));
-    assert!(data["elapsed_ms"].is_u64(), "{data}");
     assert_eq!(data["execution_deadline_unix_ms"], serde_json::Value::Null);
     assert!(outcome
         .summary
@@ -723,7 +722,8 @@ fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
     let scheduler = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
     ))
-    .with_lifecycle_store(lifecycle_store.clone());
+    .with_lifecycle_store(lifecycle_store.clone())
+    .with_run_id(run_id);
 
     lifecycle_store
         .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
@@ -749,6 +749,21 @@ fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
         .evidence_refs
         .iter()
         .any(|reference| reference.kind == "executor-result"));
+    let spans = lifecycle_store
+        .open_observation_initialized()
+        .unwrap()
+        .phase_spans(run_id)
+        .unwrap();
+    let command = spans
+        .spans
+        .iter()
+        .find(|span| span.id == "provider.command")
+        .expect("real provider execution persists its timing");
+    assert_eq!(
+        command.status,
+        homeboy_engine_primitives::phase_timing::PhaseStatus::Failed
+    );
+    assert!(command.duration_ms.unwrap() > 0.0);
     assert!(record.latest_executor_evidence.is_some());
     assert!(record
         .artifact_refs

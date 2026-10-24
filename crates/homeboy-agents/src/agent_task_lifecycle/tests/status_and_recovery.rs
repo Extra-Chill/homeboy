@@ -692,7 +692,6 @@ fn public_candidate_adoption_gate_progress_is_durable() {
     assert_eq!(adoption.gate_process_group, Some(u32::MAX));
     assert_eq!(adoption.gate_timeout_seconds, Some(1800));
     assert_eq!(adoption.gate_output_tail, "running output tail");
-    assert_eq!(adoption.gate_elapsed_ms, Some(42));
     assert_eq!(adoption.gate_last_progress_ms_ago, Some(7));
     assert_eq!(
         adoption
@@ -770,7 +769,6 @@ fn private_candidate_adoption_gate_progress_is_redacted_before_persistence() {
     .candidate_adoption
     .expect("active adoption");
     assert_eq!(adoption.gate_output_tail, "private gate output withheld");
-    assert_eq!(adoption.gate_elapsed_ms, Some(0));
     assert!(adoption.gate_last_progress_ms_ago.is_none());
     assert!(adoption.gate_progress.is_none());
     let persisted = serde_json::to_string(&adoption).expect("adoption serializes");

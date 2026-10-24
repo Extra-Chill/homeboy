@@ -825,14 +825,22 @@ fn run_materialized_provider_command_once_with_credentials(
     execution: &AgentTaskExecutionContext,
     credential_env: Option<&[(String, String)]>,
 ) -> AgentTaskOutcome {
+    let _timing = crate::phase_timing::for_execution(execution);
     let mut containment_report = ProviderContainmentReport::default();
-    let mut outcome = run_materialized_provider_command_once_contained(
-        request,
-        provider,
-        &mut containment_report,
-        execution,
-        credential_env,
-    );
+    let mut outcome = crate::phase_timing::time_with_outcome(
+        "provider.command",
+        || {
+            Ok(run_materialized_provider_command_once_contained(
+                request,
+                provider,
+                &mut containment_report,
+                execution,
+                credential_env,
+            ))
+        },
+        |outcome| outcome.status != AgentTaskOutcomeStatus::Succeeded,
+    )
+    .expect("provider operation returns an outcome");
     // Adapter metadata.model is the requested Pi route, not the provider's
     // responseModel. Keep response identity separate from routing identity.
     if request.request.executor.backend == "pi" {
@@ -1647,7 +1655,6 @@ fn run_materialized_provider_command_once_contained(
                 &stdout,
                 &stderr,
                 SignalTerminationContext {
-                    elapsed_ms: started.elapsed().as_millis(),
                     requested_timeout_ms,
                     process_timeout_ms: process_timeout.as_millis(),
                     liveness_timeout_ms: Some(liveness_timeout_ms),
@@ -2368,12 +2375,8 @@ fn executor_process_diagnostic_data(
     })
 }
 
-/// Timing/budget context captured at the moment a provider process was
-/// observed to have died from a signal. Recorded verbatim in the diagnostic so
-/// an operator can tell "no deadline was configured" apart from "a deadline
-/// expired" without re-deriving it from the aggregate.
+/// Deadline configuration at signal termination; duration lives in phase spans.
 pub(super) struct SignalTerminationContext {
-    pub elapsed_ms: u128,
     pub requested_timeout_ms: u64,
     pub process_timeout_ms: u128,
     pub liveness_timeout_ms: Option<u64>,
@@ -2491,31 +2494,16 @@ fn signal_termination_outcome(
             "likely_oom_kill".to_string(),
             Value::Bool(signal == 9 && stdout.is_empty() && stderr.is_empty()),
         );
-        object.insert(
-            "elapsed_ms".to_string(),
-            Value::from(u64::try_from(context.elapsed_ms).unwrap_or(u64::MAX)),
-        );
-        object.insert(
-            "timeout_ms".to_string(),
-            Value::from(context.requested_timeout_ms),
-        );
-        object.insert(
-            "process_timeout_ms".to_string(),
-            Value::from(u64::try_from(context.process_timeout_ms).unwrap_or(u64::MAX)),
-        );
-        object.insert(
-            "liveness_timeout_ms".to_string(),
-            context
-                .liveness_timeout_ms
-                .map(Value::from)
-                .unwrap_or(Value::Null),
-        );
-        object.insert(
-            "execution_deadline_unix_ms".to_string(),
-            context
-                .execution_deadline_unix_ms
-                .map(Value::from)
-                .unwrap_or(Value::Null),
+        object.extend(
+            json!({
+                "timeout_ms": context.requested_timeout_ms,
+                "process_timeout_ms": u64::try_from(context.process_timeout_ms).unwrap_or(u64::MAX),
+                "liveness_timeout_ms": context.liveness_timeout_ms,
+                "execution_deadline_unix_ms": context.execution_deadline_unix_ms,
+            })
+            .as_object()
+            .expect("budget object")
+            .clone(),
         );
         object.insert(
             "signal_remediation_hints".to_string(),
@@ -2535,10 +2523,9 @@ fn signal_termination_outcome(
         AgentTaskFailureClassification::Provider,
         "agent_task.provider_signal_terminated",
         format!(
-            "provider '{}' was terminated by {} after {}ms before producing an outcome ({stdout_note}); termination was not initiated by Homeboy's provider deadline or liveness watchdog",
+            "provider '{}' was terminated by {} before producing an outcome ({stdout_note}); termination was not initiated by Homeboy's provider deadline or liveness watchdog",
             provider.id,
-            signal_label(signal),
-            context.elapsed_ms
+            signal_label(signal)
         ),
         data,
     )
