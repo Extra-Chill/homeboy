@@ -1533,6 +1533,16 @@ fn promisor_configured_transport_seals_local_lab_bundle_without_runner_transport
             false,
         )
         .unwrap();
+        let timing_root = tempfile::tempdir().unwrap();
+        let timing_store = homeboy_core::observation::ObservationStore::open_initialized_at(
+            timing_root.path().join("timing.db"),
+        )
+        .unwrap();
+        let timing_run = timing_store
+            .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+            .unwrap();
+        let _timing =
+            homeboy_core::observation::phase_timing::for_run(&timing_store, &timing_run.id);
         let (output, status) = sync_workspace(
             "lab-promisor-transport",
             RunnerWorkspaceSyncOptions {
@@ -1544,6 +1554,27 @@ fn promisor_configured_transport_seals_local_lab_bundle_without_runner_transport
             },
         )
         .expect("persisted selected-promisor policy must hydrate and seal the bundle");
+        let reopened = homeboy_core::observation::ObservationStore::open_initialized_at(
+            timing_store.database_path(),
+        )
+        .unwrap();
+        let spans = reopened.phase_spans(&timing_run.id).unwrap().spans;
+        for name in [
+            "runner_inventory",
+            "bundle_object_closure",
+            "delta_computation",
+            "bundle_build",
+            "bundle_hash",
+            "transfer_apply_verify",
+        ] {
+            let id = format!("stage.lab.source_materialization.{name}");
+            let span = spans
+                .iter()
+                .find(|span| span.id == id)
+                .unwrap_or_else(|| panic!("missing {id}"));
+            assert!(span.duration_ms.is_some());
+            assert_eq!(span.status, homeboy_core::phase_timing::PhaseStatus::Ok);
+        }
         assert_eq!(status, 0);
         assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);
         assert!(output.materialization_plan.controller_git_bundle.is_some());

@@ -173,7 +173,10 @@ pub(super) fn materialize_git_bundle_controlled(
     // resolved SHA is recorded separately in provenance and verified on Lab.
     let refs = controller_bundle_refs("HEAD", request.changed_since_base, request.git_fetch_refs);
     let object_cache = git_object_cache_path(request.remote_path, request.remote_url);
-    let cached = cached_commits(runner, &object_cache, control)?;
+    let cached = homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.runner_inventory",
+        || cached_commits(runner, &object_cache, control),
+    )?;
 
     // The runner already holds this exact commit (a sibling of the same batch,
     // or the batch's prepared bundle, transferred it): install from the cache
@@ -186,13 +189,19 @@ pub(super) fn materialize_git_bundle_controlled(
             Err(_) => {}
         }
     }
-    hydrate_controller_bundle_objects_controlled(request.local_path, &refs, control)?;
+    homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.bundle_object_closure",
+        || hydrate_controller_bundle_objects_controlled(request.local_path, &refs, control),
+    )?;
 
     // Commits the runner's object cache already holds need not cross the wire.
     // A thin transfer that cannot be installed (the cache lost objects between
     // the query and the install) falls back to the complete closure, which
     // never depends on runner state.
-    let prerequisites = bundle_prerequisites(request.local_path, request.head, &cached, control)?;
+    let prerequisites = homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.delta_computation",
+        || bundle_prerequisites(request.local_path, request.head, &cached, control),
+    )?;
     if !prerequisites.is_empty() {
         match transfer_git_bundle(
             runner,
@@ -249,9 +258,14 @@ fn install_from_object_cache(
         request.allow_dirty_lab_workspace,
         object_cache,
     );
-    control.shell(
-        &super::util::shell_command_for_runner(runner, &command)?,
-        "materialize git workspace from the runner object cache",
+    homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.runner_apply_verify",
+        || {
+            control.shell(
+                &super::util::shell_command_for_runner(runner, &command)?,
+                "materialize git workspace from the runner object cache",
+            )
+        },
     )
 }
 
@@ -410,16 +424,21 @@ fn transfer_git_bundle(
     object_cache: &str,
     control: &WorkspaceControl,
 ) -> Result<String> {
-    let output = control.output(
-        Command::new("git")
-            .arg("bundle")
-            .arg("create")
-            .arg(bundle_path)
-            .args(refs)
-            .args(prerequisites.iter().map(|commit| format!("^{commit}")))
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .current_dir(request.local_path),
-        "create git bundle",
+    let output = homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.bundle_build",
+        || {
+            control.output(
+                Command::new("git")
+                    .arg("bundle")
+                    .arg("create")
+                    .arg(bundle_path)
+                    .args(refs)
+                    .args(prerequisites.iter().map(|commit| format!("^{commit}")))
+                    .env("GIT_NO_LAZY_FETCH", "1")
+                    .current_dir(request.local_path),
+                "create git bundle",
+            )
+        },
     )?;
     if !output.status.success() {
         return Err(Error::internal_unexpected(format!(
@@ -427,7 +446,10 @@ fn transfer_git_bundle(
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    let sha256 = super::snapshot::snapshot_file_sha256(bundle_path, control)?;
+    let sha256 = homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.bundle_hash",
+        || super::snapshot::snapshot_file_sha256(bundle_path, control),
+    )?;
     let retain = bundled_ref_commits(request.local_path, refs, control)?;
 
     let install_command = git_bundle_install_command(
@@ -444,39 +466,44 @@ fn transfer_git_bundle(
             retain: &retain,
         },
     );
-    match runner.kind {
-        RunnerKind::Local => materialize_git_bundle_piped_controlled(
-            bundle_path,
-            &format!("sh -c {}", shell::quote_arg(&install_command)),
-            "materialize local git bundle workspace",
-            control,
-        ),
-        RunnerKind::Ssh => {
-            let (_server, client) = ssh_client_for_runner(runner)?;
-            if client.is_local {
-                materialize_git_bundle_piped_controlled(
-                    bundle_path,
-                    &format!("sh -c {}", shell::quote_arg(&install_command)),
-                    "materialize local git bundle workspace",
-                    control,
-                )
-            } else {
-                let remote = format!("{}@{}", client.user, client.host);
-                let target = format!(
-                    "ssh {ssh_args} {remote} {remote_command}",
-                    ssh_args = ssh_args(&client),
-                    remote = shell::quote_arg(&remote),
-                    remote_command = shell::quote_arg(&install_command),
-                );
-                materialize_git_bundle_piped_controlled(
-                    bundle_path,
-                    &target,
-                    "materialize SSH git bundle workspace",
-                    control,
-                )
+    // Installation consumes the stream and verifies its digest on the runner;
+    // these overlap and cannot honestly be reported as separate wall times.
+    homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.transfer_apply_verify",
+        || match runner.kind {
+            RunnerKind::Local => materialize_git_bundle_piped_controlled(
+                bundle_path,
+                &format!("sh -c {}", shell::quote_arg(&install_command)),
+                "materialize local git bundle workspace",
+                control,
+            ),
+            RunnerKind::Ssh => {
+                let (_server, client) = ssh_client_for_runner(runner)?;
+                if client.is_local {
+                    materialize_git_bundle_piped_controlled(
+                        bundle_path,
+                        &format!("sh -c {}", shell::quote_arg(&install_command)),
+                        "materialize local git bundle workspace",
+                        control,
+                    )
+                } else {
+                    let remote = format!("{}@{}", client.user, client.host);
+                    let target = format!(
+                        "ssh {ssh_args} {remote} {remote_command}",
+                        ssh_args = ssh_args(&client),
+                        remote = shell::quote_arg(&remote),
+                        remote_command = shell::quote_arg(&install_command),
+                    );
+                    materialize_git_bundle_piped_controlled(
+                        bundle_path,
+                        &target,
+                        "materialize SSH git bundle workspace",
+                        control,
+                    )
+                }
             }
-        }
-    }?;
+        },
+    )?;
     Ok(sha256)
 }
 

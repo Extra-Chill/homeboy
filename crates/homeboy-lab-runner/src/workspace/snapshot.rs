@@ -117,53 +117,74 @@ pub(super) fn snapshot_identity_controlled(
     includes: &[String],
     control: &WorkspaceControl,
 ) -> Result<String> {
-    control.checkpoint()?;
-    let repository_integrity_evidence =
-        homeboy_core::repository_integrity::collect_operator_policy_evidence(local_path)?;
-    homeboy_core::repository_integrity::verify_tracked_symlink_portability(
-        local_path,
-        "HEAD",
-        repository_integrity_evidence.as_ref(),
-    )?;
-    let head = control
-        .git(local_path, &["rev-parse", "HEAD"])
-        .unwrap_or_else(|_| "nogit".to_string());
-    let status = snapshot_git_output_controlled(
-        local_path,
-        &["status", "--porcelain=v1"],
-        excludes,
-        control,
+    Ok(snapshot_identity_and_stats_controlled(local_path, excludes, includes, control)?.0)
+}
+
+/// Reuse the identity traversal's physical file facts instead of walking the
+/// same source again just to size filesystem admission.
+pub(super) fn snapshot_identity_and_stats_controlled(
+    local_path: &Path,
+    excludes: &[String],
+    includes: &[String],
+    control: &WorkspaceControl,
+) -> Result<(String, SnapshotStats)> {
+    homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.snapshot_build_hash",
+        || {
+            control.checkpoint()?;
+            let repository_integrity_evidence =
+                homeboy_core::repository_integrity::collect_operator_policy_evidence(local_path)?;
+            homeboy_core::repository_integrity::verify_tracked_symlink_portability(
+                local_path,
+                "HEAD",
+                repository_integrity_evidence.as_ref(),
+            )?;
+            let head = control
+                .git(local_path, &["rev-parse", "HEAD"])
+                .unwrap_or_else(|_| "nogit".to_string());
+            let status = snapshot_git_output_controlled(
+                local_path,
+                &["status", "--porcelain=v1"],
+                excludes,
+                control,
+            )
+            .unwrap_or_else(|_| "nogit".to_string());
+            let diff = snapshot_git_output_controlled(
+                local_path,
+                &["diff", "--binary", "HEAD"],
+                excludes,
+                control,
+            )
+            .unwrap_or_default();
+            let staged = snapshot_git_output_controlled(
+                local_path,
+                &["diff", "--cached", "--binary", "HEAD"],
+                excludes,
+                control,
+            )
+            .unwrap_or_default();
+            let mut hasher = Sha256::new();
+            hasher.update(local_path.display().to_string().as_bytes());
+            hasher.update(head.as_bytes());
+            hasher.update(status.as_bytes());
+            hasher.update(diff.as_bytes());
+            hasher.update(staged.as_bytes());
+            let mut stats = SnapshotStats { files: 0, bytes: 0 };
+            hash_snapshot_tree(
+                local_path,
+                local_path,
+                excludes,
+                includes,
+                &mut hasher,
+                &mut stats,
+                control,
+            )?;
+            Ok((
+                format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)),
+                stats,
+            ))
+        },
     )
-    .unwrap_or_else(|_| "nogit".to_string());
-    let diff = snapshot_git_output_controlled(
-        local_path,
-        &["diff", "--binary", "HEAD"],
-        excludes,
-        control,
-    )
-    .unwrap_or_default();
-    let staged = snapshot_git_output_controlled(
-        local_path,
-        &["diff", "--cached", "--binary", "HEAD"],
-        excludes,
-        control,
-    )
-    .unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(local_path.display().to_string().as_bytes());
-    hasher.update(head.as_bytes());
-    hasher.update(status.as_bytes());
-    hasher.update(diff.as_bytes());
-    hasher.update(staged.as_bytes());
-    hash_snapshot_tree(
-        local_path,
-        local_path,
-        excludes,
-        includes,
-        &mut hasher,
-        control,
-    )?;
-    Ok(format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)))
 }
 
 /// Return Git exclusion pathspecs with the same root and glob semantics as the
@@ -228,8 +249,13 @@ pub(super) fn workspace_content_manifest_and_hash_controlled(
     policy: &str,
     control: &WorkspaceControl,
 ) -> Result<(WorkspaceContentManifest, String)> {
-    let walk = workspace_content_walk_controlled(path, excludes, policy, control)?;
-    Ok((walk.manifest, walk.content_identity))
+    homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.content_manifest_hash",
+        || {
+            let walk = workspace_content_walk_controlled(path, excludes, policy, control)?;
+            Ok((walk.manifest, walk.content_identity))
+        },
+    )
 }
 
 /// Physical facts about one walked manifest entry, aligned by index with
@@ -626,6 +652,7 @@ fn hash_snapshot_tree(
     excludes: &[String],
     includes: &[String],
     hasher: &mut Sha256,
+    stats: &mut SnapshotStats,
     control: &WorkspaceControl,
 ) -> Result<()> {
     control.checkpoint()?;
@@ -658,8 +685,18 @@ fn hash_snapshot_tree(
         hasher.update(rel.as_bytes());
         if metadata.is_dir() {
             hasher.update(b"/dir");
-            hash_snapshot_tree(root, &entry_path, excludes, includes, hasher, control)?;
+            hash_snapshot_tree(
+                root,
+                &entry_path,
+                excludes,
+                includes,
+                hasher,
+                stats,
+                control,
+            )?;
         } else if metadata.is_file() {
+            stats.files += 1;
+            stats.bytes = stats.bytes.saturating_add(metadata.len());
             hasher.update(b"/file");
             hasher.update(metadata.len().to_le_bytes());
             read_file_chunks(&entry_path, control, |chunk| {
@@ -2079,45 +2116,60 @@ pub(super) fn materialize_snapshot_piped_controlled(
     // Resolve this once, before anything reads the tree: every manifest and the
     // staging archive must apply the identical exclude set or they disagree.
     let excludes = &excludes_with_links_controlled(local_path, excludes, control)?;
-    let manifest =
-        snapshot_input_manifest_controlled(local_path, excludes, control).map_err(|error| {
-            if error.details["workspace_sync"].is_object() {
-                return error;
-            }
-            snapshot_construction_failure(
-                "workspace_snapshot",
-                local_path,
-                None,
-                &format!(
-                    "{action}: {}; diagnostics: {}",
-                    error.message, error.details
-                ),
-            )
-        })?;
+    let manifest = homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.snapshot_input_manifest",
+        || snapshot_input_manifest_controlled(local_path, excludes, control),
+    )
+    .map_err(|error| {
+        if error.details["workspace_sync"].is_object() {
+            return error;
+        }
+        snapshot_construction_failure(
+            "workspace_snapshot",
+            local_path,
+            None,
+            &format!(
+                "{action}: {}; diagnostics: {}",
+                error.message, error.details
+            ),
+        )
+    })?;
     let source_manifest = manifest.stable_manifest.clone();
-    let stage = materialize_snapshot_stage_controlled(local_path, &manifest, scratch, control)
-        .map_err(|mut error| {
-            error.message = format!("{action}: {}", error.message);
-            error
-        })?;
+    let stage = homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.snapshot_stage_build",
+        || materialize_snapshot_stage_controlled(local_path, &manifest, scratch, control),
+    )
+    .map_err(|mut error| {
+        error.message = format!("{action}: {}", error.message);
+        error
+    })?;
     // The stage contains only the selected entries, so reapplying excludes here
     // would be a second interpretation of policy rather than a verification.
-    let staged_manifest =
-        snapshot_stable_manifest_controlled(&stage.path().join("source"), &[], control)?;
-    let current_manifest = snapshot_stable_manifest_controlled(local_path, excludes, control)?;
-    validate_snapshot_stability(
-        &source_manifest,
-        &staged_manifest,
-        &current_manifest,
-        local_path,
-        &stage.path().join("source"),
+    homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.snapshot_stability_verify",
+        || {
+            let staged_manifest =
+                snapshot_stable_manifest_controlled(&stage.path().join("source"), &[], control)?;
+            let current_manifest =
+                snapshot_stable_manifest_controlled(local_path, excludes, control)?;
+            validate_snapshot_stability(
+                &source_manifest,
+                &staged_manifest,
+                &current_manifest,
+                local_path,
+                &stage.path().join("source"),
+            )
+        },
     )?;
     let command = snapshot_staged_materialization_command(
         &stage.path().join("source"),
         target_command,
         scratch,
     );
-    control.shell(&command, action)
+    homeboy_core::observation::phase_timing::time(
+        "stage.lab.source_materialization.transfer_apply_verify",
+        || control.shell(&command, action),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
