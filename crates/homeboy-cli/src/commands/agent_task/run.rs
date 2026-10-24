@@ -746,7 +746,6 @@ pub(crate) fn preview_cook(
             &mut resolved,
             capacity.as_ref(),
             args.repository_identity.as_ref(),
-            preview_merged_worktree_reclaimable_bytes,
         );
         attach_preview_staging_component(&mut resolved, staging_component.as_ref());
         return Ok((
@@ -877,7 +876,6 @@ pub(crate) fn preview_cook(
         &mut resolved,
         capacity.as_ref(),
         args.repository_identity.as_ref(),
-        preview_merged_worktree_reclaimable_bytes,
     );
     resolved["gate_contract_validation"] =
         preview_gate_contract_disclosure(&gate_contract_validation, &args.gates.verify);
@@ -1002,49 +1000,10 @@ fn cook_preview_blocked_admission_failure(resolved: &Value) -> Option<Value> {
     Some(failure)
 }
 
-/// Estimate the bytes held by task worktrees `worktree cleanup` would
-/// nominate right now (merged, clean, no live owner). A dry-run nomination
-/// shares the exact predicate plain `worktree remove` accepts without
-/// `--force` (#16147), so the reserve-shortfall next-action can point at the
-/// surface that actually frees the space instead of repo artifacts.
-fn preview_merged_worktree_reclaimable_bytes() -> Option<u64> {
-    // A bounded dry-run plan: this runs on the shortfall error path only, and
-    // a partial nomination still proves merged worktrees hold reclaimable
-    // space, so an exhausted deadline degrades to an underestimate rather
-    // than stalling the preview.
-    let output = homeboy::core::worktree::cleanup_page(
-        homeboy::core::worktree::WorktreeCleanupPageOptions {
-            cleanup: homeboy::core::worktree::WorktreeCleanupOptions {
-                force: false,
-                dry_run: true,
-                cleanup_branches: false,
-                allow_unmerged_branches: false,
-                reaper: None,
-            },
-            limit: usize::MAX,
-            cursor: None,
-            deadline: Some(std::time::Instant::now() + Duration::from_secs(10)),
-        },
-    )
-    .ok()?;
-    let bytes: u64 = output
-        .candidates
-        .iter()
-        .filter(|candidate| candidate.branch_cleanup.safe_delete)
-        .filter_map(|candidate| {
-            homeboy::core::capacity::demand_for_tree(Path::new(&candidate.record.worktree_path))
-                .ok()
-                .map(|demand| demand.bytes)
-        })
-        .sum();
-    (bytes > 0).then_some(bytes)
-}
-
 fn apply_preview_worktree_capacity(
     resolved: &mut Value,
     capacity: Option<&Value>,
     repository_identity: Option<&Value>,
-    merged_worktree_reclaimable_bytes: impl FnOnce() -> Option<u64>,
 ) {
     let Some(capacity) = capacity else { return };
     resolved["workspace"]["capacity"] = capacity.clone();
@@ -1055,11 +1014,6 @@ fn apply_preview_worktree_capacity(
     if capacity["state"] != "shortfall" || (provider_on_lab && !allocates_controller_worktree) {
         return;
     }
-    let repository_path = repository_identity
-        .and_then(|identity| identity.get("repository_path"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let mut inspection_path = repository_path;
     if provider_on_lab {
         // A Lab-placed Cook's planned controller worktree is a plain source
         // checkout: the provider attempt and deterministic gates run on the
@@ -1070,7 +1024,10 @@ fn apply_preview_worktree_capacity(
         let estimate = source.as_deref().and_then(|path| {
             homeboy::core::cleanup::estimated_checkout_allocation_bytes(Path::new(path))
         });
-        inspection_path = inspection_path.or(source.clone());
+        let inspection_path = repository_identity
+            .and_then(|identity| identity.get("repository_path"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         if let Some(required_bytes) = estimate {
             let available_bytes = capacity["available_bytes"].as_u64();
             resolved["workspace"]["capacity"]["lab_checkout_allocation"] = serde_json::json!({
@@ -1086,7 +1043,9 @@ fn apply_preview_worktree_capacity(
             let blocker = format!(
                 "local worktree filesystem cannot hold this Lab-placed Cook's plain source checkout: ~{required_bytes} bytes needed, {available} bytes available"
             );
-            let next_action = worktree_artifact_inspection_action(inspection_path.as_deref());
+            let next_action = worktree_artifact_inspection_action(
+                inspection_path.as_deref().or(source.as_deref()),
+            );
             let capacity = resolved["workspace"]["capacity"].clone();
             resolved["placement"]["admission"] =
                 blocked_preview_admission(blocker, Some(next_action));
@@ -1099,22 +1058,14 @@ fn apply_preview_worktree_capacity(
     let shortfall = capacity["shortfall_bytes"].as_u64().unwrap_or_default();
     let blocker =
         format!("local worktree filesystem is {shortfall} bytes below its configured reserve");
-    // Merged, clean task worktrees routinely hold orders of magnitude more
-    // space than reconstructable repo artifacts. When they exist, the
-    // next-action must name the surface that actually frees the space
-    // (#16147).
-    let merged_worktree_bytes = merged_worktree_reclaimable_bytes();
-    let next_action = if merged_worktree_bytes.is_some() {
-        "homeboy worktree cleanup --apply".to_string()
-    } else {
-        worktree_artifact_inspection_action(inspection_path.as_deref())
-    };
-    resolved["placement"]["admission"] = blocked_preview_admission(blocker, Some(next_action));
+    // The reserve shortfall only words a hint; the operator's cleanup command
+    // measures the merged worktrees that actually hold reclaimable space on
+    // demand (#16396).
+    resolved["placement"]["admission"] = blocked_preview_admission(
+        blocker,
+        Some("homeboy worktree cleanup --dry-run".to_string()),
+    );
     resolved["placement"]["admission"]["capacity"] = capacity.clone();
-    if let Some(bytes) = merged_worktree_bytes {
-        resolved["placement"]["admission"]["capacity"]["merged_worktree_reclaimable_bytes"] =
-            serde_json::json!(bytes);
-    }
 }
 
 /// The bounded inspection that reports the specific worktrees holding
@@ -12103,39 +12054,17 @@ mod tests {
             "reserved_bytes": 100,
             "shortfall_bytes": 10
         });
-        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None, || None);
+        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None);
         assert_eq!(resolved["placement"]["admission"]["state"], "blocked");
         assert_eq!(
             resolved["placement"]["admission"]["capacity"]["shortfall_bytes"],
             10
         );
-        let action = resolved["placement"]["admission"]["next_action"]
-            .as_str()
-            .expect("bounded cleanup action");
-        assert!(action.contains("--all-worktrees") || action.contains("repo-artifacts"));
-    }
-
-    #[test]
-    fn preview_worktree_capacity_shortfall_points_at_worktree_cleanup_when_merged_worktrees_hold_space(
-    ) {
-        let mut resolved = serde_json::json!({ "placement": { "selected": "local" } });
-        let capacity = serde_json::json!({
-            "state": "shortfall",
-            "available_bytes": 90,
-            "reserved_bytes": 100,
-            "shortfall_bytes": 10
-        });
-        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None, || {
-            Some(13_000_000_000)
-        });
-        assert_eq!(resolved["placement"]["admission"]["state"], "blocked");
+        // The preview never inventories merged worktrees itself (#16396); it
+        // names the on-demand inspection that measures the reclaimable space.
         assert_eq!(
             resolved["placement"]["admission"]["next_action"],
-            "homeboy worktree cleanup --apply"
-        );
-        assert_eq!(
-            resolved["placement"]["admission"]["capacity"]["merged_worktree_reclaimable_bytes"],
-            13_000_000_000u64
+            "homeboy worktree cleanup --dry-run"
         );
     }
 
@@ -12144,7 +12073,7 @@ mod tests {
         let available = serde_json::json!({ "placement": { "selected": "local" } });
         let mut resolved = available;
         let capacity = serde_json::json!({ "state": "available", "shortfall_bytes": 0 });
-        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None, || None);
+        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None);
         assert!(resolved["placement"].get("admission").is_none());
 
         for workspace in [
@@ -12157,7 +12086,6 @@ mod tests {
                 &mut lab,
                 Some(&serde_json::json!({ "state": "shortfall", "shortfall_bytes": 10 })),
                 None,
-                || None,
             );
             assert!(lab["placement"].get("admission").is_none(), "{lab}");
         }
@@ -12185,7 +12113,7 @@ mod tests {
             "reserved_bytes": 20 * GIB,
             "shortfall_bytes": 10 * GIB,
         });
-        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), Some(&identity), || None);
+        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), Some(&identity));
         assert!(
             resolved["placement"].get("admission").is_none(),
             "a checkout-sized allocation must not be blocked by the flat reserve: {resolved}"
@@ -12218,7 +12146,7 @@ mod tests {
             "reserved_bytes": 20_u64 * 1024 * 1024 * 1024,
             "shortfall_bytes": 20_u64 * 1024 * 1024 * 1024 - 1024,
         });
-        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), Some(&identity), || None);
+        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), Some(&identity));
         let admission = &resolved["placement"]["admission"];
         assert_eq!(admission["state"], "blocked", "{resolved}");
         let blocker = admission["remaining_blocker"]
@@ -12266,7 +12194,7 @@ mod tests {
                 "workspace": {"action": "planned_create", "kind": "native", "path": destination},
                 "placement": {"requested": "lab", "selected": "lab", "admission": super::admissible_preview_admission()}
             });
-            apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None, || None);
+            apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None);
             let preview = super::cook_preview_result(
                 resolved,
                 Vec::new(),
@@ -12285,9 +12213,10 @@ mod tests {
             assert!(preview["failure"]["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("below its configured reserve")));
-            assert!(preview["failure"]["next_action"]
-                .as_str()
-                .is_some_and(|action| action.starts_with("homeboy cleanup")));
+            assert_eq!(
+                preview["failure"]["next_action"].as_str(),
+                Some("homeboy worktree cleanup --dry-run")
+            );
             assert!(
                 !destination.exists(),
                 "capacity preview must not allocate a checkout"
