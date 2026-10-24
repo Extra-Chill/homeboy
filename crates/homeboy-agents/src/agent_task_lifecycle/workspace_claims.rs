@@ -231,7 +231,7 @@ fn orphaned_terminal_run(
                 "durable controller run is missing and left no terminal aggregate",
             )
         })?;
-    let state = super::conversion::run_state_for_aggregate(&aggregate);
+    let state = aggregate.status();
     Ok(TerminalRun {
         state,
         revision: 0,

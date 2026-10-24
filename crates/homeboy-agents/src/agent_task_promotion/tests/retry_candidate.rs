@@ -1,6 +1,7 @@
 //! #16292 §2: the runtime, not a fabricated artifact list, captures retry work.
 use super::*;
 use crate::agent_task::*;
+use crate::agent_task_lifecycle::AgentTaskRunState;
 use crate::agent_task_promotion::promote::promote_with_provider_and_checkpoint_in_observation_store;
 use crate::agent_task_scheduler::*;
 use std::sync::{
@@ -64,7 +65,7 @@ fn runtime_retry_inherits_uncommitted_work_promotes_and_pushes_candidate_sha() {
         .run(plan);
     assert_eq!(
         aggregate.status(),
-        AgentTaskAggregateStatus::Succeeded,
+        AgentTaskRunState::Succeeded,
         "{aggregate:#?}"
     );
     let outcome = &aggregate.outcomes[0];

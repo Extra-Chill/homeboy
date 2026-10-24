@@ -492,21 +492,3 @@ pub(crate) fn run_provider_handle(
         metadata,
     }
 }
-
-pub(crate) fn run_state_for_aggregate(aggregate: &AgentTaskAggregate) -> AgentTaskRunState {
-    match aggregate.status() {
-        crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded => {
-            AgentTaskRunState::Succeeded
-        }
-        crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialFailure => {
-            AgentTaskRunState::PartialFailure
-        }
-        crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable => {
-            AgentTaskRunState::PartialRecoverable
-        }
-        crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed => AgentTaskRunState::Failed,
-        crate::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled => {
-            AgentTaskRunState::Cancelled
-        }
-    }
-}

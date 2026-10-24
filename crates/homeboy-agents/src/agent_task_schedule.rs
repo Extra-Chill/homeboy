@@ -412,6 +412,7 @@ mod plan {
 
 mod aggregate {
     use super::*;
+    use crate::agent_task_lifecycle::AgentTaskRunState;
 
     /// `status` is not stored: it is a function of `outcomes` (see
     /// [`AgentTaskAggregate::status`]). Serialization emits the derived value
@@ -467,9 +468,9 @@ mod aggregate {
     }
 
     impl AgentTaskAggregate {
-        /// Derived from the outcomes; see [`AgentTaskAggregateStatus::from_outcomes`].
-        pub fn status(&self) -> AgentTaskAggregateStatus {
-            AgentTaskAggregateStatus::from_outcomes(&self.outcomes)
+        /// Derived from the outcomes; see [`AgentTaskRunState::from_outcomes`].
+        pub fn status(&self) -> AgentTaskRunState {
+            AgentTaskRunState::from_outcomes(&self.outcomes)
         }
 
         /// Candidate aggregates record their controller decision on the winner.
@@ -529,48 +530,6 @@ mod aggregate {
         pub sha256: Option<String>,
         #[serde(default, skip_serializing_if = "Value::is_null")]
         pub payload: Value,
-    }
-
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "snake_case")]
-    pub enum AgentTaskAggregateStatus {
-        Succeeded,
-        PartialRecoverable,
-        PartialFailure,
-        Failed,
-        Cancelled,
-    }
-
-    impl AgentTaskAggregateStatus {
-        /// The single definition of an aggregate's status. Any cancelled
-        /// outcome cancels the run; a run whose outcomes are all recoverable
-        /// candidates is `PartialRecoverable`; otherwise a recoverable
-        /// candidate counts as not failed. An aggregate with no outcomes has
-        /// no succeeded work and is `Failed`.
-        pub fn from_outcomes(outcomes: &[AgentTaskOutcome]) -> Self {
-            use AgentTaskOutcomeStatus::{Cancelled, CandidateRecoverable, NoOp, Succeeded};
-            if outcomes.iter().any(|outcome| outcome.status == Cancelled) {
-                return Self::Cancelled;
-            }
-            if !outcomes.is_empty()
-                && outcomes
-                    .iter()
-                    .all(|outcome| outcome.status == CandidateRecoverable)
-            {
-                return Self::PartialRecoverable;
-            }
-            let failed = outcomes
-                .iter()
-                .any(|outcome| !matches!(outcome.status, Succeeded | NoOp | CandidateRecoverable));
-            let succeeded = outcomes
-                .iter()
-                .any(|outcome| matches!(outcome.status, Succeeded | NoOp));
-            match (succeeded, failed) {
-                (true, false) => Self::Succeeded,
-                (true, true) => Self::PartialFailure,
-                _ => Self::Failed,
-            }
-        }
     }
 
     impl AgentTaskAggregateTotals {

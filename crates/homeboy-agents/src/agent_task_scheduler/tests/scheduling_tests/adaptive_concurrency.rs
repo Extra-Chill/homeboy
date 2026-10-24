@@ -73,7 +73,7 @@ mod adaptive_concurrency_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+            crate::agent_task_lifecycle::AgentTaskRunState::Succeeded
         );
         assert_eq!(entered_before_release, 3);
         assert_eq!(adaptive.configured_max_concurrency, 1);
@@ -108,7 +108,7 @@ mod adaptive_concurrency_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+            crate::agent_task_lifecycle::AgentTaskRunState::Succeeded
         );
         assert!(max_seen.load(Ordering::SeqCst) <= 1);
         assert_eq!(adaptive.effective_concurrency, 1);
@@ -146,7 +146,7 @@ mod adaptive_concurrency_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed
+            crate::agent_task_lifecycle::AgentTaskRunState::Failed
         );
         assert_eq!(aggregate.totals.blocked, 2);
         assert_eq!(max_seen.load(Ordering::SeqCst), 0);
@@ -181,7 +181,7 @@ mod adaptive_concurrency_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+            crate::agent_task_lifecycle::AgentTaskRunState::Succeeded
         );
         assert_eq!(adaptive.effective_concurrency, 2);
         assert!(adaptive.decisions.iter().any(|decision| {

@@ -4,8 +4,7 @@
 use super::*;
 use crate::agent_task::{AgentTaskArtifact, AgentTaskCandidate, AgentTaskOutcomeStatus};
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskExecutionContext,
-    AgentTaskExecutorAdapter, AgentTaskScheduler,
+    AgentTaskAggregate, AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskScheduler,
 };
 use homeboy_core::test_support::with_isolated_home;
 use std::fs;
@@ -69,7 +68,7 @@ fn status_totals_state(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> (
-    AgentTaskAggregateStatus,
+    AgentTaskRunState,
     AgentTaskAggregateTotals,
     AgentTaskRunState,
 ) {
@@ -116,7 +115,7 @@ fn mixed_outcomes_keep_status_and_totals_through_deferred_candidate_reconciliati
         record_run_aggregate_in_store(&store, "mixed-scheduler", &plan, &scheduled)
             .expect("record scheduler aggregate");
         let before = status_totals_state(&store, "mixed-scheduler");
-        assert_eq!(before.0, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(before.0, AgentTaskRunState::Succeeded);
         assert_eq!(before.1.succeeded, 1);
         assert_eq!(before.1.candidate_recoverable, 1);
         assert_eq!(before.1.recoverable_candidates, 1);
@@ -188,9 +187,76 @@ fn stale_persisted_status_reads_back_derived_from_outcomes() {
     fs::write(&aggregate_path, serde_json::to_vec(&stale).expect("bytes")).expect("write");
 
     let read = store.read_aggregate(run_id).expect("read aggregate");
-    assert_eq!(read.status(), AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(read.status(), AgentTaskRunState::Succeeded);
     assert_eq!(
         serde_json::to_value(&read).expect("reserialize")["status"],
         "succeeded"
     );
+}
+
+#[test]
+fn derived_status_is_the_run_state_the_store_records_for_every_outcome_mix() {
+    use AgentTaskOutcomeStatus::{Cancelled, CandidateRecoverable, Failed, Succeeded};
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let mut plan = test_plan();
+    let mut task_b = plan.tasks[0].clone();
+    task_b.task_id = "task-b".to_string();
+    plan.tasks.push(task_b);
+    let cases: [(&str, &[AgentTaskOutcomeStatus], AgentTaskRunState); 5] = [
+        (
+            "all-succeeded",
+            &[Succeeded, Succeeded],
+            AgentTaskRunState::Succeeded,
+        ),
+        (
+            "mixed",
+            &[Succeeded, Failed],
+            AgentTaskRunState::PartialFailure,
+        ),
+        (
+            "all-candidate-recoverable",
+            &[CandidateRecoverable, CandidateRecoverable],
+            AgentTaskRunState::PartialRecoverable,
+        ),
+        (
+            "any-cancelled",
+            &[Succeeded, Cancelled],
+            AgentTaskRunState::Cancelled,
+        ),
+        ("no-outcomes", &[], AgentTaskRunState::Failed),
+    ];
+    for (run_id, statuses, expected) in cases {
+        let outcomes: Vec<AgentTaskOutcome> = statuses
+            .iter()
+            .zip(["task-a", "task-b"])
+            .map(|(status, task_id)| AgentTaskOutcome {
+                task_id: task_id.to_string(),
+                status: *status,
+                ..Default::default()
+            })
+            .collect();
+        let aggregate = AgentTaskAggregate {
+            schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: plan.plan_id.clone(),
+            totals: AgentTaskAggregateTotals::from_outcomes(plan.tasks.len(), &outcomes),
+            outcomes,
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        };
+        store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+            .expect("submit run");
+        let recorded = record_run_aggregate_in_store(&store, run_id, &plan, &aggregate)
+            .expect("record aggregate");
+
+        assert_eq!(aggregate.status(), expected, "{run_id}");
+        assert!(aggregate.status().is_terminal(), "{run_id}");
+        assert_eq!(recorded.state(), aggregate.status(), "{run_id}");
+        let (status, _, state) = status_totals_state(&store, run_id);
+        assert_eq!(state, status, "{run_id}");
+    }
 }

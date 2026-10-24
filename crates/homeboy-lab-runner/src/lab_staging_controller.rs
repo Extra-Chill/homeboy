@@ -6061,9 +6061,8 @@ mod tests {
 
     #[test]
     fn terminal_receipt_replay_restores_one_durable_cook_completion_intent() {
-        use homeboy_agents::agent_task_scheduler::{
-            AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskPlan,
-        };
+        use homeboy_agents::agent_task_lifecycle::AgentTaskRunState;
+        use homeboy_agents::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
         use homeboy_agents::agent_task_service::{
             AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, CookRecipeStore,
         };
@@ -6109,7 +6108,7 @@ mod tests {
                     artifact_bindings: Vec::new(),
                     queue: Default::default(),
                 };
-                assert_eq!(aggregate.status(), AgentTaskAggregateStatus::Succeeded);
+                assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
                 homeboy_agents::agent_task_lifecycle::record_completed_run(
                     &plan,
                     &aggregate,
