@@ -54,7 +54,7 @@ pub(super) fn run_postprocess_steps(
                 let outcome = checkpoint_failure_outcome(step, error.message);
                 events.push(event(
                     &step.id,
-                    AgentTaskScheduleSupport::state_for_outcome(&outcome),
+                    AgentTaskState::from_outcome_status(outcome.status),
                     1,
                     outcome.summary.clone(),
                 ));
@@ -64,7 +64,7 @@ pub(super) fn run_postprocess_steps(
         }
         events.push(event(
             &step.id,
-            AgentTaskScheduleSupport::state_for_outcome(&outcome),
+            AgentTaskState::from_outcome_status(outcome.status),
             1,
             outcome.summary.clone(),
         ));
