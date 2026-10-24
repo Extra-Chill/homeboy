@@ -502,10 +502,7 @@ fn default_review_is_bounded_and_points_to_full_evidence() {
 #[test]
 fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
     struct PatchExecutor {
-        path: String,
         run_id: String,
-        size_bytes: u64,
-        sha256: String,
     }
 
     struct NoChangeReviewExecutor;
@@ -539,25 +536,16 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             request: AgentTaskRequest,
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
+            std::fs::write(
+                std::path::Path::new(request.workspace.root.as_deref().unwrap())
+                    .join("candidate.txt"),
+                "new\n",
+            )
+            .unwrap();
             AgentTaskOutcome {
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Succeeded,
-                summary: Some("produced patch before failed gate".to_string()),
-                artifacts: vec![AgentTaskArtifact {
-                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                    id: "candidate".to_string(),
-                    kind: "patch".to_string(),
-                    name: Some("candidate.patch".to_string()),
-                    label: None,
-                    role: None,
-                    semantic_key: None,
-                    path: Some(self.path.clone()),
-                    url: None,
-                    mime: Some("text/x-diff".to_string()),
-                    size_bytes: Some(self.size_bytes),
-                    sha256: Some(self.sha256.clone()),
-                    metadata: Value::Null,
-                }],
+                summary: Some("produced candidate before failed gate".into()),
                 evidence_refs: vec![AgentTaskEvidenceRef {
                     kind: "plan".to_string(),
                     uri: format!("homeboy://agent-task/run/{}/plan#task=task-a", self.run_id),
@@ -572,19 +560,35 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
         let cook_id = "cook-reader-substantive-candidate";
         let candidate_run_id = "cook-reader-substantive-candidate-attempt-1";
         let retry_run_id = "cook-reader-substantive-candidate-attempt-2";
-        let patch = tempfile::NamedTempFile::new().expect("candidate patch");
-        let patch_contents = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
-        std::fs::write(patch.path(), patch_contents).expect("write candidate patch");
+        let repo = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@example.test"],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(repo.path().join("candidate.txt"), "old\n").unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-qm", "base"]] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.root = Some(repo.path().display().to_string());
         run_loaded_plan(
-            test_plan(),
+            plan,
             Some(candidate_run_id),
             Arc::new(PatchExecutor {
-                path: patch.path().display().to_string(),
-                run_id: candidate_run_id.to_string(),
-                size_bytes: patch_contents.len() as u64,
-                sha256: homeboy_engine_primitives::content_hash::sha256_hex(
-                    patch_contents.as_bytes(),
-                ),
+                run_id: candidate_run_id.into(),
             }),
         )
         .expect("substantive candidate completed");

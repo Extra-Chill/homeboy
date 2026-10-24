@@ -78,8 +78,7 @@ fn candidate_options(
         .clone()
         .unwrap_or_else(|| git_head(path, "HEAD"));
     if let Some(patch) = patch.as_ref().filter(|p| !p.trim().is_empty()) {
-        let normalized =
-            super::super::patch::normalize_promotion_patch(patch, &options.to_worktree)?;
+        let normalized = super::patch_fixture::normalize_fixture_diff(patch, &options.to_worktree)?;
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), &normalized.content).unwrap();
         git(path, &["apply", file.path().to_str().unwrap()]);

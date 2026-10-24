@@ -3460,7 +3460,7 @@ pub fn prepare_manual_finalization_identity(requested_id: &str) -> Result<String
             let candidate = crate::agent_task_lifecycle::select_cook_candidate(requested_id)?;
             if candidate.incomplete
                 || candidate.selected_task_id.is_none()
-                || candidate.selected_artifact_id.is_none()
+                || candidate.selected_candidate_sha.is_none()
             {
                 return Err(Error::validation_invalid_argument(
                     "run_id",
@@ -3522,7 +3522,7 @@ fn require_manual_finalization_run(run_id: &str) -> Result<String> {
         if !candidate.incomplete
             && candidate.run_id == run_id
             && candidate.selected_task_id.is_some()
-            && candidate.selected_artifact_id.is_some()
+            && candidate.selected_candidate_sha.is_some()
         {
             return Ok(run_id.to_string());
         }
@@ -3574,7 +3574,7 @@ fn manual_candidate_binding(
     if selection.incomplete
         || selection.run_id != run_id
         || selection.selected_task_id.is_none()
-        || selection.selected_artifact_id.is_none()
+        || selection.selected_candidate_sha.is_none()
     {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -6803,9 +6803,9 @@ pub(crate) fn cook_failure_context_with_stores(
         selected_task_id: selection
             .as_ref()
             .and_then(|selection| selection.selected_task_id.clone()),
-        selected_artifact_id: selection
+        selected_candidate_sha: selection
             .as_ref()
-            .and_then(|selection| selection.selected_artifact_id.clone()),
+            .and_then(|selection| selection.selected_candidate_sha.clone()),
         promotion_provenance,
         durable_recipe_ref: format!("homeboy://agent-task/cooks/{cook_id}/recipe"),
         lifecycle_state,

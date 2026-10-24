@@ -18,7 +18,6 @@ pub use candidate_bundle::{
 mod committed_changes;
 pub(crate) use committed_changes::resolve_candidate_revision;
 mod fingerprint;
-mod patch;
 mod promote;
 mod run_plan_projection;
 mod types;
@@ -27,7 +26,6 @@ pub use apply::{apply_materialized_workspace_patch, preflight_managed_workspace}
 pub use fingerprint::{
     candidate_fingerprint, AgentTaskCandidateFingerprint, AgentTaskPromotionCandidate,
 };
-pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
 pub(crate) use promote::capture_declared_base;
 pub(crate) use promote::gate_setup_outcome_failure;
 pub(crate) use promote::{active_gate_supervision, with_gate_supervision};

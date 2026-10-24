@@ -1,4 +1,5 @@
 #![cfg(test)]
+pub(crate) mod patch_fixture;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,6 +12,7 @@ mod candidate_fixture;
 pub(crate) mod candidate_snapshot;
 mod immutable_candidate;
 mod resume_candidate;
+mod retry_candidate;
 use super::types::{
     AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionReport,
     AgentTaskPromotionRequest,

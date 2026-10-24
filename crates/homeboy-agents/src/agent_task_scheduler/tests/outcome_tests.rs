@@ -490,32 +490,17 @@ fn policy_denial_is_terminal_even_when_retry_policy_matches_every_failure() {
 }
 
 #[test]
-fn base_bound_patch_survives_policy_denial_and_missing_review_form_for_fresh_review() {
-    let patch = "diff --git a/lib.rs b/lib.rs\n--- a/lib.rs\n+++ b/lib.rs\n@@ -1 +1 @@\n-base\n+candidate\n";
+fn candidate_commit_survives_policy_denial_and_missing_review_form_for_fresh_review() {
     let mut denied = outcome(
         "policy-denied-patch".to_string(),
         AgentTaskOutcomeStatus::Failed,
     );
     denied.failure_classification = Some(AgentTaskFailureClassification::PolicyDenied);
-    denied.artifacts = vec![AgentTaskArtifact {
-        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-        id: "candidate".to_string(),
-        kind: "patch".to_string(),
-        size_bytes: Some(patch.len() as u64),
-        sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
-            patch.as_bytes(),
-        )),
-        metadata: json!({
-            "task_id": "policy-denied-patch",
-            "producer_attempt": 1,
-            "run_id": "run-11280",
-            "base_ref": "base-11280",
-            "provider_backend": "provider",
-            "repository_identity": "repository-11280",
-            "workspace_identity": "workspace-11280",
-        }),
-        ..Default::default()
-    }];
+    denied.candidate = Some(crate::agent_task::AgentTaskCandidate {
+        base_sha: "base".into(),
+        candidate_sha: "commit".into(),
+        tree_sha: "tree".into(),
+    });
 
     AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(&mut denied);
 

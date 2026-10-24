@@ -497,15 +497,10 @@ impl AgentTaskScheduleSupport {
                         recovered.status = AgentTaskOutcomeStatus::Succeeded;
                         recovered.failure_classification = None;
                         let harvest = joined.and_then(|_| {
-                            super::harvest_uncommitted_patch(&mut recovered, &task)
-                                .and_then(|_| super::harvest_committed_patch(&mut recovered, &task))
-                                .and_then(|_| {
-                                    super::harvest_candidate_commit(&mut recovered, &task)
-                                })
+                            super::harvest_candidate_commit(&mut recovered, &task)
                                 .map_err(|error| format!("{error:?}"))
                         });
                         if harvest.is_ok() {
-                            super::finalize_candidate_artifacts(&mut recovered, &task);
                             super::mark_timeout_workspace_candidates_incomplete(&mut recovered);
                             // The provider has exited, so runtime artifact discovery can no
                             // longer race its writes to the isolated attempt workspace.
@@ -988,10 +983,7 @@ impl AgentTaskScheduleSupport {
                 | AgentTaskOutcomeStatus::NoOp
                 | AgentTaskOutcomeStatus::Cancelled
                 | AgentTaskOutcomeStatus::CandidateRecoverable
-        ) || !outcome
-            .artifacts
-            .iter()
-            .any(|artifact| is_base_bound_patch_candidate(outcome, artifact))
+        ) || outcome.candidate.is_none()
         {
             return;
         }
@@ -1068,11 +1060,11 @@ impl AgentTaskScheduleSupport {
         // Timeout discovery can append a provider-generated patch after the
         // ordinary completion finalization. Bind it before this outcome can be
         // selected as a recoverable candidate or persisted for continuation.
-        super::finalize_candidate_artifacts(outcome, running);
 
-        let actionable_patch = outcome.metadata.get("actionable").and_then(Value::as_bool)
-            != Some(false)
-            && outcome.artifacts.iter().any(is_actionable_patch_artifact);
+        let actionable_patch = outcome.candidate.is_some()
+            || (running.task_base_sha.is_none()
+                && outcome.metadata.get("actionable").and_then(Value::as_bool) != Some(false)
+                && outcome.artifacts.iter().any(is_actionable_patch_artifact));
         if actionable_patch {
             outcome.status = AgentTaskOutcomeStatus::Succeeded;
             outcome.failure_classification = None;
@@ -1835,35 +1827,6 @@ impl AgentTaskScheduleSupport {
 
         totals
     }
-}
-
-fn is_base_bound_patch_candidate(outcome: &AgentTaskOutcome, artifact: &AgentTaskArtifact) -> bool {
-    is_actionable_patch_artifact(artifact)
-        && artifact.size_bytes.is_some_and(|size| size > 0)
-        && artifact
-            .sha256
-            .as_deref()
-            .is_some_and(homeboy_engine_primitives::content_hash::is_sha256_hex)
-        && artifact.metadata.get("task_id").and_then(Value::as_str) == Some(&outcome.task_id)
-        && artifact
-            .metadata
-            .get("producer_attempt")
-            .is_some_and(Value::is_u64)
-        && [
-            "run_id",
-            "base_ref",
-            "provider_backend",
-            "repository_identity",
-            "workspace_identity",
-        ]
-        .iter()
-        .all(|key| {
-            artifact
-                .metadata
-                .get(*key)
-                .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-        })
 }
 
 #[cfg(test)]

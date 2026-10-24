@@ -201,7 +201,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
         if let Some(selected) = value.get("selected_candidate") {
             output["selected_candidate"] = compact_fields(
                 selected,
-                &["run_id", "selected_task_id", "selected_artifact_id"],
+                &["run_id", "selected_task_id", "selected_candidate_sha"],
             );
         }
     }
@@ -5411,7 +5411,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         "attempts": attempts.iter().take(COMPACT_TASK_LIMIT).map(|attempt| compact_fields(attempt, &["attempt", "run_id", "run_state", "aggregate_path"])).collect::<Vec<_>>(),
         "attempts_omitted": attempts.len().saturating_sub(COMPACT_TASK_LIMIT),
         "finalization": value.get("finalization").map(|finalization| compact_fields(finalization, &["schema", "status", "pr_number", "pr_url", "updated_at", "created_at"])),
-        "selected_candidate": value.get("selected_candidate").map(|candidate| compact_fields(candidate, &["latest_attempt_run_id", "run_id", "attempt", "invocation_scoped", "selected_task_id", "selected_artifact_id", "reason", "incomplete", "skipped_newer_attempts", "applied_promotion"])),
+        "selected_candidate": value.get("selected_candidate").map(|candidate| compact_fields(candidate, &["latest_attempt_run_id", "run_id", "attempt", "invocation_scoped", "selected_task_id", "selected_candidate_sha", "reason", "incomplete", "skipped_newer_attempts", "applied_promotion"])),
     });
     if let Some(candidate) = candidate_projection {
         summary["durable_candidate"] = candidate.clone();
@@ -7009,7 +7009,7 @@ mod tests {
             "stop_reason": "x".repeat(COMPACT_TEXT_LIMIT + 1),
             "attempts": attempts,
             "finalization": { "status": "blocked", "nested_evidence": { "large": "x".repeat(COMPACT_TEXT_LIMIT + 1) } },
-            "selected_candidate": { "latest_attempt_run_id": "run-14", "run_id": "run-12", "selected_task_id": "task-12", "selected_artifact_id": "patch-12", "reason": "canonical", "skipped_newer_attempts": [{"run_id":"run-14","reason":"malformed"}] }
+            "selected_candidate": { "latest_attempt_run_id": "run-14", "run_id": "run-12", "selected_task_id": "task-12", "selected_candidate_sha": "patch-12", "reason": "canonical", "skipped_newer_attempts": [{"run_id":"run-14","reason":"malformed"}] }
         });
 
         let compact = compact_cook_report(report.clone(), false);
@@ -7023,7 +7023,7 @@ mod tests {
         assert!(compact["attempts"][0].get("promotion").is_none());
         assert_eq!(compact["selected_candidate"]["run_id"], "run-12");
         assert_eq!(
-            compact["selected_candidate"]["selected_artifact_id"],
+            compact["selected_candidate"]["selected_candidate_sha"],
             "patch-12"
         );
         assert_eq!(compact["full_command"], "homeboy agent-task status run-14");

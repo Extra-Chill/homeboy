@@ -140,58 +140,33 @@ pub(crate) fn reconcile_deferred_candidate_in_store(
                 }
             }
             Some("candidate_recovered") => {
-                let Some(candidates) = action_value
-                    .get("candidate_artifacts")
-                    .and_then(Value::as_array)
+                let Some(candidate) = action_value.get("candidate").cloned().and_then(|value| {
+                    serde_json::from_value::<crate::agent_task::AgentTaskCandidate>(value).ok()
+                }) else {
+                    continue;
+                };
+                let plan = lifecycle_store.read_controller_plan(&run_id)?;
+                let Some(root) = plan
+                    .tasks
+                    .iter()
+                    .find(|task| task.task_id == outcome.task_id)
+                    .and_then(|task| task.workspace.root.as_deref())
                 else {
                     continue;
                 };
-                let mut recovered = Vec::new();
-                for value in candidates {
-                    let Ok(artifact) = serde_json::from_value::<AgentTaskArtifact>(value.clone())
-                    else {
-                        continue;
-                    };
-                    let portable = artifact.url.as_deref()
-                        == Some(&candidate_artifact_url(
-                            &run_id,
-                            &outcome.task_id,
-                            &artifact.id,
-                        ));
-                    let valid_sha = artifact
-                        .sha256
-                        .as_deref()
-                        .is_some_and(content_hash::is_sha256_hex);
-                    let content_matches = artifact
-                        .path
-                        .as_deref()
-                        .and_then(|candidate_path| fs::read(candidate_path).ok())
-                        .is_some_and(|bytes| {
-                            let actual = content_hash::sha256_hex(&bytes);
-                            artifact.sha256.as_deref() == Some(actual.as_str())
-                        });
-                    if artifact.schema == crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA
-                        && portable
-                        && valid_sha
-                        && content_matches
-                        && crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(
-                            &artifact,
-                        )
-                    {
-                        recovered.push(artifact);
-                    }
-                }
-                if recovered.is_empty() {
+                if crate::agent_task_promotion::validate_candidate_commit(
+                    std::path::Path::new(root),
+                    &candidate,
+                )
+                .is_err()
+                {
                     continue;
                 }
-                crate::agent_task_timeout_artifacts::append_unique_artifacts(
-                    &mut outcome.artifacts,
-                    recovered,
-                );
+                outcome.candidate = Some(candidate);
                 outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
                 outcome.failure_classification = None;
                 outcome.summary =
-                    Some("deferred cleanup recovered a canonical patch candidate".to_string());
+                    Some("deferred cleanup recovered an immutable candidate".to_string());
                 outcome.metadata["deferred_candidate_reconciled_at"] = json!(now_timestamp());
                 outcome.metadata["safe_next_action"] =
                     json!("Promote the recovered candidate through controller-owned gates.");
@@ -7708,7 +7683,7 @@ pub struct AgentTaskCookCandidateSelection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_artifact_id: Option<String>,
+    pub selected_candidate_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_newer_attempts: Vec<AgentTaskCookCandidateSkippedAttempt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -7746,7 +7721,10 @@ fn select_cook_candidate_from_index(
 ) -> Result<AgentTaskCookCandidateSelection> {
     if let Some(candidate) = index.latest_substantive_candidate.as_ref() {
         if substantive_candidate_in_store(&candidate.run_id, lifecycle_store).as_ref()
-            == Some(&(candidate.task_id.clone(), candidate.artifact_id.clone()))
+            == Some(&(
+                candidate.task_id.clone(),
+                candidate.candidate.candidate_sha.clone(),
+            ))
         {
             return Ok(AgentTaskCookCandidateSelection {
                 schema: "homeboy/agent-task-cook-candidate-selection/v1".to_string(),
@@ -7757,7 +7735,7 @@ fn select_cook_candidate_from_index(
                 reason: "latest_substantive_candidate_pointer".to_string(),
                 incomplete: false,
                 selected_task_id: Some(candidate.task_id.clone()),
-                selected_artifact_id: Some(candidate.artifact_id.clone()),
+                selected_candidate_sha: Some(candidate.candidate.candidate_sha.clone()),
                 skipped_newer_attempts: Vec::new(),
                 skipped_newer_run_ids: Vec::new(),
             });
@@ -7791,7 +7769,7 @@ fn select_cook_candidate_from_index(
                 },
                 incomplete: false,
                 selected_task_id: Some(task_id),
-                selected_artifact_id: Some(artifact_id),
+                selected_candidate_sha: Some(artifact_id),
                 skipped_newer_attempts,
                 skipped_newer_run_ids,
             });
@@ -7812,7 +7790,7 @@ fn select_cook_candidate_from_index(
             reason: "selection_window_exhausted_without_promotable_candidate".to_string(),
             incomplete: true,
             selected_task_id: None,
-            selected_artifact_id: None,
+            selected_candidate_sha: None,
             skipped_newer_attempts,
             skipped_newer_run_ids,
         });
@@ -7835,7 +7813,7 @@ fn select_cook_candidate_from_index(
             .to_string(),
         incomplete: false,
         selected_task_id: None,
-        selected_artifact_id: None,
+        selected_candidate_sha: None,
         skipped_newer_attempts,
         skipped_newer_run_ids,
     })
@@ -7887,15 +7865,12 @@ fn substantive_candidate_from_aggregate(
     aggregate: &AgentTaskAggregate,
     promotion: Option<Value>,
 ) -> Option<AgentTaskCookLatestSubstantiveCandidate> {
-    let (task_id, artifact_id) = substantive_candidate_in_aggregate(run_id, aggregate)?;
+    let (task_id, _) = substantive_candidate_in_aggregate(run_id, aggregate)?;
     let outcome = aggregate
         .outcomes
         .iter()
         .find(|outcome| outcome.task_id == task_id)?;
-    let artifact = outcome
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.id == artifact_id)?;
+    let candidate = outcome.candidate.clone()?;
     let promotion_provenance = promotion
         .as_ref()
         .and_then(|value| value.get("provenance").cloned());
@@ -7910,16 +7885,8 @@ fn substantive_candidate_from_aggregate(
         run_id: run_id.to_string(),
         attempt,
         task_id,
-        artifact_id,
-        artifact_kind: artifact.kind.clone(),
-        artifact_sha256: artifact.sha256.clone(),
-        artifact_size_bytes: artifact.size_bytes,
-        integrity: json!({
-            "sha256": artifact.sha256,
-            "size_bytes": artifact.size_bytes,
-            "controller_projection": "verified",
-            "canonical_patch": true,
-        }),
+        candidate,
+        integrity: json!({"immutable_commit": true}),
         promotion_provenance,
         destination_provenance,
         recorded_at: now_timestamp(),
@@ -7965,33 +7932,8 @@ fn substantive_candidate_in_aggregate(
             .flatten()
     });
     let outcome = outcome?;
-    // Metadata alone (and typed artifact envelopes) cannot authorize recovery.
-    // Selection requires controller-readable bytes that pass the same integrity
-    // and canonical patch normalization used by promotion.
-    outcome.artifacts.iter().find_map(|artifact| {
-        if !crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact) {
-            return None;
-        }
-        let path = crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
-            run_id,
-            &outcome.task_id,
-            artifact,
-        )
-        .ok()
-        .flatten()?;
-        std::fs::canonicalize(path)
-            .ok()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|bytes| {
-                (crate::agent_task_promotion::validate_artifact_content(artifact, &bytes).is_ok()
-                    && crate::agent_task_promotion::normalize_promotion_patch(
-                        &bytes,
-                        "candidate-selection",
-                    )
-                    .is_ok_and(|patch| !patch.content.trim().is_empty()))
-                .then(|| (outcome.task_id.clone(), artifact.id.clone()))
-            })
-    })
+    let candidate = outcome.candidate.as_ref()?;
+    Some((outcome.task_id.clone(), candidate.candidate_sha.clone()))
 }
 
 /// Read one durable attempt without resolving a cook ID through its latest

@@ -617,14 +617,8 @@ pub struct AgentTaskCandidateAdoption {
     #[serde(skip)]
     pub workspace_identity: String,
     #[serde(skip)]
-    pub artifact_id: String,
-    #[serde(skip)]
-    pub sha256: String,
+    pub candidate: Option<crate::agent_task_outcome::AgentTaskCandidate>,
     pub decision: AgentTaskCandidateAdoptionDecision,
-    /// Scheduler-populated content resolved from the selected artifact.
-    /// This is never accepted from or serialized into rotation policy.
-    #[serde(skip)]
-    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -188,7 +188,7 @@ fn record_interrupted_local_owner_locked(
             || outcome
                 .artifacts
                 .iter()
-                .any(crate::agent_task_timeout_artifacts::is_actionable_patch_artifact)
+                .any(crate::agent_task_evidence_discovery::is_actionable_patch_artifact)
     });
     let (aggregate_status, ownership_state, run_cancelled) = if harvested {
         (
@@ -396,32 +396,29 @@ fn harvest_interrupted_owner_candidate(
     artifact_root: &Path,
     outcome: &mut AgentTaskOutcome,
 ) {
-    let discovery = crate::agent_task_timeout_artifacts::TimeoutArtifactDiscovery::discover(task);
-    crate::agent_task_timeout_artifacts::append_unique_artifacts(
+    let discovery = crate::agent_task_evidence_discovery::TimeoutArtifactDiscovery::discover(task);
+    crate::agent_task_evidence_discovery::append_unique_artifacts(
         &mut outcome.artifacts,
         discovery.artifacts,
     );
-    crate::agent_task_timeout_artifacts::append_unique_evidence_refs(
+    crate::agent_task_evidence_discovery::append_unique_evidence_refs(
         &mut outcome.evidence_refs,
         discovery.evidence_refs,
     );
     outcome.diagnostics.extend(discovery.diagnostics);
     if let Some(discovered) = discovery.outcome {
-        crate::agent_task_timeout_artifacts::append_unique_artifacts(
+        crate::agent_task_evidence_discovery::append_unique_artifacts(
             &mut outcome.artifacts,
             discovered.artifacts,
         );
-        crate::agent_task_timeout_artifacts::append_unique_evidence_refs(
+        crate::agent_task_evidence_discovery::append_unique_evidence_refs(
             &mut outcome.evidence_refs,
             discovered.evidence_refs,
         );
         outcome.diagnostics.extend(discovered.diagnostics);
     }
     harvest_git_workspace_candidate(run_id, task, artifact_root, outcome);
-    let harvested = outcome
-        .artifacts
-        .iter()
-        .any(crate::agent_task_timeout_artifacts::is_actionable_patch_artifact);
+    let harvested = outcome.candidate.is_some();
     if harvested {
         outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
         outcome.failure_classification = None;
@@ -432,7 +429,7 @@ fn harvest_interrupted_owner_candidate(
     }
     outcome.status = AgentTaskOutcomeStatus::Failed;
     outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
-    crate::agent_task_timeout_artifacts::append_unique_evidence_refs(
+    crate::agent_task_evidence_discovery::append_unique_evidence_refs(
         &mut outcome.evidence_refs,
         vec![AgentTaskEvidenceRef {
             kind: "interrupted-owner-candidate".to_string(),
@@ -474,69 +471,12 @@ fn harvest_git_workspace_candidate(
     if top_level != root {
         return;
     }
-    let Ok(output) = bounded_harvest_git(
-        &root,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--binary",
-            "HEAD",
-            "--",
-        ],
-        MAX_PATCH_BYTES,
-        HARVEST_GIT_TIMEOUT,
-    ) else {
+    let Ok(base) = git_output(&root, &["rev-parse", "HEAD"]) else {
         return;
     };
-    if output.stdout.is_empty() {
-        return;
-    }
-    let Ok(head_sha) = git_output(&root, &["rev-parse", "HEAD"]) else {
-        return;
-    };
-    let task_id = homeboy_core::paths::sanitize_path_segment(&task.task_id);
-    let artifact_id = format!("interrupted-{task_id}.patch");
-    let path = artifact_root
-        .join("interrupted-provider-candidates")
-        .join(homeboy_core::paths::sanitize_path_segment(run_id))
-        .join(&artifact_id);
-    if std::fs::create_dir_all(path.parent().expect("candidate artifact parent")).is_err()
-        || std::fs::write(&path, &output.stdout).is_err()
-    {
-        return;
-    }
-    let sha256 = content_hash::sha256_hex(&output.stdout);
-    outcome.artifacts.push(AgentTaskArtifact {
-        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-        id: artifact_id,
-        kind: "patch".to_string(),
-        name: Some("interrupted-provider.patch".to_string()),
-        label: Some("Interrupted provider workspace diff".to_string()),
-        role: Some("patch".to_string()),
-        semantic_key: None,
-        path: Some(path.display().to_string()),
-        url: None,
-        mime: Some("text/x-patch".to_string()),
-        size_bytes: Some(output.stdout.len() as u64),
-        sha256: Some(sha256),
-        metadata: json!({
-            "actionable": true,
-            "discovered_from": "durable_task_workspace",
-            "source_provenance": {
-                "run_id": run_id,
-                "task_id": task.task_id,
-                "workspace": root,
-                "head_sha": head_sha,
-                "ownership": "durable_plan_workspace_after_owner_exit",
-            },
-        }),
-    });
-    outcome.evidence_refs.push(AgentTaskEvidenceRef {
-        kind: "interrupted-provider-workspace".to_string(),
-        uri: path.display().to_string(),
-        label: Some("Read-only diff harvested from the owned provider workspace".to_string()),
-    });
+    outcome.candidate = crate::agent_task_scheduler::candidate_from_workspace(&root, &base, run_id)
+        .ok()
+        .flatten();
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Result<String> {
@@ -1759,7 +1699,7 @@ fn runner_id_from_artifact_provenance(aggregate: &AgentTaskAggregate) -> Result<
         .iter()
         .flat_map(|outcome| &outcome.artifacts)
         .filter(|artifact| {
-            crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
+            crate::agent_task_evidence_discovery::is_actionable_patch_artifact(artifact)
                 && artifact.size_bytes.is_some()
                 && artifact.sha256.is_some()
         })
@@ -1820,7 +1760,7 @@ fn aggregate_has_runner_backed_actionable_patch(aggregate: &AgentTaskAggregate) 
         .iter()
         .flat_map(|outcome| &outcome.artifacts)
         .any(|artifact| {
-            crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
+            crate::agent_task_evidence_discovery::is_actionable_patch_artifact(artifact)
                 && artifact.path.as_deref().is_none_or(|path| {
                     let path = Path::new(path);
                     path.is_absolute() && !path.is_file()
@@ -2076,7 +2016,7 @@ fn project_terminal_artifacts_in_store(
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
             let actionable =
-                crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact);
+                crate::agent_task_evidence_discovery::is_actionable_patch_artifact(artifact);
             let remote_runner = record.runner_id().filter(|runner_id| {
                 super::lifecycle_ops::execution_runner_id().as_deref() != Some(*runner_id)
             });
@@ -2362,7 +2302,7 @@ fn controller_projected_local_artifact_path(
 }
 
 fn requires_durable_lab_projection(artifact: &AgentTaskArtifact) -> bool {
-    crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
+    crate::agent_task_evidence_discovery::is_actionable_patch_artifact(artifact)
         || matches!(
             artifact.kind.as_str(),
             "transcript" | "result" | "agent-result" | "agent_result" | "git_bundle"
@@ -3240,17 +3180,16 @@ mod tests {
             std::fs::read(workspace.path().join("tracked.txt")).unwrap(),
             before
         );
-        let artifact = outcome.artifacts.first().expect("harvested patch");
-        assert!(crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact));
-        assert_eq!(
-            artifact.metadata["discovered_from"],
-            "durable_task_workspace"
-        );
-        assert!(Path::new(artifact.path.as_deref().unwrap()).starts_with(artifact_root.path()));
-        assert!(std::fs::read(artifact.path.as_deref().unwrap())
-            .unwrap()
-            .windows(b"after".len())
-            .any(|window| window == b"after"));
+        assert!(outcome.artifacts.is_empty());
+        let candidate = outcome.candidate.unwrap();
+        crate::agent_task_promotion::validate_candidate_commit(workspace.path(), &candidate)
+            .unwrap();
+        assert!(git_output(
+            workspace.path(),
+            &["show", &format!("{}:tracked.txt", candidate.candidate_sha)]
+        )
+        .unwrap()
+        .contains("after"));
     }
 
     #[test]

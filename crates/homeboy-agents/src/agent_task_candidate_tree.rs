@@ -8,7 +8,7 @@ use serde_json::Value;
 pub(crate) fn validate_gate_feedback_candidate_baseline(
     root: &Path,
     baseline: &Value,
-) -> Result<String> {
+) -> Result<crate::agent_task::AgentTaskCandidate> {
     let candidate: crate::agent_task::AgentTaskCandidate = serde_json::from_value(
         baseline
             .get("candidate_commit")
@@ -18,17 +18,7 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
     .map_err(|_| invalid("non-recoverable: baseline has no immutable candidate; run a new Cook"))?;
     crate::agent_task_promotion::validate_candidate_commit(root, &candidate)?;
     validate_immutable_candidate_tree(root, &candidate.candidate_sha)?;
-    git(
-        root,
-        &[
-            "diff",
-            "--binary",
-            "--full-index",
-            &candidate.base_sha,
-            &candidate.candidate_sha,
-        ],
-    )
-    .map(|diff| format!("{}\n", diff.trim_end_matches('\n')))
+    Ok(candidate)
 }
 
 pub(crate) fn validate_immutable_candidate_tree(root: &Path, candidate_sha: &str) -> Result<()> {
@@ -130,9 +120,11 @@ mod tests {
     #[test]
     fn layered_remediation_uses_complete_candidate_commit() {
         let (temp, baseline) = candidate_repo();
-        let diff = validate_gate_feedback_candidate_baseline(temp.path(), &baseline).unwrap();
-        assert!(diff.contains("new.txt"));
-        assert!(diff.contains("candidate"));
+        let candidate = validate_gate_feedback_candidate_baseline(temp.path(), &baseline).unwrap();
+        assert_eq!(
+            candidate.candidate_sha,
+            git(temp.path(), &["rev-parse", "HEAD"]).unwrap()
+        );
         std::fs::write(temp.path().join("unrelated.txt"), "drift\n").unwrap();
         assert!(validate_gate_feedback_candidate_baseline(temp.path(), &baseline).is_err());
     }

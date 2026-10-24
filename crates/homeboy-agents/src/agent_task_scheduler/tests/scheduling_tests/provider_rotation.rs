@@ -906,39 +906,28 @@ mod provider_rotation_tests {
             outcome.failure_classification,
             Some(AgentTaskFailureClassification::Timeout)
         );
-        assert!(outcome.artifacts.iter().any(|artifact| {
-            artifact.kind == "patch"
-                && artifact.metadata["producer_attempt"] == 1
-                && artifact.metadata["provider_rotation_index"] == 0
-        }));
+        assert!(outcome.candidate.is_some());
+        assert!(outcome.artifacts.is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(outcome.metadata.pointer("/provider_rotation").is_none());
     }
 
     #[test]
-    fn explicit_candidate_adoption_materializes_verified_patch_with_provenance() {
+    fn explicit_candidate_adoption_checks_out_verified_commit_with_provenance() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
         let candidate_file = workspace.join("adopted.txt");
         fs::write(&candidate_file, "candidate\n").expect("candidate change");
         git_output(&workspace, &["add", "adopted.txt"]).expect("stage candidate");
-        let patch = git_output_raw(
-            &workspace,
-            &[
-                "diff",
-                "--cached",
-                "--binary",
-                "--full-index",
-                "--",
-                "adopted.txt",
-            ],
-        )
-        .expect("candidate patch");
-        git_output(&workspace, &["reset", "--hard", "HEAD"]).expect("restore clean task base");
-        let patch_path = temp.path().join("candidate.patch");
-        fs::write(&patch_path, &patch).expect("persist candidate patch");
-        let expected_fingerprint = fingerprint(patch.as_bytes());
+        let base = git_output(&workspace, &["rev-parse", "HEAD"]).unwrap();
+        git_output(&workspace, &["commit", "-m", "candidate"]).unwrap();
+        let candidate = crate::agent_task::AgentTaskCandidate {
+            base_sha: base.clone(),
+            candidate_sha: git_output(&workspace, &["rev-parse", "HEAD"]).unwrap(),
+            tree_sha: git_output(&workspace, &["rev-parse", "HEAD^{tree}"]).unwrap(),
+        };
+        git_output(&workspace, &["reset", "--hard", &base]).unwrap();
         let observed = Arc::new(Mutex::new(None));
         let scheduler = AgentTaskScheduler::new(Arc::new(AdoptionExecutor {
             observed: Arc::clone(&observed),
@@ -951,8 +940,7 @@ mod provider_rotation_tests {
             base_fingerprint: "ignored-before-materialization".to_string(),
             adoption: Some(crate::agent_task::AgentTaskCandidateAdoption {
                 source_attempt: "attempt-provider-a".to_string(),
-                patch_path: patch_path.display().to_string(),
-                patch_fingerprint: expected_fingerprint.clone(),
+                candidate: candidate.clone(),
                 provider_backend: "provider-a".to_string(),
                 provider_model: Some("model-a".to_string()),
                 decision: "continue verified candidate".to_string(),
@@ -975,7 +963,7 @@ mod provider_rotation_tests {
         assert!(attempt.base_fingerprint.starts_with("sha256:"));
         let adoption = attempt.adoption.expect("adoption provenance");
         assert_eq!(adoption.source_attempt, "attempt-provider-a");
-        assert_eq!(adoption.patch_fingerprint, expected_fingerprint);
+        assert_eq!(adoption.candidate, candidate);
         assert_eq!(adoption.provider_backend, "provider-a");
         assert_eq!(adoption.provider_model.as_deref(), Some("model-a"));
     }

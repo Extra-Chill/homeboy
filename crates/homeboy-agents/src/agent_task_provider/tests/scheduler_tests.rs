@@ -94,16 +94,15 @@ fn remapped_lab_cook_spawns_and_harvests_from_runner_snapshot_identity() {
         provider_observation["attestation"]["canonical_path"], provider_cwd,
         "the spawned provider must receive the attestation for its isolated cwd"
     );
-    let patch = aggregate.outcomes[0]
+    let candidate = aggregate.outcomes[0]
+        .candidate
+        .as_ref()
+        .expect("candidate commit");
+    crate::agent_task_promotion::validate_candidate_commit(&source, candidate).unwrap();
+    assert!(aggregate.outcomes[0]
         .artifacts
         .iter()
-        .find(|artifact| artifact.kind == "patch")
-        .expect("committed change harvest patch");
-    assert!(
-        std::fs::read_to_string(patch.path.as_deref().expect("patch path"))
-            .expect("read patch")
-            .contains("provider-change.txt")
-    );
+        .all(|artifact| artifact.kind != "patch"));
 }
 
 #[test]

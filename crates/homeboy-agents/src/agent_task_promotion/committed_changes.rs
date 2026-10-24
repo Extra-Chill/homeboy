@@ -7,7 +7,7 @@ use homeboy_core::{Error, Result};
 
 use super::types::AgentTaskPromotionRequest;
 
-pub(crate) struct CommittedChangesPatch {
+pub(crate) struct AdoptionAdmission {
     pub(crate) base_ref: String,
     pub(crate) candidate: String,
     pub(crate) historical_task_base: Option<String>,
@@ -28,9 +28,9 @@ pub(crate) struct AdoptionMergeProof {
     pub(crate) resolved_base_tree: String,
 }
 
-pub(crate) fn committed_changes_patch(
+pub(crate) fn adopted_commit(
     options: &AgentTaskPromotionRequest,
-) -> Result<Option<CommittedChangesPatch>> {
+) -> Result<Option<AdoptionAdmission>> {
     let Some(worktree_path) = options.source_worktree_path.as_deref() else {
         return Ok(None);
     };
@@ -103,7 +103,7 @@ pub(crate) fn committed_changes_patch(
     if commits.is_empty() {
         return Ok(None);
     }
-    Ok(Some(CommittedChangesPatch {
+    Ok(Some(AdoptionAdmission {
         base_ref,
         candidate,
         historical_task_base,

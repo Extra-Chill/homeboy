@@ -2,7 +2,7 @@
 #![cfg(test)]
 
 use super::super::promote::{
-    normalize_promotion_patch, resume_promoted_patch, retain_committed_changes_artifact,
+    normalize_fixture_diff, resume_promoted_patch, retain_committed_changes_artifact,
 };
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::candidate_fixture::{
@@ -218,10 +218,10 @@ fn committed_changes_retention_uses_the_explicit_observation_store() {
 }
 
 #[test]
-fn normalize_promotion_patch_leaves_unrelated_workspace_paths() {
+fn normalize_fixture_diff_leaves_unrelated_workspace_paths() {
     let patch = "diff --git a/workspace/fixture.txt b/workspace/fixture.txt\n--- a/workspace/fixture.txt\n+++ b/workspace/fixture.txt\n@@ -1 +1 @@\n-old\n+new\n";
 
-    let normalized = normalize_promotion_patch(patch, "homeboy@promoted-task")
+    let normalized = normalize_fixture_diff(patch, "homeboy@promoted-task")
         .expect("unrelated workspace path remains repo-relative");
 
     assert_eq!(normalized.changed_files, vec!["workspace/fixture.txt"]);
@@ -366,10 +366,10 @@ fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
 }
 
 #[test]
-fn normalize_promotion_patch_rejects_repo_sandbox_without_relative_suffix() {
+fn normalize_fixture_diff_rejects_repo_sandbox_without_relative_suffix() {
     let patch = "diff --git a/workspace/homeboy-refactor b/workspace/homeboy-refactor\n--- a/workspace/homeboy-refactor\n+++ b/workspace/homeboy-refactor\n@@ -1 +1 @@\n-old\n+new\n";
 
-    let err = normalize_promotion_patch(patch, "homeboy@promoted-task")
+    let err = normalize_fixture_diff(patch, "homeboy@promoted-task")
         .expect_err("repo sandbox path without suffix rejected");
 
     assert!(err.message.contains("no repo-relative suffix"));

@@ -92,8 +92,11 @@ fn attempt_workspace_identity_and_adoption_round_trip_for_lab_rematerialization(
         base_fingerprint: "sha256:base".to_string(),
         adoption: Some(AgentTaskCandidateAdoption {
             source_attempt: "attempt-1a2b".to_string(),
-            patch_path: "/artifacts/candidate.patch".to_string(),
-            patch_fingerprint: "sha256:patch".to_string(),
+            candidate: AgentTaskCandidate {
+                base_sha: "base".into(),
+                candidate_sha: "candidate".into(),
+                tree_sha: "tree".into(),
+            },
             provider_backend: "provider-a".to_string(),
             provider_model: Some("model-a".to_string()),
             decision: "continue verified candidate".to_string(),

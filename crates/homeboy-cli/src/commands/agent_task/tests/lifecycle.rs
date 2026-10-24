@@ -1094,7 +1094,7 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
             "selected_candidate": {
                 "run_id": run_id,
                 "selected_task_id": "candidate-task",
-                "selected_artifact_id": "patch",
+                "selected_candidate_sha": "patch",
             },
         });
         let compact = super::super::status::compact_cook_report(report.clone(), false);

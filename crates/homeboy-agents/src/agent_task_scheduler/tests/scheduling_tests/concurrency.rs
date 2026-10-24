@@ -716,15 +716,9 @@ pub(super) mod concurrency_tests {
             )
             .expect("deferred cleanup JSON");
             if action["status"] == "candidate_recovered" {
-                let candidates = action["candidate_artifacts"]
-                    .as_array()
-                    .expect("recovered candidates");
-                assert!(candidates.iter().any(|artifact| {
-                    artifact["kind"] == "patch"
-                        && artifact["sha256"]
-                            .as_str()
-                            .is_some_and(|sha| sha.len() == 64)
-                }));
+                assert!(action["candidate"]["candidate_sha"]
+                    .as_str()
+                    .is_some_and(|sha| sha.len() == 40));
                 break;
             }
             assert!(
@@ -854,11 +848,13 @@ pub(super) mod concurrency_tests {
                 request.executor.config["workspace_root"],
                 workspace.display().to_string()
             );
-            assert!(
-                !workspace.join("agent-change.txt").exists(),
-                "retry must start without the prior attempt's edits"
-            );
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt > 1 {
+                assert_eq!(
+                    std::fs::read_to_string(workspace.join("agent-change.txt")).unwrap(),
+                    format!("attempt {}\n", attempt - 1)
+                );
+            }
             std::fs::write(
                 workspace.join("agent-change.txt"),
                 format!("attempt {attempt}\n"),
@@ -895,7 +891,7 @@ pub(super) mod concurrency_tests {
     }
 
     #[test]
-    fn retry_uses_clean_isolated_workspace_after_permission_denial() {
+    fn retry_inherits_candidate_in_isolated_workspace_after_permission_denial() {
         // Attempt worktrees are now retained when they hold work (#8579), so
         // isolate the controller-scratch home to keep those retained checkouts
         // out of the developer's real `~/.local/share/homeboy`.
@@ -960,10 +956,8 @@ pub(super) mod concurrency_tests {
             .stdout
             .is_empty());
         assert!(!target.join("agent-change.txt").exists());
-        assert!(aggregate.outcomes[0]
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.id == "task-1-attempt-2-committed-changes"));
+        assert!(aggregate.outcomes[0].candidate.is_some());
+        assert!(aggregate.outcomes[0].artifacts.is_empty());
         let retry = aggregate.outcomes[0]
             .diagnostics
             .iter()
@@ -977,14 +971,7 @@ pub(super) mod concurrency_tests {
             retry.data["diagnostics"][0]["data"]["operation"],
             "write_file"
         );
-        assert_eq!(
-            retry.data["artifacts"][0]["id"],
-            "task-1-attempt-1-uncommitted-changes"
-        );
-        assert_eq!(
-            retry.data["artifacts"][0]["metadata"]["change_source"],
-            "uncommitted_attempt_workspace"
-        );
+        assert!(retry.data["candidate"]["candidate_sha"].is_string());
     }
 
     #[test]
@@ -1048,25 +1035,14 @@ pub(super) mod concurrency_tests {
                 outcome.failure_classification,
                 Some(AgentTaskFailureClassification::Transient)
             );
-            for attempt in 1..=expected_attempts {
-                let patch = outcome
-                    .artifacts
-                    .iter()
-                    .find(|artifact| {
-                        artifact.id == format!("task-1-attempt-{attempt}-uncommitted-changes")
-                    })
-                    .expect("each failed attempt's patch remains available");
-                assert!(patch.size_bytes.is_some_and(|size| size > 0));
-                assert!(patch.sha256.is_some());
-                assert!(patch.metadata["base_ref"].is_string());
-            }
+            assert!(outcome.candidate.is_some());
+            assert!(outcome.artifacts.is_empty());
             let workspaces = workspaces.lock().expect("workspaces");
             if expected_attempts == 2 {
                 assert_ne!(workspaces[0], workspaces[1]);
                 assert!(outcome.diagnostics.iter().any(|diagnostic| {
                     diagnostic.class == "agent_task.retry_attempt"
-                        && diagnostic.data["artifacts"][0]["id"]
-                            == "task-1-attempt-1-uncommitted-changes"
+                        && diagnostic.data["candidate"]["candidate_sha"].is_string()
                 }));
             }
             assert_eq!(
