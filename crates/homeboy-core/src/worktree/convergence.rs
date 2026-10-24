@@ -133,8 +133,8 @@ pub fn pr_route(branch: &str, url: Option<&str>) -> Error {
 }
 
 /// The refusal for a destination that diverged from its base and is not the
-/// rework of the PR named by `task_url`. Naming a PR whose head is a different
-/// branch is its own mistake; pointing that caller at the PR-URL flow it
+/// rework of an open PR named by `task_url`. Naming a PR this branch does not
+/// head (another branch's, or a closed one) is its own mistake; pointing that caller at the PR-URL flow it
 /// already used would send it in a circle.
 pub fn diverged_route(branch: &str, task_url: Option<&str>) -> Error {
     let Some(url) = task_url.filter(|url| url.contains("/pull/")) else {
@@ -143,7 +143,7 @@ pub fn diverged_route(branch: &str, task_url: Option<&str>) -> Error {
     let mut error = Error::validation_invalid_argument(
         "task_url",
         format!(
-            "Cook destination branch `{branch}` is not the head of {url}; run Cook on that PR's head branch, or open a PR for `{branch}` and pass its URL"
+            "Cook destination branch `{branch}` is not the head of an open PR at {url}; run Cook on that PR's head branch, or open a PR for `{branch}` and pass its URL"
         ),
         Some(branch.to_string()),
         Some(vec![format!(
@@ -152,7 +152,7 @@ pub fn diverged_route(branch: &str, task_url: Option<&str>) -> Error {
         )]),
     );
     error.details["destination_convergence"] = serde_json::json!({
-        "next_action": "pr_head_mismatch", "branch": branch, "pr_url": url,
+        "next_action": "pr_head_mismatch", "branch": branch, "task_url": url,
     });
     error
 }
@@ -291,7 +291,7 @@ mod tests {
         let mismatch = diverged_route("feature", Some(url));
         assert!(mismatch
             .message
-            .contains("`feature` is not the head of https://github.com/o/r/pull/7"));
+            .contains("`feature` is not the head of an open PR at https://github.com/o/r/pull/7"));
         assert_eq!(
             mismatch.details["destination_convergence"]["next_action"],
             "pr_head_mismatch"
