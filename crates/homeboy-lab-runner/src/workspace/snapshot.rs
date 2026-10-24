@@ -141,19 +141,19 @@ pub(super) fn snapshot_identity_controlled(
     includes: &[String],
     control: &WorkspaceControl,
 ) -> Result<String> {
-    Ok(snapshot_identity_and_stats_controlled(local_path, excludes, includes, control)?.0)
+    Ok(snapshot_identity_manifest_and_hash_controlled(local_path, excludes, includes, control)?.0)
 }
 
-/// Reuse the identity traversal's physical file facts instead of walking the
-/// same source again just to size filesystem admission.
-pub(super) fn snapshot_identity_and_stats_controlled(
+/// Bind the legacy path/Git snapshot identity and portable content inventory
+/// in the same traversal, sharing every file read.
+pub(super) fn snapshot_identity_manifest_and_hash_controlled(
     local_path: &Path,
     excludes: &[String],
     includes: &[String],
     control: &WorkspaceControl,
-) -> Result<(String, SnapshotStats)> {
+) -> Result<(String, SnapshotStats, WorkspaceContentManifest, String)> {
     homeboy_core::observation::phase_timing::time(
-        "stage.lab.source_materialization.snapshot_build_hash",
+        "stage.lab.source_materialization.content_manifest_hash",
         || {
             control.checkpoint()?;
             let repository_integrity_evidence =
@@ -166,46 +166,34 @@ pub(super) fn snapshot_identity_and_stats_controlled(
             let head = control
                 .git(local_path, &["rev-parse", "HEAD"])
                 .unwrap_or_else(|_| "nogit".to_string());
-            let status = snapshot_git_output_controlled(
-                local_path,
-                &["status", "--porcelain=v1"],
-                excludes,
-                control,
-            )
-            .unwrap_or_else(|_| "nogit".to_string());
-            let diff = snapshot_git_output_controlled(
-                local_path,
-                &["diff", "--binary", "HEAD"],
-                excludes,
-                control,
-            )
-            .unwrap_or_default();
-            let staged = snapshot_git_output_controlled(
-                local_path,
-                &["diff", "--cached", "--binary", "HEAD"],
-                excludes,
-                control,
-            )
-            .unwrap_or_default();
             let mut hasher = Sha256::new();
             hasher.update(local_path.display().to_string().as_bytes());
             hasher.update(head.as_bytes());
-            hasher.update(status.as_bytes());
-            hasher.update(diff.as_bytes());
-            hasher.update(staged.as_bytes());
-            let mut stats = SnapshotStats { files: 0, bytes: 0 };
-            hash_snapshot_tree(
+            for (args, fallback) in [
+                (vec!["status", "--porcelain=v1"], "nogit"),
+                (vec!["diff", "--binary", "HEAD"], ""),
+                (vec!["diff", "--cached", "--binary", "HEAD"], ""),
+            ] {
+                hasher.update(
+                    snapshot_git_output_controlled(local_path, &args, excludes, control)
+                        .unwrap_or_else(|_| fallback.to_string())
+                        .as_bytes(),
+                );
+            }
+            let effective_excludes = effective_snapshot_excludes(excludes.to_vec(), includes);
+            let walk = workspace_content_walk_with_identity_controlled(
                 local_path,
-                local_path,
-                excludes,
-                includes,
-                &mut hasher,
-                &mut stats,
+                &effective_excludes,
+                WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
                 control,
+                Some(&mut hasher),
             )?;
+            let stats = walk.stats;
             Ok((
                 format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)),
                 stats,
+                walk.manifest,
+                walk.content_identity,
             ))
         },
     )
@@ -296,6 +284,7 @@ struct ContentWalkRecord {
 }
 
 struct WorkspaceContentWalk {
+    stats: SnapshotStats,
     manifest: WorkspaceContentManifest,
     content_identity: String,
     records: Vec<ContentWalkRecord>,
@@ -307,6 +296,16 @@ fn workspace_content_walk_controlled(
     excludes: &[String],
     policy: &str,
     control: &WorkspaceControl,
+) -> Result<WorkspaceContentWalk> {
+    workspace_content_walk_with_identity_controlled(path, excludes, policy, control, None)
+}
+
+fn workspace_content_walk_with_identity_controlled(
+    path: &Path,
+    excludes: &[String],
+    policy: &str,
+    control: &WorkspaceControl,
+    snapshot_hasher: Option<&mut Sha256>,
 ) -> Result<WorkspaceContentWalk> {
     control.checkpoint()?;
     let (algorithm, executable_capability) =
@@ -325,17 +324,21 @@ fn workspace_content_walk_controlled(
         entries: Vec::new(),
     };
     let mut records = Vec::new();
+    let mut stats = SnapshotStats { files: 0, bytes: 0 };
     ContentHashTraversal {
         root: &root,
         excludes,
         hasher: &mut hasher,
+        snapshot_hasher,
+        stats: &mut stats,
         executable_capability,
         manifest: Some(&mut manifest),
         records: &mut records,
         control,
     }
-    .collect(&root, Path::new(""), &mut vec![root.clone()])?;
+    .collect(&root, Path::new(""), &mut vec![root.clone()], true)?;
     Ok(WorkspaceContentWalk {
+        stats,
         manifest,
         content_identity: format!("sha256:{:x}", hasher.finalize()),
         records,
@@ -400,6 +403,8 @@ struct ContentHashTraversal<'a> {
     root: &'a Path,
     excludes: &'a [String],
     hasher: &'a mut Sha256,
+    snapshot_hasher: Option<&'a mut Sha256>,
+    stats: &'a mut SnapshotStats,
     executable_capability: ExecutableCapability,
     manifest: Option<&'a mut WorkspaceContentManifest>,
     records: &'a mut Vec<ContentWalkRecord>,
@@ -412,6 +417,7 @@ impl ContentHashTraversal<'_> {
         path: &Path,
         logical: &Path,
         ancestors: &mut Vec<std::path::PathBuf>,
+        snapshot_active: bool,
     ) -> Result<()> {
         self.control.checkpoint()?;
         let mut children = match fs::read_dir(path) {
@@ -460,6 +466,14 @@ impl ContentHashTraversal<'_> {
                     ));
                 }
             };
+            if snapshot_active {
+                if let Some(hasher) = self.snapshot_hasher.as_mut() {
+                    hasher.update(relative_path.to_string_lossy().as_bytes());
+                }
+            }
+            // Legacy snapshot identities bind a link's spelling only; the portable
+            // content digest additionally binds its dereferenced contents.
+            let snapshot_entry = snapshot_active && !link_metadata.file_type().is_symlink();
             // A symlink whose target resolves is dereferenced so its target content
             // stays provenance-bound (target drift changes the hash). A symlink whose
             // target is intentionally unavailable on the controller (e.g. a tracked
@@ -521,6 +535,11 @@ impl ContentHashTraversal<'_> {
                         None,
                     ));
                 }
+                if snapshot_entry {
+                    if let Some(hasher) = self.snapshot_hasher.as_mut() {
+                        hasher.update(b"/dir");
+                    }
+                }
                 hash_directory_entry(self.hasher, &relative);
                 record_workspace_content_manifest_entry(
                     &mut self.manifest,
@@ -536,14 +555,27 @@ impl ContentHashTraversal<'_> {
                     symlink_target: None,
                 });
                 ancestors.push(canonical);
-                self.collect(&resolved, &relative_path, ancestors)?;
+                self.collect(&resolved, &relative_path, ancestors, snapshot_entry)?;
                 ancestors.pop();
             } else if metadata.is_file() {
                 let hash_executable = self.executable_capability.value(&metadata);
                 hash_file_entry_header(self.hasher, &relative, hash_executable, metadata.len());
+                if snapshot_entry {
+                    self.stats.files += 1;
+                    self.stats.bytes = self.stats.bytes.saturating_add(metadata.len());
+                    if let Some(hasher) = self.snapshot_hasher.as_mut() {
+                        hasher.update(b"/file");
+                        hasher.update(metadata.len().to_le_bytes());
+                    }
+                }
                 let mut file_hash = Sha256::new();
                 let bytes = read_file_chunks(&resolved, self.control, |chunk| {
                     self.hasher.update(chunk);
+                    if snapshot_entry {
+                        if let Some(hasher) = self.snapshot_hasher.as_mut() {
+                            hasher.update(chunk);
+                        }
+                    }
                     file_hash.update(chunk);
                     Ok(())
                 })?;
@@ -668,68 +700,6 @@ pub(super) fn local_snapshot_stats_controlled(
     let mut stats = SnapshotStats { files: 0, bytes: 0 };
     collect_stats(path, path, excludes, includes, &mut stats, control)?;
     Ok(stats)
-}
-
-fn hash_snapshot_tree(
-    root: &Path,
-    path: &Path,
-    excludes: &[String],
-    includes: &[String],
-    hasher: &mut Sha256,
-    stats: &mut SnapshotStats,
-    control: &WorkspaceControl,
-) -> Result<()> {
-    control.checkpoint()?;
-    let mut entries = fs::read_dir(path)
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read sync directory".to_string()))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("read sync directory entry".to_string()),
-            )
-        })?;
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        control.checkpoint()?;
-        let entry_path = entry.path();
-        if is_excluded(root, &entry_path, excludes, includes) {
-            continue;
-        }
-        let metadata = entry.metadata().map_err(|err| {
-            Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
-        })?;
-        let rel = entry_path
-            .strip_prefix(root)
-            .unwrap_or(&entry_path)
-            .to_string_lossy();
-        hasher.update(rel.as_bytes());
-        if metadata.is_dir() {
-            hasher.update(b"/dir");
-            hash_snapshot_tree(
-                root,
-                &entry_path,
-                excludes,
-                includes,
-                hasher,
-                stats,
-                control,
-            )?;
-        } else if metadata.is_file() {
-            stats.files += 1;
-            stats.bytes = stats.bytes.saturating_add(metadata.len());
-            hasher.update(b"/file");
-            hasher.update(metadata.len().to_le_bytes());
-            read_file_chunks(&entry_path, control, |chunk| {
-                hasher.update(chunk);
-                Ok(())
-            })?;
-        }
-    }
-    Ok(())
 }
 
 fn collect_stats(

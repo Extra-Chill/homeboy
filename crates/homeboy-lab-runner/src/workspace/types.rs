@@ -118,6 +118,9 @@ pub struct RunnerWorkspaceSyncOutput {
     pub resource_lifecycle: ResourceLifecycleRecord,
     pub sync_mode: RunnerWorkspaceSyncMode,
     pub snapshot_identity: String,
+    /// Controller inventory and digest captured together during sync.
+    #[serde(skip)]
+    pub content: Option<(super::snapshot::WorkspaceContentManifest, String)>,
     /// Opaque capability for resolving this exact physical snapshot in a later
     /// runner command. Callers must not parse it as a path or source identity.
     pub workspace_ref: String,

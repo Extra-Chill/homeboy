@@ -845,6 +845,7 @@ pub(crate) struct LabWorkspaceMetadataInputs<'a> {
     pub(crate) workspace_snapshots: &'a [SourceSnapshot],
     pub(crate) legacy_path_materialization_plan: &'a PathMaterializationPlan,
     pub(crate) primary_synced_workspace: &'a RunnerWorkspaceSyncOutput,
+    pub(crate) extra_synced_workspaces: &'a [RunnerWorkspaceSyncOutput],
 }
 
 /// Add verification metadata without changing the registered path-materialization
@@ -855,24 +856,14 @@ pub(crate) fn attach_lab_workspace_metadata(
 ) -> Result<()> {
     let source_snapshot = inputs.source_snapshot;
     let primary_workspace_plan = &inputs.primary_synced_workspace.materialization_plan;
-    let source_path = source_snapshot.local_path.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "source_snapshot.local_path",
-            "Lab workspace verification requires a controller source path",
-            None,
-            None,
-        )
-    })?;
+    let (content_manifest, content_hash) = inputs
+        .primary_synced_workspace
+        .content
+        .as_ref()
+        .ok_or_else(|| Error::internal_unexpected("Lab workspace sync has no content inventory"))?;
     let permission_policy = crate::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY;
-    let content_hash =
-        crate::workspace_content_hash(Path::new(source_path), &source_snapshot.sync_excludes)?;
     let content_hash_algorithm = crate::workspace_content_hash_algorithm(permission_policy)
         .expect("default workspace content permission policy is supported");
-    let content_manifest = crate::workspace_content_manifest_for_policy(
-        Path::new(source_path),
-        &source_snapshot.sync_excludes,
-        permission_policy,
-    )?;
     lab_metadata["source_snapshot"] =
         serde_json::to_value(source_snapshot).unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_content_hash"] = serde_json::json!(content_hash);
@@ -893,13 +884,12 @@ pub(crate) fn attach_lab_workspace_metadata(
     lab_metadata["workspace_provenance"] = serde_json::json!({
         "schema": "homeboy/lab-workspace-provenance/v1",
         "entries": inputs.workspace_snapshots.iter().map(|snapshot| {
-            let source_path = Path::new(snapshot.local_path.as_deref().unwrap_or_default());
-            let content_hash = crate::workspace_content_hash(source_path, &snapshot.sync_excludes)?;
-            let content_manifest = crate::workspace_content_manifest_for_policy(
-                source_path,
-                &snapshot.sync_excludes,
-                permission_policy,
-            )?;
+            let workspace = std::iter::once(inputs.primary_synced_workspace)
+                .chain(inputs.extra_synced_workspaces.iter())
+                .find(|workspace| Some(workspace.remote_path.as_str()) == snapshot.remote_path.as_deref())
+                .ok_or_else(|| Error::internal_unexpected("workspace provenance has no synced workspace"))?;
+            let (content_manifest, content_hash) = workspace.content.as_ref()
+                .ok_or_else(|| Error::internal_unexpected("workspace provenance has no content inventory"))?;
             Ok(serde_json::json!({
                 "remote_path": snapshot.remote_path,
                 "materialization_mode": inputs.legacy_path_materialization_plan.entries.iter()

@@ -37,7 +37,7 @@ use super::snapshot::{
 };
 use super::snapshot::{
     materialize_snapshot_incremental_controlled, materialize_snapshot_with_scratch_controlled,
-    snapshot_identity_and_stats_controlled, workspace_content_manifest_and_hash_controlled,
+    snapshot_identity_manifest_and_hash_controlled,
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
@@ -246,8 +246,13 @@ fn sync_workspace_in_roots_controlled(
 
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot | RunnerWorkspaceSyncMode::SnapshotGit => {
-            let (snapshot, stats) =
-                snapshot_identity_and_stats_controlled(&local_path, &excludes, &includes, control)?;
+            let (snapshot, stats, content_manifest, content_hash) =
+                snapshot_identity_manifest_and_hash_controlled(
+                    &local_path,
+                    &excludes,
+                    &includes,
+                    control,
+                )?;
             let remote_path = temp::unique_name(
                 &deterministic_remote_path(
                     workspace_root,
@@ -271,13 +276,6 @@ fn sync_workspace_in_roots_controlled(
                 &includes,
                 workspace_cleanliness,
             );
-            let content_manifest = workspace_content_manifest_and_hash_controlled(
-                &local_path,
-                &excludes,
-                WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-                control,
-            )?
-            .0;
             let admission = require_snapshot_filesystem_admission(
                 roots.data(),
                 &runner,
@@ -423,7 +421,7 @@ fn sync_workspace_in_roots_controlled(
                 source_transfer: materialization_plan.controller_git_bundle.as_ref(),
                 snapshot_identity: &snapshot,
                 snapshot_excludes: &excludes,
-                content_manifest: Some(content_manifest),
+                content_manifest: Some(content_manifest.clone()),
                 run_id: options.run_isolation_token.as_deref(),
                 cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
             });
@@ -486,6 +484,7 @@ fn sync_workspace_in_roots_controlled(
                     resource_lifecycle,
                     sync_mode: options.mode,
                     snapshot_identity: snapshot,
+                    content: Some((content_manifest, content_hash)),
                     workspace_ref,
                     prepared_workspace_lease,
                     counts: stats,
@@ -726,6 +725,14 @@ fn sync_workspace_in_roots_controlled(
                     resource_lifecycle,
                     sync_mode: RunnerWorkspaceSyncMode::Git,
                     snapshot_identity: git.head,
+                    content: Some(
+                        super::snapshot::workspace_content_manifest_and_hash_controlled(
+                            &local_path,
+                            &excludes,
+                            WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                            control,
+                        )?,
+                    ),
                     workspace_ref,
                     prepared_workspace_lease,
                     counts: ByteFileCounts::default(),
@@ -989,8 +996,8 @@ fn materialize_git_fallback_filesystem_snapshot(
     _closure_error: &Error,
     control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
-    let (snapshot, stats) =
-        snapshot_identity_and_stats_controlled(local_path, excludes, includes, control)?;
+    let (snapshot, stats, content_manifest, content_hash) =
+        snapshot_identity_manifest_and_hash_controlled(local_path, excludes, includes, control)?;
     let remote_path = temp::unique_name(
         &deterministic_remote_path(
             workspace_root,
@@ -1000,13 +1007,6 @@ fn materialize_git_fallback_filesystem_snapshot(
         ),
         "",
     );
-    let content_manifest = workspace_content_manifest_and_hash_controlled(
-        local_path,
-        excludes,
-        WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-        control,
-    )?
-    .0;
     let workspace_cleanliness = "filesystem_snapshot_after_git_closure_failure";
     let mut materialization_plan = workspace_materialization_plan(
         workspace_root,
@@ -1058,7 +1058,7 @@ fn materialize_git_fallback_filesystem_snapshot(
         source_transfer: None,
         snapshot_identity: &snapshot,
         snapshot_excludes: excludes,
-        content_manifest: Some(content_manifest),
+        content_manifest: Some(content_manifest.clone()),
         run_id: options.run_isolation_token.as_deref(),
         cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
     });
@@ -1121,6 +1121,7 @@ fn materialize_git_fallback_filesystem_snapshot(
             resource_lifecycle,
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: snapshot,
+            content: Some((content_manifest, content_hash)),
             workspace_ref,
             prepared_workspace_lease,
             counts: stats,
@@ -1626,6 +1627,14 @@ pub fn reuse_compatible_snapshot_workspace(
         resource_lifecycle,
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         snapshot_identity: snapshot.snapshot_identity,
+        content: Some(
+            super::snapshot::workspace_content_manifest_and_hash_controlled(
+                &local_path,
+                &excludes,
+                WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                &WorkspaceControl::default(),
+            )?,
+        ),
         workspace_ref,
         prepared_workspace_lease: snapshot.workspace_lease,
         counts: ByteFileCounts::default(),
@@ -4997,16 +5006,39 @@ mod tests {
         std::os::unix::fs::symlink("nested/input", source.path().join("link")).unwrap();
         let excludes = vec!["excluded".to_string()];
         let control = WorkspaceControl::default();
-        let (identity, stats) = snapshot::snapshot_identity_and_stats_controlled(
-            source.path(),
-            &excludes,
-            &[],
-            &control,
-        )
-        .unwrap();
+        let (identity, stats, manifest, digest) =
+            snapshot::snapshot_identity_manifest_and_hash_controlled(
+                source.path(),
+                &excludes,
+                &[],
+                &control,
+            )
+            .unwrap();
         let expected =
             snapshot::local_snapshot_stats_controlled(source.path(), &excludes, &[], &control)
                 .unwrap();
+        let independent = snapshot::workspace_content_manifest_and_hash_for_policy(
+            source.path(),
+            &excludes,
+            crate::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+        )
+        .unwrap();
+        assert_eq!((manifest, digest), independent);
+        // Independent legacy encoding guards the persisted snapshot identity,
+        // including the spelling-only treatment of symlinks.
+        use sha2::{Digest, Sha256};
+        let mut legacy = Sha256::new();
+        legacy.update(source.path().display().to_string().as_bytes());
+        legacy.update(b"nogitnogit");
+        #[cfg(unix)]
+        legacy.update(b"link");
+        legacy.update(b"nested/dirnested/input/file");
+        legacy.update(7_u64.to_le_bytes());
+        legacy.update(b"payload");
+        assert_eq!(
+            identity,
+            format!("snapshot:{}", &format!("{:x}", legacy.finalize())[..16])
+        );
         assert_eq!(stats.files, expected.files);
         assert_eq!(stats.bytes, expected.bytes);
         assert_eq!(
@@ -5075,7 +5107,6 @@ mod tests {
         let reopened = ObservationStore::open_initialized_at(store.database_path()).unwrap();
         let spans = reopened.phase_spans(&run.id).unwrap().spans;
         for name in [
-            "snapshot_build_hash",
             "content_manifest_hash",
             "snapshot_input_manifest",
             "snapshot_stage_build",

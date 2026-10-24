@@ -3381,6 +3381,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 workspace_snapshots: &stage.workspace_snapshots,
                 legacy_path_materialization_plan: &stage.path_materialization_plan,
                 primary_synced_workspace: &stage.synced,
+                extra_synced_workspaces: &stage.synced_extra_workspaces,
             },
         )?;
         lab_metadata["workspace_cleanliness"] = json!({

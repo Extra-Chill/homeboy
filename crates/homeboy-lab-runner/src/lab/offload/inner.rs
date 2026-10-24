@@ -2263,6 +2263,7 @@ pub(crate) fn run_lab_offload_inner(
         path_materialization_plan,
         source_snapshot,
         workspace_snapshots,
+        synced_extra_workspaces,
         mut remapped_args,
         agent_task_run_id,
         runner_required_extensions,
@@ -2432,6 +2433,7 @@ pub(crate) fn run_lab_offload_inner(
             workspace_snapshots: &workspace_snapshots,
             legacy_path_materialization_plan: &path_materialization_plan,
             primary_synced_workspace: &synced,
+            extra_synced_workspaces: &synced_extra_workspaces,
         },
     )?;
     if let Some(verified_cook_baseline) = request.verified_cook_baseline {
