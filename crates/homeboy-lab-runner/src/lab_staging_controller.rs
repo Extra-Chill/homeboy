@@ -1407,14 +1407,21 @@ fn materialize_deferred_source<T>(
     plan: &homeboy_agents::agent_task_scheduler::AgentTaskPlan,
     materialize: impl FnOnce(&crate::workspace::WorkspaceControl) -> Result<T>,
 ) -> Result<T> {
+    // Detached controller workers do not inherit thread-local timing. Bind to
+    // the lifecycle store's roots, not the worker's ambient installation.
+    let _timing = homeboy_core::observation::phase_timing::enter(Some((
+        store.observation_db_path(),
+        run_id.to_string(),
+    )));
     let control = deferred_source_control(store, run_id, runner_id, plan);
-    let result: Result<T> = (|| {
-        control.checkpoint()?;
-        let value = materialize(&control)?;
-        control.checkpoint()?;
-        ensure_deferred_source_active(store, run_id)?;
-        Ok(value)
-    })();
+    let result: Result<T> =
+        homeboy_core::observation::phase_timing::time("stage.lab.source_materialization", || {
+            control.checkpoint()?;
+            let value = materialize(&control)?;
+            control.checkpoint()?;
+            ensure_deferred_source_active(store, run_id)?;
+            Ok(value)
+        });
     result.map_err(|mut error| {
         error.details["lab_source_materialization"] = json!({
             "phase": "source_materialization", "runner_job_accepted": false,
@@ -1468,16 +1475,21 @@ fn deferred_source_control(
         if last.is_some_and(|last| last.elapsed() < Duration::from_secs(5)) {
             return Ok(());
         }
-        homeboy_agents::agent_task_lifecycle::record_lab_offload_phase_in_store(
-            &progress_store,
-            homeboy_agents::agent_task_lifecycle::LabOffloadPhaseRecord {
-                requested_run_id: &progress_run,
-                runner_id: &progress_runner,
-                phase: "source_materialization",
-                remote_workspace: None,
-                source_checkout: None,
-                provider_rotation: None,
-                durable_plan: None,
+        homeboy_core::observation::phase_timing::time(
+            "stage.lab.source_materialization.checkpoint_record_writes",
+            || {
+                homeboy_agents::agent_task_lifecycle::record_lab_offload_phase_in_store(
+                    &progress_store,
+                    homeboy_agents::agent_task_lifecycle::LabOffloadPhaseRecord {
+                        requested_run_id: &progress_run,
+                        runner_id: &progress_runner,
+                        phase: "source_materialization",
+                        remote_workspace: None,
+                        source_checkout: None,
+                        provider_rotation: None,
+                        durable_plan: None,
+                    },
+                )
             },
         )?;
         *last = Some(Instant::now());
@@ -5046,6 +5058,26 @@ mod tests {
                 "cancelled materialization child was not reaped"
             );
             assert!(ensure_deferred_source_active(&store, run_id).is_err());
+            let observation = homeboy_core::observation::ObservationStore::open_initialized_at(
+                store.observation_db_path(),
+            )
+            .expect("reopen timing store");
+            let spans = observation
+                .phase_spans(run_id)
+                .expect("stored timings")
+                .spans;
+            let source_span = spans
+                .iter()
+                .find(|span| span.id == "stage.lab.source_materialization")
+                .expect("source timing");
+            assert_eq!(
+                source_span.status,
+                homeboy_core::phase_timing::PhaseStatus::Failed
+            );
+            assert!(source_span.duration_ms.is_some());
+            assert!(spans.iter().any(|span| span.id
+                == "stage.lab.source_materialization.checkpoint_record_writes"
+                && span.duration_ms.is_some()));
             assert_eq!(
                 store.read_record(run_id).expect("terminal record").state(),
                 homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled
