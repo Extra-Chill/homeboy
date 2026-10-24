@@ -31,23 +31,35 @@ pub(crate) struct DefaultBranchRequest<'a> {
 
 pub(crate) fn resolve_default_branch(
     request: DefaultBranchRequest<'_>,
+    repository: Option<(&Path, &Path, &str)>,
 ) -> Result<DefaultBranchResolution> {
     let started = Instant::now();
+    let remote_for = |path: &Path| match repository.filter(|(_, root, _)| *root == path) {
+        Some((_, _, remote)) => Ok(remote.to_string()),
+        None => resolve_default_remote(path, started),
+    };
     let candidates = [
         request.workspace.map(|path| (path, "workspace_upstream")),
         request.component.map(|path| (path, "repository_metadata")),
         request.destination.map(|path| (path, "remote_head")),
     ];
-    let mut existing = Vec::<(PathBuf, &str)>::new();
+    let mut existing = Vec::new();
     for (path, source) in candidates.into_iter().flatten() {
-        if let Some(root) = bounded_git_read(
+        let root = if let Some((_, root, _)) =
+            repository.filter(|(component, root, _)| *component == path || *root == path)
+        {
+            root.to_path_buf()
+        } else if let Some(root) = bounded_git_read(
             path,
             &["rev-parse", "--show-toplevel"],
             "repository root",
             started,
         )? {
-            existing.push((PathBuf::from(root), source));
-        }
+            PathBuf::from(root)
+        } else {
+            continue;
+        };
+        existing.push((root, source));
     }
 
     let (path, base, inferred_from, source) = if let Some(base) = request.explicit_base {
@@ -57,25 +69,42 @@ pub(crate) fn resolve_default_branch(
         }
         let remote = path
             .as_deref()
-            .map(|path| resolve_default_remote(path, started))
+            .map(remote_for)
             .transpose()?
             .unwrap_or_else(|| "origin".to_string());
-        (
-            path,
-            base.to_string(),
-            format!("{remote}/{base}"),
-            "explicit",
-        )
+        let from = format!("{remote}/{base}");
+        (path, base.to_string(), from, "explicit")
     } else {
         let mut resolved = None;
         for (path, candidate_source) in &existing {
+            let default_branch = || {
+                remote_for(path)
+                    .and_then(|remote| {
+                        homeboy::core::git::default_remote_branch_until(
+                            path,
+                            &remote,
+                            started + DEFAULT_BRANCH_RESOLUTION_TIMEOUT,
+                        )
+                    })
+                    .map_err(|error| {
+                        if started.elapsed() >= DEFAULT_BRANCH_RESOLUTION_TIMEOUT {
+                            default_branch_timeout_error(
+                                path,
+                                "remote default branch",
+                                started.elapsed(),
+                            )
+                        } else {
+                            error
+                        }
+                    })
+            };
             let remote_ref = if *candidate_source == "workspace_upstream" {
                 match git_upstream_branch(path, started)? {
                     Some(upstream) => Some(upstream),
-                    None => default_remote_branch(path, started)?,
+                    None => default_branch()?,
                 }
             } else {
-                default_remote_branch(path, started)?
+                default_branch()?
             };
             if let Some(remote_ref) = remote_ref {
                 let base = remote_ref
@@ -108,39 +137,35 @@ pub(crate) fn resolve_default_branch(
     let from = request.explicit_from.unwrap_or(&inferred_from).to_string();
     let (sha, evidence_path) = if let Some(path) = path {
         let sha = resolve_commit(&path, &from, started)?;
-        let remote = resolve_default_remote(&path, started)?;
+        let remote = remote_for(&path)?;
         let base_ref = format!("{remote}/{base}");
-        let base_sha = match resolve_commit(&path, &base_ref, started)? {
+        let base_sha = match if base_ref == from {
+            sha.clone()
+        } else {
+            resolve_commit(&path, &base_ref, started)?
+        } {
             Some(sha) => Some(sha),
             None => resolve_commit(&path, &base, started)?,
         };
         if request.compatibility_fallback.is_none() {
-            let sha = sha.ok_or_else(|| unavailable_ref_error("from", &from, &remote))?;
-            let base_sha = base_sha.ok_or_else(|| unavailable_ref_error("base", &base, &remote))?;
-            if sha != base_sha {
-                return Err(Error::validation_invalid_argument(
-                    "from",
-                    format!("source ref `{from}` does not resolve to declared base `{base}`"),
-                    Some(from),
-                    Some(vec![format!(
-                        "Use the declared base ref: --from {base_ref} --base {base}"
-                    )]),
-                ));
+            if sha.is_none() {
+                return Err(unavailable_ref_error("from", &from, &remote));
             }
-            (Some(sha), Some(path.display().to_string()))
-        } else {
-            if sha.is_some() && base_sha.is_some() && sha != base_sha {
-                return Err(Error::validation_invalid_argument(
-                    "from",
-                    format!("source ref `{from}` does not resolve to declared base `{base}`"),
-                    Some(from),
-                    Some(vec![format!(
-                        "Use the declared base ref: --from {base_ref} --base {base}"
-                    )]),
-                ));
+            if base_sha.is_none() {
+                return Err(unavailable_ref_error("base", &base, &remote));
             }
-            (sha, Some(path.display().to_string()))
         }
+        if sha.is_some() && base_sha.is_some() && sha != base_sha {
+            return Err(Error::validation_invalid_argument(
+                "from",
+                format!("source ref `{from}` does not resolve to declared base `{base}`"),
+                Some(from),
+                Some(vec![format!(
+                    "Use the declared base ref: --from {base_ref} --base {base}"
+                )]),
+            ));
+        }
+        (sha, Some(path.display().to_string()))
     } else {
         (None, None)
     };
@@ -190,20 +215,6 @@ fn resolve_commit(path: &Path, reference: &str, started: Instant) -> Result<Opti
     )?
     .map(|value| value.trim().to_string())
     .filter(|value| !value.is_empty()))
-}
-
-fn default_remote_branch(path: &Path, started: Instant) -> Result<Option<String>> {
-    homeboy::core::git::default_remote_branch_until(
-        path,
-        started + DEFAULT_BRANCH_RESOLUTION_TIMEOUT,
-    )
-    .map_err(|error| {
-        if started.elapsed() >= DEFAULT_BRANCH_RESOLUTION_TIMEOUT {
-            default_branch_timeout_error(path, "remote default branch", started.elapsed())
-        } else {
-            error
-        }
-    })
 }
 
 fn resolve_default_remote(path: &Path, started: Instant) -> Result<String> {
@@ -301,14 +312,17 @@ mod tests {
             let (fixture, checkout) = default_branch_checkout(branch);
             git(&checkout, &["checkout", "--detach"]);
 
-            let resolution = resolve_default_branch(DefaultBranchRequest {
-                explicit_base: None,
-                explicit_from: None,
-                workspace: None,
-                component: Some(&checkout),
-                destination: None,
-                compatibility_fallback: None,
-            })
+            let resolution = resolve_default_branch(
+                DefaultBranchRequest {
+                    explicit_base: None,
+                    explicit_from: None,
+                    workspace: None,
+                    component: Some(&checkout),
+                    destination: None,
+                    compatibility_fallback: None,
+                },
+                None,
+            )
             .expect("resolve remote default while detached");
 
             assert_eq!(resolution.base, branch);
@@ -322,14 +336,17 @@ mod tests {
     #[test]
     fn explicit_overrides_win_and_conflicting_or_missing_refs_fail() {
         let (_fixture, checkout) = default_branch_checkout("trunk");
-        let explicit = resolve_default_branch(DefaultBranchRequest {
-            explicit_base: Some("trunk"),
-            explicit_from: Some("origin/trunk"),
-            workspace: None,
-            component: Some(&checkout),
-            destination: None,
-            compatibility_fallback: None,
-        })
+        let explicit = resolve_default_branch(
+            DefaultBranchRequest {
+                explicit_base: Some("trunk"),
+                explicit_from: Some("origin/trunk"),
+                workspace: None,
+                component: Some(&checkout),
+                destination: None,
+                compatibility_fallback: None,
+            },
+            None,
+        )
         .expect("explicit refs resolve");
         assert_eq!(explicit.base, "trunk");
         assert_eq!(explicit.from, "origin/trunk");
@@ -337,26 +354,32 @@ mod tests {
 
         git(&checkout, &["branch", "other"]);
         git(&checkout, &["commit", "--allow-empty", "-m", "other"]);
-        let conflict = resolve_default_branch(DefaultBranchRequest {
-            explicit_base: Some("trunk"),
-            explicit_from: Some("HEAD"),
-            workspace: None,
-            component: Some(&checkout),
-            destination: None,
-            compatibility_fallback: None,
-        })
+        let conflict = resolve_default_branch(
+            DefaultBranchRequest {
+                explicit_base: Some("trunk"),
+                explicit_from: Some("HEAD"),
+                workspace: None,
+                component: Some(&checkout),
+                destination: None,
+                compatibility_fallback: None,
+            },
+            None,
+        )
         .expect_err("conflicting refs fail");
         assert_eq!(conflict.details["field"], "from");
         assert_eq!(conflict.details["tried"].as_array().map(Vec::len), Some(1));
 
-        let missing = resolve_default_branch(DefaultBranchRequest {
-            explicit_base: Some("missing"),
-            explicit_from: None,
-            workspace: None,
-            component: Some(&checkout),
-            destination: None,
-            compatibility_fallback: None,
-        })
+        let missing = resolve_default_branch(
+            DefaultBranchRequest {
+                explicit_base: Some("missing"),
+                explicit_from: None,
+                workspace: None,
+                component: Some(&checkout),
+                destination: None,
+                compatibility_fallback: None,
+            },
+            None,
+        )
         .expect_err("missing base fails");
         assert_eq!(missing.details["field"], "from");
     }
@@ -364,14 +387,17 @@ mod tests {
     #[test]
     fn compatibility_mode_preserves_deferred_cook_base_resolution() {
         let fixture = tempfile::tempdir().expect("fixture");
-        let resolution = resolve_default_branch(DefaultBranchRequest {
-            explicit_base: None,
-            explicit_from: None,
-            workspace: None,
-            component: Some(fixture.path()),
-            destination: None,
-            compatibility_fallback: Some("main"),
-        })
+        let resolution = resolve_default_branch(
+            DefaultBranchRequest {
+                explicit_base: None,
+                explicit_from: None,
+                workspace: None,
+                component: Some(fixture.path()),
+                destination: None,
+                compatibility_fallback: Some("main"),
+            },
+            None,
+        )
         .expect("defer Cook base validation until materialization");
 
         assert_eq!(resolution.base, "main");
@@ -387,14 +413,17 @@ mod tests {
         let component = checkout.join("components").join("database");
         std::fs::create_dir_all(&component).expect("create component subdirectory");
 
-        let resolution = resolve_default_branch(DefaultBranchRequest {
-            explicit_base: None,
-            explicit_from: None,
-            workspace: None,
-            component: Some(&component),
-            destination: None,
-            compatibility_fallback: None,
-        })
+        let resolution = resolve_default_branch(
+            DefaultBranchRequest {
+                explicit_base: None,
+                explicit_from: None,
+                workspace: None,
+                component: Some(&component),
+                destination: None,
+                compatibility_fallback: None,
+            },
+            None,
+        )
         .expect("resolve default branch from component subdirectory");
 
         assert_eq!(resolution.base, "main");
@@ -447,14 +476,17 @@ mod tests {
         );
 
         let started = Instant::now();
-        let error = resolve_default_branch(DefaultBranchRequest {
-            explicit_base: None,
-            explicit_from: None,
-            workspace: None,
-            component: Some(&checkout),
-            destination: None,
-            compatibility_fallback: Some("main"),
-        })
+        let error = resolve_default_branch(
+            DefaultBranchRequest {
+                explicit_base: None,
+                explicit_from: None,
+                workspace: None,
+                component: Some(&checkout),
+                destination: None,
+                compatibility_fallback: Some("main"),
+            },
+            None,
+        )
         .expect_err("a delayed Git resolver must not block Cook indefinitely");
 
         assert!(
@@ -515,14 +547,17 @@ mod tests {
         );
 
         let started = Instant::now();
-        let error = resolve_default_branch(DefaultBranchRequest {
-            explicit_base: None,
-            explicit_from: None,
-            workspace: None,
-            component: Some(&checkout),
-            destination: None,
-            compatibility_fallback: Some("main"),
-        })
+        let error = resolve_default_branch(
+            DefaultBranchRequest {
+                explicit_base: None,
+                explicit_from: None,
+                workspace: None,
+                component: Some(&checkout),
+                destination: None,
+                compatibility_fallback: Some("main"),
+            },
+            None,
+        )
         .expect_err("a delayed remote lookup must not block Cook indefinitely");
 
         assert!(

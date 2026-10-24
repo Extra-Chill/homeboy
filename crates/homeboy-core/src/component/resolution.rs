@@ -992,6 +992,37 @@ fn is_named_component_worktree(
     }
 }
 
+/// Select the effective worktree source from an already resolved registration.
+/// Preserve CWD clone preference without loading the component or its remote
+/// identity again. The primary path remains authoritative for base metadata.
+pub fn worktree_source_from_repository(
+    component: &Component,
+    git_root: &Path,
+    origin_url: Option<&str>,
+) -> PathBuf {
+    let registered_path = Path::new(&component.local_path);
+    let cwd = std::env::current_dir().ok();
+    if cwd.as_deref() == Some(git_root) {
+        return git_root.to_path_buf();
+    }
+    let Some(cwd_root) = cwd.and_then(|cwd| detect_git_root(&cwd)) else {
+        return git_root.to_path_buf();
+    };
+    if cwd_root == git_root {
+        return cwd_root;
+    }
+    let remote_matches = crate::git::remote_origin_url(&cwd_root)
+        .as_deref()
+        .is_some_and(|url| Some(url) == origin_url);
+    if same_git_common_dir(registered_path, &cwd_root)
+        || remote_matches
+        || is_named_component_worktree(&component.id, registered_path, &cwd_root)
+    {
+        return cwd_root;
+    }
+    git_root.to_path_buf()
+}
+
 fn same_git_common_dir(a: &Path, b: &Path) -> bool {
     match (git_common_dir(a), git_common_dir(b)) {
         (Some(a), Some(b)) => a == b,

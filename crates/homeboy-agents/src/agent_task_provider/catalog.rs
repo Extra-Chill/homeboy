@@ -340,7 +340,7 @@ impl ExtensionProviderAgentTaskExecutor {
     }
 
     pub fn default_backend(&self) -> homeboy_core::Result<Option<String>> {
-        default_backend_from_policy(None)
+        default_backend_for_component(None)
     }
 
     #[cfg(test)]
@@ -364,13 +364,17 @@ impl ExtensionProviderAgentTaskExecutor {
 }
 
 pub fn default_backend() -> homeboy_core::Result<Option<String>> {
-    default_backend_from_policy(None)
+    default_backend_for_component(None)
 }
 
 pub fn default_backend_for_component(
-    component_id: Option<&str>,
+    component: Option<&component::Component>,
 ) -> homeboy_core::Result<Option<String>> {
-    default_backend_from_policy(component_id)
+    default_backend_from_policy_sources(
+        component,
+        homeboy_core::extension::catalog::load_all_extensions().unwrap_or_default(),
+        || defaults::load_config().agent_task.default_backend,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -719,15 +723,6 @@ pub fn provider_secret_env_scopes(
             },
         )
         .collect()
-}
-
-fn default_backend_from_policy(component_id: Option<&str>) -> homeboy_core::Result<Option<String>> {
-    let component = component_id.and_then(|id| component::load(id).ok());
-    default_backend_from_policy_sources(
-        component.as_ref(),
-        homeboy_core::extension::catalog::load_all_extensions().unwrap_or_default(),
-        || defaults::load_config().agent_task.default_backend,
-    )
 }
 
 pub(super) fn default_backend_from_policy_sources<F>(

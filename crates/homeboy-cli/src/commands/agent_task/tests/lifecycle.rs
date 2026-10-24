@@ -1447,7 +1447,8 @@ fn goal_and_prompt_remain_a_valid_single_source_cook_shape() {
         "--no-finalize".to_string(),
     ]);
 
-    validate_cook_request(&args).expect("goal plus prompt is one valid Cook source");
+    validate_cook_request_with_provenance(&args, None, None)
+        .expect("goal plus prompt is one valid Cook source");
 }
 
 #[test]
@@ -1467,12 +1468,13 @@ fn cook_preflight_scans_at_file_content_not_its_absolute_source_path() {
         "--no-finalize".to_string(),
     ]);
 
-    validate_cook_request(&args).expect("absolute @file source is not provider evidence");
+    validate_cook_request_with_provenance(&args, None, None)
+        .expect("absolute @file source is not provider evidence");
 
     std::fs::write(file.path(), "Read /private/evidence.json before editing.\n")
         .expect("rewrite prompt");
-    let error =
-        validate_cook_request(&args).expect_err("absolute path in prompt content is evidence");
+    let error = validate_cook_request_with_provenance(&args, None, None)
+        .expect_err("absolute path in prompt content is evidence");
     assert_eq!(error.details["field"], "prompt");
     assert!(error.message.contains("undeclared absolute evidence path"));
 }
@@ -1496,7 +1498,8 @@ fn cook_preflight_rejects_contradictory_retry_budget_with_corrected_command() {
         "1".to_string(),
     ]);
 
-    let error = validate_cook_request(&args).expect_err("unfunded retry intent fails preflight");
+    let error = validate_cook_request_with_provenance(&args, None, None)
+        .expect_err("unfunded retry intent fails preflight");
     assert_eq!(error.details["field"], "max-provider-executions");
     assert!(
         error
@@ -1546,7 +1549,7 @@ fn cook_preflight_rejects_execution_caps_that_remove_configured_rotations() {
             "1".to_string(),
         ]);
 
-        let error = validate_cook_request(&args)
+        let error = validate_cook_request_with_provenance(&args, None, None)
             .expect_err("an execution cap cannot remove configured fallbacks");
         assert_eq!(error.details["field"], "max-provider-executions");
         assert!(error.message.contains("--max-provider-executions 3"));
@@ -6375,7 +6378,8 @@ fn cook_preflight_rejects_reviewer_unsafe_verify_file_and_names_the_token() {
         .snapshot_file_inputs()
         .expect("snapshot gate file");
 
-    let error = validate_cook_request(&args).expect_err("unsafe public gate is rejected");
+    let error = validate_cook_request_with_provenance(&args, None, None)
+        .expect_err("unsafe public gate is rejected");
 
     assert_eq!(error.details["field"], "verification");
     let problem = error.details["problem"].as_str().expect("problem text");
@@ -6394,7 +6398,8 @@ fn cook_preflight_rejects_reviewer_unsafe_verify_file_and_names_the_token() {
     args.gates
         .snapshot_file_inputs()
         .expect("snapshot clean gate file");
-    validate_cook_request(&args).expect("reviewer-safe gate is admitted");
+    validate_cook_request_with_provenance(&args, None, None)
+        .expect("reviewer-safe gate is admitted");
 }
 
 #[test]
@@ -6861,8 +6866,12 @@ fn cook_without_gate_and_finalizing_reports_actionable_gate_error() {
             .expect("create linked worktree")
             .success());
 
-        let error = validate_cook_request(&gate_requirement_cook_args(&target, false, false))
-            .expect_err("finalizing cook without a gate is rejected");
+        let error = validate_cook_request_with_provenance(
+            &gate_requirement_cook_args(&target, false, false),
+            None,
+            None,
+        )
+        .expect_err("finalizing cook without a gate is rejected");
 
         assert_eq!(error.details["field"], "verify");
         assert!(

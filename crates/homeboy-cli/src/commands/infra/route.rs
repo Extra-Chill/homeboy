@@ -879,8 +879,15 @@ fn admit_unmaterialized_cook(
             "unmaterialized admission called for a non-Cook command",
         ));
     };
-    let resolved = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
-    crate::commands::agent_task::run::validate_cook_request_with_provenance(&resolved, provenance)?;
+    let mut args = *cook.clone();
+    let repository = crate::commands::agent_task::run::resolve_cook_repository(&mut args)?;
+    let resolved =
+        crate::commands::agent_task::run::resolve_cook_destination(args, repository.as_ref())?;
+    crate::commands::agent_task::run::validate_cook_request_with_provenance(
+        &resolved,
+        provenance,
+        repository.as_ref().map(|repo| &repo.component),
+    )?;
     // Run every check the replay worker will run, including model-override
     // confirmation, before any admission record is persisted (#15009). A
     // queued Lab admission has no TTY to prompt against, so a submission that
@@ -3542,10 +3549,21 @@ fn materialize_agent_task_cook_plan(
     else {
         return Ok(None);
     };
-    let cook = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
-    crate::commands::agent_task::run::validate_cook_request_with_provenance(&cook, provenance)?;
-    let provision = crate::commands::agent_task::run::provision_cook_destination(&cook)?;
-    let mut plan = crate::commands::agent_task::run::compile_cook_plan(&cook, provision, None)?;
+    let mut args = *cook.clone();
+    let repository = crate::commands::agent_task::run::resolve_cook_repository(&mut args)?;
+    let component = repository.as_ref().map(|repo| &repo.component);
+    let cook =
+        crate::commands::agent_task::run::resolve_cook_destination(args, repository.as_ref())?;
+    crate::commands::agent_task::run::validate_cook_request_with_provenance(
+        &cook, provenance, component,
+    )?;
+    let provision = crate::commands::agent_task::run::provision_cook_destination(
+        &cook,
+        repository.as_ref(),
+        false,
+    )?;
+    let mut plan =
+        crate::commands::agent_task::run::compile_cook_plan(&cook, provision, None, component)?;
     if let Some(provenance) = provenance {
         crate::commands::agent_task::run::record_cook_argument_provenance(&mut plan, provenance);
     }

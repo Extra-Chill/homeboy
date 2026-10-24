@@ -894,7 +894,21 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
         let handle = worktree_handle(&options.repo, &request.branch);
 
         if options.dry_run {
-            match planned_create_path(&options.repo, &request.branch, &options.from) {
+            let planned = component::resolve_target(TargetSpec {
+                component_id: Some(&options.repo),
+                allow_synthetic: true,
+                accept_bare_directory: true,
+                ..Default::default()
+            })
+            .and_then(|target| {
+                planned_create_path(
+                    &target.component_id,
+                    &queue_ops::source_checkout_for_worktree(&target)?,
+                    &request.branch,
+                    &options.from,
+                )
+            });
+            match planned {
                 Ok(path) => {
                     let mut row = queue_row(
                         &request.branch,
@@ -1026,21 +1040,14 @@ fn queue_failure(error: &Error) -> WorktreeQueueCreateFailure {
 
 /// Validate a prospective native worktree creation and return the exact path
 /// that `create` will use, without creating a branch, checkout, or record.
-pub fn planned_create_path(repo: &str, branch: &str, from: &str) -> Result<String> {
-    let target = component::resolve_target(TargetSpec {
-        component_id: Some(repo),
-        path_override: None,
-        project: None,
-        capability: None,
-        // Preview must resolve repository paths exactly as create does. Otherwise
-        // Cook can provision an unregistered checkout but cannot preview it.
-        allow_synthetic: true,
-        accept_bare_directory: true,
-        ..TargetSpec::default()
-    })?;
-    let source_checkout = queue_ops::source_checkout_for_worktree(&target)?;
+pub fn planned_create_path(
+    component_id: &str,
+    source_checkout: &Path,
+    branch: &str,
+    from: &str,
+) -> Result<String> {
     git::run_git(
-        &source_checkout,
+        source_checkout,
         &["rev-parse", "--verify", &format!("{from}^{{commit}}")],
         "git rev-parse --verify",
     )?;
@@ -1050,7 +1057,7 @@ pub fn planned_create_path(repo: &str, branch: &str, from: &str) -> Result<Strin
             source_checkout.display()
         ))
     })?;
-    let path = parent.join(handle_for_branch(&target.component_id, branch));
+    let path = parent.join(handle_for_branch(component_id, branch));
     if path.exists() {
         return Err(Error::validation_invalid_argument(
             "branch",

@@ -303,7 +303,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             }
             // Reject unsupported Cook source shapes before discovering a provider
             // or preparing the local/Lab execution route.
-            run::validate_cook_request_with_provenance(&cook_args, provenance)?;
+            run::validate_cook_request_with_provenance(&cook_args, provenance, None)?;
             if progress.is_some() {
                 run::run_cook_with_executor_and_dispatcher_with_progress(
                     *cook_args,
