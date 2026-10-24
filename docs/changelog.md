@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.12] - 2026-10-24
+
+### Changed
+- Cook reworks open PR destinations instead of routing them to themselves
+- Finish Cook candidate commits on main: fix the tests #16374 left failing, keep the reaped-root harvest, test resume tree refusal (#16303 S2d)
+- Pass the resolved Cook component into provider route resolution
+- Move remaining self-timing onto phase spans; one run timing context in core (#16371 slice 2)
+- move Cook self-timing from ad hoc duration fields onto phase spans
+
 ## [0.433.11] - 2026-10-24
 
 ### Changed
