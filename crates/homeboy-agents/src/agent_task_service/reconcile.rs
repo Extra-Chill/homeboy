@@ -122,10 +122,14 @@ fn verified_reconciled_status(
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
     let record = rooted_exact_status(lifecycle_store, run_id)?;
-    let remains_active = discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
-        .runs
-        .into_iter()
-        .any(|run| run.run_id == run_id);
+    let remains_active = discover_runs_in_store(
+        lifecycle_store,
+        AgentTaskDiscoveryFilter::Active,
+        Default::default(),
+    )?
+    .runs
+    .into_iter()
+    .any(|run| run.run_id == run_id);
     // Only an accepted runner job leaves a projection behind. A submission that
     // never obtained a job identity has nothing for the runner to resolve, so
     // requiring an Idle report would make it permanently unreconcilable.
@@ -429,10 +433,14 @@ pub(crate) fn reconcile_run_in_store(
             .runner_id()
             .map(|runner_id| format!("runner:{runner_id}"))
             .unwrap_or_else(|| "local".to_string());
-        let candidate = discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
-            .runs
-            .into_iter()
-            .find(|run| run.run_id == *resolved_run_id);
+        let candidate = discover_runs_in_store(
+            lifecycle_store,
+            AgentTaskDiscoveryFilter::Active,
+            Default::default(),
+        )?
+        .runs
+        .into_iter()
+        .find(|run| run.run_id == *resolved_run_id);
         match candidate {
             Some(run) if run.liveness.is_some_and(AgentTaskLiveness::is_reconcilable) => {
                 let liveness = run.liveness.expect("checked reconcilable liveness");
@@ -441,13 +449,16 @@ pub(crate) fn reconcile_run_in_store(
                 let refreshed = decision_status(lifecycle_store, resolved_run_id, dry_run)?;
                 let locally_reconcilable_after_runner_idle =
                     refreshed.is_locally_reconcilable_after_runner_idle();
-                let still_reconcilable =
-                    discover_runs_in_store(lifecycle_store, AgentTaskDiscoveryFilter::Active)?
-                        .runs
-                        .into_iter()
-                        .find(|run| run.run_id == *resolved_run_id)
-                        .and_then(|run| run.liveness)
-                        .is_some_and(AgentTaskLiveness::is_reconcilable);
+                let still_reconcilable = discover_runs_in_store(
+                    lifecycle_store,
+                    AgentTaskDiscoveryFilter::Active,
+                    Default::default(),
+                )?
+                .runs
+                .into_iter()
+                .find(|run| run.run_id == *resolved_run_id)
+                .and_then(|run| run.liveness)
+                .is_some_and(AgentTaskLiveness::is_reconcilable);
                 if refreshed.state().is_terminal() || !still_reconcilable {
                     runs.push(AgentTaskReconcileRun {
                         run_id: resolved_run_id.clone(),

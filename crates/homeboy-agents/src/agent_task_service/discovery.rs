@@ -199,9 +199,9 @@ pub struct AgentTaskDiscoveryReport {
     /// Bounded health evidence for malformed, legacy, conflicting, or
     /// quarantined lifecycle rows in the returned page.
     pub record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
-    /// Health for the local lifecycle registry snapshot read. Latest discovery
-    /// includes only the physical pages read before stopping. Separate from
-    /// `record_health` so unrelated historical rows do not obscure a narrow filter.
+    /// Health for the records read: the indexed active set for active discovery,
+    /// the pages walked for latest discovery, otherwise the bounded registry.
+    /// Separate from page health so unrelated rows do not obscure a narrow filter.
     pub global_record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
     /// Liveness buckets for the `active` filter so operators can separate
     /// genuinely-active runs from stale/suspect/unreconciled records at a
@@ -382,8 +382,8 @@ pub fn discover_runs_with_options(
     filter: AgentTaskDiscoveryFilter,
     options: AgentTaskDiscoveryOptions,
 ) -> Result<AgentTaskDiscoveryReport> {
-    let (records, record_health) = agent_task_lifecycle::read_records_with_health()?;
-    discovery_report(filter, options, records, record_health)
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    discover_runs_in_store(&store, filter, options)
 }
 
 /// Read one immutable-keyset physical page. The cursor encodes the observation
@@ -402,8 +402,29 @@ pub fn discover_runs_page(
         .map(|cursor| decode_page_cursor(cursor, &scope))
         .transpose()?;
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let (records, _physical_record_health, physical_count, physical_truncated, next) =
-        store.read_record_page_with_health(after, FILTERED_DISCOVERY_PHYSICAL_LIMIT)?;
+    let (records, physical_count, physical_truncated, next) =
+        if filter == AgentTaskDiscoveryFilter::Active {
+            let records = store.read_active_records()?;
+            let physical_count = records.len();
+            let records = records
+                .into_iter()
+                .map(|record| {
+                    let cursor = RunCursor {
+                        started_at: record.submitted_at.clone(),
+                        id: record.run_id.clone(),
+                    };
+                    agent_task_lifecycle::AgentTaskRecordPageRecord { record, cursor }
+                })
+                .filter(|row| {
+                    after.as_ref().is_none_or(|after| {
+                        (&row.cursor.started_at, &row.cursor.id) < (&after.started_at, &after.id)
+                    })
+                })
+                .collect::<Vec<_>>();
+            (records, physical_count, false, None)
+        } else {
+            store.read_record_keyset_page(after, FILTERED_DISCOVERY_PHYSICAL_LIMIT)?
+        };
     let submitted_after = options
         .submitted_after
         .as_deref()
@@ -424,26 +445,21 @@ pub fn discover_runs_page(
         .into_iter()
         .filter(|page_record| !is_fixture_runner_record(&page_record.record))
         .filter(|page_record| {
-            filter != AgentTaskDiscoveryFilter::Active
-                || matches!(
-                    page_record.record.state(),
-                    agent_task_lifecycle::AgentTaskRunState::Queued
-                        | agent_task_lifecycle::AgentTaskRunState::Running
-                )
-        })
-        .filter(|page_record| {
             matches_discovery_options(&page_record.record, &legacy, submitted_after.as_ref())
         })
         .collect::<Vec<_>>();
     let matching_truncated = records.len() > limit;
     records.truncate(limit);
-    let next_cursor = if let Some(last) = records.last() {
-        (physical_truncated || matching_truncated)
-            .then(|| encode_page_cursor(last.cursor.clone(), scope))
-    } else {
-        physical_truncated
-            .then(|| encode_page_cursor(next.expect("truncated page has cursor"), scope))
-    };
+    let next_cursor = (physical_truncated || matching_truncated).then(|| {
+        encode_page_cursor(
+            records
+                .last()
+                .map(|row| row.cursor.clone())
+                .or(next)
+                .expect("truncated page has cursor"),
+            scope,
+        )
+    });
     let truncated = next_cursor.is_some();
     let search_status = if records.len() == limit && (matching_truncated || physical_truncated) {
         AgentTaskDiscoverySearchStatus::MatchingLimitReached
@@ -542,19 +558,21 @@ fn invalid_page_cursor(value: &str) -> Error {
 pub(crate) fn discover_runs_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     filter: AgentTaskDiscoveryFilter,
+    options: AgentTaskDiscoveryOptions,
 ) -> Result<AgentTaskDiscoveryReport> {
-    let (records, record_health) =
-        agent_task_lifecycle::read_records_with_health_in_store(lifecycle_store)?;
-    discovery_report(
-        filter,
-        AgentTaskDiscoveryOptions::default(),
-        records,
-        record_health,
-    )
+    let (records, record_health) = if filter == AgentTaskDiscoveryFilter::Active {
+        let records = lifecycle_store.read_active_records()?;
+        let mut health = AgentTaskRecordHealthSummary::healthy();
+        health.healthy = records.len();
+        (records, health)
+    } else {
+        agent_task_lifecycle::read_records_with_health_in_store(lifecycle_store)?
+    };
+    discovery_report(filter, options, records, record_health)
 }
 
 /// Find the newest run matching list filters with a newest-first keyset walk.
-/// `global_record_health` describes only the physical pages read before stopping.
+/// `global_record_health` counts the decoded rows read before stopping.
 pub fn discover_filtered_latest_run(
     options: AgentTaskDiscoveryOptions,
 ) -> Result<AgentTaskDiscoveryReport> {
@@ -569,17 +587,9 @@ pub fn discover_filtered_latest_run(
     let mut health = AgentTaskRecordHealthSummary::healthy();
     let mut selected = Vec::new();
     loop {
-        let (records, page_health, _, truncated, next) =
-            store.read_record_page_with_health(after, FILTERED_DISCOVERY_PHYSICAL_LIMIT)?;
-        health.healthy += page_health.healthy;
-        health.malformed += page_health.malformed;
-        health.conflicting += page_health.conflicting;
-        health.fixture += page_health.fixture;
-        health.quarantined += page_health.quarantined;
-        health.samples.extend(page_health.samples);
-        health
-            .samples
-            .truncate(agent_task_lifecycle::HEALTH_SAMPLE_LIMIT);
+        let (records, _, truncated, next) =
+            store.read_record_keyset_page(after, FILTERED_DISCOVERY_PHYSICAL_LIMIT)?;
+        health.healthy += records.len();
         if let Some(row) = records.into_iter().find(|row| {
             !is_fixture_runner_record(&row.record)
                 && seen.insert(row.record.run_id.clone())
@@ -626,15 +636,6 @@ fn discovery_report(
     let mut seen_run_ids = BTreeSet::new();
     records.retain(|record| seen_run_ids.insert(record.run_id.clone()));
     let is_active = filter == AgentTaskDiscoveryFilter::Active;
-    if is_active {
-        records.retain(|record| {
-            matches!(
-                record.state(),
-                agent_task_lifecycle::AgentTaskRunState::Queued
-                    | agent_task_lifecycle::AgentTaskRunState::Running
-            )
-        });
-    }
     let submitted_after = options
         .submitted_after
         .as_deref()

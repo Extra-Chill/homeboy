@@ -2866,6 +2866,7 @@ fn persist_discovery_record(run_id: &str, branch: &str, state: AgentTaskRunState
         record.submitted_at = "2026-09-10T00:00:00Z".to_string();
         record.updated_at = Some("2026-09-10T00:00:00Z".to_string());
         record.set_state_for_test(state);
+        record.lifecycle.execution.state = state.into();
     })
     .expect("set discovery fixture keyset and state");
 }
