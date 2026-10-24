@@ -1469,7 +1469,7 @@ impl AgentTaskScheduleSupport {
 
     /// Attach the ordered attempt sequence to the final outcome under
     /// `metadata.provider_rotation.attempts` so durable run records and
-    /// `agent-task status|logs|latest` show what happened per attempt.
+    /// `agent-task status|logs` and `agent-task list --latest` show what happened per attempt.
     pub(super) fn attach_rotation_evidence(
         outcome: &mut AgentTaskOutcome,
         attempts: &[AgentTaskProviderRotationAttempt],

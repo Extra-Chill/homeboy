@@ -31,7 +31,6 @@ pub const FEDERATED_DISCOVERY_COMMAND: &str =
 pub enum AgentTaskDiscoveryFilter {
     All,
     Active,
-    Latest,
 }
 
 const AGENT_TASK_PAGE_CURSOR_SCHEMA: &str = "homeboy/agent-task-discovery-cursor/v1";
@@ -50,8 +49,7 @@ pub const MAX_AGENT_TASK_DISCOVERY_PAGE_LIMIT: usize = 100;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentTaskDiscoveryOptions {
     /// Maximum number of runs to return, applied after filtering/sorting.
-    /// `None` returns every matching run. Ignored for the `latest` filter,
-    /// which is always a single run.
+    /// `None` returns every matching run.
     pub limit: Option<usize>,
     /// Zero-based offset into the filtered, newest-first result set.
     pub cursor: usize,
@@ -201,9 +199,9 @@ pub struct AgentTaskDiscoveryReport {
     /// Bounded health evidence for malformed, legacy, conflicting, or
     /// quarantined lifecycle rows in the returned page.
     pub record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
-    /// Health for the complete local lifecycle registry. This is deliberately
-    /// separate from `record_health` so a narrow filter is not obscured by
-    /// unrelated historical rows.
+    /// Health for the local lifecycle registry snapshot read. Latest discovery
+    /// includes only the physical pages read before stopping. Separate from
+    /// `record_health` so unrelated historical rows do not obscure a narrow filter.
     pub global_record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
     /// Liveness buckets for the `active` filter so operators can separate
     /// genuinely-active runs from stale/suspect/unreconciled records at a
@@ -377,8 +375,7 @@ pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscov
     discover_runs_with_options(filter, AgentTaskDiscoveryOptions::default())
 }
 
-/// Discovery with operator options (currently `--limit`). The `latest` filter
-/// is inherently a single run, so a limit is a no-op there; `all`/`active`
+/// Discovery with operator options (currently `--limit`). Both filters
 /// truncate to the requested cap after filtering and sorting, and report the
 /// pre-cap `total` so consumers know more runs exist (#5681).
 pub fn discover_runs_with_options(
@@ -438,9 +435,6 @@ pub fn discover_runs_page(
             matches_discovery_options(&page_record.record, &legacy, submitted_after.as_ref())
         })
         .collect::<Vec<_>>();
-    if filter == AgentTaskDiscoveryFilter::Latest {
-        records.truncate(1);
-    }
     let matching_truncated = records.len() > limit;
     records.truncate(limit);
     let next_cursor = if let Some(last) = records.last() {
@@ -492,7 +486,6 @@ fn filter_name(filter: AgentTaskDiscoveryFilter) -> &'static str {
     match filter {
         AgentTaskDiscoveryFilter::All => "all",
         AgentTaskDiscoveryFilter::Active => "active",
-        AgentTaskDiscoveryFilter::Latest => "latest",
     }
 }
 
@@ -560,18 +553,54 @@ pub(crate) fn discover_runs_in_store(
     )
 }
 
-/// Find the newest run matching list filters without treating a bounded display
-/// snapshot as the complete search corpus.
+/// Find the newest run matching list filters with a newest-first keyset walk.
+/// `global_record_health` describes only the physical pages read before stopping.
 pub fn discover_filtered_latest_run(
     options: AgentTaskDiscoveryOptions,
 ) -> Result<AgentTaskDiscoveryReport> {
-    let (records, record_health) = agent_task_lifecycle::read_all_records_with_health()?;
-    discovery_report(
-        AgentTaskDiscoveryFilter::Latest,
-        options,
-        records,
-        record_health,
-    )
+    let submitted_after = options
+        .submitted_after
+        .as_deref()
+        .map(parse_submitted_after)
+        .transpose()?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let mut after = None;
+    let mut seen = BTreeSet::new();
+    let mut health = AgentTaskRecordHealthSummary::healthy();
+    let mut selected = Vec::new();
+    loop {
+        let (records, page_health, _, truncated, next) =
+            store.read_record_page_with_health(after, FILTERED_DISCOVERY_PHYSICAL_LIMIT)?;
+        health.healthy += page_health.healthy;
+        health.malformed += page_health.malformed;
+        health.conflicting += page_health.conflicting;
+        health.fixture += page_health.fixture;
+        health.quarantined += page_health.quarantined;
+        health.samples.extend(page_health.samples);
+        health
+            .samples
+            .truncate(agent_task_lifecycle::HEALTH_SAMPLE_LIMIT);
+        if let Some(row) = records.into_iter().find(|row| {
+            !is_fixture_runner_record(&row.record)
+                && seen.insert(row.record.run_id.clone())
+                && matches_discovery_options(&row.record, &options, submitted_after.as_ref())
+        }) {
+            selected.push(row.record);
+            break;
+        }
+        if !truncated {
+            break;
+        }
+        after = next;
+    }
+    let mut report = discovery_report(
+        AgentTaskDiscoveryFilter::All,
+        AgentTaskDiscoveryOptions::default(),
+        selected,
+        health,
+    )?;
+    report.filter = "latest";
+    Ok(report)
 }
 
 fn discovery_report(
@@ -612,9 +641,6 @@ fn discovery_report(
         .map(parse_submitted_after)
         .transpose()?;
     records.retain(|record| matches_discovery_options(record, &options, submitted_after.as_ref()));
-    if filter == AgentTaskDiscoveryFilter::Latest {
-        records.truncate(1);
-    }
     let total = records.len();
 
     let now = chrono::Utc::now();
@@ -623,11 +649,7 @@ fn discovery_report(
         .as_ref()
         .map(|l| liveness_summary_for_records(&records, now, l));
 
-    // `latest` is always a single run; only `all`/`active` honor a limit cap.
-    let effective_limit = match filter {
-        AgentTaskDiscoveryFilter::Latest => None,
-        _ => options.limit,
-    };
+    let effective_limit = options.limit;
     let cursor = options.cursor.min(total);
     let end = effective_limit
         .map(|limit| cursor.saturating_add(limit).min(total))
@@ -648,11 +670,7 @@ fn discovery_report(
 
     Ok(AgentTaskDiscoveryReport {
         schema: "homeboy/agent-task-discovery/v1",
-        filter: match filter {
-            AgentTaskDiscoveryFilter::All => "all",
-            AgentTaskDiscoveryFilter::Active => "active",
-            AgentTaskDiscoveryFilter::Latest => "latest",
-        },
+        filter: filter_name(filter),
         // Constant rather than a parameter: there is no discovery path that
         // writes. If one is ever added it must set this, not inherit `false`.
         reconciled: false,
