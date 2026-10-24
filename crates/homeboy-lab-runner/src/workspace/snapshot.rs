@@ -29,43 +29,67 @@ mod test_snapshot_directory_discovery_hook {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
 
-    type Hook = (PathBuf, Box<dyn FnOnce() + Send>);
+    type Hooks = std::collections::HashMap<PathBuf, Box<dyn FnOnce() + Send>>;
 
-    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+    static HOOK: OnceLock<Mutex<Hooks>> = OnceLock::new();
 
-    pub(crate) struct Guard;
+    pub(crate) struct Guard(PathBuf);
 
     pub(crate) fn install(path: PathBuf, action: impl FnOnce() + Send + 'static) -> Guard {
         let mut hook = HOOK
-            .get_or_init(|| Mutex::new(None))
+            .get_or_init(|| Mutex::new(Hooks::new()))
             .lock()
             .expect("snapshot discovery hook lock");
         assert!(
-            hook.is_none(),
-            "snapshot discovery hook is already installed"
+            !hook.contains_key(&path),
+            "snapshot discovery hook is already installed for this path"
         );
-        *hook = Some((path, Box::new(action)));
-        Guard
+        hook.insert(path.clone(), Box::new(action));
+        Guard(path)
     }
 
     pub(crate) fn run(path: &Path) {
         let action = HOOK
-            .get_or_init(|| Mutex::new(None))
+            .get_or_init(|| Mutex::new(Hooks::new()))
             .lock()
             .expect("snapshot discovery hook lock")
-            .take_if(|(expected, _)| expected == path)
-            .map(|(_, action)| action);
+            .remove(path);
         if let Some(action) = action {
             action();
         }
     }
 
+    #[test]
+    fn independent_discovery_hooks_do_not_replace_or_clear_each_other() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let roots = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let installed = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            for index in 0..2 {
+                let path = roots.path().join(index.to_string());
+                let calls = calls.clone();
+                let installed = installed.clone();
+                scope.spawn(move || {
+                    let _guard = install(path.clone(), move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                    });
+                    installed.wait();
+                    run(&path);
+                });
+            }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     impl Drop for Guard {
         fn drop(&mut self) {
-            *HOOK
-                .get_or_init(|| Mutex::new(None))
+            HOOK.get_or_init(|| Mutex::new(Hooks::new()))
                 .lock()
-                .expect("snapshot discovery hook lock") = None;
+                .expect("snapshot discovery hook lock")
+                .remove(&self.0);
         }
     }
 }
@@ -1260,15 +1284,28 @@ pub(crate) fn materialize_prepared_workspace_update(
     let temporary = format!("{}.tmp-{}", remote_path, uuid::Uuid::new_v4());
     let backup = format!("{}.previous-{}", remote_path, uuid::Uuid::new_v4());
     let lock = format!("{}.update-lock", remote_path);
-    // `mkdir` is an atomic filesystem primitive on the local runner and over
-    // SSH. Holding this directory across all phases gives a runner-neutral CAS
-    // boundary without relying on controller-local advisory locks.
+    // Hold one directory across all phases of the runner-neutral CAS. Use
+    // create_dir locally: some mkdir implementations report success to both
+    // racing creators (uutils 0.8.0), violating the exclusivity contract.
+    let local_lock = match runner.kind {
+        RunnerKind::Local => true,
+        RunnerKind::Ssh => ssh_client_for_runner(runner)?.1.is_local,
+    };
     let acquire_lock = format!("mkdir {}", shell::quote_arg(&lock));
     let release_lock = format!("rmdir {}", shell::quote_arg(&lock));
-    run_shell_command(
-        &shell_command_for_runner(runner, &acquire_lock)?,
-        "acquire prepared workspace update lock",
-    )?;
+    if local_lock {
+        fs::create_dir(&lock).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("acquire prepared workspace update lock".into()),
+            )
+        })?;
+    } else {
+        run_shell_command(
+            &shell_command_for_runner(runner, &acquire_lock)?,
+            "acquire prepared workspace update lock",
+        )?;
+    }
     let removals = delta
         .deleted_paths
         .iter()
@@ -1448,10 +1485,19 @@ pub(crate) fn materialize_prepared_workspace_update(
     if result.is_err() {
         cleanup_incremental_temporary(runner, &temporary, false);
     }
-    let release_result = run_shell_command(
-        &shell_command_for_runner(runner, &release_lock)?,
-        "release prepared workspace update lock",
-    );
+    let release_result = if local_lock {
+        fs::remove_dir(&lock).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("release prepared workspace update lock".into()),
+            )
+        })
+    } else {
+        run_shell_command(
+            &shell_command_for_runner(runner, &release_lock)?,
+            "release prepared workspace update lock",
+        )
+    };
     result.and(release_result).map(|_| delta.transfer.clone())
 }
 

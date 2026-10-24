@@ -1361,7 +1361,7 @@ mod tests {
         validate_runner_extension_revision, validate_runner_extension_settings,
         ExtensionParityPlan, ExtensionParityPlanStep, ExtensionParityProbe, ExtensionShowOutput,
     };
-    use homeboy_core::test_support::with_isolated_home;
+    use crate::test_support::with_isolated_home;
 
     use crate::{
         Runner, RunnerExecMode, RunnerExecOutput, RunnerExtensionMaterializationRequest,

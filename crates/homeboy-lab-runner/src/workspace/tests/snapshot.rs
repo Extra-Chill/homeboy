@@ -97,11 +97,14 @@ fn snapshot_git_readback_failure_fails_materialization_contract() {
 
 #[test]
 fn snapshot_git_readback_failure_rolls_back_remote_workspace_and_registration() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     let _path_guard = PATH_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .expect("PATH lock");
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
         fs::write(source.path().join("file.txt"), "snapshot\n").expect("source file");
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -478,11 +481,14 @@ fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
 
 #[test]
 fn snapshot_git_fails_before_handoff_when_controller_closure_is_unavailable() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     let _path_guard = PATH_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .expect("PATH lock");
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source workspace");
         let runner_root = tempfile::tempdir().expect("runner root");
         fs::create_dir_all(source.path().join("components/demo")).expect("component root");
@@ -725,7 +731,7 @@ fn snapshot_command_failure_bounds_multibyte_output_at_a_character_boundary() {
 
 #[test]
 fn runner_snapshot_includes_override_generated_output_excludes() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(source.path().join("packages/cli/dist")).expect("dist dir");
@@ -771,7 +777,7 @@ fn runner_snapshot_includes_override_generated_output_excludes() {
 
 #[test]
 fn runner_snapshot_excludes_extend_default_snapshot_policy() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(source.path().join("src")).expect("src dir");
@@ -1074,6 +1080,9 @@ fn snapshot_sync_uses_source_gitignore_discovered_excludes_as_fallback() {
 
 #[test]
 fn snapshot_sync_excludes_late_injected_dmc_context_from_every_manifest() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     let _source_sync_excludes_guard = SOURCE_SYNC_EXCLUDES_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -1274,7 +1283,7 @@ fn workspace_sync_materialization_contract_records_inputs_provenance_policy_and_
 
 #[test]
 fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::write(source.path().join("Cargo.toml"), "[package]\nname='app'\n").expect("manifest");
@@ -1329,7 +1338,7 @@ fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
 /// directories remain listed.
 #[test]
 fn workspace_list_omits_partial_git_checkouts_without_a_valid_head() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         crate::create(
             &format!(
@@ -1499,11 +1508,14 @@ fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overl
 
 #[test]
 fn snapshot_git_hydrates_partial_clone_on_controller_without_lab_remote_access() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     let _path_guard = PATH_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .expect("PATH lock");
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let author = tempfile::tempdir().expect("author tempdir");
         let source = tempfile::tempdir().expect("source tempdir");
@@ -1753,7 +1765,7 @@ fn snapshot_staging_runtime_owner_fixture() {
 
 #[test]
 fn snapshot_staging_runtime_owner_protects_live_stage_and_reclaims_killed_stage() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source");
         let input = source.path().join("input.txt");
         fs::write(&input, "source bytes").expect("write source");
@@ -1913,7 +1925,6 @@ fn immutable_replay_snapshot_rejects_regular_file_swapped_to_symlink_during_copy
     use std::os::unix::fs::symlink;
 
     let source = tempfile::tempdir().expect("source");
-    let _lock = replay_snapshot_hook_lock();
     let input = source.path().join("input.txt");
     let external = tempfile::NamedTempFile::new().expect("external");
     fs::write(&input, "recorded").expect("write regular input");
@@ -1933,7 +1944,6 @@ fn immutable_replay_snapshot_rejects_directory_swapped_to_external_symlink_durin
     use std::os::unix::fs::symlink;
 
     let source = tempfile::tempdir().expect("source");
-    let _lock = replay_snapshot_hook_lock();
     let directory = source.path().join("directory");
     let external = tempfile::tempdir().expect("external");
     fs::create_dir(&directory).expect("create source directory");
@@ -2554,7 +2564,7 @@ fn git_backed_snapshot_preserves_tracked_internal_file_and_directory_links() {
 
 #[test]
 fn snapshot_git_omits_absent_optional_root_context_paths() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let optional_paths = ["/.datamachine", "/.claude", "/AGENTS.md", "/.git"];
 
         for (index, ignored_paths) in optional_paths
@@ -2630,7 +2640,7 @@ fn snapshot_archive_fails_for_existing_unreadable_input() {
 fn snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_injection() {
     // Materialization stages under the runtime tempdir; hold the isolated
     // home so a concurrent test cannot swap or reclaim that root mid-copy.
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_injection_body()
     });
 }
@@ -3207,10 +3217,4 @@ fn copy_snapshot_materializes_symlinked_dependency_contents() {
             .exists(),
         "snapshot exclusions must also apply inside dereferenced dependencies"
     );
-}
-fn replay_snapshot_hook_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("replay snapshot hook lock")
 }

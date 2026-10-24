@@ -50,6 +50,9 @@ fn file_api_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[test]
 fn file_route_rejects_paths_outside_runner_workspace_root() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_provider();
     let _home = HomeGuard::new();
     let (_temp, workspace) = file_api_workspace();
@@ -74,6 +77,9 @@ fn file_route_rejects_paths_outside_runner_workspace_root() {
 
 #[test]
 fn file_routes_upload_and_download_inside_runner_workspace_root() {
+    if crate::test_support::isolated_process() {
+        return;
+    }
     register_provider();
     let _home = HomeGuard::new();
     let (_temp, workspace) = file_api_workspace();

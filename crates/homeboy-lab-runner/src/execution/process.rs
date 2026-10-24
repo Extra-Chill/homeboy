@@ -1193,6 +1193,9 @@ mod tests {
 
     #[test]
     fn runner_temp_owner_scopes_workload_bytes_and_preserves_unknown_entries() {
+        if crate::test_support::isolated_process() {
+            return;
+        }
         let _guard = homeboy_core::test_support::home_env_guard();
         let root = tempfile::tempdir().expect("runtime temp root");
         // Cleanup also scans the socket-safe invocation root. Isolate that
@@ -1281,6 +1284,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn runner_temp_owner_exports_a_socket_safe_path_for_long_run_identity() {
+        if crate::test_support::isolated_process() {
+            return;
+        }
         use std::os::unix::net::UnixListener;
 
         let _guard = homeboy_core::test_support::home_env_guard();

@@ -13,7 +13,7 @@ use homeboy_core::error::Error;
 
 #[test]
 fn admission_reconciliation_reports_its_phase_before_the_probe() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         begin_refresh_live_progress("prepare");
         let guard = RefreshLiveGuard;
         let result = reconciled_refresh_admission_with(

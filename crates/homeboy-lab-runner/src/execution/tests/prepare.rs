@@ -91,7 +91,7 @@ fn test_resolve_cwd_rejects_ssh_cwd_outside_workspace_root() {
 
 #[test]
 fn prepare_runner_process_uses_embedded_runner_snapshot() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let plan = prepare_runner_process(RunnerProcessRequest {
             runner_id: "lab".to_string(),
             runner: Some(ssh_runner()),
@@ -116,7 +116,7 @@ fn prepare_runner_process_uses_embedded_runner_snapshot() {
 
 #[test]
 fn prepare_runner_process_defers_runner_owned_secret_plan_entries() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let mut runner = ssh_runner();
         runner.id = "homeboy-lab".to_string();
         runner.secret_env.insert(
@@ -166,7 +166,7 @@ fn prepare_runner_process_defers_runner_owned_secret_plan_entries() {
 
 #[test]
 fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let auth_dir = home.path().join(".codex");
         std::fs::create_dir_all(&auth_dir).expect("auth directory");
         std::fs::write(
@@ -340,7 +340,7 @@ fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
 
 #[test]
 fn ssh_runner_prep_leaves_default_path_to_runner_side() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let plan = prepare_runner_process(RunnerProcessRequest {
             runner_id: "lab".to_string(),
             runner: Some(ssh_runner()),
@@ -367,7 +367,7 @@ fn ssh_runner_prep_leaves_default_path_to_runner_side() {
 
 #[test]
 fn ssh_runner_prep_preserves_explicit_path() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let mut runner = ssh_runner();
         runner
             .env
@@ -399,7 +399,7 @@ fn ssh_runner_prep_preserves_explicit_path() {
 
 #[test]
 fn ssh_runner_prep_marks_remote_placement_as_resolved() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let plan = prepare_runner_process(RunnerProcessRequest {
             runner_id: "lab".to_string(),
             runner: Some(ssh_runner()),
@@ -448,7 +448,7 @@ fn local_runner_prep_marks_placement_as_resolved() {
     // carrying an explicit `--placement` recursively spawns
     // `homeboy component show` / `extension show` plus the extension
     // ready_check and saturates the host.
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -493,7 +493,7 @@ fn local_runner_prep_marks_placement_as_resolved() {
 
 #[test]
 fn daemon_worker_marks_nested_cook_as_runner_hosted() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -541,7 +541,7 @@ fn daemon_worker_marks_nested_cook_as_runner_hosted() {
 
 #[test]
 fn daemon_prep_never_forwards_runner_owned_guard_policy_to_the_job() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -584,7 +584,7 @@ fn daemon_prep_never_forwards_runner_owned_guard_policy_to_the_job() {
 
 #[test]
 fn runner_prep_drops_undeclared_sensitive_env() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -619,7 +619,7 @@ fn runner_prep_drops_undeclared_sensitive_env() {
 
 #[test]
 fn runner_prep_allows_declared_sensitive_env() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -650,7 +650,7 @@ fn runner_prep_allows_declared_sensitive_env() {
 
 #[test]
 fn daemon_prep_preserves_placement_marker_and_unrelated_runner_side_secret() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -698,7 +698,7 @@ fn daemon_prep_preserves_placement_marker_and_unrelated_runner_side_secret() {
 
 #[test]
 fn runner_prep_runtime_secret_env_allowlist_declares_sensitive_env() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -735,7 +735,7 @@ fn runner_prep_runtime_secret_env_allowlist_declares_sensitive_env() {
 
 #[test]
 fn runner_prep_diagnostic_identifies_local_controller_secret_source() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -764,7 +764,7 @@ fn runner_prep_diagnostic_identifies_local_controller_secret_source() {
 
 #[test]
 fn daemon_prep_diagnostic_identifies_remote_runner_daemon_secret_source() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -803,7 +803,7 @@ fn daemon_prep_diagnostic_identifies_remote_runner_daemon_secret_source() {
 
 #[test]
 fn daemon_local_prep_normalizes_default_path_on_runner_side() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -848,7 +848,7 @@ fn daemon_local_prep_normalizes_default_path_on_runner_side() {
 
 #[test]
 fn daemon_local_prep_prefers_configured_homeboy_path_for_nested_homeboy() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");

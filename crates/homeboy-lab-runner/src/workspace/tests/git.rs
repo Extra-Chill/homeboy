@@ -15,7 +15,7 @@ use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 
 #[test]
 fn changed_since_private_origin_without_controller_closure_falls_back_to_snapshot() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let author = tempfile::tempdir().expect("author tempdir");
         let source = tempfile::tempdir().expect("source tempdir");
@@ -209,7 +209,7 @@ fn changed_since_private_origin_without_controller_closure_falls_back_to_snapsho
 
 #[test]
 fn changed_since_promisor_base_without_controller_closure_falls_back_to_snapshot() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let author = tempfile::tempdir().expect("author tempdir");
         let source = tempfile::tempdir().expect("source tempdir");
@@ -447,7 +447,7 @@ fn git_without_lazy_fetch(path: &Path, args: &[&str]) -> std::result::Result<(),
 
 #[test]
 fn git_materialization_keeps_homeboy_state_outside_checkout_and_refuses_dirty_state() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         git(source.path(), &["init"]);
@@ -514,7 +514,7 @@ fn git_materialization_keeps_homeboy_state_outside_checkout_and_refuses_dirty_st
 
 #[test]
 fn controller_routed_git_sync_materializes_bundle_for_public_remote() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         git(source.path(), &["init"]);
@@ -599,7 +599,7 @@ fn controller_routed_git_sync_materializes_bundle_for_public_remote() {
 
 #[test]
 fn controller_git_bundle_transfers_only_commits_missing_from_runner_cache() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         git(source.path(), &["init", "-b", "main"]);
@@ -767,7 +767,7 @@ fn controller_git_bundle_transfers_only_commits_missing_from_runner_cache() {
 
 #[test]
 fn controller_routed_git_sync_rejects_shallow_source_checkout() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let clone_parent = tempfile::tempdir().expect("clone parent tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -843,7 +843,7 @@ fn controller_routed_git_sync_rejects_shallow_source_checkout() {
 
 #[test]
 fn git_sync_of_detached_extension_source_preserves_source_revision() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         git(source.path(), &["init"]);
@@ -1238,7 +1238,7 @@ fn pack_count(repo: &Path) -> usize {
 
 #[test]
 fn promisor_bundle_hydration_fetches_missing_blobs_in_one_batch() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let author = tempfile::tempdir().expect("author tempdir");
         let source = tempfile::tempdir().expect("source tempdir");
@@ -1307,7 +1307,7 @@ fn promisor_bundle_hydration_fetches_missing_blobs_in_one_batch() {
 
 #[test]
 fn promisor_bundle_hydration_is_a_no_op_when_the_closure_is_complete() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let source = tempfile::tempdir().expect("source tempdir");
         git(origin.path(), &["init", "-b", "main"]);
@@ -1504,7 +1504,7 @@ impl PromisorTransportFixture {
 #[cfg(unix)]
 #[test]
 fn promisor_configured_transport_seals_local_lab_bundle_without_runner_transport() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let fixture = PromisorTransportFixture::new();
         // Fail deterministically without persisted policy, rather than depending
         // on DNS or ambient SSH configuration to reject the fixture hostname.
@@ -1640,18 +1640,30 @@ fn assert_hung_promisor_transport_stopped(cancel: bool, batched: bool) {
     use crate::workspace::WorkspaceControl;
     use homeboy_core::cooperative_control::CooperativeControl;
     use homeboy_engine_primitives::command::process_is_running;
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use std::time::{Duration, Instant};
 
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let fixture = PromisorTransportFixture::new();
         fixture.configure(if batched { 2 } else { 1 });
         let pid_file = fixture.transport.path().join("descendant.pid");
         let observed_pid = pid_file.clone();
         let control = WorkspaceControl::new(CooperativeControl::new(
-            Instant::now() + Duration::from_secs(if cancel { 10 } else { 2 }),
+            Instant::now() + Duration::from_secs(60), // setup watchdog only
             Arc::new(move || cancel && observed_pid.exists()),
         ));
+        let transport_pid = pid_file.clone();
+        let deadline = OnceLock::new();
+        let control = control.with_checkpoint_observer(Arc::new(move || {
+            // Arm a real deadline only once the target transport has spawned
+            // its descendant. Git fixture/setup time is not the behavior under
+            // test, and can exceed a fixed two-second budget under suite load.
+            if !cancel && transport_pid.exists() {
+                let deadline = *deadline.get_or_init(|| Instant::now() + Duration::from_millis(50));
+                WorkspaceControl::before(Some(deadline)).checkpoint()?;
+            }
+            Ok(())
+        }));
         let runner_root = tempfile::tempdir().unwrap();
         crate::create(
             &format!(
@@ -1664,7 +1676,6 @@ fn assert_hung_promisor_transport_stopped(cancel: bool, batched: bool) {
         let runner = crate::load("lab-hung-promisor").unwrap();
         let destination = runner_root.path().join("workspace");
         let destination_text = destination.display().to_string();
-        let started = Instant::now();
         let result = crate::workspace::git::materialize_git_bundle_controlled(
             &runner,
             crate::workspace::git::ControllerGitBundleMaterializationRequest {
@@ -1680,7 +1691,6 @@ fn assert_hung_promisor_transport_stopped(cancel: bool, batched: bool) {
             &control,
         );
         let error = result.err().expect("hung transport must be interrupted");
-        assert!(started.elapsed() < Duration::from_secs(8));
         assert_eq!(error.details["workspace_sync"]["command_started"], true);
         assert_eq!(
             error.details["workspace_sync"]["action"],

@@ -1107,7 +1107,7 @@ mod tests {
 
     #[test]
     fn direct_daemon_without_a_broker_token_uses_ssh_for_files() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             server::create(
                 &serde_json::json!({ "id": "srv", "host": "localhost", "user": "test" })
                     .to_string(),
@@ -1128,7 +1128,7 @@ mod tests {
     #[test]
     fn ssh_private_directory_creation_preserves_existing_shared_permissions() {
         use std::os::unix::fs::PermissionsExt;
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             server::create(
                 &json!({"id": "private-mkdir", "host": "localhost", "user": "test"}).to_string(),
                 false,

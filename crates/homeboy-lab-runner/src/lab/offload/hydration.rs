@@ -942,7 +942,7 @@ mod tests {
     /// already recorded the component identity. The bare path stays ambiguous.
     #[test]
     fn hydration_uses_admitted_component_for_nested_worktree() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let root = tempfile::tempdir().expect("repository root");
             let primary = root.path().join("blocks-engine");
             let nested = primary.join("php-transformer");
@@ -1057,7 +1057,7 @@ mod tests {
 
     #[test]
     fn hydration_skips_when_linked_extensions_do_not_provide_dependencies() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let extension_dir = home.path().join(".config/homeboy/extensions/fixture");
             std::fs::create_dir_all(&extension_dir).expect("extension directory");
             std::fs::write(
@@ -1127,7 +1127,7 @@ mod tests {
         let _timing =
             homeboy_core::observation::phase_timing::for_run(&timing_store, &timing_run.id);
 
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
                 "fixture-tool",
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > hydration-args.txt\n",
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn stale_prepared_marker_without_dependency_output_hydrates() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
                 "fixture-tool",
                 "#!/bin/sh\nmkdir -p node_modules/example apps/cli/dist/cli\nprintf installed > node_modules/example/index.js\nprintf ready > apps/cli/dist/cli/main.mjs\n",
@@ -1215,7 +1215,7 @@ mod tests {
 
     #[test]
     fn detected_npm_hydrates_stale_marker_then_reuses_validated_outputs() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             write_detected_node_adapter(home.path());
             let path_guard = FakeBinGuard::install(
                 "npm",
@@ -1260,7 +1260,7 @@ mod tests {
 
     #[test]
     fn prepared_source_with_empty_node_modules_hydrates_before_reuse() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             write_detected_node_adapter(home.path());
             let path_guard = FakeBinGuard::install(
                 "npm",
@@ -1301,7 +1301,7 @@ mod tests {
 
     #[test]
     fn detected_composer_hydrates_nested_component_from_repository_root() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             write_detected_composer_adapter(home.path());
             let path_guard = FakeBinGuard::install(
                 "composer",
@@ -1340,7 +1340,7 @@ mod tests {
 
     #[test]
     fn successful_live_hydration_requires_declared_output_kind() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
                 "fixture-tool",
                 "#!/bin/sh\nprintf not-a-directory > node_modules\n",
@@ -1369,7 +1369,7 @@ mod tests {
 
     #[test]
     fn prepared_marker_cannot_reuse_an_outputless_provider_plan() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
                 "fixture-tool",
                 "#!/bin/sh\nprintf hydrated > hydration-ran\n",
@@ -1397,7 +1397,7 @@ mod tests {
 
     #[test]
     fn prepared_marker_missing_declared_build_output_hydrates() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
                 "fixture-tool",
                 "#!/bin/sh\nmkdir -p node_modules/example apps/cli/dist/cli\nprintf installed > node_modules/example/index.js\nprintf ready > apps/cli/dist/cli/main.mjs\n",
@@ -1426,7 +1426,7 @@ mod tests {
 
     #[test]
     fn prepared_marker_with_declared_outputs_reuses_cache() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install("fixture-tool", "#!/bin/sh\nexit 99\n");
             crate::create(&path_guard.local_runner_spec("lab-local"), false)
                 .expect("create local runner");
@@ -1462,7 +1462,7 @@ mod tests {
 
     #[test]
     fn detected_controller_dependencies_restore_through_restore_path() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             write_detected_node_adapter(home.path());
             let project = tempfile::tempdir().expect("controller project");
             std::fs::write(project.path().join("package.json"), "{}").expect("package manifest");
@@ -1561,7 +1561,7 @@ mod tests {
     /// starts, classified as workspace setup.
     #[test]
     fn hydration_failure_fails_before_executor() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
                 "fixture-tool",
                 "#!/bin/sh\nprintf 'fixture failure' >&2\nexit 2\n",
@@ -1598,7 +1598,7 @@ mod tests {
     /// workloads such as bench/rig offloads.
     #[test]
     fn hydration_runs_for_materialized_workspace_jobs() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
                 "fixture-tool",
                 "#!/bin/sh\nprintf '%s\\n' hydrated > workspace-hydrated.txt\n",
@@ -1645,7 +1645,7 @@ mod tests {
 
     #[test]
     fn hydration_resolves_extension_entrypoint_from_runner_home() {
-        homeboy_core::test_support::with_isolated_home(|controller_home| {
+        crate::test_support::with_isolated_home(|controller_home| {
             let runner_home = tempfile::tempdir().expect("runner home");
             let extension_id = "fixture-runtime";
             let entrypoint = "scripts/install.sh";
@@ -1704,7 +1704,7 @@ mod tests {
 
     #[test]
     fn hydration_missing_runner_extension_entrypoint_fails_actionably() {
-        homeboy_core::test_support::with_isolated_home(|_controller_home| {
+        crate::test_support::with_isolated_home(|_controller_home| {
             let runner_home = tempfile::tempdir().expect("runner home");
             crate::create(
                 &serde_json::json!({

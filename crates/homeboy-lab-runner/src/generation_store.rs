@@ -2834,7 +2834,6 @@ mod tests {
     use std::cell::RefCell;
     use std::time::{Duration, Instant};
 
-    use homeboy_core::test_support;
     use serde_json::json;
 
     use super::*;
@@ -2901,7 +2900,7 @@ mod tests {
 
     #[test]
     fn live_reservation_blocks_admission_with_retryable_reconcile_action() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let current_identity = process_start_identity(std::process::id())
                 .expect("inspect test process")
                 .expect("test process is live");
@@ -2930,7 +2929,7 @@ mod tests {
 
     #[test]
     fn registry_lock_publishes_durable_owner_and_phase_metadata() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             with_runner_registry_lock("runner-a", || {
                 let lock_path = path("runner-a")?.with_extension("lock");
                 let owner: serde_json::Value = serde_json::from_slice(
@@ -2949,7 +2948,7 @@ mod tests {
 
     #[test]
     fn lock_timeout_reports_the_live_holder_phase_age_deadline_and_action() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let lock_path = path("runner-a")
                 .expect("registry path")
                 .with_extension("lock");
@@ -2984,7 +2983,7 @@ mod tests {
 
     #[test]
     fn failed_mutation_clears_its_owned_reservation_before_returning() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let error = with_admission_fence("runner-a", None, "ensure_remote_daemon", |_| {
                 Err::<(), _>(Error::internal_unexpected("remote mutation failed"))
             })
@@ -3003,7 +3002,7 @@ mod tests {
 
     #[test]
     fn concurrent_admission_observes_mutation_reservation_without_waiting_for_remote_work() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
             let holder_barrier = std::sync::Arc::clone(&barrier);
             let holder = std::thread::spawn(move || {
@@ -3034,7 +3033,7 @@ mod tests {
 
     #[test]
     fn dead_reservation_is_reclaimed_before_admission() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let mut owner = std::process::Command::new("sh")
                 .args(["-c", "sleep 60"])
                 .spawn()
@@ -3061,7 +3060,7 @@ mod tests {
 
     #[test]
     fn retiring_an_unpublishable_replacement_releases_its_endpoint_and_operation_identity() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let first_operation = replacement_operation("runner-a").expect("operation");
             record_replacement_operation_replay("runner-a", "ensure-running", "replay")
                 .expect("replay journal");
@@ -3092,7 +3091,7 @@ mod tests {
     /// exact rejection as durable evidence.
     #[test]
     fn retiring_a_rejected_ensure_running_replacement_preserves_evidence_and_frees_the_operation() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let first_operation = replacement_operation("runner-a").expect("operation");
             let command =
                 "homeboy daemon ensure-running --replacement-operation-id operation-a --addr 127.0.0.1:0";
@@ -3154,7 +3153,7 @@ mod tests {
     /// recovery (e.g. a state-loss replay in flight).
     #[test]
     fn retiring_ensure_running_refuses_a_journal_of_a_different_kind() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             replacement_operation("runner-a").expect("operation");
             record_replacement_operation_replay(
                 "runner-a",
@@ -3181,7 +3180,7 @@ mod tests {
 
     #[test]
     fn explicit_candidate_reconciliation_supersedes_ensure_running_with_evidence() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let operation_id = replacement_operation("runner-a").expect("operation");
             record_replacement_operation_replay(
                 "runner-a",
@@ -3228,7 +3227,7 @@ mod tests {
 
     #[test]
     fn verified_live_lease_adoption_terminalizes_ensure_running_with_evidence() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let operation_id = replacement_operation("runner-a").expect("operation");
             record_replacement_operation_replay(
                 "runner-a",
@@ -3268,7 +3267,7 @@ mod tests {
 
     #[test]
     fn legacy_replacement_journal_remains_replayable_after_rebinding() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let path = replacement_operation_path("runner-a").expect("journal path");
             write_durable_json(
                 &path,
@@ -3615,7 +3614,7 @@ mod tests {
 
     #[test]
     fn missing_controller_run_releases_evidence_without_attestation() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let idle = session("lease-idle", "daemon-idle", Some(101));
             let current = session("lease-current", "daemon-current", Some(303));
             let mut generations = RollingGenerations::new("lease-current".to_string(), current);
@@ -3650,7 +3649,7 @@ mod tests {
 
     #[test]
     fn status_reports_idle_stop_blocker_without_retrying_stop() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let idle = session("lease-idle", "daemon-idle", Some(101));
             let current = session("lease-current", "daemon-current", Some(303));
             let mut generations = RollingGenerations::new("lease-current".to_string(), current);
@@ -3679,7 +3678,7 @@ mod tests {
 
     #[test]
     fn controller_directory_artifact_is_verified_by_tree_classification() {
-        test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
             let run = homeboy_core::observation::RunRecord {
                 id: "directory-run".into(),
@@ -3763,7 +3762,7 @@ mod tests {
     /// verified stays registered and is reported as evidence-blocked.
     #[test]
     fn unverifiable_evidence_blocks_retirement_by_default_and_is_classified() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             idle_generation_with_unverifiable_evidence();
             let operations = FakeEndpointOperations::default();
             operations.active_jobs.borrow_mut().extend([
@@ -3790,7 +3789,7 @@ mod tests {
     /// run ownership as retired evidence. Nothing is deleted.
     #[test]
     fn release_unverified_evidence_retires_and_keeps_provenance() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             idle_generation_with_unverifiable_evidence();
             let operations = FakeEndpointOperations::default();
             operations.active_jobs.borrow_mut().extend([
@@ -3835,7 +3834,7 @@ mod tests {
     /// The release never overrides live work: a busy generation stays.
     #[test]
     fn release_unverified_evidence_never_retires_a_busy_generation() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             idle_generation_with_unverifiable_evidence();
             let operations = FakeEndpointOperations::default();
             operations.active_jobs.borrow_mut().extend([
@@ -3866,7 +3865,7 @@ mod tests {
     #[test]
     fn a_dangling_job_owner_lets_verified_idle_generations_retire_without_bypassing_per_generation_gates(
     ) {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let idle = session("lease-idle", "daemon-idle", Some(101));
             let busy = session("lease-busy", "daemon-busy", Some(202));
             let current = session("lease-current", "daemon-current", Some(303));
@@ -3928,7 +3927,7 @@ mod tests {
 
     #[test]
     fn concurrent_status_projections_preserve_stale_direct_generation_state_without_operations() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let draining = session("lease-draining", "daemon-draining", Some(101));
             let active = session("lease-active", "daemon-active", Some(202));
             record_job("runner-a", &draining, "draining-job").expect("record draining job");
@@ -3968,7 +3967,7 @@ mod tests {
 
     #[test]
     fn endpoint_fallback_retires_only_the_authoritatively_idle_draining_generation() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
             record_job("runner-a", &a, "job-a").expect("record A job");
@@ -4026,7 +4025,7 @@ mod tests {
 
     #[test]
     fn reconciled_zero_for_admission_owner_retires_unclaimed_jobs() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let current = session("lease-current", "daemon-current", Some(202));
             record_job("runner-a", &current, "job-a").expect("record first job");
             record_job("runner-a", &current, "job-b").expect("record second job");
@@ -4057,7 +4056,7 @@ mod tests {
 
     #[test]
     fn live_daemon_owner_keeps_its_durable_job() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let current = session("lease-current", "daemon-current", Some(202));
             record_job("runner-a", &current, "job-live").expect("record live job");
             let operations = FakeEndpointOperations::default();
@@ -4125,7 +4124,7 @@ mod tests {
 
     #[test]
     fn tombstones_a_large_dead_direct_generation_inventory_without_accepting_new_work() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let mut generations =
                 RollingGenerations::new("lease-0", session("lease-0", "daemon-0", Some(1000)));
             for index in 1..58 {
@@ -4363,7 +4362,7 @@ mod tests {
 
     #[test]
     fn a_registry_without_runner_identity_is_rejected_unchanged() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let mut prior = RollingGenerations::new("lease-a", a);
             assert!(prior.admit_job_for("lease-a", "job-a"));
@@ -4388,7 +4387,7 @@ mod tests {
 
     #[test]
     fn completed_result_ownership_requires_generation_preserving_refresh_until_retired() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let current = session("lease-a", "daemon-a", Some(101));
             let mut generations = RollingGenerations::new("lease-a", current.clone());
             assert!(generations.admit_job_for("lease-a", "job-a"));
@@ -4417,7 +4416,7 @@ mod tests {
 
     #[test]
     fn registry_rejects_an_explicit_mismatched_runner_id() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             homeboy_core::engine::local_files::write_json_file(
                 &path("runner-a").expect("registry path"),
@@ -4440,7 +4439,7 @@ mod tests {
 
     #[test]
     fn malformed_prior_registry_is_not_migrated() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let registry_path = path("runner-a").expect("registry path");
             std::fs::create_dir_all(registry_path.parent().expect("registry directory"))
                 .expect("create registry directory");
@@ -4458,7 +4457,7 @@ mod tests {
 
     #[test]
     fn unsupported_registry_shape_fails_closed() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let registry_path = path("runner-a").expect("registry path");
             std::fs::create_dir_all(registry_path.parent().expect("registry directory"))
                 .expect("create registry directory");
@@ -4480,7 +4479,7 @@ mod tests {
 
     #[test]
     fn fresh_direct_admission_replaces_a_stale_endpoint_and_preserves_draining_jobs() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "127.0.0.1:63114", Some(101));
             let fresh = session("lease-fresh", "127.0.0.1:50575", Some(202));
             record_job("runner-a", &stale, "active-stale-job").expect("record stale job");
@@ -4515,7 +4514,7 @@ mod tests {
 
     #[test]
     fn draining_generation_keeps_result_routing_after_zero_job_reconciliation() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
 
@@ -4582,7 +4581,7 @@ mod tests {
 
     #[test]
     fn reconciliation_reports_owner_counts_and_observed_counts() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "daemon-stale", Some(101));
             let fresh = session("lease-fresh", "daemon-fresh", Some(202));
             let mut generations = RollingGenerations::new("lease-fresh", fresh.clone());
@@ -4629,7 +4628,7 @@ mod tests {
 
     #[test]
     fn unreachable_draining_generation_keeps_unverified_persisted_claims() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "daemon-stale", Some(101));
             let fresh = session("lease-fresh", "daemon-fresh", Some(202));
             let mut generations = RollingGenerations::new("lease-fresh", fresh.clone());
@@ -4682,7 +4681,7 @@ mod tests {
 
     #[test]
     fn cancelling_a_queued_owned_job_settles_its_ledger_owner() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let endpoint = session("lease-cancel", "daemon-cancel", Some(101));
             let job_id = uuid::Uuid::new_v4();
             record_job("runner-a", &endpoint, &job_id.to_string()).expect("record queued job");
@@ -4788,7 +4787,7 @@ mod tests {
 
     #[test]
     fn unclaimed_draining_projection_retires_when_live_daemon_is_idle() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "daemon-stale", Some(101));
             let fresh = session("lease-fresh", "daemon-fresh", Some(202));
             record_job("runner-a", &stale, "job-stale").expect("record stale job");
@@ -4852,7 +4851,7 @@ mod tests {
 
     #[test]
     fn reachable_terminal_settlement_failure_is_not_overridden_by_an_idle_live_daemon() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "daemon-stale", Some(101));
             let fresh = session("lease-fresh", "daemon-fresh", Some(202));
             record_job("runner-a", &stale, "job-stale").expect("record stale job");
@@ -4893,7 +4892,7 @@ mod tests {
 
     #[test]
     fn proven_stopped_draining_generation_retires_without_touching_live_owner() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let stopped = session("lease-stopped", "daemon-stopped", Some(101));
             let live = session("lease-live", "daemon-live", Some(202));
             activate(
@@ -4968,7 +4967,7 @@ mod tests {
 
     #[test]
     fn stopped_generation_job_owner_blocks_by_default_and_names_attestation() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let operations = stopped_generation_with_stuck_job(true);
 
             let result = reconcile_with("runner-a", &operations).expect("reconcile");
@@ -4992,7 +4991,7 @@ mod tests {
 
     #[test]
     fn attested_release_retires_stopped_generation_and_keeps_live_owner() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let operations = stopped_generation_with_stuck_job(true);
 
             let result = reconcile_with_operations(
@@ -5023,7 +5022,7 @@ mod tests {
 
     #[test]
     fn attestation_never_releases_a_generation_not_proven_stopped() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let operations = stopped_generation_with_stuck_job(false);
 
             let result = reconcile_with_operations(
@@ -5051,7 +5050,7 @@ mod tests {
 
     #[test]
     fn dropped_generation_a_reconnect_retains_one_owner_after_admission_rotates_to_b() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "daemon-stale", Some(101));
             let fresh = session("lease-fresh", "daemon-fresh", Some(202));
             record_job("runner-a", &stale, "job-stale").expect("record stale job");
@@ -5088,7 +5087,7 @@ mod tests {
 
     #[test]
     fn persisted_generation_rotation_routes_jobs_projects_status_and_retires_once() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
 
@@ -5263,7 +5262,7 @@ mod tests {
 
     #[test]
     fn reconciliation_rebuilds_draining_counts_and_retires_terminal_generations() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
             let c = session("lease-c", "daemon-c", Some(303));
@@ -5331,7 +5330,7 @@ mod tests {
 
     #[test]
     fn failed_terminal_reconciliation_keeps_the_generation_draining() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
 
@@ -5368,7 +5367,7 @@ mod tests {
 
     #[test]
     fn second_rotation_keeps_jobs_owned_by_the_named_draining_generation() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
             let c = session("lease-c", "daemon-c", Some(303));
@@ -5399,7 +5398,7 @@ mod tests {
 
     #[test]
     fn persisted_lease_alias_routes_to_its_named_generation() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
             let mut generations = RollingGenerations::new("build-a", a.clone());
@@ -5426,7 +5425,7 @@ mod tests {
 
     #[test]
     fn first_rotation_pins_active_a_jobs_before_b_can_retire_it() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
 
@@ -5456,7 +5455,7 @@ mod tests {
 
     #[test]
     fn activation_rollback_restores_a_after_post_validation_failure() {
-        test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
             activate(

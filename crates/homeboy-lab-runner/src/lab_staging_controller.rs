@@ -4993,7 +4993,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn deferred_source_cancellation_reaps_a_blocked_git_index_and_fences_handoff() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let run_id = "blocked-source-index";
             submit_recipe_run(run_id);
             let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store");
@@ -5116,7 +5116,7 @@ mod tests {
 
     #[test]
     fn detached_staging_publishes_planned_ownership_before_daemon_convergence() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             clear_installed_adapter();
             register();
             enable_production_routing();
@@ -5467,7 +5467,7 @@ mod tests {
     /// terminalizes with its attempt instead of orphaning `running`.
     #[test]
     fn staging_prepare_fails_fast_when_linked_attempt_already_terminal() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let run_id = format!("run-13619-prepare-{}", uuid::Uuid::new_v4());
             submit_recipe_run(&run_id);
             terminalize_attempt_record(&run_id);
@@ -5492,7 +5492,7 @@ mod tests {
     /// lifecycle after its attempt terminalized.
     #[test]
     fn staging_execute_refuses_pre_dispatch_work_for_terminal_attempt() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let run_id = format!("run-13619-execute-{}", uuid::Uuid::new_v4());
             submit_recipe_run(&run_id);
             let request =
@@ -6063,7 +6063,7 @@ mod tests {
         // Both production recovery paths must publish completion custody; neither
         // may depend on a later status read or re-observe the remote provider.
         for replay_observer in [false, true] {
-            homeboy_core::test_support::with_isolated_home(|_| {
+            crate::test_support::with_isolated_home(|_| {
                 let mut request = execution_request();
                 let plan: AgentTaskPlan = serde_json::from_value(json!({
                     "schema": "homeboy/agent-task-plan/v1", "plan_id": "terminal-cook",
@@ -6375,7 +6375,7 @@ mod tests {
 
     #[test]
     fn incompatible_stable_admission_preserves_the_immutable_cook_recipe() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let run_id = "stale-runtime-recipe";
             submit_recipe_run(run_id);
             let recipe = persist_lab_staging_recipe(
@@ -6883,7 +6883,7 @@ mod tests {
 
     #[test]
     fn incompatible_handoff_identity_is_rejected_before_workspace_materialization() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let operations = Arc::new(RecordedStageOperations::default());
             operations.reject_handoff_identity_once();
             let adapter = StageExecutionAdapter::new(operations.clone());
@@ -6903,7 +6903,7 @@ mod tests {
 
     #[test]
     fn adapter_recovers_after_each_effect_before_completion_without_repeating_side_effects() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             // Odd persistence calls store intent. Even calls store the completion
             // checkpoint, so crashing on each even call exercises every exact-once
             // window after an injected side effect.
@@ -6971,7 +6971,7 @@ mod tests {
 
     #[test]
     fn lab_staging_resume_and_offload_timings_are_read_from_sqlite() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let request = execution_request();
             submit_recipe_run(&request.recipe.run_id);
             let adapter = StageExecutionAdapter::new(Arc::new(RecordedStageOperations::default()));
@@ -7081,7 +7081,7 @@ mod tests {
 
     #[test]
     fn checkpointed_runtime_stage_updates_the_persisted_parent_progress() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let request = execution_request();
             submit_recipe_run(&request.recipe.run_id);
             let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
@@ -7214,7 +7214,7 @@ mod tests {
 
     #[test]
     fn partial_or_cancelled_hydration_does_not_advance_the_checkpoint() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             for cancelled in [false, true] {
                 let operations = Arc::new(RecordedStageOperations::default());
                 if cancelled {
@@ -7254,7 +7254,7 @@ mod tests {
 
     #[test]
     fn cancellation_inside_workspace_preserves_custody_and_releases_only_its_pin() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let unrelated =
                 homeboy_core::runtime_promotion::pin_cook_generation("unrelated-active-job")
                     .unwrap();
@@ -7325,7 +7325,7 @@ mod tests {
 
     #[test]
     fn completed_workspace_is_checkpointed_before_cancellation_and_never_repeated() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let operations = Arc::new(RecordedStageOperations::default());
             operations
                 .cancel_after_workspace
@@ -7372,7 +7372,7 @@ mod tests {
 
     #[test]
     fn expired_workspace_budget_has_no_observation_grace_or_provider_dispatch() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let operations = Arc::new(RecordedStageOperations::default());
             let adapter = StageExecutionAdapter::new(operations.clone());
             let mut request = execution_request();
@@ -7424,7 +7424,7 @@ mod tests {
 
     #[test]
     fn retryable_observation_outage_keeps_the_original_child_recoverable() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let operations = Arc::new(RecordedStageOperations::default());
             operations.fail_observation_once();
             let adapter = StageExecutionAdapter::new(operations.clone());
@@ -7697,7 +7697,7 @@ mod tests {
 
     #[test]
     fn workspace_intent_without_receipt_recovers_to_rematerialize() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let request = execution_request();
             submit_recipe_run(&request.recipe.run_id);
             let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
@@ -7713,7 +7713,7 @@ mod tests {
 
     #[test]
     fn workspace_intent_with_invalid_receipt_fails_closed() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let request = execution_request();
             submit_recipe_run(&request.recipe.run_id);
             let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
@@ -7825,7 +7825,7 @@ mod tests {
 
     #[test]
     fn execute_and_resume_use_the_controller_job_handle_boundary() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             clear_installed_adapter();
             let run_id = "lab-controller-harness";
             submit_recipe_run(run_id);
@@ -7894,7 +7894,7 @@ mod tests {
 
     #[test]
     fn cancellation_signals_the_owned_token_before_adapter_confirmation() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let run_id = "cancel-authority";
             submit_recipe_run(run_id);
             let args = vec!["agent-task".to_string(), "run-plan".to_string()];
@@ -7998,7 +7998,7 @@ mod tests {
 
     #[test]
     fn production_adapter_readiness_fails_closed_when_uninstalled() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             clear_installed_adapter();
             assert!(require_production_adapter().is_err());
         });
@@ -8230,7 +8230,7 @@ mod tests {
 
     #[test]
     fn production_dispatch_recovery_rebuilds_receipt_after_accepted_bind_before_receipt() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let request = execution_request();
             submit_recipe_run(&request.recipe.run_id);
             homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
@@ -8345,7 +8345,7 @@ mod tests {
 
     #[test]
     fn registration_keeps_lab_routing_disabled_without_submission_hook() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             clear_installed_adapter();
             register();
             assert!(!routing_ready());
@@ -8354,7 +8354,7 @@ mod tests {
 
     #[test]
     fn production_enablement_installs_the_staging_adapter() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             clear_installed_adapter();
             register();
             enable_production_routing();
@@ -8365,7 +8365,7 @@ mod tests {
 
     #[test]
     fn cancellation_guard_removes_token_after_adapter_error() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let run_id = "adapter-error".to_string();
             let token = LabStagingCancellationToken::default();
             cancellations()
@@ -8383,7 +8383,7 @@ mod tests {
 
     #[test]
     fn recipe_round_trips_without_secret_values_and_reconstructs_borrowed_request() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let run_id = "recipe-round-trip";
             submit_recipe_run(run_id);
             let args = vec!["agent-task".to_string(), "run-plan".to_string()];
@@ -8432,7 +8432,7 @@ mod tests {
 
     #[test]
     fn malformed_recipe_diagnostic_is_visible_after_run_cancellation() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let run_id = "malformed-recipe-after-cancel";
             submit_recipe_run(run_id);
             let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
@@ -8478,7 +8478,7 @@ mod tests {
 
     #[test]
     fn private_recipe_preserves_runtime_materialization_sources() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let run_id = "private-runtime-sources";
             submit_recipe_run(run_id);
             let plan = json!({
@@ -8659,7 +8659,7 @@ mod tests {
 
     #[test]
     fn prepare_recipe_lookup_failure_terminalizes_the_parent_with_retry_metadata() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let run_id = "prepare-plan-lookup-failure";
             submit_recipe_run(run_id);
             let args = vec!["agent-task".to_string(), "run-plan".to_string()];
@@ -8717,7 +8717,7 @@ mod tests {
 
     #[test]
     fn secret_bearing_recipe_never_reaches_public_or_durable_projection_surfaces() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             const MARKER: &str = "staging-secret-marker";
             let run_id = "secret-projection";
             submit_recipe_run(run_id);
@@ -8815,7 +8815,7 @@ mod tests {
 
     #[test]
     fn recipe_load_requires_existing_attempt_plan_and_immutable_attachment() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             assert!(load_lab_staging_recipe("missing-attempt").is_err());
             let run_id = "recipe-conflict";
             submit_recipe_run(run_id);
@@ -8873,7 +8873,7 @@ mod tests {
 
     #[test]
     fn durable_dispatch_carries_the_execution_bundle_for_oversized_provenance() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
             let remote_cwd = workspace.path().join("workspace");
             std::fs::create_dir_all(crate::lab::offload::remote_lab_artifact_dir(
@@ -8909,7 +8909,7 @@ mod tests {
 
     #[test]
     fn durable_dispatch_without_a_bundle_cannot_stage_oversized_provenance() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let (request, mut lab_metadata, _) =
                 oversized_durable_dispatch_inputs("/runner/ws", ("lease-1", "reservation-1"), None);
             // The pre-fix durable dispatch never published a bundle.
@@ -8931,7 +8931,7 @@ mod tests {
 
     #[test]
     fn durable_dispatch_without_a_verified_build_identity_fails_actionably() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let (request, lab_metadata, _) =
                 oversized_durable_dispatch_inputs("/runner/ws", ("lease-1", "reservation-1"), None);
             let (_, env) = durable_dispatch_env(&request, &lab_metadata, Vec::new(), &json!({}))
@@ -8947,7 +8947,7 @@ mod tests {
 
     #[test]
     fn durable_dispatch_bundle_beats_job_override_authority() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let (mut request, lab_metadata, _) = oversized_durable_dispatch_inputs(
                 "/runner/ws",
                 ("lease-1", "reservation-1"),

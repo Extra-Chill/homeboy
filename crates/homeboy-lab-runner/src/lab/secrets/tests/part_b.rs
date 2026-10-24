@@ -80,7 +80,7 @@ fn lab_secret_env_handoff_plan_defers_provider_credentials_to_runner_references(
 #[test]
 fn hydrate_agent_task_secret_env_defers_missing_provider_config_secret() {
     let _secret = RemovedEnvVar::new("HOMEBOY_CONTROLLER_MISSING_PROVIDER_TOKEN");
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let mut env = HashMap::new();
 
         let metadata = hydrate_agent_task_secret_env(
@@ -517,7 +517,7 @@ fn hydrate_agent_task_secret_env_defers_run_plan_secrets_to_runner() {
 #[test]
 fn hydrate_agent_task_secret_env_defers_provider_default_run_plan_secrets_to_runner_refs() {
     let _access_token_env = RemovedEnvVar::new("EXAMPLE_PROVIDER_ACCESS_TOKEN");
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let auth_path = temp.path().join("provider-auth.json");
         std::fs::write(
@@ -634,7 +634,7 @@ fn run_plan_codex_route_preserves_provider_source_delivery_for_luna_model() {
 #[test]
 fn provider_run_plan_credential_handoff_uses_runner_ref_without_serializing_value() {
     let _access_token_env = RemovedEnvVar::new("EXAMPLE_PROVIDER_ACCESS_TOKEN");
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let primary_auth = temp.path().join("primary-auth.json");
         let fallback_auth = temp.path().join("fallback-auth.json");
@@ -1156,7 +1156,7 @@ fn example_oauth_plan() -> AgentTaskPlan {
 
 #[test]
 fn controller_resolvable_json_file_source_is_not_a_runner_identity() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let store = home.path().join(".example-provider/auth.json");
         std::fs::create_dir_all(store.parent().unwrap()).expect("store dir");
         std::fs::write(
@@ -1184,7 +1184,7 @@ fn controller_resolvable_json_file_source_is_not_a_runner_identity() {
 
 #[test]
 fn unresolvable_declared_source_still_requires_a_runner_identity() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let provider = fixture_provider_with_example_defaults();
         let plan = example_oauth_plan();
 

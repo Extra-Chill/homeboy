@@ -298,7 +298,7 @@ fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
 
 #[test]
 fn retained_terminal_receipt_reclassifies_and_releases_compacted_workspace() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_id = "lab-local-prune-terminal-receipt";
         let run_id = "compacted-terminal-run";
         let job_id = "job-from-prior-runner-generation";
@@ -387,7 +387,7 @@ fn retained_terminal_receipt_reclassifies_and_releases_compacted_workspace() {
 /// unknown owner stays fail-closed.
 #[test]
 fn declared_gate_workspace_resolves_its_runner_exec_run_authority() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner_id = "lab-local-prune-gate-run";
         let source_parent = tempfile::tempdir().expect("source parent");
         // The controller's private resource package is gone after the gate, as
@@ -610,7 +610,7 @@ fn runner_job_authority_requires_exact_transport_state_and_consistent_snapshot()
 
 #[test]
 fn non_agent_task_polling_loss_retains_job_owned_workspace_until_terminal_reconciliation() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("review-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -826,7 +826,7 @@ fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing(
 
 #[test]
 fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("live-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -921,7 +921,7 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
 
 #[test]
 fn uncertain_handoff_disarms_ttl_pruning() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("live-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -1555,7 +1555,7 @@ fn ssh_orphan_artifact_dir_delete_revalidates_checkout_absence() {
 
 #[test]
 fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         // Orphans sit behind hundreds of unowned entries, mid-root and on the
         // final entry. Thousands of fixtures only multiplied setup I/O.
         const WORKSPACE_COUNT: usize = 640;
@@ -1763,7 +1763,7 @@ fn prune_size_command_bounds_each_measurement() {
 
 #[test]
 fn unavailable_job_authority_fails_closed_despite_inactive_process_evidence() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let root = tempfile::tempdir().expect("workspace root");
         let workspace = root.path().join("_lab_workspaces/orphan");
         write_orphan_workspace(&workspace);

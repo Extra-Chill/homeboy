@@ -1594,7 +1594,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sync_lab_offload_rigs_snapshots_worktree_and_remaps_nested_relative_directory_package() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let worktree = home.path().join("declared-worktree");
             let rig_file = worktree.join("rigs/fixture-matrix/nested/rig.json");
             std::fs::create_dir_all(rig_file.parent().expect("rig parent")).expect("rig parent");
@@ -1720,7 +1720,7 @@ mod tests {
 
     #[test]
     fn sync_lab_offload_rigs_rejects_relative_directory_sibling_package() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let worktree = home.path().join("declared-worktree");
             for path in [
                 worktree.join("rigs/a/rig.json"),
@@ -2042,7 +2042,7 @@ mod tests {
 
     #[test]
     fn fuzz_rig_package_binds_nested_component_to_its_distinct_remote_checkout() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let rig_package = home.path().join("Developer/homeboy-rigs");
             let monorepo = home.path().join("Developer/jetpack");
             let component = monorepo.join("projects/plugins/jetpack");
@@ -2194,7 +2194,7 @@ mod tests {
 
     #[test]
     fn default_component_selects_its_materialized_checkout() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             std::fs::write(
@@ -2252,7 +2252,7 @@ mod tests {
 
     #[test]
     fn collects_rig_component_dependency_checkout_roots() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let checkout = home.path().join("Developer/woocommerce");
             std::fs::create_dir_all(checkout.join("plugins/woocommerce")).expect("checkout");
             let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
@@ -2311,7 +2311,7 @@ mod tests {
         // This fixture deliberately creates no component checkout or registry
         // entry. Planning is network-free; the immutable fetch occurs only on
         // the selected Lab runner during the later sync phase.
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
             std::fs::create_dir_all(&rig_dir).expect("create rig dir");
             let base_sha = "0123456789abcdef0123456789abcdef01234567";
@@ -2379,7 +2379,7 @@ mod tests {
 
     #[test]
     fn bench_path_override_updates_single_component_dependency_checkout_root() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let checkout = home.path().join("Developer/example-repo");
             let override_checkout = home.path().join("Developer/example-repo@bench-evidence");
             let override_component = override_checkout.join("packages/example-component");
@@ -2470,7 +2470,7 @@ mod tests {
 
     #[test]
     fn fuzz_list_single_component_dependency_uses_primary_checkout_when_rig_path_is_unresolved() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let checkout = home.path().join("Developer/example-component");
             std::fs::create_dir_all(&checkout).expect("checkout");
             let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
@@ -2523,7 +2523,7 @@ mod tests {
 
     #[test]
     fn unresolved_env_backed_checkout_root_uses_containing_primary_workspace() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let checkout_root = home.path().join("Developer/example");
             let component_path = checkout_root.join("projects/plugins/example-component");
             std::fs::create_dir_all(&component_path).expect("component path");
@@ -2582,7 +2582,7 @@ mod tests {
 
     #[test]
     fn bench_path_override_derives_lab_source_checkout_root() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let checkout = home.path().join("Developer/example-repo");
             let override_checkout = home.path().join("Developer/example-repo@bench-evidence");
             let override_component = override_checkout.join("packages/example-component");
@@ -2622,7 +2622,7 @@ mod tests {
 
     #[test]
     fn unavailable_checkout_root_with_nested_path_override_derives_lab_source_root() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let checkout_root = home.path().join("Developer/example-monorepo");
             let component_path = checkout_root.join("packages/example-component");
             std::fs::create_dir_all(&component_path).expect("component path");
@@ -2651,7 +2651,7 @@ mod tests {
 
     #[test]
     fn unavailable_checkout_root_with_nested_path_override_derives_dependency_root() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let checkout_root = home.path().join("Developer/example-monorepo");
             let component_path = checkout_root.join("packages/example-component");
             std::fs::create_dir_all(&component_path).expect("component path");
@@ -2691,7 +2691,7 @@ mod tests {
 
     #[test]
     fn nested_path_override_rejects_unrelated_concrete_checkout_root() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let checkout_root = home.path().join("Developer/example-monorepo");
             let component_path = checkout_root.join("packages/example-component");
             std::fs::create_dir_all(&component_path).expect("component path");
@@ -2722,7 +2722,7 @@ mod tests {
 
     #[test]
     fn expands_package_root_for_remote_component_dependency_root() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let checkout = home.path().join("Developer/studio-web");
             std::fs::create_dir_all(checkout.join("rigs/studio-web-product-matrix"))
                 .expect("rig package");
@@ -2921,7 +2921,7 @@ mod tests {
 
     #[test]
     fn primary_source_rig_ids_discovers_rigs_from_current_source_tree() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let checkout = home.path().join("Developer/studio-web-release-clean");
             let rig_dir = checkout.join("rigs/studio-web-product-matrix");
             std::fs::create_dir_all(&rig_dir).expect("rig dir");
@@ -2945,7 +2945,7 @@ mod tests {
 
     #[test]
     fn installed_rig_metadata_beats_a_nested_primary_rig_directory() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let rig_id = "stripe";
             let rig_dir = home.path().join("package/rigs/stripe");
             std::fs::create_dir_all(&rig_dir).expect("rig directory");
@@ -3147,7 +3147,7 @@ mod tests {
 
     #[test]
     fn explicit_single_component_rig_path_materializes_without_declared_path() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let component_path = home.path().join("Developer/component/plugins/package");
             std::fs::create_dir_all(&component_path).expect("component path");
             let rig_dir = home.path().join(".config/homeboy/rigs");
@@ -3202,7 +3202,7 @@ mod tests {
 
     #[test]
     fn rig_check_keeps_job_scoped_component_paths_on_the_runner() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let rig_dir = home.path().join(".config/homeboy/rigs");
             std::fs::create_dir_all(&rig_dir).expect("rig directory");
             std::fs::write(

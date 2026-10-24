@@ -341,7 +341,7 @@ mod tests {
     /// test's empty config, never the ambient machine's runner registry.
     #[test]
     fn disconnected_with_nothing_configured_makes_no_attempt() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let observed = readiness(LabRunnerReadinessState::Disconnected);
             let (resolved, attempt) = attempt_auto_placement_reconnect(&observed);
 
@@ -485,7 +485,7 @@ mod tests {
     /// states that a reconnect was attempted and failed").
     #[test]
     fn an_unreachable_configured_runner_is_attempted_and_bounded_end_to_end() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             homeboy_core::server::create(
                 r#"{"id":"homeboy-lab","host":"192.0.2.1","user":"user"}"#,
                 false,

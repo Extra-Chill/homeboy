@@ -3676,7 +3676,7 @@ mod tests {
             homeboy_lab_contract::LabRuntimeAncestry::ExactSource,
         );
 
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let run_id = "late-identity-drift-fallback";
             let mut durable_plan =
                 homeboy_agents::agent_task_scheduler::AgentTaskPlan::new(run_id, Vec::new());

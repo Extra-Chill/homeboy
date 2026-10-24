@@ -156,7 +156,7 @@ fn test_runner_policy_enforces_projects_commands_workspace_and_artifacts() {
 
 #[test]
 fn test_daemon_api_get_requires_connected_runner() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         super::super::super::create(
             r#"{"id":"lab-local","kind":"local","workspace_root":"/tmp"}"#,
             false,

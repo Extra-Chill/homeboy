@@ -996,7 +996,7 @@ fn record_evicted_evidence_loss(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::test_support::with_isolated_home;
+    use crate::test_support::with_isolated_home;
     use homeboy_core::{Error, ErrorCode};
     use std::sync::{Arc, Barrier};
 

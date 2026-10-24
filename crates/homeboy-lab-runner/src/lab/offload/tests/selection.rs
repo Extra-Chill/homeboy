@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn real_offload_persists_selection_and_failed_preflight_spans() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         use homeboy_core::observation::{NewRunRecord, ObservationStore, ACTIVE_RUN_ID_ENV};
         let store = ObservationStore::open_initialized().expect("store");
         let run = store

@@ -12,7 +12,6 @@ use super::connection_daemon::{
     daemon_version_from_body, versions_match,
 };
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
-use homeboy_core::test_support;
 
 #[test]
 fn controller_proxy_url_rejects_userinfo_before_opening_a_forward() {

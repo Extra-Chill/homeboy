@@ -7,7 +7,6 @@ use crate::{
 };
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
-use homeboy_core::test_support;
 
 /// Environment variables that redirect Cargo's output directory. A nested Cargo
 /// fixture that asserts a fixture-local `target/` path must not inherit these
@@ -1477,7 +1476,7 @@ fn managed_slot_materialization_publishes_verified_select_authority() {
 
 #[test]
 fn materialize_failure_preserves_compiler_diagnostics_and_active_binary() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let fixture = tempfile::tempdir().expect("fixture directory");
         let source = fixture.path().join("source");
         let workspace = fixture.path().join("workspace");
@@ -1629,7 +1628,7 @@ fn select_plan_only_probes_requested_binary() {
 
 #[test]
 fn select_without_materialization_sha_promotes_the_verified_binary() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
             false,
@@ -1666,7 +1665,7 @@ fn select_without_materialization_sha_promotes_the_verified_binary() {
 
 #[test]
 fn reconnect_rollback_restores_only_its_own_selected_binary() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/newer/homeboy"}"#,
             false,
@@ -1695,7 +1694,7 @@ fn reconnect_rollback_restores_only_its_own_selected_binary() {
 
 #[test]
 fn reconnect_rollback_restores_its_own_selected_binary() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/selected/homeboy"}"#,
             false,
@@ -1724,7 +1723,7 @@ fn reconnect_rollback_restores_its_own_selected_binary() {
 
 #[test]
 fn post_promotion_active_job_race_restores_prior_selection_without_stopping_daemon() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/selected/homeboy"}"#,
             false,
@@ -1756,7 +1755,7 @@ fn post_promotion_active_job_race_restores_prior_selection_without_stopping_daem
 
 #[test]
 fn post_promotion_active_job_race_preserves_newer_selector_as_contention() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/newer/homeboy"}"#,
             false,
@@ -1810,7 +1809,7 @@ fn rollback_failure_keeps_the_primary_refresh_error() {
 
 #[test]
 fn rollback_failure_persists_one_exact_previous_binary_continuation() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let error = durable_refresh_partial_error(
             Error::internal_unexpected("rollback reconnect failed"),
             "lab runner",
@@ -1839,7 +1838,7 @@ fn rollback_failure_persists_one_exact_previous_binary_continuation() {
 
 #[test]
 fn successful_rollback_does_not_publish_partial_state() {
-    test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let primary = rollback_refresh_error_with::<(), _>(
             Error::internal_unexpected("candidate connect failed"),
             || Ok(()),

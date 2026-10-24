@@ -488,7 +488,7 @@ fn in_flight_daemon_disconnect_error_surfaces_inspection_commands() {
 
 #[test]
 fn in_flight_daemon_disconnect_outcome_marks_durable_run_detached() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let source = Error::new(
             ErrorCode::InternalUnexpected,
             "query runner daemon: error sending request for url (http://127.0.0.1:63203/jobs/job-123)",

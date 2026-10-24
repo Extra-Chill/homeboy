@@ -49,7 +49,7 @@ fn apply_patch_step_accepts_noop_mutation_return() {
 
 #[test]
 fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let run_id = "cook-8525-attempt-1";
         homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
             run_id,
@@ -479,7 +479,7 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
 
 #[test]
 fn capability_fallback_persists_the_verified_local_outcome() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let decision = homeboy_lab_contract::ExecutionPlacementDecision::new(
             "test",
             "1",
@@ -577,7 +577,7 @@ fn local_outcome_without_an_agent_task_target_does_not_read_an_observation_id_as
 
 #[test]
 fn timed_fallback_preserves_agent_task_target_for_the_verified_local_outcome() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::register_runner_lab_offload_provider();
         let decision = homeboy_lab_contract::ExecutionPlacementDecision::new(
             "test",

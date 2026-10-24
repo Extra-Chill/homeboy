@@ -139,7 +139,7 @@ fn runner_resolved_provider_source_is_refreshed_from_controller() {
 
 #[test]
 fn runner_secret_env_resolution_uses_provider_json_file_source_values() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let provider_dir = home.path().join(".provider");
         std::fs::create_dir_all(&provider_dir).expect("provider dir");
         std::fs::write(
@@ -206,7 +206,7 @@ fn controller_secret_env_resolution_errors_when_required_name_has_no_ref() {
 
 #[test]
 fn runner_secret_env_resolution_preserves_fallback_source_errors() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let sources = HashMap::from([(
             "ACCESS_TOKEN".to_string(),
             json_file_source("~/.missing-provider/auth.json", "tokens.access_token"),
@@ -228,7 +228,7 @@ fn runner_secret_env_resolution_preserves_fallback_source_errors() {
 
 #[test]
 fn runner_secret_env_plan_source_failure_stays_fail_closed_without_runner_ref() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let mut plan = SecretEnvPlan::from_secret_env_names(["ACCESS_TOKEN".to_string()]);
         plan.provider_credentials.insert(
             "pi.agent-task-executor".to_string(),
@@ -284,7 +284,7 @@ fn runner_secret_env_resolution_stays_fail_closed_without_runner_ref_or_source()
 
 #[test]
 fn controller_secret_env_resolution_uses_fallback_sources() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let provider_dir = home.path().join(".provider");
         std::fs::create_dir_all(&provider_dir).expect("provider dir");
         std::fs::write(
@@ -319,7 +319,7 @@ fn controller_secret_env_resolution_uses_fallback_sources() {
 
 #[test]
 fn controller_secret_env_resolution_keeps_controller_owned_plan_entries_local() {
-    homeboy_core::test_support::with_isolated_home(|home| {
+    crate::test_support::with_isolated_home(|home| {
         let provider_dir = home.path().join(".provider");
         std::fs::create_dir_all(&provider_dir).expect("provider dir");
         std::fs::write(

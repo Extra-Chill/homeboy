@@ -4934,7 +4934,7 @@ mod ownership_tests {
 
     #[test]
     fn existing_job_owned_workspace_is_rejected_before_git_materialization() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("runner root");
             crate::create(
                 &format!(

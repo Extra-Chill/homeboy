@@ -1243,7 +1243,7 @@ mod tests {
 
     #[test]
     fn isolated_lab_nodejs_overlay_stages_root_assets_for_project_tests() {
-        homeboy_core::test_support::with_isolated_home(|_home| {
+        crate::test_support::with_isolated_home(|_home| {
             let source_root = tempfile::tempdir().expect("extension source root");
             let nodejs = source_root.path().join("nodejs");
             let scripts_lib = source_root.path().join("scripts/lib");
@@ -1340,7 +1340,7 @@ mod tests {
 
     #[test]
     fn isolated_lab_overlay_stages_shared_assets_from_cloned_install_metadata() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let extensions_root = home.path().join(".config/homeboy/extensions");
             let wordpress = extensions_root.join("wordpress");
             let scripts_lib = extensions_root.join("scripts/lib");
@@ -1398,7 +1398,7 @@ mod tests {
 
     #[test]
     fn concurrent_job_snapshots_keep_distinct_extension_revisions_after_global_source_changes() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        crate::test_support::with_isolated_home(|home| {
             let runner_root = tempfile::tempdir().expect("runner root");
             crate::create(
                 &format!(

@@ -546,6 +546,22 @@ mod dependency_scoped_excludes_tests {
 
 #[cfg(test)]
 mod tests {
+    // These fixtures exercise dependency lifecycle/cache behavior, not the
+    // operator's free-space reserve on the shared temporary filesystem.
+    fn with_isolated_home(body: impl FnOnce(&tempfile::TempDir)) {
+        crate::test_support::with_isolated_home(|home| {
+            homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
+                retention: homeboy_core::defaults::RetentionConfig {
+                    reconstructable_artifact_reserve_bytes: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("save fixture capacity policy");
+            body(home);
+        });
+    }
+
     use std::path::Path;
     use std::process::Command;
 
@@ -661,7 +677,7 @@ mod tests {
 
     #[test]
     fn sync_workspace_materializes_validation_dependency_siblings() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let source = workspace_parent.path().join("host-app");
             let dependency = workspace_parent.path().join("shared-runtime");
@@ -742,7 +758,7 @@ mod tests {
 
     #[test]
     fn sync_workspace_runs_validation_dependency_lifecycle_before_materializing() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        with_isolated_home(|_| {
             // The dependency lifecycle runs component deps/build scripts through the
             // extension subsystem, which registers its runners at binary startup.
             // Register them explicitly here so this test does not depend on a
@@ -829,7 +845,7 @@ mod tests {
 
     #[test]
     fn sync_workspace_uses_manifest_id_for_absolute_validation_dependency() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        with_isolated_home(|_| {
             // Register the extension runners this dependency lifecycle needs (see
             // the sibling test above) rather than relying on cross-test global state.
             homeboy_core::extension::component_script::register_component_script_runner();
@@ -962,7 +978,7 @@ mod tests {
 
     #[test]
     fn repeated_and_transitive_syncs_build_each_dependency_once() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        with_isolated_home(|_| {
             homeboy_core::extension::component_script::register_component_script_runner();
             homeboy_core::extension::build::register_component_build_runner();
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
@@ -1039,7 +1055,7 @@ mod tests {
 
     #[test]
     fn source_change_rebuilds_only_the_changed_dependency() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        with_isolated_home(|_| {
             homeboy_core::extension::component_script::register_component_script_runner();
             homeboy_core::extension::build::register_component_build_runner();
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
@@ -1085,7 +1101,7 @@ mod tests {
 
     #[test]
     fn sync_workspace_failed_validation_dependency_build_keeps_source_clean() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let source = workspace_parent.path().join("host-app");
             let dependency = workspace_parent.path().join("shared-runtime");
@@ -1169,7 +1185,7 @@ mod tests {
 
     #[test]
     fn sync_workspace_clones_missing_registered_validation_dependency() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let remote_parent = tempfile::tempdir().expect("remote parent");
             let source = workspace_parent.path().join("host-app");
@@ -1248,7 +1264,7 @@ mod tests {
 
     #[test]
     fn sync_workspace_rolls_back_checkout_when_validation_dependency_fails() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let source = workspace_parent.path().join("host-app");
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -1314,7 +1330,7 @@ mod tests {
 
     #[test]
     fn validation_dependency_workspace_errors_when_sibling_missing() {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let source = workspace_parent.path().join("host-app");
             fs::create_dir_all(&source).expect("source dir");
@@ -1344,7 +1360,7 @@ mod tests {
 
     #[test]
     fn registered_dependency_wins_over_plain_sibling_with_matching_manifest() {
-        homeboy_core::test_support::with_isolated_home(|home| {
+        with_isolated_home(|home| {
             let parent = tempfile::tempdir().expect("workspace parent");
             let sibling = parent.path().join("dependency");
             let registered = parent.path().join("registered-dependency");

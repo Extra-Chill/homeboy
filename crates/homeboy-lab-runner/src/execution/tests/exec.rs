@@ -904,7 +904,7 @@ fn runner_execution_record_uses_dispatched_path_materialization_plan() {
 
 #[test]
 fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs_local() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -1016,7 +1016,7 @@ fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs
 
 #[test]
 fn remote_daemon_secret_env_refs_require_missing_controller_refs() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -1053,7 +1053,7 @@ fn remote_daemon_secret_env_refs_require_missing_controller_refs() {
 
 #[test]
 fn daemon_read_only_runner_exec_ignores_unrelated_missing_secret_env_refs() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -1101,7 +1101,7 @@ fn daemon_read_only_runner_exec_ignores_unrelated_missing_secret_env_refs() {
 
 #[test]
 fn daemon_runner_exec_requires_declared_missing_secret_env_refs() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -1305,7 +1305,7 @@ fn runner_exec_secret_env_names_prefer_explicit_runtime_secret_env() {
 
 #[test]
 fn test_exec_runs_local_runner_command() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
             .expect("create local runner");
 
@@ -1387,7 +1387,7 @@ fn test_exec_runs_local_runner_command() {
 
 #[test]
 fn real_runner_exec_rejects_a_duplicate_terminal_explicit_run_id() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
             .expect("create local runner");
         let run_id = "duplicate-terminal-run";
@@ -1425,7 +1425,7 @@ fn real_runner_exec_rejects_a_duplicate_terminal_explicit_run_id() {
 
 #[test]
 fn test_exec_does_not_leak_ambient_process_env() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let _guard = EnvVarGuard::set("HOMEBOY_TEST_AMBIENT_ONLY", "leaked");
         super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
             .expect("create local runner");
@@ -1477,7 +1477,7 @@ fn test_exec_does_not_leak_ambient_process_env() {
 
 #[test]
 fn test_exec_preserves_explicit_request_env() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
             .expect("create local runner");
 
@@ -1529,7 +1529,7 @@ fn test_exec_preserves_explicit_request_env() {
 #[cfg(unix)]
 #[test]
 fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
             .expect("create local runner");
         let extension = tempfile::tempdir().expect("extension fixture");
@@ -1620,7 +1620,7 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
 
 #[test]
 fn test_exec_rejects_missing_required_local_runner_path() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         super::super::super::create(
             &format!(
@@ -1681,7 +1681,7 @@ fn test_exec_rejects_missing_required_local_runner_path() {
 
 #[test]
 fn test_exec_reports_required_path_diagnostics() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         let required_path = workspace.path().join("project");
         std::fs::create_dir(&required_path).expect("required path");
@@ -1750,7 +1750,7 @@ fn test_exec_reports_required_path_diagnostics() {
 
 #[test]
 fn test_exec_rejects_unreachable_ssh_runner_without_diagnostic_fallback() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         server::create(
             // Use a TEST-NET address that cannot identify an actual runner, so
             // the transport preflight cannot accidentally reach a host on the

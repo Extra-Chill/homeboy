@@ -343,7 +343,7 @@ fn cancelled_terminal_snapshot_overrides_a_preexisting_success_result() {
 
 #[test]
 fn lab_offload_handoff_persists_run_when_job_is_accepted() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner = ssh_runner();
         let job_id = uuid::Uuid::new_v4();
         let job = Job {
@@ -396,7 +396,7 @@ fn lab_offload_handoff_persists_run_when_job_is_accepted() {
 
 #[test]
 fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner = ssh_runner();
         let job = running_job();
         let job_id = job.id.to_string();
@@ -472,7 +472,7 @@ fn transient_daemon_transport_drop_keeps_the_durable_job_recoverable() {
     // is still executing. The poll failure must stay recoverable (retryable,
     // "recoverable_followup_required") so a reconnect can resume observing it,
     // and must NOT persist a terminal mirror or execution record.
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner = ssh_runner();
         let job = running_job();
         let job_id = job.id.to_string();
@@ -565,7 +565,7 @@ fn daemon_identity_transition_reports_a_restarted_control_plane() {
 
 #[test]
 fn direct_daemon_preserves_declared_provider_source_through_execution() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
         let workspace = tempfile::tempdir().expect("workspace");
         let store = workspace.path().join("provider-auth.json");
@@ -655,7 +655,7 @@ fn direct_daemon_preserves_declared_provider_source_through_execution() {
 
 #[test]
 fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
         let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
         let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
@@ -704,7 +704,7 @@ fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
 
 #[test]
 fn zero_wait_direct_daemon_cancels_unset_agent_task_workload() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
         let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
         let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
@@ -879,7 +879,7 @@ fn assert_zero_wait_handoff(output: &RunnerExecOutput, exit_code: i32) {
 
 #[test]
 fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         // The in-process daemon's /exec endpoint drives runner processes through
         // the RunnerExecDriver hook (production wires this at CLI startup); register
         // the runner-side driver so this end-to-end handoff can run the child.
@@ -1040,7 +1040,7 @@ fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion(
 
 #[test]
 fn runner_exec_source_claim_diagnostic_distinguishes_missing_and_owned_sources() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
         let missing = runner_exec_source_claim_error(&store, "missing-source", "daemon-job")
             .expect("missing source diagnostic");
@@ -1088,7 +1088,7 @@ fn foreground_portable_retry_binds_the_daemon_job_before_terminal_projection() {
 }
 
 fn foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_id: &str) {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
         // Both controller entrypoints execute the same portable `run-plan`
         // child without --detach-after-handoff. Its daemon acceptance must
@@ -1189,7 +1189,7 @@ fn wait_for_terminal_daemon_job(client: &Client, daemon_url: &str, job_id: &str)
 
 #[test]
 fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let runner = ssh_runner();
         let job = running_job();
         let job_id = job.id.to_string();
@@ -1463,7 +1463,7 @@ fn lab_runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
 
 #[test]
 fn daemon_exec_failure_without_error_field_is_actionable() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let addr = listener.local_addr().expect("addr");
         let (request_tx, request_rx) = std::sync::mpsc::channel();
@@ -2006,7 +2006,7 @@ fn daemon_exec_stale_response_error_is_actionable() {
 
 #[test]
 fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    crate::test_support::with_isolated_home(|_| {
         // A stale daemon that answers `{"success": false}` with no error/data.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let addr = listener.local_addr().expect("addr");

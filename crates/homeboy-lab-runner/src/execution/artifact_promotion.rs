@@ -797,7 +797,7 @@ impl RunnerExecEvidenceRole {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::test_support::with_isolated_home;
+    use crate::test_support::with_isolated_home;
 
     fn output(cwd: &Path) -> RunnerExecOutput {
         RunnerExecOutput {
