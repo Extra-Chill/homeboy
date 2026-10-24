@@ -8357,10 +8357,12 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
             record.metadata["pre_execution_failure"]["provider_executions_consumed"],
             0
         );
+        // Terminal phase spans close after the state transition they time.
         assert_eq!(
             logs.events
-                .last()
-                .and_then(|event| event.data["state"].as_str()),
+                .iter()
+                .rev()
+                .find_map(|event| event.data["state"].as_str()),
             Some("failed")
         );
         assert_eq!(retry.metadata["retry_of"], successor);
