@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.13] - 2026-10-24
+
+### Changed
+- Delete retired EntityRows legacy-key mirrors and no_op_gate_failed spellings
+- Retire the pre-generation agent-runtimes migration
+- Phase spans cover the whole Cook: absolute starts, wait/harvest/finalization spans, runs hotspots --coverage
+
 ## [0.433.12] - 2026-10-24
 
 ### Changed
