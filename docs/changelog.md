@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.23] - 2026-10-24
+
+### Changed
+- SnapshotGit installs .git without a throwaway checkout and verifies in the overlay command
+- Delete agent-task latest; walk list --latest as a bounded keyset page
+
 ## [0.433.22] - 2026-10-24
 
 ### Changed
