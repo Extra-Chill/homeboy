@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.18] - 2026-10-24
+
+### Changed
+- Bind the run timing context in the Lab staging state machine so source materialization sub-phases reach the run
+
 ## [0.433.17] - 2026-10-24
 
 ### Changed
