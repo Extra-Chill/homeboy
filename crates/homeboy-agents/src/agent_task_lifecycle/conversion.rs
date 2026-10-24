@@ -215,17 +215,13 @@ pub(crate) fn tasks_for_aggregate(
                 .outcomes
                 .iter()
                 .find(|outcome| outcome.task_id == request.task_id);
-            if let Some(event) = aggregate
-                .events
-                .iter()
-                .rev()
-                .find(|event| event.task_id == request.task_id)
-            {
-                project_task_state(&mut task, event.state);
-            } else if let Some(outcome) = outcome {
-                project_task_state(&mut task, task_state_for_outcome_status(outcome.status));
-            }
+            // A task with an outcome takes its state from that outcome; event
+            // state only describes tasks that have not finished yet.
             if let Some(outcome) = outcome {
+                project_task_state(
+                    &mut task,
+                    AgentTaskState::from_outcome_status(outcome.status),
+                );
                 let (backend, selector, model) = terminal_executor_identity(outcome, request);
                 task.backend = backend;
                 task.selector = selector;
@@ -234,6 +230,13 @@ pub(crate) fn tasks_for_aggregate(
                     .selector
                     .as_ref()
                     .map(|selector| format!("{}:{selector}", task.backend));
+            } else if let Some(event) = aggregate
+                .events
+                .iter()
+                .rev()
+                .find(|event| event.task_id == request.task_id)
+            {
+                project_task_state(&mut task, event.state);
             }
             task
         })
@@ -245,23 +248,14 @@ pub(crate) fn tasks_for_aggregate(
             .find(|outcome| outcome.task_id == step.id);
         let mut task = AgentTaskRunTask::queued(step.id.clone(), "artifact-postprocess");
         if let Some(outcome) = outcome {
-            project_task_state(&mut task, task_state_for_outcome_status(outcome.status));
+            project_task_state(
+                &mut task,
+                AgentTaskState::from_outcome_status(outcome.status),
+            );
         }
         task
     }));
     tasks
-}
-
-pub(crate) fn task_state_for_outcome_status(status: AgentTaskOutcomeStatus) -> AgentTaskState {
-    match status {
-        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
-            AgentTaskState::Succeeded
-        }
-        AgentTaskOutcomeStatus::CandidateRecoverable => AgentTaskState::CandidateRecoverable,
-        AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
-        AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
-        _ => AgentTaskState::Failed,
-    }
 }
 
 pub(crate) fn events_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskProgressEvent> {
@@ -269,7 +263,7 @@ pub(crate) fn events_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTas
         .iter()
         .map(|outcome| AgentTaskProgressEvent {
             task_id: outcome.task_id.clone(),
-            state: task_state_for_outcome_status(outcome.status),
+            state: AgentTaskState::from_outcome_status(outcome.status),
             attempt: 1,
             message: outcome.summary.clone(),
         })
@@ -425,7 +419,7 @@ pub(crate) fn provider_handle_from_outcome_metadata(
             .get("stream_uri")
             .and_then(Value::as_str)
             .map(ToString::to_string),
-        state: Some(task_state_for_outcome_status(outcome.status)),
+        state: Some(AgentTaskState::from_outcome_status(outcome.status)),
         metadata: outcome.metadata.clone(),
     })
 }
@@ -494,16 +488,7 @@ pub(crate) fn run_provider_handle(
         backend: handle.backend,
         provider_run_id: handle.run_id,
         stream_uri: handle.stream_uri,
-        state: Some(match outcome.status {
-            crate::agent_task::AgentTaskOutcomeStatus::Succeeded
-            | crate::agent_task::AgentTaskOutcomeStatus::NoOp => AgentTaskState::Succeeded,
-            crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable => {
-                AgentTaskState::CandidateRecoverable
-            }
-            crate::agent_task::AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
-            crate::agent_task::AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
-            _ => AgentTaskState::Failed,
-        }),
+        state: Some(AgentTaskState::from_outcome_status(outcome.status)),
         metadata,
     }
 }

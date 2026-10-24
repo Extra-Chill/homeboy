@@ -1391,7 +1391,7 @@ impl AgentTaskScheduler {
                             &mut outcome,
                         );
                     }
-                    let state = AgentTaskScheduleSupport::state_for_outcome(&outcome);
+                    let state = AgentTaskState::from_outcome_status(outcome.status);
                     events.push(event(
                         &outcome.task_id,
                         state,
@@ -2631,7 +2631,7 @@ fn child_runs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskChildR
             Some(AgentTaskChildRun {
                 task_id: outcome.task_id.clone(),
                 run_id,
-                state: AgentTaskScheduleSupport::state_for_outcome(outcome),
+                state: AgentTaskState::from_outcome_status(outcome.status),
                 provider: outcome
                     .metadata
                     .get("provider")

@@ -469,7 +469,7 @@ impl AgentTaskScheduleSupport {
             outcome.metadata = serde_json::json!({ "deferred_cleanup_pending": true });
             events.push(event(
                 &task.task_id,
-                Self::state_for_outcome(&outcome),
+                AgentTaskState::from_outcome_status(outcome.status),
                 task.attempt,
                 outcome.summary.clone(),
             ));
@@ -1676,18 +1676,6 @@ impl AgentTaskScheduleSupport {
     ) -> Option<RunningTask> {
         let index = running.iter().position(|task| task.task_id == task_id)?;
         Some(running.remove(index))
-    }
-
-    pub(super) fn state_for_outcome(outcome: &AgentTaskOutcome) -> AgentTaskState {
-        match outcome.status {
-            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
-                AgentTaskState::Succeeded
-            }
-            AgentTaskOutcomeStatus::CandidateRecoverable => AgentTaskState::CandidateRecoverable,
-            AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
-            AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
-            _ => AgentTaskState::Failed,
-        }
     }
 
     #[expect(

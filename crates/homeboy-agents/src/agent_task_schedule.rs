@@ -656,6 +656,19 @@ mod aggregate {
         TimedOut,
     }
 
+    impl AgentTaskState {
+        /// The single definition of a task's state once it has an outcome.
+        pub fn from_outcome_status(status: AgentTaskOutcomeStatus) -> Self {
+            match status {
+                AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => Self::Succeeded,
+                AgentTaskOutcomeStatus::CandidateRecoverable => Self::CandidateRecoverable,
+                AgentTaskOutcomeStatus::Timeout => Self::TimedOut,
+                AgentTaskOutcomeStatus::Cancelled => Self::Cancelled,
+                _ => Self::Failed,
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
     pub struct AgentTaskQueueStatus {
         pub max_concurrency: usize,

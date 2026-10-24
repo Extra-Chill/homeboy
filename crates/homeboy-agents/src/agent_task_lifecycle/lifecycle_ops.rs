@@ -65,6 +65,7 @@ pub(crate) fn reconcile_deferred_candidate_in_store(
         Err(_) => return Ok(false),
     };
     let mut changed = false;
+    let mut recovered_events = Vec::new();
 
     for outcome in &mut aggregate.outcomes {
         if outcome.status != AgentTaskOutcomeStatus::Timeout {
@@ -170,6 +171,13 @@ pub(crate) fn reconcile_deferred_candidate_in_store(
                 outcome.metadata["deferred_candidate_reconciled_at"] = json!(now_timestamp());
                 outcome.metadata["safe_next_action"] =
                     json!("Promote the recovered candidate through controller-owned gates.");
+                // The task's last event must not keep contradicting its outcome.
+                recovered_events.push(AgentTaskProgressEvent {
+                    task_id: outcome.task_id.clone(),
+                    state: AgentTaskState::from_outcome_status(outcome.status),
+                    attempt: action_value["attempt"].as_u64().unwrap_or(1) as u32,
+                    message: outcome.summary.clone(),
+                });
                 changed = true;
             }
             Some(_) => continue,
@@ -178,6 +186,7 @@ pub(crate) fn reconcile_deferred_candidate_in_store(
     if !changed {
         return Ok(false);
     }
+    aggregate.events.extend(recovered_events);
 
     let plan = lifecycle_store.read_controller_plan(&run_id)?;
     aggregate.totals =

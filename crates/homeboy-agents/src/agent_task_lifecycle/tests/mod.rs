@@ -336,5 +336,6 @@ mod state_graph;
 mod status_and_recovery;
 mod status_purity;
 mod submit_and_persist;
+mod task_state;
 mod terminal_and_reconcile;
 mod terminal_transitions;
