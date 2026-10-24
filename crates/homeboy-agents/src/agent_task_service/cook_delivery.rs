@@ -228,8 +228,7 @@ impl CookDeliveryBlockerCode {
 pub struct CookDeliveryCandidate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    /// The latest promotion's status. `no_op_gate_failed` reads as
-    /// `no_changes_gate_failed`.
+    /// The latest promotion's status.
     pub promotion: AgentTaskPromotionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,

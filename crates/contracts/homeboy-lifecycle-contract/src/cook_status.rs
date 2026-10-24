@@ -94,8 +94,7 @@ pub enum CookStatus {
     /// Finalization ran and found no changed files.
     NoChanges,
     /// A no-op candidate failed its gates. Spelled `no_changes_gate_failed`,
-    /// matching the promotion status it reports; reports written before
-    /// #16049 spelled it `no_op_gate_failed`, which still parses here.
+    /// matching the promotion status it reports.
     NoChangesGateFailed,
     /// A deterministic gate failed.
     GateFailed,
@@ -162,7 +161,7 @@ impl CookStatus {
             "intentional_no_change" => Self::IntentionalNoChange,
             "no_candidate" => Self::NoCandidate,
             "no_changes" => Self::NoChanges,
-            "no_changes_gate_failed" | "no_op_gate_failed" => Self::NoChangesGateFailed,
+            "no_changes_gate_failed" => Self::NoChangesGateFailed,
             "gate_failed" => Self::GateFailed,
             "gates_deferred" => Self::GatesDeferred,
             "gate_declaration_invalid" => Self::GateDeclarationInvalid,
@@ -402,18 +401,16 @@ mod tests {
         assert_eq!(parsed, status);
     }
 
-    /// One canonical spelling is written; the historical one still parses.
     #[test]
-    fn the_no_change_gate_failure_has_one_written_spelling() {
-        assert_eq!(
-            CookStatus::NoChangesGateFailed.as_str(),
-            "no_changes_gate_failed"
+    fn the_no_change_gate_failure_has_one_spelling() {
+        let status = CookStatus::from_status("no_changes_gate_failed");
+        assert_eq!(status, CookStatus::NoChangesGateFailed);
+        assert!(status.is_gate_failure());
+        assert_eq!(status.as_str(), "no_changes_gate_failed");
+        assert_ne!(
+            CookStatus::from_status("no_op_gate_failed"),
+            CookStatus::NoChangesGateFailed
         );
-        for spelling in ["no_changes_gate_failed", "no_op_gate_failed"] {
-            let status = CookStatus::from_status(spelling);
-            assert_eq!(status, CookStatus::NoChangesGateFailed);
-            assert!(status.is_gate_failure());
-        }
     }
 
     #[test]

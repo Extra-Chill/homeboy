@@ -156,7 +156,7 @@ pub fn build_list_output(report: ProjectListReport) -> ProjectReportOutput {
         command: "project.list".to_string(),
         hint: report.hint,
         extra: ProjectReportExtra {
-            projects: Some(EntityRows::with_legacy_key(report.projects, "projects")),
+            projects: Some(EntityRows::new(report.projects)),
             ..Default::default()
         },
         ..Default::default()
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(value["entities"][0]["id"], "alpha");
         assert_eq!(value["entities"][0]["domain"], "alpha.example");
         assert_eq!(value["entities"][1]["id"], "beta");
-        assert_eq!(value["entities"], value["projects"]);
+        assert!(value.get("projects").is_none(), "no mirror: {value}");
     }
 
     #[test]
@@ -381,7 +381,7 @@ mod tests {
         let value = serde_json::to_value(&output).expect("serialize project list");
 
         assert_eq!(value["entities"], serde_json::json!([]));
-        assert_eq!(value["projects"], serde_json::json!([]));
+        assert!(value.get("projects").is_none(), "no mirror: {value}");
     }
 
     #[test]

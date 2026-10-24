@@ -99,7 +99,6 @@ fn from_run_metadata_reads_every_persisted_delivery_shape() {
             blocker: None,
         },
         gate_failed("gate_failed"),
-        gate_failed("no_op_gate_failed"),
         gate_failed("no_changes_gate_failed"),
         Case {
             name: "gates deferred",
@@ -185,7 +184,7 @@ fn from_run_metadata_reads_every_persisted_delivery_shape() {
 
 #[test]
 fn every_gate_failure_spelling_names_the_failing_gate() {
-    for status in ["gate_failed", "no_op_gate_failed", "no_changes_gate_failed"] {
+    for status in ["gate_failed", "no_changes_gate_failed"] {
         let delivery = CookDelivery::from_run_metadata(&delivery_metadata(
             json!({ "promotion": promotion(status, failed_gate()) }),
         ))
@@ -198,6 +197,17 @@ fn every_gate_failure_spelling_names_the_failing_gate() {
         assert_eq!(blocker.evidence, "/cook_delivery/artifacts/promotion");
         assert_eq!(delivery.gates[0].state, AgentTaskGateStatus::Failed);
     }
+}
+
+/// The pre-#16049 spelling stopped parsing when its serde alias was retired
+/// (#16390); a delivery carrying it is not a delivery this binary understands.
+#[test]
+fn the_retired_no_op_gate_failed_spelling_is_no_longer_a_delivery() {
+    let delivery = CookDelivery::from_run_metadata(&delivery_metadata(
+        json!({ "promotion": promotion("no_op_gate_failed", failed_gate()) }),
+    ));
+
+    assert!(delivery.is_none());
 }
 
 #[test]

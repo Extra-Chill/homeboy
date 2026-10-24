@@ -384,8 +384,7 @@ pub enum ExtensionOutput {
     List {
         #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
-        /// Rows under `entities`, mirrored under the deprecated `extensions`
-        /// key (#14876).
+        /// Rows under `entities` (#14876).
         #[serde(flatten)]
         extensions: EntityRows<ExtensionInventoryEntry>,
     },
@@ -994,7 +993,7 @@ fn list(project: Option<String>, readiness: ExtensionReadinessMode) -> CmdResult
 fn list_output(project_id: Option<String>, rows: Vec<ExtensionInventoryEntry>) -> ExtensionOutput {
     ExtensionOutput::List {
         project_id,
-        extensions: EntityRows::with_legacy_key(rows, "extensions"),
+        extensions: EntityRows::new(rows),
     }
 }
 
@@ -1970,7 +1969,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
-    fn extension_list_mirrors_rows_under_entities_and_legacy_extensions_key() {
+    fn extension_list_emits_rows_only_under_entities() {
         with_isolated_home(|home| {
             let extension_dir = home.path().join(".config/homeboy/extensions/listed");
             fs::create_dir_all(&extension_dir).expect("extension dir");
@@ -1985,7 +1984,7 @@ mod tests {
 
             assert_eq!(value["command"], "extension.list");
             assert_eq!(value["entities"][0]["id"], "listed");
-            assert_eq!(value["entities"], value["extensions"]);
+            assert!(value.get("extensions").is_none(), "no mirror: {value}");
         });
     }
 
@@ -1996,7 +1995,7 @@ mod tests {
 
         assert_eq!(value["command"], "extension.list");
         assert_eq!(value["entities"], serde_json::json!([]));
-        assert_eq!(value["extensions"], serde_json::json!([]));
+        assert!(value.get("extensions").is_none(), "no mirror: {value}");
         assert!(value.get("project_id").is_none());
     }
 

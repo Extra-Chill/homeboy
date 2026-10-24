@@ -96,9 +96,7 @@ pub enum AgentTaskCookLoopStatus {
     /// differently, so provider remediation is intentionally withheld.
     IntentionalNoChange,
     NoChanges,
-    /// A no-patch candidate failed its gates. Reports written before #16049
-    /// spelled this `no_op_gate_failed`.
-    #[serde(alias = "no_op_gate_failed")]
+    /// A no-patch candidate failed its gates.
     NoChangesGateFailed,
     /// At least one declared deterministic gate deferred rather than
     /// executing (no failure occurred). The candidate patch is promoted and
