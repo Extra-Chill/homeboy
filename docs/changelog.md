@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.19] - 2026-10-24
+
+### Changed
+- Keep the first cancellation cause when a second writer commits the same cancellation
+
 ## [0.433.18] - 2026-10-24
 
 ### Changed
