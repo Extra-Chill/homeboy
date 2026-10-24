@@ -4130,6 +4130,104 @@ fn discovery_rejects_zero_limit_to_preserve_pagination_progress() {
 }
 
 #[test]
+fn active_discovery_finds_records_beyond_a_thousand_terminal_rows() {
+    with_isolated_home(|_| {
+        for run_id in ["old-active-a", "old-active-b"] {
+            agent_task_lifecycle::seed_queued_run_for_tests(&discovery_plan(), Some(run_id))
+                .unwrap();
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.submitted_at = "2020-01-01T00:00:00Z".to_string();
+            })
+            .unwrap();
+        }
+        let observation = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+        let mut terminal = observation.get_run("old-active-a").unwrap().unwrap();
+        terminal.started_at = "2026-01-01T00:00:00Z".to_string();
+        terminal.finished_at = Some("2026-01-01T00:01:00Z".to_string());
+        terminal.status = "cancelled".to_string();
+        for index in 0..1001 {
+            terminal.id = format!("terminal-{index:04}");
+            terminal.metadata_json["agent_task_run"]["run_id"] = serde_json::json!(terminal.id);
+            terminal.metadata_json["agent_task_run"]["state"] = serde_json::json!("cancelled");
+            terminal.metadata_json["agent_task_run"]["submitted_at"] =
+                serde_json::json!(terminal.started_at);
+            observation.upsert_imported_run(&terminal).unwrap();
+        }
+        assert_eq!(
+            observation
+                .list_runs(homeboy_core::observation::RunListFilter {
+                    kind: Some("agent-task".to_string()),
+                    limit: Some(1000),
+                    ..Default::default()
+                })
+                .unwrap()
+                .len(),
+            1000
+        );
+        let full = discover_runs(AgentTaskDiscoveryFilter::Active).unwrap();
+        assert_eq!(full.count, 2);
+        assert_eq!(full.global_record_health.healthy, 2);
+        let store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+        assert_eq!(
+            discover_runs_in_store(&store, AgentTaskDiscoveryFilter::Active, Default::default())
+                .unwrap()
+                .count,
+            2
+        );
+        let complete = discover_runs_page(
+            AgentTaskDiscoveryFilter::Active,
+            AgentTaskDiscoveryPageOptions {
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            complete
+                .runs
+                .iter()
+                .map(|run| &run.run_id)
+                .collect::<Vec<_>>(),
+            full.runs.iter().map(|run| &run.run_id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            complete.search_status,
+            AgentTaskDiscoverySearchStatus::Complete
+        );
+        assert!(!complete.truncated);
+        assert_eq!(complete.physical_count, 2);
+        let first = discover_runs_page(
+            AgentTaskDiscoveryFilter::Active,
+            AgentTaskDiscoveryPageOptions {
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            first.search_status,
+            AgentTaskDiscoverySearchStatus::MatchingLimitReached
+        );
+        let second = discover_runs_page(
+            AgentTaskDiscoveryFilter::Active,
+            AgentTaskDiscoveryPageOptions {
+                limit: 1,
+                cursor: first.next_cursor,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            second.search_status,
+            AgentTaskDiscoverySearchStatus::Complete
+        );
+        assert_eq!(second.count, 1);
+        assert_ne!(first.runs[0].run_id, second.runs[0].run_id);
+    });
+}
+
+#[test]
 fn discovery_998_record_history_and_active_pages_do_not_repeat_or_lose_records() {
     with_isolated_home(|_| {
         for index in 0..998 {

@@ -996,7 +996,7 @@ impl AgentTaskLifecycleStore {
         after: Option<ObservationRunCursor>,
         limit: usize,
     ) -> Result<(Vec<AgentTaskRunRecord>, bool, Option<ObservationRunCursor>)> {
-        let (records, _, _, truncated, next) = self.read_record_page_with_health(after, limit)?;
+        let (records, _, truncated, next) = self.read_record_keyset_page(after, limit)?;
         Ok((
             records.into_iter().map(|record| record.record).collect(),
             truncated,
@@ -1004,16 +1004,15 @@ impl AgentTaskLifecycleStore {
         ))
     }
 
-    /// Read one immutable-keyset page while retaining health evidence for raw
-    /// rows that older builds cannot decode. The continuation is based on the
+    /// Read one immutable-keyset page, omitting unreadable rows.
+    /// The continuation is based on the
     /// physical observation page, so unreadable rows never stall a walk.
-    pub(crate) fn read_record_page_with_health(
+    pub(crate) fn read_record_keyset_page(
         &self,
         after: Option<ObservationRunCursor>,
         limit: usize,
     ) -> Result<(
         Vec<AgentTaskRecordPageRecord>,
-        super::AgentTaskRecordHealthSummary,
         usize,
         bool,
         Option<ObservationRunCursor>,
@@ -1027,14 +1026,8 @@ impl AgentTaskLifecycleStore {
                 ..Default::default()
             })?;
         let physical_count = page.runs.len();
-        let (records, health) = page_records_with_health(page.runs)?;
-        Ok((
-            records,
-            health,
-            physical_count,
-            page.truncated,
-            page.next_cursor,
-        ))
+        let records = page_records(page.runs)?;
+        Ok((records, physical_count, page.truncated, page.next_cursor))
     }
 
     pub(crate) fn read_mission_record_page(
@@ -3260,38 +3253,18 @@ fn records_with_health(
     Ok((records, health))
 }
 
-/// A discovery page preserves typed rows that normal lifecycle reads accept,
-/// even if record health separately flags an inconsistent projection. Only an
-/// unreadable row is omitted, while its diagnostic remains in the page health.
-fn page_records_with_health(
-    observation_runs: Vec<RunRecord>,
-) -> Result<(
-    Vec<AgentTaskRecordPageRecord>,
-    super::AgentTaskRecordHealthSummary,
-)> {
-    let mut health = super::AgentTaskRecordHealthSummary::healthy();
+/// Preserve readable rows and their exact observation ordering keys.
+fn page_records(observation_runs: Vec<RunRecord>) -> Result<Vec<AgentTaskRecordPageRecord>> {
     let mut records = Vec::new();
     for run in observation_runs {
-        match snapshot_from_run(&run) {
-            Ok(record) => {
-                if let Err(item) = super::health::diagnose_run(&run) {
-                    super::health::record_health_item(&mut health, item);
-                } else {
-                    health.healthy += 1;
-                }
-                records.push(AgentTaskRecordPageRecord {
-                    record,
-                    cursor: ObservationRunCursor::from_run(&run),
-                });
-            }
-            Err(_) => {
-                if let Err(item) = super::health::diagnose_run(&run) {
-                    super::health::record_health_item(&mut health, item);
-                }
-            }
+        if let Ok(record) = snapshot_from_run(&run) {
+            records.push(AgentTaskRecordPageRecord {
+                record,
+                cursor: ObservationRunCursor::from_run(&run),
+            });
         }
     }
-    Ok((records, health))
+    Ok(records)
 }
 
 /// Raw durable rows are read only through a resolved store now. The last
