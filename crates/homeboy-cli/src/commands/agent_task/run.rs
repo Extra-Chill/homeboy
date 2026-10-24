@@ -717,7 +717,11 @@ pub(crate) fn preview_cook(
     ) {
         record_preview_phase(&mut progress, "base_preparation");
         let preparation = with_preview_heartbeat(&mut progress, "base_preparation", || {
-            homeboy::agents::agent_task_service::prepare_cook_workspace_base(Path::new(path), base)
+            homeboy::agents::agent_task_service::prepare_cook_workspace_base(
+                Path::new(path),
+                base,
+                args.dispatch.task_url.as_deref(),
+            )
         })?;
         args.prepared_base_sha = preparation.base_sha.clone();
         serde_json::to_value(preparation)
@@ -6142,6 +6146,30 @@ pub(crate) fn resolve_cook_destination(
             next_live_derived_cook_branch(&handle_repository, &derived_cook_branch(&task_url)?)?
         }
     };
+    if args.head.is_none() {
+        let repository = cook_provision_repository(&args);
+        let registered = cook_registered_component_by_id(&handle_repository)?
+            .map(|component| PathBuf::from(component.local_path));
+        let path = registered.as_deref().or_else(|| {
+            repository
+                .as_deref()
+                .map(Path::new)
+                .filter(|path| path.is_dir())
+        });
+        let handle = format!("{handle_repository}@{}", slugify_cook_branch(&head));
+        if let Some(url) = homeboy::core::worktree::convergence::derived_open_pull_request(
+            path, &handle, &head, &task_url,
+        )? {
+            args.dispatch.task_url = Some(url.clone());
+            resolve_cook_pull_request(&mut args).map_err(|error| {
+                let mut route = homeboy::core::worktree::convergence::pr_route(&head, Some(&url));
+                route.message = format!("Could not resolve the destination's open PR: {}; rerun with --task-url {url} and GitHub access before provider execution", error.message);
+                route
+            })?;
+            resolve_cook_base(&mut args)?;
+            return Ok(args);
+        }
+    }
     let handle = format!("{handle_repository}@{}", slugify_cook_branch(&head));
     args.to_worktree = Some(handle.clone());
     let derived = args.head.is_none();
@@ -6336,6 +6364,16 @@ mod cook_pull_request_ref_tests {
             linked.to_str().unwrap(),
         ]);
 
+        run_git(&[
+            "-C",
+            linked.to_str().unwrap(),
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "PR work",
+        ]);
+        let pr_head =
+            homeboy::core::git::run_git(&linked, &["rev-parse", "HEAD"], "PR head").unwrap();
         let bin = tempfile::tempdir().expect("fake gh bin");
         let gh = bin.path().join("gh");
         homeboy_test_support::write_executable(
@@ -6403,6 +6441,32 @@ mod cook_pull_request_ref_tests {
                 assert_eq!(resolved.base.as_deref(), Some("release"));
                 assert_eq!(resolved.head.as_deref(), Some("feature"));
             }
+            run_git(&["branch", "fix/issue-7-repo"]);
+            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in *list*) printf '[{\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
+            let mut issue = parse(&[]);
+            issue.dispatch.task_url = Some("https://github.com/example/repo/issues/7".into());
+            let resolved =
+                resolve_cook_destination(issue.clone()).expect("issue adopts canonical PR");
+            assert_eq!(
+                resolved.dispatch.task_url.as_deref(),
+                Some("https://github.com/example/repo/pull/1895")
+            );
+            assert_eq!(resolved.head.as_deref(), Some("feature"));
+            assert_eq!(resolved.base.as_deref(), Some("release"));
+            assert_eq!(resolved.to_worktree.as_deref(), Some("repository@feature"));
+            assert_eq!(
+                homeboy::core::git::run_git(&linked, &["rev-parse", "HEAD"], "preserved PR head")
+                    .unwrap(),
+                pr_head
+            );
+            std::fs::write(&gh, "#!/bin/sh\nexit 1\n").unwrap();
+            let error = resolve_cook_destination(issue).expect_err("lookup fails closed");
+            assert!(error.message.contains("--task-url https://github.com/"));
+            std::fs::write(
+                &gh,
+                "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
+            )
+            .unwrap();
             for extra in [
                 vec!["--head", "other"],
                 vec!["--base", "other"],

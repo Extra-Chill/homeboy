@@ -13,10 +13,71 @@ pub fn require_issue_destination_without_pr(path: &Path, branch: &str) -> Result
     if !origin.contains("github.com") {
         return Ok(());
     }
-    let output = std::process::Command::new("gh")
-        .args([
-            "pr", "list", "--state", "open", "--head", branch, "--json", "url",
-        ])
+    if let Some(url) = open_pull_request(path, branch, None)? {
+        return Err(pr_route(branch, Some(&url)));
+    }
+    Ok(())
+}
+
+/// Resolve the actual destination before consulting GitHub. Managed records
+/// can live in a different source clone from the requested repository.
+pub fn derived_open_pull_request(
+    repository: Option<&Path>,
+    handle: &str,
+    branch: &str,
+    issue_url: &str,
+) -> Result<Option<String>> {
+    let managed = match super::resolve_workspace_ref_if_present(handle)? {
+        Some(super::WorkspaceRefRecord::Task(record))
+            if record.state == super::TaskWorktreeState::Active =>
+        {
+            [record.worktree_path, record.source_checkout]
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .find(|path| path.is_dir())
+        }
+        _ => None,
+    };
+    let Some(path) = managed
+        .as_deref()
+        .or(repository)
+        .filter(|path| path.is_dir())
+    else {
+        return Ok(None);
+    };
+    if managed.is_none()
+        && ![
+            format!("refs/heads/{branch}"),
+            format!("refs/remotes/origin/{branch}"),
+        ]
+        .iter()
+        .any(|reference| {
+            git::output_optional(path, &["rev-parse", "--verify", "--quiet", reference]).is_some()
+        })
+    {
+        return Ok(None);
+    }
+    open_pull_request(path, branch, Some(issue_url))
+}
+
+/// Canonical open-PR lookup for destination admission and issue-to-PR adoption.
+/// An explicit issue URL supplies repository authority even in local mirrors.
+pub fn open_pull_request(
+    path: &Path,
+    branch: &str,
+    issue_url: Option<&str>,
+) -> Result<Option<String>> {
+    let mut command = std::process::Command::new("gh");
+    command.args([
+        "pr", "list", "--state", "open", "--head", branch, "--json", "url",
+    ]);
+    if let Some(repository) = issue_url
+        .and_then(|url| url.strip_prefix("https://github.com/"))
+        .and_then(|url| url.split_once("/issues/").map(|(repo, _)| repo))
+    {
+        command.args(["--repo", repository]);
+    }
+    let output = command
         .current_dir(path)
         .output()
         .map_err(|error| infrastructure(error.to_string()))?;
@@ -25,19 +86,33 @@ pub fn require_issue_destination_without_pr(path: &Path, branch: &str) -> Result
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }
-    require_no_open_pr(branch, &output.stdout)
+    parse_open_pr(&output.stdout)
 }
 
-fn require_no_open_pr(branch: &str, response: &[u8]) -> Result<()> {
+fn parse_open_pr(response: &[u8]) -> Result<Option<String>> {
     let prs: serde_json::Value =
         serde_json::from_slice(response).map_err(|error| infrastructure(error.to_string()))?;
-    if !prs.is_array() {
-        return Err(infrastructure("invalid PR list response".into()));
+    match prs.as_array().map(Vec::as_slice) {
+        Some([]) => Ok(None),
+        Some([pr]) => pr["url"]
+            .as_str()
+            .filter(|url| url.contains("/pull/"))
+            .map(|url| Some(url.to_string()))
+            .ok_or_else(|| infrastructure("invalid open PR URL".into())),
+        _ => Err(infrastructure(
+            "ambiguous or invalid PR list response".into(),
+        )),
     }
-    if let Some(url) = prs.pointer("/0/url").and_then(serde_json::Value::as_str) {
-        return Err(pr_route(branch, Some(url)));
-    }
-    Ok(())
+}
+
+/// A canonical PR-URL task may keep its own head, even when behind base.
+/// Use the same source-HEAD/base snapshot semantics as ahead-only candidates;
+/// never reset, force-push, or route a PR's rework back to itself.
+pub fn is_pr_rework(path: &Path, branch: &str, task_url: Option<&str>) -> Result<bool> {
+    let Some(task_url) = task_url.filter(|url| url.contains("/pull/")) else {
+        return Ok(false);
+    };
+    Ok(open_pull_request(path, branch, None)?.as_deref() == Some(task_url))
 }
 
 pub fn pr_route(branch: &str, url: Option<&str>) -> Error {
@@ -53,10 +128,14 @@ pub fn pr_route(branch: &str, url: Option<&str>) -> Error {
         "task_url",
         "Cook destination contains existing PR work; use the PR-URL rework flow",
         Some(branch.to_string()),
-        Some(vec![
-            command.clone(),
-            "After creating a PR, rerun Cook with --task-url <the PR URL>.".to_string(),
-        ]),
+        Some(if url.is_some() {
+            vec![command.clone()]
+        } else {
+            vec![
+                command.clone(),
+                "After creating a PR, rerun Cook with --task-url <the PR URL>.".to_string(),
+            ]
+        }),
     );
     error.details["destination_convergence"] = serde_json::json!({
         "next_action": "cook_pr_url", "command": command, "pr_url": url,
@@ -71,6 +150,7 @@ pub fn converge_destination(
     base: &str,
     adopted: bool,
     issue_owned: bool,
+    task_url: Option<&str>,
 ) -> Result<()> {
     super::verify_linked_worktree_root(path)?;
     let branch = git::run_git(
@@ -116,9 +196,12 @@ pub fn converge_destination(
         &["rev-list", "--count", &format!("HEAD..{base}")],
         "inspect destination base",
     )?;
-    if ahead.trim() != "0" && behind.trim() != "0" {
+    if ahead.trim() != "0" && behind.trim() != "0" && !is_pr_rework(path, branch.trim(), task_url)?
+    {
+        require_issue_destination_without_pr(path, branch.trim())?;
         return Err(pr_route(branch.trim(), None));
     }
+
     // An authenticated earlier attempt stays recoverable even when HEAD
     // already equals the pin. Providers always start from a clean checkout.
     if !status.is_empty() {
@@ -145,7 +228,7 @@ pub fn converge_destination(
 }
 
 fn infrastructure(message: String) -> Error {
-    let mut error = Error::git_command_failed(message);
+    let mut error = Error::git_command_failed(format!("{message}; retry with GitHub access or use --task-url https://github.com/<owner>/<repo>/pull/<n> before provider execution"));
     error.retryable = Some(true);
     error.details["failure_class"] = serde_json::json!("infrastructure");
     error
@@ -238,7 +321,7 @@ mod tests {
     #[test]
     fn worktree_behind_without_unique_commits_converges() {
         let f = fixture();
-        converge_destination(&f.destination, &f.base, false, true).unwrap();
+        converge_destination(&f.destination, &f.base, false, true, None).unwrap();
         assert_eq!(git(&f.destination, &["rev-parse", "HEAD"]), f.base);
         assert!(git(&f.destination, &["status", "--porcelain"]).is_empty());
     }
@@ -250,26 +333,10 @@ mod tests {
         git(&f.destination, &["add", "."]);
         git(&f.destination, &["commit", "-m", "unique candidate"]);
         let head = git(&f.destination, &["rev-parse", "HEAD"]);
-        let error = converge_destination(&f.destination, &f.base, false, true).unwrap_err();
+        let error = converge_destination(&f.destination, &f.base, false, true, None).unwrap_err();
         assert_eq!(
             error.details["destination_convergence"]["command"],
             "gh pr create --head fix/issue-1"
-        );
-        assert_eq!(git(&f.destination, &["rev-parse", "HEAD"]), head);
-    }
-
-    #[test]
-    fn worktree_open_pr_routes_to_exact_cook_command() {
-        let f = fixture();
-        let head = git(&f.destination, &["rev-parse", "HEAD"]);
-        let error = require_no_open_pr(
-            "fix/issue-1",
-            br#"[{"url":"https://github.com/Extra-Chill/homeboy/pull/42"}]"#,
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.details["destination_convergence"]["command"],
-            "homeboy agent-task cook --task-url https://github.com/Extra-Chill/homeboy/pull/42"
         );
         assert_eq!(git(&f.destination, &["rev-parse", "HEAD"]), head);
     }
@@ -303,12 +370,79 @@ mod tests {
                 ),
             );
             let head = git(&f.destination, &["rev-parse", "HEAD"]);
-            let error = converge_destination(&f.destination, &f.base, false, true).unwrap_err();
+            let error =
+                converge_destination(&f.destination, &f.base, false, true, None).unwrap_err();
             assert_eq!(
                 error.details["destination_convergence"]["command"],
                 "homeboy agent-task cook --task-url https://github.com/Extra-Chill/homeboy/pull/42"
             );
             assert_eq!(git(&f.destination, &["rev-parse", "HEAD"]), head);
+
+            git(
+                &f.destination,
+                &["commit", "--allow-empty", "-m", "PR work"],
+            );
+            let candidate = git(&f.destination, &["rev-parse", "HEAD"]);
+            converge_destination(
+                &f.destination,
+                &f.base,
+                false,
+                false,
+                Some("https://github.com/Extra-Chill/homeboy/pull/42"),
+            )
+            .expect("admit diverged PR without resetting");
+            assert_eq!(git(&f.destination, &["rev-parse", "HEAD"]), candidate);
+            git(
+                &f.source,
+                &["update-ref", "refs/remotes/origin/fix/issue-1", &candidate],
+            );
+            git(
+                &f.source,
+                &["update-ref", "refs/remotes/origin/main", &f.base],
+            );
+            git(
+                &f.source,
+                &["worktree", "remove", f.destination.to_str().unwrap()],
+            );
+            git(&f.source, &["branch", "-D", "fix/issue-1"]);
+            // Remote-only branches are the same authority creation adopts.
+            let classification = super::super::stale_destination::classify_local_branch(
+                &f.source,
+                "repo@fix-issue-1",
+                "fix/issue-1",
+                "main",
+            )
+            .unwrap();
+            assert!(matches!(
+                classification,
+                super::super::stale_destination::DestinationFreshness::Stale(_)
+            ));
+            let error = super::super::stale_destination::refuse_foreign_history(classification)
+                .unwrap_err();
+            assert_eq!(
+                error.details["destination_convergence"]["pr_url"],
+                "https://github.com/Extra-Chill/homeboy/pull/42"
+            );
+            for state in ["closed", "merged"] {
+                std::fs::write(&gh, "#!/bin/sh\nprintf '[]'\n").unwrap();
+                let classification = super::super::stale_destination::classify_local_branch(
+                    &f.source,
+                    "repo@fix-issue-1",
+                    "fix/issue-1",
+                    "main",
+                )
+                .unwrap();
+                let error = super::super::stale_destination::refuse_foreign_history(classification)
+                    .expect_err(state);
+                assert_eq!(
+                    error.details["destination_convergence"]["command"],
+                    "gh pr create --head fix/issue-1"
+                );
+                assert_eq!(
+                    git(&f.source, &["rev-parse", "refs/remotes/origin/fix/issue-1"]),
+                    candidate
+                );
+            }
         });
     }
 
@@ -316,7 +450,7 @@ mod tests {
     fn worktree_foreign_dirt_is_refused_with_files() {
         let f = fixture();
         std::fs::write(f.destination.join("operator.txt"), "keep").unwrap();
-        let error = converge_destination(&f.destination, &f.base, false, true).unwrap_err();
+        let error = converge_destination(&f.destination, &f.base, false, true, None).unwrap_err();
         assert!(error.to_string().contains("operator.txt"));
         assert_eq!(
             std::fs::read_to_string(f.destination.join("operator.txt")).unwrap(),
@@ -328,7 +462,7 @@ mod tests {
     fn worktree_authenticated_prior_attempt_is_stashed_before_reset() {
         let f = fixture();
         std::fs::write(f.destination.join("candidate.txt"), "keep candidate").unwrap();
-        converge_destination(&f.destination, &f.base, true, true).unwrap();
+        converge_destination(&f.destination, &f.base, true, true, None).unwrap();
         assert_eq!(git(&f.destination, &["rev-parse", "HEAD"]), f.base);
         assert!(git(&f.destination, &["status", "--porcelain"]).is_empty());
         git(&f.destination, &["stash", "apply"]);

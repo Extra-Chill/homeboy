@@ -134,15 +134,22 @@ pub fn classify_worktree_destination(
     Ok(DestinationFreshness::Fresh)
 }
 
-/// Classify a local branch that exists without a destination worktree. A
-/// missing branch is unclassified: creation starts it from the base.
+/// Classify the local branch, or origin-only branch, creation would adopt.
+/// Only a branch absent from both is unclassified and starts from the base.
 pub fn classify_local_branch(
     source: &Path,
     handle: &str,
     branch: &str,
     base: &str,
 ) -> Result<DestinationFreshness> {
-    let reference = format!("refs/heads/{branch}");
+    // Match worktree creation's local-first, then origin adoption authority.
+    let local = format!("refs/heads/{branch}");
+    let reference =
+        if git::output_optional(source, &["rev-parse", "--verify", "--quiet", &local]).is_some() {
+            local
+        } else {
+            format!("refs/remotes/origin/{branch}")
+        };
     if git::output_optional(
         source,
         &[
@@ -204,7 +211,7 @@ pub fn classify_component_branch(
     };
     let classification = classify_local_branch(&source, handle, branch, base)?;
     if !matches!(classification, DestinationFreshness::Unclassified) {
-        // Only an existing local branch can be someone's PR head to preserve.
+        // An existing local or origin branch can be someone's PR head.
         super::convergence::require_issue_destination_without_pr(&source, branch)?;
     }
     Ok(classification)
@@ -241,7 +248,7 @@ pub fn refuse_stale_derived_destination(
 
 /// A destination is refused for history this Cook did not create: commits
 /// ahead of the base, another branch, or a detached HEAD.
-fn refuse_foreign_history(classification: DestinationFreshness) -> Result<()> {
+pub(super) fn refuse_foreign_history(classification: DestinationFreshness) -> Result<()> {
     match classification {
         DestinationFreshness::Stale(stale)
             if stale
