@@ -23,7 +23,7 @@ fn run_snapshot_fence_test_hook() {
 }
 
 use super::harvest::{
-    git_is_repository, git_output_raw, git_output_with_env, git_status_ignoring_snapshot_excludes,
+    git_is_repository, git_output_with_env, git_status_ignoring_snapshot_excludes,
     git_status_porcelain,
 };
 use super::*;
@@ -297,15 +297,7 @@ impl AttemptWorkspace {
 pub(super) struct HarvestPreflight {
     pub(super) base_sha: Option<String>,
     pub(super) source_provenance: Option<serde_json::Value>,
-    pub(super) candidate_baseline: Option<CandidateBaseline>,
-}
-
-/// A gate-feedback retry may start from the promoted, uncommitted candidate.
-/// This patch is derived only after its recorded provenance reproduces the
-/// exact worktree tree, so it cannot authorize arbitrary existing dirt.
-#[derive(Debug)]
-pub(super) struct CandidateBaseline {
-    patch: String,
+    pub(super) candidate_baseline: Option<crate::agent_task::AgentTaskCandidate>,
 }
 
 pub(super) fn prepare_committed_harvest(
@@ -509,30 +501,30 @@ fn pinned_cook_workspace_base_snapshot(
 fn verified_initial_cook_candidate_baseline(
     root: &Path,
     request: &AgentTaskRequest,
-) -> Result<Option<CandidateBaseline>, HarvestError> {
+) -> Result<Option<crate::agent_task::AgentTaskCandidate>, HarvestError> {
     let Some(baseline) = request.metadata.get("cook_initial_candidate_baseline") else {
         return Ok(None);
     };
     let commit = baseline
         .get("commit")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| HarvestError::CandidateBaselineMismatch {
+        .ok_or_else(|| HarvestError::CandidateTreeMismatch {
             message: "initial Cook candidate baseline has no commit".to_string(),
         })?;
     let expected_tree = baseline
         .get("tree")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| HarvestError::CandidateBaselineMismatch {
+        .ok_or_else(|| HarvestError::CandidateTreeMismatch {
             message: "initial Cook candidate baseline has no tree".to_string(),
         })?;
     let source_root = baseline
         .get("source_root")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| HarvestError::CandidateBaselineMismatch {
+        .ok_or_else(|| HarvestError::CandidateTreeMismatch {
             message: "initial Cook candidate baseline has no source workspace".to_string(),
         })?;
     if root != Path::new(source_root) {
-        return Err(HarvestError::CandidateBaselineMismatch {
+        return Err(HarvestError::CandidateTreeMismatch {
             message: "initial Cook candidate retry did not restore its recorded source workspace"
                 .to_string(),
         });
@@ -541,7 +533,7 @@ fn verified_initial_cook_candidate_baseline(
     if git_output(root, &["rev-parse", "HEAD^{tree}"])?
         != git_output(root, &["rev-parse", &format!("{parent}^{{tree}}")])?
     {
-        return Err(HarvestError::CandidateBaselineMismatch {
+        return Err(HarvestError::CandidateTreeMismatch {
             message: "initial Cook candidate source HEAD changed before retry".to_string(),
         });
     }
@@ -557,12 +549,14 @@ fn verified_initial_cook_candidate_baseline(
     git_output_with_env(root, &add_args, index_env)?;
     let actual_tree = git_output_with_env(root, &["write-tree"], index_env)?;
     if actual_tree != expected_tree {
-        return Err(HarvestError::CandidateBaselineMismatch {
+        return Err(HarvestError::CandidateTreeMismatch {
             message: "initial Cook candidate workspace changed after admission failure".to_string(),
         });
     }
-    Ok(Some(CandidateBaseline {
-        patch: git_output_raw(root, &["diff", "--binary", "--full-index", "HEAD", commit])?,
+    Ok(Some(crate::agent_task::AgentTaskCandidate {
+        base_sha: parent,
+        candidate_sha: commit.to_string(),
+        tree_sha: expected_tree.to_string(),
     }))
 }
 
@@ -573,7 +567,7 @@ fn verified_preexisting_cook_baseline(
     root: &Path,
     request: &AgentTaskRequest,
     context: &HarvestExecutionContext,
-) -> Option<Result<CandidateBaseline, HarvestError>> {
+) -> Option<Result<crate::agent_task::AgentTaskCandidate, HarvestError>> {
     let baseline = request.metadata.get("verified_cook_baseline")?;
     if baseline
         .get("preexisting_candidate")
@@ -615,54 +609,14 @@ fn verified_preexisting_cook_baseline(
             status: "Cook baseline contract has no baseline tree".to_string(),
         }));
     };
-    Some(workspace_patch_for_tree(root, expected_tree).map(|patch| CandidateBaseline { patch }))
-}
-
-fn workspace_patch_for_tree(root: &Path, expected_tree: &str) -> Result<String, HarvestError> {
-    let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
-        command: "create Cook baseline Git index".to_string(),
-        cwd: root.to_path_buf(),
-        message: error.to_string(),
-    })?;
-    let index_path = index.path().display().to_string();
-    let git = |args: &[&str]| {
-        let output = Command::new("git")
-            .args(args)
-            .env("GIT_INDEX_FILE", &index_path)
-            .current_dir(root)
-            .output()
-            .map_err(|error| HarvestError::Git {
-                command: args.join(" "),
-                cwd: root.to_path_buf(),
-                message: error.to_string(),
-            })?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            Err(HarvestError::CandidateBaselineMismatch {
-                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            })
-        }
-    };
-    let head = git(&["rev-parse", "HEAD"])?;
-    git(&["read-tree", &head])?;
-    let add_args = ["add", "--all", "--", "."];
-    git(&add_args)?;
-    let tree = git(&["write-tree"])?;
-    if tree != expected_tree {
-        return Err(HarvestError::CandidateBaselineMismatch {
-            message: "dirty workspace does not reproduce the authorized Cook baseline tree"
-                .to_string(),
-        });
-    }
-    git(&["diff", "--cached", "--binary", "HEAD"])
+    Some(Err(HarvestError::DirtyWorkspace { status: format!("non-recoverable: dirty Lab snapshot has no immutable candidate ({expected_tree}); run a new Cook") }))
 }
 
 fn verified_gate_feedback_baseline(
     root: &Path,
     request: &AgentTaskRequest,
     status: &str,
-) -> Result<CandidateBaseline, HarvestError> {
+) -> Result<crate::agent_task::AgentTaskCandidate, HarvestError> {
     let cook_loop = request
         .inputs
         .get("cook_loop")
@@ -678,28 +632,18 @@ fn verified_gate_feedback_baseline(
             status: status.to_string(),
         });
     };
-    let required = [
-        "source_run_id",
-        "source_task_id",
-        "source_patch_task_id",
-        "patch_artifact",
-        "failed_gates",
-        "next_attempt",
-        "to_worktree",
-    ];
-    if !is_gate_feedback || required.iter().any(|key| !cook_loop.contains_key(*key)) {
+    if !is_gate_feedback {
         return Err(HarvestError::DirtyWorkspace {
             status: status.to_string(),
         });
     }
-    let patch = crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
+    crate::agent_task_candidate_tree::validate_gate_feedback_candidate_baseline(
         root,
         &serde_json::Value::Object(cook_loop.clone()),
     )
-    .map_err(|error| HarvestError::CandidateBaselineMismatch {
+    .map_err(|error| HarvestError::CandidateTreeMismatch {
         message: error.message,
-    })?;
-    Ok(CandidateBaseline { patch })
+    })
 }
 
 fn snapshot_harvest_error(cwd: &Path, message: String) -> HarvestError {
@@ -763,7 +707,7 @@ fn validate_derived_cook_baseline(
 pub(super) fn prepare_attempt_workspace(
     request: &mut AgentTaskRequest,
     base: Option<&str>,
-    candidate_baseline: Option<&CandidateBaseline>,
+    candidate_baseline: Option<&crate::agent_task::AgentTaskCandidate>,
     scratch_root: &Path,
 ) -> Result<Option<Arc<AttemptWorkspace>>, HarvestError> {
     let Some(root) = request.workspace.root.as_deref().map(PathBuf::from) else {
@@ -817,7 +761,10 @@ pub(super) fn prepare_attempt_workspace(
         apply_adopted_candidate(&attempt_root, adoption)?;
     }
     if let Some(candidate_baseline) = candidate_baseline {
-        apply_gate_feedback_baseline(&attempt_root, candidate_baseline)?;
+        git_output(
+            &attempt_root,
+            &["checkout", "--detach", &candidate_baseline.candidate_sha],
+        )?;
     }
     let setup = hydrate_attempt_workspace(&attempt_root, &root, attempt_component_id(request));
     request.metadata["cook_attempt_workspace_setup"] = setup;
@@ -929,38 +876,6 @@ fn block_attempt_worktree_push(attempt_root: &Path) {
     );
 }
 
-fn apply_gate_feedback_baseline(
-    root: &Path,
-    baseline: &CandidateBaseline,
-) -> Result<(), HarvestError> {
-    let patch = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
-        command: "create gate-feedback baseline patch".to_string(),
-        cwd: root.to_path_buf(),
-        message: error.to_string(),
-    })?;
-    std::fs::write(patch.path(), &baseline.patch).map_err(|error| HarvestError::Git {
-        command: "write gate-feedback baseline patch".to_string(),
-        cwd: root.to_path_buf(),
-        message: error.to_string(),
-    })?;
-    let patch_path = patch.path().display().to_string();
-    git_output(root, &["apply", "--index", "--binary", &patch_path])?;
-    git_output(
-        root,
-        &[
-            "-c",
-            "user.name=Homeboy",
-            "-c",
-            "user.email=homeboy@localhost",
-            "commit",
-            "--no-verify",
-            "-m",
-            "homeboy: gate-feedback candidate baseline",
-        ],
-    )?;
-    Ok(())
-}
-
 pub(super) fn remap_workspace_config(
     config: &mut serde_json::Value,
     source: &Path,
@@ -992,21 +907,15 @@ fn apply_adopted_candidate(
     root: &Path,
     adoption: &crate::agent_task::AgentTaskCandidateAdoption,
 ) -> Result<(), HarvestError> {
-    let patch = std::fs::read(&adoption.patch_path).map_err(|error| HarvestError::Adoption {
-        message: format!("could not read candidate patch: {error}"),
-    })?;
-    let actual_fingerprint = fingerprint(&patch);
-    if actual_fingerprint != adoption.patch_fingerprint {
-        return Err(HarvestError::Adoption {
-            message: "candidate patch fingerprint did not match the explicit adoption request"
-                .to_string(),
-        });
-    }
-    git_output(root, &["apply", "--index", &adoption.patch_path]).map_err(|error| {
-        HarvestError::Adoption {
-            message: format!("could not apply adopted candidate: {error:?}"),
-        }
-    })?;
+    crate::agent_task_promotion::validate_candidate_commit(root, &adoption.candidate).map_err(
+        |error| HarvestError::Adoption {
+            message: error.message,
+        },
+    )?;
+    git_output(
+        root,
+        &["checkout", "--detach", &adoption.candidate.candidate_sha],
+    )?;
     Ok(())
 }
 
@@ -1206,37 +1115,6 @@ mod tests {
         let diff = git_output(&attempt_root, &["diff", "--name-only", "HEAD~1", "HEAD"])
             .expect("local diff");
         assert!(diff.contains("f.txt"), "local diff harvest must still work");
-    }
-
-    #[test]
-    fn authorized_cook_baseline_patch_includes_untracked_candidate_files() {
-        let source = tempfile::tempdir().expect("source repository");
-        git(source.path(), &["init", "-b", "main"]);
-        fs::write(source.path().join("tracked.txt"), "base").expect("base file");
-        git(source.path(), &["add", "tracked.txt"]);
-        git(
-            source.path(),
-            &[
-                "-c",
-                "user.name=Homeboy Test",
-                "-c",
-                "user.email=homeboy@example.test",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-        fs::write(source.path().join("tracked.txt"), "candidate").expect("candidate file");
-        fs::write(source.path().join("untracked.txt"), "candidate").expect("untracked file");
-        let add_args = ["add", "--all", "--", "."];
-        git(source.path(), &add_args);
-        let tree = git_output(source.path(), &["write-tree"]).expect("candidate tree");
-        git(source.path(), &["reset", "--mixed", "HEAD"]);
-
-        let patch = workspace_patch_for_tree(source.path(), &tree).expect("authorized baseline");
-
-        assert!(patch.contains("tracked.txt"));
-        assert!(patch.contains("untracked.txt"));
     }
 
     #[test]

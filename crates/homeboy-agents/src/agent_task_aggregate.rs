@@ -8,7 +8,7 @@ use super::agent_task::{
     AgentTaskFollowUp, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskUsage,
     AgentTaskUsageCompleteness,
 };
-use crate::agent_task_timeout_artifacts::is_patch_artifact_kind;
+use crate::agent_task_evidence_discovery::is_patch_artifact_kind;
 use homeboy_core::markdown::escape_markdown_table_cell;
 
 pub const AGENT_TASK_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-aggregate/v1";

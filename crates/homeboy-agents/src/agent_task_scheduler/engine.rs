@@ -934,10 +934,7 @@ impl AgentTaskScheduler {
                         workspace.base_sha(),
                     );
                 }
-                let task_base_sha = attempt_workspace
-                    .as_ref()
-                    .map(|workspace| workspace.base_sha().to_string())
-                    .or(task_base_sha);
+                // The task base remains immutable when a retry checks out a candidate.
                 if let Some(adoption) = scheduled.adoption.as_ref() {
                     if let Err(mut outcome) = validate_and_apply_candidate_adoption(
                         &request,
@@ -1234,10 +1231,7 @@ impl AgentTaskScheduler {
                             });
                         }
                     }
-                    if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
-                        .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
-                        .and_then(|_| harvest_candidate_commit(&mut outcome, &running_task))
-                    {
+                    if let Err(error) = harvest_candidate_commit(&mut outcome, &running_task) {
                         outcome = committed_harvest_failure(outcome, error);
                     }
                     // Harvest can add Homeboy-generated patch artifacts after the
@@ -1248,7 +1242,6 @@ impl AgentTaskScheduler {
                         &running_task.request,
                         !running_task.timeout_cancel_requested,
                     );
-                    finalize_candidate_artifacts(&mut outcome, &running_task);
                     let outcome =
                         AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
                     let mut outcome = outcome;
@@ -1256,7 +1249,6 @@ impl AgentTaskScheduler {
                     // the provider returned its incomplete result. Bind those
                     // late artifacts to this exact execution before selecting a
                     // recoverable candidate for promotion.
-                    finalize_candidate_artifacts(&mut outcome, &running_task);
                     // Learn a usage cap this attempt surfaced so a later task
                     // in this same plan skips the same capped route instead of
                     // spending its own execution rediscovering it (#13644).
@@ -1288,10 +1280,7 @@ impl AgentTaskScheduler {
                     // that patch into the next provider.
                     let candidate_ready_for_convergence = outcome.failure_classification
                         != Some(AgentTaskFailureClassification::Stalled)
-                        && outcome
-                            .artifacts
-                            .iter()
-                            .any(is_fingerprinted_actionable_patch_artifact);
+                        && outcome.candidate.is_some();
                     let rotation_takes_over = !candidate_ready_for_convergence
                         && AgentTaskScheduleSupport::rotation_policy_for_request(
                             &running_task.request,
@@ -1319,7 +1308,9 @@ impl AgentTaskScheduler {
                         // result proves the provider no longer owns the checkout.
                         // Harvest above is therefore race-free.
                         super::mark_timeout_workspace_candidates_incomplete(&mut outcome);
-                        let recovered = outcome.artifacts.iter().any(is_actionable_patch_artifact);
+                        let recovered = outcome.candidate.is_some()
+                            || (running_task.task_base_sha.is_none()
+                                && outcome.artifacts.iter().any(is_actionable_patch_artifact));
                         outcome.status = if recovered && !rotation_takes_over {
                             AgentTaskOutcomeStatus::CandidateRecoverable
                         } else {
@@ -1515,7 +1506,7 @@ impl AgentTaskScheduler {
                                         );
                                         match select_candidate_adoption(
                                             template,
-                                            &candidate_artifacts,
+                                            outcome.candidate.as_ref(),
                                             &running_task,
                                         ) {
                                             Ok(adoption) => Some(adoption),
@@ -1795,15 +1786,6 @@ impl AgentTaskScheduler {
     }
 }
 
-fn is_fingerprinted_actionable_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
-    is_actionable_patch_artifact(artifact)
-        && artifact
-            .sha256
-            .as_deref()
-            .is_some_and(|fingerprint| !fingerprint.trim().is_empty())
-}
-
-#[cfg(test)]
 pub(crate) fn persist_resolved_provider_model(
     outcome: &mut AgentTaskOutcome,
     request: &AgentTaskRequest,
@@ -2094,20 +2076,15 @@ pub(super) fn complete_deferred_cleanup_recovery(
         .map_err(|error| format!("cannot read deferred cleanup descriptor: {error}"))?;
     let mut action: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|error| format!("cannot parse deferred cleanup descriptor: {error}"))?;
-    let candidates = outcome
-        .artifacts
-        .iter()
-        .filter(|artifact| is_actionable_patch_artifact(artifact))
-        .cloned()
-        .collect::<Vec<_>>();
+    let candidate = outcome.candidate.as_ref();
     action["completed_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
-    match (cleanup, candidates.is_empty()) {
+    match (cleanup, candidate.is_none()) {
         (Err(error), false) => {
             // A committed or dirty attempt is deliberately retained, but its
             // harvested patch is still a completed durable result.
             action["status"] = serde_json::json!("candidate_recovered");
-            action["candidate_artifacts"] =
-                serde_json::to_value(candidates).unwrap_or(serde_json::Value::Null);
+            action["candidate"] =
+                serde_json::to_value(candidate).unwrap_or(serde_json::Value::Null);
             action["workspace_retention"] =
                 serde_json::json!(error.chars().take(512).collect::<String>());
         }
@@ -2118,8 +2095,8 @@ pub(super) fn complete_deferred_cleanup_recovery(
         (Ok(()), true) => action["status"] = serde_json::json!("completed_no_candidate"),
         (Ok(()), false) => {
             action["status"] = serde_json::json!("candidate_recovered");
-            action["candidate_artifacts"] =
-                serde_json::to_value(candidates).unwrap_or(serde_json::Value::Null);
+            action["candidate"] =
+                serde_json::to_value(candidate).unwrap_or(serde_json::Value::Null);
         }
     }
     let content = serde_json::to_vec_pretty(&action)
@@ -2136,6 +2113,7 @@ fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> 
         "summary": outcome.summary,
         "diagnostics": outcome.diagnostics,
         "artifacts": outcome.artifacts,
+        "candidate": outcome.candidate,
         "evidence_refs": outcome.evidence_refs,
     })
 }
@@ -2163,13 +2141,13 @@ fn cleanup_attempt_workspace(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
     compaction_reason: Option<&str>,
-) -> Option<RecoverablePatchProof> {
+) -> Option<RecoverableCommitProof> {
     let Some(workspace) = &running._attempt_workspace else {
         return None;
     };
     if let Err(error) = workspace.cleanup() {
         if let Some(reason) = compaction_reason {
-            match recoverable_patch_proof(outcome, running, workspace) {
+            match recoverable_commit_proof(outcome, running, workspace) {
                 Ok(proof) => return Some(proof.with_reason(reason)),
                 Err(refusal) => outcome.diagnostics.push(AgentTaskDiagnostic {
                     class: "agent_task.attempt_workspace_compaction_refused".to_string(),
@@ -2190,14 +2168,12 @@ fn cleanup_attempt_workspace(
     None
 }
 
-struct RecoverablePatchProof {
-    id: String,
-    sha256: String,
-    base_ref: String,
+struct RecoverableCommitProof {
+    candidate: crate::agent_task::AgentTaskCandidate,
     reason: String,
 }
 
-impl RecoverablePatchProof {
+impl RecoverableCommitProof {
     fn with_reason(mut self, reason: &str) -> Self {
         self.reason = reason.to_string();
         self
@@ -2212,7 +2188,7 @@ fn release_and_compact_attempt_workspace(
     reason: &str,
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
-    authorization: Option<RecoverablePatchProof>,
+    authorization: Option<RecoverableCommitProof>,
 ) {
     let Some(authorization) = authorization else {
         let _ = release_scratch(allocation, reason, outcome);
@@ -2225,9 +2201,7 @@ fn release_and_compact_attempt_workspace(
         "compaction_authorization": {
             "outcome": "authorized",
             "reason": authorization.reason,
-            "patch_artifact_id": authorization.id,
-            "patch_sha256": authorization.sha256,
-            "base_ref": authorization.base_ref,
+            "candidate": authorization.candidate,
         },
     });
     match crate::controller_scratch::release_attempt_with_compaction_authorization(
@@ -2245,9 +2219,7 @@ fn release_and_compact_attempt_workspace(
                         "outcome": "compacted",
                         "reason": authorization.reason,
                         "path": running.request.workspace.root,
-                        "patch_artifact_id": authorization.id,
-                        "patch_sha256": authorization.sha256,
-                        "base_ref": authorization.base_ref,
+                        "candidate": authorization.candidate,
                     }),
                 }),
                 Err(error) => outcome.diagnostics.push(AgentTaskDiagnostic {
@@ -2265,55 +2237,34 @@ fn release_and_compact_attempt_workspace(
     }
 }
 
-fn recoverable_patch_proof(
+fn recoverable_commit_proof(
     outcome: &AgentTaskOutcome,
     running: &RunningTask,
     workspace: &AttemptWorkspace,
-) -> Result<RecoverablePatchProof, String> {
-    let artifact_root = artifact_root_for_running(running).map_err(|error| format!("{error:?}"))?;
-    let mut matches = outcome.artifacts.iter().filter(|artifact| {
-        artifact.kind == "patch"
-            && artifact.metadata["run_id"].as_str() == running.run_id.as_deref()
-            && artifact.metadata["task_id"].as_str() == Some(running.task_id.as_str())
-            && artifact.metadata["producer_attempt"].as_u64() == Some(running.attempt as u64)
-            && artifact.metadata["base_ref"].as_str() == Some(workspace.base_sha())
-    });
-    let Some(artifact) = matches.next() else {
-        return Err("no finalized patch artifact is bound to this attempt base".to_string());
-    };
-    if matches.next().is_some() {
-        return Err(
-            "multiple finalized patch artifacts are bound to this attempt base".to_string(),
-        );
-    }
-    let Some(path) = artifact.path.as_deref().map(std::path::PathBuf::from) else {
-        return Err("patch artifact has no readable path".to_string());
-    };
-    if !path.starts_with(&artifact_root) {
-        return Err("patch artifact is outside the durable artifact root".to_string());
-    }
-    let Some(expected_sha256) = artifact.sha256.as_deref() else {
-        return Err("patch artifact has no content hash".to_string());
-    };
-    let patch =
-        std::fs::read(&path).map_err(|error| format!("cannot read patch artifact: {error}"))?;
-    if homeboy_engine_primitives::content_hash::sha256_hex(&patch) != expected_sha256 {
-        return Err("patch artifact content hash does not match its finalized record".to_string());
-    }
-    if !crate::controller_scratch::workspace_matches_patch(
+) -> Result<RecoverableCommitProof, String> {
+    let candidate = outcome.candidate.as_ref().ok_or("no immutable candidate")?;
+    crate::agent_task_promotion::validate_candidate_commit(workspace.root(), candidate)
+        .map_err(|error| error.message)?;
+    crate::agent_task_candidate_tree::validate_immutable_candidate_tree(
         workspace.root(),
-        workspace.base_sha(),
-        &patch,
-    ) {
-        return Err(
-            "checkout does not exactly match the finalized patch against its immutable base"
-                .to_string(),
-        );
+        &candidate.candidate_sha,
+    )
+    .map_err(|error| error.message)?;
+    let reference = format!(
+        "{}{}",
+        super::harvest::CANDIDATE_REF_PREFIX,
+        homeboy_core::paths::sanitize_path_segment(
+            running.run_id.as_deref().unwrap_or("unrecorded-run")
+        )
+    );
+    if super::git_output(workspace.root(), &["rev-parse", &reference])
+        .map_err(|error| format!("{error:?}"))?
+        != candidate.candidate_sha
+    {
+        return Err("candidate is not pinned to its producing run".to_string());
     }
-    Ok(RecoverablePatchProof {
-        id: artifact.id.clone(),
-        sha256: expected_sha256.to_string(),
-        base_ref: workspace.base_sha().to_string(),
+    Ok(RecoverableCommitProof {
+        candidate: candidate.clone(),
         reason: String::new(),
     })
 }
@@ -2600,6 +2551,18 @@ fn reset_attempt_request(
         );
     }
     request.workspace.root = source_workspace_root;
+    if let (Some(attempt), Some(candidate)) = (
+        request.workspace.attempt.as_mut(),
+        outcome.candidate.as_ref(),
+    ) {
+        attempt.adoption = Some(crate::agent_task::AgentTaskCandidateAdoption {
+            source_attempt: attempt.identity.clone(),
+            candidate: candidate.clone(),
+            provider_backend: request.executor.backend.clone(),
+            provider_model: request.executor.model().map(str::to_string),
+            decision: "retry previous candidate commit".to_string(),
+        });
+    }
     append_unique_artifacts(
         &mut candidate_artifacts,
         outcome

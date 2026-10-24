@@ -10,7 +10,7 @@ pub mod agent_task;
 pub mod agent_task_action_result;
 pub(crate) mod agent_task_aggregate;
 pub mod agent_task_artifacts;
-pub mod agent_task_candidate_baseline;
+pub mod agent_task_candidate_tree;
 pub mod agent_task_config_materialization;
 pub mod agent_task_contract;
 pub(crate) mod agent_task_cook_loop;
@@ -28,6 +28,7 @@ pub mod orchestration;
 // Public so the fanout and controller command adapters can emit wave-terminal
 // and controller lifecycle notifications. Cook's own emitters stay internal.
 pub mod agent_task_builtin_backend;
+pub(crate) mod agent_task_evidence_discovery;
 pub mod agent_task_notify;
 mod agent_task_process_containment;
 pub mod agent_task_promotion;
@@ -43,7 +44,6 @@ pub mod agent_task_secrets;
 pub mod agent_task_service;
 pub mod agent_task_submission_service;
 pub mod agent_task_timeout;
-pub(crate) mod agent_task_timeout_artifacts;
 pub mod agent_task_workspace_identity;
 pub mod agent_tasks;
 pub(crate) mod agent_tool_control_plane;

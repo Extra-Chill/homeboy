@@ -91,10 +91,8 @@ mod stall_rotation_tests {
                 task_base_sha: String::new(),
                 repository_identity: String::new(),
                 workspace_identity: String::new(),
-                artifact_id: String::new(),
-                sha256: String::new(),
+                candidate: None,
                 decision: AgentTaskCandidateAdoptionDecision::AdoptPreviousCandidate,
-                content: None,
             }),
             ..AgentTaskProviderRotationEntry::default()
         }

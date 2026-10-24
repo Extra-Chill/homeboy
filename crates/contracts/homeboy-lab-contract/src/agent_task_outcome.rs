@@ -8,6 +8,14 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The immutable Cook candidate pinned at `refs/homeboy/candidates/<run_id>`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCandidate {
+    pub base_sha: String,
+    pub candidate_sha: String,
+    pub tree_sha: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskOutcomeStatus {

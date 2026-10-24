@@ -35,9 +35,10 @@ use homeboy_core::git::GitPushTransportClass;
 use homeboy_core::{Error, Result};
 
 use super::apply::{verify_with_runtime_tmpdir, TrustedUnpushedCandidateDestination};
-use super::committed_changes::{committed_changes_patch, CommittedChangesPatch};
+use super::committed_changes::{adopted_commit, AdoptionAdmission};
 #[cfg(test)]
-pub(crate) use super::patch::{normalize_promotion_patch, validate_artifact_content};
+#[cfg(test)]
+pub(crate) use super::tests::patch_fixture::{normalize_fixture_diff, validate_artifact_content};
 #[cfg(test)]
 use super::tests::FakePromotionWorkspaceProvider;
 use super::types::{
@@ -521,7 +522,7 @@ fn resume_promoted_patch_admission(
             .with_retryable(false));
     }
     validate_candidate_commit(target_path, commit)?;
-    if crate::agent_task_candidate_baseline::workspace_tree(target_path)? != commit.tree_sha {
+    if crate::agent_task_candidate_tree::workspace_tree(target_path)? != commit.tree_sha {
         git_output(
             target_path,
             &["read-tree", "--reset", "-u", &commit.candidate_sha],
@@ -747,7 +748,7 @@ fn promote_with_provider_and_checkpoint_internal(
     // Adoption supplies an immutable commit candidate. It intentionally bypasses
     // provider artifact selection, but still uses the ordinary promotion/gates
     // implementation and durable checkpoint.
-    let committed_patch = committed_changes_patch(&options)?.ok_or_else(|| {
+    let committed_patch = adopted_commit(&options)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "candidate_ref",
             "candidate revision contains no changes after the recorded task base",
@@ -1374,7 +1375,7 @@ fn promote_committed_changes(
     source_kind: &str,
     outcome: &AgentTaskOutcome,
     artifact: Option<&AgentTaskArtifact>,
-    committed_patch: CommittedChangesPatch,
+    committed_patch: AdoptionAdmission,
 ) -> Result<AgentTaskPromotionReport> {
     let mut outcome = outcome.clone();
     outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
@@ -1728,7 +1729,7 @@ fn run_promotion_gates_inner(
         return Ok(PromotionGateRun::without_gates(options.dry_run));
     }
 
-    let candidate_checkout = ImmutableCandidateCheckout::materialize(
+    let candidate_checkout = CandidateGateCheckout::materialize(
         worktree_path,
         options
             .source_run_id
@@ -2051,8 +2052,21 @@ mod lab_gate_binding_tests {
                     "gate_environment":{"lab_runner":"absent-fixture-runner", "hydrate_rust_cache":false}
                 }
             })).unwrap();
-            let report = run_promotion_gates(&options, repo, Some(&candidate), None, None, store)
-                .expect("non-execution is retained, not a fabricated candidate mismatch");
+            let report = run_promotion_gates(
+                &options,
+                repo,
+                Some(&candidate),
+                Some(
+                    &crate::agent_task_promotion::tests::candidate_snapshot::snapshot(
+                        repo,
+                        &git_output(repo, &["rev-parse", "HEAD"]).unwrap(),
+                        "gate-test",
+                    ),
+                ),
+                None,
+                store,
+            )
+            .expect("non-execution is retained, not a fabricated candidate mismatch");
             assert_eq!(report.status, AgentTaskPromotionStatus::GateDeferred);
             assert_eq!(report.deterministic_gates.len(), 2);
             let unavailable = &report.deterministic_gates[0];
@@ -2110,8 +2124,21 @@ mod lab_gate_binding_tests {
             }))
             .unwrap();
 
-            let report = run_promotion_gates(&options, repo, Some(&candidate), None, None, store)
-                .expect("an absent runner defers the gate; it is not a setup error");
+            let report = run_promotion_gates(
+                &options,
+                repo,
+                Some(&candidate),
+                Some(
+                    &crate::agent_task_promotion::tests::candidate_snapshot::snapshot(
+                        repo,
+                        &git_output(repo, &["rev-parse", "HEAD"]).unwrap(),
+                        "gate-test",
+                    ),
+                ),
+                None,
+                store,
+            )
+            .expect("an absent runner defers the gate; it is not a setup error");
 
             assert_eq!(report.status, AgentTaskPromotionStatus::GateDeferred);
             assert!(
@@ -2156,8 +2183,21 @@ mod lab_gate_binding_tests {
             }))
             .unwrap();
 
-            let report = run_promotion_gates(&options, repo, Some(&candidate), None, None, store)
-                .expect("local gates run against the destination workspace");
+            let report = run_promotion_gates(
+                &options,
+                repo,
+                Some(&candidate),
+                Some(
+                    &crate::agent_task_promotion::tests::candidate_snapshot::snapshot(
+                        repo,
+                        &git_output(repo, &["rev-parse", "HEAD"]).unwrap(),
+                        "gate-test",
+                    ),
+                ),
+                None,
+                store,
+            )
+            .expect("local gates run against the destination workspace");
 
             assert!(repo.join("hydration-count").is_file());
             assert!(report
@@ -2231,7 +2271,7 @@ mod lab_gate_binding_tests {
             let candidate = harvested_candidate(repo);
             let commits_before = commit_objects(repo);
 
-            let checkout = ImmutableCandidateCheckout::materialize(
+            let checkout = CandidateGateCheckout::materialize(
                 repo,
                 "candidate-fixture",
                 None,
@@ -2258,7 +2298,7 @@ mod lab_gate_binding_tests {
             let candidate = harvested_candidate(repo);
             std::fs::write(repo.join("candidate.txt"), "diverged\n").unwrap();
 
-            let error = ImmutableCandidateCheckout::materialize(
+            let error = CandidateGateCheckout::materialize(
                 repo,
                 "candidate-fixture",
                 None,
@@ -2282,11 +2322,17 @@ mod lab_gate_binding_tests {
     #[test]
     fn executed_lab_tree_mismatch_is_rejected_at_real_checkout_binding_boundary() {
         with_git_candidate(|repo, store| {
-            let checkout = ImmutableCandidateCheckout::materialize(
+            let checkout = CandidateGateCheckout::materialize(
                 repo,
                 "lab-binding-fixture",
                 None,
-                None,
+                Some(
+                    &crate::agent_task_promotion::tests::candidate_snapshot::snapshot(
+                        repo,
+                        &git_output(repo, &["rev-parse", "HEAD"]).unwrap(),
+                        "gate-test",
+                    ),
+                ),
                 store,
             )
             .unwrap()
@@ -2597,14 +2643,14 @@ impl From<CandidateTreeMismatch> for Error {
 
 /// A run-scoped detached worktree whose commit tree is exactly the promoted
 /// candidate. The source destination stays dirty for final commit/push/PR.
-struct ImmutableCandidateCheckout {
+struct CandidateGateCheckout {
     source_root: PathBuf,
     path: PathBuf,
     allocation: crate::controller_scratch::ControllerScratchAllocation,
     identity: AgentTaskGateCandidateCheckout,
 }
 
-impl ImmutableCandidateCheckout {
+impl CandidateGateCheckout {
     fn materialize(
         source_root: &Path,
         run_id: &str,
@@ -2679,21 +2725,14 @@ impl ImmutableCandidateCheckout {
                 }
                 .into())
             }
-            None => git_output(
-                source_root,
-                &[
-                    "-c",
-                    "user.name=Homeboy",
-                    "-c",
-                    "user.email=homeboy@localhost",
-                    "commit-tree",
-                    &fingerprint.tree,
-                    "-p",
-                    &fingerprint.head,
-                    "-m",
-                    "homeboy: immutable promotion candidate",
-                ],
-            )?,
+            None => {
+                return Err(Error::validation_invalid_argument(
+                    "candidate",
+                    "non-recoverable: no reachable immutable candidate; run a new Cook",
+                    None,
+                    None,
+                ))
+            }
         };
         let data_root = observation_store.data_root().ok_or_else(|| {
             Error::internal_unexpected("promotion observation store has no data root")
@@ -2748,7 +2787,7 @@ impl ImmutableCandidateCheckout {
     }
 }
 
-impl Drop for ImmutableCandidateCheckout {
+impl Drop for CandidateGateCheckout {
     fn drop(&mut self) {
         let _ = Command::new("git")
             .args(["worktree", "remove", "--force"])

@@ -197,20 +197,21 @@ mod timeout_tests {
             outcome.metadata["timeout_recovery"]["incomplete"],
             Value::Bool(true)
         );
-        let patch = outcome
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.metadata["change_source"] == "uncommitted_attempt_workspace")
-            .expect("harvested attempt-workspace diff");
-        assert_eq!(patch.metadata["incomplete"], Value::Bool(true));
-        assert_eq!(
-            patch.metadata["recovery_required"],
-            json!(["fresh_review", "deterministic_gates"])
-        );
+        assert!(outcome.artifacts.is_empty());
+        let candidate = outcome.candidate.as_ref().expect("immutable candidate");
+        assert!(git_output(
+            &source,
+            &[
+                "show",
+                &format!("{}:provider-change.txt", candidate.candidate_sha)
+            ]
+        )
+        .unwrap()
+        .contains("partial work"));
     }
 
     #[test]
-    fn timeout_after_dirty_worktree_fingerprints_the_producing_run_patch() {
+    fn timeout_after_dirty_worktree_pins_the_producing_run_commit() {
         struct EditThenTimeout;
 
         impl AgentTaskExecutorAdapter for EditThenTimeout {
@@ -253,31 +254,19 @@ mod timeout_tests {
                     .expect("persisted aggregate");
             let outcome = &aggregate.outcomes[0];
             assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
-            let patch = outcome
-                .artifacts
-                .iter()
-                .find(|artifact| {
-                    artifact.metadata["change_source"] == "uncommitted_attempt_workspace"
-                })
-                .expect("harvested attempt-workspace diff");
-            for key in [
-                "run_id",
-                "task_id",
-                "producer_attempt",
-                "base_ref",
-                "provider_backend",
-                "repository_identity",
-                "workspace_identity",
-            ] {
-                assert!(
-                    patch.metadata.get(key).is_some_and(|value| {
-                        value.as_str().is_some_and(|value| !value.is_empty()) || value.is_u64()
-                    }),
-                    "timeout uncommitted patch is missing {key}: {:#?}",
-                    patch.metadata
-                );
-            }
-            assert_eq!(patch.metadata["run_id"], "timeout-dirty-fingerprint");
+            assert!(outcome.artifacts.is_empty());
+            let candidate = outcome.candidate.as_ref().expect("immutable candidate");
+            assert_eq!(
+                git_output(
+                    &source,
+                    &[
+                        "rev-parse",
+                        "refs/homeboy/candidates/timeout-dirty-fingerprint"
+                    ]
+                )
+                .unwrap(),
+                candidate.candidate_sha
+            );
         });
     }
 

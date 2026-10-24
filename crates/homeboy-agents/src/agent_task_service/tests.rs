@@ -1782,30 +1782,11 @@ fn persisted_timeout_candidate_is_admitted_for_continuation() {
             .expect("persisted aggregate");
         let outcome = aggregate.outcomes.first().expect("timeout outcome");
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
-        let artifact = outcome
+        assert!(outcome.candidate.is_some(), "{outcome:#?}");
+        assert!(outcome
             .artifacts
             .iter()
-            .find(|artifact| artifact.kind == "patch")
-            .expect("persisted timeout patch");
-        for key in [
-            "run_id",
-            "task_id",
-            "producer_attempt",
-            "base_ref",
-            "provider_backend",
-            "repository_identity",
-            "workspace_identity",
-        ] {
-            assert!(
-                artifact.metadata.get(key).is_some_and(|value| {
-                    value.as_str().is_some_and(|value| !value.is_empty()) || value.is_u64()
-                }),
-                "persisted timeout patch is missing {key}: {:#?}",
-                artifact.metadata
-            );
-        }
-        assert_eq!(artifact.metadata["run_id"], "service-timeout-candidate");
-        assert_eq!(artifact.metadata["task_id"], outcome.task_id);
+            .all(|artifact| artifact.kind != "patch"));
     });
 }
 

@@ -1,7 +1,7 @@
 //! Split partition of tests (see mod.rs for shared setup).
 #![cfg(test)]
 
-use super::super::promote::normalize_promotion_patch;
+use super::super::promote::normalize_fixture_diff;
 use super::super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionReport,
     AgentTaskPromotionRequest, AgentTaskPromotionSource, AgentTaskPromotionStatus,
@@ -121,10 +121,10 @@ fn promote_recoverable_candidate_applies_exactly_one_actionable_patch() {
 }
 
 #[test]
-fn normalize_promotion_patch_strips_lab_sandbox_workspace_prefix() {
+fn normalize_fixture_diff_strips_lab_sandbox_workspace_prefix() {
     let patch = "diff --git a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n--- a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n+++ b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
 
-    let normalized = normalize_promotion_patch(patch, "homeboy@promoted-task")
+    let normalized = normalize_fixture_diff(patch, "homeboy@promoted-task")
         .expect("sandbox-prefixed patch normalizes");
 
     assert_eq!(normalized.changed_files, vec!["src/lib.rs"]);
@@ -465,7 +465,7 @@ fn validate_patch_rejects_path_traversal() {
     let patch = "--- a/src/lib.rs\n+++ b/../secret\n@@ -1 +1 @@\n-old\n+new\n";
 
     let err =
-        normalize_promotion_patch(patch, "repo@promoted-task").expect_err("unsafe path rejected");
+        normalize_fixture_diff(patch, "repo@promoted-task").expect_err("unsafe path rejected");
 
     assert!(err.message.contains("unsafe patch path"));
 }
@@ -620,7 +620,7 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
 
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
     assert!(provider.apply_calls.is_empty());
-    let normalized = normalize_promotion_patch(patch, "homeboy@promoted-task").unwrap();
+    let normalized = normalize_fixture_diff(patch, "homeboy@promoted-task").unwrap();
     assert!(normalized
         .content
         .contains("diff --git a/src/lib.rs b/src/lib.rs"));
@@ -737,7 +737,7 @@ fn promotion_report_serializes_generic_command_evidence() {
 /// for binary edits, pure renames, empty files and mode changes carry only a
 /// `diff --git` header, and each must still name its changed files (#16005).
 #[test]
-fn normalize_promotion_patch_reads_changed_files_from_header_only_sections() {
+fn normalize_fixture_diff_reads_changed_files_from_header_only_sections() {
     type Change = fn(&Path);
     let cases: [(&str, Change, &[&str]); 5] = [
         (
@@ -800,7 +800,7 @@ fn normalize_promotion_patch_reads_changed_files_from_header_only_sections() {
         let patch = String::from_utf8(output.stdout).expect("utf8 patch");
         assert!(patch.starts_with("diff --git "), "{name} produced a patch");
 
-        let normalized = normalize_promotion_patch(&patch, "homeboy@promoted-task")
+        let normalized = normalize_fixture_diff(&patch, "homeboy@promoted-task")
             .unwrap_or_else(|error| panic!("{name} normalizes: {error:?}"));
         assert_eq!(normalized.changed_files, expected, "{name}");
     }

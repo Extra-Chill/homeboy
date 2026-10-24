@@ -1,7 +1,7 @@
 //! Split partition of tests (see mod.rs for shared setup).
 #![cfg(test)]
 
-use super::super::promote::{normalize_promotion_patch, promote};
+use super::super::promote::{normalize_fixture_diff, promote};
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::{
@@ -136,7 +136,7 @@ fn promote_recoverable_candidate_harvests_committed_changes_behind_an_empty_patc
 
 #[test]
 fn validate_patch_extracts_safe_changed_files() {
-    let patch = normalize_promotion_patch(VALID_PATCH, "repo@promoted-task").expect("valid patch");
+    let patch = normalize_fixture_diff(VALID_PATCH, "repo@promoted-task").expect("valid patch");
 
     assert_eq!(patch.changed_files, vec!["src/lib.rs"]);
     assert_eq!(patch.content, VALID_PATCH);

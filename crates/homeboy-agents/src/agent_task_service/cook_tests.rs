@@ -795,7 +795,7 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
                 latest_run_id: "timeout-run".to_string(),
                 selected_run_id: None,
                 selected_task_id: None,
-                selected_artifact_id: None,
+                selected_candidate_sha: None,
                 promotion_provenance: None,
                 durable_recipe_ref: "homeboy://agent-task/cooks/timeout-report/recipe".to_string(),
                 lifecycle_state: "Failed".to_string(),
@@ -917,7 +917,7 @@ fn provider_timeout_resume_is_not_offered_while_deferred_cleanup_is_pending() {
         latest_run_id: "timeout-pending-run".to_string(),
         selected_run_id: None,
         selected_task_id: None,
-        selected_artifact_id: None,
+        selected_candidate_sha: None,
         promotion_provenance: None,
         durable_recipe_ref: "homeboy://agent-task/cooks/timeout-pending-cleanup/recipe".to_string(),
         lifecycle_state: "Failed".to_string(),
@@ -1090,7 +1090,7 @@ fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
         latest_run_id: "startup-without-output-run".to_string(),
         selected_run_id: None,
         selected_task_id: None,
-        selected_artifact_id: None,
+        selected_candidate_sha: None,
         promotion_provenance: None,
         durable_recipe_ref: "homeboy://agent-task/cooks/startup-without-output-report/recipe"
             .to_string(),
@@ -1285,7 +1285,7 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
                 latest_run_id: "rotation-run".to_string(),
                 selected_run_id: None,
                 selected_task_id: None,
-                selected_artifact_id: None,
+                selected_candidate_sha: None,
                 promotion_provenance: None,
                 durable_recipe_ref: "recipe".to_string(),
                 lifecycle_state: "failed".to_string(),
@@ -1419,7 +1419,7 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
                 "run_id": selected_run_id,
                 "incomplete": false,
                 "selected_task_id": "provider",
-                "selected_artifact_id": "candidate",
+                "selected_candidate_sha": "candidate",
             })),
             stop_reason: None,
             terminal_phase: None,
@@ -1432,7 +1432,7 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
                 latest_run_id: "review-form-timeout-report-attempt-2".to_string(),
                 selected_run_id: Some(selected_run_id.to_string()),
                 selected_task_id: Some("provider".to_string()),
-                selected_artifact_id: Some("candidate".to_string()),
+                selected_candidate_sha: Some("candidate".to_string()),
                 promotion_provenance: None,
                 durable_recipe_ref: "homeboy://agent-task/cooks/review-form-timeout-report/recipe"
                     .to_string(),
@@ -1549,6 +1549,28 @@ fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
     .unwrap();
 }
 
+fn committed_fixture_candidate(
+    root: &std::path::Path,
+    run_id: &str,
+) -> crate::agent_task::AgentTaskCandidate {
+    std::fs::create_dir_all(root).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.test"],
+    ] {
+        git_output(root, &args).unwrap();
+    }
+    std::fs::write(root.join("candidate.txt"), "old\n").unwrap();
+    git_output(root, &["add", "."]).unwrap();
+    git_output(root, &["commit", "-qm", "base"]).unwrap();
+    let base = git_output(root, &["rev-parse", "HEAD"]).unwrap();
+    std::fs::write(root.join("candidate.txt"), "new\n").unwrap();
+    crate::agent_task_scheduler::candidate_from_workspace(root, &base, run_id)
+        .unwrap()
+        .unwrap()
+}
+
 fn seed_substantive_candidate_aggregate(
     run_id: &str,
     plan: &AgentTaskPlan,
@@ -1560,8 +1582,10 @@ fn seed_substantive_candidate_aggregate(
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     };
 
-    std::fs::write(patch_path, patch).expect("write candidate patch");
     let task = plan.tasks.first().expect("candidate plan has one task");
+    let candidate = patch
+        .starts_with("diff --git ")
+        .then(|| committed_fixture_candidate(&patch_path.with_extension("repo"), run_id));
     agent_task_lifecycle::record_run_aggregate(
         run_id,
         plan,
@@ -1579,16 +1603,7 @@ fn seed_substantive_candidate_aggregate(
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: None,
                 failure_classification: None,
-                artifacts: vec![AgentTaskArtifact {
-                    id: "candidate".to_string(),
-                    kind: "patch".to_string(),
-                    path: Some(patch_path.display().to_string()),
-                    size_bytes: Some(patch.len() as u64),
-                    sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
-                        patch.as_bytes(),
-                    )),
-                    ..Default::default()
-                }],
+                artifacts: Vec::new(),
                 typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
@@ -1596,7 +1611,7 @@ fn seed_substantive_candidate_aggregate(
                 workflow: None,
                 follow_up: None,
                 metadata: serde_json::json!({ "model": task.executor.model() }),
-                candidate: None,
+                candidate,
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -16209,7 +16224,9 @@ fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run
             provenance["selected_task_id"],
             options.identity.initial_plan.tasks[0].task_id
         );
-        assert_eq!(provenance["selected_artifact_id"], "candidate");
+        assert!(provenance["selected_candidate_sha"]
+            .as_str()
+            .is_some_and(|sha| sha.len() == 40));
         assert_eq!(
             canonical_cook_recovery_run_id(cook_id).as_deref(),
             Some(selected_run_id),
@@ -16363,7 +16380,9 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
             selected["selected_task_id"],
             options.identity.initial_plan.tasks[0].task_id
         );
-        assert_eq!(selected["selected_artifact_id"], "candidate");
+        assert!(selected["selected_candidate_sha"]
+            .as_str()
+            .is_some_and(|sha| sha.len() == 40));
         let context = report.value.failure_context.expect("recovery context");
         assert_eq!(context.latest_run_id, latest_empty_run_id);
         assert_eq!(context.selected_run_id.as_deref(), Some(candidate_run_id));
@@ -22483,19 +22502,9 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         };
         aggregate.outcomes[0].status =
             crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable;
-        let candidate_patch = target.path().join("candidate.patch");
-        let candidate_bytes = b"diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
-        std::fs::write(&candidate_patch, candidate_bytes).expect("write candidate patch");
-        aggregate.outcomes[0].artifacts = vec![crate::agent_task::AgentTaskArtifact {
-            id: "candidate".to_string(),
-            kind: "patch".to_string(),
-            path: Some(candidate_patch.display().to_string()),
-            size_bytes: Some(candidate_bytes.len() as u64),
-            sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
-                candidate_bytes,
-            )),
-            ..Default::default()
-        }];
+        let candidate = committed_fixture_candidate(&target.path().join("candidate-repo"), run_id);
+        aggregate.outcomes[0].artifacts = Vec::new();
+        aggregate.outcomes[0].candidate = Some(candidate.clone());
         agent_task_lifecycle::record_run_aggregate(
             run_id,
             &options.identity.initial_plan,
@@ -22548,7 +22557,10 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         let selection = agent_task_lifecycle::select_cook_candidate(cook_id)
             .expect("select canonical candidate");
         assert_eq!(selection.selected_task_id.as_deref(), Some("task"));
-        assert_eq!(selection.selected_artifact_id.as_deref(), Some("candidate"));
+        assert_eq!(
+            selection.selected_candidate_sha.as_deref(),
+            Some(candidate.candidate_sha.as_str())
+        );
         assert!(promotion.finalization_eligible(false));
 
         assert_eq!(
@@ -22630,7 +22642,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
             "task"
         );
         assert_eq!(
-            intent["manual_candidate_binding"]["selection"]["selected_artifact_id"],
+            intent["manual_candidate_binding"]["selection"]["selected_candidate_sha"],
             "candidate"
         );
         assert_eq!(

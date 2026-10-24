@@ -1684,23 +1684,19 @@ mod tests {
 
             assert!(dispatched.load(Ordering::SeqCst), "provider was dispatched");
             assert_eq!(aggregate.outcomes.len(), 1);
-            let patch = aggregate.outcomes[0]
+            let candidate = aggregate.outcomes[0].candidate.as_ref();
+            assert_eq!(
+                candidate.is_some(),
+                expect_patch,
+                "only changed attempts harvest a candidate"
+            );
+            assert!(aggregate.outcomes[0]
                 .artifacts
                 .iter()
-                .find(|artifact| artifact.kind == "patch");
-            assert_eq!(
-                patch.is_some(),
-                expect_patch,
-                "only changed attempts harvest a patch"
-            );
-            if let Some(patch) = patch {
-                assert!(
-                    std::fs::read_to_string(patch.path.as_deref().expect("patch path"))
-                        .expect("read candidate patch")
-                        .contains("provider-change.txt")
-                );
+                .all(|artifact| artifact.kind != "patch"));
+            if candidate.is_some() {
                 assert_eq!(
-                    patch.metadata["source_provenance"]["materialization_mode"],
+                    aggregate.outcomes[0].metadata["source_provenance"]["materialization_mode"],
                     "filesystem_snapshot"
                 );
             }
@@ -1758,13 +1754,9 @@ mod tests {
             dispatched.load(Ordering::SeqCst),
             "task worktree reaches provider"
         );
-        let patch = aggregate.outcomes[0]
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.kind == "patch")
-            .expect("task candidate is harvested");
+        assert!(aggregate.outcomes[0].candidate.is_some());
         assert_eq!(
-            patch.metadata["source_provenance"]["workspace_snapshot_identity"],
+            aggregate.outcomes[0].metadata["source_provenance"]["workspace_snapshot_identity"],
             task_snapshot
                 .workspace_snapshot_identity
                 .expect("task identity")
@@ -1965,14 +1957,10 @@ mod tests {
                 "clean exclusion-aware Lab snapshot must reach the provider: {aggregate:?}"
             );
             assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
+            assert!(aggregate.outcomes[0].candidate.is_some());
             assert_eq!(
-                aggregate.outcomes[0]
-                    .artifacts
-                    .iter()
-                    .find(|artifact| artifact.kind == "patch")
-                    .expect("harvested patch")
-                    .metadata["source_provenance"]["workspace_snapshot_identity"],
-                synced.snapshot_identity,
+                aggregate.outcomes[0].metadata["source_provenance"]["workspace_snapshot_identity"],
+                synced.snapshot_identity
             );
 
             std::fs::write(remote.join("file.txt"), "drift\n").expect("tracked drift");

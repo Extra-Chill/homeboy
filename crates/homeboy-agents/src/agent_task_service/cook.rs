@@ -2038,7 +2038,7 @@ fn canonical_candidate_produced(selected_candidate: Option<&Value>) -> bool {
         && candidate["selected_task_id"]
             .as_str()
             .is_some_and(|value| !value.is_empty())
-        && candidate["selected_artifact_id"]
+        && candidate["selected_candidate_sha"]
             .as_str()
             .is_some_and(|value| !value.is_empty())
 }
@@ -2256,7 +2256,7 @@ pub struct AgentTaskCookFailureContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_artifact_id: Option<String>,
+    pub selected_candidate_sha: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub promotion_provenance: Option<Value>,
     pub durable_recipe_ref: String,
@@ -2495,7 +2495,7 @@ mod run_lifecycle_projection_tests {
             latest_run_id: "run".to_string(),
             selected_run_id: None,
             selected_task_id: None,
-            selected_artifact_id: None,
+            selected_candidate_sha: None,
             promotion_provenance: None,
             durable_recipe_ref: "homeboy://agent-task/cooks/cook/recipe".to_string(),
             lifecycle_state: "failed".to_string(),
@@ -2640,7 +2640,7 @@ mod run_lifecycle_projection_tests {
             "run_id": "cook-projection-attempt-1",
             "incomplete": false,
             "selected_task_id": "task-1",
-            "selected_artifact_id": "patch-1",
+            "selected_candidate_sha": "patch-1",
         }));
 
         let serialized = serde_json::to_value(&candidate).expect("serialize");
@@ -2660,7 +2660,7 @@ mod run_lifecycle_projection_tests {
             "run_id": "cook-projection-attempt-1",
             "incomplete": false,
             "selected_task_id": "task-1",
-            "selected_artifact_id": "patch-1",
+            "selected_candidate_sha": "patch-1",
         }));
         candidate.finalization = Some(serde_json::json!({
             "status": "review_ready",
@@ -2680,7 +2680,7 @@ mod run_lifecycle_projection_tests {
             "run_id": "cook-projection-attempt-1",
             "incomplete": false,
             "selected_task_id": "task-1",
-            "selected_artifact_id": "patch-1",
+            "selected_candidate_sha": "patch-1",
         }));
         // Legacy receipts can establish that finalization was attempted, but
         // cannot establish publication without the PR identity.
@@ -2697,8 +2697,8 @@ mod run_lifecycle_projection_tests {
     fn empty_unknown_and_conflicting_selections_never_produce_candidates() {
         for candidate in [
             serde_json::json!({"run_id": "run", "incomplete": false}),
-            serde_json::json!({"run_id": "", "incomplete": false, "selected_task_id": "task", "selected_artifact_id": "patch"}),
-            serde_json::json!({"run_id": "run", "incomplete": true, "selected_task_id": "task", "selected_artifact_id": "patch"}),
+            serde_json::json!({"run_id": "", "incomplete": false, "selected_task_id": "task", "selected_candidate_sha": "patch"}),
+            serde_json::json!({"run_id": "run", "incomplete": true, "selected_task_id": "task", "selected_candidate_sha": "patch"}),
         ] {
             assert!(
                 cook_completion(Some(&candidate), true, None, None).is_none(),
@@ -2713,7 +2713,7 @@ mod run_lifecycle_projection_tests {
             "run_id": "failed-provider-run",
             "incomplete": false,
             "selected_task_id": "task",
-            "selected_artifact_id": "patch",
+            "selected_candidate_sha": "patch",
         });
 
         let completion = cook_completion(Some(&candidate), true, None, None)
@@ -2730,7 +2730,7 @@ mod run_lifecycle_projection_tests {
             "run_id": "older-canonical-run",
             "incomplete": false,
             "selected_task_id": "task",
-            "selected_artifact_id": "patch",
+            "selected_candidate_sha": "patch",
         });
         let newer_receipt = serde_json::json!({"status": "review_ready", "pr_number": 12291});
 
@@ -2752,7 +2752,7 @@ mod run_lifecycle_projection_tests {
             "run_id": "canonical-run",
             "incomplete": false,
             "selected_task_id": "task",
-            "selected_artifact_id": "patch",
+            "selected_candidate_sha": "patch",
         });
         let receipt = serde_json::json!({"status": "review_ready", "pr_number": 12291});
 

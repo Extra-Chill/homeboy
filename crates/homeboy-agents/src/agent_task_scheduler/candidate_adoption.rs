@@ -1,141 +1,55 @@
-use homeboy_engine_primitives::content_hash;
-use std::io::Write;
 use std::path::Path;
-use std::process::Command;
 
 use super::*;
-use crate::agent_task_promotion::{normalize_promotion_patch, validate_artifact_content};
 
 pub(super) fn select_candidate_adoption(
     template: &AgentTaskCandidateAdoption,
-    artifacts: &[AgentTaskArtifact],
+    candidate: Option<&crate::agent_task::AgentTaskCandidate>,
     running: &RunningTask,
 ) -> Result<AgentTaskCandidateAdoption, String> {
-    let matches = artifacts
-        .iter()
-        .filter(|artifact| is_actionable_patch_artifact(artifact))
-        .collect::<Vec<_>>();
-    if matches.len() != 1 {
-        return Err("candidate adoption requires exactly one matching artifact id".to_string());
-    }
-    let artifact = matches[0];
-    let expected_run = running.run_id.as_deref().unwrap_or_default();
-    let expected_base = running.task_base_sha.as_deref().unwrap_or_default();
-    let repository_identity = artifact.metadata["repository_identity"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "candidate artifact has no canonical repository provenance".to_string())?;
-    let workspace_identity = artifact.metadata["workspace_identity"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "candidate artifact has no canonical workspace provenance".to_string())?;
-    if artifact.kind != "patch"
-        || artifact.metadata["run_id"] != expected_run
-        || artifact.metadata["task_id"] != running.task_id
-        || artifact.metadata["producer_attempt"] != running.attempt
-        || artifact.metadata["base_ref"] != expected_base
-        || artifact.metadata["provider_backend"] != running.request.executor.backend
-        || artifact.metadata["provider_selector"]
-            != serde_json::json!(running.request.executor.selector)
-        || artifact.metadata["provider_model"]
-            != serde_json::json!(running.request.executor.model())
-    {
-        return Err(
-            "candidate adoption provenance does not exactly match the producing attempt"
-                .to_string(),
-        );
-    }
-    let expected_url = candidate_artifact_url(expected_run, &running.task_id, &artifact.id);
-    if artifact.url.as_deref() != Some(expected_url.as_str()) {
-        return Err(
-            "candidate adoption artifact must use the run artifacts evidence URL".to_string(),
-        );
-    }
-    let path = artifact
-        .path
-        .as_deref()
-        .ok_or_else(|| "candidate adoption artifact content is unavailable".to_string())?;
-    let content = std::fs::read_to_string(path)
-        .map_err(|error| format!("read candidate adoption artifact: {error}"))?;
-    let sha256 = sha256(&content);
-    if artifact.sha256.as_deref() != Some(sha256.as_str()) {
-        return Err("candidate adoption SHA-256 does not match artifact content".to_string());
-    }
-    validate_artifact_content(artifact, &content).map_err(|error| error.message)?;
+    let candidate = candidate
+        .ok_or_else(|| "non-recoverable: attempt has no immutable candidate".to_string())?;
     Ok(AgentTaskCandidateAdoption {
-        source_run_id: expected_run.to_string(),
+        source_run_id: running.run_id.clone().unwrap_or_default(),
         source_task_id: running.task_id.clone(),
         source_attempt: running.attempt,
         provider_backend: running.request.executor.backend.clone(),
         provider_selector: running.request.executor.selector.clone(),
         provider_model: running.request.executor.model().map(str::to_string),
-        task_base_sha: expected_base.to_string(),
-        repository_identity: repository_identity.to_string(),
-        workspace_identity: workspace_identity.to_string(),
-        artifact_id: artifact.id.clone(),
-        sha256,
-        content: Some(content),
+        task_base_sha: candidate.base_sha.clone(),
+        candidate: Some(candidate.clone()),
         ..template.clone()
     })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "scheduler returns the complete outcome for durable lifecycle recording"
-)]
+#[expect(clippy::result_large_err, reason = "durable scheduler outcome")]
 pub(super) fn validate_and_apply_candidate_adoption(
     request: &AgentTaskRequest,
     adoption: &AgentTaskCandidateAdoption,
     task_base_sha: Option<&str>,
 ) -> Result<(), AgentTaskOutcome> {
-    let fail = |message| candidate_adoption_failure(message);
-    if adoption.decision != AgentTaskCandidateAdoptionDecision::AdoptPreviousCandidate
-        || adoption.task_base_sha != task_base_sha.unwrap_or_default()
-        || canonical_repository_identity_for_root(request.workspace.root.as_deref()).as_deref()
-            != Some(adoption.repository_identity.as_str())
-    {
-        return Err(fail(
-            "candidate adoption identity or base did not verify".to_string(),
-        ));
-    }
+    let candidate = adoption.candidate.as_ref().ok_or_else(|| {
+        candidate_adoption_failure(
+            "non-recoverable: adoption has no immutable candidate".to_string(),
+        )
+    })?;
     let root = request.workspace.root.as_deref().ok_or_else(|| {
-        fail("candidate adoption requires an isolated attempt workspace".to_string())
+        candidate_adoption_failure(
+            "candidate adoption requires an isolated attempt workspace".to_string(),
+        )
     })?;
-    let content = adoption.content.as_deref().ok_or_else(|| {
-        fail("candidate adoption content was not resolved from its artifact".to_string())
-    })?;
-    let normalized =
-        normalize_promotion_patch(content, root).map_err(|error| fail(error.message))?;
-    if normalized.content != content {
-        return Err(fail(
-            "candidate adoption payload must already be promotion-normalized".to_string(),
+    if task_base_sha != Some(candidate.base_sha.as_str()) {
+        return Err(candidate_adoption_failure(
+            "candidate adoption base did not verify".to_string(),
         ));
     }
-    for check in [true, false] {
-        let mut command = Command::new("git");
-        command
-            .args(["apply", "--whitespace=nowarn"])
-            .arg(if check { "--check" } else { "--index" })
-            .arg("-")
-            .current_dir(root)
-            .stdin(std::process::Stdio::piped());
-        let mut child = command.spawn().map_err(|error| fail(error.to_string()))?;
-        child
-            .stdin
-            .take()
-            .expect("piped stdin")
-            .write_all(content.as_bytes())
-            .map_err(|error| fail(error.to_string()))?;
-        let output = child
-            .wait_with_output()
-            .map_err(|error| fail(error.to_string()))?;
-        if !output.status.success() {
-            return Err(fail(format!(
-                "candidate adoption patch does not apply: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-    }
+    crate::agent_task_promotion::validate_candidate_commit(Path::new(root), candidate)
+        .map_err(|error| candidate_adoption_failure(error.message))?;
+    super::git_output(
+        Path::new(root),
+        &["checkout", "--detach", &candidate.candidate_sha],
+    )
+    .map_err(|error| candidate_adoption_failure(format!("{error:?}")))?;
     Ok(())
 }
 
@@ -159,101 +73,9 @@ pub(super) fn attach_candidate_adoption_provenance(
         "task_base_sha": adoption.task_base_sha,
         "repository_identity": adoption.repository_identity,
         "workspace_identity": adoption.workspace_identity,
-        "artifact_id": adoption.artifact_id,
-        "sha256": adoption.sha256,
+        "candidate": adoption.candidate,
         "decision": adoption.decision,
     });
-}
-
-pub(super) fn finalize_candidate_artifacts(outcome: &mut AgentTaskOutcome, running: &RunningTask) {
-    for artifact in &mut outcome.artifacts {
-        if is_actionable_patch_artifact(artifact) {
-            bind_candidate_artifact_fingerprint(artifact, running);
-        }
-    }
-}
-
-pub(super) fn bind_candidate_artifact_fingerprint(
-    artifact: &mut AgentTaskArtifact,
-    running: &RunningTask,
-) {
-    let Some(run_id) = running.run_id.as_deref().filter(|id| !id.is_empty()) else {
-        return;
-    };
-    let provenance_root = running.source_workspace_root.as_deref().or(running
-        .request
-        .workspace
-        .root
-        .as_deref());
-    let repository_identity = canonical_repository_identity_for_root(provenance_root)
-        .or_else(|| local_repository_identity_for_root(provenance_root));
-    let workspace_identity = running
-        .source_provenance
-        .as_ref()
-        .and_then(|value| value.get("workspace_snapshot_identity"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| repository_identity.clone());
-    if let Some(path) = artifact.path.as_deref() {
-        if let Ok(content) = std::fs::read(path) {
-            artifact.sha256 = Some(content_hash::sha256_hex(&content));
-            artifact.size_bytes = Some(content.len() as u64);
-        }
-    }
-    if !artifact.metadata.is_object() {
-        artifact.metadata = serde_json::json!({});
-    }
-    let metadata = artifact.metadata.as_object_mut().expect("object metadata");
-    metadata.extend(serde_json::Map::from_iter([
-        ("run_id".to_string(), serde_json::json!(run_id)),
-        ("task_id".to_string(), serde_json::json!(running.task_id)),
-        (
-            "producer_attempt".to_string(),
-            serde_json::json!(running.attempt),
-        ),
-        (
-            "provider_backend".to_string(),
-            serde_json::json!(running.request.executor.backend),
-        ),
-        (
-            "provider_selector".to_string(),
-            serde_json::json!(running.request.executor.selector),
-        ),
-        (
-            "provider_model".to_string(),
-            serde_json::json!(running.request.executor.model()),
-        ),
-    ]));
-    if let Some(base_ref) = running.task_base_sha.as_deref().filter(|id| !id.is_empty()) {
-        metadata.insert("base_ref".to_string(), serde_json::json!(base_ref));
-    }
-    if let Some(repository_identity) = repository_identity {
-        metadata.insert(
-            "repository_identity".to_string(),
-            serde_json::json!(repository_identity),
-        );
-    }
-    if let Some(workspace_identity) = workspace_identity {
-        metadata.insert(
-            "workspace_identity".to_string(),
-            serde_json::json!(workspace_identity),
-        );
-    }
-    if let Some(root) = running
-        .request
-        .workspace
-        .root
-        .as_deref()
-        .filter(|root| !root.is_empty())
-    {
-        metadata.insert("workspace_root".to_string(), serde_json::json!(root));
-    }
-    artifact.url = Some(candidate_artifact_url(
-        run_id,
-        &running.task_id,
-        &artifact.id,
-    ));
 }
 
 fn candidate_adoption_failure(message: String) -> AgentTaskOutcome {
@@ -273,45 +95,4 @@ fn candidate_adoption_failure(message: String) -> AgentTaskOutcome {
         metadata: serde_json::Value::Null,
         candidate: None,
     }
-}
-
-fn candidate_artifact_url(run_id: &str, task_id: &str, artifact_id: &str) -> String {
-    use homeboy_core::execution_contract::encode_uri_component;
-    format!(
-        "homeboy://agent-task/run/{}/artifacts#task={}&artifact={}",
-        encode_uri_component(run_id),
-        encode_uri_component(task_id),
-        encode_uri_component(artifact_id),
-    )
-}
-
-fn sha256(content: &str) -> String {
-    content_hash::sha256_hex(content.as_bytes())
-}
-
-fn canonical_repository_identity_for_root(root: Option<&str>) -> Option<String> {
-    let root = Path::new(root?);
-    let remote = homeboy_core::git::remote_origin_url(root)?;
-    let repository = homeboy_core::git::release_download::parse_github_url(&remote)?;
-    Some(format!(
-        "github://{}/{}/{}",
-        repository.host.to_ascii_lowercase(),
-        repository.owner.to_ascii_lowercase(),
-        repository.repo.to_ascii_lowercase(),
-    ))
-}
-
-fn local_repository_identity_for_root(root: Option<&str>) -> Option<String> {
-    let root = Path::new(root?);
-    // A local-only repository has no canonical remote, but its common Git
-    // directory still distinguishes it from another checkout at the same base.
-    let git_dir = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(root)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
-    let git_dir = String::from_utf8(git_dir.stdout).ok()?;
-    let git_dir = std::fs::canonicalize(git_dir.trim()).ok()?;
-    Some(format!("local://{}", sha256(&git_dir.to_string_lossy())))
 }

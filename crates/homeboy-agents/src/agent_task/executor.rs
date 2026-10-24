@@ -271,8 +271,7 @@ pub struct AgentTaskAttemptWorkspace {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskCandidateAdoption {
     pub source_attempt: String,
-    pub patch_path: String,
-    pub patch_fingerprint: String,
+    pub candidate: super::AgentTaskCandidate,
     pub provider_backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_model: Option<String>,
