@@ -132,6 +132,31 @@ pub fn pr_route(branch: &str, url: Option<&str>) -> Error {
     error
 }
 
+/// The refusal for a destination that diverged from its base and is not the
+/// rework of an open PR named by `task_url`. Naming a PR this branch does not
+/// head (another branch's, or a closed one) is its own mistake; pointing that caller at the PR-URL flow it
+/// already used would send it in a circle.
+pub fn diverged_route(branch: &str, task_url: Option<&str>) -> Error {
+    let Some(url) = task_url.filter(|url| url.contains("/pull/")) else {
+        return pr_route(branch, None);
+    };
+    let mut error = Error::validation_invalid_argument(
+        "task_url",
+        format!(
+            "Cook destination branch `{branch}` is not the head of an open PR at {url}; run Cook on that PR's head branch, or open a PR for `{branch}` and pass its URL"
+        ),
+        Some(branch.to_string()),
+        Some(vec![format!(
+            "gh pr create --head {}",
+            homeboy_engine_primitives::shell::quote_arg(branch)
+        )]),
+    );
+    error.details["destination_convergence"] = serde_json::json!({
+        "next_action": "pr_head_mismatch", "branch": branch, "task_url": url,
+    });
+    error
+}
+
 /// Converge a clean issue-owned linked worktree to an immutable base. Dirt is
 /// accepted only after the controller has authenticated and adopted it.
 pub fn converge_destination(
@@ -188,7 +213,7 @@ pub fn converge_destination(
     if ahead.trim() != "0" && behind.trim() != "0" && !is_pr_rework(path, branch.trim(), task_url)?
     {
         require_issue_destination_without_pr(path, branch.trim())?;
-        return Err(pr_route(branch.trim(), None));
+        return Err(diverged_route(branch.trim(), task_url));
     }
 
     // An authenticated earlier attempt stays recoverable even when HEAD
@@ -259,6 +284,23 @@ pub fn retry_fetch<T>(mut fetch: impl FnMut() -> Result<T>) -> Result<T> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_diverged_branch_names_the_pr_it_does_not_head() {
+        let url = "https://github.com/o/r/pull/7";
+        let mismatch = diverged_route("feature", Some(url));
+        assert!(mismatch
+            .message
+            .contains("`feature` is not the head of an open PR at https://github.com/o/r/pull/7"));
+        assert_eq!(
+            mismatch.details["destination_convergence"]["next_action"],
+            "pr_head_mismatch"
+        );
+        for task_url in [None, Some("https://github.com/o/r/issues/7")] {
+            let route = diverged_route("feature", task_url);
+            assert!(route.message.contains("existing PR work"));
+        }
+    }
 
     #[test]
     fn pr_history_classifies_states_and_fails_closed() {
