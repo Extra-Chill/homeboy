@@ -1520,7 +1520,7 @@ mod tests {
             ["homeboy", "agent-task", "reconcile", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "list"].as_slice(),
             ["homeboy", "agent-task", "active"].as_slice(),
-            ["homeboy", "agent-task", "latest"].as_slice(),
+            ["homeboy", "agent-task", "list", "--latest"].as_slice(),
             [
                 "homeboy",
                 "agent-task",

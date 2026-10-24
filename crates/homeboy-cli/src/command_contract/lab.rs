@@ -179,7 +179,6 @@ const LAB_VISIBLE_COMMAND_PATHS: &[&[&str]] = &[
     &["agent-task", "status"],
     &["agent-task", "list"],
     &["agent-task", "active"],
-    &["agent-task", "latest"],
     &["agent-task", "logs"],
     &["agent-task", "artifacts"],
     &["agent-task", "evidence"],

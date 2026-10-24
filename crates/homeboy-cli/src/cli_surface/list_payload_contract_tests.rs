@@ -35,7 +35,7 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "agent-task list",
-        "schema-versioned discovery report; `runs` shared with active and latest",
+        "schema-versioned discovery report; `runs` shared with active and list --latest",
     ),
     (
         "agent-task prompts list",

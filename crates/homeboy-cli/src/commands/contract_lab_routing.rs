@@ -209,8 +209,7 @@ impl Commands {
                     | agent_task::AgentTaskCommand::Review(_)
                     | agent_task::AgentTaskCommand::List(_)
                     | agent_task::AgentTaskCommand::Active(_)
-                    | agent_task::AgentTaskCommand::Reconcile(_)
-                    | agent_task::AgentTaskCommand::Latest(_),
+                    | agent_task::AgentTaskCommand::Reconcile(_),
             }) => LabCommandContract::runner_resident_read_polling(AGENT_TASK_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:

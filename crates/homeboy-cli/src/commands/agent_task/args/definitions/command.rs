@@ -133,8 +133,6 @@ pub enum AgentTaskCommand {
     /// provider state. Success leaves every selected durable record reconciled
     /// to that state.
     Reconcile(ReconcileArgs),
-    /// Show the latest durable run.
-    Latest(LatestArgs),
     /// Read the canonical durable event stream for a run.
     Logs(LogsArgs),
     /// List artifacts and evidence refs recorded for a completed run.
@@ -499,12 +497,6 @@ pub struct ReconcileArgs {
     #[arg(long, value_name = "KEY", requires = "apply")]
     pub idempotency_key: Option<String>,
 }
-#[derive(Args, Debug)]
-pub struct LatestArgs {
-    /// Number of newest durable runs to inspect before selecting the latest.
-    #[arg(long = "limit", value_name = "N")]
-    pub limit: Option<usize>,
-}
 impl From<ListArgs> for AgentTaskDiscoveryOptions {
     fn from(args: ListArgs) -> Self {
         Self {
@@ -527,14 +519,6 @@ impl From<ActiveArgs> for AgentTaskDiscoveryOptions {
             limit: (!args.full).then(|| args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
             cursor: 0,
             branch: args.branch,
-            ..Default::default()
-        }
-    }
-}
-impl From<LatestArgs> for AgentTaskDiscoveryOptions {
-    fn from(args: LatestArgs) -> Self {
-        Self {
-            limit: Some(args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
             ..Default::default()
         }
     }
