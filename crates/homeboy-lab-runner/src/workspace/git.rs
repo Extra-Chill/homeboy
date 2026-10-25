@@ -329,7 +329,7 @@ const GIT_OBJECT_CACHE_REF_LIMIT: usize = 64;
 /// objects unreachable from the exclusions and records the boundary commits as
 /// prerequisites the cache is known to hold. An unreachable or empty cache
 /// yields no exclusions and a complete transfer.
-fn bundle_prerequisites(
+pub(super) fn bundle_prerequisites(
     local_path: &Path,
     head: &str,
     cached: &[String],
@@ -392,7 +392,7 @@ fn cached_commits(
 
 /// Commits named by the bundle's non-`HEAD` refs, which the runner workspace
 /// must still contain once it stops borrowing from the object cache.
-fn bundled_ref_commits(
+pub(super) fn bundled_ref_commits(
     local_path: &Path,
     refs: &[String],
     control: &WorkspaceControl,
@@ -510,54 +510,6 @@ fn transfer_git_bundle(
     Ok(sha256)
 }
 
-/// Materialize a controller Git workspace as its exact captured commit, then
-/// apply its filtered working-tree contents. The controller completes and
-/// transfers the object closure; a Lab must never contact the source remote.
-pub(super) fn materialize_git_snapshot_controlled(
-    runner: &Runner,
-    local_path: &Path,
-    remote_path: &str,
-    excludes: &[String],
-    git_fetch_refs: &[String],
-    control: &WorkspaceControl,
-) -> Result<Option<ControllerGitBundleProvenance>> {
-    control.checkpoint()?;
-    let head = control.git(local_path, &["rev-parse", "HEAD"])?;
-    let branch = control
-        .git(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .ok()
-        .filter(|branch| branch != "HEAD");
-    let remote_url = control
-        .git(local_path, &["config", "--get", "remote.origin.url"])
-        .ok()
-        .filter(|url| !url.trim().is_empty())
-        .unwrap_or_else(|| "homeboy-controller-bundle".to_string());
-    let provenance = materialize_git_bundle_controlled(
-        runner,
-        ControllerGitBundleMaterializationRequest {
-            metadata_only: true,
-            local_path,
-            remote_path,
-            head: &head,
-            branch: branch.as_deref(),
-            remote_url: &remote_url,
-            changed_since_base: None,
-            git_fetch_refs,
-            allow_dirty_lab_workspace: false,
-        },
-        control,
-    )?;
-    super::snapshot::materialize_snapshot_overlay_controlled(
-        runner,
-        local_path,
-        remote_path,
-        excludes,
-        control,
-    )?;
-    control.checkpoint()?;
-    Ok(Some(provenance))
-}
-
 /// Resolve the exact object closure locally before `git bundle` can invoke a
 /// promisor remote itself. The controller is the only participant allowed to
 /// use the source checkout's authenticated transport.
@@ -566,7 +518,7 @@ pub(super) fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[Strin
     hydrate_controller_bundle_objects_controlled(local_path, refs, &WorkspaceControl::default())
 }
 
-fn hydrate_controller_bundle_objects_controlled(
+pub(super) fn hydrate_controller_bundle_objects_controlled(
     local_path: &Path,
     refs: &[String],
     control: &WorkspaceControl,
@@ -1003,7 +955,7 @@ fn promisor_remote(local_path: &Path, control: &WorkspaceControl) -> Result<Opti
     Ok(remote)
 }
 
-fn controller_bundle_refs(
+pub(super) fn controller_bundle_refs(
     head: &str,
     changed_since_base: Option<&str>,
     git_fetch_refs: &[String],
@@ -1030,7 +982,7 @@ fn push_unique_bundle_ref(refs: &mut Vec<String>, git_ref: &str) {
     }
 }
 
-fn validate_controller_git_bundle_source(
+pub(super) fn validate_controller_git_bundle_source(
     local_path: &Path,
     control: &WorkspaceControl,
 ) -> Result<()> {

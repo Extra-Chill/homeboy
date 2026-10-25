@@ -184,6 +184,73 @@ pub(super) fn sync_extra_lab_workspaces(
     )
 }
 
+/// Materialize a primary root and every declared extra with one plan/commit.
+pub(crate) fn sync_lab_workspace_roots_controlled(
+    runner_id: &str,
+    primary: RunnerWorkspaceSyncOptions,
+    extras: &[ExtraLabWorkspace],
+    control: &crate::workspace::WorkspaceControl,
+) -> Result<(
+    RunnerWorkspaceSyncOutput,
+    Vec<RunnerWorkspaceSyncOutput>,
+    Vec<LabWorkspaceMappingEntry>,
+)> {
+    let primary_path = canonical_existing_dir(&primary.path, "path")?;
+    let mut seen = HashSet::from([primary_path]);
+    let mut requests = vec![(primary, Vec::new())];
+    let mut entries = Vec::new();
+    for extra in extras {
+        let local_path = canonical_existing_dir(&extra.path.display().to_string(), "workspace")?;
+        if !seen.insert(local_path.clone()) {
+            continue;
+        }
+        let receipt = if is_provider_agent_dir(extra, &local_path) {
+            Some(plan_provider_agent_dir_staging(&local_path)?)
+        } else {
+            None
+        };
+        let excludes = receipt
+            .as_ref()
+            .map(ProviderAgentDirStagingReceipt::snapshot_excludes)
+            .unwrap_or_default();
+        requests.push((
+            RunnerWorkspaceSyncOptions {
+                path: local_path.display().to_string(),
+                mode: if extra.role == "agent_task_plan_runtime" {
+                    RunnerWorkspaceSyncMode::Snapshot
+                } else {
+                    extra_workspace_sync_mode(&local_path)
+                },
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: extra.git_fetch_refs.clone(),
+                snapshot_includes: extra.snapshot_includes.clone(),
+                allow_dirty_lab_workspace: extra.allow_dirty_lab_workspace,
+                validation_dependency_ids: None,
+                run_isolation_token: None,
+            },
+            excludes,
+        ));
+        entries.push((extra, receipt));
+    }
+    let mut results =
+        crate::workspace::sync_workspace_batch_controlled(runner_id, requests, control)?
+            .into_iter();
+    let primary = results.next().expect("primary root");
+    let extras = results.collect::<Vec<_>>();
+    let mapping = entries
+        .into_iter()
+        .zip(&extras)
+        .map(|((extra, receipt), synced)| {
+            let mut entry = workspace_mapping_entry(&extra.role, synced);
+            entry.source_provenance = extra.source_provenance.clone();
+            entry.staging_receipt = receipt;
+            entry
+        })
+        .collect();
+    Ok((primary, extras, mapping))
+}
+
 pub(crate) fn sync_extra_lab_workspaces_controlled(
     runner_id: &str,
     primary_local_path: &str,

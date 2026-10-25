@@ -638,7 +638,6 @@ fn timed_fallback_preserves_agent_task_target_for_the_verified_local_outcome() {
                 expected_source_snapshot_identity: None,
                 verified_cook_baseline: None,
                 require_controller_git_bundle: false,
-                reuse_compatible_snapshot: false,
                 job_overrides: homeboy_core::lab_offload::LabJobOverrides::default(),
             },
             None,

@@ -69,7 +69,6 @@ impl LabOffloadProvider for RunnerLabOffload {
             expected_source_snapshot_identity: request.expected_source_snapshot_identity,
             verified_cook_baseline: request.verified_cook_baseline,
             require_controller_git_bundle: request.require_controller_git_bundle,
-            reuse_compatible_snapshot: request.reuse_compatible_snapshot,
             job_overrides: request.job_overrides,
         })
     }

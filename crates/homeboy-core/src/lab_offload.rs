@@ -174,7 +174,6 @@ mod tests {
                 expected_source_snapshot_identity: None,
                 verified_cook_baseline: None,
                 require_controller_git_bundle: false,
-                reuse_compatible_snapshot: false,
                 job_overrides: LabJobOverrides::default(),
             })
             .expect("local placement does not require a runner provider");

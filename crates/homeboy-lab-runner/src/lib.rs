@@ -469,25 +469,25 @@ pub use session::{
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
 pub use upgrade_runners::register as register_runner_upgrade;
-pub use workspace::reap_run_workspace;
 pub use workspace::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, plan_workspace_pull,
-    prune_workspaces, pull_workspace, resolve_workspace_ref, reuse_compatible_snapshot_workspace,
-    sync_workspace, sync_workspace_before, update_workspace, verify_workspace_ref_hydration_source,
-    workspace_snapshots, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
-    RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
-    RunnerWorkspaceMaterializationPlan, RunnerWorkspaceOutputPaths, RunnerWorkspacePruneEntry,
-    RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
-    RunnerWorkspacePullOptions, RunnerWorkspacePullOutput, RunnerWorkspacePullPlan,
-    RunnerWorkspaceRefResolution, RunnerWorkspaceSnapshotAppliedFilters,
-    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
-    RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput, WorkspaceContentManifest,
-    WorkspaceContentManifestEntry,
+    prune_workspaces, pull_workspace, resolve_workspace_ref, sync_workspace, sync_workspace_before,
+    update_workspace, verify_workspace_ref_hydration_source, workspace_snapshots, ByteFileCounts,
+    RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
+    RunnerWorkspaceMaterializationContract, RunnerWorkspaceMaterializationPlan,
+    RunnerWorkspaceOutputPaths, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions,
+    RunnerWorkspacePullOutput, RunnerWorkspacePullPlan, RunnerWorkspaceRefResolution,
+    RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
+    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
+    RunnerWorkspaceUpdateOutput, WorkspaceContentManifest, WorkspaceContentManifestEntry,
 };
+pub use workspace::{materialization_commit, materialization_plan, reap_run_workspace};
+#[cfg(test)]
+pub(crate) use workspace::{workspace_content_hash, workspace_content_manifest_for_policy};
 pub(crate) use workspace::{
-    workspace_content_hash, workspace_content_hash_algorithm,
-    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    workspace_content_hash_algorithm, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 pub use workspace_root_provider::register as register_runner_workspace_root_provider;
 

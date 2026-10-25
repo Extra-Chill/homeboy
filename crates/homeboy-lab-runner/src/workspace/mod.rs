@@ -26,13 +26,21 @@ pub(crate) use sync::update_workspace_resource_lifecycle;
 #[cfg(test)]
 pub(crate) use sync::workspace_resource_lifecycle;
 pub(crate) use sync::write_runner_state_file;
+#[cfg(test)]
+pub(crate) use sync::INVOCATIONS;
 pub use sync::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, prune_workspaces,
-    reap_run_workspace, resolve_workspace_ref, reuse_compatible_snapshot_workspace,
-    verify_workspace_ref_hydration_source, workspace_snapshots,
+    reap_run_workspace, resolve_workspace_ref, verify_workspace_ref_hydration_source,
+    workspace_snapshots,
 };
-pub use sync::{sync_workspace, sync_workspace_before, update_workspace};
-pub(crate) use sync::{sync_workspace_controlled, sync_workspace_controlled_with_excludes};
+pub use sync::{
+    materialization_commit, materialization_plan, sync_workspace, sync_workspace_before,
+    update_workspace,
+};
+pub(crate) use sync::{
+    sync_workspace_batch_controlled, sync_workspace_controlled,
+    sync_workspace_controlled_with_excludes,
+};
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
@@ -56,10 +64,11 @@ pub(crate) use snapshot::materialize_snapshot_with_scratch_controlled;
 pub(crate) use snapshot::{
     copy_snapshot_to_directory, effective_snapshot_excludes, immutable_replay_snapshot,
     local_snapshot_stats, materialize_snapshot, materialize_snapshot_git, replay_artifact_identity,
-    snapshot_identity, workspace_content_hash, workspace_content_hash_algorithm,
-    workspace_content_manifest_for_policy, ImmutableReplaySnapshot,
+    snapshot_identity, workspace_content_hash_algorithm, ImmutableReplaySnapshot,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
+#[cfg(test)]
+pub(crate) use snapshot::{workspace_content_hash, workspace_content_manifest_for_policy};
 pub use snapshot::{WorkspaceContentManifest, WorkspaceContentManifestEntry};
 pub use snapshot_provider::register as register_workspace_snapshot_provider;
 pub(crate) use types::{canonical_workspace_path, default_excludes_for, DEFAULT_EXCLUDES};

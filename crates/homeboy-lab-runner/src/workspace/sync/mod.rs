@@ -15,7 +15,6 @@ use homeboy_core::resource_lifecycle_index::{
     ResourceLifecycle, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
 };
 
-use self::snapshots::workspace_snapshots_for_source;
 use super::super::validation_dependencies::{
     sync_validation_dependency_workspaces, RunnerValidationDependencySyncOutput,
 };
@@ -26,18 +25,15 @@ use super::super::{
 use super::control::WorkspaceControl;
 use super::git::{
     git_snapshot_controlled, materialize_git_bundle_controlled, materialize_git_controlled,
-    materialize_git_snapshot_controlled, ControllerGitBundleMaterializationRequest,
-    GitMaterializationRequest,
+    ControllerGitBundleMaterializationRequest, GitMaterializationRequest,
 };
 use super::snapshot::{
-    effective_snapshot_excludes, materialize_prepared_workspace_update,
-    materialize_snapshot_git_controlled, snapshot_identity, snapshot_manifest_delta,
-    workspace_content_manifest_for_policy, SnapshotManifestDelta,
+    effective_snapshot_excludes, materialize_prepared_workspace_update, snapshot_identity,
+    snapshot_manifest_delta, workspace_content_manifest_for_policy,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 use super::snapshot::{
-    materialize_snapshot_incremental_controlled, materialize_snapshot_with_scratch_controlled,
-    snapshot_identity_manifest_and_hash_controlled,
+    materialize_snapshot_with_scratch_controlled, snapshot_identity_manifest_and_hash_controlled,
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
@@ -45,10 +41,9 @@ use super::types::{
     RunnerWorkspacePruneConvergence, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
     RunnerWorkspacePruneOutput, RunnerWorkspacePrunePageReceipt,
     RunnerWorkspacePruneRetainedReason, RunnerWorkspacePruneSkippedEntry,
-    RunnerWorkspacePruneWithheldReason, RunnerWorkspaceRefResolution, RunnerWorkspaceSnapshotEntry,
-    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence, RunnerWorkspaceUpdateOptions,
-    RunnerWorkspaceUpdateOutput,
+    RunnerWorkspacePruneWithheldReason, RunnerWorkspaceRefResolution, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence,
+    RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput,
 };
 use super::util::{
     deterministic_remote_path, git_output, hex_prefix, parent_remote_path,
@@ -66,7 +61,17 @@ use homeboy_lab_contract::lab::handoff::{
 };
 use sha2::{Digest, Sha256};
 
+mod protocol;
+mod protocol_controller;
+#[cfg(test)]
+mod protocol_tests;
+#[cfg(test)]
+mod protocol_transport_tests;
 mod snapshots;
+pub use protocol::{materialization_commit, materialization_plan};
+pub(crate) use protocol_controller::sync_workspace_batch_controlled;
+#[cfg(test)]
+pub(crate) use protocol_controller::INVOCATIONS;
 #[cfg(test)]
 pub(crate) use snapshots::workspace_snapshot_scan_command;
 pub use snapshots::{list_workspaces, workspace_snapshots};
@@ -204,7 +209,6 @@ fn sync_workspace_in_roots_controlled(
     control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
     control.checkpoint()?;
-    let deadline = control.deadline();
     let runner = load_in_roots(roots, runner_id)?;
     let local_path = canonical_workspace_path(&options.path)?;
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
@@ -218,7 +222,9 @@ fn sync_workspace_in_roots_controlled(
         )
     })?;
     validate_absolute_path("workspace_root", workspace_root)?;
-    require_runner_workspace_disk_headroom(&runner, workspace_root)?;
+    if options.mode == RunnerWorkspaceSyncMode::Git {
+        require_runner_workspace_disk_headroom(&runner, workspace_root)?;
+    }
 
     let mut excludes = super::types::default_excludes_for(&local_path);
     for pattern in &runner.policy.snapshot_excludes {
@@ -246,255 +252,14 @@ fn sync_workspace_in_roots_controlled(
 
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot | RunnerWorkspaceSyncMode::SnapshotGit => {
-            let (snapshot, stats, content_manifest, content_hash) =
-                snapshot_identity_manifest_and_hash_controlled(
-                    &local_path,
-                    &excludes,
-                    &includes,
-                    control,
-                )?;
-            let remote_path = temp::unique_name(
-                &deterministic_remote_path(
-                    workspace_root,
-                    &local_path,
-                    &snapshot,
-                    options.run_isolation_token.as_deref(),
-                ),
-                "",
-            );
-            let workspace_cleanliness = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
-                "snapshot_synthetic_git_unique_workspace"
-            } else {
-                "snapshot_unique_workspace"
-            };
-            let mut materialization_plan = workspace_materialization_plan(
-                workspace_root,
-                &local_path,
-                &remote_path,
-                &snapshot,
-                &options,
-                &includes,
-                workspace_cleanliness,
-            );
-            let admission = require_snapshot_filesystem_admission(
-                roots.data(),
+            let output = protocol_controller::sync_workspace_batch_in_roots(
+                roots,
                 &runner,
-                &local_path,
-                &remote_path,
-                &stats,
-                content_manifest.entry_count as u64,
-            )?;
-            let scratch = admission.scratch();
-            let git_backed_snapshot = git_output(&local_path, &["rev-parse", "HEAD"]).is_ok();
-            let (synthetic_checkout, fallback_reason) = if options.mode
-                == RunnerWorkspaceSyncMode::SnapshotGit
-                && git_backed_snapshot
-            {
-                match materialize_git_snapshot_controlled(
-                    &runner,
-                    &local_path,
-                    &remote_path,
-                    &excludes,
-                    &options.git_fetch_refs,
-                    control,
-                ) {
-                    Ok(provenance) => {
-                        materialization_plan.controller_git_bundle = provenance;
-                        (None, None)
-                    }
-                    Err(error) => {
-                        return Err(workspace_sync_effect_error(error, &runner.id, &remote_path))
-                    }
-                }
-            } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
-                match materialize_snapshot_git_controlled(
-                    &runner,
-                    &local_path,
-                    &remote_path,
-                    &excludes,
-                    &snapshot,
-                    control,
-                ) {
-                    Ok(identity) => (Some(identity), None),
-                    Err(error) => {
-                        if error.details["workspace_sync"]["remote_effect_uncertain"] != true {
-                            rollback_materialized_workspace_before(
-                                &runner,
-                                workspace_root,
-                                &remote_path,
-                                true,
-                            );
-                        }
-                        return Err(workspace_sync_effect_error(error, &runner.id, &remote_path));
-                    }
-                }
-            } else {
-                let seed = compatible_incremental_snapshot(
-                    &runner,
-                    &local_path,
-                    &excludes,
-                    &content_manifest,
-                    control,
-                )?;
-                materialization_plan.snapshot_transfer = Some(match seed {
-                    Some((seed, delta)) => {
-                        match materialize_snapshot_incremental_controlled(
-                            &runner,
-                            &local_path,
-                            &remote_path,
-                            &seed.remote_path,
-                            &excludes,
-                            &delta,
-                            control,
-                        ) {
-                            Ok(transfer) => transfer,
-                            Err(error) => {
-                                if error.details["workspace_sync"]["remote_effect_uncertain"]
-                                    != true
-                                {
-                                    rollback_materialized_workspace_before(
-                                        &runner,
-                                        workspace_root,
-                                        &remote_path,
-                                        deadline.is_some(),
-                                    );
-                                }
-                                return Err(workspace_sync_effect_error(
-                                    error,
-                                    &runner.id,
-                                    &remote_path,
-                                ));
-                            }
-                        }
-                    }
-                    None => {
-                        if let Err(error) = materialize_snapshot_with_scratch_controlled(
-                            &runner,
-                            &local_path,
-                            &remote_path,
-                            &excludes,
-                            Some(scratch),
-                            control,
-                        ) {
-                            if error.details["workspace_sync"]["remote_effect_uncertain"] != true {
-                                rollback_materialized_workspace_before(
-                                    &runner,
-                                    workspace_root,
-                                    &remote_path,
-                                    true,
-                                );
-                            }
-                            return Err(workspace_sync_effect_error(
-                                error,
-                                &runner.id,
-                                &remote_path,
-                            ));
-                        }
-                        super::types::SnapshotTransferStats {
-                            reused: ByteFileCounts::default(),
-                            transferred: stats,
-                            final_size: stats,
-                        }
-                    }
-                });
-                (None, None)
-            };
-            if fallback_reason.is_some() || options.mode == RunnerWorkspaceSyncMode::Snapshot {
-                materialization_plan.actual_materialization_mode =
-                    Some("filesystem_snapshot".to_string());
-            } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit && git_backed_snapshot {
-                // Snapshot-git deliberately retains Git metadata for callers
-                // that need a checkout baseline.
-                materialization_plan.actual_materialization_mode =
-                    Some(RunnerWorkspaceSyncMode::SnapshotGit.as_str().to_string());
-            }
-            materialization_plan.fallback_reason = fallback_reason;
-            let metadata = workspace_metadata(WorkspaceMetadataRequest {
-                runner_id: &runner.id,
-                local_path: &local_path,
-                remote_path: &remote_path,
-                sync_mode: options.mode,
-                actual_materialization_mode: materialization_plan
-                    .actual_materialization_mode
-                    .as_deref(),
-                fallback_reason: materialization_plan.fallback_reason.as_deref(),
-                source_transfer: materialization_plan.controller_git_bundle.as_ref(),
-                snapshot_identity: &snapshot,
-                snapshot_excludes: &excludes,
-                content_manifest: Some(content_manifest.clone()),
-                run_id: options.run_isolation_token.as_deref(),
-                cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
-            });
-            let resource_lifecycle = metadata.resource_lifecycle.clone().unwrap_or_else(|| {
-                workspace_resource_lifecycle(
-                    &runner.id,
-                    &remote_path,
-                    None,
-                    ResourceCleanupPolicy::DeleteOnSuccess,
-                )
-            });
-            let prepared_workspace_lease = metadata.workspace_lease.clone();
-            let workspace_ref = prepared_workspace_lease
-                .clone()
-                .expect("new workspace metadata has an opaque ref");
-            let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
-                &runner,
-                metadata,
-                &local_path,
-                &remote_path,
-                &excludes,
-                options.validation_dependency_ids.as_deref(),
+                vec![(options.clone(), extra_excludes.to_vec())],
                 control,
-            ) {
-                Ok(dependencies) => dependencies,
-                Err(err) => {
-                    if !err.details["workspace_sync"].is_object() {
-                        rollback_materialized_workspace_before(
-                            &runner,
-                            workspace_root,
-                            &remote_path,
-                            deadline.is_some(),
-                        );
-                    }
-                    return Err(workspace_materialized_effect_error(
-                        err,
-                        &runner.id,
-                        &remote_path,
-                    ));
-                }
-            };
-            let current_workspace = current_workspace_summary(
-                &local_path,
-                &remote_path,
-                options.mode,
-                true,
-                synthetic_checkout,
-            );
-            let workspace_lease = workspace_lease(&runner.id, &current_workspace);
-            Ok((
-                RunnerWorkspaceSyncOutput {
-                    variant: "workspace_sync",
-                    command: "runner.workspace.sync",
-                    runner_id: runner.id,
-                    local_path: local_path.display().to_string(),
-                    remote_path,
-                    materialization_plan,
-                    current_workspace,
-                    workspace_lease,
-                    resource_lifecycle,
-                    sync_mode: options.mode,
-                    snapshot_identity: snapshot,
-                    content: Some((content_manifest, content_hash)),
-                    workspace_ref,
-                    prepared_workspace_lease,
-                    counts: stats,
-                    excludes,
-                    includes,
-                    workspace_cleanliness: workspace_cleanliness.to_string(),
-                    validation_dependencies,
-                },
-                0,
-            ))
+            )?
+            .remove(0);
+            Ok((output, 0))
         }
         RunnerWorkspaceSyncMode::Git => {
             let git = match git_snapshot_controlled(
@@ -1504,176 +1269,6 @@ pub fn hydrate_prepared_workspace_source_snapshot(
     source_snapshot.prepared_workspace_original_snapshot_identity = Some(original);
     source_snapshot.prepared_workspace_update_lineage = snapshot.update_lineage;
     Ok(())
-}
-
-/// Return a previously materialized source snapshot only when it is tied to the
-/// exact clean controller checkout now being dispatched. This lets callers that
-/// already hold a runner snapshot avoid reopening Git transport (and its object
-/// closure) merely to hand the same source to a provider.
-pub fn reuse_compatible_snapshot_workspace(
-    runner_id: &str,
-    options: &RunnerWorkspaceSyncOptions,
-) -> Result<Option<RunnerWorkspaceSyncOutput>> {
-    if options.changed_since_base.is_some() || !options.git_fetch_refs.is_empty() {
-        return Ok(None);
-    }
-
-    let runner = load(runner_id)?;
-    let local_path = canonical_workspace_path(&options.path)?;
-    let source_commit = git_output(&local_path, &["rev-parse", "HEAD"]).ok();
-    let source_dirty = git_output(&local_path, &["status", "--porcelain=v1"])
-        .ok()
-        .map(|status| !status.trim().is_empty());
-    let Some(source_commit) = source_commit else {
-        return Ok(None);
-    };
-    if source_dirty != Some(false) {
-        return Ok(None);
-    }
-
-    let (snapshots, _) = workspace_snapshots(
-        runner_id,
-        RunnerWorkspaceSnapshotFilters {
-            limit: usize::MAX,
-            ..Default::default()
-        },
-    )?;
-    let local_path_string = local_path.display().to_string();
-    let Some(snapshot) = snapshots.snapshots.into_iter().find(|snapshot| {
-        snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.as_str()
-            && snapshot.workspace_ref.is_some()
-            && snapshot.local_path == local_path_string
-            && snapshot.source_commit.as_deref() == Some(source_commit.as_str())
-            && snapshot.source_dirty == Some(false)
-    }) else {
-        return Ok(None);
-    };
-    let Some(workspace_ref) = snapshot.workspace_ref.clone() else {
-        return Ok(None);
-    };
-
-    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "workspace_root",
-            "runner workspace sync requires workspace_root",
-            Some(runner.id.clone()),
-            Some(vec![
-                "Set runner.workspace_root to the remote workspace directory.".to_string(),
-            ]),
-        )
-    })?;
-    let mut excludes = super::types::default_excludes_for(&local_path);
-    for pattern in &runner.policy.snapshot_excludes {
-        if !excludes.contains(pattern) {
-            excludes.push(pattern.clone());
-        }
-    }
-    for pattern in homeboy_core::source_snapshot::policy_for_path(&local_path).sync_excludes {
-        if !excludes.contains(&pattern) {
-            excludes.push(pattern);
-        }
-    }
-    let mut includes = runner.policy.snapshot_includes.clone();
-    for pattern in &options.snapshot_includes {
-        if !includes.contains(pattern) {
-            includes.push(pattern.clone());
-        }
-    }
-    let excludes = effective_snapshot_excludes(excludes, &includes);
-    let workspace_cleanliness = "snapshot_reused_clean_workspace";
-    let mut snapshot_options = options.clone();
-    snapshot_options.mode = RunnerWorkspaceSyncMode::Snapshot;
-    snapshot_options.controller_routed_git = false;
-    let mut materialization_plan = workspace_materialization_plan(
-        workspace_root,
-        &local_path,
-        &snapshot.remote_path,
-        &snapshot.snapshot_identity,
-        &snapshot_options,
-        &includes,
-        workspace_cleanliness,
-    );
-    materialization_plan.actual_materialization_mode = snapshot.actual_materialization_mode;
-    let current_workspace = RunnerWorkspaceCurrentSummary {
-        local_path: local_path_string.clone(),
-        remote_path: snapshot.remote_path.clone(),
-        sync_mode: RunnerWorkspaceSyncMode::Snapshot,
-        materialized: true,
-        source_commit: snapshot.source_commit.clone(),
-        source_ref: snapshot.source_ref.clone(),
-        source_dirty: snapshot.source_dirty,
-        synthetic_checkout_commit: None,
-        synthetic_checkout_ref: None,
-        synthetic_checkout_tree: None,
-    };
-    let resource_lifecycle = snapshot.resource_lifecycle.unwrap_or_else(|| {
-        workspace_resource_lifecycle(
-            &runner.id,
-            &snapshot.remote_path,
-            None,
-            ResourceCleanupPolicy::DeleteOnSuccess,
-        )
-    });
-
-    Ok(Some(RunnerWorkspaceSyncOutput {
-        variant: "workspace_sync",
-        command: "runner.workspace.sync",
-        runner_id: runner.id.clone(),
-        local_path: local_path_string,
-        remote_path: snapshot.remote_path,
-        materialization_plan,
-        workspace_lease: workspace_lease(&runner.id, &current_workspace),
-        current_workspace,
-        resource_lifecycle,
-        sync_mode: RunnerWorkspaceSyncMode::Snapshot,
-        snapshot_identity: snapshot.snapshot_identity,
-        content: Some(
-            super::snapshot::workspace_content_manifest_and_hash_controlled(
-                &local_path,
-                &excludes,
-                WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-                &WorkspaceControl::default(),
-            )?,
-        ),
-        workspace_ref,
-        prepared_workspace_lease: snapshot.workspace_lease,
-        counts: ByteFileCounts::default(),
-        excludes,
-        includes,
-        workspace_cleanliness: workspace_cleanliness.to_string(),
-        validation_dependencies: Vec::new(),
-    }))
-}
-
-/// A seed may differ in source revision, but must have been materialized from
-/// the same controller path under the exact effective security/exclude policy.
-/// Older metadata lacks that policy and is deliberately ineligible.
-fn compatible_incremental_snapshot(
-    runner: &super::super::Runner,
-    local_path: &Path,
-    excludes: &[String],
-    controller_manifest: &super::snapshot::WorkspaceContentManifest,
-    control: &WorkspaceControl,
-) -> Result<Option<(RunnerWorkspaceSnapshotEntry, SnapshotManifestDelta)>> {
-    homeboy_core::observation::phase_timing::time(
-        "stage.lab.source_materialization.delta_computation",
-        || {
-            let snapshots = workspace_snapshots_for_source(runner, local_path, control)?;
-            let local_path = local_path.display().to_string();
-            Ok(snapshots.into_iter().find_map(|snapshot| {
-                (snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.as_str()
-                    && snapshot.local_path == local_path
-                    && snapshot.snapshot_excludes == excludes)
-                    .then(|| {
-                        let manifest = snapshot.content_manifest.clone()?;
-                        snapshot_manifest_delta(controller_manifest, &manifest)
-                            .ok()
-                            .map(|delta| (snapshot, delta))
-                    })
-                    .flatten()
-            }))
-        },
-    )
 }
 
 fn is_runner_git_auth_or_network_failure(error: &Error) -> bool {
@@ -3125,70 +2720,6 @@ fn snapshot_filesystem_requirement(
     }
 }
 
-/// Refuse before the archive pipeline or runner extraction creates a partial
-/// workspace. The controller scratch path and runner destination are probed
-/// independently: a roomy root filesystem cannot mask a constrained `/tmp`.
-fn require_snapshot_filesystem_admission(
-    data_root: &Path,
-    runner: &super::super::Runner,
-    local_path: &Path,
-    remote_path: &str,
-    stats: &ByteFileCounts,
-    entry_count: u64,
-) -> Result<SnapshotFilesystemAdmission> {
-    let requirement = snapshot_filesystem_requirement(stats.bytes, entry_count);
-    let scratch = std::env::var_os("TMPDIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    // A stale or constrained configured TMPDIR is not an admission dead end.
-    // The source parent is deterministic and avoids reconstructing an ad-hoc
-    // shell environment; it is selected only when it passes the same probe.
-    let fallback_scratch = local_path.parent().unwrap_or(local_path).to_path_buf();
-    let scratch_probe = local_snapshot_filesystem_probe(&scratch, "controller snapshot scratch")?;
-    let (selected_scratch, scratch_probe) =
-        if snapshot_probe_has_capacity(&scratch_probe, requirement) {
-            (scratch, scratch_probe)
-        } else {
-            let fallback_probe = local_snapshot_filesystem_probe(
-                &fallback_scratch,
-                "controller alternate snapshot scratch",
-            )?;
-            if !snapshot_probe_has_capacity(&fallback_probe, requirement) {
-                return Err(snapshot_capacity_error(
-                    &scratch_probe,
-                    requirement,
-                    runner,
-                    Some(&fallback_scratch),
-                ));
-            }
-            (fallback_scratch, fallback_probe)
-        };
-    let destination_probe = match runner.kind {
-        RunnerKind::Local => {
-            local_snapshot_filesystem_probe(Path::new(remote_path), "runner snapshot destination")?
-        }
-        RunnerKind::Ssh => ssh_snapshot_filesystem_probe(runner, remote_path)?,
-    };
-    let admission = SnapshotFilesystemAdmission::acquire(
-        data_root,
-        selected_scratch,
-        &[scratch_probe, destination_probe],
-        requirement,
-        runner,
-    )
-    .map_err(|mut error| {
-        error.retryable = Some(true);
-        error.details["snapshot_logical_bytes"] = serde_json::json!(stats.bytes);
-        error.details["snapshot_entry_count"] = serde_json::json!(entry_count);
-        error.details["copy_amplification"] = serde_json::json!(2);
-        error.details["safety_margin_bytes"] = serde_json::json!(64 * 1024 * 1024_u64);
-        error.details["required_bytes"] = serde_json::json!(requirement.bytes);
-        error.details["required_inodes"] = serde_json::json!(requirement.inodes);
-        error
-    })?;
-    Ok(admission)
-}
-
 #[derive(Debug, Clone)]
 struct SnapshotFilesystemProbe {
     identity: String,
@@ -3261,40 +2792,6 @@ fn local_snapshot_filesystem_probe(
     })
 }
 
-fn ssh_snapshot_filesystem_probe(
-    runner: &super::super::Runner,
-    path: &str,
-) -> Result<SnapshotFilesystemProbe> {
-    let (_, client) = ssh_client_for_runner(runner)?;
-    let command = format!(
-        "p={}; while [ ! -e \"$p\" ] && [ \"$p\" != / ]; do p=$(dirname \"$p\"); done; df -Pk \"$p\" | awk 'NR==2 {{print $1 \" \" $4}}'; df -Pi \"$p\" | awk 'NR==2 {{print $4}}'",
-        shell::quote_arg(path)
-    );
-    let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
-    let mut values = output.stdout.split_whitespace();
-    let identity = values.next().unwrap_or("unknown");
-    let available_bytes = values
-        .next()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(|value| value.saturating_mul(1024));
-    let available_inodes = values.next().and_then(|value| value.parse::<u64>().ok());
-    match (available_bytes, available_inodes) {
-        (Some(available_bytes), Some(available_inodes)) => Ok(SnapshotFilesystemProbe {
-            // A runner ID scopes a device name to its host. `df` device names
-            // are only meaningful within one runner's namespace.
-            identity: format!("runner:{}:{identity}", runner.id),
-            path: path.to_string(),
-            role: "runner snapshot destination",
-            available_bytes,
-            available_inodes,
-        }),
-        _ => Err(Error::internal_unexpected(
-            "runner did not return a bounded filesystem capacity probe",
-        )
-        .with_retryable(true)),
-    }
-}
-
 fn snapshot_capacity_error(
     probe: &SnapshotFilesystemProbe,
     requirement: SnapshotFilesystemRequirement,
@@ -3348,19 +2845,14 @@ const SNAPSHOT_RESERVATION_NAMESPACE: &str = "snapshot-filesystem-reservations";
 /// proven gone by process start identity or its TTL lapses.
 #[derive(Debug)]
 struct SnapshotFilesystemAdmission {
-    scratch: std::path::PathBuf,
     db_path: std::path::PathBuf,
     leases: Vec<(String, String)>,
 }
 
 impl SnapshotFilesystemAdmission {
-    fn scratch(&self) -> &Path {
-        &self.scratch
-    }
-
     fn acquire(
         data_root: &Path,
-        scratch: std::path::PathBuf,
+        _scratch: std::path::PathBuf,
         probes: &[SnapshotFilesystemProbe],
         requirement: SnapshotFilesystemRequirement,
         runner: &super::super::Runner,
@@ -3383,7 +2875,6 @@ impl SnapshotFilesystemAdmission {
         });
         let payload = serde_json::json!({ "lease_id": lease_id });
         let mut admission = Self {
-            scratch,
             db_path,
             leases: Vec::new(),
         };
@@ -5111,7 +4602,8 @@ mod tests {
             "snapshot_input_manifest",
             "snapshot_stage_build",
             "snapshot_stability_verify",
-            "delta_computation",
+            "plan",
+            "commit",
             "transfer_apply_verify",
             "record_writes",
         ] {

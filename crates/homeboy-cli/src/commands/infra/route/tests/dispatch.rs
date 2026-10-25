@@ -976,7 +976,6 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
             expected_source_snapshot_identity: None,
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
-            reuse_compatible_snapshot: false,
             job_overrides: runners::LabJobOverrides::default(),
         };
         let recipe = homeboy_lab_runner::LabStagingRecipe::from_request(

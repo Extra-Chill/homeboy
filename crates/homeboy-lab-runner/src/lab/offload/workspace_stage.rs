@@ -317,25 +317,24 @@ fn prepare_lab_offload_workspace_stage_inner(
     // source objects. A job-owned execution view must therefore materialize its
     // own checkout instead of borrowing a snapshot another job may reap.
     let requires_chunk_transfer = !declared_agent_task_evidence_inputs(&offload_args).is_empty();
+    let mut batched_extras = None;
     let synced = preflight_before_workspace_sync(
         requires_chunk_transfer,
         || lab_runner_file_transfer(runner_id).map(|_| ()),
         || {
             control.checkpoint()?;
-            Ok(
-                if request.reuse_compatible_snapshot && run_isolation_token.is_none() {
-                    match reuse_compatible_snapshot_workspace(runner_id, &sync_options)? {
-                        Some(snapshot) => (snapshot, 0),
-                        None => crate::workspace::sync_workspace_controlled(
-                            runner_id,
-                            sync_options,
-                            control,
-                        )?,
-                    }
-                } else {
-                    crate::workspace::sync_workspace_controlled(runner_id, sync_options, control)?
-                },
-            )
+            if sync_mode != RunnerWorkspaceSyncMode::Git {
+                let (primary, extras, mapping) =
+                    crate::lab_workspaces::sync_lab_workspace_roots_controlled(
+                        runner_id,
+                        sync_options,
+                        &extra_workspaces,
+                        control,
+                    )?;
+                batched_extras = Some((extras, mapping));
+                return Ok((primary, 0));
+            }
+            crate::workspace::sync_workspace_controlled(runner_id, sync_options, control)
         },
     )?
     .0;
@@ -473,13 +472,18 @@ fn prepare_lab_offload_workspace_stage_inner(
             );
         }
 
-        let synced_extra_workspaces = crate::lab_workspaces::sync_extra_lab_workspaces_controlled(
-            runner_id,
-            &synced.local_path,
-            extra_workspaces,
-            &mut workspace_mapping,
-            control,
-        )?;
+        let synced_extra_workspaces = if let Some((extras, mapping)) = batched_extras {
+            workspace_mapping.extend(mapping);
+            extras
+        } else {
+            crate::lab_workspaces::sync_extra_lab_workspaces_controlled(
+                runner_id,
+                &synced.local_path,
+                extra_workspaces,
+                &mut workspace_mapping,
+                control,
+            )?
+        };
         completed_extras = serde_json::json!(synced_extra_workspaces);
         if !synced_extra_workspaces.is_empty() {
             plan = with_step(
@@ -2190,12 +2194,32 @@ mod tests {
             let runner_root = tempfile::tempdir().unwrap();
             for root in [source.path(), extra.path()] {
                 std::fs::write(root.join("input.txt"), "materialized bytes\n").unwrap();
+                std::fs::write(root.join("deleted"), b"remove me").unwrap();
+                std::fs::write(root.join("executable"), b"#!/bin/sh\nexit 0\n").unwrap();
                 git(root, &["init"]);
                 git(root, &["config", "user.email", "test@example.com"]);
                 git(root, &["config", "user.name", "Test"]);
                 git(root, &["add", "."]);
                 git(root, &["commit", "-m", "source"]);
             }
+            // Dirty bytes, deletion, executable mode, and untracked content
+            // must survive without changing the Git baseline.
+            for root in [source.path(), extra.path()] {
+                std::fs::write(root.join("input.txt"), b"dirty\0bytes\xff\n").unwrap();
+                std::fs::write(root.join("untracked"), b"untracked\n").unwrap();
+                std::fs::remove_file(root.join("deleted")).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(
+                        root.join("executable"),
+                        std::fs::Permissions::from_mode(0o755),
+                    )
+                    .unwrap();
+                    std::os::unix::fs::symlink("untracked", root.join("link")).unwrap();
+                }
+            }
+            crate::workspace::INVOCATIONS.with(|count| count.set(0));
             crate::create(&serde_json::json!({"id": "hash-once", "kind": "local", "workspace_root": runner_root.path()}).to_string(), false).unwrap();
             let args = vec!["homeboy".to_string(), "fuzz".to_string(), "run".to_string()];
             let request = LabOffloadRequest {
@@ -2233,6 +2257,59 @@ mod tests {
             .unwrap();
             std::env::remove_var("HOMEBOY_LAB_EXTRA_WORKSPACES_JSON");
             assert_eq!(stage.synced.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
+            crate::workspace::INVOCATIONS.with(|count| {
+                assert_eq!(
+                    count.get(),
+                    2,
+                    "one plan and one commit for the whole stage"
+                )
+            });
+            for synced in std::iter::once(&stage.synced).chain(&stage.synced_extra_workspaces) {
+                let local = Path::new(&synced.local_path);
+                let remote = Path::new(&synced.remote_path);
+                assert_eq!(
+                    std::fs::read(remote.join("input.txt")).unwrap(),
+                    b"dirty\0bytes\xff\n"
+                );
+                assert_eq!(
+                    std::fs::read(remote.join("untracked")).unwrap(),
+                    b"untracked\n"
+                );
+                assert!(!remote.join("deleted").exists());
+                assert_eq!(
+                    std::fs::read(remote.join("executable")).unwrap(),
+                    std::fs::read(local.join("executable")).unwrap()
+                );
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_ne!(
+                        std::fs::metadata(remote.join("executable"))
+                            .unwrap()
+                            .permissions()
+                            .mode()
+                            & 0o100,
+                        0
+                    );
+                }
+                for args in [
+                    &["rev-parse", "HEAD"][..],
+                    &["status", "--porcelain=v1", "-z"][..],
+                ] {
+                    let expected = std::process::Command::new("git")
+                        .args(args)
+                        .current_dir(local)
+                        .output()
+                        .unwrap();
+                    let actual = std::process::Command::new("git")
+                        .args(args)
+                        .current_dir(remote)
+                        .output()
+                        .unwrap();
+                    assert!(actual.status.success());
+                    assert_eq!(actual.stdout, expected.stdout);
+                }
+            }
             // Attachment must be independent of controller filesystem access.
             std::fs::remove_file(source.path().join("input.txt")).unwrap();
             std::fs::remove_file(extra.path().join("input.txt")).unwrap();
