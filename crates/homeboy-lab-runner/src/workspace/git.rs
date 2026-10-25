@@ -329,36 +329,56 @@ const GIT_OBJECT_CACHE_REF_LIMIT: usize = 64;
 /// objects unreachable from the exclusions and records the boundary commits as
 /// prerequisites the cache is known to hold. An unreachable or empty cache
 /// yields no exclusions and a complete transfer.
-pub(super) fn bundle_prerequisites(
+///
+/// Two processes answer this for the whole cache: one lists the cached commits
+/// known locally, one lists the commits descending from `HEAD` on their
+/// ancestry paths. A failed query yields a complete transfer.
+pub(crate) fn bundle_prerequisites(
     local_path: &Path,
     head: &str,
     cached: &[String],
     control: &WorkspaceControl,
 ) -> Result<Vec<String>> {
-    let mut prerequisites = Vec::new();
-    for commit in cached {
-        let commit = commit.as_str();
-        if prerequisites.iter().any(|known| known == commit) {
-            continue;
-        }
-        let present = control.output(
+    if cached.is_empty() {
+        return Ok(Vec::new());
+    }
+    let commits = |leading: &[&str], action: &str| -> Result<Option<Vec<String>>> {
+        let output = control.output_exact(
             Command::new("git")
-                .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
+                .arg("rev-list")
+                .args(leading)
+                .arg("--ignore-missing")
+                .args(cached)
                 .env("GIT_NO_LAZY_FETCH", "1")
                 .current_dir(local_path),
-            "probe cached git commit",
+            action,
         )?;
-        if !present.status.success() {
-            continue;
-        }
-        let contains_head = control.output(
-            Command::new("git")
-                .args(["merge-base", "--is-ancestor", head, commit])
-                .current_dir(local_path),
-            "probe cached git commit ancestry",
-        )?;
-        if !contains_head.status.success() {
-            prerequisites.push(commit.to_string());
+        Ok(output.status.success().then(|| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }))
+    };
+    let Some(present) = commits(
+        &["--no-walk=unsorted"],
+        "list cached git commits known locally",
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let exclude_head = format!("^{head}");
+    let Some(contain_head) = commits(
+        &["--ancestry-path", &exclude_head],
+        "list cached git commits containing HEAD",
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut prerequisites: Vec<String> = Vec::new();
+    for commit in present {
+        if commit != head && !contain_head.contains(&commit) && !prerequisites.contains(&commit) {
+            prerequisites.push(commit);
         }
     }
     Ok(prerequisites)
