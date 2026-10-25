@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.32] - 2026-10-25
+
+### Changed
+- Harvested candidate commit satisfies Cook's required patch artifact
+- Delete the Cook runtime pin so recover continues Cooks recorded by older Homeboy builds
+
 ## [0.433.31] - 2026-10-25
 
 ### Changed
