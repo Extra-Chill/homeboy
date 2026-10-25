@@ -25,7 +25,7 @@ pub(super) struct PlanResponse {
     pub(super) available_inodes: u64,
     pub(super) total_bytes: u64,
     pub(super) tips: Vec<Vec<String>>,
-    pub(super) missing: Vec<Vec<super::super::snapshot::WorkspaceContentManifestEntry>>,
+    pub(super) missing: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,6 +80,9 @@ pub(super) fn materialization_plan_controlled(
 ) -> Result<serde_json::Value> {
     control.checkpoint()?;
     let request: PlanRequest = json(&fs::read(input).map_err(io)?)?;
+    if request.identity != homeboy_product_identity::build_identity().display {
+        return Err(io("runner build identity mismatch"));
+    }
     let first = request
         .roots
         .first()
@@ -90,8 +93,32 @@ pub(super) fn materialization_plan_controlled(
     )?;
     let disk = local_runner_workspace_disk_probe(Path::new(&first.remote_path))
         .ok_or_else(|| io("runner filesystem capacity unavailable"))?;
-    let mut tips = Vec::new();
+    let store = super::blobs::store(&first.remote_path);
+    super::blobs::prune(&store)?;
+    let inventory = super::blobs::inventory(&request.roots)?;
     let mut missing = Vec::new();
+    let mut required_bytes = 0u64;
+    for (digest, bytes) in &inventory {
+        let path = store.join(super::blobs::key(digest)?);
+        if !super::blobs::valid(&path, digest, control)? {
+            let _ = fs::remove_file(path);
+            missing.push(digest.clone());
+            required_bytes = required_bytes.saturating_add(*bytes);
+        }
+    }
+    let mut required_inodes = missing.len() as u64;
+    for root in &request.roots {
+        let size = super::blobs::assembled_size(root);
+        required_bytes = required_bytes.saturating_add(size.bytes);
+        required_inodes += size.inodes;
+    }
+    if required_bytes > probe.available_bytes
+        || required_inodes > probe.available_inodes
+        || runner_workspace_disk_is_critical(disk)
+    {
+        return Err(io("runner snapshot capacity refused by plan"));
+    }
+    let mut tips = Vec::new();
     for root in request.roots {
         let output = homeboy_core::observation::phase_timing::time(
             "stage.lab.source_materialization.runner_inventory",
@@ -117,9 +144,6 @@ pub(super) fn materialization_plan_controlled(
                 .map(str::to_string)
                 .collect(),
         );
-        // The execution view is private, not a mutable seed from another job.
-        // Until blob-addressed transfer lands, all overlay paths are requested.
-        missing.push(root.manifest.entries);
     }
     control.checkpoint()?;
     serde_json::to_value(PlanResponse {
@@ -150,6 +174,22 @@ pub(super) fn materialization_commit_controlled(
             "runner build identity changed since materialization plan",
         ));
     }
+    let first = request.roots.first().ok_or_else(|| io("empty commit"))?;
+    let store = super::blobs::store(&first.summary.remote_path);
+    fs::create_dir_all(&store).map_err(io)?;
+    if let Ok(blobs) = fs::read_dir(input.join("blobs")) {
+        for blob in blobs {
+            control.checkpoint()?;
+            let blob = blob.map_err(io)?;
+            let digest = format!("sha256:{}", blob.file_name().to_string_lossy());
+            let key = super::blobs::key(&digest)?;
+            if !super::blobs::valid(&blob.path(), &digest, control)? {
+                return Err(io("transferred blob digest mismatch"));
+            }
+            fs::rename(blob.path(), store.join(key)).map_err(io)?;
+        }
+    }
+    let mut synthetic = Vec::new();
     for (index, root) in request.roots.iter().enumerate() {
         control.checkpoint()?;
         validate_absolute_path("remote_path", &root.summary.remote_path)?;
@@ -157,14 +197,26 @@ pub(super) fn materialization_commit_controlled(
             return Err(io("materialization metadata path mismatch"));
         }
         let source = input.join(index.to_string()).join("source");
-        let (_, digest) = super::super::snapshot::workspace_content_manifest_and_hash_unspanned(
-            &source,
-            &[],
-            WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-            control,
-        )?;
+        super::blobs::assemble(&root.summary, &source, control)?;
+        let (actual, digest) =
+            super::super::snapshot::workspace_content_manifest_and_hash_unspanned(
+                &source,
+                &[],
+                WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                control,
+            )?;
         if digest != root.summary.content_hash {
             return Err(io("runner materialization content digest mismatch"));
+        }
+        for (expected, actual) in root.summary.manifest.entries.iter().zip(&actual.entries) {
+            if expected.path != actual.path
+                || expected.symlink_target != actual.symlink_target
+                || (expected.kind == "file"
+                    && expected.mode.is_some()
+                    && expected.mode != actual.mode)
+            {
+                return Err(io("runner materialization mode or symlink mismatch"));
+            }
         }
         if let Some(git) = &root.install_git {
             let command = super::super::git::git_bundle_install_command(
@@ -194,7 +246,24 @@ pub(super) fn materialization_commit_controlled(
                 return Err(io(String::from_utf8_lossy(&output.stderr)));
             }
         }
-        if root.install_git.is_some() || root.prepared_git {
+        if root.prepared_git {
+            let command = super::super::snapshot::synthetic_git_checkout_command(
+                &source.display().to_string(),
+                &root.metadata.snapshot_identity,
+                None,
+                None,
+                false,
+            );
+            control.shell(&command, "install synthetic Git baseline")?;
+            synthetic.push(serde_json::json!({
+                "synthetic_commit": control.git(&source, &["rev-parse", "HEAD"])?,
+                "synthetic_ref": control.git(&source, &["symbolic-ref", "HEAD"])?,
+                "synthetic_tree": control.git(&source, &["rev-parse", "HEAD^{tree}"])?,
+            }));
+        } else {
+            synthetic.push(serde_json::Value::Null);
+        }
+        if root.install_git.is_some() {
             fs::rename(
                 input.join(index.to_string()).join("git/.git"),
                 source.join(".git"),
@@ -282,5 +351,6 @@ pub(super) fn materialization_commit_controlled(
         }
     }
     control.checkpoint()?;
-    Ok(serde_json::json!({"committed": true}))
+    super::blobs::prune(&store)?;
+    Ok(serde_json::json!({"committed": true, "synthetic": synthetic}))
 }

@@ -91,6 +91,10 @@ pub struct WorkspaceContentManifestEntry {
     pub bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_executable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
 }
 
 #[cfg(test)]

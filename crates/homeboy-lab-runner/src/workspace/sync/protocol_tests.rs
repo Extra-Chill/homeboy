@@ -20,13 +20,8 @@ fn fixture(transport: &Path, destination: &Path) -> CommitRequest {
         run_isolation_token: None,
     };
     let source = transport.join("0/source");
-    let (snapshot, _, manifest, hash) = snapshot_identity_manifest_and_hash_controlled(
-        &source,
-        &[],
-        &[],
-        &WorkspaceControl::default(),
-    )
-    .unwrap();
+    let (snapshot, _, manifest, hash) =
+        snapshot_content_controlled(&source, &[], &[], &WorkspaceControl::default()).unwrap();
     let remote = destination.display().to_string();
     let metadata = workspace_metadata(WorkspaceMetadataRequest {
         runner_id: "protocol",
@@ -42,6 +37,15 @@ fn fixture(transport: &Path, destination: &Path) -> CommitRequest {
         run_id: None,
         cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
     });
+    fs::create_dir(transport.join("blobs")).unwrap();
+    fs::rename(
+        source.join("file"),
+        transport
+            .join("blobs")
+            .join(super::blobs::key(manifest.entries[0].sha256.as_deref().unwrap()).unwrap()),
+    )
+    .unwrap();
+    fs::remove_dir(&source).unwrap();
     CommitRequest {
         identity: homeboy_product_identity::build_identity().display,
         roots: vec![CommitRoot {
@@ -66,7 +70,13 @@ fn commit_rejects_corrupt_bytes_before_publishing_anything() {
     let destination = root.path().join("workspace");
     let request = fixture(incoming.path(), &destination);
     write_json(&incoming.path().join("commit.json"), &request).unwrap();
-    fs::write(incoming.path().join("0/source/file"), b"corrupt").unwrap();
+    let blob = fs::read_dir(incoming.path().join("blobs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(blob, b"corrupt").unwrap();
     assert!(
         format!("{:?}", materialization_commit(incoming.path()).unwrap_err())
             .contains("digest mismatch")
@@ -105,8 +115,8 @@ fn interrupted_commit_replay_converges_without_replacing_another_lease() {
     );
     // A reconnect re-sends the immutable stream. The existing complete tree is
     // verified, not replaced, and the same lease remains authoritative.
-    fs::create_dir(incoming.path().join("0/source")).unwrap();
-    fs::write(incoming.path().join("0/source/file"), b"exact\0bytes\xff").unwrap();
+    // Blob replay recreates the temporary assembled root.
+
     materialization_commit(incoming.path()).unwrap();
     assert_eq!(
         fs::read(destination.join("file")).unwrap(),
@@ -149,7 +159,13 @@ fn plan_capacity_response_includes_aggregate_requirements() {
         serde_json::from_value(materialization_plan(&incoming.path().join("plan.json")).unwrap())
             .unwrap();
     assert_eq!(response.tips.len(), 1);
-    assert_eq!(response.missing[0], request.roots[0].manifest.entries);
+    assert_eq!(
+        response.missing,
+        super::blobs::inventory(&request.roots)
+            .unwrap()
+            .into_keys()
+            .collect::<Vec<_>>()
+    );
     let runner = crate::Runner {
         id: "capacity".into(),
         ..serde_json::from_value::<crate::Runner>(

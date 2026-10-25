@@ -483,7 +483,9 @@ pub use workspace::{
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
     RunnerWorkspaceUpdateOutput, WorkspaceContentManifest, WorkspaceContentManifestEntry,
 };
-pub use workspace::{materialization_commit, materialization_plan, reap_run_workspace};
+pub use workspace::{
+    materialization_commit, materialization_plan, prune_workspace_blobs, reap_run_workspace,
+};
 #[cfg(test)]
 pub(crate) use workspace::{workspace_content_hash, workspace_content_manifest_for_policy};
 pub(crate) use workspace::{

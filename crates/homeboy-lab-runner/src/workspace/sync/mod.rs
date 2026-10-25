@@ -32,9 +32,7 @@ use super::snapshot::{
     snapshot_manifest_delta, workspace_content_manifest_for_policy,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
-use super::snapshot::{
-    materialize_snapshot_with_scratch_controlled, snapshot_identity_manifest_and_hash_controlled,
-};
+use super::snapshot::{materialize_snapshot_with_scratch_controlled, snapshot_content_controlled};
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
     RunnerWorkspaceLivenessEvidence, RunnerWorkspaceMaterializationPlan, RunnerWorkspaceMetadata,
@@ -61,6 +59,9 @@ use homeboy_lab_contract::lab::handoff::{
 };
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+mod blob_tests;
+pub(super) mod blobs;
 mod protocol;
 mod protocol_controller;
 #[cfg(test)]
@@ -69,6 +70,10 @@ mod protocol_tests;
 mod protocol_transport_tests;
 mod snapshots;
 pub use protocol::{materialization_commit, materialization_plan};
+
+pub fn prune_workspace_blobs(workspace_root: &Path) -> Result<()> {
+    blobs::prune(&workspace_root.join(".homeboy-blobs"))
+}
 pub(crate) use protocol_controller::sync_workspace_batch_controlled;
 #[cfg(test)]
 pub(crate) use protocol_controller::INVOCATIONS;
@@ -762,7 +767,7 @@ fn materialize_git_fallback_filesystem_snapshot(
     control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
     let (snapshot, stats, content_manifest, content_hash) =
-        snapshot_identity_manifest_and_hash_controlled(local_path, excludes, includes, control)?;
+        snapshot_content_controlled(local_path, excludes, includes, control)?;
     let remote_path = temp::unique_name(
         &deterministic_remote_path(
             workspace_root,
@@ -809,6 +814,10 @@ fn materialize_git_fallback_filesystem_snapshot(
     materialization_plan.fallback_reason =
         Some("controller_git_object_closure_unavailable".to_string());
     materialization_plan.snapshot_transfer = Some(super::types::SnapshotTransferStats {
+        missing_blobs: stats.files as u64,
+        missing_bytes: stats.bytes,
+        total_blobs: stats.files as u64,
+        total_bytes: stats.bytes,
         reused: ByteFileCounts::default(),
         transferred: stats,
         final_size: stats,
@@ -1507,6 +1516,22 @@ fn prune_workspaces_for_runner(
     })?;
     validate_absolute_path("workspace_root", workspace_root)?;
     let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
+    if options.apply {
+        if runner.kind == RunnerKind::Local {
+            prune_workspace_blobs(Path::new(workspace_root))?;
+        } else {
+            let binary = crate::remote_runner_homeboy_path(runner, "prune workspace blobs")?;
+            let command = format!(
+                "{} runner workspace prune-blobs --workspace-root {}",
+                shell::quote_arg(&binary),
+                shell::quote_arg(workspace_root)
+            );
+            super::util::run_shell_command(
+                &super::util::shell_command_for_runner(runner, &command)?,
+                "prune workspace blob retention",
+            )?;
+        }
+    }
     let limit = options.limit.max(1);
     let passes = if options.apply || options.converge {
         options.passes.max(1)
@@ -3140,7 +3165,9 @@ fn is_stale_materialized_workspace_lifecycle(metadata: &serde_json::Value, path:
         && metadata
             .get("snapshot_identity")
             .and_then(|value| value.as_str())
-            .is_some_and(|identity| identity.starts_with("snapshot:"))
+            .is_some_and(|identity| {
+                identity.starts_with("snapshot:") || identity.starts_with("sha256:")
+            })
         && metadata.get("remote_path").and_then(|value| value.as_str()) == path.to_str()
         && resource.get("owner").and_then(|value| value.as_str()) == Some("runner.workspace")
         && resource.get("run_id").and_then(|value| value.as_str()) == Some("materialized-workspace")
@@ -4498,40 +4525,28 @@ mod tests {
         let excludes = vec!["excluded".to_string()];
         let control = WorkspaceControl::default();
         let (identity, stats, manifest, digest) =
-            snapshot::snapshot_identity_manifest_and_hash_controlled(
-                source.path(),
-                &excludes,
-                &[],
-                &control,
-            )
-            .unwrap();
-        let expected =
-            snapshot::local_snapshot_stats_controlled(source.path(), &excludes, &[], &control)
-                .unwrap();
+            snapshot::snapshot_content_controlled(source.path(), &excludes, &[], &control).unwrap();
         let independent = snapshot::workspace_content_manifest_and_hash_for_policy(
             source.path(),
             &excludes,
             crate::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
         )
         .unwrap();
-        assert_eq!((manifest, digest), independent);
-        // Independent legacy encoding guards the persisted snapshot identity,
-        // including the spelling-only treatment of symlinks.
-        use sha2::{Digest, Sha256};
-        let mut legacy = Sha256::new();
-        legacy.update(source.path().display().to_string().as_bytes());
-        legacy.update(b"nogitnogit");
-        #[cfg(unix)]
-        legacy.update(b"link");
-        legacy.update(b"nested/dirnested/input/file");
-        legacy.update(7_u64.to_le_bytes());
-        legacy.update(b"payload");
+        assert_eq!(identity, digest);
         assert_eq!(
-            identity,
-            format!("snapshot:{}", &format!("{:x}", legacy.finalize())[..16])
+            stats.files,
+            manifest.entries.iter().filter(|e| e.kind == "file").count()
         );
-        assert_eq!(stats.files, expected.files);
-        assert_eq!(stats.bytes, expected.bytes);
+        assert_eq!(
+            stats.bytes,
+            manifest
+                .entries
+                .iter()
+                .filter(|e| e.kind == "file")
+                .filter_map(|e| e.bytes)
+                .sum::<u64>()
+        );
+        assert_eq!((manifest, digest), independent);
         assert_eq!(
             identity,
             snapshot::snapshot_identity_controlled(source.path(), &excludes, &[], &control)
@@ -4597,11 +4612,27 @@ mod tests {
         }
         let reopened = ObservationStore::open_initialized_at(store.database_path()).unwrap();
         let spans = reopened.phase_spans(&run.id).unwrap().spans;
-        for name in [
-            "content_manifest_hash",
+        for name in ["content_manifest_hash", "plan", "commit"] {
+            assert_eq!(
+                spans
+                    .iter()
+                    .filter(|s| s.id == format!("stage.lab.source_materialization.{name}"))
+                    .count(),
+                2,
+                "one {name} per stage"
+            );
+        }
+        for retired in [
             "snapshot_input_manifest",
             "snapshot_stage_build",
             "snapshot_stability_verify",
+        ] {
+            assert!(!spans
+                .iter()
+                .any(|s| s.id == format!("stage.lab.source_materialization.{retired}")));
+        }
+        for name in [
+            "content_manifest_hash",
             "plan",
             "commit",
             "transfer_apply_verify",

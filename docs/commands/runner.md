@@ -1016,8 +1016,13 @@ homeboy runner workspace sync <runner-id> --path <local-worktree> --mode git
 
 Modes:
 
-- `snapshot` copies the current local tree, including dirty edits, through a tar stream from the controller. Use this for private or proxy-dependent sources because the runner does not need repository access.
+- `snapshot` installs the current local tree, including dirty edits, from a content manifest and missing SHA-256 blobs streamed directly from the controller. Use this for private or proxy-dependent sources because the runner does not need repository access.
+- `snapshot-git` uses the same content transfer and installs Git metadata without a throwaway checkout. Sources without Git receive a synthetic baseline.
 - `git` requires a clean local tree, then clones or refreshes `remote.origin.url` on the runner and checks out local `HEAD` detached. Use this only when the runner is allowed to fetch the remote directly.
+
+Snapshot stages use two runner calls: `plan` checks identity/capacity and reports missing blobs; `commit` verifies blobs and assembled trees before atomic installation. `snapshot_identity` is the portable content digest. Transfer stats report stage-wide, cross-root deduplicated `missing_blobs`, `missing_bytes`, `total_blobs`, and `total_bytes` on each root's output. No controller source staging tree is created; changed bytes or file metadata during streaming refuse the snapshot.
+
+The runner keeps verified blobs in `workspace_root/.homeboy-blobs`, independent of mutable execution views. Corrupt blobs are requested again by the next plan. Workspace prune applies blob retention too: seven days since last use and a 10 GiB cap, evicting oldest mtimes first. Interrupted commits can be replayed with the same lease.
 
 Private/proxied sources:
 

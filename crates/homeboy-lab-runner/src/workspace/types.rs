@@ -191,6 +191,10 @@ pub struct RunnerWorkspaceMaterializationContract {
 /// compatible immutable seed; `transferred` is copied from the controller.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct SnapshotTransferStats {
+    pub missing_blobs: u64,
+    pub missing_bytes: u64,
+    pub total_blobs: u64,
+    pub total_bytes: u64,
     pub reused: ByteFileCounts,
     pub transferred: ByteFileCounts,
     pub final_size: ByteFileCounts,
