@@ -139,11 +139,10 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// The attempt's applied candidate failed (or never completed) its
     /// deterministic gates and holds no replacement proof yet.
     pub applied_gate_failure: bool,
-    /// The attempt's applied candidate is verified, carries a publishable
-    /// review form, and has no publication receipt.
-    pub publish_ready: bool,
-    /// Applied, verified candidate with no publication receipt, independently
-    /// of whether its outcome contains a publishable review form.
+    /// Applied, verified candidate with no publication receipt. Its review
+    /// form is publication's input, not a reason to replay provider work: a
+    /// missing, incomplete or malformed agent form is replaced with
+    /// `--review-form` on the publish step (#16441).
     pub verified_unpublished: bool,
     /// HEAD of the destination worktree when its branch holds commits ahead
     /// of the recorded base (#16181). A terminal `no_changes` attempt in that
@@ -180,21 +179,16 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
             ));
         }
     }
-    if inputs.publish_ready && !status_is_settled(&status) {
+    if inputs.verified_unpublished
+        && inputs.agent_incomplete_reason.is_none()
+        && !status_is_settled(&status)
+    {
         return CookRecoveryStep::Publish;
     }
-    if status == CookStatus::CandidateRecoverable {
-        if inputs.verified_unpublished {
-            return CookRecoveryStep::none(format!(
-                "The verified candidate has no publishable review form. Inspect it with `agent-task diagnose {run}`; if the task is done, publish it with a complete review form via `agent-task recover {run} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`.",
-                run = inputs.run_id
-            ));
-        }
-        if inputs.continuation_completed {
-            return CookRecoveryStep::none(
-                "The candidate's terminal continuation is already completed; inspect it with `agent-task diagnose` before supplying publication inputs.",
-            );
-        }
+    if status == CookStatus::CandidateRecoverable && inputs.continuation_completed {
+        return CookRecoveryStep::none(
+            "The candidate's terminal continuation is already completed; inspect it with `agent-task diagnose` before supplying publication inputs.",
+        );
     }
     if status == CookStatus::NoChanges {
         if let Some(candidate_ref) = inputs.adoptable_candidate_ref {
@@ -940,24 +934,20 @@ mod tests {
     }
 
     #[test]
-    fn verified_candidate_without_review_form_requires_operator_form() {
-        let decided = step("candidate_recoverable", |inputs| {
-            inputs.run_id = "run-1";
-            inputs.verified_unpublished = true;
-            inputs.continuation_completed = true;
-        });
-        let CookRecoveryStep::None { reason } = decided else {
-            panic!("missing review form must not continue: {decided:?}");
-        };
-        assert!(reason.contains("agent-task recover run-1 --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>"));
-        assert_eq!(
-            step("candidate_recoverable", |inputs| {
-                inputs.verified_unpublished = true;
-                inputs.continuation_completed = true;
-                inputs.publish_ready = true;
-            }),
-            CookRecoveryStep::Publish
-        );
+    fn verified_candidate_without_review_form_publishes_with_operator_form() {
+        // The review form is publication input: a verified candidate without
+        // a usable one publishes, never rearms or replays provider work.
+        for status in ["candidate_recoverable", "durable_failure"] {
+            assert_eq!(
+                step(status, |inputs| {
+                    inputs.verified_unpublished = true;
+                    inputs.continuation_completed = true;
+                    inputs.continuation_rearm_required = true;
+                }),
+                CookRecoveryStep::Publish,
+                "{status}"
+            );
+        }
         assert!(step("candidate_recoverable", |inputs| {
             inputs.continuation_completed = true;
         })
@@ -967,7 +957,7 @@ mod tests {
             cook_id: "cook".to_string(),
             run_id: "run-1".to_string(),
             status: "candidate_recoverable".to_string(),
-            step: CookRecoveryStep::none(reason),
+            step: CookRecoveryStep::none("no step"),
         };
         let supplied = super::super::AgentTaskSuppliedReviewForm {
             form: serde_json::from_value(serde_json::json!({
@@ -1161,7 +1151,7 @@ mod tests {
         ] {
             assert_eq!(
                 step(status, |inputs| {
-                    inputs.publish_ready = true;
+                    inputs.verified_unpublished = true;
                     inputs.retry_admitted = true;
                 }),
                 CookRecoveryStep::Publish,
@@ -1175,14 +1165,14 @@ mod tests {
             "green_no_finalize",
         ] {
             assert_ne!(
-                step(status, |inputs| inputs.publish_ready = true),
+                step(status, |inputs| inputs.verified_unpublished = true),
                 CookRecoveryStep::Publish,
                 "{status} is already settled"
             );
         }
         assert_eq!(
             step("candidate_recoverable", |inputs| {
-                inputs.publish_ready = true;
+                inputs.verified_unpublished = true;
                 inputs.agent_incomplete_reason = Some("not done");
             })
             .action_name(),

@@ -255,8 +255,13 @@ pub struct AiFilledReviewForm {
     /// The agent's own verdict on whether the requested task is done. Gates
     /// prove the repository still passes, not that the task was completed;
     /// only the agent can declare that, and it must do so structurally rather
-    /// than in prose (#16051). Absent means the form is incomplete.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// than in prose (#16051). Absent means the form is incomplete, and so
+    /// does any value other than the two verdicts (#16441).
+    #[serde(
+        default,
+        deserialize_with = "completion_field",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub completion: Option<AiReviewCompletion>,
     /// Why the task is not complete. Required when `completion` is `incomplete`.
     #[serde(
@@ -304,6 +309,20 @@ where
         Prose::One(text) => single_line_prose(&text),
         Prose::Many(entries) => single_line_prose(&entries.join(" ")),
     })
+}
+
+/// Read a `completion` that is neither verdict as absent, which `validate`
+/// already refuses as an incomplete form. A prose answer in this enum slot is
+/// the same shape mistake #12386 tolerates for the prose fields: it must reach
+/// the review-form loop as a gap rather than fail the parse and discard a
+/// verified candidate along with the form's other content (#16441).
+fn completion_field<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<AiReviewCompletion>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(AiReviewCompletion::deserialize(serde_json::Value::deserialize(deserializer)?).ok())
 }
 
 /// Collapse line breaks, control characters, and whitespace runs into single
@@ -2235,6 +2254,34 @@ mod tests {
             .expect("absence is not an error")
             .is_none());
     }
+
+    /// A prose `completion` reads as absent: the form parses as incomplete and
+    /// keeps the rest of the agent's content (#16441).
+    #[test]
+    fn prose_completion_parses_as_an_incomplete_form() {
+        let outputs = serde_json::json!({
+            "review_form": {
+                "pr_title": "Guard the reload render path",
+                "summary": "Guard the reload path.",
+                "what_changed": ["Guard reloads"],
+                "compatibility": "Additive",
+                "used_for": "Traced the reload path, then implemented and verified the guard.",
+                "completion": "All acceptance criteria hold and the gates pass.",
+            }
+        });
+
+        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("a prose completion is not a parse error")
+            .expect("form present");
+        assert_eq!(form.completion, None);
+        assert_eq!(form.pr_title, "Guard the reload render path");
+        assert_eq!(form.summary, "Guard the reload path.");
+        assert_eq!(form.what_changed, vec!["Guard reloads".to_string()]);
+        assert_eq!(form.compatibility, "Additive");
+        let gap = form.validate().expect_err("an absent verdict is incomplete");
+        assert!(gap.message.contains("completion is missing"), "{}", gap.message);
+    }
+
     fn dossier() -> AgentTaskReviewDossier {
         AgentTaskReviewDossier {
             schema: dossier_schema(),
