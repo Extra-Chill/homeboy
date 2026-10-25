@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.35] - 2026-10-25
+
+### Changed
+- Reuse the status observation's runner identity during Lab handoff
+
 ## [0.433.34] - 2026-10-25
 
 ### Changed
