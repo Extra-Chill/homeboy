@@ -77,19 +77,19 @@ pub(super) fn sync_validation_dependency_workspaces(
 }
 
 #[derive(Debug)]
-struct PreparedValidationDependencyWorkspace {
-    remote_name: String,
-    local_path: PathBuf,
-    prepared_path: PathBuf,
+pub(crate) struct PreparedValidationDependencyWorkspace {
+    pub(crate) remote_name: String,
+    pub(crate) local_path: PathBuf,
+    pub(crate) prepared_path: PathBuf,
     /// Excludes for shipping this prepared tree (#15797). See
     /// [`prepared_dependency_snapshot_excludes`].
-    snapshot_excludes: Vec<String>,
+    pub(crate) snapshot_excludes: Vec<String>,
     /// Clean git source evidence, published beside the runner checkout.
-    source_evidence: String,
-    prepared: crate::validation_dependency_cache::PreparedDependencyCopy,
+    pub(crate) source_evidence: String,
+    pub(crate) prepared: crate::validation_dependency_cache::PreparedDependencyCopy,
 }
 
-fn validation_dependency_workspaces(
+pub(crate) fn validation_dependency_workspaces(
     local_path: &Path,
     excludes: &[String],
     selected_dependency_ids: Option<&[String]>,

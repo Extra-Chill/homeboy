@@ -15,6 +15,7 @@ use super::CmdResult;
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RunnerWorkspaceOutput {
+    Materialization(serde_json::Value),
     List(Box<RunnerWorkspaceListOutput>),
     Snapshots(Box<RunnerWorkspaceSnapshotsOutput>),
     Sync(Box<RunnerWorkspaceSyncOutput>),
@@ -26,6 +27,16 @@ pub enum RunnerWorkspaceOutput {
 
 #[derive(Subcommand)]
 pub(super) enum RunnerWorkspaceCommand {
+    /// Internal stage-wide source materialization endpoint
+    #[command(hide = true)]
+    Materialization {
+        #[arg(long)]
+        input: std::path::PathBuf,
+        #[arg(long)]
+        response: std::path::PathBuf,
+        #[arg(long)]
+        commit: bool,
+    },
     /// List recent runner-side Lab workspaces and reusable exec commands
     List {
         /// Runner ID
@@ -174,6 +185,25 @@ pub(super) enum RunnerWorkspaceSyncModeArg {
 
 pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceOutput> {
     match command {
+        RunnerWorkspaceCommand::Materialization {
+            input,
+            response,
+            commit,
+        } => {
+            let value = if commit {
+                runner::materialization_commit(&input)?
+            } else {
+                runner::materialization_plan(&input)?
+            };
+            std::fs::write(
+                response,
+                serde_json::to_vec(&value).map_err(|error| {
+                    homeboy::core::Error::internal_json(error.to_string(), None)
+                })?,
+            )
+            .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+            Ok((RunnerWorkspaceOutput::Materialization(value), 0))
+        }
         RunnerWorkspaceCommand::List { runner_id, limit } => {
             runner::list_workspaces(&runner_id, limit).map(|(output, exit_code)| {
                 (RunnerWorkspaceOutput::List(Box::new(output)), exit_code)

@@ -10,11 +10,11 @@ use crate::workspace::snapshot::{
     copy_snapshot_to_directory, excludes_with_links_to_excluded_targets, immutable_replay_snapshot,
     materialize_snapshot_piped, materialize_snapshot_stage,
     register_after_snapshot_directory_discovery_hook, snapshot_input_manifest,
-    snapshot_install_command, snapshot_overlay_install_command, snapshot_stable_manifest,
-    synthetic_checkout_value, validate_snapshot_stability, workspace_content_hash,
-    workspace_content_hash_algorithm, workspace_content_hash_for_policy,
-    workspace_content_manifest_and_hash_for_policy, workspace_content_manifest_for_policy,
-    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    snapshot_install_command, snapshot_stable_manifest, synthetic_checkout_value,
+    validate_snapshot_stability, workspace_content_hash, workspace_content_hash_algorithm,
+    workspace_content_hash_for_policy, workspace_content_manifest_and_hash_for_policy,
+    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -110,7 +110,7 @@ fn snapshot_git_readback_failure_rolls_back_remote_workspace_and_registration() 
         let runner_root = tempfile::tempdir().expect("runner root");
         let shim_root = tempfile::tempdir().expect("git shim root");
         let shim = shim_root.path().join("git");
-        homeboy_test_support::write_executable(&shim, "#!/bin/sh\nif [ \"$1\" = \"-C\" ] && [ \"$3\" = \"rev-parse\" ] && [ \"$4\" = \"HEAD\" ] && [ -e \"$2/.git/refs/notes/homeboy-snapshot\" ]; then exit 1; fi\nexec /usr/bin/git \"$@\"\n", 0o755)
+        homeboy_test_support::write_executable(&shim, "#!/bin/sh\nif { [ \"$1\" = \"-C\" ] && [ \"$3\" = \"rev-parse\" ] && [ \"$4\" = \"HEAD\" ] && [ -e \"$2/.git/refs/notes/homeboy-snapshot\" ]; } || { [ \"$1\" = \"rev-parse\" ] && [ \"$2\" = \"HEAD\" ] && [ -e .git/refs/notes/homeboy-snapshot ]; }; then exit 1; fi\nexec /usr/bin/git \"$@\"\n", 0o755)
         .expect("write git shim");
 
         crate::create(
@@ -143,7 +143,7 @@ fn snapshot_git_readback_failure_rolls_back_remote_workspace_and_registration() 
         std::env::set_var("PATH", original_path);
 
         let error = result.expect_err("required snapshot-git readback must fail");
-        assert!(format!("{error:?}").contains("synthetic snapshot-git checkout"));
+        assert!(format!("{error:?}").contains("rev-parse"), "{error:?}");
         let workspaces_root = runner_root.path().join("_lab_workspaces");
         assert!(
             !workspaces_root.exists()
@@ -1694,10 +1694,6 @@ fn snapshot_install_commands_parse_under_posix_shells() {
         assert_parses_under_posix_shells(
             &snapshot_install_command(remote_path),
             "snapshot install command",
-        );
-        assert_parses_under_posix_shells(
-            &snapshot_overlay_install_command(remote_path),
-            "snapshot overlay install command",
         );
     }
 }

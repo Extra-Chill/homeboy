@@ -138,7 +138,6 @@ pub struct LabStagingRecipe {
     pub local_output_run_id_emitted: bool,
     pub read_only_polling: bool,
     pub require_controller_git_bundle: bool,
-    pub reuse_compatible_snapshot: bool,
     pub source_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_source_snapshot_identity: Option<String>,
@@ -220,7 +219,6 @@ impl LabStagingRecipe {
                 || local_output_run_id_emitted,
             read_only_polling: request.read_only_polling,
             require_controller_git_bundle: request.require_controller_git_bundle,
-            reuse_compatible_snapshot: request.reuse_compatible_snapshot,
             // Durable staging replays this recipe from a controller daemon
             // whose working directory is unrelated to the operator's checkout.
             // Bind relative source paths to the initiating process's cwd now,
@@ -3328,7 +3326,6 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 .as_deref(),
             verified_cook_baseline: request.recipe.verified_cook_baseline.as_ref(),
             require_controller_git_bundle: request.recipe.require_controller_git_bundle,
-            reuse_compatible_snapshot: request.recipe.reuse_compatible_snapshot,
             job_overrides: homeboy_core::lab_offload::LabJobOverrides {
                 env: request.recipe.job_override_env.clone(),
                 secret_env_names: request.recipe.secret_env_names.clone(),
@@ -4986,7 +4983,6 @@ mod tests {
             detach_after_handoff: true,
             source_path: Some(std::path::Path::new("/work/source")),
             require_controller_git_bundle: true,
-            reuse_compatible_snapshot: true,
             job_overrides: homeboy_core::lab_offload::LabJobOverrides {
                 env,
                 secret_env_names: vec!["AGENT_TOKEN".to_string()],

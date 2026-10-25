@@ -49,9 +49,6 @@ pub struct LabOffloadRequest<'a> {
     pub verified_cook_baseline: Option<&'a serde_json::Value>,
     /// Select controller-bundle materialization before runner-side Git transport.
     pub require_controller_git_bundle: bool,
-    /// Reuse a clean, exact-source snapshot already materialized on the selected
-    /// runner instead of rebuilding the source through Git transport.
-    pub reuse_compatible_snapshot: bool,
     pub job_overrides: LabJobOverrides,
 }
 
@@ -105,7 +102,6 @@ impl<'a> LabOffloadRequest<'a> {
             expected_source_snapshot_identity: None,
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
-            reuse_compatible_snapshot: false,
             job_overrides: LabJobOverrides::default(),
         }
     }
@@ -143,7 +139,6 @@ mod tests {
             expected_source_snapshot_identity,
             verified_cook_baseline,
             require_controller_git_bundle,
-            reuse_compatible_snapshot,
             job_overrides,
         } = request;
 
@@ -172,7 +167,6 @@ mod tests {
         assert!(expected_source_snapshot_identity.is_none());
         assert!(verified_cook_baseline.is_none());
         assert!(!require_controller_git_bundle);
-        assert!(!reuse_compatible_snapshot);
         assert!(job_overrides.env.is_empty());
         assert!(job_overrides.secret_env_names.is_empty());
         assert!(job_overrides.workspace_root.is_none());

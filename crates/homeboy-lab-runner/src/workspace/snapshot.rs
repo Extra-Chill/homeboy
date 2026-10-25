@@ -16,9 +16,8 @@ use super::control::WorkspaceControl;
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
 use super::types::{ByteFileCounts, SnapshotStats, SnapshotTransferStats};
 use super::util::{
-    git_output, hex_prefix, owner_capture_shell, owner_restore_shell, parent_remote_path,
-    run_shell_capture, run_shell_command, run_shell_command_before, shell_command_for_runner,
-    ssh_args, ssh_client_for_runner,
+    git_output, hex_prefix, run_shell_capture, run_shell_command, run_shell_command_before,
+    shell_command_for_runner, ssh_args, ssh_client_for_runner,
 };
 use homeboy_lab_contract::lab::handoff::{
     runner_workspace_metadata_path, runner_workspace_state_dir,
@@ -115,16 +114,6 @@ pub use homeboy_runner_contract::workspace_content_identity::{
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
-// The SSH path passes this script through `sh -c` after shell-quoting it. A
-// single quote can expand from one byte to five bytes at that layer. 16 KiB
-// therefore remains below Linux's 128 KiB single-argument limit even in that
-// worst case, while leaving room for the SSH invocation and its environment.
-const INCREMENTAL_PREPARE_COMMAND_MAX_BYTES: usize = 16 * 1024;
-
-// Fixed shell syntax, owner capture, UUID, and repeated path references. The
-// preflight deliberately overestimates so it can reject before allocating a
-// command proportional to the manifest.
-const INCREMENTAL_PREPARE_COMMAND_FIXED_OVERHEAD_BYTES: usize = 4 * 1024;
 const SNAPSHOT_MANIFEST_DIFFERENCE_LIMIT: usize = 8;
 
 pub(crate) fn snapshot_identity(
@@ -263,11 +252,18 @@ pub(super) fn workspace_content_manifest_and_hash_controlled(
 ) -> Result<(WorkspaceContentManifest, String)> {
     homeboy_core::observation::phase_timing::time(
         "stage.lab.source_materialization.content_manifest_hash",
-        || {
-            let walk = workspace_content_walk_controlled(path, excludes, policy, control)?;
-            Ok((walk.manifest, walk.content_identity))
-        },
+        || workspace_content_manifest_and_hash_unspanned(path, excludes, policy, control),
     )
+}
+
+pub(super) fn workspace_content_manifest_and_hash_unspanned(
+    path: &Path,
+    excludes: &[String],
+    policy: &str,
+    control: &WorkspaceControl,
+) -> Result<(WorkspaceContentManifest, String)> {
+    let walk = workspace_content_walk_controlled(path, excludes, policy, control)?;
+    Ok((walk.manifest, walk.content_identity))
 }
 
 /// Physical facts about one walked manifest entry, aligned by index with
@@ -1123,124 +1119,6 @@ fn validate_workspace_content_manifest(manifest: &WorkspaceContentManifest) -> R
 /// Materialize an immutable snapshot by linking unchanged content from a
 /// compatible runner-local seed, deleting paths absent from the controller
 /// manifest, and transporting only the manifest's explicit changed paths.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn materialize_snapshot_incremental_controlled(
-    runner: &Runner,
-    local_path: &Path,
-    remote_path: &str,
-    seed_path: &str,
-    excludes: &[String],
-    delta: &SnapshotManifestDelta,
-    control: &WorkspaceControl,
-) -> Result<SnapshotTransferStats> {
-    control.checkpoint()?;
-    let temporary = format!("{}.tmp-{}", remote_path, uuid::Uuid::new_v4());
-    if !incremental_prepare_command_fits(remote_path, &temporary, seed_path, delta) {
-        materialize_snapshot_with_scratch_controlled(
-            runner,
-            local_path,
-            remote_path,
-            excludes,
-            None,
-            control,
-        )?;
-        return Ok(SnapshotTransferStats {
-            reused: ByteFileCounts::default(),
-            transferred: delta.transfer.final_size,
-            final_size: delta.transfer.final_size,
-        });
-    }
-    let prepare = incremental_prepare_command(remote_path, &temporary, seed_path, delta);
-    if prepare.len() > INCREMENTAL_PREPARE_COMMAND_MAX_BYTES {
-        materialize_snapshot_with_scratch_controlled(
-            runner,
-            local_path,
-            remote_path,
-            excludes,
-            None,
-            control,
-        )?;
-        return Ok(SnapshotTransferStats {
-            reused: ByteFileCounts::default(),
-            transferred: delta.transfer.final_size,
-            final_size: delta.transfer.final_size,
-        });
-    }
-    let finalize = incremental_finalize_command(remote_path, &temporary);
-    let result = match runner.kind {
-        RunnerKind::Local => control
-            .shell(&prepare, "prepare incremental local workspace snapshot")
-            .and_then(|_| {
-                materialize_changed_paths_controlled(
-                    local_path,
-                    &local_extract_command(&temporary),
-                    &delta.changed_paths,
-                    "materialize incremental local workspace delta",
-                    control,
-                )
-            })
-            .and_then(|_| {
-                control.shell(&finalize, "finalize incremental local workspace snapshot")
-            }),
-        RunnerKind::Ssh => {
-            let (_server, client) = ssh_client_for_runner(runner)?;
-            if client.is_local {
-                control
-                    .shell(&prepare, "prepare incremental local workspace snapshot")
-                    .and_then(|_| {
-                        materialize_changed_paths_controlled(
-                            local_path,
-                            &local_extract_command(&temporary),
-                            &delta.changed_paths,
-                            "materialize incremental local workspace delta",
-                            control,
-                        )
-                    })
-                    .and_then(|_| {
-                        control.shell(&finalize, "finalize incremental local workspace snapshot")
-                    })
-            } else {
-                let remote = format!("{}@{}", client.user, client.host);
-                let remote_shell = |script: &str| {
-                    format!(
-                        "ssh {} {} {}",
-                        ssh_args(&client),
-                        shell::quote_arg(&remote),
-                        shell::quote_arg(script),
-                    )
-                };
-                control
-                    .shell(
-                        &remote_shell(&prepare),
-                        "prepare incremental SSH workspace snapshot",
-                    )
-                    .and_then(|_| {
-                        materialize_changed_paths_controlled(
-                            local_path,
-                            &remote_extract_command(&client, &remote, &temporary),
-                            &delta.changed_paths,
-                            "materialize incremental SSH workspace delta",
-                            control,
-                        )
-                    })
-                    .and_then(|_| {
-                        control.shell(
-                            &remote_shell(&finalize),
-                            "finalize incremental SSH workspace snapshot",
-                        )
-                    })
-            }
-        }
-    };
-    if result
-        .as_ref()
-        .is_err_and(|error| error.details["workspace_sync"]["remote_effect_uncertain"] != true)
-    {
-        cleanup_incremental_temporary(runner, &temporary, control.deadline().is_some());
-    }
-    result.map(|_| delta.transfer.clone())
-}
-
 /// Stage a delta over a prepared workspace while retaining paths outside the
 /// included source manifest, such as dependencies and generated runtime assets.
 pub(crate) fn materialize_prepared_workspace_update(
@@ -1471,65 +1349,6 @@ pub(crate) fn materialize_prepared_workspace_update(
     result.and(release_result).map(|_| delta.transfer.clone())
 }
 
-fn saturating_shell_quote_upper_bound(value: &str) -> usize {
-    // `quote_arg` can render each apostrophe as `'\\''` and add delimiters.
-    const SHELL_META: &[char] = &[
-        ' ', '\t', '\n', '\'', '"', '\\', '$', '`', '!', '*', '?', '[', ']', '(', ')', '{', '}',
-        '<', '>', '|', '&', ';', '#', '~',
-    ];
-    if value.contains(SHELL_META) {
-        value.len().saturating_mul(5).saturating_add(2)
-    } else {
-        value.len()
-    }
-}
-
-pub(super) fn incremental_prepare_command_fits(
-    remote_path: &str,
-    temporary: &str,
-    seed_path: &str,
-    delta: &SnapshotManifestDelta,
-) -> bool {
-    incremental_prepare_command_preflight_bytes(remote_path, temporary, seed_path, delta)
-        <= INCREMENTAL_PREPARE_COMMAND_MAX_BYTES
-}
-
-fn incremental_prepare_command_preflight_bytes(
-    remote_path: &str,
-    temporary: &str,
-    seed_path: &str,
-    delta: &SnapshotManifestDelta,
-) -> usize {
-    let parent = parent_remote_path(remote_path);
-    let mut bytes = INCREMENTAL_PREPARE_COMMAND_FIXED_OVERHEAD_BYTES;
-
-    // Account for every path embedded in the outer command, including the
-    // nested `sh -c` cleanup predicate for retained paths.
-    for path in &delta.retained_paths {
-        bytes = bytes.saturating_add(
-            saturating_shell_quote_upper_bound(path)
-                .saturating_mul(5)
-                .saturating_add(64),
-        );
-    }
-    for path in delta
-        .deleted_paths
-        .iter()
-        .chain(delta.replaced_paths.iter())
-        .chain(delta.changed_file_paths.iter())
-    {
-        bytes = bytes.saturating_add(saturating_shell_quote_upper_bound(path).saturating_add(64));
-    }
-
-    // These values are repeated in the generated setup, clone, cleanup, and
-    // removal clauses. Multiplying their conservative quoted size keeps the
-    // check independent of controller or runner path length.
-    bytes = bytes.saturating_add(saturating_shell_quote_upper_bound(&parent).saturating_mul(4));
-    bytes = bytes.saturating_add(saturating_shell_quote_upper_bound(temporary).saturating_mul(12));
-    bytes = bytes.saturating_add(saturating_shell_quote_upper_bound(seed_path).saturating_mul(2));
-    bytes
-}
-
 fn cleanup_incremental_temporary(runner: &Runner, temporary: &str, bounded: bool) {
     let command = format!("rm -rf -- {}", shell::quote_arg(temporary));
     let deadline = bounded.then(|| Instant::now() + Duration::from_secs(5));
@@ -1566,68 +1385,6 @@ fn cleanup_incremental_temporary(runner: &Runner, temporary: &str, bounded: bool
             }
         }
     }
-}
-
-fn incremental_prepare_command(
-    remote_path: &str,
-    temporary: &str,
-    seed_path: &str,
-    delta: &SnapshotManifestDelta,
-) -> String {
-    let parent = parent_remote_path(remote_path);
-    let removals = delta
-        .deleted_paths
-        .iter()
-        .chain(delta.replaced_paths.iter())
-        // The seed is hard-link cloned. Unlink changed files before tar writes
-        // them so a new snapshot can never mutate its immutable seed inode.
-        .chain(delta.changed_file_paths.iter())
-        .map(|path| {
-            format!(
-                "rm -rf -- {}/{}",
-                shell::quote_arg(temporary),
-                shell::quote_arg(path)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" && ");
-    let retain = delta
-        .retained_paths
-        .iter()
-        .map(|path| format!("[ \"$relative\" = {} ]", shell::quote_arg(path)))
-        .collect::<Vec<_>>()
-        .join(" || ");
-    let retain = if retain.is_empty() {
-        "false".to_string()
-    } else {
-        retain
-    };
-    let cleanup = format!(
-        "find {temporary} -mindepth 1 -depth -exec sh -c {script} sh {temporary} {{}} +",
-        temporary = shell::quote_arg(temporary),
-        script = shell::quote_arg(&format!(
-            "root=$1; shift; for path do relative=${{path#\"$root\"/}}; if ! ({retain}); then rm -rf -- \"$path\"; fi; done"
-        )),
-    );
-    format!(
-        "{owner_capture} ; mkdir -p {parent} && rm -rf {temporary} && mkdir -p {temporary} && {seed} && {cleanup} {removals}",
-        owner_capture = owner_capture_shell(&parent),
-        parent = shell::quote_arg(&parent),
-        temporary = shell::quote_arg(temporary),
-        seed = seed_snapshot_command(seed_path, temporary),
-        cleanup = cleanup,
-        removals = if removals.is_empty() { String::new() } else { format!(" && {removals}") },
-    )
-}
-
-fn incremental_finalize_command(remote_path: &str, temporary: &str) -> String {
-    let parent = parent_remote_path(remote_path);
-    format!(
-        "mv {} {} && {}",
-        shell::quote_arg(temporary),
-        shell::quote_arg(remote_path),
-        owner_restore_shell(&parent, remote_path),
-    )
 }
 
 fn seed_snapshot_command(seed_path: &str, destination: &str) -> String {
@@ -1758,62 +1515,6 @@ pub(super) fn materialize_snapshot_git_controlled(
     )
 }
 
-/// Apply a filtered controller snapshot over an existing runner checkout while
-/// preserving its runner-created Git directory. The overlay is staged before
-/// replacing worktree content so an interrupted transfer cannot leave a
-/// partially extracted archive behind.
-pub(super) fn materialize_snapshot_overlay_controlled(
-    runner: &Runner,
-    local_path: &Path,
-    remote_path: &str,
-    excludes: &[String],
-    control: &WorkspaceControl,
-) -> Result<()> {
-    let target = format!(
-        "sh -c {}",
-        shell::quote_arg(&snapshot_overlay_install_command(remote_path))
-    );
-    match runner.kind {
-        RunnerKind::Local => materialize_snapshot_piped_controlled(
-            local_path,
-            &target,
-            excludes,
-            "apply local Git workspace snapshot overlay",
-            None,
-            control,
-        ),
-        RunnerKind::Ssh => {
-            let (_server, client) = ssh_client_for_runner(runner)?;
-            if client.is_local {
-                materialize_snapshot_piped_controlled(
-                    local_path,
-                    &target,
-                    excludes,
-                    "apply local Git workspace snapshot overlay",
-                    None,
-                    control,
-                )
-            } else {
-                let remote = format!("{}@{}", client.user, client.host);
-                let command = snapshot_overlay_install_command(remote_path);
-                materialize_snapshot_piped_controlled(
-                    local_path,
-                    &format!(
-                        "ssh {} {} {}",
-                        ssh_args(&client),
-                        shell::quote_arg(&remote),
-                        shell::quote_arg(&command),
-                    ),
-                    excludes,
-                    "apply SSH Git workspace snapshot overlay",
-                    None,
-                    control,
-                )
-            }
-        }
-    }
-}
-
 /// Identity of the synthetic git checkout materialized for a `snapshot-git`
 /// sync. Surfaced as run evidence so write-capable agent-task dispatches can
 /// trace the dirty controller-side worktree back to the synthetic commit that
@@ -1926,7 +1627,7 @@ pub(super) fn synthetic_checkout_value(
         })
 }
 
-fn synthetic_git_checkout_command(
+pub(super) fn synthetic_git_checkout_command(
     remote_path: &str,
     snapshot: &str,
     remote_url: Option<&str>,
@@ -2934,13 +2635,6 @@ pub(super) fn snapshot_install_command(remote_path: &str) -> String {
         .op(WorkspaceMaterializationOperation::AtomicReplaceTemp)
         .restore_owner()
         .command()
-}
-
-pub(super) fn snapshot_overlay_install_command(remote_path: &str) -> String {
-    let remote_path = shell::quote_arg(remote_path);
-    format!(
-        "dest={remote_path}; tmp=\"${{dest}}.overlay.$$\"; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && trap 'rm -rf \"$tmp\"' EXIT && tar -C \"$tmp\" -xf - && find \"$dest\" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {{}} + && cp -a \"$tmp\"/. \"$dest\"/ && git -C \"$dest\" read-tree HEAD && test \"$(git -C \"$dest\" rev-parse --is-inside-work-tree)\" = true && git -C \"$dest\" rev-parse --verify -q HEAD >/dev/null"
-    )
 }
 
 mod git_spelling;

@@ -189,8 +189,6 @@ pub struct LabRoutingRequest<'a> {
     /// Require controller bundle materialization for the selected source
     /// checkout before any runner-side Git transport is attempted.
     pub require_controller_git_bundle: bool,
-    /// Reuse an exact clean snapshot already materialized on the selected runner.
-    pub reuse_compatible_snapshot: bool,
     pub job_overrides: crate::lab_offload::LabJobOverrides,
 }
 
@@ -1136,7 +1134,6 @@ fn execute_lab_offload_with_timeout(
         .map(str::to_string);
     let verified_cook_baseline = request.verified_cook_baseline.cloned();
     let require_controller_git_bundle = request.require_controller_git_bundle;
-    let reuse_compatible_snapshot = request.reuse_compatible_snapshot;
     let job_overrides = request.job_overrides;
     let worker_placement_outcome_target = placement_outcome_target.clone();
     // A dispatched command must stay observable between "submitted" and
@@ -1187,7 +1184,6 @@ fn execute_lab_offload_with_timeout(
             expected_source_snapshot_identity: expected_source_snapshot_identity.as_deref(),
             verified_cook_baseline: verified_cook_baseline.as_ref(),
             require_controller_git_bundle,
-            reuse_compatible_snapshot,
             job_overrides,
         });
         let _ = tx.send(result);
@@ -1396,7 +1392,6 @@ mod tests {
             expected_source_snapshot_identity: None,
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
-            reuse_compatible_snapshot: false,
             job_overrides: crate::lab_offload::LabJobOverrides::default(),
         })
         .unwrap();
@@ -2119,7 +2114,6 @@ mod tests {
                 expected_source_snapshot_identity: None,
                 verified_cook_baseline: None,
                 require_controller_git_bundle: false,
-                reuse_compatible_snapshot: false,
                 job_overrides: crate::lab_offload::LabJobOverrides::default(),
             },
             None,
