@@ -13,10 +13,6 @@
 //! and are otherwise inferred *exactly* for the common single-test binary,
 //! where the binary duration and the test duration are the same measurement.
 //!
-//! An optional `test.durations` sidecar is consulted first, so an extension can
-//! supply richer timings later without any change here. The stdout path is the
-//! fallback that makes this work today with no extension release.
-//!
 //! # Why share-of-budget, not an absolute number
 //!
 //! A 400-second test is unremarkable in a two-hour suite and pathological in a
@@ -50,9 +46,6 @@ pub use homeboy_extension_contract::test_duration::{
     duration_source, output_marker, slow_rule, SlowTestFinding, TestDurations, TestUnitDuration,
 };
 pub use parse::parse_duration_samples;
-
-use homeboy_core::error::Result;
-use homeboy_engine_primitives::local_files;
 
 /// Default share of the enforced budget above which one test unit is a
 /// finding. At the 1500 s budget this repository ran until recently, 10% is
@@ -142,27 +135,6 @@ impl TestDurationSamples {
             && self.unfinished.is_empty()
             && self.suite_seconds.is_none()
     }
-}
-
-/// Read the optional `test.durations` sidecar.
-///
-/// The sidecar is an *inbound* contract: extensions that can produce richer
-/// timings than stdout carries (per-test times from a JSON test reporter, for
-/// example) write it, and this is the consumer. Absent or unparseable means
-/// "no extra information", never an error — duration is advisory and must not
-/// be able to fail a run in either direction.
-pub fn parse_test_durations_file(path: &std::path::Path) -> Result<Option<TestDurations>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = local_files::read_file(path, "read test durations file")?;
-    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return Ok(None);
-    };
-    if homeboy_core::structured_sidecar::validate_payload("test.durations", &payload).is_err() {
-        return Ok(None);
-    }
-    Ok(serde_json::from_value::<TestDurations>(payload).ok())
 }
 
 /// Apply the slow-test policy to a sample set and produce the reportable
@@ -810,46 +782,6 @@ mod tests {
                 "unittests src/lib.rs (beta)"
             ],
             "two crates' lib tests must not collapse into one unit"
-        );
-    }
-
-    #[test]
-    fn a_malformed_durations_sidecar_is_ignored_rather_than_fatal() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test-durations.json");
-        std::fs::write(&path, "{ this is not json").expect("write");
-        assert_eq!(
-            parse_test_durations_file(&path).expect("a bad sidecar is never an error"),
-            None
-        );
-    }
-
-    #[test]
-    fn an_absent_durations_sidecar_is_not_an_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(
-            parse_test_durations_file(&dir.path().join("missing.json")).expect("absent is fine"),
-            None
-        );
-    }
-
-    #[test]
-    fn a_valid_durations_sidecar_round_trips() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test-durations.json");
-        std::fs::write(
-            &path,
-            r#"{"measured_seconds":12.5,"binaries":[{"name":"tests/a.rs","seconds":12.5,"source":"binary-summary"}]}"#,
-        )
-        .expect("write");
-        let parsed = parse_test_durations_file(&path)
-            .expect("valid sidecar parses")
-            .expect("sidecar present");
-        assert_eq!(parsed.measured_seconds, Some(12.5));
-        assert_eq!(parsed.binaries.len(), 1);
-        assert!(
-            parsed.complete,
-            "completeness defaults to true when omitted"
         );
     }
 }

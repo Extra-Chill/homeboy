@@ -779,9 +779,9 @@ fn initialize_structured_sidecars(
     Ok(())
 }
 
-/// Canonicalize the legacy test producer envelope to the registry's array-only
-/// failure contract. Counts and runner diagnoses belong to `test.results` and
-/// captured output; this sidecar contains only individual failure records.
+/// Preserve failure arrays and replace any other shape with an empty array.
+/// Counts and runner diagnoses belong to `test.results` and captured output;
+/// this sidecar contains only individual failure records.
 fn normalize_declared_test_failures(
     run_dir_path: &Path,
     declared: &[homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration],
@@ -801,9 +801,6 @@ fn normalize_declared_test_failures(
         .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
         .and_then(|payload| match payload {
             serde_json::Value::Array(items) => Some(items),
-            serde_json::Value::Object(mut object) => object
-                .remove("failures")
-                .and_then(|value| value.as_array().cloned()),
             _ => None,
         })
         .unwrap_or_default();
@@ -1243,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_test_failure_envelopes_without_losing_runner_diagnosis() {
+    fn normalizes_non_array_test_failures_without_losing_runner_diagnosis() {
         let run_dir = RunDir::create().expect("run dir");
         let failures = run_dir.step_file(run_dir::files::TEST_FAILURES);
         let output = CommandOutput {
@@ -1258,7 +1255,7 @@ mod tests {
         std::fs::write(
             &failures,
             serde_json::to_string(&json!({
-                "failures": [],
+                "failures": [{"message": "legacy failure"}],
                 "total": 0,
                 "passed": 0,
             }))
@@ -1278,6 +1275,22 @@ mod tests {
         assert!(output
             .stdout
             .contains("PHPUNIT_ZERO_TESTS cause=changed_file_filter_mismatch"));
+
+        for input in [
+            json!([{"message": "failure"}]),
+            json!(null),
+            json!(42),
+            json!("bad"),
+        ] {
+            std::fs::write(&failures, input.to_string()).expect("write fixture");
+            normalize_declared_test_failures(run_dir.path(), &[declaration("test.failures")])
+                .expect("normalize failures");
+            let actual: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&failures).expect("normalized failures"),
+            )
+            .expect("failure array");
+            assert_eq!(actual, if input.is_array() { input } else { json!([]) });
+        }
 
         std::fs::remove_file(&failures).expect("remove sidecar");
         normalize_declared_test_failures(run_dir.path(), &[declaration("test.failures")])

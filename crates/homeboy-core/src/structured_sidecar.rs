@@ -11,11 +11,15 @@ use crate::{Error, Result};
 pub enum StructuredSidecarShape {
     Array,
     Object,
+    /// Newline-delimited JSON: each non-empty line is one object record.
+    ObjectLines,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct StructuredSidecarSchema {
     pub key: &'static str,
+    /// Product-prefix-free environment suffix, when exported to extensions.
+    pub env: Option<&'static str>,
     pub schema_version: &'static str,
     pub path: &'static str,
     pub producer: Option<&'static str>,
@@ -37,6 +41,7 @@ pub struct StructuredSidecarSchema {
 pub const REGISTRY: &[StructuredSidecarSchema] = &[
     StructuredSidecarSchema {
         key: "lint.findings",
+        env: Some("LINT_FINDINGS_FILE"),
         schema_version: "v1",
         path: run_dir::files::LINT_FINDINGS,
         producer: Some("lint"),
@@ -49,6 +54,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     // looked, so an empty array is the honest clean-pass value here too.
     StructuredSidecarSchema {
         key: "lint.producers",
+        env: Some("LINT_PRODUCERS_FILE"),
         schema_version: "v1",
         path: run_dir::files::LINT_PRODUCERS,
         producer: Some("lint"),
@@ -58,6 +64,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
     StructuredSidecarSchema {
         key: "test.results",
+        env: Some("TEST_RESULTS_FILE"),
         schema_version: "v1",
         path: run_dir::files::TEST_RESULTS,
         producer: Some("test"),
@@ -67,6 +74,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
     StructuredSidecarSchema {
         key: "test.failures",
+        env: Some("TEST_FAILURES_FILE"),
         schema_version: "v1",
         path: run_dir::files::TEST_FAILURES,
         producer: Some("test"),
@@ -76,6 +84,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
     StructuredSidecarSchema {
         key: "test.coverage",
+        env: Some("COVERAGE_FILE"),
         schema_version: "v1",
         path: run_dir::files::COVERAGE,
         producer: Some("test"),
@@ -83,22 +92,39 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         required_fields: &[],
         seed_on_start: false,
     },
-    // Duration is a first-class test fact, and it travels on its own key so a
-    // slow suite can never be confused with a failing one. Optional inbound
-    // enrichment: core derives durations from the runner's captured stdout, so
-    // an extension that never writes this file loses nothing. Extensions that
-    // can report richer timings than stdout carries write it here. (#10655)
     StructuredSidecarSchema {
-        key: "test.durations",
+        key: "fix.results",
+        env: Some("FIX_RESULTS_FILE"),
         schema_version: "v1",
-        path: run_dir::files::TEST_DURATIONS,
-        producer: Some("test"),
-        shape: StructuredSidecarShape::Object,
+        path: run_dir::files::FIX_RESULTS,
+        producer: Some("fix"),
+        shape: StructuredSidecarShape::Array,
+        required_fields: &[],
+        seed_on_start: false,
+    },
+    StructuredSidecarSchema {
+        key: "bench.responsiveness",
+        env: Some("BENCH_RESPONSIVENESS_FILE"),
+        schema_version: "v1",
+        path: run_dir::files::BENCH_RESPONSIVENESS,
+        producer: Some("bench"),
+        shape: StructuredSidecarShape::ObjectLines,
+        required_fields: &[],
+        seed_on_start: false,
+    },
+    StructuredSidecarSchema {
+        key: "fuzz.artifacts",
+        env: Some("FUZZ_ARTIFACTS_DIR"),
+        schema_version: "v1",
+        path: run_dir::files::FUZZ_ARTIFACTS_DIR,
+        producer: Some("fuzz"),
+        shape: StructuredSidecarShape::Array,
         required_fields: &[],
         seed_on_start: false,
     },
     StructuredSidecarSchema {
         key: "bench.results",
+        env: Some("BENCH_RESULTS_FILE"),
         schema_version: "v1",
         path: run_dir::files::BENCH_RESULTS,
         producer: Some("bench"),
@@ -108,6 +134,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
     StructuredSidecarSchema {
         key: "fuzz.results",
+        env: Some("FUZZ_RESULTS_FILE"),
         schema_version: "v1",
         path: run_dir::files::FUZZ_RESULTS,
         producer: Some("fuzz"),
@@ -117,6 +144,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
     StructuredSidecarSchema {
         key: "trace.results",
+        env: Some("TRACE_RESULTS_FILE"),
         schema_version: "v1",
         path: run_dir::files::TRACE_RESULTS,
         producer: Some("trace"),
@@ -126,6 +154,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
     StructuredSidecarSchema {
         key: "trace.artifacts",
+        env: None,
         schema_version: "v1",
         path: "artifacts",
         producer: Some("trace"),
@@ -135,6 +164,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
     StructuredSidecarSchema {
         key: "resource.summary",
+        env: None,
         schema_version: "v1",
         path: run_dir::files::RESOURCE_SUMMARY,
         producer: None,
@@ -144,6 +174,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
     StructuredSidecarSchema {
         key: "producer.summary",
+        env: None,
         schema_version: "v1",
         path: "producer-summary.json",
         producer: None,
@@ -153,6 +184,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
     StructuredSidecarSchema {
         key: "findings",
+        env: None,
         schema_version: "v1",
         path: "findings.json",
         producer: None,
@@ -162,6 +194,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
     },
     StructuredSidecarSchema {
         key: "annotations",
+        env: Some("ANNOTATIONS_DIR"),
         schema_version: "v1",
         path: run_dir::files::ANNOTATIONS_DIR,
         producer: None,
@@ -192,7 +225,9 @@ impl StructuredSidecarSchema {
     /// before a run so a clean pass still leaves readable evidence.
     pub fn empty_payload(&self) -> Value {
         match self.shape {
-            StructuredSidecarShape::Array => Value::Array(Vec::new()),
+            StructuredSidecarShape::Array | StructuredSidecarShape::ObjectLines => {
+                Value::Array(Vec::new())
+            }
             StructuredSidecarShape::Object => Value::Object(serde_json::Map::new()),
         }
     }
@@ -232,7 +267,9 @@ pub fn validate_payload(key: &str, payload: &Value) -> Result<()> {
     })?;
 
     match schema.shape {
-        StructuredSidecarShape::Array => validate_array_payload(schema, payload),
+        StructuredSidecarShape::Array | StructuredSidecarShape::ObjectLines => {
+            validate_array_payload(schema, payload)
+        }
         StructuredSidecarShape::Object => validate_object_payload(schema, payload),
     }?;
 
@@ -315,7 +352,18 @@ pub fn validate_sidecar_file(key: &str, path: &Path) -> Result<SidecarFileCheck>
         return Ok(SidecarFileCheck::Absent);
     }
 
-    let payload: Value = serde_json::from_str(trimmed).map_err(|err| {
+    let parsed =
+        if schema(key).is_some_and(|entry| entry.shape == StructuredSidecarShape::ObjectLines) {
+            trimmed
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(serde_json::from_str)
+                .collect::<std::result::Result<Vec<Value>, _>>()
+                .map(Value::Array)
+        } else {
+            serde_json::from_str(trimmed)
+        };
+    let payload: Value = parsed.map_err(|err| {
         Error::validation_invalid_argument(
             "structured_sidecar",
             format!(
@@ -414,7 +462,9 @@ mod tests {
             "lint.findings",
             "test.results",
             "test.failures",
-            "test.durations",
+            "fix.results",
+            "bench.responsiveness",
+            "fuzz.artifacts",
             "bench.results",
             "trace.results",
         ] {
@@ -458,11 +508,26 @@ mod tests {
     }
 
     #[test]
+    fn object_lines_sidecar_validates_each_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bench-responsiveness.jsonl");
+        std::fs::write(&path, "{\"label\":\"a\"}\n{\"label\":\"b\"}\n").unwrap();
+        assert_eq!(
+            validate_sidecar_file("bench.responsiveness", &path).unwrap(),
+            SidecarFileCheck::Valid
+        );
+        std::fs::write(&path, "{\"label\":\"a\"}\n[1]\n").unwrap();
+        assert!(validate_sidecar_file("bench.responsiveness", &path).is_err());
+    }
+
+    #[test]
     fn empty_payload_matches_declared_shape() {
         for entry in REGISTRY {
             let empty = entry.empty_payload();
             match entry.shape {
-                StructuredSidecarShape::Array => assert!(empty.is_array(), "{}", entry.key),
+                StructuredSidecarShape::Array | StructuredSidecarShape::ObjectLines => {
+                    assert!(empty.is_array(), "{}", entry.key)
+                }
                 StructuredSidecarShape::Object => assert!(empty.is_object(), "{}", entry.key),
             }
         }
@@ -496,7 +561,6 @@ mod tests {
         validate_payload("lint.findings", &json!([{ "message": "lint failed" }])).unwrap();
         validate_payload("test.results", &json!({ "total": 2, "failed": 0 })).unwrap();
         validate_payload("test.failures", &json!([{ "message": "test failed" }])).unwrap();
-        validate_payload("test.durations", &json!({ "measured_seconds": 12.5 })).unwrap();
         validate_payload("bench.results", &json!({ "results": [] })).unwrap();
         validate_payload("trace.results", &json!({ "runs": [] })).unwrap();
         validate_payload("bench.results", &json!({ "browser_profiles": [] })).unwrap();
