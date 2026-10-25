@@ -23796,7 +23796,8 @@ fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate
             "provenance":{"worktree_path":root, "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(root, &target_head, "first-run")}, "operator_notification":{"status":"blocked","message":"red"}
         })).unwrap();
     let baseline =
-        materialize_follow_up_baseline(&report, "first-run", "candidate-task").expect("baseline");
+        materialize_follow_up_baseline_in_root(&report, temp.path(), "first-run", "candidate-task")
+            .expect("baseline");
     assert!(git_output(&baseline.path, &["status", "--porcelain"])
         .unwrap()
         .is_empty());
@@ -23871,9 +23872,13 @@ fn follow_up_baseline_accepts_unchanged_commit_and_rejects_patch_only_records() 
     })).unwrap()
     };
 
-    let baseline =
-        materialize_follow_up_baseline(&report(empty_sha256), "first-run", "candidate-task")
-            .expect("empty verified no-change baseline");
+    let baseline = materialize_follow_up_baseline_in_root(
+        &report(empty_sha256),
+        temp.path(),
+        "first-run",
+        "candidate-task",
+    )
+    .expect("empty verified no-change baseline");
     assert_eq!(
         git_output(&baseline.path, &["rev-parse", "HEAD^{tree}"]).unwrap(),
         git_output(&root, &["rev-parse", "HEAD^{tree}"]).unwrap()
@@ -23881,8 +23886,9 @@ fn follow_up_baseline_accepts_unchanged_commit_and_rejects_patch_only_records() 
     assert!(git_output(&baseline.path, &["status", "--porcelain"])
         .unwrap()
         .is_empty());
-    let error = match materialize_follow_up_baseline(
+    let error = match materialize_follow_up_baseline_in_root(
         &report("bad-digest"),
+        temp.path(),
         "first-run",
         "candidate-task",
     ) {
@@ -23967,7 +23973,8 @@ fn follow_up_baseline_combines_adopted_candidate_with_overlapping_provider_delta
     .unwrap();
 
     let baseline =
-        materialize_follow_up_baseline(&report, "first-run", "candidate-task").expect("baseline");
+        materialize_follow_up_baseline_in_root(&report, temp.path(), "first-run", "candidate-task")
+            .expect("baseline");
 
     assert!(git_output(&baseline.path, &["status", "--porcelain"])
         .unwrap()
@@ -24033,7 +24040,12 @@ fn follow_up_baseline_refuses_when_promotion_target_head_has_advanced() {
         }))
         .unwrap();
 
-    let error = match materialize_follow_up_baseline(&report, "first-run", "candidate-task") {
+    let error = match materialize_follow_up_baseline_in_root(
+        &report,
+        temp.path(),
+        "first-run",
+        "candidate-task",
+    ) {
         Ok(_) => panic!("target advancement rejects the stale promotion baseline"),
         Err(error) => error,
     };
@@ -24814,7 +24826,8 @@ fn re_materialize_follow_up_baseline_recovers_after_worktree_deletion() {
     }))
     .unwrap();
     let baseline =
-        materialize_follow_up_baseline(&report, "first-run", "candidate-task").expect("baseline");
+        materialize_follow_up_baseline_in_root(&report, temp.path(), "first-run", "candidate-task")
+            .expect("baseline");
     let baseline_path = baseline.path.clone();
     assert!(baseline_path.exists());
     let original_commit = baseline.capability().commit().to_string();

@@ -4,7 +4,7 @@
 //! git baseline a cook retry runs against. `CookFollowUpBaseline` owns a
 //! detached `git worktree` (cleaned up in its `Drop`), `DerivedCookBaselineCapability`
 //! is the non-serializable controller-validated authority derived from it, and
-//! `materialize_initial_candidate_baseline`/`materialize_follow_up_baseline`
+//! `materialize_initial_candidate_baseline`/`materialize_follow_up_baseline_in_root`
 //! build them from a source root or a prior promotion. The private `git_output`
 //! helpers live here because this cluster is their only user.
 
@@ -254,15 +254,6 @@ impl Drop for CookFollowUpBaseline {
             .current_dir(&self.source_root)
             .status();
     }
-}
-
-#[cfg(test)]
-pub(crate) fn materialize_follow_up_baseline(
-    promotion: &AgentTaskPromotionReport,
-    source_run_id: &str,
-    bound_task_id: &str,
-) -> Result<CookFollowUpBaseline> {
-    materialize_follow_up_baseline_at(promotion, None, None, source_run_id, bound_task_id)
 }
 
 pub(crate) fn materialize_follow_up_baseline_in_root(
@@ -614,11 +605,11 @@ pub(crate) fn compare_gate_failures_to_verified_base(
 }
 
 /// Re-materialize a follow-up baseline worktree at a specific path that was
-/// previously created by [`materialize_follow_up_baseline`] but has since been
+/// previously created by [`materialize_follow_up_baseline_in_root`] but has since been
 /// reaped (e.g. by tmp cleanup, disk-pressure cleanup, or `git worktree prune`).
 ///
 /// This reuses the same durable promotion data and worktree/patch logic as
-/// [`materialize_follow_up_baseline`] to deterministically recreate an identical
+/// [`materialize_follow_up_baseline_in_root`] to deterministically recreate an identical
 /// worktree at the original path, preserving the baseline identity contract for
 /// the provider preflight and subsequent gate verification.
 pub(crate) fn re_materialize_follow_up_baseline(
