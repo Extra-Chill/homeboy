@@ -282,6 +282,23 @@ pub(super) fn typed_artifact_from_evidence(
     }
 }
 
+pub(super) fn typed_artifact_from_candidate(
+    candidate: &crate::agent_task::AgentTaskCandidate,
+) -> AgentTaskTypedArtifact {
+    AgentTaskTypedArtifact {
+        name: "patch".to_string(),
+        artifact_type: Some("git_commit".to_string()),
+        artifact_schema: None,
+        payload: serde_json::json!({
+            "base_sha": candidate.base_sha,
+            "candidate_sha": candidate.candidate_sha,
+            "tree_sha": candidate.tree_sha,
+        }),
+        artifact: None,
+        metadata: serde_json::json!({ "normalized_from": "homeboy_candidate" }),
+    }
+}
+
 pub(super) fn typed_artifact_from_outcome(outcome: &AgentTaskOutcome) -> AgentTaskTypedArtifact {
     AgentTaskTypedArtifact {
         name: "agent_result".to_string(),

@@ -87,3 +87,75 @@ fn binds_artifacts_to_generic_child_run_ids_for_durable_fanout() {
         Some("artifacts/case-a/report.json")
     );
 }
+
+/// Cook declares a required `patch` artifact, and Homeboy's harvested
+/// candidate commit is that change set (#16303). A provider that edits its
+/// workspace and exits cleanly must stay succeeded, with a succeeded provider
+/// runtime, so publication accepts it (#15679).
+#[test]
+fn harvested_candidate_commit_satisfies_required_patch_artifact() {
+    use super::concurrency::concurrency_tests::init_git_workspace;
+
+    struct EditAndSucceed;
+
+    impl AgentTaskExecutorAdapter for EditAndSucceed {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let root = request
+                .workspace
+                .root
+                .as_deref()
+                .expect("attempt workspace");
+            fs::write(std::path::Path::new(root).join("base.txt"), "new\n").expect("edit");
+            AgentTaskOutcome {
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("provider edited the workspace".to_string()),
+                ..Default::default()
+            }
+        }
+    }
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        init_git_workspace(&workspace);
+        let mut plan = plan_with_required_artifacts(&["patch", "agent_result"]);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        crate::agent_task_lifecycle::submit_plan(&plan, Some("candidate-patch-run"))
+            .expect("submit run");
+        crate::agent_task_service::run_submitted(
+            "candidate-patch-run".to_string(),
+            Arc::new(EditAndSucceed),
+        )
+        .expect("run provider");
+
+        let aggregate = crate::agent_task_lifecycle::read_aggregate("candidate-patch-run")
+            .expect("persisted aggregate");
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Succeeded,
+            "{outcome:#?}"
+        );
+        let candidate = outcome.candidate.as_ref().expect("candidate commit");
+        let patch = outcome
+            .typed_artifacts
+            .iter()
+            .find(|artifact| artifact.name == "patch")
+            .expect("patch typed artifact");
+        assert_eq!(
+            patch.payload["candidate_sha"],
+            json!(candidate.candidate_sha)
+        );
+
+        let record = crate::agent_task_lifecycle::reconcile_status("candidate-patch-run")
+            .expect("lifecycle record");
+        assert!(record.lifecycle.provider_runtime.iter().all(|runtime| {
+            runtime.state == homeboy_core::run_lifecycle_record::ProviderRuntimeState::Succeeded
+        }));
+    });
+}
