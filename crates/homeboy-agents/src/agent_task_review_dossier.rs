@@ -2278,8 +2278,14 @@ mod tests {
         assert_eq!(form.summary, "Guard the reload path.");
         assert_eq!(form.what_changed, vec!["Guard reloads".to_string()]);
         assert_eq!(form.compatibility, "Additive");
-        let gap = form.validate().expect_err("an absent verdict is incomplete");
-        assert!(gap.message.contains("completion is missing"), "{}", gap.message);
+        let gap = form
+            .validate()
+            .expect_err("an absent verdict is incomplete");
+        assert!(
+            gap.message.contains("completion is missing"),
+            "{}",
+            gap.message
+        );
     }
 
     fn dossier() -> AgentTaskReviewDossier {

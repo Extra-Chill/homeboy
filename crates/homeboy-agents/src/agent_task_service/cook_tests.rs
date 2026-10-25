@@ -23416,10 +23416,9 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
         );
         let failure = preflight.failure.expect("publication needs a usable form");
         assert!(
-            failure["message"]
-                .as_str()
-                .unwrap()
-                .contains(&format!("agent-task recover {run_id} --review-form @FORM.json")),
+            failure["message"].as_str().unwrap().contains(&format!(
+                "agent-task recover {run_id} --review-form @FORM.json"
+            )),
             "{failure}"
         );
 
