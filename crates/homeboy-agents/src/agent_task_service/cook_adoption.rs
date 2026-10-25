@@ -280,7 +280,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         attempt,
     )?;
     let cook_id = &recipe.cook_id;
-    let mut options = super::reconstruct_adoption_options(&recipe)?;
+    let mut options = super::reconstruct_options_without_dispatcher(&recipe)?;
     // Adoption is a separate explicit authorization. The durable recipe keeps
     // its historical policy, while this invocation may accept only normalized
     // immutable-baseline matches produced below.

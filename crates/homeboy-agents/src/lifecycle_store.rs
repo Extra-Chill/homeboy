@@ -1323,91 +1323,11 @@ impl AgentTaskLifecycleStore {
         .map_err(|conflict| AgentTaskTransitionError::Conflict(conflict).into())
     }
 
-    /// Replace only the runtime provenance of a parked Cook. Re-read eligibility
-    /// under the same lock as the pin-changing write, preserving every other
-    /// durable input and any intervening cancellation/provider reservation.
-    pub(crate) fn rebind_queued_cook_runtime(
-        &self,
-        run_id: &str,
-        runtime: Value,
-    ) -> Result<AgentTaskRunRecord> {
-        use crate::agent_task_service::{
-            pre_execution_runtime_recovery, PreExecutionRuntimeRecovery,
-        };
-        homeboy_core::controller_runtime::validate(&runtime)?;
-        if runtime["originating"]["build_identity"].as_str()
-            != Some(homeboy_core::build_identity::current().display.as_str())
-        {
-            return Err(Error::internal_unexpected(
-                "Cook runtime admission returned a foreign generation",
-            ));
-        }
-        self.with_config_lock(|| {
-            let mut record = self.read_record(run_id)?;
-            let key = homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY;
-            let recovery = pre_execution_runtime_recovery(&record);
-            if record.metadata[key] == runtime {
-                return Ok(record);
-            }
-            if recovery.is_none() {
-                return Err(Error::validation_invalid_argument(
-                    "controller_runtime_recovery",
-                    "Cook runtime rebinding requires unambiguous zero-execution admission",
-                    Some(run_id.to_string()),
-                    None,
-                ));
-            }
-            if record.state() != AgentTaskRunState::Queued
-                || recovery != Some(PreExecutionRuntimeRecovery::QueuedRuntimeAdmission)
-            {
-                return Err(Error::validation_invalid_argument(
-                    "controller_runtime_recovery",
-                    "only a parked queued Cook may replace its runtime pin",
-                    Some(run_id.to_string()),
-                    None,
-                ));
-            }
-            record.metadata["controller_runtime_recovery"] =
-                PreExecutionRuntimeRecovery::QueuedRuntimeAdmission
-                    .provenance(record.metadata[key].clone(), runtime.clone());
-            record.metadata[key] = runtime;
-            record.metadata["controller_identity"] =
-                serde_json::json!(homeboy_core::build_identity::current().display);
-            record.updated_at = Some(super::now_timestamp());
-            write_record_fenced(
-                self,
-                &record,
-                read_mirrored_aggregate_in_store(self, run_id)?,
-                false,
-                true,
-                RecordWriteGuard::annotation(&record),
-            )
-        })
-    }
-
-    pub(crate) fn rearm_pre_execution_record_with_runtime(
-        &self,
-        record: &AgentTaskRunRecord,
-        runtime: Value,
-    ) -> Result<AgentTaskRunRecord> {
-        homeboy_core::controller_runtime::validate(&runtime)?;
-        self.rearm_pre_execution_record_inner(record, Some(runtime))
-    }
-
-    /// Rearm a retryable zero-provider record without changing controller
-    /// runtime ownership. Runner-bound retries execute under a separate runner
-    /// runtime while the original controller pin remains authoritative.
+    /// Rearm a retryable zero-provider record as queued. The caller's copy
+    /// carries whichever controller runtime its submission admitted.
     pub(crate) fn rearm_pre_execution_record(
         &self,
         record: &AgentTaskRunRecord,
-    ) -> Result<AgentTaskRunRecord> {
-        self.rearm_pre_execution_record_inner(record, None)
-    }
-
-    fn rearm_pre_execution_record_inner(
-        &self,
-        record: &AgentTaskRunRecord,
-        runtime: Option<Value>,
     ) -> Result<AgentTaskRunRecord> {
         self.with_config_lock(|| {
             let existing = self.read_record(&record.run_id)?;
@@ -1422,8 +1342,8 @@ impl AgentTaskLifecycleStore {
                     != 0
             {
                 return Err(Error::validation_invalid_argument(
-                    "controller_runtime_recovery",
-                    "controller runtime rebinding requires a retryable terminal pre-execution record with zero provider executions",
+                    "pre_execution_recovery",
+                    "rearming requires a retryable terminal pre-execution record with zero provider executions",
                     Some(record.run_id.clone()),
                     None,
                 ));
@@ -1433,32 +1353,20 @@ impl AgentTaskLifecycleStore {
                 || record.plan_id != existing.plan_id
             {
                 return Err(Error::validation_invalid_argument(
-                    "controller_runtime_recovery",
-                    "controller runtime rebinding must preserve the durable run and plan identity while rearming it as queued",
+                    "pre_execution_recovery",
+                    "rearming must preserve the durable run and plan identity while rearming it as queued",
                     Some(record.run_id.clone()),
                     None,
                 ));
             }
 
             let mut rebound = record.clone();
-            if let Some(runtime) = runtime {
-                let previous = existing
-                    .metadata
-                    .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                rebound.metadata["controller_runtime_recovery"] = crate::agent_task_service::PreExecutionRuntimeRecovery::RetryablePreExecutionFailure
-                    .provenance(previous, runtime.clone());
-                rebound.metadata
-                    [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = runtime;
-            } else {
-                rebound.metadata["pre_execution_recovery"] = serde_json::json!({
-                    "schema": "homeboy/pre-execution-recovery/v1",
-                    "reason": "retryable_pre_execution_failure",
-                    "provider_executions_consumed": 0,
-                    "recovered_at": super::now_timestamp(),
-                });
-            }
+            rebound.metadata["pre_execution_recovery"] = serde_json::json!({
+                "schema": "homeboy/pre-execution-recovery/v1",
+                "reason": "retryable_pre_execution_failure",
+                "provider_executions_consumed": 0,
+                "recovered_at": super::now_timestamp(),
+            });
             rebound.metadata["controller_identity"] =
                 serde_json::json!(homeboy_core::build_identity::current().display);
             // Rearming replaces the terminal record with the caller's queued

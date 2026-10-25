@@ -5009,11 +5009,6 @@ where
             ));
         };
         let mut result = None;
-        let historical_terminal =
-            agent_task_service_direct::historical_terminal_continuation_is_eligible(
-                &recipe,
-                record.state(),
-            );
         let dispatcher = reconstruct_dispatcher;
         let executor = executor.clone();
         let execute = |options| {
@@ -5023,30 +5018,17 @@ where
                 &options,
                 args.artifact_id.as_deref(),
             )?;
-            let cook = if historical_terminal {
-                run_cook_explicit(
-                    options,
-                    executor.clone(),
-                    agent_task_service::CookMode::ContinueTerminal,
-                )?
-            } else {
-                run_cook_explicit(
-                    options,
-                    executor.clone(),
-                    agent_task_service::CookMode::Resume,
-                )?
-            };
+            let cook = run_cook_explicit(
+                options,
+                executor.clone(),
+                agent_task_service::CookMode::Resume,
+            )?;
             let exit_code = cook.exit_code;
             result = Some(cook.value);
             Ok(exit_code)
         };
-        let exit_code = if historical_terminal {
-            agent_task_service::consume_claimed_terminal_with_dispatcher(
-                claim, dispatcher, execute,
-            )?
-        } else {
-            agent_task_service::consume_claimed_with_dispatcher(claim, dispatcher, execute)?
-        };
+        let exit_code =
+            agent_task_service::consume_claimed_with_dispatcher(claim, dispatcher, execute)?;
         let value = cook_report_with_continuation(
             serde_json::to_value(result.ok_or_else(|| {
                 homeboy::core::Error::internal_unexpected(
@@ -5071,8 +5053,6 @@ where
             })?
             .plan,
     )?;
-    let pre_execution_runtime_recovery =
-        agent_task_service::pre_execution_runtime_recovery_is_eligible(&recipe, &record);
     let dispatcher = if local_override.is_some() {
         None
     } else {
@@ -5092,14 +5072,8 @@ where
         })?;
     let terminal_review_form_continuation =
         agent_task_service::terminal_review_form_continuation_is_eligible(&attempt.plan, &record)?;
-    let mut options = if terminal_review_form_continuation {
-        agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)?
-    } else if pre_execution_runtime_recovery {
-        agent_task_service::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
-            &recipe, dispatcher,
-        )?
-    } else if local_override.is_some() {
-        agent_task_service::reconstruct_options_with_local_placement_override(&recipe)?
+    let mut options = if local_override.is_some() && !terminal_review_form_continuation {
+        agent_task_service::reconstruct_options_without_dispatcher(&recipe)?
     } else {
         agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)?
     };
@@ -5347,18 +5321,9 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 ));
             }
         };
-        let reconstruction =
-            if agent_task_service_direct::historical_terminal_continuation_is_eligible(
-                &recipe,
-                record.state(),
-            ) {
-                agent_task_service::reconstruct_adoption_options_with_dispatcher(
-                    &recipe, dispatcher,
-                )
-            } else {
-                agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)
-            };
-        if let Err(error) = reconstruction {
+        if let Err(error) =
+            agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)
+        {
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
@@ -5459,8 +5424,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             ))
         }
     };
-    let pre_execution_runtime_recovery =
-        agent_task_service::pre_execution_runtime_recovery_is_eligible(&recipe, &record);
     let dispatcher = match if local_override.is_some() {
         Ok(None)
     } else {
@@ -5516,19 +5479,8 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 ))
             }
         };
-    let historical_terminal =
-        agent_task_service_direct::historical_terminal_continuation_is_eligible(
-            &recipe,
-            record.state(),
-        );
-    let mut options = match if terminal_review || historical_terminal {
-        agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)
-    } else if pre_execution_runtime_recovery {
-        agent_task_service::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
-            &recipe, dispatcher,
-        )
-    } else if local_override.is_some() {
-        agent_task_service::reconstruct_options_with_local_placement_override(&recipe)
+    let mut options = match if local_override.is_some() && !terminal_review {
+        agent_task_service::reconstruct_options_without_dispatcher(&recipe)
     } else {
         agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)
     } {
@@ -5689,12 +5641,10 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 "ref": format!("homeboy://agent-task/run/{run_id}/evidence"),
             }],
             "continuation": {
-                "path": if historical_terminal {
-                    "historical_terminal"
-                } else if terminal_review {
+                "path": if terminal_review {
                     "terminal_review_form"
                 } else {
-                    "current_runtime"
+                    "resume"
                 },
                 "provider_replay": provider_replay,
                 "provider_behavior": if provider_replay { "replay" } else { "not_replayed" }
@@ -11685,45 +11635,10 @@ fn retry_cook_alias(
 /// Retry exactly the run `args.run_id` resolves to, without consulting Cook
 /// recovery. This is the step executor `agent-task recover` calls.
 pub(super) fn retry_exact(args: RetryArgs) -> CmdResult<Value> {
-    let explicit_local = homeboy::core::parsed_command_preflight::captured_result()
-        .is_some_and(|result| result.placement.requested == homeboy_lab_contract::Placement::Local);
-    let reconstruct = if explicit_local {
-        reconstruct_local_cook_attempt_dispatcher
-    } else {
-        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher
-    };
     retry_with(
         args,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-        reconstruct,
     )
-}
-
-fn reconstruct_local_cook_attempt_dispatcher(
-    recipe: &Value,
-) -> homeboy::core::Result<
-    Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
-> {
-    if recipe.get("kind").and_then(Value::as_str) == Some("lab") {
-        let admission = homeboy::core::parsed_command_preflight::captured_result()
-            .map(|result| result.resource_admission);
-        if let Some(
-            homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected {
-                label,
-                ..
-            },
-        ) = admission
-        {
-            return Err(Error::validation_invalid_argument(
-                "placement",
-                format!("explicit local retry refused: controller resource admission rejected {label}; wait for controller capacity or retry without --placement local"),
-                None,
-                None,
-            ));
-        }
-        return Ok(None);
-    }
-    crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(recipe)
 }
 
 /// Reserve a retry successor through the control-plane Retry action: the one
@@ -11779,27 +11694,12 @@ fn reserve_retry_through_action(
     Ok((acknowledgement, retry))
 }
 
-pub(super) fn retry_with<F>(
-    args: RetryArgs,
-    _executor: SharedAgentTaskExecutor,
-    reconstruct_dispatcher: F,
-) -> CmdResult<Value>
-where
-    F: Fn(
-            &Value,
-        ) -> homeboy::core::Result<
-            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
-        > + Copy,
-{
+pub(super) fn retry_with(args: RetryArgs, _executor: SharedAgentTaskExecutor) -> CmdResult<Value> {
     if let Some(error) = explicit_local_retry_admission_refusal(
         homeboy::core::parsed_command_preflight::captured_result().as_ref(),
     ) {
         return Err(error);
     }
-    homeboy::agents::agent_task_service::validate_retry_runtime_compatibility(
-        &args.run_id,
-        reconstruct_dispatcher,
-    )?;
     let idempotency_key = args
         .idempotency_key
         .clone()
@@ -12450,14 +12350,6 @@ mod tests {
             .message
             .contains("resource admission rejected agent-task retry"));
         homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
-
-        let recipe = serde_json::json!({ "kind": "lab", "runner_id": "lab-1" });
-        let dispatcher = super::reconstruct_local_cook_attempt_dispatcher(&recipe)
-            .expect("explicit local placement should reconstruct locally");
-        assert!(
-            dispatcher.is_none(),
-            "the retry successor must be controller-owned rather than sent to the prior Lab runner",
-        );
     }
 
     #[test]

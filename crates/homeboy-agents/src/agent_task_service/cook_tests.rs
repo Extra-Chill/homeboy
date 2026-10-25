@@ -12667,7 +12667,7 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
 }
 
 #[test]
-fn existing_recipe_pre_execution_recovery_does_not_reapply_runtime_pin() {
+fn existing_recipe_from_an_older_build_reconstructs_its_admitted_transport() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-pre-execution-runtime-recovery";
         let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
@@ -12675,26 +12675,17 @@ fn existing_recipe_pre_execution_recovery_does_not_reapply_runtime_pin() {
         let mut recipe = super::super::load_recipe(cook_id).expect("load recipe");
         recipe.runtime_generation = "homeboy 0.1.0+historical".to_string();
 
-        let strict = reconstruct_existing_cook_options(&recipe, None, None, false, false, false)
-            .expect_err("ordinary continuation retains runtime pinning");
-        assert!(strict.message.contains("pinned to Homeboy runtime"));
-
-        let missing_transport =
-            reconstruct_existing_cook_options(&recipe, None, None, false, true, false)
-                .expect_err("runtime recovery must still reconstruct the admitted transport");
+        let missing_transport = super::super::reconstruct_options_with_dispatcher(&recipe, None)
+            .expect_err("continuation must still reconstruct the admitted transport");
         assert_eq!(
             missing_transport.details["field"],
             "cook_recipe.promotion_transport.attempt_dispatch"
         );
-        let recovered = reconstruct_existing_cook_options(
+        let recovered = super::super::reconstruct_options_with_dispatcher(
             &recipe,
-            None,
             options.provider_transport.attempt_dispatcher.clone(),
-            false,
-            true,
-            false,
         )
-        .expect("pre-execution continuation uses the current runtime");
+        .expect("an older build's recipe continues on the current runtime");
         assert_eq!(
             recovered.identity.initial_run_id,
             options.identity.initial_run_id
@@ -14887,8 +14878,9 @@ fn adoption_replays_provider_discovery_failure_in_the_same_recipe_attempt() {
             .root
             .clone()
             .expect("continuation plan has an authenticated baseline root");
-        let mut reconstructed = super::super::reconstruct_adoption_options(&failed_recipe)
-            .expect("reconstruct adoption policy");
+        let mut reconstructed =
+            super::super::reconstruct_options_without_dispatcher(&failed_recipe)
+                .expect("reconstruct adoption policy");
         super::rebind_baseline_continuation_workspace(&mut reconstructed, &continuation_plan)
             .expect("restore the active task-worktree identity");
         assert_eq!(

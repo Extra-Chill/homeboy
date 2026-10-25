@@ -144,7 +144,7 @@ fn missing_transport_child_projection_resolves_without_recursion_or_provider_dis
 }
 
 #[test]
-fn historical_runtime_retry_rebinds_zero_execution_and_executes_once() {
+fn historical_runtime_retry_continues_zero_execution_and_executes_once() {
     let (Ok(old_binary), Ok(new_binary)) = (
         std::env::var("HOMEBOY_15504_OLD_BINARY"),
         std::env::var("HOMEBOY_15504_NEW_BINARY"),
@@ -402,37 +402,12 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
         String::from_utf8_lossy(&admitted.stdout),
         String::from_utf8_lossy(&admitted.stderr)
     );
-    let queued_record = store.read_record(&retry_id).expect("read queued retry");
-    assert_eq!(
-        queued_record.metadata["controller_runtime_recovery"]["previous"], original_runtime,
-        "retry reservation must preserve source runtime provenance"
-    );
     assert_eq!(
         store
             .read_cook_index(cook_id)
             .expect("advanced Cook index")
             .latest_run_id,
         retry_id
-    );
-    let queued_successor = store.read_record(&retry_id).expect("queued successor");
-    assert_eq!(
-        queued_successor.metadata["controller_runtime_recovery"]["previous"], original_runtime,
-        "successor runtime rebinding retains the source pin"
-    );
-    assert_eq!(
-        queued_successor.metadata["controller_runtime_recovery"]["current"]["originating"]
-            ["build_identity"],
-        candidate_display
-    );
-    assert_eq!(
-        homeboy::agents::agent_task_service::pre_execution_runtime_recovery(
-            &store
-                .read_record(&retry_id)
-                .expect("queued retry successor")
-        ),
-        Some(
-            homeboy::agents::agent_task_service::PreExecutionRuntimeRecovery::ReboundZeroExecution
-        )
     );
     let wait_for_provider = || {
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -492,14 +467,12 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
     );
     let successor = store.read_record(&retry_id).expect("recovered successor");
     assert_eq!(successor.metadata["retry_of"], run_id);
-    assert_eq!(
-        successor.metadata["controller_runtime_recovery"]["previous"], original_runtime,
+    assert!(
+        successor
+            .metadata
+            .get("controller_runtime_recovery")
+            .is_none(),
         "{successor:#?}"
-    );
-    assert_eq!(
-        successor.metadata["controller_runtime_recovery"]["current"]["originating"]
-            ["build_identity"],
-        candidate_display
     );
     assert_eq!(
         recipe_store

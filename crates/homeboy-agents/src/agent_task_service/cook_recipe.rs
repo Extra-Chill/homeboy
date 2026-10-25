@@ -2858,53 +2858,21 @@ pub fn reconstruct_options(recipe: &AgentTaskCookRecipe) -> Result<CookRequest> 
     reconstruct_options_with_dispatcher(recipe, None)
 }
 
+/// Reconstruct immutable Cook inputs bound to the recipe's exact attempt
+/// dispatcher. A recipe recorded by any Homeboy build reconstructs: its
+/// `runtime_generation` is provenance, never an admission pin.
 pub fn reconstruct_options_with_dispatcher(
     recipe: &AgentTaskCookRecipe,
     attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
 ) -> Result<CookRequest> {
-    reconstruct_recipe_options(recipe, attempt_dispatcher, true, true)
+    reconstruct_recipe_options(recipe, attempt_dispatcher, true)
 }
 
-/// Reconstruct immutable Cook inputs for a lifecycle-validated local placement
-/// transition. The caller proves the transition against the durable run record;
-/// this only relaxes reconstruction of the superseded Lab transport.
-pub fn reconstruct_options_with_local_placement_override(
-    recipe: &AgentTaskCookRecipe,
-) -> Result<CookRequest> {
-    reconstruct_recipe_options(recipe, None, true, false)
-}
-
-/// Reconstruct a pre-execution recovery that must revalidate its current
-/// transport before provider work can resume.
-pub fn reconstruct_options_for_pre_execution_recovery_with_dispatcher(
-    recipe: &AgentTaskCookRecipe,
-    attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
-) -> Result<CookRequest> {
-    reconstruct_recipe_options(recipe, attempt_dispatcher, false, true)
-}
-
-/// Compatibility authority for replacing a controller pin before execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PreExecutionRuntimeRecovery {
-    RetryablePreExecutionFailure,
-    RetryablePreExecutionTransportFailure,
-    QueuedRuntimeAdmission,
-    ReboundZeroExecution,
-}
-
-impl PreExecutionRuntimeRecovery {
-    pub(crate) fn provenance(self, previous: Value, current: Value) -> Value {
-        serde_json::json!({
-            "schema": "homeboy/controller-runtime-pre-execution-recovery/v1",
-            "reason": self,
-            "compatibility": "unambiguous_zero_provider_execution",
-            "previous": previous,
-            "current": current,
-            "provider_executions_consumed": 0,
-            "recovered_at": agent_task_lifecycle::now_timestamp(),
-        })
-    }
+/// Reconstruct immutable Cook inputs without binding the recorded attempt
+/// dispatcher. Adoption never dispatches provider work, and a lifecycle-validated
+/// local placement transition supersedes the recorded Lab transport.
+pub fn reconstruct_options_without_dispatcher(recipe: &AgentTaskCookRecipe) -> Result<CookRequest> {
+    reconstruct_recipe_options(recipe, None, false)
 }
 
 pub(crate) fn has_unambiguous_zero_execution(
@@ -2923,124 +2891,6 @@ pub(crate) fn has_unambiguous_zero_execution(
         && record.lab_handoff.as_ref().is_none_or(|handoff| {
             handoff.state != agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
         })
-}
-
-pub fn pre_execution_runtime_recovery(
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Option<PreExecutionRuntimeRecovery> {
-    use agent_task_lifecycle::AgentTaskRunState;
-    if !has_unambiguous_zero_execution(record) {
-        return None;
-    }
-    if record.state().is_terminal()
-        && super::cook_pre_execution::retryable_pre_execution_failure(record)
-    {
-        return Some(PreExecutionRuntimeRecovery::RetryablePreExecutionFailure);
-    }
-    let admission = &record.metadata["cook_runtime_admission"];
-    if record.state() == AgentTaskRunState::Queued
-        && admission["schema"] == "homeboy/cook-runtime-admission/v1"
-        && admission["state"] == "queued"
-        && record.metadata["execution_scheduling"]["epoch"]
-            .as_u64()
-            .is_some_and(|epoch| epoch > 0)
-        && record.metadata["execution_scheduling"]["current_intent_id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty())
-        && admission["provider_executions_consumed"].as_u64() == Some(0)
-    {
-        return Some(PreExecutionRuntimeRecovery::QueuedRuntimeAdmission);
-    }
-    let recovery = &record.metadata["controller_runtime_recovery"];
-    let current =
-        &record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY];
-    if matches!(
-        record.state(),
-        AgentTaskRunState::Queued | AgentTaskRunState::Running
-    ) && recovery["schema"] == "homeboy/controller-runtime-pre-execution-recovery/v1"
-        && recovery["provider_executions_consumed"].as_u64() == Some(0)
-        && recovery["current"] == *current
-        && current["originating"]["build_identity"].as_str()
-            == Some(homeboy_core::build_identity::current().display.as_str())
-        && matches!(
-            recovery["reason"].as_str(),
-            Some(
-                "queued_runtime_admission"
-                    | "retryable_pre_execution_failure"
-                    | "retryable_pre_execution_transport_failure"
-            )
-        )
-    {
-        return Some(PreExecutionRuntimeRecovery::ReboundZeroExecution);
-    }
-    None
-}
-
-/// Whether immutable inputs may be reconstructed on this controller. Actual
-/// pin replacement is separately fenced and rechecks the durable record.
-pub fn pre_execution_runtime_recovery_is_eligible(
-    _recipe: &AgentTaskCookRecipe,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> bool {
-    pre_execution_runtime_recovery(record).is_some()
-}
-
-/// One reconstruction boundary for queued dispatch and CLI continuation.
-pub fn reconstruct_options_for_record_with_dispatcher(
-    recipe: &AgentTaskCookRecipe,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-    dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
-) -> Result<CookRequest> {
-    reconstruct_recipe_options(
-        recipe,
-        dispatcher,
-        pre_execution_runtime_recovery(record).is_none()
-            && !committed_runtime_rebind_matches_recipe(recipe, record),
-        true,
-    )
-}
-
-/// Once provider execution starts, the admitted pin still owns reconstruction.
-/// The historical recipe remains immutable; its exact previous identity must
-/// match the committed transition rather than authorizing another rebind.
-fn committed_runtime_rebind_matches_recipe(
-    recipe: &AgentTaskCookRecipe,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> bool {
-    let recovery = &record.metadata["controller_runtime_recovery"];
-    let runtime =
-        &record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY];
-    recovery["schema"] == "homeboy/controller-runtime-pre-execution-recovery/v1"
-        && recovery["reason"] == "queued_runtime_admission"
-        && recovery["compatibility"] == "unambiguous_zero_provider_execution"
-        && recovery["provider_executions_consumed"].as_u64() == Some(0)
-        && recovery["previous"]["originating"]["build_identity"].as_str()
-            == Some(recipe.runtime_generation.as_str())
-        && recovery["current"] == *runtime
-        && runtime["originating"]["build_identity"].as_str()
-            == Some(homeboy_core::build_identity::current().display.as_str())
-}
-
-/// Reconstruct the policy used to adopt an already-prepared candidate. Adoption
-/// never replays provider work, so it may use a validated historical recipe
-/// after a controller runtime upgrade.
-pub fn reconstruct_adoption_options(recipe: &AgentTaskCookRecipe) -> Result<CookRequest> {
-    reconstruct_recipe_options(recipe, None, false, false)
-}
-
-/// A historical recipe can only continue through the terminal adoption path.
-/// Other states could still dispatch or replay provider work and must retain
-/// the runtime pin.
-pub fn historical_terminal_continuation_is_eligible(
-    recipe: &AgentTaskCookRecipe,
-    state: agent_task_lifecycle::AgentTaskRunState,
-) -> bool {
-    recipe.runtime_generation != homeboy_core::build_identity::current().display
-        && matches!(
-            state,
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
-                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-        )
 }
 
 /// Resolve a Cook identifier to its latest durable attempt. Candidate selection
@@ -3109,10 +2959,7 @@ pub fn resolve_cook_continuation_run_id_in_store(
 /// evidence has nothing to continue. Retryable pre-provider failures remain
 /// selected so they can be retried. The Cook still owns earlier
 /// attempts. Continue from the newest one that holds a recoverable candidate,
-/// so its promotion and feedback loop can dispatch a fresh retry. This is also
-/// the only continuation a historical recipe admits after a controller upgrade
-/// (`historical_terminal_continuation_is_eligible`), so a Cook stranded by a
-/// pre-provider failure no longer becomes unrecoverable on every upgrade.
+/// so its promotion and feedback loop can dispatch a fresh retry.
 fn continuation_source_run_id(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     recipe: &AgentTaskCookRecipe,
@@ -3152,37 +2999,12 @@ fn continuation_source_run_id(
         .unwrap_or(latest_run_id)
 }
 
-/// Adoption accepts historical policy, but a remediation retry still needs the
-/// recipe's exact durable transport reconstructed before it can dispatch.
-pub fn reconstruct_adoption_options_with_dispatcher(
-    recipe: &AgentTaskCookRecipe,
-    attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
-) -> Result<CookRequest> {
-    reconstruct_recipe_options(recipe, attempt_dispatcher, false, true)
-}
-
 fn reconstruct_recipe_options(
     recipe: &AgentTaskCookRecipe,
     attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
-    require_current_runtime: bool,
     require_attempt_dispatcher: bool,
 ) -> Result<CookRequest> {
     validate_recipe(recipe)?;
-    if require_current_runtime
-        && recipe.runtime_generation != homeboy_core::build_identity::current().display
-    {
-        return Err(Error::validation_invalid_argument(
-            "cook_recipe.runtime_generation",
-            format!(
-                "cook recipe is pinned to Homeboy runtime `{}` but this process is `{}`",
-                recipe.runtime_generation,
-                homeboy_core::build_identity::current().display
-            ),
-            Some(recipe.cook_id.clone()),
-            None,
-        )
-        .with_retryable(true));
-    }
     let initial = recipe
         .attempts
         .first()
@@ -3334,38 +3156,6 @@ fn reconstruct_recipe_options(
     })
 }
 
-/// Check a Cook retry's immutable runtime pin before the control-plane action
-/// identity is admitted. This uses the same reconstruction guard as dispatch,
-/// but does not claim an action or reserve a successor.
-pub fn validate_retry_runtime_compatibility<F>(
-    run_id: &str,
-    reconstruct_dispatcher: F,
-) -> Result<()>
-where
-    F: FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-{
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let requested_record = lifecycle_store.read_record(run_id).ok();
-    if requested_record
-        .as_ref()
-        .is_some_and(|record| record.metadata["cook_id"].as_str().is_none())
-    {
-        return Ok(());
-    }
-    let canonical_run_id =
-        resolve_cook_continuation_run_id_in_store(&default_store()?, &lifecycle_store, run_id)?;
-    let record = lifecycle_store.read_record(&canonical_run_id)?;
-    let Some(cook_id) = record.metadata["cook_id"].as_str() else {
-        return Ok(());
-    };
-    let recipe_store = CookRecipeStore::for_lifecycle_store(&lifecycle_store);
-    let recipe = recipe_store.load_recipe(cook_id)?;
-    let dispatcher = reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
-    let require_current_runtime = !pre_execution_runtime_recovery_is_eligible(&recipe, &record);
-    reconstruct_recipe_options(&recipe, dispatcher, require_current_runtime, true).map(|_| ())
-}
-
 pub fn consume_claimed_with_dispatcher(
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
@@ -3490,11 +3280,7 @@ fn consume_claimed_with_dispatcher_policy(
             return Err(error);
         }
     };
-    let options = match if matches!(mode, CookMode::ContinueTerminal | CookMode::Adopt) {
-        reconstruct_adoption_options_with_dispatcher(&recipe, attempt_dispatcher)
-    } else {
-        reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)
-    } {
+    let options = match reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher) {
         Ok(options) => options,
         Err(error) if error.retryable == Some(true) => {
             claim.retry()?;
@@ -3507,8 +3293,8 @@ fn consume_claimed_with_dispatcher_policy(
     };
     let mut options = options;
     if matches!(mode, CookMode::ContinueTerminal | CookMode::Adopt) {
-        // A newer coordinator may finish an accepted terminal candidate, but it
-        // must never replay provider work under a different runtime generation.
+        // A terminal continuation finishes an accepted candidate; it never
+        // spends the retry budget on new provider work.
         options.retry_policy.max_attempts = recipe
             .attempts
             .last()
@@ -4211,252 +3997,6 @@ mod tests {
         (recipe, plan)
     }
 
-    #[test]
-    fn queued_runtime_rebind_preserves_original_admission_and_survives_restart() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let store = CookRecipeStore::from_current_data_root().unwrap();
-            let lifecycle =
-                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
-            let mut historical = recipe();
-            historical.runtime_generation = "homeboy historical-controller".into();
-            store.persist_recipe(&historical).unwrap();
-            let plan = &historical.attempts[0].plan;
-            lifecycle
-                .submit_plan_with_runtime_admission(plan, "run", |_| {
-                    Ok(serde_json::json!({"originating": {"build_identity": historical.runtime_generation}}))
-                })
-                .unwrap();
-            agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle, "cook", 1, "run")
-                .unwrap();
-            assert!(agent_task_lifecycle::defer_cook_runtime_admission_in_store(
-                &lifecycle,
-                "run",
-                serde_json::json!({"operation": "upgrade"})
-            )
-            .unwrap());
-            let before = lifecycle.read_record("run").unwrap();
-            assert!(before.metadata["cook_runtime_admission"]
-                .get("fence")
-                .is_none());
-            assert!(before.metadata["execution_scheduling"]["current_intent_id"].is_string());
-            assert!(before.metadata.get("retry_of").is_none());
-            let before_plan =
-                serde_json::to_value(lifecycle.read_controller_plan("run").unwrap()).unwrap();
-            let before_index = serde_json::to_value(
-                agent_task_lifecycle::cook_index_in_store(&lifecycle, "cook").unwrap(),
-            )
-            .unwrap();
-            assert!(reconstruct_options(&historical).is_err());
-
-            // A crash after manifest admission but before the store commit has
-            // no effect on the original queue row; retry uses the same request.
-            let failed =
-                super::super::cook_pre_execution::rebind_queued_cook_runtime_with_admission(
-                    &historical,
-                    &lifecycle,
-                    "run",
-                    |id| {
-                        let _manifest =
-                            super::super::cook_pre_execution::production_runtime_admission(
-                                &lifecycle,
-                            )(id)?;
-                        Err(Error::internal_unexpected("interrupted before commit"))
-                    },
-                );
-            assert!(failed.is_err());
-            assert_eq!(
-                serde_json::to_value(lifecycle.read_record("run").unwrap()).unwrap(),
-                serde_json::to_value(&before).unwrap()
-            );
-
-            let restarted =
-                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
-            let rebound =
-                super::super::rebind_queued_cook_runtime_in_store(&historical, &restarted, "run")
-                    .unwrap();
-            let recovery = &rebound.metadata["controller_runtime_recovery"];
-            assert_eq!(recovery["reason"], "queued_runtime_admission");
-            assert_eq!(
-                recovery["compatibility"],
-                "unambiguous_zero_provider_execution"
-            );
-            assert_eq!(
-                recovery["previous"]["originating"]["build_identity"],
-                historical.runtime_generation
-            );
-            assert_eq!(
-                recovery["current"]["originating"]["build_identity"],
-                homeboy_core::build_identity::current().display
-            );
-            homeboy_core::controller_runtime::validate(&recovery["current"]).unwrap();
-            let mut expected = serde_json::to_value(&before).unwrap();
-            let actual = serde_json::to_value(&rebound).unwrap();
-            for key in [
-                "controller_runtime",
-                "controller_identity",
-                "controller_runtime_recovery",
-            ] {
-                expected["metadata"][key] = actual["metadata"][key].clone();
-            }
-            expected["updated_at"] = actual["updated_at"].clone();
-            // The store-owned write revision advances on the rebind commit, like
-            // `updated_at`; it is write bookkeeping, not runtime provenance (#15718).
-            assert!(rebound.revision > before.revision);
-            expected["revision"] = actual["revision"].clone();
-            assert_eq!(
-                actual, expected,
-                "only runtime provenance changes: workspace, tracker, budget and claims survive"
-            );
-            assert_eq!(
-                serde_json::to_value(restarted.read_controller_plan("run").unwrap()).unwrap(),
-                before_plan
-            );
-            assert_eq!(
-                serde_json::to_value(
-                    agent_task_lifecycle::cook_index_in_store(&restarted, "cook").unwrap()
-                )
-                .unwrap(),
-                before_index
-            );
-            assert_eq!(
-                serde_json::to_value(store.load_recipe("cook").unwrap()).unwrap(),
-                serde_json::to_value(&historical).unwrap()
-            );
-            let options =
-                reconstruct_options_for_record_with_dispatcher(&historical, &rebound, None)
-                    .unwrap();
-            assert_eq!(options.identity.initial_run_id, "run");
-            assert_eq!(
-                serde_json::to_value(&options.identity.initial_plan).unwrap(),
-                serde_json::to_value(plan).unwrap()
-            );
-            let expected_gates: crate::agent_task_gate::VerifyGateOptions =
-                serde_json::from_value(historical.gate_policy.clone()).unwrap();
-            assert_eq!(
-                serde_json::to_value(&options.gates).unwrap(),
-                serde_json::to_value(expected_gates).unwrap()
-            );
-            let repeated =
-                super::super::cook_pre_execution::rebind_queued_cook_runtime_with_admission(
-                    &historical,
-                    &restarted,
-                    "run",
-                    |_| panic!("committed rebind must not readmit"),
-                )
-                .unwrap();
-            assert_eq!(serde_json::to_value(repeated).unwrap(), actual);
-            let intent = super::super::current_execution_intent(&restarted, &rebound)
-                .unwrap()
-                .unwrap();
-            assert!(agent_task_lifecycle::claim_exact_execution_intent_in_store(
-                &restarted,
-                &intent,
-                |_, _| Ok(()),
-            )
-            .unwrap()
-            .is_some());
-            let running = restarted.read_record("run").unwrap();
-            reconstruct_options_for_record_with_dispatcher(&historical, &running, None).unwrap();
-            restarted
-                .mutate_record("run", |record| {
-                    record.metadata["provider_executions_consumed"] = serde_json::json!(1);
-                    record.metadata["provider_run_ids"] = serde_json::json!(["started-provider"]);
-                    true
-                })
-                .unwrap();
-            let started = restarted.read_record("run").unwrap();
-            assert!(!pre_execution_runtime_recovery_is_eligible(
-                &historical,
-                &started
-            ));
-            reconstruct_options_for_record_with_dispatcher(&historical, &started, None)
-                .expect("started work reconstructs only on its already-admitted runtime");
-            assert!(
-                restarted
-                    .rebind_queued_cook_runtime("run", recovery["current"].clone())
-                    .is_ok(),
-                "replayed commit is inert after claim"
-            );
-        });
-    }
-
-    #[test]
-    fn queued_runtime_rebind_rechecks_started_accepted_and_ambiguous_records() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            for evidence in [
-                "consumed",
-                "reservation",
-                "handle",
-                "accepted",
-                "job",
-                "missing_count",
-                "malformed_executions",
-            ] {
-                let context = homeboy_core::test_support::HermeticTestContext::new();
-                let store = CookRecipeStore::new(context.path_roots());
-                let lifecycle =
-                    agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-                let (mut historical, _) = persist_recipe_run(&store, &lifecycle);
-                historical.runtime_generation = "homeboy historical-controller".into();
-                assert!(agent_task_lifecycle::defer_cook_runtime_admission_in_store(
-                    &lifecycle,
-                    "run",
-                    Value::Null
-                )
-                .unwrap());
-                let runtime = super::super::cook_pre_execution::production_runtime_admission(
-                    &lifecycle,
-                )("run")
-                .unwrap();
-                // Model evidence arriving after the read/admission and before
-                // the fenced commit. The store must inspect the fresh row.
-                lifecycle.mutate_record("run", |record| {
-                    match evidence {
-                        "consumed" => record.metadata["provider_executions_consumed"] = serde_json::json!(1),
-                        "reservation" => record.metadata["provider_executions"] = serde_json::json!([{"state": "running"}]),
-                        "handle" => record.provider_handles.push(serde_json::from_value(serde_json::json!({"task_id": "task", "backend": "test", "provider_run_id": "provider"})).unwrap()),
-                        "accepted" => record.lab_handoff = Some(serde_json::from_value(serde_json::json!({"state": "accepted", "authority": "runner_daemon", "runner_id": "lab", "runner_job_id": "job", "accepted_at": "2026-09-30T00:00:00Z"})).unwrap()),
-                        "job" => record.metadata["runner_job_id"] = serde_json::json!("job"),
-                        "missing_count" => { record.ensure_metadata_object().remove("provider_executions_consumed"); },
-                        "malformed_executions" => record.metadata["provider_executions"] = serde_json::json!({}),
-                        _ => unreachable!(),
-                    }
-                    true
-                }).unwrap();
-                let before = lifecycle.read_record("run").unwrap();
-                assert!(
-                    !pre_execution_runtime_recovery_is_eligible(&historical, &before),
-                    "{evidence}"
-                );
-                assert!(
-                    lifecycle
-                        .rebind_queued_cook_runtime("run", runtime)
-                        .is_err(),
-                    "{evidence}"
-                );
-                assert!(
-                    !agent_task_lifecycle::defer_cook_runtime_admission_in_store(
-                        &lifecycle,
-                        "run",
-                        Value::Null
-                    )
-                    .unwrap(),
-                    "{evidence}"
-                );
-                assert!(
-                    reconstruct_options_for_record_with_dispatcher(&historical, &before, None)
-                        .is_err(),
-                    "{evidence}"
-                );
-                assert_eq!(
-                    serde_json::to_value(lifecycle.read_record("run").unwrap()).unwrap(),
-                    serde_json::to_value(before).unwrap(),
-                    "{evidence}: retain exact pin and record"
-                );
-            }
-        });
-    }
-
     /// The store-rooted form of the deleted ambient `consume_next_with`: claim
     /// the next durable continuation from this store and consume it through an
     /// injected normal-cook boundary.
@@ -4838,8 +4378,8 @@ mod tests {
         lab_recipe.promotion_transport["attempt_dispatch"] =
             serde_json::json!({ "kind": "lab", "runner_id": "lab-fixture" });
 
-        let options = reconstruct_options_with_local_placement_override(&lab_recipe)
-            .expect("lab recipe reconstructs");
+        let options =
+            reconstruct_options_without_dispatcher(&lab_recipe).expect("lab recipe reconstructs");
         assert_eq!(
             options.gates.gate_environment.lab_runner.as_deref(),
             Some("lab-fixture")
@@ -4856,8 +4396,8 @@ mod tests {
         lab_recipe.gate_policy["gate_environment"] =
             serde_json::json!({ "lab_runner": "explicit-runner" });
 
-        let options = reconstruct_options_with_local_placement_override(&lab_recipe)
-            .expect("lab recipe reconstructs");
+        let options =
+            reconstruct_options_without_dispatcher(&lab_recipe).expect("lab recipe reconstructs");
         assert_eq!(
             options.gates.gate_environment.lab_runner.as_deref(),
             Some("explicit-runner")
@@ -4902,7 +4442,7 @@ mod tests {
         pinned.gate_policy["verify"] =
             serde_json::json!(["homeboy --runner declared-runner review test --path ."]);
 
-        let options = reconstruct_options_with_local_placement_override(&pinned)
+        let options = reconstruct_options_without_dispatcher(&pinned)
             .expect("pinned gate recipe reconstructs");
         assert_eq!(options.gates.gate_environment.lab_runner, None);
     }
@@ -4911,8 +4451,8 @@ mod tests {
     /// with no gate runner.
     #[test]
     fn local_attempt_dispatch_keeps_gates_local() {
-        let options = reconstruct_options_with_local_placement_override(&recipe())
-            .expect("local recipe reconstructs");
+        let options =
+            reconstruct_options_without_dispatcher(&recipe()).expect("local recipe reconstructs");
         assert_eq!(options.gates.gate_environment.lab_runner, None);
     }
 
@@ -4920,7 +4460,8 @@ mod tests {
     /// durable gate policy of a fresh Lab cook.
     #[test]
     fn admission_persists_placement_following_gate_runner_for_lab_cooks() {
-        let mut request = reconstruct_adoption_options(&recipe()).expect("reconstruct fixture");
+        let mut request =
+            reconstruct_options_without_dispatcher(&recipe()).expect("reconstruct fixture");
         request.provider_transport.attempt_dispatcher = Some(Arc::new(LabRunnerDispatcher));
 
         let persisted = initial_recipe(&request).expect("admission recipe");
@@ -4945,7 +4486,8 @@ mod tests {
     /// gate on the runner.
     #[test]
     fn admitted_request_gates_match_the_persisted_recipe_policy() {
-        let mut request = reconstruct_adoption_options(&recipe()).expect("reconstruct fixture");
+        let mut request =
+            reconstruct_options_without_dispatcher(&recipe()).expect("reconstruct fixture");
         request.provider_transport.attempt_dispatcher = Some(Arc::new(LabRunnerDispatcher));
 
         let admitted = admitted_gate_policy(&request).expect("admitted gate policy");
@@ -4966,7 +4508,8 @@ mod tests {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = CookRecipeStore::new(context.path_roots());
         let dispatcher: Arc<dyn AgentTaskCookAttemptDispatcher> = Arc::new(LabLikeDispatcher);
-        let mut request = reconstruct_adoption_options(&recipe()).expect("reconstruct fixture");
+        let mut request =
+            reconstruct_options_without_dispatcher(&recipe()).expect("reconstruct fixture");
         request.identity.cook_id = "lab-cook".to_string();
         request.identity.initial_run_id = "lab-run".to_string();
         request.workspace.to_worktree = "fixture@lab".to_string();
@@ -5038,7 +4581,8 @@ mod tests {
 
     #[test]
     fn request_sections_round_trip_through_the_v1_recipe_without_a_dispatcher() {
-        let mut options = reconstruct_adoption_options(&recipe()).expect("reconstruct fixture");
+        let mut options =
+            reconstruct_options_without_dispatcher(&recipe()).expect("reconstruct fixture");
         options.identity.cook_id = "nested-cook".to_string();
         options.identity.initial_run_id = "nested-run".to_string();
         options.workspace.to_worktree = "fixture@nested".to_string();
@@ -5075,8 +4619,8 @@ mod tests {
         assert_eq!(persisted.finalization["ai_model"], "nested-model");
         assert_eq!(persisted.finalization["draft_pr"], true);
 
-        let reconstructed =
-            reconstruct_adoption_options(&persisted).expect("reconstruct persisted recipe");
+        let reconstructed = reconstruct_options_without_dispatcher(&persisted)
+            .expect("reconstruct persisted recipe");
         assert_eq!(reconstructed.identity.cook_id, options.identity.cook_id);
         assert_eq!(
             reconstructed.workspace.to_worktree,
@@ -5143,16 +4687,16 @@ mod tests {
         historical.attempts[0].plan.metadata["cook_workspace_base"] =
             serde_json::json!({"sha": "immutable-plan-base"});
 
-        let adoption =
-            reconstruct_adoption_options(&historical).expect("reconstruct historical adoption");
+        let adoption = reconstruct_options_without_dispatcher(&historical)
+            .expect("reconstruct historical adoption");
         assert_eq!(
             adoption.workspace.task_base_sha.as_deref(),
             Some("immutable-plan-base")
         );
 
         historical.finalization["task_base_sha"] = serde_json::json!("recipe-base");
-        let adoption =
-            reconstruct_adoption_options(&historical).expect("reconstruct current adoption");
+        let adoption = reconstruct_options_without_dispatcher(&historical)
+            .expect("reconstruct current adoption");
         assert_eq!(
             adoption.workspace.task_base_sha.as_deref(),
             Some("recipe-base")
@@ -5160,45 +4704,19 @@ mod tests {
     }
 
     #[test]
-    fn provider_replay_keeps_runtime_pin_while_adoption_accepts_historical_policy() {
+    fn recorded_runtime_generation_is_provenance_not_a_reconstruction_pin() {
         let mut historical = recipe();
         historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
 
-        let replay = reconstruct_options(&historical).expect_err("replay requires pinned runtime");
-        assert_eq!(replay.details["field"], "cook_recipe.runtime_generation");
+        let replay = reconstruct_options(&historical).expect("replay reads a historical recipe");
+        assert_eq!(replay.identity.cook_id, historical.cook_id);
 
-        let adoption =
-            reconstruct_adoption_options(&historical).expect("adoption reads historical policy");
+        let adoption = reconstruct_options_without_dispatcher(&historical)
+            .expect("adoption reads historical policy");
         assert_eq!(adoption.identity.cook_id, historical.cook_id);
         assert!(adoption.gates.verify.is_empty());
         assert!(adoption.finalization.no_finalize);
         assert!(adoption.provider_transport.attempt_dispatcher.is_none());
-    }
-
-    #[test]
-    fn historical_terminal_admission_matches_provider_replay_policy() {
-        let current = recipe();
-        assert!(!historical_terminal_continuation_is_eligible(
-            &current,
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
-        ));
-        reconstruct_options(&current).expect("current runtime permits normal continuation");
-
-        let mut historical = current.clone();
-        historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
-        assert!(historical_terminal_continuation_is_eligible(
-            &historical,
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
-        ));
-        reconstruct_adoption_options(&historical)
-            .expect("historical terminal continuation avoids provider replay");
-
-        assert!(!historical_terminal_continuation_is_eligible(
-            &historical,
-            agent_task_lifecycle::AgentTaskRunState::Failed
-        ));
-        reconstruct_options(&historical)
-            .expect_err("historical provider replay retains runtime pin");
     }
 
     #[test]
@@ -6152,7 +5670,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_mismatch_keeps_explicitly_rearmed_continuation_pending() {
+    fn rearmed_continuation_from_an_older_runtime_is_consumed() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let (store, lifecycle_store) = rooted_stores(&context);
         let mut historical = recipe();
@@ -6171,15 +5689,15 @@ mod tests {
             .claim_continuation_for("cook", "run")
             .unwrap()
             .unwrap();
-        let error = store
+        let exit_code = store
             .consume_claimed_with_dispatcher(claim, |_| Ok(None), |_| Ok(0))
-            .unwrap_err();
+            .expect("the recorded runtime generation no longer pins continuation");
 
-        assert_eq!(error.retryable, Some(true));
+        assert_eq!(exit_code, 0);
         assert!(store
             .claim_continuation_for("cook", "run")
             .unwrap()
-            .is_some());
+            .is_none());
     }
 
     /// A record carrying an undecodable continuation is inert: it is neither

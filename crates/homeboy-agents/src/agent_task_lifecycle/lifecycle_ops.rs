@@ -2815,7 +2815,7 @@ where
     record.metadata = metadata;
     let mut preserved_controller_runtime = None;
     let mut pre_execution_recovery = false;
-    let mut pre_execution_runtime_recovery = false;
+    let mut controller_pre_execution_recovery = false;
     // A submission only needs `run_id`'s own row to merge forward, whether
     // it is brand new or a resubmission of a record this same write path
     // already committed to SQLite.
@@ -2860,7 +2860,7 @@ where
             crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
                 &existing,
             );
-        pre_execution_runtime_recovery = execution_runner_id.is_none() && pre_execution_recovery;
+        controller_pre_execution_recovery = execution_runner_id.is_none() && pre_execution_recovery;
         // A runner may re-submit the plan after the controller reserved a
         // side-effect claim. Claims are durable exactly-once ownership, not
         // plan-derived state, so replacing the record must retain them.
@@ -2902,8 +2902,8 @@ where
                 }
             }
         }
-        // A runner re-submitting a retry must not erase its lineage or runtime
-        // recovery receipt. Both are durable authority/evidence, not plan state.
+        // A runner re-submitting a retry must not erase its lineage. It is
+        // durable authority, not plan state.
         for key in [
             "retry_of",
             "retried_from",
@@ -2911,7 +2911,6 @@ where
             "retries",
             "retry_requested_at",
             "retry_origin",
-            "controller_runtime_recovery",
         ] {
             if let Some(value) = existing.metadata.get(key) {
                 record.metadata[key] = value.clone();
@@ -2995,7 +2994,7 @@ where
             // any provider work in case cancellation won immediately after.
             // Bounded: this run's own just-committed row, not history (#14962).
             if let Ok(cancelled) = lifecycle_store.read_record_bounded(&run_id) {
-                if cancelled.state().is_terminal() && !pre_execution_runtime_recovery {
+                if cancelled.state().is_terminal() && !controller_pre_execution_recovery {
                     return Ok(cancelled);
                 }
             }
@@ -3012,13 +3011,10 @@ where
                     [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                     admission.runtime();
             }
-            if pre_execution_runtime_recovery {
-                record = lifecycle_store
-                    .rearm_pre_execution_record_with_runtime(&record, admission.runtime())?;
-            } else if pre_execution_recovery {
-                // Runner execution has its own runtime provenance. Clear the
-                // terminal pre-provider projection without rebinding the
-                // controller pin to the runner's executable (#13552).
+            if pre_execution_recovery {
+                // Clear the terminal pre-provider projection. The record
+                // already carries the controller pin chosen above; runner
+                // execution keeps its own runtime provenance (#13552).
                 record = lifecycle_store.rearm_pre_execution_record(&record)?;
             } else {
                 // Admission may have waited in the queue. Apply the runtime
@@ -6687,19 +6683,6 @@ where
     if let Some(reservation_metadata) = reservation_metadata {
         metadata.extend(reservation_metadata);
     }
-    let transport_runtime_recovery = crate::agent_task_service::pre_execution_runtime_recovery(
-        &source,
-    ) == Some(
-        crate::agent_task_service::PreExecutionRuntimeRecovery::RetryablePreExecutionFailure,
-    );
-    let previous_controller_runtime = transport_runtime_recovery
-        .then(|| {
-            source
-                .metadata
-                .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-                .cloned()
-        })
-        .flatten();
     let mut record = submit_plan_with_runtime_admission_in_store(
         lifecycle_store,
         &plan,
@@ -6709,22 +6692,6 @@ where
         admission_status,
         admit_runtime,
     )?;
-    if let Some(previous) = previous_controller_runtime {
-        let recovered = lifecycle_store.mutate_record(&record.run_id, |child| {
-            let current = child
-                .metadata
-                .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-                .cloned()
-                .unwrap_or(Value::Null);
-            child.metadata["controller_runtime_recovery"] = crate::agent_task_service::PreExecutionRuntimeRecovery::RetryablePreExecutionTransportFailure
-                .provenance(previous, current);
-            child.metadata["controller_runtime_recovery"]["source_run_id"] = json!(source.run_id);
-            true
-        })?;
-        record = recovered.ok_or_else(|| {
-            Error::internal_unexpected("persisted transport runtime recovery child is unavailable")
-        })?;
-    }
     if let Some(mut acceptance) = source.acceptance.clone() {
         // A repair is a new candidate, but it retains the rejected verdict and
         // evidence as lineage instead of erasing the reviewer decision.

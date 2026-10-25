@@ -2069,7 +2069,7 @@ fn canonical_finalization_recovery_run_id_with_stores(
         .map(|(store, _)| store.load_recipe(cook_id))
         .unwrap_or_else(|| super::cook_recipe::load_recipe(cook_id))
         .ok()?;
-    let options = super::cook_recipe::reconstruct_adoption_options(&recipe).ok()?;
+    let options = super::cook_recipe::reconstruct_options_without_dispatcher(&recipe).ok()?;
     let promotion = stores
         .map(|(_, lifecycle)| {
             super::cook_promotion::persisted_promotion_for_attempt_in_store(lifecycle, run_id)
@@ -4905,35 +4905,6 @@ fn record_cook_disk_pressure_advisory(
     )
 }
 
-fn reconstruct_existing_cook_options(
-    recipe: &super::cook_recipe::AgentTaskCookRecipe,
-    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
-    attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
-    adoption_or_historical_continuation: bool,
-    pre_execution_runtime_recovery: bool,
-    local_placement_override: bool,
-) -> Result<CookRequest> {
-    if adoption_or_historical_continuation {
-        super::reconstruct_adoption_options_with_dispatcher(recipe, attempt_dispatcher)
-    } else if local_placement_override {
-        super::cook_recipe::reconstruct_options_with_local_placement_override(recipe)
-    } else if pre_execution_runtime_recovery {
-        super::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
-            recipe,
-            attempt_dispatcher,
-        )
-    } else {
-        match record {
-            Some(record) => super::cook_recipe::reconstruct_options_for_record_with_dispatcher(
-                recipe,
-                record,
-                attempt_dispatcher,
-            ),
-            None => super::reconstruct_options_with_dispatcher(recipe, attempt_dispatcher),
-        }
-    }
-}
-
 /// Typed execution intent. Continuation authorization is no longer encoded by
 /// selecting a different public runner.
 #[derive(Debug, Clone, Copy, Default)]
@@ -5783,18 +5754,17 @@ fn run_cook_spine(
         && requested_record
             .as_ref()
             .is_some_and(|record| transport_admission_reset_available(Some(record)));
-    let pre_execution_runtime_recovery = requested_record
-        .as_ref()
-        .is_some_and(|record| super::pre_execution_runtime_recovery_is_eligible(&recipe, record));
     let mut options = if existing_recipe {
-        let mut reconstructed = reconstruct_existing_cook_options(
-            &recipe,
-            requested_record.as_ref(),
-            options.provider_transport.attempt_dispatcher,
-            adopted_model.is_some() || matches!(mode, CookMode::Adopt | CookMode::ContinueTerminal),
-            pre_execution_runtime_recovery,
-            local_placement_override,
-        )?;
+        let adoption =
+            adopted_model.is_some() || matches!(mode, CookMode::Adopt | CookMode::ContinueTerminal);
+        let mut reconstructed = if local_placement_override && !adoption {
+            super::reconstruct_options_without_dispatcher(&recipe)?
+        } else {
+            super::reconstruct_options_with_dispatcher(
+                &recipe,
+                options.provider_transport.attempt_dispatcher,
+            )?
+        };
         if let Some(attempt) = recipe
             .attempts
             .iter()
