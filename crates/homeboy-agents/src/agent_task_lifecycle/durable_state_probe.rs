@@ -111,11 +111,6 @@ pub fn seed_status_purity_fixtures_for_test() -> super::Result<Vec<StatusPurityF
             AgentTaskTerminalOutcome::PartialFailure,
         ),
         (
-            "partial_recoverable",
-            "purity-partial-recoverable",
-            AgentTaskTerminalOutcome::PartialRecoverable,
-        ),
-        (
             "candidate_recoverable",
             "purity-candidate-recoverable",
             AgentTaskTerminalOutcome::CandidateRecoverable,

@@ -4498,7 +4498,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
         aggregate.totals.succeeded = 0;
         aggregate.totals.candidate_recoverable = 1;
         aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
-        // One outcome, all recoverable candidates: the derived status is PartialRecoverable.
+        // One outcome, all recoverable candidates: the derived status is CandidateRecoverable.
         aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
             schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
             id: "recoverable.patch".to_string(),
@@ -4524,7 +4524,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             store::read_record("agent-task-disconnected-child")
                 .expect("committed controller projection")
                 .state(),
-            AgentTaskRunState::PartialRecoverable
+            AgentTaskRunState::CandidateRecoverable
         );
         assert!(
             !store::aggregate_path(&record.run_id)
@@ -4536,7 +4536,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
         let durable_aggregate = durable.aggregate.expect("mirrored aggregate");
         assert_eq!(
             durable_aggregate.status(),
-            AgentTaskRunState::PartialRecoverable
+            AgentTaskRunState::CandidateRecoverable
         );
         let durable_patch = &durable_aggregate.outcomes[0].artifacts[0];
         assert_eq!(durable_patch.id, "recoverable.patch");
@@ -4562,7 +4562,10 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
                     .expect("committed artifacts"),
             )
         });
-        assert_eq!(status_record.state(), AgentTaskRunState::PartialRecoverable);
+        assert_eq!(
+            status_record.state(),
+            AgentTaskRunState::CandidateRecoverable
+        );
         assert!(
             log.events
                 .iter()
@@ -4572,7 +4575,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
         assert_eq!(artifacts.artifacts[0].id, "recoverable.patch");
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
-        assert_eq!(record.state(), AgentTaskRunState::PartialRecoverable);
+        assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
         assert!(store::aggregate_path(&record.run_id)
             .expect("aggregate path")
             .exists());

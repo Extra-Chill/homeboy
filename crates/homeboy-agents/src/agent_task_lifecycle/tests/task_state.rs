@@ -102,7 +102,7 @@ fn failed_task_recovered_by_deferred_candidate_reconciliation_reads_back_recover
         );
         assert_eq!(
             store.read_record(run_id).expect("record").state(),
-            AgentTaskRunState::PartialRecoverable
+            AgentTaskRunState::CandidateRecoverable
         );
     });
 }

@@ -115,9 +115,7 @@ fn delivery_run_state(
         return None;
     }
     match next.lifecycle().run_state? {
-        AgentTaskRunState::CandidateRecoverable => (run.state()
-            != AgentTaskRunState::CandidateRecoverable)
-            .then_some(AgentTaskRunState::CandidateRecoverable),
+        AgentTaskRunState::CandidateRecoverable => Some(AgentTaskRunState::CandidateRecoverable),
         AgentTaskRunState::Succeeded => (run.state() == AgentTaskRunState::CandidateRecoverable
             && previous.is_some_and(CookDelivery::is_unverified)
             && run.candidate_adoption.is_none())

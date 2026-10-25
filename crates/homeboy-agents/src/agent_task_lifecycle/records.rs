@@ -660,7 +660,6 @@ impl AgentTaskRunRecord {
             self.state,
             AgentTaskRunState::Succeeded
                 | AgentTaskRunState::CandidateRecoverable
-                | AgentTaskRunState::PartialRecoverable
                 | AgentTaskRunState::PartialFailure
         )
     }
@@ -1717,9 +1716,9 @@ pub enum AgentTaskRunState {
     Queued,
     Running,
     Succeeded,
-    /// Backward-compatible projection for older durable records.
+    /// The run stopped holding a recoverable candidate: every outcome is
+    /// candidate-recoverable, or Cook delivery recorded that verdict.
     CandidateRecoverable,
-    PartialRecoverable,
     PartialFailure,
     Failed,
     Cancelled,
@@ -1728,7 +1727,7 @@ pub enum AgentTaskRunState {
 impl AgentTaskRunState {
     /// The single definition of an aggregate's status, always a terminal
     /// state. Any cancelled outcome cancels the run; a run whose outcomes are
-    /// all recoverable candidates is `PartialRecoverable`; otherwise a
+    /// all recoverable candidates is `CandidateRecoverable`; otherwise a
     /// recoverable candidate counts as not failed. An aggregate with no
     /// outcomes has no succeeded work and is `Failed`.
     pub fn from_outcomes(outcomes: &[crate::agent_task::AgentTaskOutcome]) -> Self {
@@ -1743,7 +1742,7 @@ impl AgentTaskRunState {
                 .iter()
                 .all(|outcome| outcome.status == CandidateRecoverable)
         {
-            return Self::PartialRecoverable;
+            return Self::CandidateRecoverable;
         }
         let failed = outcomes
             .iter()
@@ -1771,7 +1770,6 @@ impl AgentTaskRunState {
             self,
             AgentTaskRunState::Succeeded
                 | AgentTaskRunState::CandidateRecoverable
-                | AgentTaskRunState::PartialRecoverable
                 | AgentTaskRunState::PartialFailure
                 | AgentTaskRunState::Failed
                 | AgentTaskRunState::Cancelled
@@ -1838,10 +1836,10 @@ impl AgentTaskRunState {
 /// keeps `record.state` and `record.lifecycle.execution.state` in lockstep
 /// instead of a hand-synced map.
 ///
-/// That 1:1 claim was false until #6761: `CandidateRecoverable` and
-/// `PartialRecoverable` both mapped to `PartialFailure`, so three run states
-/// arrived at every serialized consumer as one string and the comment saying
-/// otherwise is why it went unnoticed. The projection is now injective, and
+/// That 1:1 claim was false until #6761: `CandidateRecoverable` mapped to
+/// `PartialFailure`, so two run states arrived at every serialized consumer as
+/// one string and the comment saying otherwise is why it went unnoticed. The
+/// projection is now injective, and
 /// `the_projection_is_injective` below fails if a future variant re-collapses
 /// it.
 impl From<AgentTaskRunState> for RunExecutionState {
@@ -1851,7 +1849,6 @@ impl From<AgentTaskRunState> for RunExecutionState {
             AgentTaskRunState::Running => RunExecutionState::Running,
             AgentTaskRunState::Succeeded => RunExecutionState::Succeeded,
             AgentTaskRunState::CandidateRecoverable => RunExecutionState::CandidateRecoverable,
-            AgentTaskRunState::PartialRecoverable => RunExecutionState::PartialRecoverable,
             AgentTaskRunState::PartialFailure => RunExecutionState::PartialFailure,
             AgentTaskRunState::Failed => RunExecutionState::Failed,
             AgentTaskRunState::Cancelled => RunExecutionState::Cancelled,
@@ -1887,7 +1884,6 @@ impl From<AgentTaskRunState> for RunLifecycleStatus {
             // together so this still agrees with the `RunExecutionState`
             // projection above.
             AgentTaskRunState::CandidateRecoverable => RunLifecycleStatus::CandidateRecoverable,
-            AgentTaskRunState::PartialRecoverable => RunLifecycleStatus::PartialRecoverable,
             AgentTaskRunState::PartialFailure => RunLifecycleStatus::PartialFailure,
             AgentTaskRunState::Failed => RunLifecycleStatus::Failed,
             AgentTaskRunState::Cancelled => RunLifecycleStatus::Cancelled,
@@ -1917,7 +1913,6 @@ mod run_state_lifecycle_projection_tests {
             (Queued, Failed),
             (Running, Succeeded),
             (Running, CandidateRecoverable),
-            (Running, PartialRecoverable),
             (Running, PartialFailure),
             (Running, Failed),
             // Resubmission, zero-execution rearm, detached Cook reclaim.
@@ -1949,7 +1944,6 @@ mod run_state_lifecycle_projection_tests {
             (Succeeded, Running),
             (Failed, Running),
             (CandidateRecoverable, Running),
-            (PartialRecoverable, Running),
             (PartialFailure, Running),
             (Cancelled, Succeeded),
             (Cancelled, CandidateRecoverable),
@@ -1958,7 +1952,6 @@ mod run_state_lifecycle_projection_tests {
             (Succeeded, Cancelled),
             (Failed, Cancelled),
             (PartialFailure, Cancelled),
-            (PartialRecoverable, Cancelled),
         ];
         for (from, to) in refused {
             assert!(
@@ -1970,19 +1963,18 @@ mod run_state_lifecycle_projection_tests {
 
     /// Every `AgentTaskRunState`, so a new variant is a compile error in the
     /// tests below rather than a silently unchecked one.
-    const ALL_RUN_STATES: [AgentTaskRunState; 8] = [
+    const ALL_RUN_STATES: [AgentTaskRunState; 7] = [
         AgentTaskRunState::Queued,
         AgentTaskRunState::Running,
         AgentTaskRunState::Succeeded,
         AgentTaskRunState::CandidateRecoverable,
-        AgentTaskRunState::PartialRecoverable,
         AgentTaskRunState::PartialFailure,
         AgentTaskRunState::Failed,
         AgentTaskRunState::Cancelled,
     ];
 
-    /// The defect #6761 fixed: `CandidateRecoverable`, `PartialRecoverable`,
-    /// and `PartialFailure` all projected to `PartialFailure`, so a consumer
+    /// The defect #6761 fixed: `CandidateRecoverable` and `PartialFailure`
+    /// both projected to `PartialFailure`, so a consumer
     /// reading only the serialized run could not tell "there is a candidate to
     /// promote" from "this partially failed".
     ///
@@ -2031,22 +2023,14 @@ mod run_state_lifecycle_projection_tests {
     /// around a run that is waiting on a decision.
     #[test]
     fn recoverable_states_are_terminal_unsuccessful_and_not_retryable() {
-        for state in [
-            AgentTaskRunState::CandidateRecoverable,
-            AgentTaskRunState::PartialRecoverable,
-        ] {
-            let projected = RunLifecycleStatus::from(state);
-            assert!(projected.is_terminal(), "{state:?} must be terminal");
-            assert!(!projected.is_success(), "{state:?} must not claim success");
-            assert!(
-                !projected.is_retryable(),
-                "{state:?} must not instruct a retry"
-            );
-            // Deliberately no `is_recoverable()` helper: a boolean would
-            // re-collapse `CandidateRecoverable` and `PartialRecoverable` into
-            // one bit, which is the exact loss this change removes. Consumers
-            // match the variant they care about.
-        }
+        let state = AgentTaskRunState::CandidateRecoverable;
+        let projected = RunLifecycleStatus::from(state);
+        assert!(projected.is_terminal(), "{state:?} must be terminal");
+        assert!(!projected.is_success(), "{state:?} must not claim success");
+        assert!(
+            !projected.is_retryable(),
+            "{state:?} must not instruct a retry"
+        );
     }
 
     /// The direct projection must never diverge from composing the two that
@@ -2060,7 +2044,6 @@ mod run_state_lifecycle_projection_tests {
             AgentTaskRunState::Running,
             AgentTaskRunState::Succeeded,
             AgentTaskRunState::CandidateRecoverable,
-            AgentTaskRunState::PartialRecoverable,
             AgentTaskRunState::PartialFailure,
             AgentTaskRunState::Failed,
             AgentTaskRunState::Cancelled,
@@ -2084,7 +2067,6 @@ mod run_state_lifecycle_projection_tests {
             AgentTaskRunState::Running,
             AgentTaskRunState::Succeeded,
             AgentTaskRunState::CandidateRecoverable,
-            AgentTaskRunState::PartialRecoverable,
             AgentTaskRunState::PartialFailure,
             AgentTaskRunState::Failed,
             AgentTaskRunState::Cancelled,

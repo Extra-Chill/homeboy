@@ -293,3 +293,58 @@ fn a_no_change_gate_failure_is_recoverable_and_canonically_spelled() {
     );
     assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
 }
+
+/// One recoverable run state (#15718): a run whose only task ends
+/// candidate-recoverable derives `CandidateRecoverable`, Cook delivery's
+/// verdict leaves it there, and the candidate stays eligible for recovery in
+/// both readings.
+#[test]
+fn a_candidate_recoverable_run_reads_the_same_before_and_after_delivery() {
+    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let run_id = "run-cook-delivery-one-recoverable-state";
+    let lifecycle_store = store_with_run(&context, run_id);
+    let plan = test_plan();
+    let mut aggregate = succeeded_aggregate(&plan);
+    aggregate.totals.succeeded = 0;
+    aggregate.totals.candidate_recoverable = 1;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable;
+    aggregate.events[0].state = AgentTaskState::CandidateRecoverable;
+    let recover_eligibility = |record: &AgentTaskRunRecord| {
+        lifecycle_action_eligibility(record, None)
+            .actions
+            .into_iter()
+            .find(|entry| entry.action == ControlPlaneAction::Promote)
+            .expect("promote action")
+            .availability
+    };
+
+    let before = record_run_aggregate_in_store(&lifecycle_store, run_id, &plan, &aggregate)
+        .expect("aggregate recorded");
+    assert_eq!(aggregate.status(), AgentTaskRunState::CandidateRecoverable);
+    assert_eq!(before.state(), AgentTaskRunState::CandidateRecoverable);
+    assert_eq!(
+        recover_eligibility(&before),
+        ControlPlaneActionAvailability::Indeterminate
+    );
+
+    let after = record_promotion_in_store(
+        &lifecycle_store,
+        run_id,
+        promotion(run_id, "gate_failed", gate("failed")),
+    )
+    .expect("delivery verdict recorded");
+    assert_eq!(
+        persisted_delivery(&after).lifecycle().run_state,
+        Some(AgentTaskRunState::CandidateRecoverable)
+    );
+    assert_eq!(after.state(), AgentTaskRunState::CandidateRecoverable);
+    assert_eq!(
+        lifecycle_store.read_record(run_id).expect("reread").state(),
+        AgentTaskRunState::CandidateRecoverable
+    );
+    assert_eq!(
+        recover_eligibility(&after),
+        ControlPlaneActionAvailability::Indeterminate
+    );
+}

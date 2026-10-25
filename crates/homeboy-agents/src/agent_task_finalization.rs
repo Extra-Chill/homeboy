@@ -1644,9 +1644,7 @@ fn validate_durable_publication_eligibility(
             .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
     let authenticated_partial_provider_recovery = matches!(
         lifecycle.execution.state,
-        RunExecutionState::PartialFailure
-            | RunExecutionState::CandidateRecoverable
-            | RunExecutionState::PartialRecoverable
+        RunExecutionState::PartialFailure | RunExecutionState::CandidateRecoverable
     ) && ((all_provider_runtimes_succeeded
         && lifecycle
             .provider_runtime

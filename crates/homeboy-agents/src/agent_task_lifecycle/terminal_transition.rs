@@ -34,7 +34,6 @@ use super::*;
 pub enum AgentTaskTerminalOutcome {
     Succeeded,
     CandidateRecoverable,
-    PartialRecoverable,
     PartialFailure,
     Failed,
     Cancelled,
@@ -45,7 +44,6 @@ impl AgentTaskTerminalOutcome {
         match self {
             Self::Succeeded => AgentTaskRunState::Succeeded,
             Self::CandidateRecoverable => AgentTaskRunState::CandidateRecoverable,
-            Self::PartialRecoverable => AgentTaskRunState::PartialRecoverable,
             Self::PartialFailure => AgentTaskRunState::PartialFailure,
             Self::Failed => AgentTaskRunState::Failed,
             Self::Cancelled => AgentTaskRunState::Cancelled,
@@ -56,7 +54,6 @@ impl AgentTaskTerminalOutcome {
         match state {
             AgentTaskRunState::Succeeded => Some(Self::Succeeded),
             AgentTaskRunState::CandidateRecoverable => Some(Self::CandidateRecoverable),
-            AgentTaskRunState::PartialRecoverable => Some(Self::PartialRecoverable),
             AgentTaskRunState::PartialFailure => Some(Self::PartialFailure),
             AgentTaskRunState::Failed => Some(Self::Failed),
             AgentTaskRunState::Cancelled => Some(Self::Cancelled),

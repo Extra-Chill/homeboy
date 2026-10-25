@@ -1385,7 +1385,7 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
                 AgentTaskCookAttemptReport {
                     attempt: 1,
                     run_id: selected_run_id.to_string(),
-                    run_state: "PartialRecoverable".to_string(),
+                    run_state: "CandidateRecoverable".to_string(),
                     aggregate_path: None,
                     promotion: None,
                     feedback: None,
@@ -15709,10 +15709,10 @@ fn seed_timeout_gate_failed_cook(
     )
     .expect("persist gate failure");
     agent_task_lifecycle::rewrite_record_for_test(&attempt_id, |record| {
-        record.set_state_for_test(AgentTaskRunState::PartialRecoverable);
+        record.set_state_for_test(AgentTaskRunState::CandidateRecoverable);
         record.tasks[0].set_state_for_test(AgentTaskState::CandidateRecoverable);
     })
-    .expect("retain partial recoverable terminal state");
+    .expect("retain candidate recoverable terminal state");
     for (attempt, run_id) in [(1, attempt_id.as_str()), (2, latest_id.as_str())] {
         agent_task_lifecycle::record_cook_attempt_in_store(
             &lifecycle_store,
@@ -22517,8 +22517,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         )
         .expect("persist candidate-recoverable aggregate");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            // An all-candidate aggregate derives `PartialRecoverable`; the run
-            // reaches `CandidateRecoverable` through the Cook terminal state.
+            // An all-candidate aggregate already derives `CandidateRecoverable`.
             record.set_state_for_test(AgentTaskRunState::CandidateRecoverable);
             record
                 .lifecycle

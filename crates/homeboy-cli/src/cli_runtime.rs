@@ -7082,7 +7082,6 @@ mod tests {
                 AgentTaskRunState::Failed,
                 AgentTaskRunState::Cancelled,
                 AgentTaskRunState::CandidateRecoverable,
-                AgentTaskRunState::PartialRecoverable,
             ] {
                 crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
                     record.set_state_for_test(state);

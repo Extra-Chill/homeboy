@@ -163,12 +163,7 @@ impl TerminalWorkspaceAuthorityProof {
         authorities.dedup();
         let controller_terminal = matches!(
             self.controller_state.as_str(),
-            "Succeeded"
-                | "CandidateRecoverable"
-                | "PartialRecoverable"
-                | "PartialFailure"
-                | "Failed"
-                | "Cancelled"
+            "Succeeded" | "CandidateRecoverable" | "PartialFailure" | "Failed" | "Cancelled"
         );
         let accepted_binding_matches =
             self.accepted_runner_id.is_some() == self.accepted_runner_job_id.is_some();

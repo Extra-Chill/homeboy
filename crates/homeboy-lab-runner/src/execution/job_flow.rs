@@ -549,9 +549,9 @@ fn exact_attempt_terminal_job_status(
     use homeboy_agents::agent_task_lifecycle::AgentTaskRunState;
     match state {
         AgentTaskRunState::Cancelled => Some(JobStatus::Cancelled),
-        AgentTaskRunState::Succeeded
-        | AgentTaskRunState::CandidateRecoverable
-        | AgentTaskRunState::PartialRecoverable => Some(JobStatus::Succeeded),
+        AgentTaskRunState::Succeeded | AgentTaskRunState::CandidateRecoverable => {
+            Some(JobStatus::Succeeded)
+        }
         AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure => Some(JobStatus::Failed),
         AgentTaskRunState::Queued | AgentTaskRunState::Running => None,
     }

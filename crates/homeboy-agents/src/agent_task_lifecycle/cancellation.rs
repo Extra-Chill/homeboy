@@ -910,7 +910,6 @@ fn cancel_resolved_run_in_store(
     if matches!(
         record.state(),
         AgentTaskRunState::Succeeded
-            | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
     ) {
@@ -1525,7 +1524,6 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
         matches!(
             record.state(),
             AgentTaskRunState::Succeeded
-                | AgentTaskRunState::PartialRecoverable
                 | AgentTaskRunState::PartialFailure
                 | AgentTaskRunState::Failed
                 | AgentTaskRunState::Cancelled

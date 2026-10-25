@@ -76,7 +76,7 @@ impl CookVerdict {
         }
         let category = match self.state.as_str() {
             "stale" => "stale_running_record",
-            "candidate_recoverable" | "partial_recoverable" => "candidate_recoverable",
+            "candidate_recoverable" => "candidate_recoverable",
             "failed" | "partial_failure" | "timed_out" => "execution_failure",
             "cancelled" => "cancelled",
             _ => return None,
@@ -222,7 +222,7 @@ fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<St
         State::Stale => Some(
             "the run owner stopped reporting progress; the durable record is stale".to_string(),
         ),
-        State::CandidateRecoverable | State::PartialRecoverable => Some(match candidate {
+        State::CandidateRecoverable => Some(match candidate {
             Some("verification_pending") => {
                 "the candidate was promoted but its gates have not verified it; it was not published"
                     .to_string()

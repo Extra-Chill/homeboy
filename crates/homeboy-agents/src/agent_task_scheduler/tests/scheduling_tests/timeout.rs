@@ -189,7 +189,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskRunState::PartialRecoverable,
+            AgentTaskRunState::CandidateRecoverable,
             "a non-empty attempt diff is recoverable rather than discarded"
         );
         let outcome = &aggregate.outcomes[0];
@@ -409,7 +409,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+            crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
         );
         assert_eq!(aggregate.totals.candidate_recoverable, 1);
         assert_eq!(aggregate.totals.recoverable_candidates, 1);
@@ -523,7 +523,7 @@ mod timeout_tests {
 
             assert_eq!(
                 aggregate.status(),
-                crate::agent_task_lifecycle::AgentTaskRunState::PartialRecoverable,
+                crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
                 "{aggregate:#?}"
             );
             let outcome = &aggregate.outcomes[0];

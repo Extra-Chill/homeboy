@@ -1066,13 +1066,13 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
         .expect("actual status payload renders");
 
         // An aggregate whose outcomes are all recoverable candidates derives
-        // `partial_recoverable` (the scheduler rule, #15718).
+        // `candidate_recoverable` (the scheduler rule, #15718).
         assert_eq!(exit_code, 0);
-        assert_eq!(value["state"], "partial_recoverable");
+        assert_eq!(value["state"], "candidate_recoverable");
         assert_eq!(value["candidate"]["state"], "patch_available");
         assert!(value.get("durable_candidate").is_none());
         assert!(
-            rendered.contains("Status: partial_recoverable"),
+            rendered.contains("Status: candidate_recoverable"),
             "{rendered}"
         );
         assert!(

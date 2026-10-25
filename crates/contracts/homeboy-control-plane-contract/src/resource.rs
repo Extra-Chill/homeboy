@@ -865,7 +865,6 @@ pub enum ControlPlaneState {
     Running,
     Succeeded,
     CandidateRecoverable,
-    PartialRecoverable,
     PartialFailure,
     Failed,
     Cancelled,

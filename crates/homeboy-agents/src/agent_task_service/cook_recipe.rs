@@ -3040,7 +3040,6 @@ pub fn historical_terminal_continuation_is_eligible(
             state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
                 | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-                | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
         )
 }
 
@@ -3145,9 +3144,7 @@ fn continuation_source_run_id(
                 .is_ok_and(|record| {
                     matches!(
                         record.state(),
-                        AgentTaskRunState::CandidateRecoverable
-                            | AgentTaskRunState::PartialRecoverable
-                            | AgentTaskRunState::Succeeded
+                        AgentTaskRunState::CandidateRecoverable | AgentTaskRunState::Succeeded
                     )
                 })
         })

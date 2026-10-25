@@ -5509,8 +5509,8 @@ pub fn reconcile_status_with_options(
 /// candidate-adoption review can dispatch remediation to a *different*,
 /// still-pending run (`candidate_adoption.remediation_run_id`) before this
 /// record's own outcome is knowable, and `enqueue_terminal_continuation`
-/// deliberately only ever queues a continuation for `Succeeded`,
-/// `CandidateRecoverable`, or `PartialRecoverable` records. So this waits
+/// deliberately only ever queues a continuation for `Succeeded` or
+/// `CandidateRecoverable` records. So this waits
 /// until any dispatched remediation is itself terminal — meaning there is
 /// nothing left to resume — before restoring this record's true terminal
 /// fact.
@@ -5842,9 +5842,7 @@ fn converge_resolved_run_in_store(
     // consumer owns execution and cannot inherit a local closure.
     if matches!(
         record.state(),
-        AgentTaskRunState::Succeeded
-            | AgentTaskRunState::CandidateRecoverable
-            | AgentTaskRunState::PartialRecoverable
+        AgentTaskRunState::Succeeded | AgentTaskRunState::CandidateRecoverable
     ) {
         let recipe_by_cook_id = record
             .metadata
@@ -6205,7 +6203,6 @@ pub(crate) fn mark_resuming_in_store(
     if matches!(
         record.state(),
         AgentTaskRunState::Succeeded
-            | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
             | AgentTaskRunState::Cancelled

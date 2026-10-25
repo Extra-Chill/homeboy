@@ -314,7 +314,6 @@ fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
                     record.state(),
                     agent_task_lifecycle::AgentTaskRunState::Succeeded
                         | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-                        | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
                 ) =>
         {
             return WorkflowRunOutcome::Pending;
@@ -509,7 +508,6 @@ fn attempt_status_label(state: agent_task_lifecycle::AgentTaskRunState) -> &'sta
         AgentTaskRunState::Running => "running",
         AgentTaskRunState::Succeeded => "succeeded",
         AgentTaskRunState::CandidateRecoverable => "candidate_recoverable",
-        AgentTaskRunState::PartialRecoverable => "partial_recoverable",
         AgentTaskRunState::PartialFailure => "partial_failure",
         AgentTaskRunState::Failed => "failed",
         AgentTaskRunState::Cancelled => "cancelled",

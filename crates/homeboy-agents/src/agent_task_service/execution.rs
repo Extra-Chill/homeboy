@@ -1349,7 +1349,6 @@ fn terminal_run_result_for_record(
         record.state(),
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialFailure
             | agent_task_lifecycle::AgentTaskRunState::Failed
             | agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -3345,7 +3344,6 @@ mod terminal_exit_code_tests {
         assert_eq!(terminal_record_exit_code(&State::Succeeded, &aggregate), 0);
         for state in [
             State::CandidateRecoverable,
-            State::PartialRecoverable,
             State::PartialFailure,
             State::Failed,
             State::Cancelled,

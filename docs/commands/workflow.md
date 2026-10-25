@@ -24,7 +24,7 @@ Statuses:
 
 | Thing | Terminal statuses |
 |---|---|
-| Step | `succeeded`, `failed`, `timed_out`, `cancelled`, `skipped`; a `cook` step reports its Cook's run state (`succeeded`, `candidate_recoverable`, `partial_recoverable`, `partial_failure`, `failed`, `cancelled`) |
+| Step | `succeeded`, `failed`, `timed_out`, `cancelled`, `skipped`; a `cook` step reports its Cook's run state (`succeeded`, `candidate_recoverable`, `partial_failure`, `failed`, `cancelled`) |
 | Instance | `succeeded`, `failed`, `cancelled`, `budget_exhausted` |
 
 ## The `homeboy/workflow/v1` format

@@ -2221,7 +2221,6 @@ fn run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord)
         record.state(),
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialFailure
             | agent_task_lifecycle::AgentTaskRunState::Failed
             | agent_task_lifecycle::AgentTaskRunState::Cancelled

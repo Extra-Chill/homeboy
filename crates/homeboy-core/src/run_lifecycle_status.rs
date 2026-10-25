@@ -10,13 +10,12 @@ pub const RUN_LIFECYCLE_STATUS_SCHEMA: &str = "homeboy/run-lifecycle-status/v1";
 ///
 /// # Recoverable is not retryable
 ///
-/// `CandidateRecoverable` and `PartialRecoverable` are terminal and
-/// unsuccessful, like `PartialFailure`, and like it they are **not
-/// retryable** — re-running reproduces the same stop. They are separate
-/// because the *next action* differs: a candidate can be promoted, partial
-/// work can be resumed, and a partial failure offers neither. Folding them
-/// into `PartialFailure` (which is what happened before) left a consumer
-/// holding a serialized run unable to tell those three apart.
+/// `CandidateRecoverable` is terminal and unsuccessful, like
+/// `PartialFailure`, and like it is **not retryable** — re-running reproduces
+/// the same stop. It is separate because the *next action* differs: a
+/// candidate can be promoted or resumed, and a partial failure offers
+/// neither. Folding it into `PartialFailure` (which is what happened before)
+/// left a consumer holding a serialized run unable to tell the two apart.
 ///
 /// # Unknown is the tolerance hatch
 ///
@@ -31,8 +30,6 @@ pub enum RunLifecycleStatus {
     Succeeded,
     /// Stopped, unsuccessful, but a promotable candidate survived.
     CandidateRecoverable,
-    /// Stopped, unsuccessful, but the partial work can be resumed.
-    PartialRecoverable,
     PartialFailure,
     Failed,
     Cancelled,
@@ -49,7 +46,6 @@ impl RunLifecycleStatus {
             self,
             Self::Succeeded
                 | Self::CandidateRecoverable
-                | Self::PartialRecoverable
                 | Self::PartialFailure
                 | Self::Failed
                 | Self::Cancelled
@@ -75,7 +71,6 @@ impl From<RunExecutionState> for RunLifecycleStatus {
             RunExecutionState::Running => Self::Running,
             RunExecutionState::Succeeded => Self::Succeeded,
             RunExecutionState::CandidateRecoverable => Self::CandidateRecoverable,
-            RunExecutionState::PartialRecoverable => Self::PartialRecoverable,
             RunExecutionState::PartialFailure => Self::PartialFailure,
             RunExecutionState::Failed => Self::Failed,
             RunExecutionState::Cancelled => Self::Cancelled,
@@ -239,9 +234,8 @@ mod tests {
             (RunLifecycleStatus::Succeeded, true, true, false),
             // Terminal, unsuccessful, and NOT retryable: re-running reproduces
             // the same stop. The next action is promotion or resumption, which
-            // is why these are separate variants rather than `PartialFailure`.
+            // is why this is a separate variant rather than `PartialFailure`.
             (RunLifecycleStatus::CandidateRecoverable, true, false, false),
-            (RunLifecycleStatus::PartialRecoverable, true, false, false),
             (RunLifecycleStatus::PartialFailure, true, false, false),
             (RunLifecycleStatus::Failed, true, false, true),
             (RunLifecycleStatus::Cancelled, true, false, false),
@@ -265,7 +259,7 @@ mod tests {
 
     #[test]
     fn source_states_project_to_canonical_status() {
-        for label in "unknown,queued,running,succeeded,candidate_recoverable,partial_recoverable,partial_failure,failed,cancelled"
+        for label in "unknown,queued,running,succeeded,candidate_recoverable,partial_failure,failed,cancelled"
             .split(',')
         {
             let source: RunExecutionState = serde_json::from_value(label.into()).unwrap();

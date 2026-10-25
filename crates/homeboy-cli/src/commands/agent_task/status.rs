@@ -795,7 +795,6 @@ fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) 
     let recoverable = matches!(
         record.state(),
         agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
     ) || CookDelivery::from_run_metadata(&record.metadata).is_some_and(
         |delivery| delivery.blocker_code() == Some(CookDeliveryBlockerCode::GateFailed),
     );
@@ -5372,7 +5371,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
     let mut value = value;
     let recoverable = matches!(
         value.get("status").and_then(Value::as_str),
-        Some("candidate_recoverable" | "partial_recoverable")
+        Some("candidate_recoverable")
     );
     let candidate_run_id = recoverable
         .then(|| {
@@ -5866,7 +5865,7 @@ fn bounded_value(value: &Value) -> Value {
 ///
 /// `status` reads records as untyped JSON, so the state has to be parsed back
 /// into the lifecycle enum instead of compared against an inline string list.
-/// An inline list is exactly how `partial_failure`, `partial_recoverable`, and
+/// An inline list is exactly how `partial_failure` and
 /// `candidate_recoverable` runs came to be reported as `liveness.status:
 /// "active"` forever — the list named only `succeeded`/`failed`/`cancelled`, so
 /// an orchestrator polling liveness never saw those runs finish.

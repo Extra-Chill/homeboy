@@ -307,12 +307,10 @@ pub struct ActivityCounts {
     /// resource history, not execution outcomes.
     pub succeeded: usize,
     /// Stopped with a promotable candidate. Counted separately from
-    /// `partial_failure` since #6761 — before that both, plus
-    /// `partial_recoverable`, were summed into `partial_failure`, so an
+    /// `partial_failure` since #6761 — before that both were summed into
+    /// `partial_failure`, so an
     /// operator could not see how many runs were waiting on a promotion.
     pub candidate_recoverable: usize,
-    /// Stopped with resumable partial work. See `candidate_recoverable`.
-    pub partial_recoverable: usize,
     pub partial_failure: usize,
     pub failed: usize,
     pub cancelled: usize,

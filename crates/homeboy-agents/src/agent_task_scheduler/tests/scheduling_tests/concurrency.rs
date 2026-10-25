@@ -1037,7 +1037,7 @@ pub(super) mod concurrency_tests {
             assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts, "{name}");
             assert_eq!(
                 aggregate.status(),
-                AgentTaskRunState::PartialRecoverable,
+                AgentTaskRunState::CandidateRecoverable,
                 "{name}"
             );
             let outcome = &aggregate.outcomes[0];

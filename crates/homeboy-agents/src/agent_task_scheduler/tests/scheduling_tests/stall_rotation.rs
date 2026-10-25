@@ -348,7 +348,7 @@ mod stall_rotation_tests {
         );
         assert_eq!(
             aggregate.status(),
-            AgentTaskRunState::PartialRecoverable,
+            AgentTaskRunState::CandidateRecoverable,
             "{aggregate:#?}"
         );
         assert_eq!(

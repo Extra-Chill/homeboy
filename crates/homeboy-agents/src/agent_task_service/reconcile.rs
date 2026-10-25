@@ -761,7 +761,6 @@ fn run_state_label(state: agent_task_lifecycle::AgentTaskRunState) -> &'static s
         AgentTaskRunState::Running => "running",
         AgentTaskRunState::Succeeded => "succeeded",
         AgentTaskRunState::CandidateRecoverable => "candidate_recoverable",
-        AgentTaskRunState::PartialRecoverable => "partial_recoverable",
         AgentTaskRunState::PartialFailure => "partial_failure",
         AgentTaskRunState::Failed => "failed",
         AgentTaskRunState::Cancelled => "cancelled",

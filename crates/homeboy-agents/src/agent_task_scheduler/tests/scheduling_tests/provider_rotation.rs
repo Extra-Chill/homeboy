@@ -650,7 +650,7 @@ mod provider_rotation_tests {
         .with_run_id(run_id)
         .run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::PartialRecoverable);
+        assert_eq!(aggregate.status(), AgentTaskRunState::CandidateRecoverable);
         assert_eq!(
             aggregate.outcomes[0].status,
             AgentTaskOutcomeStatus::CandidateRecoverable
@@ -680,7 +680,7 @@ mod provider_rotation_tests {
         }))
         .run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::PartialRecoverable);
+        assert_eq!(aggregate.status(), AgentTaskRunState::CandidateRecoverable);
         assert_eq!(
             aggregate.outcomes[0].status,
             AgentTaskOutcomeStatus::CandidateRecoverable
@@ -891,7 +891,7 @@ mod provider_rotation_tests {
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskRunState::PartialRecoverable,
+            AgentTaskRunState::CandidateRecoverable,
             "the retained timeout candidate must remain eligible for controller promotion: {aggregate:#?}"
         );
         assert_eq!(aggregate.totals.candidate_recoverable, 1);

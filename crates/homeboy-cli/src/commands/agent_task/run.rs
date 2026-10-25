@@ -4963,7 +4963,6 @@ where
         record.state(),
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
     ) {
         // Ordinary continuation consumes only the pending entry scheduled by
         // authoritative reconciliation. Failed and completed claims require an
@@ -5254,7 +5253,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                     record.state(),
                     agent_task_lifecycle::AgentTaskRunState::Succeeded
                         | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-                        | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
                 )
             })
     {
@@ -5409,7 +5407,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         record.state(),
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
     ) {
         match agent_task_service::preflight_continuation_claim(&recipe.cook_id, &run_id, args.rearm)
         {
