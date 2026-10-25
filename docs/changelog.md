@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.26] - 2026-10-25
+
+### Changed
+- Lab staging: classify the runner git cache in two processes and throttle durable cancellation reads
+- Lab materialization: two runner calls per stage (plan, commit) replace the probe/transfer round-trips
+
 ## [0.433.25] - 2026-10-25
 
 ### Changed
