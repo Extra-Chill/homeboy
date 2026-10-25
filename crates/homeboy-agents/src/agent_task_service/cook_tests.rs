@@ -20,9 +20,8 @@ use super::super::cook_promotion::{
     preflight_cook_promotion_in_store, prepare_manual_finalization_identity,
     promote_attempt_in_store, promote_or_load_attempt_in_store, promotion_executed_model_in_store,
     record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_cook_pr_with_backend_and_review_form, replacement_gate_execution_started,
-    selected_candidate_task_id_in_store, verify_replacement_gates, AgentTaskSuppliedReviewForm,
-    BaseCatchUp, CookReportInput,
+    recover_cook_pr_with_backend_and_review_form, selected_candidate_task_id_in_store,
+    verify_replacement_gates, AgentTaskSuppliedReviewForm, BaseCatchUp, CookReportInput,
 };
 use super::super::execution_step::execution_step_fixtures::{
     current_intent, kill_test_child_at_marker, step_harness, terminal_delivery, QueuedRunTransport,
@@ -18745,11 +18744,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             None,
         )
         .expect_err("missing candidate ref fails before shell execution");
-        assert!(!replacement_gate_execution_started(
-            &test_lifecycle_store(),
-            "run-verify-replacement"
-        )
-        .expect("read replacement gate fence"));
+        assert!(replacement_gate_fence("run-verify-replacement").is_null());
         git_output(&target, &["update-ref", candidate_ref, &candidate_sha]).unwrap();
         std::fs::remove_file(&patch_path).expect("patch evidence is not a continuation input");
         mark_replacement_gate_execution_started(&test_lifecycle_store(), "run-verify-replacement")
@@ -18959,6 +18954,34 @@ fn with_corrected_gate_candidate_placement(
     lab: bool,
     test: impl FnOnce(CookRequest, PathBuf, AgentTaskPromotionReport),
 ) {
+    with_corrected_gate_failure(lab, |options, target| {
+        let replacement = verify_replacement_gates(
+            &options.identity.initial_run_id,
+            VerifyGateOptions {
+                verify: vec!["test \"$(cat tracked.txt)\" = promoted".to_string()],
+                gate_environment: crate::agent_task_gate::AgentTaskGateEnvironmentPolicy {
+                    shared_cargo_target: Some(lab),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            "operator authorized corrected candidate-bound gates".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
+        test(options, target, replacement);
+    });
+}
+
+fn replacement_gate_fence(run_id: &str) -> serde_json::Value {
+    test_lifecycle_store().read_record(run_id).unwrap().metadata
+        ["replacement_gate_execution_fences"]["verify-replacement"]
+        .clone()
+}
+
+/// A candidate whose original gates failed, before any replacement gates run.
+fn with_corrected_gate_failure(lab: bool, test: impl FnOnce(CookRequest, PathBuf)) {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("candidate");
@@ -19074,22 +19097,54 @@ fn with_corrected_gate_candidate_placement(
             config.retention.shared_store_reserve_bytes = u64::MAX;
             homeboy_core::defaults::save_config(&config).unwrap();
         }
-        let replacement = verify_replacement_gates(
-            run_id,
-            VerifyGateOptions {
-                verify: vec!["test \"$(cat tracked.txt)\" = promoted".to_string()],
-                gate_environment: crate::agent_task_gate::AgentTaskGateEnvironmentPolicy {
-                    shared_cargo_target: Some(lab),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            "operator authorized corrected candidate-bound gates".to_string(),
-            None,
-        )
-        .unwrap();
+        test(options, target);
+    });
+}
+
+fn corrected_replacement_gates(run_id: &str, verify: &str) -> Result<AgentTaskPromotionReport> {
+    verify_replacement_gates(
+        run_id,
+        VerifyGateOptions {
+            verify: vec![verify.to_string()],
+            ..Default::default()
+        },
+        "operator authorized corrected candidate-bound gates".to_string(),
+        None,
+    )
+}
+
+#[test]
+fn a_finished_failing_replacement_run_is_replaced_without_interrupted_rerun_authority() {
+    with_corrected_gate_failure(false, |options, _target| {
+        let run_id = &options.identity.initial_run_id;
+        corrected_replacement_gates(run_id, "test \"$(cat tracked.txt)\" = never")
+            .expect_err("the replacement gate ran and failed");
+        assert!(replacement_gate_fence(run_id).is_null());
+
+        let replacement =
+            corrected_replacement_gates(run_id, "test \"$(cat tracked.txt)\" = promoted")
+                .expect("a finished failing run is replaced with external-proof authority only");
         assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
-        test(options, target, replacement);
+        assert!(replacement_gate_fence(run_id).is_null());
+    });
+}
+
+#[test]
+fn a_replacement_refused_before_its_gates_leaves_no_fence() {
+    with_corrected_gate_failure(false, |options, target| {
+        let run_id = &options.identity.initial_run_id;
+        // A hand commit moves the destination HEAD off the candidate's ancestry.
+        git_output(&target, &["commit", "--quiet", "-am", "hand salvage"]).unwrap();
+        let refused = corrected_replacement_gates(run_id, "test \"$(cat tracked.txt)\" = promoted")
+            .expect_err("no reachable candidate refuses before any gate runs");
+        assert!(refused.message.contains("no reachable immutable candidate"));
+        assert!(replacement_gate_fence(run_id).is_null());
+
+        git_output(&target, &["reset", "--quiet", "HEAD~"]).unwrap();
+        let replacement =
+            corrected_replacement_gates(run_id, "test \"$(cat tracked.txt)\" = promoted")
+                .expect("the retry needs no interrupted-rerun authority");
+        assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
     });
 }
 
@@ -19341,6 +19396,14 @@ fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning(
         let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().expect("store");
         mark_replacement_gate_execution_started(&lifecycle_store, run_id)
             .expect("persist start fence");
+        let set_owner = |pid: u32| {
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["replacement_gate_execution_fences"]["verify-replacement"]
+                    ["owner_pid"] = serde_json::json!(pid);
+            })
+            .expect("set fence owner");
+        };
+        set_owner(u32::MAX);
 
         let gate_log = target.path().join("must-not-run");
         let error = verify_replacement_gates(
@@ -19359,6 +19422,7 @@ fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning(
             error.details["recovery"]["kind"],
             "external_candidate_bound_proof_required"
         );
+        set_owner(std::process::id());
         let live_error = verify_replacement_gates(
             cook_id,
             VerifyGateOptions {

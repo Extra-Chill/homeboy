@@ -1733,6 +1733,10 @@ pub fn verify_replacement_gates(
                 external_authorization,
                 interrupted_rerun_authorization,
             );
+            // Gates that returned, green or failing, are finished, not interrupted.
+            lifecycle_store.mutate_record(&run_id, |record| {
+                finish_replacement_gate_execution(&mut record.metadata)
+            })?;
             match result {
                 Ok(report) => {
                     lifecycle_store.complete_cook_operation(
@@ -1811,14 +1815,14 @@ fn verify_replacement_gates_owned(
     let interrupted_rerun_authorization =
         interrupted_rerun_authorization.filter(|authorization| !authorization.trim().is_empty());
     let recovering_interrupted_execution =
-        replacement_gate_execution_started(lifecycle_store, run_id)?;
+        match replacement_gate_execution_owner_live(&lifecycle_store.read_record(run_id)?.metadata)
+        {
+            Some(true) => return Err(live_replacement_gate_execution_error(run_id)),
+            Some(false) => true,
+            None => false,
+        };
     if recovering_interrupted_execution && interrupted_rerun_authorization.is_none() {
         return Err(interrupted_replacement_gate_execution_error(run_id));
-    }
-    if recovering_interrupted_execution
-        && replacement_gate_execution_is_live(lifecycle_store, run_id)?
-    {
-        return Err(live_replacement_gate_execution_error(run_id));
     }
     if !matches!(
         original.status,
@@ -1920,8 +1924,8 @@ fn verify_replacement_gates_owned(
             replacement_gate_workspace.as_deref(),
             &observation_store,
             || {
-                // This fence is deliberately irreversible. Artifact hydration and
-                // candidate validation are retryable; durable gates are not.
+                // A process that dies after this point, with gates possibly
+                // running, leaves the fence; a returned execution lifts it.
                 mark_replacement_gate_execution_started(lifecycle_store, run_id)
             },
         )?;
@@ -2027,48 +2031,32 @@ fn bind_persisted_promotion_artifact(
         .map_err(|error| Error::internal_json(error.to_string(), None))
 }
 
-pub(crate) fn replacement_gate_execution_started(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<bool> {
-    Ok(lifecycle_store
-        .read_record(run_id)?
-        .metadata
-        .pointer(&format!(
-            "/{REPLACEMENT_GATE_EXECUTION_FENCES_KEY}/verify-replacement"
-        ))
-        .is_some())
+/// A replacement gate execution still fenced: `Some(live)` says whether its
+/// owner process runs. A finished or never-started execution is `None`.
+pub(crate) fn replacement_gate_execution_owner_live(metadata: &Value) -> Option<bool> {
+    let fence = metadata
+        .get(REPLACEMENT_GATE_EXECUTION_FENCES_KEY)?
+        .get("verify-replacement")?;
+    Some(
+        fence["owner_pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .is_some_and(homeboy_core::process::pid_is_running),
+    )
 }
 
-fn replacement_gate_execution_is_live(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<bool> {
-    let record = lifecycle_store.read_record(run_id)?;
-    Ok(record
-        .metadata
-        .pointer(&format!(
-            "/{REPLACEMENT_GATE_EXECUTION_FENCES_KEY}/verify-replacement/owner_pid"
-        ))
-        .and_then(Value::as_u64)
-        .and_then(|pid| u32::try_from(pid).ok())
-        .is_some_and(homeboy_core::process::pid_is_running))
-}
-
+/// Written immediately before the first replacement gate command executes.
 pub(crate) fn mark_replacement_gate_execution_started(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<()> {
     lifecycle_store.mutate_record(run_id, |record| {
-        let metadata = record.ensure_metadata_object();
-        let fences = metadata
+        let fences = record
+            .ensure_metadata_object()
             .entry(REPLACEMENT_GATE_EXECUTION_FENCES_KEY.to_string())
             .or_insert_with(|| serde_json::json!({}));
         if !fences.is_object() {
             *fences = serde_json::json!({});
-        }
-        if fences.get("verify-replacement").is_some() {
-            return false;
         }
         fences["verify-replacement"] = serde_json::json!({
             "schema": "homeboy/agent-task-replacement-gate-execution-fence/v1",
@@ -2078,6 +2066,15 @@ pub(crate) fn mark_replacement_gate_execution_started(
         true
     })?;
     Ok(())
+}
+
+/// Lift this process's fence once its gate execution has returned.
+fn finish_replacement_gate_execution(metadata: &mut Value) -> bool {
+    let fence = format!("/{REPLACEMENT_GATE_EXECUTION_FENCES_KEY}/verify-replacement/owner_pid");
+    metadata.pointer(&fence) == Some(&Value::from(std::process::id()))
+        && metadata[REPLACEMENT_GATE_EXECUTION_FENCES_KEY]
+            .as_object_mut()
+            .is_some_and(|fences| fences.remove("verify-replacement").is_some())
 }
 
 fn interrupted_replacement_gate_execution_error(run_id: &str) -> Error {
