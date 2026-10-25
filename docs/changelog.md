@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.25] - 2026-10-25
+
+### Changed
+- Give follow-up baseline tests their own artifact root; delete the root-less test wrapper
+
 ## [0.433.24] - 2026-10-25
 
 ### Changed
