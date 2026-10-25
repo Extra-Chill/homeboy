@@ -151,7 +151,30 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
             timeout: std::time::Duration::from_secs(args.drain_timeout),
             cancel_active: args.cancel_active,
         },
-    )?;
+    );
+    waiting_upgrade_response(result)
+}
+
+/// Another process may have terminalized the operation while this CLI waited.
+/// Use the status command's durable reader rather than reporting a stale local error.
+fn waiting_upgrade_response(
+    result: homeboy::core::Result<upgrade::UpgradeResult>,
+) -> CmdResult<Value> {
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(id) = error.details["operation_id"].as_str() {
+                let status = upgrade::load_upgrade_operation_status(Some(id))?;
+                if status.status != "running" {
+                    let exit = i32::from(status.failed);
+                    let json = serde_json::to_value(status)
+                        .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
+                    return Ok((json, exit));
+                }
+            }
+            return Err(error);
+        }
+    };
     // Surface any runner left version-degraded by the upgrade with a prominent
     // warning and its exact remediation command, instead of burying the drift in
     // the JSON payload (only ever rediscovered via `homeboy self status`).
@@ -260,6 +283,87 @@ fn upgrade_exit_code(result: &upgrade::UpgradeResult, _targeted_runner_upgrade: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn externally_finished_upgrade(status: homeboy::core::observation::RunStatus) -> (Value, i32) {
+        use homeboy::core::observation::{NewRunRecord, ObservationStore};
+        use serde_json::json;
+
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().unwrap();
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("upgrade")
+                        .command("homeboy upgrade")
+                        .metadata(json!({"phase": "resuming_admission"}))
+                        .build(),
+                )
+                .unwrap();
+            let id = run.id;
+            assert_eq!(
+                upgrade::load_upgrade_operation_status(Some(&id))
+                    .unwrap()
+                    .status,
+                "running"
+            );
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let finisher = std::thread::spawn({
+                let id = id.clone();
+                move || {
+                    // A separate store connection simulates the replacement process.
+                    ObservationStore::open_initialized()
+                        .unwrap()
+                        .finish_running_run(&id, status, None)
+                        .unwrap();
+                    done_tx.send(()).unwrap();
+                }
+            });
+            // The originating CLI is blocked until the other owner terminalizes.
+            done_rx.recv().unwrap();
+            let mut error = homeboy::core::Error::internal_unexpected(format!(
+                "upgrade operation is no longer running: {id}"
+            ));
+            error.details["operation_id"] = json!(id);
+            let response = waiting_upgrade_response(Err(error)).unwrap();
+            finisher.join().unwrap();
+            response
+        })
+    }
+
+    #[test]
+    fn upgrade_wait_reports_external_success_without_stale_version_warning() {
+        let (body, exit) = externally_finished_upgrade(homeboy::core::observation::RunStatus::Pass);
+        assert_eq!(exit, 0);
+        assert_eq!(body["status"], "pass");
+        assert_eq!(body["failed"], false);
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(body),
+            exit,
+            "upgrade",
+            None,
+        );
+        let envelope = serde_json::to_value(envelope).unwrap();
+        assert_eq!(envelope["success"], true);
+        assert_eq!(envelope["exit_code"], 0);
+        assert_eq!(envelope["status"], "succeeded");
+        assert!(!envelope.to_string().contains("behind latest"));
+    }
+
+    #[test]
+    fn upgrade_wait_preserves_external_failure() {
+        let (body, exit) = externally_finished_upgrade(homeboy::core::observation::RunStatus::Fail);
+        assert_ne!(exit, 0);
+        assert_eq!(body["status"], "fail");
+        assert_eq!(body["failed"], true);
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(body),
+            exit,
+            "upgrade",
+            None,
+        );
+        let envelope = serde_json::to_value(envelope).unwrap();
+        assert_eq!(envelope["success"], false);
+        assert_eq!(envelope["status"], "failed");
+    }
 
     #[test]
     fn detached_response_preserves_failure_and_specific_cause() {
