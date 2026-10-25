@@ -21,7 +21,7 @@ use super::{CmdResult, RunsOutput};
 
 #[derive(Args, Clone, Debug, Default)]
 pub struct RunsHotspotsArgs {
-    /// Report timeline coverage and largest unattributed gaps for positional run ids.
+    /// Report timeline coverage including mission-linked runs, and largest unattributed gaps.
     #[arg(long)]
     pub coverage: bool,
     /// Aggregate durable phase spans for this run kind instead of fuzz artifacts.
@@ -906,8 +906,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store =
             ObservationStore::open_initialized_at(dir.path().join("coverage.sqlite")).unwrap();
-        let run = store
+        let mission = store
             .start_run(NewRunRecord::builder("agent-task").build())
+            .unwrap();
+        let run = store
+            .start_run_in_mission(NewRunRecord::builder("agent-task").build(), &mission.id)
             .unwrap();
         store
             .time_run_phase(&run.id, "terminal.record", || {
@@ -916,11 +919,15 @@ mod tests {
             })
             .unwrap();
         store.finish_run(&run.id, RunStatus::Pass, None).unwrap();
+        store
+            .finish_run(&mission.id, RunStatus::Pass, None)
+            .unwrap();
+        let expected_attempt = store.phase_coverage(&run.id, 10).unwrap();
         let (output, exit) = runs_hotspots(
             &store,
             RunsHotspotsArgs {
                 coverage: true,
-                run_ids: vec![run.id],
+                run_ids: vec![mission.id.clone(), run.id.clone()],
                 limit: 10,
                 ..Default::default()
             },
@@ -930,8 +937,12 @@ mod tests {
         let RunsOutput::Hotspots(output) = output else {
             panic!("hotspots output expected")
         };
-        assert_eq!(output.coverage.len(), 1);
+        assert_eq!(output.coverage.len(), 2);
+        assert_eq!(output.coverage[0].run_id, mission.id);
         assert!(output.coverage[0].covered_ms >= 4.0);
+        assert_eq!(output.coverage[0].covered_ms, expected_attempt.covered_ms);
+        assert_eq!(output.coverage[1], expected_attempt);
+        assert!(store.phase_spans(&mission.id).unwrap().spans.is_empty());
         assert_eq!(output.inspected_artifact_count, 0);
     }
 

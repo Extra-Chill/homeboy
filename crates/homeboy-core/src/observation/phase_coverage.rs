@@ -21,7 +21,8 @@ pub struct PhaseCoverageGap {
 }
 
 impl ObservationStore {
-    /// Read only durable evidence. Nested and overlapping phases count once.
+    /// Read only durable evidence, including runs linked by `mission_id`.
+    /// All spans are clipped to this run's timeline; overlaps count once.
     pub fn phase_coverage(&self, run_id: &str, limit: usize) -> Result<PhaseCoverage> {
         let run = self
             .get_run(run_id)?
@@ -39,14 +40,31 @@ impl ObservationStore {
             .transpose()?
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as f64)
             .max(start);
+        let mut run_ids = vec![run_id.to_owned()];
+        let mut after = None;
+        loop {
+            let page = self.list_mission_runs_page(run_id, after.as_ref(), 1000)?;
+            run_ids.extend(
+                page.runs
+                    .into_iter()
+                    .map(|run| run.id)
+                    .filter(|id| id != run_id),
+            );
+            after = page.next_cursor;
+            if after.is_none() {
+                break;
+            }
+        }
         let mut intervals = Vec::new();
-        for span in self.phase_spans(run_id)?.spans {
-            if let Some(duration) = span.duration_ms.filter(|d| d.is_finite() && *d > 0.0) {
-                let from = parse(&span.started_at)?;
-                let to = (from + duration).min(end);
-                let from = from.max(start);
-                if to > from {
-                    intervals.push((from, to, span.id));
+        for id in run_ids {
+            for span in self.phase_spans(&id)?.spans {
+                if let Some(duration) = span.duration_ms.filter(|d| d.is_finite() && *d > 0.0) {
+                    let from = parse(&span.started_at)?;
+                    let to = (from + duration).min(end);
+                    let from = from.max(start);
+                    if to > from {
+                        intervals.push((from, to, span.id));
+                    }
                 }
             }
         }
@@ -135,6 +153,82 @@ mod tests {
             .windows(2)
             .all(|pair| pair[0].duration_ms >= pair[1].duration_ms));
         assert!(coverage.covered_percentage < 50.0);
+    }
+
+    #[test]
+    fn observation_mission_coverage_unions_attempts_and_preserves_idle_gap() {
+        use homeboy_engine_primitives::phase_timing::PhaseTimer;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(dir.path().join("store.sqlite")).unwrap();
+        let mut mission = store
+            .start_run(NewRunRecord::builder("agent-task").build())
+            .unwrap();
+        let origin = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z").unwrap();
+        let at = |ms| {
+            (origin + chrono::Duration::milliseconds(ms))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
+        mission.started_at = at(0);
+        mission.finished_at = Some(at(100));
+        store.upsert_imported_run(&mission).unwrap();
+
+        let mut attempts = Vec::new();
+        for (start, end, name) in [(10, 40, "attempt.one"), (60, 100, "attempt.two")] {
+            let mut attempt = store
+                .start_run_in_mission(NewRunRecord::builder("agent-task").build(), &mission.id)
+                .unwrap();
+            attempt.started_at = at(start);
+            attempt.finished_at = Some(at(end));
+            store.upsert_imported_run(&attempt).unwrap();
+            let mut timer = PhaseTimer::new();
+            timer.record_ok(name, Duration::from_millis((end - start) as u64));
+            let mut report = timer.into_report();
+            report.spans[0].started_at = at(start);
+            store
+                .record_phase_spans(&attempt.id, name, &report)
+                .unwrap();
+            attempts.push(attempt);
+        }
+        // The parent's span overlaps attempt one and extends before its own start.
+        let mut timer = PhaseTimer::new();
+        timer.record_ok("controller.job", Duration::from_millis(30));
+        let mut report = timer.into_report();
+        report.spans[0].started_at = at(-10);
+        store
+            .record_phase_spans(&mission.id, "parent", &report)
+            .unwrap();
+        // Unrelated runs must not fill the idle gap.
+        let unrelated = store
+            .start_run(NewRunRecord::builder("agent-task").build())
+            .unwrap();
+        report.spans[0].started_at = at(40);
+        store
+            .record_phase_spans(&unrelated.id, "unrelated", &report)
+            .unwrap();
+
+        let coverage = store.phase_coverage(&mission.id, 10).unwrap();
+        assert_eq!(coverage.wall_ms, 100.0);
+        assert_eq!(coverage.covered_ms, 80.0);
+        assert_eq!(coverage.covered_percentage, 80.0);
+        assert_eq!(
+            coverage.gaps,
+            vec![PhaseCoverageGap {
+                started_at: at(40),
+                duration_ms: 20.0,
+                preceding_span: Some("attempt.one".into()),
+                following_span: Some("attempt.two".into()),
+            }]
+        );
+        for attempt in &attempts {
+            let coverage = store.phase_coverage(&attempt.id, 10).unwrap();
+            assert_eq!(coverage.covered_ms, coverage.wall_ms);
+            assert_eq!(coverage.covered_percentage, 100.0);
+            assert!(coverage.gaps.is_empty());
+            assert_eq!(store.phase_spans(&attempt.id).unwrap().spans.len(), 1);
+        }
+        assert_eq!(store.phase_spans(&mission.id).unwrap().spans.len(), 1);
     }
 
     #[test]
