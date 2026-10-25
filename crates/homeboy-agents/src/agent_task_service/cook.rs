@@ -46,8 +46,6 @@ use homeboy_core::{Error, Result};
 use homeboy_engine_primitives::shell::quote_arg;
 
 use super::cook_activity::{CookActivityProbe, CookProviderActivity};
-#[cfg(test)]
-use super::cook_baseline::materialize_follow_up_baseline;
 use super::cook_baseline::{
     cook_attempt_harvest_context, materialize_follow_up_baseline_in_root,
     materialize_initial_candidate_baseline, re_materialize_follow_up_baseline,
