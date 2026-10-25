@@ -23185,16 +23185,24 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         test_lifecycle_store()
             .record_run_aggregate(run_id, &options.identity.initial_plan, &existing_form)
             .unwrap();
-        let error = recover_cook_pr_with_backend_and_review_form(
+        let mut replaced = supplied_test_review_form();
+        replaced.form.summary = "Operator summary replaces the agent's.".to_string();
+        let replacement = recover_cook_pr_with_backend_and_review_form(
             cook_id,
-            Some(supplied_test_review_form()),
+            Some(replaced),
             None,
             Vec::new(),
             true,
-            &mut CaptureBackend::default(),
+            &mut CaptureBackend {
+                synthetic_gate_proof: Some(applied.clone()),
+                ..Default::default()
+            },
         )
-        .expect_err("a valid recorded form cannot be replaced");
-        assert_eq!(error.details["field"], "review_form");
+        .expect("a supplied form replaces even a valid recorded form");
+        assert_eq!(
+            replacement["review_dossier"]["summary"],
+            "Operator summary replaces the agent's."
+        );
         existing_form.outcomes[0].outputs = Value::Null;
         test_lifecycle_store()
             .record_run_aggregate(run_id, &options.identity.initial_plan, &existing_form)
@@ -23289,6 +23297,155 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
             )
             .unwrap()
         );
+    });
+}
+
+/// Publishes through the capture GitHub backend; every provider step panics.
+struct CapturePublishRecoveryPerformer {
+    gate_proof: AgentTaskPromotionReport,
+    created: std::cell::Cell<bool>,
+}
+
+impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecoveryPerformer {
+    fn continue_cook(
+        &self,
+        run_id: &str,
+        _rearm: bool,
+        _overrides: &crate::agent_task_service::CookRecoveryOverrides,
+    ) -> Result<(serde_json::Value, i32)> {
+        panic!("a verified candidate must not replay provider work for {run_id}")
+    }
+
+    fn preflight_continue_cook(
+        &self,
+        run_id: &str,
+        _rearm: bool,
+    ) -> Result<(serde_json::Value, i32)> {
+        panic!("a verified candidate must not preflight continuation of {run_id}")
+    }
+
+    fn retry(&self, run_id: &str) -> Result<(serde_json::Value, i32)> {
+        panic!("a verified candidate must not retry {run_id}")
+    }
+
+    fn reconcile(&self, run_id: &str) -> Result<(serde_json::Value, i32)> {
+        panic!("a verified candidate must not reconcile {run_id}")
+    }
+
+    fn adopt(&self, run_id: &str, candidate_ref: &str) -> Result<(serde_json::Value, i32)> {
+        panic!("a verified candidate must not adopt {candidate_ref} into {run_id}")
+    }
+
+    fn publish(
+        &self,
+        run_id: &str,
+        request: &crate::agent_task_service::CookPublishRequest,
+        preflight: bool,
+    ) -> Result<(serde_json::Value, i32)> {
+        let mut backend = CaptureBackend {
+            synthetic_gate_proof: Some(self.gate_proof.clone()),
+            ..Default::default()
+        };
+        let value = recover_cook_pr_with_backend_and_review_form(
+            run_id,
+            request.review_form.clone(),
+            request.component.as_deref(),
+            request.review_overrides.clone(),
+            preflight,
+            &mut backend,
+        )?;
+        self.created.set(self.created.get() || backend.created);
+        Ok((value, 0))
+    }
+}
+
+#[test]
+fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-16441";
+        let run_id = "cook-16441-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit run");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("link recipe attempt");
+        seed_substantive_candidate_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &target.path().join("candidate.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        // The agent's form cannot be parsed at all, so publishing proves it
+        // is never read alongside the supplied form.
+        let mut aggregate = agent_task_lifecycle::read_aggregate(run_id).unwrap();
+        aggregate.outcomes[0].outputs = serde_json::json!({
+            "review_form": { "summary": 42, "completion": "All gates passed." }
+        });
+        test_lifecycle_store()
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &aggregate)
+            .unwrap();
+        let applied = promotion_with_existing_path(run_id, target.path());
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
+            .expect("record verified promotion");
+        let performer = CapturePublishRecoveryPerformer {
+            gate_proof: applied,
+            created: std::cell::Cell::new(false),
+        };
+
+        let (preflight, _) = crate::agent_task_service::recover_cook(
+            cook_id,
+            crate::agent_task_service::CookRecoveryRequest {
+                preflight: true,
+                ..Default::default()
+            },
+            &performer,
+        )
+        .expect("recover --preflight plans the verified candidate");
+        assert_eq!(
+            preflight.step,
+            crate::agent_task_service::CookRecoveryStep::Publish
+        );
+        let failure = preflight.failure.expect("publication needs a usable form");
+        assert!(
+            failure["message"].as_str().unwrap().contains(&format!(
+                "agent-task recover {run_id} --review-form @FORM.json"
+            )),
+            "{failure}"
+        );
+
+        let (published, exit_code) = crate::agent_task_service::recover_cook(
+            cook_id,
+            crate::agent_task_service::CookRecoveryRequest {
+                publish: crate::agent_task_service::CookPublishRequest {
+                    review_form: Some(supplied_test_review_form()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &performer,
+        )
+        .expect("recover publishes the supplied form");
+        assert_eq!(exit_code, 0, "{:?}", published.failure);
+        assert_eq!(
+            published.step,
+            crate::agent_task_service::CookRecoveryStep::Publish
+        );
+        let result = published.result.expect("publication report");
+        assert_eq!(result["status"], "review_ready");
+        assert_eq!(
+            result["review_dossier"]["summary"],
+            "Close the issue by guarding the reload path."
+        );
+        assert!(performer.created.get());
     });
 }
 

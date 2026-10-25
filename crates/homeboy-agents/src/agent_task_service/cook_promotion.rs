@@ -3934,21 +3934,9 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
             None,
         ));
     }
+    // A supplied form replaces the agent's form whatever its state; the
+    // agent's form is never consulted alongside it (#16441).
     let supplied_review_form = resolve_supplied_recovery_review_form(&run_id, review_form)?;
-    if supplied_review_form.is_some()
-        && review_form_for_finalization_in_store(
-            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
-            &run_id,
-        )
-        .is_ok()
-    {
-        return Err(Error::validation_invalid_argument(
-            "review_form",
-            "recovery already has a valid recorded review form; --review-form is only for missing historical forms and cannot replace it",
-            Some(run_id),
-            None,
-        ));
-    }
     let finalization = cook_finalization_options_with_review_form(
         &options,
         &run_id,
@@ -5543,9 +5531,13 @@ fn cook_attempt_execution_in_store(
             .find(|line| !line.is_empty())
             .unwrap_or("Delivered the authenticated Cook candidate.")
             .to_string(),
+        // Lineage prose falls back to the task summary when the attempt's
+        // form is unusable; a malformed form never fails publication.
         form: crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
             &outcome.outputs,
-        )?
+        )
+        .ok()
+        .flatten()
         .filter(|form| form.validate().is_ok()),
         tool,
         model,
@@ -6060,28 +6052,39 @@ fn retry_descends_from_recipe(
 /// of the reviewer-facing prose. Its absence/invalidity here is an invariant
 /// violation (the gate would have looped), surfaced as a hard error rather than
 /// silently falling back to machine-templated prose.
+///
+/// This is the one decision whether the agent's form is usable. A missing,
+/// malformed, invalid or incomplete form is refused with the publish step's
+/// remedy: an operator-supplied `--review-form`, which replaces it.
 fn review_form_for_finalization_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<crate::agent_task_review_dossier::AiFilledReviewForm> {
     let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
-    let form = crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
-        &outcome.outputs,
-    )?
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "review_form",
-                format!(
-                    "cook finalization requires an AI-authored review form on run {run_id}; none was recorded. Supply a complete replacement with `homeboy agent-task recover {run_id} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`. {}",
-                    crate::agent_task_review_dossier::AiFilledReviewForm::requirement_feedback()
-                ),
-                None,
-                None,
-            )
-        })?;
-    form.validate()?;
-    form.ensure_publishable()?;
-    Ok(form)
+    crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
+        .and_then(|form| {
+            let form = form.ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "review_form",
+                    format!(
+                        "cook finalization requires an AI-authored review form on run {run_id}; none was recorded. {}",
+                        crate::agent_task_review_dossier::AiFilledReviewForm::requirement_feedback()
+                    ),
+                    None,
+                    None,
+                )
+            })?;
+            form.validate()?;
+            form.ensure_publishable()?;
+            Ok(form)
+        })
+        .map_err(|mut error| {
+            error.message = format!(
+                "{} Supply a complete replacement with `homeboy agent-task recover {run_id} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`.",
+                error.message
+            );
+            error
+        })
 }
 
 /// Every field a Cook report is built from, named at the call site.
@@ -6784,12 +6787,8 @@ pub(crate) fn cook_failure_context_with_stores(
                     .and_then(|record| record.metadata.get("cook_continuation_admission")),
                 retry_admitted || (cook_status.is_gate_failure() && continuation_pending),
             );
-            let delivered_candidate = delivered_candidate_facts(
-                &recipe,
-                record.as_ref(),
-                delivery.as_ref(),
-                lifecycle_store,
-            );
+            let delivered_candidate =
+                delivered_candidate_facts(&recipe, record.as_ref(), delivery.as_ref());
             // The adopt observation only matters for a terminal `no_changes`
             // attempt; skip the worktree inspection for every other state.
             let adoptable_candidate_ref = (status == "no_changes")
@@ -7237,8 +7236,7 @@ struct DeliveredCandidateFacts {
     /// Applied candidate whose gates failed or never completed, without
     /// replacement proof.
     applied_gate_failure: bool,
-    /// Verified, unpublished candidate with a publishable review form.
-    publish_ready: bool,
+    /// Verified, unpublished candidate; its review form is publication input.
     verified_unpublished: bool,
 }
 
@@ -7323,7 +7321,6 @@ fn delivered_candidate_facts(
     recipe: &super::AgentTaskCookRecipe,
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
     delivery: Option<&super::CookDelivery>,
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
 ) -> DeliveredCandidateFacts {
     let Some(record) = record else {
         return DeliveredCandidateFacts::default();
@@ -7350,42 +7347,10 @@ fn delivered_candidate_facts(
             .as_deref()
             .is_some_and(|sha| !sha.is_empty())
         && !delivery.is_some_and(super::CookDelivery::published);
-    let publish_ready =
-        verified_unpublished && publishable_review_form(lifecycle_store, &record.run_id);
     DeliveredCandidateFacts {
         applied_gate_failure,
-        publish_ready,
         verified_unpublished,
     }
-}
-
-/// The attempt's recorded review form exists and is publishable, so
-/// publication from the durable record needs no operator-supplied form.
-fn publishable_review_form(
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
-    run_id: &str,
-) -> bool {
-    let owned;
-    let store = match lifecycle_store {
-        Some(store) => store,
-        None => match agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment() {
-            Ok(store) => {
-                owned = store;
-                &owned
-            }
-            Err(_) => return false,
-        },
-    };
-    selected_outcome_for_attempt_in_store(store, run_id)
-        .ok()
-        .and_then(|outcome| {
-            crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
-                &outcome.outputs,
-            )
-            .ok()
-            .flatten()
-        })
-        .is_some_and(|form| form.validate().is_ok() && form.ensure_publishable().is_ok())
 }
 
 struct CookRecoveryActions {
@@ -7455,7 +7420,6 @@ fn cook_recovery_actions_with_prefix(
             agent_incomplete_reason,
             adoptable_candidate_ref,
             applied_gate_failure: delivered_candidate.applied_gate_failure,
-            publish_ready: delivered_candidate.publish_ready,
             verified_unpublished: delivered_candidate.verified_unpublished,
         });
     if !recovery_legal {
