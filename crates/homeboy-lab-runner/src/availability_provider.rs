@@ -23,7 +23,7 @@ fn readiness_from_response(
 
 /// Whether `runner_id` accepts jobs right now, from its live readiness report.
 /// Unknown or failed readiness is not eligibility.
-fn runner_accepts_jobs(runner_id: &str) -> bool {
+fn runner_accepts_jobs(runner_id: &str) -> std::result::Result<(), String> {
     crate::RunnerDiscoveryService::readiness_api(&RunnerApiReadinessRequest {
         schema: RUNNER_API_READINESS_REQUEST_SCHEMA.to_string(),
         api_version: RUNNER_API_V1,
@@ -31,7 +31,19 @@ fn runner_accepts_jobs(runner_id: &str) -> bool {
     })
     .map_err(|error| error.to_string())
     .and_then(readiness_from_response)
-    .is_ok_and(|readiness| readiness.accepting_jobs)
+    .and_then(eligibility_from_readiness)
+}
+
+fn eligibility_from_readiness(readiness: RunnerReadiness) -> std::result::Result<(), String> {
+    if readiness.accepting_jobs {
+        Ok(())
+    } else {
+        Err(readiness
+            .reasons
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| format!("runner {} is not accepting jobs", readiness.runner_id)))
+    }
 }
 
 /// Register the runner eligibility check with core. Called once at startup.
@@ -70,12 +82,21 @@ mod tests {
         })))
         .expect("readiness");
 
-        assert!(readiness.accepting_jobs);
+        assert!(eligibility_from_readiness(readiness.clone()).is_ok());
+        let refused = RunnerReadiness {
+            accepting_jobs: false,
+            reasons: vec!["controller build mismatch".into(), "capacity full".into()],
+            ..readiness
+        };
+        assert_eq!(
+            eligibility_from_readiness(refused).unwrap_err(),
+            "controller build mismatch"
+        );
     }
 
     #[test]
     fn unknown_runners_are_not_eligible() {
-        assert!(!runner_accepts_jobs("runner-that-does-not-exist"));
+        assert!(runner_accepts_jobs("runner-that-does-not-exist").is_err());
     }
 
     #[test]

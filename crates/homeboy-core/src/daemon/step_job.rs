@@ -59,6 +59,9 @@ pub const STEP_LOG_FILE: &str = "step.log";
 pub const STEP_EXIT_FILE: &str = "exit.json";
 
 const WAIT_POLL: Duration = Duration::from_millis(250);
+const RUNNER_WAIT_INITIAL: Duration = Duration::from_secs(1);
+const RUNNER_WAIT_CAP: Duration = Duration::from_secs(30);
+const RUNNER_WAIT_DEADLINE: Duration = Duration::from_secs(60 * 60);
 const SUPERVISE_POLL: Duration = Duration::from_millis(100);
 const CANCEL_STOP_DEADLINE: Duration = Duration::from_secs(15);
 
@@ -351,8 +354,8 @@ pub enum StepTerminalOutcome {
 /// not read the daemon's own process environment.
 pub type StepSecretResolver =
     Arc<dyn Fn(&[EnvSecretRef]) -> Result<Vec<(String, String)>> + Send + Sync>;
-/// Reports whether a runner can accept work now.
-pub type StepRunnerEligibility = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+/// Reports whether a runner can accept work now, or its refusal reason.
+pub type StepRunnerEligibility = Arc<dyn Fn(&str) -> std::result::Result<(), String> + Send + Sync>;
 /// Lets the domain that owns a linked run reconcile it after its child exits.
 pub type StepTerminalConsumer = Arc<dyn Fn(&StepTerminalDelivery) -> Result<Value> + Send + Sync>;
 
@@ -555,6 +558,8 @@ impl ControllerJobDriver for StepJobDriver {
         Ok(json!({
             "phase": progress.get("phase").cloned().unwrap_or(Value::Null),
             "pid": progress.get("pid").cloned().unwrap_or(Value::Null),
+            "runner_eligible": progress.get("runner_eligible").cloned().unwrap_or(Value::Null),
+            "reason": progress.get("reason").cloned().unwrap_or(Value::Null),
             "exit_code": progress.get("exit_code").cloned().unwrap_or(Value::Null),
         }))
     }
@@ -664,7 +669,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     }
 
     job.progress(checkpoint.progress())?;
-    if !await_wait(&checkpoint.request.wait, job)? {
+    if !await_wait(&checkpoint.request, job)? {
         return Ok(checkpoint.result());
     }
 
@@ -827,39 +832,117 @@ fn child_failure_cause(log: &str) -> Option<String> {
     })
 }
 
-/// Returns `false` when the job was cancelled while waiting.
-fn await_wait(wait: &StepWait, job: &ControllerJobHandle) -> Result<bool> {
+/// Returns `false` when cancelled or when the linked durable run has ended.
+fn await_wait(request: &StepJobRequest, job: &ControllerJobHandle) -> Result<bool> {
+    let probe = runner_eligibility()
+        .read()
+        .expect("step runner eligibility lock")
+        .clone();
+    let started = Instant::now();
+    await_wait_with(
+        request,
+        job,
+        probe,
+        || started.elapsed(),
+        std::thread::sleep,
+        |run_id| {
+            crate::api_jobs::agent_task_terminal_recovery::linked_durable_run_state(run_id)
+                == Some(crate::api_jobs::DaemonLinkedDurableRunState::Terminal)
+        },
+    )
+}
+
+fn await_wait_with(
+    request: &StepJobRequest,
+    job: &ControllerJobHandle,
+    probe: Option<StepRunnerEligibility>,
+    now: impl Fn() -> Duration,
+    sleep: impl Fn(Duration),
+    linked_terminal: impl Fn(&str) -> bool,
+) -> Result<bool> {
+    let wait = &request.wait;
     let not_before = wait
         .not_before
         .as_deref()
         .map(chrono::DateTime::parse_from_rfc3339)
         .transpose()
         .map_err(|error| invalid(format!("step wait.not_before is invalid: {error}")))?;
-    let probe = match wait.runner_eligible.as_deref() {
-        Some(runner) => Some((
-            runner.to_string(),
-            runner_eligibility()
-                .read()
-                .expect("step runner eligibility lock")
-                .clone()
-                .ok_or_else(|| {
-                    Error::internal_unexpected(
-                        "no runner eligibility probe is registered for step waits",
-                    )
-                })?,
-        )),
-        None => None,
-    };
+    let runner_probe = wait
+        .runner_eligible
+        .as_deref()
+        .map(|runner| {
+            probe.map(|probe| (runner, probe)).ok_or_else(|| {
+                Error::internal_unexpected(
+                    "no runner eligibility probe is registered for step waits",
+                )
+            })
+        })
+        .transpose()?;
+    let deadline = now() + RUNNER_WAIT_DEADLINE;
+    let mut next_probe = now();
+    let mut backoff = RUNNER_WAIT_INITIAL;
+    let mut last_observation = None;
     loop {
-        if job.is_cancelled() {
+        if job.is_cancelled()
+            || request
+                .linked_durable_run_id
+                .as_deref()
+                .is_some_and(&linked_terminal)
+        {
             return Ok(false);
         }
         let time_ready = not_before.is_none_or(|instant| chrono::Utc::now() >= instant);
-        let runner_ready = probe.as_ref().is_none_or(|(runner, probe)| probe(runner));
+        if let Some((runner, probe)) = &runner_probe {
+            if let Some(Err(reason)) = &last_observation {
+                if now() >= deadline {
+                    return Err(Error::internal_unexpected(format!(
+                        "runner {runner} did not become eligible within {}s: {reason}",
+                        RUNNER_WAIT_DEADLINE.as_secs()
+                    )));
+                }
+            }
+            if now() >= next_probe {
+                let observation = probe(runner);
+                // A different refusal is still ineligible: don't reset backoff
+                // until eligibility itself changes.
+                if last_observation.as_ref().is_some_and(
+                    |last: &std::result::Result<(), String>| last.is_ok() != observation.is_ok(),
+                ) {
+                    backoff = RUNNER_WAIT_INITIAL;
+                }
+                if last_observation.as_ref() != Some(&observation) {
+                    if let Err(reason) = &observation {
+                        job.progress(json!({
+                            "phase": "waiting",
+                            "runner_eligible": runner,
+                            "reason": reason,
+                        }))?;
+                    }
+                }
+                last_observation = Some(observation);
+                next_probe = now() + backoff;
+                backoff = (backoff * 2).min(RUNNER_WAIT_CAP);
+            }
+        }
+        let runner_ready = runner_probe.is_none()
+            || last_observation
+                .as_ref()
+                .is_some_and(|result| result.is_ok());
         if time_ready && runner_ready {
             return Ok(true);
         }
-        std::thread::sleep(WAIT_POLL);
+        let mut delay = next_probe.saturating_sub(now());
+        if !runner_ready {
+            delay = delay.min(deadline.saturating_sub(now()));
+        }
+        if !time_ready {
+            delay = if runner_probe.is_some() {
+                delay.min(WAIT_POLL)
+            } else {
+                WAIT_POLL
+            };
+        }
+        sleep(delay);
     }
 }
 
@@ -1037,6 +1120,138 @@ fn invalid(message: impl Into<String>) -> Error {
 mod tests {
     use super::*;
     use crate::test_support::{with_isolated_home, ControllerJobHarness};
+
+    #[test]
+    fn runner_wait_backs_off_records_reasons_and_stops_with_linked_run() {
+        with_isolated_home(|_| {
+            use std::cell::{Cell, RefCell};
+            let mut request = request("true", Default::default());
+            request.wait.runner_eligible = Some("runner-a".into());
+            request.linked_durable_run_id = Some("run-a".into());
+            let harness =
+                ControllerJobHarness::new(Arc::new(StepJobDriver), to_value(&request).unwrap())
+                    .unwrap();
+            let elapsed = Cell::new(Duration::ZERO);
+            let sleeps = RefCell::new(Vec::new());
+            let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = probes.clone();
+            let probe: StepRunnerEligibility = Arc::new(move |_| {
+                let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(if n < 3 {
+                    "build mismatch"
+                } else {
+                    "capacity full"
+                }
+                .into())
+            });
+            let result = await_wait_with(
+                &request,
+                &harness.handle(),
+                Some(probe),
+                || elapsed.get(),
+                |delay| {
+                    sleeps.borrow_mut().push(delay);
+                    elapsed.set(elapsed.get() + delay);
+                },
+                |run| {
+                    assert_eq!(run, "run-a");
+                    elapsed.get() >= Duration::from_secs(600)
+                },
+            )
+            .unwrap();
+            assert!(!result);
+            assert!(probes.load(std::sync::atomic::Ordering::SeqCst) <= 40);
+            let sleeps = sleeps.borrow();
+            assert_eq!(&sleeps[..6], &[1, 2, 4, 8, 16, 30].map(Duration::from_secs));
+            assert!(sleeps.iter().all(|delay| *delay <= RUNNER_WAIT_CAP));
+            let reasons: Vec<_> = harness
+                .events()
+                .unwrap()
+                .into_iter()
+                .filter_map(|event| {
+                    event.data.and_then(|data| {
+                        data.get("reason")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                })
+                .collect();
+            assert_eq!(reasons, ["build mismatch", "capacity full"]);
+        });
+    }
+
+    #[test]
+    fn runner_wait_deadline_names_runner_and_last_reason() {
+        with_isolated_home(|_| {
+            use std::cell::Cell;
+            let mut request = request("true", Default::default());
+            request.wait.runner_eligible = Some("runner-a".into());
+            let harness =
+                ControllerJobHarness::new(Arc::new(StepJobDriver), to_value(&request).unwrap())
+                    .unwrap();
+            let elapsed = Cell::new(Duration::ZERO);
+            let error = await_wait_with(
+                &request,
+                &harness.handle(),
+                Some(Arc::new(|_| Err("controller build mismatch".into()))),
+                || elapsed.get(),
+                |delay| elapsed.set(elapsed.get() + delay),
+                |_| false,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(
+                "runner runner-a did not become eligible within 3600s: controller build mismatch"
+            ));
+            assert_eq!(elapsed.get(), RUNNER_WAIT_DEADLINE);
+        });
+    }
+
+    #[test]
+    fn terminal_linked_run_stops_before_probing() {
+        with_isolated_home(|_| {
+            let mut request = request("true", Default::default());
+            request.wait.runner_eligible = Some("runner-a".into());
+            let run_id = uuid::Uuid::new_v4().to_string();
+            request.linked_durable_run_id = Some(run_id.clone());
+            let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
+            fixtures.terminal_run(&run_id, crate::api_jobs::JobStatus::Cancelled);
+            let harness =
+                ControllerJobHarness::new(Arc::new(StepJobDriver), to_value(&request).unwrap())
+                    .unwrap();
+            assert!(!await_wait_with(
+                &request,
+                &harness.handle(),
+                Some(Arc::new(|_| panic!("terminal run must not probe"))),
+                || Duration::ZERO,
+                |_| panic!("terminal run must not sleep"),
+                |run_id| crate::api_jobs::agent_task_terminal_recovery::linked_durable_run_state(
+                    run_id
+                ) == Some(crate::api_jobs::DaemonLinkedDurableRunState::Terminal),
+            )
+            .unwrap());
+            fixtures.remove(&run_id);
+        });
+    }
+
+    #[test]
+    fn eligible_runner_does_not_sleep() {
+        with_isolated_home(|_| {
+            let mut request = request("true", Default::default());
+            request.wait.runner_eligible = Some("runner-a".into());
+            let harness =
+                ControllerJobHarness::new(Arc::new(StepJobDriver), to_value(&request).unwrap())
+                    .unwrap();
+            assert!(await_wait_with(
+                &request,
+                &harness.handle(),
+                Some(Arc::new(|_| Ok(()))),
+                || Duration::ZERO,
+                |_| panic!("eligible runner must spawn immediately"),
+                |_| false,
+            )
+            .unwrap());
+        });
+    }
 
     struct PrepareFailure;
     impl ControllerJobDriver for PrepareFailure {
