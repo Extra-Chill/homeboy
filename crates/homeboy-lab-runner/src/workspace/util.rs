@@ -503,6 +503,13 @@ mod tests {
     }
 }
 
+/// Controller-side archive creation for runner transfer. macOS `bsdtar` would
+/// otherwise emit an AppleDouble `._<name>` member (and pax xattr records) for
+/// every entry carrying an extended attribute such as `com.apple.provenance`;
+/// GNU tar on a Linux runner extracts those as ordinary files, changing the
+/// materialized tree and its content digest.
+pub(crate) const PORTABLE_TAR_CREATE: &str = "COPYFILE_DISABLE=1 tar --no-xattrs";
+
 pub(crate) fn shell_command_for_runner(runner: &Runner, command: &str) -> Result<String> {
     match runner.kind {
         super::super::RunnerKind::Local => Ok(command.to_string()),
