@@ -2505,7 +2505,16 @@ fn retryable_cook_attempt(
             )]),
         ));
     };
-    let retryable_pre_execution_failure = super::retryable_pre_execution_failure(source);
+    // A failure before any provider execution holds no candidate, so the
+    // durable recipe replays it as the same attempt whatever its transient
+    // classification (#16441).
+    let replaces_source_attempt = source.metadata["pre_execution_failure"].is_object()
+        && source.metadata["provider_executions_consumed"]
+            .as_u64()
+            .unwrap_or_default()
+            == 0;
+    let retryable_pre_execution_failure =
+        replaces_source_attempt || super::retryable_pre_execution_failure(source);
     agent_task_lifecycle::admit_lab_pre_execution_replay(source, &source_recipe_attempt.plan)?;
     if source.metadata["pre_execution_failure"].is_object() && !retryable_pre_execution_failure {
         return Ok(None);
@@ -2529,11 +2538,6 @@ fn retryable_cook_attempt(
             });
     let source_is_retryable =
         retryable_pre_execution_failure || failed_provider_without_candidate || acceptance_repair;
-    let replaces_source_attempt = source.metadata["pre_execution_failure"].is_object()
-        && source.metadata["provider_executions_consumed"]
-            .as_u64()
-            .unwrap_or_default()
-            == 0;
     if replaces_source_attempt
         && !recipe
             .attempts
