@@ -36,8 +36,8 @@ pub use differential::{
 };
 pub use drift::{ChangeType, DriftReport, DriftedTest, ProductionChange};
 pub use durations::{
-    build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestFinding,
-    SlowTestPolicy, TestDurationSamples, TestDurations, TestUnitDuration, SLOWEST_UNITS_REPORTED,
+    build_test_durations, parse_duration_samples, SlowTestFinding, SlowTestPolicy,
+    TestDurationSamples, TestDurations, TestUnitDuration, SLOWEST_UNITS_REPORTED,
 };
 pub use homeboy_extension_contract::test_results::MainTestWorkflowResult;
 pub use parsing::{

@@ -3,8 +3,7 @@ use crate::extension::invoke::{tail_lines, RunnerOutput, WRITE_TEST_RESULTS_ENV}
 use crate::extension::test::analyze::{analyze, TestAnalysisInput};
 use crate::extension::test::baseline::{TestAdapter, TestCounts};
 use crate::extension::test::durations::{
-    build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestPolicy,
-    TestDurations,
+    build_test_durations, parse_duration_samples, SlowTestPolicy, TestDurations,
 };
 use crate::extension::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope,
@@ -1440,7 +1439,6 @@ fn run_main_test_workflow_inner(
         None
     };
     let failures_file = run_dir.step_file(run_dir::files::TEST_FAILURES);
-    let durations_file = run_dir.step_file(run_dir::files::TEST_DURATIONS);
 
     // Inventory is a complete producer operation, not a changed-test execution.
     // It must not inherit an empty changed scope that tells the extension there is
@@ -1937,13 +1935,8 @@ fn run_main_test_workflow_inner(
     // already exists, it is attached to its own field, and nothing below reads
     // it when deciding status, exit code, or baseline comparison. A slow test
     // is a finding, not a failure. (#10655)
-    let test_durations = collect_test_durations(
-        &durations_file,
-        &output.stdout,
-        child_elapsed,
-        output.timed_out,
-        timeout,
-    );
+    let test_durations =
+        collect_test_durations(&output.stdout, child_elapsed, output.timed_out, timeout);
 
     let no_tests_applicable = no_tests_applicable(
         no_tests_policy_enabled,
@@ -2244,20 +2237,16 @@ fn run_main_test_workflow_inner(
 
 /// Assemble the duration picture for one test child.
 ///
-/// Order of preference: an extension-written `test.durations` sidecar (richer
-/// timings than stdout can carry), then the runner's own output. Homeboy's
-/// wall-clock measurement of the child is attached either way, because it is
-/// the only duration that survives a kill.
+/// Parse the runner's stdout and attach Homeboy's wall-clock measurement of
+/// the child, the only duration that survives a kill.
 ///
 /// A terminated child never finishes writing its evidence, so its timings are
 /// necessarily partial. They are still returned — the run that blows the
 /// budget is precisely the one where knowing what consumed it matters — but
 /// they are marked `complete: false` and carry an explicit reason, so a
 /// partial picture can never be read as a full one. Nothing here can fail the
-/// run: an unreadable sidecar or unparseable output yields no durations, not
-/// an error.
+/// run: unparseable output still yields the child's wall-clock measurement.
 fn collect_test_durations(
-    durations_file: &Path,
     stdout: &str,
     child_elapsed: f64,
     timed_out: bool,
@@ -2269,20 +2258,6 @@ fn collect_test_durations(
             budget.as_secs()
         )
     });
-
-    if let Ok(Some(mut declared)) = parse_test_durations_file(durations_file) {
-        if declared.phase_seconds.is_none() {
-            declared.phase_seconds = Some(child_elapsed);
-        }
-        if declared.budget_seconds.is_none() {
-            declared.budget_seconds = Some(budget.as_secs_f64());
-        }
-        if let Some(reason) = incomplete_reason {
-            declared.complete = false;
-            declared.incomplete_reason = Some(reason);
-        }
-        return Some(declared);
-    }
 
     let durations = build_test_durations(
         parse_duration_samples(stdout),
@@ -3520,9 +3495,7 @@ mod tests {
     fn a_killed_test_child_still_yields_labelled_partial_timings() {
         // `execute_capability_script` returns partial stdout on timeout (see
         // its own test), so the durations path receives exactly this shape.
-        let dir = tempfile::tempdir().expect("tempdir");
         let durations = collect_test_durations(
-            &dir.path().join("absent.json"),
             PARTIAL_RUNNER_OUTPUT,
             1500.0,
             true,
@@ -3554,9 +3527,7 @@ mod tests {
         // runner printed nothing timeable, so it is reported. What must never
         // be invented is a *measured* total: no binary reported, so the sum is
         // unknown, not zero.
-        let dir = tempfile::tempdir().expect("tempdir");
         let durations = collect_test_durations(
-            &dir.path().join("absent.json"),
             "error: could not compile `homeboy`\n",
             12.0,
             false,
@@ -3573,32 +3544,6 @@ mod tests {
         assert!(durations.tests.is_empty());
         assert!(durations.slow.is_empty());
         assert!(durations.complete);
-    }
-
-    #[test]
-    fn a_declared_durations_sidecar_wins_over_stdout() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test-durations.json");
-        std::fs::write(
-            &path,
-            r#"{"measured_seconds":99.0,"binaries":[{"name":"declared","seconds":99.0,"source":"binary-summary"}]}"#,
-        )
-        .expect("write sidecar");
-
-        let durations = collect_test_durations(
-            &path,
-            PARTIAL_RUNNER_OUTPUT,
-            120.0,
-            false,
-            Duration::from_secs(1500),
-        )
-        .expect("sidecar is consumed");
-
-        assert_eq!(durations.measured_seconds, Some(99.0));
-        assert_eq!(durations.binaries.len(), 1);
-        // Homeboy's own measurements still fill the gaps the sidecar left.
-        assert_eq!(durations.phase_seconds, Some(120.0));
-        assert_eq!(durations.budget_seconds, Some(1500.0));
     }
 
     #[test]

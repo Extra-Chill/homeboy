@@ -36,7 +36,6 @@ pub mod files {
     pub const LINT_CHANGED_FILES: &str = "lint-changed-files.txt";
     pub const TEST_RESULTS: &str = "test-results.json";
     pub const TEST_FAILURES: &str = "test-failures.json";
-    pub const TEST_DURATIONS: &str = "test-durations.json";
     pub const NO_TESTS_APPLICABLE: &str = "no-tests-applicable.json";
     pub const COVERAGE: &str = "coverage.json";
     pub const FIX_RESULTS: &str = "fix-results.json";
@@ -151,29 +150,6 @@ impl RunDir {
         super::temp::bind_run_dir_owner(&self.path, None, Some(invocation_id))
     }
 
-    /// The registry key each legacy sidecar env var carries the path for.
-    ///
-    /// This is the join between the env-var surface extension scripts actually
-    /// consume and the `structured_sidecars` declarations they publish. Only
-    /// keys present here can have a manifest-declared custom path honoured;
-    /// entries mapped to `None` are run-dir files with no sidecar contract.
-    const LEGACY_SIDECAR_ENV_KEYS: &'static [(&'static str, Option<&'static str>)] = &[
-        ("LINT_FINDINGS_FILE", Some("lint.findings")),
-        ("LINT_PRODUCERS_FILE", Some("lint.producers")),
-        ("TEST_RESULTS_FILE", Some("test.results")),
-        ("TEST_FAILURES_FILE", Some("test.failures")),
-        ("TEST_DURATIONS_FILE", Some("test.durations")),
-        ("COVERAGE_FILE", Some("test.coverage")),
-        ("FIX_RESULTS_FILE", None),
-        ("BENCH_RESULTS_FILE", Some("bench.results")),
-        ("BENCH_RESPONSIVENESS_FILE", None),
-        ("FUZZ_RESULTS_FILE", Some("fuzz.results")),
-        ("FUZZ_ARTIFACTS_DIR", None),
-        ("TRACE_RESULTS_FILE", Some("trace.results")),
-        ("PHASE_TIMINGS_FILE", None),
-        ("ANNOTATIONS_DIR", Some("annotations")),
-    ];
-
     /// The registry keys core exports a legacy sidecar env var for, whether or
     /// not any manifest declares them.
     ///
@@ -184,9 +160,10 @@ impl RunDir {
     /// shipped manifest fixtures, so the day the gap closes the pin fails and
     /// says so.
     pub fn legacy_env_sidecar_keys() -> Vec<&'static str> {
-        Self::LEGACY_SIDECAR_ENV_KEYS
+        crate::structured_sidecar::REGISTRY
             .iter()
-            .filter_map(|(_, key)| *key)
+            .filter(|entry| entry.env.is_some())
+            .map(|entry| entry.key)
             .collect()
     }
 
@@ -215,7 +192,7 @@ impl RunDir {
     /// declare (`rust` reads `COVERAGE_FILE` while declaring
     /// `"test.coverage": false`, `wordpress` reads `ANNOTATIONS_DIR` while
     /// declaring `"annotations": false`, and three extensions read
-    /// `FIX_RESULTS_FILE`, which has no sidecar key at all). Narrowing before
+    /// `FIX_RESULTS_FILE` without declaring `fix.results`). Narrowing before
     /// those declarations are corrected would break shipped extensions, and an
     /// extension declaring no sidecars at all would lose the whole set.
     ///
@@ -234,19 +211,17 @@ impl RunDir {
     ) -> Vec<(String, String)> {
         let mut env_vars = self.default_legacy_env_vars();
 
-        for (env_suffix, sidecar_key) in Self::LEGACY_SIDECAR_ENV_KEYS {
-            let Some(sidecar_key) = sidecar_key else {
+        for schema in crate::structured_sidecar::REGISTRY {
+            let Some(env_suffix) = schema.env else {
                 continue;
             };
             let Some(declaration) = declared
                 .iter()
-                .find(|declaration| declaration.name == *sidecar_key)
+                .find(|declaration| declaration.name == schema.key)
             else {
                 continue;
             };
-            if Some(declaration.path.as_str())
-                == crate::structured_sidecar::default_path(sidecar_key)
-            {
+            if declaration.path == schema.path {
                 continue;
             }
             let Some(path) = self.contained_step_file(&declaration.path) else {
@@ -279,91 +254,23 @@ impl RunDir {
     }
 
     fn default_legacy_env_vars(&self) -> Vec<(String, String)> {
-        vec![
-            (run_dir_env(), self.path.to_string_lossy().to_string()),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("LINT_FINDINGS_FILE"),
-                self.step_file(files::LINT_FINDINGS)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("LINT_PRODUCERS_FILE"),
-                self.step_file(files::LINT_PRODUCERS)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("TEST_RESULTS_FILE"),
-                self.step_file(files::TEST_RESULTS)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("TEST_FAILURES_FILE"),
-                self.step_file(files::TEST_FAILURES)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("TEST_DURATIONS_FILE"),
-                self.step_file(files::TEST_DURATIONS)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("COVERAGE_FILE"),
-                self.step_file(files::COVERAGE)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("FIX_RESULTS_FILE"),
-                self.step_file(files::FIX_RESULTS)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("BENCH_RESULTS_FILE"),
-                self.step_file(files::BENCH_RESULTS)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("BENCH_RESPONSIVENESS_FILE"),
-                self.step_file(files::BENCH_RESPONSIVENESS)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("FUZZ_RESULTS_FILE"),
-                self.step_file(files::FUZZ_RESULTS)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("FUZZ_ARTIFACTS_DIR"),
-                self.step_file(files::FUZZ_ARTIFACTS_DIR)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("TRACE_RESULTS_FILE"),
-                self.step_file(files::TRACE_RESULTS)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("PHASE_TIMINGS_FILE"),
-                self.step_file(files::PHASE_TIMINGS)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            (
-                crate::product_identity::PRODUCT_IDENTITY.env_var("ANNOTATIONS_DIR"),
-                self.annotations_dir().to_string_lossy().to_string(),
-            ),
-        ]
+        let mut env_vars = vec![(run_dir_env(), self.path.to_string_lossy().to_string())];
+        for entry in crate::structured_sidecar::REGISTRY {
+            if let Some(env) = entry.env {
+                env_vars.push((
+                    crate::product_identity::PRODUCT_IDENTITY.env_var(env),
+                    self.step_file(entry.path).to_string_lossy().to_string(),
+                ));
+            }
+        }
+        // PHASE_TIMINGS_FILE remains unconditionally exported until #16451's narrowing step.
+        env_vars.push((
+            crate::product_identity::PRODUCT_IDENTITY.env_var("PHASE_TIMINGS_FILE"),
+            self.step_file(files::PHASE_TIMINGS)
+                .to_string_lossy()
+                .to_string(),
+        ));
+        env_vars
     }
 
     /// Read a step output file as a JSON value, returning None if missing.
@@ -478,10 +385,34 @@ mod tests {
         let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
         let env_vars = run_dir.legacy_env_vars();
-        assert!(env_vars.iter().any(|(k, _)| k == "HOMEBOY_RUN_DIR"));
-        assert!(env_vars
-            .iter()
-            .any(|(k, _)| k == "HOMEBOY_TRACE_RESULTS_FILE"));
+        let mut expected = vec![(
+            "HOMEBOY_RUN_DIR".to_string(),
+            run_dir.path().to_string_lossy().to_string(),
+        )];
+        for (suffix, path) in [
+            ("LINT_FINDINGS_FILE", "lint-findings.json"),
+            ("LINT_PRODUCERS_FILE", "lint-producers.json"),
+            ("TEST_RESULTS_FILE", "test-results.json"),
+            ("TEST_FAILURES_FILE", "test-failures.json"),
+            ("COVERAGE_FILE", "coverage.json"),
+            ("FIX_RESULTS_FILE", "fix-results.json"),
+            ("BENCH_RESULTS_FILE", "bench-results.json"),
+            ("BENCH_RESPONSIVENESS_FILE", "bench-responsiveness.jsonl"),
+            ("FUZZ_RESULTS_FILE", "fuzz-results.json"),
+            ("FUZZ_ARTIFACTS_DIR", "fuzz-artifacts"),
+            ("TRACE_RESULTS_FILE", "trace.json"),
+            ("PHASE_TIMINGS_FILE", "phase-timings.json"),
+            ("ANNOTATIONS_DIR", "annotations"),
+        ] {
+            expected.push((
+                format!("HOMEBOY_{suffix}"),
+                run_dir.step_file(path).to_string_lossy().to_string(),
+            ));
+        }
+        let mut actual = env_vars;
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
         run_dir.cleanup();
     }
 
@@ -581,18 +512,15 @@ mod tests {
         run_dir.cleanup();
     }
 
-    /// Every registry key that has a legacy env var must be reachable by the
-    /// override, and every mapped key must exist in the registry — otherwise a
-    /// declaration silently goes nowhere, which is the bug being fixed.
     #[test]
-    fn legacy_sidecar_env_key_map_agrees_with_the_registry() {
-        for (env_suffix, sidecar_key) in RunDir::LEGACY_SIDECAR_ENV_KEYS {
-            let Some(sidecar_key) = sidecar_key else {
-                continue;
-            };
-            assert!(
-                crate::structured_sidecar::schema(sidecar_key).is_some(),
-                "{env_suffix} maps to unknown sidecar key {sidecar_key}"
+    fn every_exported_sidecar_supports_declared_path_overrides() {
+        let run_dir = RunDir::from_existing(std::env::temp_dir()).expect("run dir");
+        for entry in crate::structured_sidecar::REGISTRY {
+            let Some(env) = entry.env else { continue };
+            let vars = run_dir.legacy_env_vars_for(&[declaration(entry.key, "custom/output")]);
+            assert_eq!(
+                value_of(&vars, &format!("HOMEBOY_{env}")),
+                run_dir.step_file("custom/output").to_string_lossy()
             );
         }
     }
