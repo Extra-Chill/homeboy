@@ -37,6 +37,12 @@ pub(super) enum RunnerWorkspaceCommand {
         #[arg(long)]
         commit: bool,
     },
+    /// Internal blob retention endpoint
+    #[command(hide = true)]
+    PruneBlobs {
+        #[arg(long)]
+        workspace_root: std::path::PathBuf,
+    },
     /// List recent runner-side Lab workspaces and reusable exec commands
     List {
         /// Runner ID
@@ -185,6 +191,13 @@ pub(super) enum RunnerWorkspaceSyncModeArg {
 
 pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceOutput> {
     match command {
+        RunnerWorkspaceCommand::PruneBlobs { workspace_root } => {
+            runner::prune_workspace_blobs(&workspace_root)?;
+            Ok((
+                RunnerWorkspaceOutput::Materialization(serde_json::json!({"pruned": true})),
+                0,
+            ))
+        }
         RunnerWorkspaceCommand::Materialization {
             input,
             response,

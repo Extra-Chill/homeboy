@@ -22,6 +22,8 @@ fn cancelling_either_runner_call_reaps_its_child_scope() {
         fs::write(fixture.path().join("plan.json"), b"{}").unwrap();
         let old_path = std::env::var("PATH").unwrap();
         std::env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+        fs::write(fixture.path().join("commit.json"), b"{}").unwrap();
+        let sources = std::collections::BTreeMap::new();
         for commit in [false, true] {
             let marker = accepted.clone();
             let control =
@@ -29,8 +31,13 @@ fn cancelling_either_runner_call_reaps_its_child_scope() {
                     Instant::now() + Duration::from_secs(10),
                     std::sync::Arc::new(move || marker.exists()),
                 ));
-            let error =
-                protocol_controller::invoke(&runner, fixture.path(), commit, &control).unwrap_err();
+            let error = protocol_controller::invoke(
+                &runner,
+                fixture.path(),
+                commit.then_some((&sources, &[])),
+                &control,
+            )
+            .unwrap_err();
             assert_eq!(error.details["workspace_sync"]["cancelled"], true);
             if commit {
                 assert_eq!(
@@ -77,10 +84,8 @@ fn tar_members(archive: &[u8]) -> (Vec<String>, Vec<String>) {
     (names, pax)
 }
 
-/// The commit call streams the controller directory to the runner as a tar
-/// archive; that archive carries exactly the directory's entries, so the
-/// runner's content digest matches the controller manifest even when files
-/// carry extended attributes (macOS `com.apple.provenance`).
+/// Blob streams carry no platform sidecars, even when source files have
+/// extended attributes (macOS `com.apple.provenance`).
 #[test]
 fn commit_archive_carries_no_platform_metadata_members() {
     crate::test_support::with_isolated_home(|_| {
@@ -105,9 +110,10 @@ fn commit_archive_carries_no_platform_metadata_members() {
         crate::create(&serde_json::json!({"id":"protocol-archive","kind":"ssh","server_id":"protocol-archive","workspace_root":fixture.path(),"homeboy_path":"/runner/homeboy"}).to_string(), false).unwrap();
         let runner = load("protocol-archive").unwrap();
         let directory = fixture.path().join("commit");
-        fs::create_dir_all(directory.join("0/source")).unwrap();
+        fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("commit.json"), b"{}").unwrap();
-        let file = directory.join("0/source/file.txt");
+        let source = tempfile::tempdir().unwrap();
+        let file = source.path().join("file.txt");
         fs::write(&file, b"bytes\n").unwrap();
         // Best effort: only hosts with `xattr` (macOS) can tag the file.
         let _ = std::process::Command::new("xattr")
@@ -116,8 +122,22 @@ fn commit_archive_carries_no_platform_metadata_members() {
             .status();
         let old_path = std::env::var("PATH").unwrap();
         std::env::set_var("PATH", format!("{}:{old_path}", bin.display()));
-        let result =
-            protocol_controller::invoke(&runner, &directory, true, &WorkspaceControl::default());
+        let digest = format!(
+            "sha256:{}",
+            super::super::snapshot::snapshot_file_sha256(&file, &WorkspaceControl::default())
+                .unwrap()
+        );
+        let mut sources = std::collections::BTreeMap::new();
+        sources.insert(
+            digest.clone(),
+            super::blobs::Source::new(file, digest.clone()).unwrap(),
+        );
+        let result = protocol_controller::invoke(
+            &runner,
+            &directory,
+            Some((&sources, std::slice::from_ref(&digest))),
+            &WorkspaceControl::default(),
+        );
         std::env::set_var("PATH", old_path);
         result.unwrap();
         let (names, pax) = tar_members(&fs::read(&archive).unwrap());
@@ -131,7 +151,13 @@ fn commit_archive_carries_no_platform_metadata_members() {
             .filter(|name| !name.is_empty())
             .collect();
         names.sort();
-        assert_eq!(names, ["0", "0/source", "0/source/file.txt", "commit.json"]);
+        assert_eq!(
+            names,
+            [
+                format!("blobs/{}", super::blobs::key(&digest).unwrap()),
+                "commit.json".into()
+            ]
+        );
         assert!(
             pax.iter().all(|record| !record.contains("xattr")),
             "{pax:?}"

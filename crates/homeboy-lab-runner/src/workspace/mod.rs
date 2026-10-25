@@ -34,8 +34,8 @@ pub use sync::{
     workspace_snapshots,
 };
 pub use sync::{
-    materialization_commit, materialization_plan, sync_workspace, sync_workspace_before,
-    update_workspace,
+    materialization_commit, materialization_plan, prune_workspace_blobs, sync_workspace,
+    sync_workspace_before, update_workspace,
 };
 pub(crate) use sync::{
     sync_workspace_batch_controlled, sync_workspace_controlled,

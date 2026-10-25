@@ -1,5 +1,5 @@
 use homeboy_engine_primitives::content_hash;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use super::control::WorkspaceControl;
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
 use super::types::{ByteFileCounts, SnapshotStats, SnapshotTransferStats};
 use super::util::{
-    git_output, hex_prefix, run_shell_capture, run_shell_command, run_shell_command_before,
+    git_output, run_shell_capture, run_shell_command, run_shell_command_before,
     shell_command_for_runner, ssh_args, ssh_client_for_runner,
 };
 use homeboy_lab_contract::lab::handoff::{
@@ -114,8 +114,6 @@ pub use homeboy_runner_contract::workspace_content_identity::{
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
-const SNAPSHOT_MANIFEST_DIFFERENCE_LIMIT: usize = 8;
-
 pub(crate) fn snapshot_identity(
     local_path: &Path,
     excludes: &[String],
@@ -130,12 +128,11 @@ pub(super) fn snapshot_identity_controlled(
     includes: &[String],
     control: &WorkspaceControl,
 ) -> Result<String> {
-    Ok(snapshot_identity_manifest_and_hash_controlled(local_path, excludes, includes, control)?.0)
+    Ok(snapshot_content_controlled(local_path, excludes, includes, control)?.0)
 }
 
-/// Bind the legacy path/Git snapshot identity and portable content inventory
-/// in the same traversal, sharing every file read.
-pub(super) fn snapshot_identity_manifest_and_hash_controlled(
+/// The portable content digest is the sole snapshot tree identity.
+pub(super) fn snapshot_content_controlled(
     local_path: &Path,
     excludes: &[String],
     includes: &[String],
@@ -152,34 +149,16 @@ pub(super) fn snapshot_identity_manifest_and_hash_controlled(
                 "HEAD",
                 repository_integrity_evidence.as_ref(),
             )?;
-            let head = control
-                .git(local_path, &["rev-parse", "HEAD"])
-                .unwrap_or_else(|_| "nogit".to_string());
-            let mut hasher = Sha256::new();
-            hasher.update(local_path.display().to_string().as_bytes());
-            hasher.update(head.as_bytes());
-            for (args, fallback) in [
-                (vec!["status", "--porcelain=v1"], "nogit"),
-                (vec!["diff", "--binary", "HEAD"], ""),
-                (vec!["diff", "--cached", "--binary", "HEAD"], ""),
-            ] {
-                hasher.update(
-                    snapshot_git_output_controlled(local_path, &args, excludes, control)
-                        .unwrap_or_else(|_| fallback.to_string())
-                        .as_bytes(),
-                );
-            }
             let effective_excludes = effective_snapshot_excludes(excludes.to_vec(), includes);
-            let walk = workspace_content_walk_with_identity_controlled(
+            let walk = workspace_content_walk_controlled(
                 local_path,
                 &effective_excludes,
                 WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
                 control,
-                Some(&mut hasher),
             )?;
             let stats = walk.stats;
             Ok((
-                format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)),
+                walk.content_identity.clone(),
                 stats,
                 walk.manifest,
                 walk.content_identity,
@@ -195,25 +174,8 @@ pub(crate) fn snapshot_git_exclude_pathspecs(excludes: &[String]) -> Vec<String>
     homeboy_core::source_snapshot::git_exclude_pathspecs(excludes)
 }
 
-fn snapshot_git_output_controlled(
-    path: &Path,
-    command: &[&str],
-    excludes: &[String],
-    control: &WorkspaceControl,
-) -> Result<String> {
-    let mut args = command
-        .iter()
-        .map(|value| (*value).to_string())
-        .collect::<Vec<_>>();
-    args.push("--".to_string());
-    args.push(".".to_string());
-    args.extend(snapshot_git_exclude_pathspecs(excludes));
-    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    control.git(path, &args)
-}
-
-/// Stable v2 digest of the files a snapshot materializes. Unlike
-/// `snapshot_identity`, this is portable across controller and runner paths.
+/// Stable v2 digest of the files a snapshot materializes, portable across
+/// controller and runner paths and also used as `snapshot_identity`.
 /// The declared permission policy is part of the algorithm marker so a digest
 /// cannot be interpreted under a different platform capability contract.
 pub(crate) fn workspace_content_hash(path: &Path, excludes: &[String]) -> Result<String> {
@@ -266,25 +228,10 @@ pub(super) fn workspace_content_manifest_and_hash_unspanned(
     Ok((walk.manifest, walk.content_identity))
 }
 
-/// Physical facts about one walked manifest entry, aligned by index with
-/// `WorkspaceContentWalk::manifest.entries`. They let the snapshot layer
-/// re-derive the content identity when an entry's recorded spelling changes.
-#[derive(Debug, Clone)]
-struct ContentWalkRecord {
-    /// The physical path the walk read (resolved through internal links).
-    source: PathBuf,
-    /// The executable flag that entered the content hash, if any.
-    hash_executable: Option<bool>,
-    /// The target text hashed for an unresolvable symlink.
-    symlink_target: Option<String>,
-}
-
 struct WorkspaceContentWalk {
     stats: SnapshotStats,
     manifest: WorkspaceContentManifest,
     content_identity: String,
-    records: Vec<ContentWalkRecord>,
-    algorithm: String,
 }
 
 fn workspace_content_walk_controlled(
@@ -292,16 +239,6 @@ fn workspace_content_walk_controlled(
     excludes: &[String],
     policy: &str,
     control: &WorkspaceControl,
-) -> Result<WorkspaceContentWalk> {
-    workspace_content_walk_with_identity_controlled(path, excludes, policy, control, None)
-}
-
-fn workspace_content_walk_with_identity_controlled(
-    path: &Path,
-    excludes: &[String],
-    policy: &str,
-    control: &WorkspaceControl,
-    snapshot_hasher: Option<&mut Sha256>,
 ) -> Result<WorkspaceContentWalk> {
     control.checkpoint()?;
     let (algorithm, executable_capability) =
@@ -319,26 +256,44 @@ fn workspace_content_walk_with_identity_controlled(
         entry_count: 0,
         entries: Vec::new(),
     };
-    let mut records = Vec::new();
     let mut stats = SnapshotStats { files: 0, bytes: 0 };
     ContentHashTraversal {
         root: &root,
         excludes,
         hasher: &mut hasher,
-        snapshot_hasher,
         stats: &mut stats,
         executable_capability,
         manifest: Some(&mut manifest),
-        records: &mut records,
         control,
     }
-    .collect(&root, Path::new(""), &mut vec![root.clone()], true)?;
+    .collect(&root, Path::new(""), &mut vec![root.clone()])?;
+    for entry in &mut manifest.entries {
+        let source = root.join(&entry.path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            entry.mode = Some(
+                fs::metadata(&source)
+                    .map(|m| m.permissions().mode() & 0o777)
+                    .unwrap_or(0o644),
+            );
+        }
+        if fs::symlink_metadata(&source).is_ok_and(|m| m.file_type().is_symlink()) {
+            let target =
+                fs::read_link(&source).map_err(|e| Error::internal_io(e.to_string(), None))?;
+            if entry.kind == "symlink"
+                || source
+                    .canonicalize()
+                    .is_ok_and(|p| p.starts_with(&root) && !is_excluded(&root, &p, excludes, &[]))
+            {
+                entry.symlink_target = Some(target.to_string_lossy().into_owned());
+            }
+        }
+    }
     Ok(WorkspaceContentWalk {
         stats,
         manifest,
         content_identity: format!("sha256:{:x}", hasher.finalize()),
-        records,
-        algorithm,
     })
 }
 
@@ -399,11 +354,9 @@ struct ContentHashTraversal<'a> {
     root: &'a Path,
     excludes: &'a [String],
     hasher: &'a mut Sha256,
-    snapshot_hasher: Option<&'a mut Sha256>,
     stats: &'a mut SnapshotStats,
     executable_capability: ExecutableCapability,
     manifest: Option<&'a mut WorkspaceContentManifest>,
-    records: &'a mut Vec<ContentWalkRecord>,
     control: &'a WorkspaceControl,
 }
 
@@ -413,7 +366,6 @@ impl ContentHashTraversal<'_> {
         path: &Path,
         logical: &Path,
         ancestors: &mut Vec<std::path::PathBuf>,
-        snapshot_active: bool,
     ) -> Result<()> {
         self.control.checkpoint()?;
         let mut children = match fs::read_dir(path) {
@@ -462,14 +414,6 @@ impl ContentHashTraversal<'_> {
                     ));
                 }
             };
-            if snapshot_active {
-                if let Some(hasher) = self.snapshot_hasher.as_mut() {
-                    hasher.update(relative_path.to_string_lossy().as_bytes());
-                }
-            }
-            // Legacy snapshot identities bind a link's spelling only; the portable
-            // content digest additionally binds its dereferenced contents.
-            let snapshot_entry = snapshot_active && !link_metadata.file_type().is_symlink();
             // A symlink whose target resolves is dereferenced so its target content
             // stays provenance-bound (target drift changes the hash). A symlink whose
             // target is intentionally unavailable on the controller (e.g. a tracked
@@ -498,11 +442,6 @@ impl ContentHashTraversal<'_> {
                             Some(target.len() as u64),
                             None,
                         );
-                        self.records.push(ContentWalkRecord {
-                            source: entry_path.clone(),
-                            hash_executable: None,
-                            symlink_target: Some(target),
-                        });
                         continue;
                     }
                 }
@@ -531,11 +470,6 @@ impl ContentHashTraversal<'_> {
                         None,
                     ));
                 }
-                if snapshot_entry {
-                    if let Some(hasher) = self.snapshot_hasher.as_mut() {
-                        hasher.update(b"/dir");
-                    }
-                }
                 hash_directory_entry(self.hasher, &relative);
                 record_workspace_content_manifest_entry(
                     &mut self.manifest,
@@ -545,33 +479,17 @@ impl ContentHashTraversal<'_> {
                     None,
                     None,
                 );
-                self.records.push(ContentWalkRecord {
-                    source: resolved.clone(),
-                    hash_executable: None,
-                    symlink_target: None,
-                });
                 ancestors.push(canonical);
-                self.collect(&resolved, &relative_path, ancestors, snapshot_entry)?;
+                self.collect(&resolved, &relative_path, ancestors)?;
                 ancestors.pop();
             } else if metadata.is_file() {
                 let hash_executable = self.executable_capability.value(&metadata);
                 hash_file_entry_header(self.hasher, &relative, hash_executable, metadata.len());
-                if snapshot_entry {
-                    self.stats.files += 1;
-                    self.stats.bytes = self.stats.bytes.saturating_add(metadata.len());
-                    if let Some(hasher) = self.snapshot_hasher.as_mut() {
-                        hasher.update(b"/file");
-                        hasher.update(metadata.len().to_le_bytes());
-                    }
-                }
+                self.stats.files += 1;
+                self.stats.bytes = self.stats.bytes.saturating_add(metadata.len());
                 let mut file_hash = Sha256::new();
                 let bytes = read_file_chunks(&resolved, self.control, |chunk| {
                     self.hasher.update(chunk);
-                    if snapshot_entry {
-                        if let Some(hasher) = self.snapshot_hasher.as_mut() {
-                            hasher.update(chunk);
-                        }
-                    }
                     file_hash.update(chunk);
                     Ok(())
                 })?;
@@ -591,11 +509,6 @@ impl ContentHashTraversal<'_> {
                     Some(bytes),
                     self.executable_capability.owner_value(&metadata),
                 );
-                self.records.push(ContentWalkRecord {
-                    source: resolved.clone(),
-                    hash_executable,
-                    symlink_target: None,
-                });
             }
         }
         Ok(())
@@ -620,6 +533,8 @@ fn record_workspace_content_manifest_entry(
         sha256,
         bytes,
         owner_executable,
+        mode: None,
+        symlink_target: None,
     });
 }
 
@@ -771,76 +686,6 @@ pub(crate) fn is_excluded(
     })
 }
 
-/// Extend `excludes` with links whose target the same excludes remove.
-///
-/// Such a link resolves in the source but arrives in the stage pointing at
-/// nothing, because its target was never staged. Materializing it instead is
-/// not an option: that turns a link into a regular file, and
-/// `validate_snapshot_stability` compares the source and staged manifests
-/// entry-for-entry and rejects the changed kind as a mixed snapshot.
-///
-/// Excluding the link keeps both manifests agreeing — neither lists it — and
-/// keeps the dangling entry out of the stage entirely.
-///
-/// Links resolving outside the root are left alone; staging materializes those
-/// on purpose, and they are not dangling.
-#[cfg(test)]
-pub(super) fn excludes_with_links_to_excluded_targets(
-    root: &Path,
-    excludes: &[String],
-) -> Vec<String> {
-    excludes_with_links_controlled(root, excludes, &WorkspaceControl::default())
-        .expect("unbounded link discovery has no control failure")
-}
-
-fn excludes_with_links_controlled(
-    root: &Path,
-    excludes: &[String],
-    control: &WorkspaceControl,
-) -> Result<Vec<String>> {
-    let mut expanded = excludes.to_vec();
-    let mut pending = vec![root.to_path_buf()];
-
-    while let Some(directory) = pending.pop() {
-        control.checkpoint()?;
-        let Ok(entries) = fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            control.checkpoint()?;
-            let path = entry.path();
-            if is_excluded(root, &path, &expanded, &[]) {
-                continue;
-            }
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
-                pending.push(path);
-                continue;
-            }
-            if !kind.is_symlink() {
-                continue;
-            }
-            // Unresolvable in the source too: already dangling, and outside
-            // what snapshot exclusions caused.
-            let Ok(target) = fs::canonicalize(&path) else {
-                continue;
-            };
-            if !target.starts_with(root) || !is_excluded(root, &target, excludes, &[]) {
-                continue;
-            }
-            if let Ok(relative) = path.strip_prefix(root) {
-                // Root-anchored so the link is matched by its exact path rather
-                // than by its file name anywhere in the tree.
-                expanded.push(format!("./{}", relative.display()));
-            }
-        }
-    }
-
-    Ok(expanded)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,7 +790,7 @@ pub(crate) fn materialize_snapshot_with_scratch_controlled(
     control: &WorkspaceControl,
 ) -> Result<()> {
     match runner.kind {
-        RunnerKind::Local => materialize_snapshot_piped_controlled(
+        RunnerKind::Local => stream_snapshot_controlled(
             local_path,
             &format!(
                 "sh -c {}",
@@ -959,7 +804,7 @@ pub(crate) fn materialize_snapshot_with_scratch_controlled(
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                materialize_snapshot_piped_controlled(
+                stream_snapshot_controlled(
                     local_path,
                     &format!(
                         "sh -c {}",
@@ -979,7 +824,7 @@ pub(crate) fn materialize_snapshot_with_scratch_controlled(
                     remote = shell::quote_arg(&remote),
                     remote_command = shell::quote_arg(&remote_command),
                 );
-                materialize_snapshot_piped_controlled(
+                stream_snapshot_controlled(
                     local_path,
                     &target,
                     excludes,
@@ -1070,6 +915,10 @@ pub(crate) fn snapshot_manifest_delta(
         replaced_paths,
         changed_file_paths,
         transfer: SnapshotTransferStats {
+            missing_blobs: transferred.files as u64,
+            missing_bytes: transferred.bytes,
+            total_blobs: final_size.files as u64,
+            total_bytes: final_size.bytes,
             reused: ByteFileCounts {
                 files: final_size.files.saturating_sub(transferred.files),
                 bytes: final_size.bytes.saturating_sub(transferred.bytes),
@@ -1660,7 +1509,7 @@ pub(crate) fn copy_snapshot_to_directory(
     destination: &Path,
     excludes: &[String],
 ) -> Result<()> {
-    materialize_snapshot_piped(
+    stream_snapshot(
         local_path,
         &format!(
             "sh -c {}",
@@ -1710,7 +1559,9 @@ pub(crate) fn immutable_replay_snapshot(
         )
     })?;
     reject_replay_symlinks(source, source, excludes)?;
-    materialize_replay_archive(source, &staged, excludes)?;
+    let copied = materialize_replay_archive(source, &staged, excludes);
+    reject_replay_symlinks(source, source, excludes)?;
+    copied?;
     // Recheck after copying so a directory-to-link race cannot turn an
     // attested replay source into a different staged object.
     reject_replay_symlinks(source, source, excludes)?;
@@ -1720,8 +1571,7 @@ pub(crate) fn immutable_replay_snapshot(
 }
 
 fn materialize_replay_archive(source: &Path, staged: &Path, excludes: &[String]) -> Result<()> {
-    let manifest = snapshot_input_manifest(source, excludes)?;
-    materialize_selected_snapshot(source, staged, &manifest, &WorkspaceControl::default())
+    copy_snapshot_to_directory(source, staged, excludes)
 }
 
 fn replay_symlink_error(path: &Path) -> Error {
@@ -1792,35 +1642,24 @@ fn reject_replay_symlinks(root: &Path, path: &Path, excludes: &[String]) -> Resu
     Ok(())
 }
 
-pub(super) fn materialize_snapshot_piped(
+pub(super) fn stream_snapshot(
     local_path: &Path,
     target_command: &str,
     excludes: &[String],
     action: &str,
     scratch: Option<&Path>,
 ) -> Result<()> {
-    materialize_snapshot_piped_before(local_path, target_command, excludes, action, scratch, None)
-}
-
-pub(super) fn materialize_snapshot_piped_before(
-    local_path: &Path,
-    target_command: &str,
-    excludes: &[String],
-    action: &str,
-    scratch: Option<&Path>,
-    deadline: Option<Instant>,
-) -> Result<()> {
-    materialize_snapshot_piped_controlled(
+    stream_snapshot_controlled(
         local_path,
         target_command,
         excludes,
         action,
         scratch,
-        &WorkspaceControl::before(deadline),
+        &WorkspaceControl::default(),
     )
 }
 
-pub(super) fn materialize_snapshot_piped_controlled(
+pub(super) fn stream_snapshot_controlled(
     local_path: &Path,
     target_command: &str,
     excludes: &[String],
@@ -1828,627 +1667,68 @@ pub(super) fn materialize_snapshot_piped_controlled(
     scratch: Option<&Path>,
     control: &WorkspaceControl,
 ) -> Result<()> {
-    // Complete the controller-side archive staging before starting the target
-    // command. In particular, an SSH target must never observe a partial or
-    // second read of a controller workspace whose overlay artifacts changed.
-    // Resolve this once, before anything reads the tree: every manifest and the
-    // staging archive must apply the identical exclude set or they disagree.
-    let excludes = &excludes_with_links_controlled(local_path, excludes, control)?;
-    let manifest = homeboy_core::observation::phase_timing::time(
-        "stage.lab.source_materialization.snapshot_input_manifest",
-        || snapshot_input_manifest_controlled(local_path, excludes, control),
-    )
-    .map_err(|error| {
-        if error.details["workspace_sync"].is_object() {
-            return error;
-        }
-        snapshot_construction_failure(
-            "workspace_snapshot",
-            local_path,
-            None,
-            &format!(
-                "{action}: {}; diagnostics: {}",
-                error.message, error.details
-            ),
-        )
-    })?;
-    let source_manifest = manifest.stable_manifest.clone();
-    let stage = homeboy_core::observation::phase_timing::time(
-        "stage.lab.source_materialization.snapshot_stage_build",
-        || materialize_snapshot_stage_controlled(local_path, &manifest, scratch, control),
-    )
-    .map_err(|mut error| {
-        error.message = format!("{action}: {}", error.message);
-        error
-    })?;
-    // The stage contains only the selected entries, so reapplying excludes here
-    // would be a second interpretation of policy rather than a verification.
-    homeboy_core::observation::phase_timing::time(
-        "stage.lab.source_materialization.snapshot_stability_verify",
-        || {
-            let staged_manifest =
-                snapshot_stable_manifest_controlled(&stage.path().join("source"), &[], control)?;
-            let current_manifest =
-                snapshot_stable_manifest_controlled(local_path, excludes, control)?;
-            validate_snapshot_stability(
-                &source_manifest,
-                &staged_manifest,
-                &current_manifest,
-                local_path,
-                &stage.path().join("source"),
-            )
-        },
-    )?;
-    let command = snapshot_staged_materialization_command(
-        &stage.path().join("source"),
-        target_command,
-        scratch,
-    );
-    homeboy_core::observation::phase_timing::time(
-        "stage.lab.source_materialization.transfer_apply_verify",
-        || control.shell(&command, action),
-    )
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SnapshotStableManifest {
-    inventory: WorkspaceContentManifest,
-    content_identity: String,
-}
-
-#[cfg(test)]
-pub(super) fn snapshot_stable_manifest(
-    path: &Path,
-    excludes: &[String],
-) -> Result<SnapshotStableManifest> {
-    snapshot_stable_manifest_controlled(path, excludes, &WorkspaceControl::default())
-}
-
-fn snapshot_stable_manifest_controlled(
-    path: &Path,
-    excludes: &[String],
-    control: &WorkspaceControl,
-) -> Result<SnapshotStableManifest> {
-    Ok(snapshot_stable_manifest_with_sources_controlled(path, excludes, control)?.0)
-}
-
-/// The stable manifest plus the physical source of each inventory entry.
-///
-/// When the snapshot source is a Git checkout, every entry is recorded under
-/// the spelling Git reports for it, so a case-insensitive controller
-/// filesystem cannot rename tracked paths in the inventory, the content
-/// identity, or the selection.
-fn snapshot_stable_manifest_with_sources_controlled(
-    path: &Path,
-    excludes: &[String],
-    control: &WorkspaceControl,
-) -> Result<(SnapshotStableManifest, Vec<PathBuf>)> {
-    let walk = workspace_content_walk_controlled(
-        path,
+    let _ = scratch;
+    let (manifest, _) = workspace_content_manifest_and_hash_controlled(
+        local_path,
         excludes,
         WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
         control,
-    )?;
-    let known = git_spelling::git_reported_paths(path, control)?;
-    let (inventory, content_identity, sources) =
-        git_spelling::apply_git_spelling(path, walk, known.as_deref(), control)?;
-    Ok((
-        SnapshotStableManifest {
-            inventory,
-            content_identity,
-        },
-        sources,
-    ))
-}
-
-pub(super) fn validate_snapshot_stability(
-    before: &SnapshotStableManifest,
-    staged: &SnapshotStableManifest,
-    after: &SnapshotStableManifest,
-    source: &Path,
-    staging_output: &Path,
-) -> Result<()> {
-    if before == staged && staged == after {
-        return Ok(());
-    }
-    Err(snapshot_construction_failure(
-        "workspace_snapshot",
-        source,
-        Some(staging_output),
-        &format!(
-            "source and staged snapshot manifests differ; refusing a mixed snapshot; {}",
-            snapshot_manifest_difference(before, staged, after)
-        ),
-    ))
-}
-
-fn snapshot_manifest_difference(
-    before: &SnapshotStableManifest,
-    staged: &SnapshotStableManifest,
-    after: &SnapshotStableManifest,
-) -> String {
-    let mut differences = Vec::new();
-    append_snapshot_manifest_difference("source-to-staged", before, staged, &mut differences);
-    append_snapshot_manifest_difference("staged-to-current", staged, after, &mut differences);
-    if differences.is_empty() {
-        "content identities differ outside the bounded manifest metadata".to_string()
-    } else {
-        format!(
-            "bounded differing entries (up to {SNAPSHOT_MANIFEST_DIFFERENCE_LIMIT}): {}",
-            differences.join(", ")
-        )
-    }
-}
-
-fn append_snapshot_manifest_difference(
-    label: &str,
-    expected: &SnapshotStableManifest,
-    actual: &SnapshotStableManifest,
-    differences: &mut Vec<String>,
-) {
-    let expected_entries = expected
-        .inventory
-        .entries
-        .iter()
-        .map(|entry| (&entry.path, entry))
-        .collect::<BTreeMap<_, _>>();
-    let actual_entries = actual
-        .inventory
-        .entries
-        .iter()
-        .map(|entry| (&entry.path, entry))
-        .collect::<BTreeMap<_, _>>();
-    let paths = expected_entries
-        .keys()
-        .chain(actual_entries.keys())
-        .copied()
-        .collect::<BTreeSet<_>>();
-    for path in paths {
-        if differences.len() == SNAPSHOT_MANIFEST_DIFFERENCE_LIMIT {
-            return;
-        }
-        match (expected_entries.get(path), actual_entries.get(path)) {
-            (Some(expected), Some(actual)) if expected == actual => {}
-            (Some(expected), Some(actual)) => differences.push(format!(
-                "{label}:{path} ({})",
-                snapshot_manifest_entry_difference(expected, actual)
-            )),
-            (Some(_), None) => differences.push(format!("{label}:{path} (missing)")),
-            (None, Some(_)) => differences.push(format!("{label}:{path} (unexpected)")),
-            (None, None) => unreachable!("entry key came from one manifest"),
-        }
-    }
-    if differences.is_empty() && expected.content_identity != actual.content_identity {
-        differences.push(format!("{label}:content identity changed"));
-    }
-}
-
-fn snapshot_manifest_entry_difference(
-    expected: &WorkspaceContentManifestEntry,
-    actual: &WorkspaceContentManifestEntry,
-) -> String {
-    let mut fields = Vec::new();
-    if expected.kind != actual.kind {
-        fields.push("kind");
-    }
-    if expected.sha256 != actual.sha256 {
-        fields.push("sha256");
-    }
-    if expected.bytes != actual.bytes {
-        fields.push("bytes");
-    }
-    if expected.owner_executable != actual.owner_executable {
-        fields.push("owner_executable");
-    }
-    if fields.is_empty() {
-        fields.push("metadata");
-    }
-    format!("changed fields: {}", fields.join(", "))
-}
-
-/// One controller-side input and its corresponding private staging output.
-/// The archive transfer consumes only `staging_output`, never `source`.
-#[derive(Debug, Clone)]
-pub(super) struct SnapshotInputManifestEntry {
-    pub(super) declaration_id: String,
-    pub(super) source: PathBuf,
-}
-
-/// An exact filesystem entry selected by the canonical content traversal.
-#[derive(Debug, Clone)]
-struct SnapshotSelectionEntry {
-    source: PathBuf,
-    relative: PathBuf,
-    kind: String,
-}
-
-/// Component-aware internal-link ancestry. `Path::ancestors` cannot confuse
-/// `link` with `link-sibling`, and the probe bound depends only on path depth.
-struct InternalLinkIndex(HashSet<PathBuf>);
-
-impl InternalLinkIndex {
-    fn discover(
-        root: &Path,
-        selection: &[SnapshotSelectionEntry],
-        control: &WorkspaceControl,
-    ) -> Result<Self> {
-        let mut links = HashSet::new();
-        for entry in selection {
-            control.checkpoint()?;
-            if fs::symlink_metadata(&entry.source)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-                && entry
-                    .source
-                    .canonicalize()
-                    .is_ok_and(|target| target.starts_with(root))
-            {
-                links.insert(entry.relative.clone());
-            }
-        }
-        Ok(Self(links))
-    }
-
-    fn contains(&self, path: &Path) -> bool {
-        self.0.contains(path)
-    }
-
-    fn below(&self, path: &Path) -> bool {
-        path.ancestors()
-            .skip(1)
-            .any(|ancestor| self.contains(ancestor))
-    }
-}
-
-/// The typed input contract for one snapshot staging operation.
-#[derive(Debug, Clone)]
-pub(super) struct SnapshotInputManifest {
-    pub(super) entries: Vec<SnapshotInputManifestEntry>,
-    stable_manifest: SnapshotStableManifest,
-    selection: Vec<SnapshotSelectionEntry>,
-}
-
-pub(super) fn snapshot_input_manifest(
-    local_path: &Path,
-    excludes: &[String],
-) -> Result<SnapshotInputManifest> {
-    snapshot_input_manifest_controlled(local_path, excludes, &WorkspaceControl::default())
-}
-
-fn snapshot_input_manifest_controlled(
-    local_path: &Path,
-    excludes: &[String],
-    control: &WorkspaceControl,
-) -> Result<SnapshotInputManifest> {
-    control.checkpoint()?;
-    let entries = fs::read_dir(local_path)
-        .map_err(|err| Error::internal_io(err.to_string(), Some("read snapshot root".to_string())))?
-        .map(|entry| {
-            control.checkpoint()?;
-            entry.map_err(|err| {
-                Error::internal_io(
-                    err.to_string(),
-                    Some("read snapshot root entry".to_string()),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut manifest_entries = Vec::new();
-    for entry in entries {
-        control.checkpoint()?;
-        let source = entry.path();
-        if is_excluded(local_path, &source, excludes, &[]) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let declaration_id = format!("root:{name}");
-        // `read_dir` is not a presence guarantee. Validate each required input
-        // immediately and report its durable declaration identity before SSH.
-        if let Err(error) = fs::symlink_metadata(&source) {
-            return Err(snapshot_construction_failure(
-                &declaration_id,
-                &source,
-                None,
-                &error.to_string(),
-            ));
-        }
-        manifest_entries.push(SnapshotInputManifestEntry {
-            declaration_id,
-            source,
-        });
-    }
-    let (stable_manifest, sources) =
-        snapshot_stable_manifest_with_sources_controlled(local_path, excludes, control)?;
-    let mut selection = stable_manifest
-        .inventory
-        .entries
-        .iter()
-        .zip(sources)
-        .map(|(entry, source)| {
-            control.checkpoint()?;
-            Ok(SnapshotSelectionEntry {
-                source,
-                relative: PathBuf::from(&entry.path),
-                kind: entry.kind.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    // Git metadata is intentionally outside content identity, but
-    // snapshot-git and generic snapshot copies still transport it explicitly.
-    let mut selected = selection
-        .iter()
-        .map(|entry| entry.relative.clone())
-        .collect::<HashSet<_>>();
-    for entry in &manifest_entries {
-        if matches!(
-            entry.source.file_name().and_then(|name| name.to_str()),
-            Some(".git")
-        ) {
-            collect_transport_only_selection(
-                &entry.source,
-                local_path,
-                excludes,
-                &mut selection,
-                &mut selected,
-                control,
-            )?;
-        }
-    }
-    Ok(SnapshotInputManifest {
-        entries: manifest_entries,
-        stable_manifest,
-        selection,
-    })
-}
-
-fn collect_transport_only_selection(
-    path: &Path,
-    root: &Path,
-    excludes: &[String],
-    selection: &mut Vec<SnapshotSelectionEntry>,
-    selected: &mut HashSet<PathBuf>,
-    control: &WorkspaceControl,
-) -> Result<()> {
-    control.checkpoint()?;
-    let relative = path.strip_prefix(root).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("select snapshot transport path".to_string()),
-        )
-    })?;
-    if !selected.insert(relative.to_path_buf()) {
-        return Ok(());
-    }
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("inspect snapshot transport path".to_string()),
-        )
-    })?;
-    let kind = if metadata.file_type().is_symlink() {
-        "symlink"
-    } else if metadata.is_dir() {
-        "directory"
-    } else {
-        "file"
-    };
-    selection.push(SnapshotSelectionEntry {
-        source: path.to_path_buf(),
-        relative: relative.to_path_buf(),
-        kind: kind.to_string(),
-    });
-    if metadata.is_dir() {
-        for child in fs::read_dir(path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("read snapshot transport directory".to_string()),
-            )
-        })? {
-            let child = child.map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("read snapshot transport entry".to_string()),
-                )
-            })?;
-            let child = child.path();
-            if !is_excluded(root, &child, excludes, &[]) {
-                collect_transport_only_selection(
-                    &child, root, excludes, selection, selected, control,
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Materialize every required manifest entry into one private staging tree.
-/// The returned guard keeps the staging output and its cleanup owner alive
-/// through transfer, making it the sole tar input after validation succeeds.
-#[derive(Debug)]
-pub(super) struct SnapshotStage {
-    path: PathBuf,
-    _scratch_stage: Option<tempfile::TempDir>,
-    _runtime_owner: Option<homeboy_core::engine::temp::RuntimeTempOwner>,
-}
-
-impl SnapshotStage {
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn materialize_snapshot_stage(
-    local_path: &Path,
-    manifest: &SnapshotInputManifest,
-    scratch: Option<&Path>,
-) -> Result<SnapshotStage> {
-    materialize_snapshot_stage_before(local_path, manifest, scratch, None)
-}
-
-fn materialize_snapshot_stage_before(
-    local_path: &Path,
-    manifest: &SnapshotInputManifest,
-    scratch: Option<&Path>,
-    deadline: Option<Instant>,
-) -> Result<SnapshotStage> {
-    materialize_snapshot_stage_controlled(
-        local_path,
-        manifest,
-        scratch,
-        &WorkspaceControl::before(deadline),
     )
-}
-
-fn materialize_snapshot_stage_controlled(
-    local_path: &Path,
-    manifest: &SnapshotInputManifest,
-    scratch: Option<&Path>,
-    control: &WorkspaceControl,
-) -> Result<SnapshotStage> {
-    control.checkpoint()?;
-    let stage = match scratch {
-        Some(path) => {
-            let scratch_stage = tempfile::Builder::new()
-                .prefix("homeboy-snapshot-stage-")
-                .tempdir_in(path)
-                .map_err(|error| {
-                    snapshot_construction_failure("staging", local_path, None, &error.to_string())
-                })?;
-            SnapshotStage {
-                path: scratch_stage.path().to_path_buf(),
-                _scratch_stage: Some(scratch_stage),
-                _runtime_owner: None,
-            }
-        }
-        None => {
-            let runtime_owner = homeboy_core::engine::temp::RuntimeTempOwner::allocate(
-                "homeboy-snapshot-stage",
-                "workspace_snapshot",
-            )
-            .map_err(|error| {
-                snapshot_construction_failure("staging", local_path, None, &error.to_string())
-            })?;
-            SnapshotStage {
-                path: runtime_owner.path().to_path_buf(),
-                _scratch_stage: None,
-                _runtime_owner: Some(runtime_owner),
-            }
-        }
-    };
-    let stage_source = stage.path().join("source");
-    fs::create_dir_all(&stage_source).map_err(|error| {
+    .map_err(|e| {
         snapshot_construction_failure(
-            "staging",
+            "content",
             local_path,
-            Some(&stage_source),
-            &error.to_string(),
+            None,
+            &format!("{action}: {}; {}", e.message, e.details),
         )
     })?;
-    materialize_selected_snapshot(local_path, &stage_source, manifest, control)?;
-    Ok(stage)
-}
-
-/// Materialize exactly the entries selected by `workspace_content_manifest`.
-///
-/// Selection is complete before copying begins. The subsequent manifest checks
-/// reject a changed or incomplete source instead of silently broadening the
-/// archive with a second exclusion implementation.
-fn materialize_selected_snapshot(
-    source_root: &Path,
-    destination: &Path,
-    manifest: &SnapshotInputManifest,
-    control: &WorkspaceControl,
-) -> Result<()> {
-    #[cfg(test)]
-    for entry in &manifest.entries {
-        test_snapshot_directory_discovery_hook::run(&entry.source);
-    }
-
-    let root = content_hash_root(source_root)?;
-    let internal_links = InternalLinkIndex::discover(&root, &manifest.selection, control)?;
-    materialize_selection_with_lookup(
-        destination,
-        manifest,
-        control,
-        |entry| internal_links.contains(&entry.relative),
-        |entry| internal_links.below(&entry.relative),
-    )
-}
-
-fn materialize_selection_with_lookup(
-    destination: &Path,
-    manifest: &SnapshotInputManifest,
-    control: &WorkspaceControl,
-    is_internal_link: impl Fn(&SnapshotSelectionEntry) -> bool,
-    is_below_internal_link: impl Fn(&SnapshotSelectionEntry) -> bool,
-) -> Result<()> {
-    let output = |entry: &SnapshotSelectionEntry| destination.join(&entry.relative);
-    let failure = |entry: &SnapshotSelectionEntry, error: &dyn std::fmt::Display| {
-        let declaration_id = manifest
-            .entries
-            .iter()
-            .find(|candidate| entry.source.starts_with(&candidate.source))
-            .map(|candidate| candidate.declaration_id.as_str())
-            .unwrap_or("selection");
-        snapshot_construction_failure(
-            declaration_id,
-            manifest
-                .entries
-                .iter()
-                .find(|candidate| entry.source.starts_with(&candidate.source))
-                .map(|candidate| candidate.source.as_path())
-                .unwrap_or(entry.source.as_path()),
-            Some(&output(entry)),
-            &error.to_string(),
-        )
-    };
-
-    // Create real directories first, so selected paths through an internal
-    // symlink always have their target before the link is recreated.
-    for entry in &manifest.selection {
-        control.checkpoint()?;
-        if entry.kind != "directory" || is_internal_link(entry) || is_below_internal_link(entry) {
-            continue;
-        }
-        fs::create_dir_all(output(entry)).map_err(|error| failure(entry, &error))?;
-    }
-    for entry in &manifest.selection {
-        control.checkpoint()?;
-        if entry.kind == "directory" && is_internal_link(entry) && !is_below_internal_link(entry) {
-            copy_snapshot_symlink(entry, &output(entry), &failure)?;
-        }
-    }
-    for entry in &manifest.selection {
-        control.checkpoint()?;
-        if entry.kind != "file" || is_below_internal_link(entry) {
-            continue;
-        }
-        if is_internal_link(entry) {
-            copy_snapshot_symlink(entry, &output(entry), &failure)?;
-            continue;
-        }
-        let target = output(entry);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|error| failure(entry, &error))?;
-        }
-        copy_snapshot_file(&entry.source, &target, control).map_err(|error| {
-            if error.details["workspace_sync"].is_object() {
-                error
-            } else {
-                failure(
-                    entry,
-                    &format!("{}; diagnostics: {}", error.message, error.details),
-                )
+    super::sync::blobs::pipe(
+        |writer| {
+            let mut archive = tar::Builder::new(writer);
+            let mut links = Vec::<PathBuf>::new();
+            for entry in &manifest.entries {
+                let relative = Path::new(&entry.path);
+                if links.iter().any(|p| relative.starts_with(p)) {
+                    continue;
+                }
+                let path = local_path.join(relative);
+                if entry.symlink_target.is_some() {
+                    archive
+                        .append_path_with_name(&path, relative)
+                        .map_err(|e| Error::internal_io(e.to_string(), None))?;
+                    links.push(relative.to_path_buf());
+                } else if entry.kind == "file" {
+                    super::sync::blobs::Source::new(path, entry.sha256.clone().unwrap())?.append(
+                        &mut archive,
+                        relative,
+                        control,
+                    )?;
+                } else {
+                    archive
+                        .append_dir(relative, path)
+                        .map_err(|e| Error::internal_io(e.to_string(), None))?;
+                }
             }
-        })?;
-    }
-    for entry in &manifest.selection {
-        control.checkpoint()?;
-        if entry.kind == "symlink" && !is_below_internal_link(entry) {
-            copy_snapshot_symlink(entry, &output(entry), &failure)?;
-        }
-    }
-    Ok(())
+            archive
+                .finish()
+                .map_err(|e| Error::internal_io(e.to_string(), None))
+        },
+        |reader| {
+            let output = control.output_with_stdin(
+                std::process::Command::new("sh").args(["-c", target_command]),
+                reader,
+                action,
+            )?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(Error::internal_io(
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                    Some(action.into()),
+                ))
+            }
+        },
+    )
 }
 
 const SNAPSHOT_COPY_CHUNK_BYTES: usize = 64 * 1024;
@@ -2486,69 +1766,7 @@ fn read_file_chunks(
     }
 }
 
-fn copy_snapshot_file(source: &Path, target: &Path, control: &WorkspaceControl) -> Result<()> {
-    control.checkpoint()?;
-    let metadata =
-        fs::metadata(source).map_err(|error| Error::internal_io(error.to_string(), None))?;
-    let mut output =
-        fs::File::create(target).map_err(|error| Error::internal_io(error.to_string(), None))?;
-    let bytes = read_file_chunks(source, control, |chunk| {
-        output.write_all(chunk).map_err(|error| {
-            Error::internal_io(error.to_string(), Some("copy snapshot file".to_string()))
-        })
-    })?;
-    if bytes != metadata.len() {
-        return Err(snapshot_construction_failure(
-            "selection",
-            source,
-            Some(target),
-            "source file size changed during copying",
-        ));
-    }
-    output
-        .set_permissions(metadata.permissions())
-        .map_err(|error| Error::internal_io(error.to_string(), None))?;
-    Ok(())
-}
-
-fn copy_snapshot_symlink(
-    entry: &SnapshotSelectionEntry,
-    destination: &Path,
-    failure: &impl Fn(&SnapshotSelectionEntry, &dyn std::fmt::Display) -> Error,
-) -> Result<()> {
-    let target = fs::read_link(&entry.source).map_err(|error| failure(entry, &error))?;
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| failure(entry, &error))?;
-    }
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(target, destination).map_err(|error| failure(entry, &error))?;
-    #[cfg(not(unix))]
-    {
-        let _ = target;
-        return Err(failure(
-            entry,
-            &"snapshot symlink materialization is unsupported on this platform",
-        ));
-    }
-    Ok(())
-}
-
-fn snapshot_staged_materialization_command(
-    stage: &Path,
-    target_command: &str,
-    scratch: Option<&Path>,
-) -> String {
-    let command = format!(
-        "{tar} -C {stage} -cf - . | {target_command}",
-        tar = super::util::PORTABLE_TAR_CREATE,
-        stage = shell::quote_arg(&stage.display().to_string()),
-    );
-    scratch.map_or(command.clone(), |scratch| {
-        scratch_scoped_command(&command, scratch)
-    })
-}
-
-fn snapshot_construction_failure(
+pub(super) fn snapshot_construction_failure(
     declaration_id: &str,
     source: &Path,
     staging_output: Option<&Path>,
@@ -2577,21 +1795,6 @@ fn snapshot_construction_failure(
         "remediation": "Correct the controller-side snapshot inputs, then start the replacement lifecycle run selected by its owner.",
     });
     error
-}
-
-/// Scope one snapshot command to an admitted controller scratch filesystem.
-///
-/// Uses `export` rather than a `TMPDIR=x cmd` assignment prefix: the archive
-/// command begins with a `(...)` subshell, and POSIX sh only accepts assignment
-/// prefixes on *simple* commands. `TMPDIR=x (cd ...)` is a hard parse error
-/// under dash (`Syntax error: "(" unexpected`), which failed every
-/// scratch-admitted materialization before a byte was transferred.
-pub(super) fn scratch_scoped_command(command: &str, scratch: &Path) -> String {
-    format!(
-        "export TMPDIR={}; {};",
-        shell::quote_arg(&scratch.display().to_string()),
-        command.trim_end_matches(';')
-    )
 }
 
 pub(crate) fn effective_snapshot_excludes(
@@ -2638,11 +1841,3 @@ pub(super) fn snapshot_install_command(remote_path: &str) -> String {
         .restore_owner()
         .command()
 }
-
-mod git_spelling;
-
-#[cfg(test)]
-mod construction_tests;
-
-#[cfg(test)]
-mod git_spelling_tests;

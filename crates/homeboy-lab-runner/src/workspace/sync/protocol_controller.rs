@@ -72,6 +72,7 @@ pub(super) fn sync_workspace_batch_in_roots(
     let mut commit_roots = Vec::new();
     let mut git_sources = Vec::new();
     let mut admissions = Vec::new();
+    let mut sources = std::collections::BTreeMap::new();
     for (index, (options, extra_excludes)) in requests.iter().enumerate() {
         let local_path = canonical_workspace_path(&options.path)?;
         let mut excludes = super::super::types::default_excludes_for(&local_path);
@@ -97,12 +98,8 @@ pub(super) fn sync_workspace_batch_in_roots(
             }
         }
         let excludes = effective_snapshot_excludes(excludes, &includes);
-        let (snapshot, stats, manifest, digest) = snapshot_identity_manifest_and_hash_controlled(
-            &local_path,
-            &excludes,
-            &includes,
-            control,
-        )?;
+        let (snapshot, stats, manifest, digest) =
+            snapshot_content_controlled(&local_path, &excludes, &includes, control)?;
         let remote_path = temp::unique_name(
             &deterministic_remote_path(
                 workspace_root,
@@ -112,36 +109,22 @@ pub(super) fn sync_workspace_batch_in_roots(
             ),
             "",
         );
-        // Controller scratch admission is local; runner capacity arrives in plan.
-        let requirement = snapshot_filesystem_requirement(stats.bytes, manifest.entry_count as u64);
-        let probe =
-            local_snapshot_filesystem_probe(transfer.path(), "controller snapshot scratch")?;
-        admissions.push(SnapshotFilesystemAdmission::acquire(
-            roots.data(),
-            transfer.path().to_path_buf(),
-            &[probe],
-            requirement,
-            runner,
-        )?);
+        for entry in &manifest.entries {
+            if entry.kind == "file" {
+                let digest = entry
+                    .sha256
+                    .clone()
+                    .ok_or_else(|| io("file has no digest"))?;
+                sources
+                    .entry(digest.clone())
+                    .or_insert(super::blobs::Source::new(
+                        local_path.join(&entry.path),
+                        digest,
+                    )?);
+            }
+        }
         let directory = transfer.path().join(index.to_string());
         fs::create_dir(&directory).map_err(io)?;
-        let source = directory.join("source");
-        // Reuse the established immutable staging and stability contract. This
-        // extraction is controller-local and does not invoke the runner.
-        super::super::snapshot::materialize_snapshot_piped_controlled(
-            &local_path,
-            &format!(
-                "sh -c {}",
-                shell::quote_arg(&format!(
-                    "mkdir -p {source} && tar -p -C {source} -xf -",
-                    source = shell::quote_arg(&source.display().to_string())
-                ))
-            ),
-            &excludes,
-            "prepare batch snapshot",
-            Some(transfer.path()),
-            control,
-        )?;
         let head = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
             control.git(&local_path, &["rev-parse", "HEAD"]).ok()
         } else {
@@ -181,6 +164,10 @@ pub(super) fn sync_workspace_batch_in_roots(
         if options.mode == RunnerWorkspaceSyncMode::Snapshot {
             plan.actual_materialization_mode = Some("filesystem_snapshot".into());
             plan.snapshot_transfer = Some(super::super::types::SnapshotTransferStats {
+                missing_blobs: 0,
+                missing_bytes: 0,
+                total_blobs: 0,
+                total_bytes: 0,
                 reused: ByteFileCounts::default(),
                 transferred: stats,
                 final_size: stats,
@@ -200,27 +187,8 @@ pub(super) fn sync_workspace_batch_in_roots(
             run_id: options.run_isolation_token.as_deref(),
             cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
         });
-        let synthetic = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit && head.is_none() {
-            let command = super::super::snapshot::synthetic_git_checkout_command(
-                &source.display().to_string(),
-                &snapshot,
-                None,
-                None,
-                false,
-            );
-            control.shell(&command, "prepare synthetic batch Git baseline")?;
-            let identity = super::super::snapshot::SyntheticCheckoutIdentity {
-                synthetic_commit: control.git(&source, &["rev-parse", "HEAD"])?,
-                synthetic_ref: control.git(&source, &["symbolic-ref", "HEAD"])?,
-                synthetic_tree: control.git(&source, &["rev-parse", "HEAD^{tree}"])?,
-            };
-            fs::create_dir(directory.join("git")).map_err(io)?;
-            fs::rename(source.join(".git"), directory.join("git/.git")).map_err(io)?;
-            Some(identity)
-        } else {
-            None
-        };
-        let prepared_git = synthetic.is_some();
+        let prepared_git = options.mode == RunnerWorkspaceSyncMode::SnapshotGit && head.is_none();
+        let synthetic = None;
         let current_workspace =
             current_workspace_summary(&local_path, &remote_path, options.mode, true, synthetic);
         let workspace_lease = workspace_lease(runner_id, &current_workspace);
@@ -284,7 +252,7 @@ pub(super) fn sync_workspace_batch_in_roots(
     write_json(&transfer.path().join("plan.json"), &plan)?;
     let response = homeboy_core::observation::phase_timing::time(
         "stage.lab.source_materialization.plan",
-        || invoke(runner, transfer.path(), false, control),
+        || invoke(runner, transfer.path(), None, control),
     )?;
     let response: PlanResponse = serde_json::from_value(response).map_err(io)?;
     if response.identity != plan.identity {
@@ -293,18 +261,51 @@ pub(super) fn sync_workspace_batch_in_roots(
             plan.identity, response.identity
         )));
     }
+    let inventory = super::blobs::inventory(&plan.roots)?;
+    let missing_bytes: u64 = response
+        .missing
+        .iter()
+        .map(|d| {
+            inventory
+                .get(d)
+                .copied()
+                .ok_or_else(|| io("plan requested unknown digest"))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .iter()
+        .sum();
+    for output in &mut outputs {
+        let stats = super::super::types::SnapshotTransferStats {
+            missing_blobs: response.missing.len() as u64,
+            missing_bytes,
+            total_blobs: inventory.len() as u64,
+            total_bytes: inventory.values().sum(),
+            reused: ByteFileCounts {
+                files: inventory.len().saturating_sub(response.missing.len()),
+                bytes: inventory
+                    .values()
+                    .sum::<u64>()
+                    .saturating_sub(missing_bytes),
+            },
+            transferred: ByteFileCounts {
+                files: response.missing.len(),
+                bytes: missing_bytes,
+            },
+            final_size: output.counts,
+        };
+        output.materialization_plan.snapshot_transfer = Some(stats);
+    }
     let mut requirement = SnapshotFilesystemRequirement {
         bytes: 0,
         inodes: 0,
     };
-    for output in &outputs {
-        let root_requirement = snapshot_filesystem_requirement(
-            output.counts.bytes,
-            output.content.as_ref().unwrap().0.entry_count as u64,
-        );
+    for root in &plan.roots {
+        let root_requirement = super::blobs::assembled_size(root);
         requirement.bytes = requirement.bytes.saturating_add(root_requirement.bytes);
         requirement.inodes = requirement.inodes.saturating_add(root_requirement.inodes);
     }
+    requirement.bytes = requirement.bytes.saturating_add(missing_bytes);
+    requirement.inodes += response.missing.len() as u64;
     let probe = SnapshotFilesystemProbe {
         identity: format!("runner:{runner_id}:{workspace_root}"),
         path: workspace_root.into(),
@@ -409,12 +410,19 @@ pub(super) fn sync_workspace_batch_in_roots(
             roots: commit_roots,
         },
     )?;
-    homeboy_core::observation::phase_timing::time(
+    let committed = homeboy_core::observation::phase_timing::time(
         "stage.lab.source_materialization.commit",
         || {
             homeboy_core::observation::phase_timing::time(
                 "stage.lab.source_materialization.transfer_apply_verify",
-                || invoke(runner, transfer.path(), true, control),
+                || {
+                    invoke(
+                        runner,
+                        transfer.path(),
+                        Some((&sources, &response.missing)),
+                        control,
+                    )
+                },
             )
         },
     )
@@ -426,6 +434,20 @@ pub(super) fn sync_workspace_batch_in_roots(
         error
     })?;
     control.checkpoint()?;
+    for (index, output) in outputs.iter_mut().enumerate() {
+        if let Some(value) = committed
+            .get("synthetic")
+            .and_then(|v| v.get(index))
+            .filter(|v| !v.is_null())
+        {
+            output.current_workspace.synthetic_checkout_commit =
+                value["synthetic_commit"].as_str().map(str::to_string);
+            output.current_workspace.synthetic_checkout_ref =
+                value["synthetic_ref"].as_str().map(str::to_string);
+            output.current_workspace.synthetic_checkout_tree =
+                value["synthetic_tree"].as_str().map(str::to_string);
+        }
+    }
     outputs.truncate(original_count);
     Ok(outputs)
 }
@@ -433,65 +455,105 @@ pub(super) fn sync_workspace_batch_in_roots(
 pub(super) fn invoke(
     runner: &Runner,
     directory: &Path,
-    commit: bool,
+    blobs: Option<(
+        &std::collections::BTreeMap<String, super::blobs::Source>,
+        &[String],
+    )>,
     control: &WorkspaceControl,
 ) -> Result<serde_json::Value> {
     control.checkpoint()?;
     #[cfg(test)]
     INVOCATIONS.with(|counter| counter.set(counter.get() + 1));
-    let local_transport = runner.kind == RunnerKind::Local
+    let local = runner.kind == RunnerKind::Local
         || super::super::util::ssh_client_for_runner(runner)
             .is_ok_and(|(_, client)| client.is_local);
-    if local_transport {
-        let response = if commit {
-            materialization_commit_controlled(directory, control)
-        } else {
-            materialization_plan_controlled(&directory.join("plan.json"), control)
-        }?;
-        control.checkpoint()?;
-        return Ok(response);
-    }
-    let binary = crate::remote_runner_homeboy_path(runner, "materialize Lab sources")?;
     let root = runner
         .workspace_root
         .as_deref()
         .ok_or_else(|| io("runner has no workspace root"))?;
-    let remote = format!(
-        "set -eu; mkdir -p {root}; stage=$(mktemp -d {template}); trap 'rm -rf \"$stage\"' EXIT HUP INT TERM; tar -p -C \"$stage\" -xf -; {binary} runner workspace materialization --input \"$stage{input}\" --response \"$stage/response.json\" {commit} >&2; cat \"$stage/response.json\"",
-        root = shell::quote_arg(root), template = shell::quote_arg(&format!("{root}/.materialization.XXXXXXXX")),
-        binary = shell::quote_arg(binary), input = if commit { "" } else { "/plan.json" }, commit = if commit { "--commit" } else { "" },
-    );
-    let target = super::super::util::shell_command_for_runner(runner, &remote)?;
-    let command = format!(
-        "{} -C {} -cf - {} | {}",
-        super::super::util::PORTABLE_TAR_CREATE,
-        shell::quote_arg(&directory.display().to_string()),
-        if commit { "." } else { "plan.json" },
-        target
-    );
-    let output = control
-        .output_exact(
-            Command::new("bash").args(["-o", "pipefail", "-c", &command]),
-            "runner materialization call",
-        )
-        .map_err(|mut error| {
-            if commit && error.details["workspace_sync"]["command_started"] == true {
-                error.details["workspace_sync"]["remote_effect_uncertain"] =
-                    serde_json::json!(true);
-            }
-            error
-        })?;
-    if !output.status.success() {
-        return super::super::util::shell_output_failure(output, "runner materialization call")
-            .map(|()| serde_json::Value::Null).map_err(|mut error| {
-                if commit && error.code == ErrorCode::RunnerLabTransportFailure {
-                    error.details["workspace_sync"] = serde_json::json!({"command_started": true, "remote_effect_uncertain": true});
-                }
-                error
-            });
+    if local && blobs.is_none() {
+        let response = materialization_plan_controlled(&directory.join("plan.json"), control)?;
+        control.checkpoint()?;
+        return Ok(response);
     }
+    let incoming = if local {
+        Some(tempfile::tempdir_in(root).map_err(io)?)
+    } else {
+        None
+    };
+    let response = super::blobs::pipe(
+        |writer| {
+            let mut archive = tar::Builder::new(writer);
+            if let Some((sources, missing)) = blobs {
+                for digest in missing {
+                    control.checkpoint()?;
+                    sources
+                        .get(digest)
+                        .ok_or_else(|| io("missing source blob"))?
+                        .append(
+                            &mut archive,
+                            &PathBuf::from("blobs").join(super::blobs::key(digest)?),
+                            control,
+                        )?;
+                }
+                for entry in fs::read_dir(directory).map_err(io)? {
+                    let entry = entry.map_err(io)?;
+                    if entry.file_type().map_err(io)?.is_dir() {
+                        archive
+                            .append_dir_all(entry.file_name(), entry.path())
+                            .map_err(io)?;
+                    }
+                }
+            }
+            // The declaration is the seal: never send it after a failed stability
+            // check, even when an extractor accepts an otherwise partial archive.
+            let name = if blobs.is_some() {
+                "commit.json"
+            } else {
+                "plan.json"
+            };
+            archive
+                .append_path_with_name(directory.join(name), name)
+                .map_err(io)?;
+            archive.finish().map_err(io)
+        },
+        |reader| {
+            if let Some(incoming) = &incoming {
+                tar::Archive::new(reader)
+                    .unpack(incoming.path())
+                    .map_err(io)?;
+                materialization_commit_controlled(incoming.path(), control)
+            } else {
+                let binary = crate::remote_runner_homeboy_path(runner, "materialize Lab sources")?;
+                let remote = format!("set -eu; mkdir -p {root}; stage=$(mktemp -d {template}); trap 'rm -rf \"$stage\"' EXIT HUP INT TERM; tar -p -C \"$stage\" -xf -; {binary} runner workspace materialization --input \"$stage{input}\" --response \"$stage/response.json\" {commit} >&2; cat \"$stage/response.json\"", root = shell::quote_arg(root), template = shell::quote_arg(&format!("{root}/.materialization.XXXXXXXX")), binary = shell::quote_arg(binary), input = if blobs.is_some() { "" } else { "/plan.json" }, commit = if blobs.is_some() { "--commit" } else { "" });
+                let command = super::super::util::shell_command_for_runner(runner, &remote)?;
+                let output = control
+                    .output_with_stdin(
+                        Command::new("bash").args(["-o", "pipefail", "-c", &command]),
+                        reader,
+                        "runner materialization call",
+                    )
+                    .map_err(|mut error| {
+                        if blobs.is_some()
+                            && error.details["workspace_sync"]["command_started"] == true
+                        {
+                            error.details["workspace_sync"]["remote_effect_uncertain"] =
+                                serde_json::json!(true);
+                        }
+                        error
+                    })?;
+                if !output.status.success() {
+                    return super::super::util::shell_output_failure(output, "runner materialization call").map(|()| serde_json::Value::Null).map_err(|mut error| {
+                    if blobs.is_some() && error.code == ErrorCode::RunnerLabTransportFailure { error.details["workspace_sync"] = serde_json::json!({"command_started": true, "remote_effect_uncertain": true}); }
+                    error
+                });
+                }
+                json(&output.stdout)
+            }
+        },
+    )?;
     control.checkpoint()?;
-    json(&output.stdout)
+    Ok(response)
 }
 
 #[cfg(test)]
