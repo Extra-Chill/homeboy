@@ -762,6 +762,7 @@ pub(crate) struct ConvergedLabHandoffRuntime {
     pub(crate) runner: crate::Runner,
     pub(crate) status: crate::RunnerStatusReport,
     pub(crate) homeboy_path: String,
+    pub(crate) configured_build_identity: Option<String>,
 }
 
 fn handoff_convergence_action(
@@ -858,7 +859,8 @@ pub(crate) fn converge_lab_handoff_runtime(
         | RuntimeSetAdmission::Converge
         | RuntimeSetAdmission::RefuseRuntime => {}
     }
-    for _ in 0..2 {
+    let mut refreshes = 0;
+    loop {
         let runner = crate::load(runner_id)?;
         let command = crate::remote_runner_homeboy_path(&runner, "Lab handoff convergence")?;
         let status = crate::status_for_admission(runner_id)?;
@@ -878,7 +880,11 @@ pub(crate) fn converge_lab_handoff_runtime(
                 None,
             ));
         }
-        let configured = crate::configured_runner_homeboy_build_identity(&runner, command)?;
+        // Status already probed the configured job binary; probe only if that failed.
+        let configured = match &status.configured_job_binary_build_identity {
+            Some(identity) => Some(identity.clone()),
+            None => crate::configured_runner_homeboy_build_identity(&runner, command)?,
+        };
         let daemon = session.homeboy_build_identity.clone();
         match handoff_convergence_action(
             &runner,
@@ -894,17 +900,11 @@ pub(crate) fn converge_lab_handoff_runtime(
                     runner,
                     status,
                     homeboy_path,
+                    configured_build_identity: configured,
                 });
             }
-            HandoffConvergenceAction::Refuse => {
-                return Err(handoff_identity_error(
-                    runner_id,
-                    requested,
-                    configured.as_deref(),
-                    daemon.as_deref(),
-                ));
-            }
-            HandoffConvergenceAction::Refresh(mode) => {
+            HandoffConvergenceAction::Refresh(mode) if refreshes < 2 => {
+                refreshes += 1;
                 let (report, exit_code) = crate::refresh_homeboy_binary(handoff_refresh_options(
                     runner_id.to_string(),
                     mode,
@@ -919,22 +919,16 @@ pub(crate) fn converge_lab_handoff_runtime(
                     ));
                 }
             }
+            HandoffConvergenceAction::Refuse | HandoffConvergenceAction::Refresh(_) => {
+                return Err(handoff_identity_error(
+                    runner_id,
+                    requested,
+                    configured.as_deref(),
+                    daemon.as_deref(),
+                ));
+            }
         }
     }
-    let runner = crate::load(runner_id)?;
-    let command = crate::remote_runner_homeboy_path(&runner, "Lab handoff convergence")?;
-    let status = crate::status_for_admission(runner_id)?;
-    let configured = crate::configured_runner_homeboy_build_identity(&runner, command)?;
-    let daemon = status
-        .session
-        .as_ref()
-        .and_then(|session| session.homeboy_build_identity.clone());
-    Err(handoff_identity_error(
-        runner_id,
-        requested,
-        configured.as_deref(),
-        daemon.as_deref(),
-    ))
 }
 
 fn default_lab_staging_tunnel_mode() -> crate::RunnerTunnelMode {
@@ -2929,19 +2923,18 @@ impl ProductionLabStagingOperations {
             // Mixed-version recovery: old recipes had no immutable binding.
             return Ok(None);
         };
-        converge_lab_handoff_runtime(
+        // Convergence returns only a transport-checked, identity-ready observation.
+        let converged = converge_lab_handoff_runtime(
             &request.recipe.runner_id,
             request.recipe.tunnel_mode.clone(),
             requested,
         )?;
-        let runner = crate::load(&request.recipe.runner_id)?;
-        let command = crate::remote_runner_homeboy_path(&runner, "durable Lab handoff")?;
-        let status = Self::status_for_recipe_transport(request)?;
-        let daemon = status
+        let daemon = converged
+            .status
             .session
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone());
-        let configured = crate::configured_runner_homeboy_build_identity(&runner, command)?;
+        let configured = converged.configured_build_identity;
         if !handoff_identities_match(requested, configured.as_deref(), daemon.as_deref()) {
             return Err(handoff_identity_error(
                 &request.recipe.runner_id,
@@ -4407,8 +4400,10 @@ impl StageExecutionAdapter {
                     Some(effect) => effect,
                     None => match checkpoint.next_action() {
                         LabStagingPhase::AcceptedMaterializeWorkspace => {
-                            let handoff_identity =
-                                self.operations.validate_handoff_identity(request)?;
+                            let handoff_identity = homeboy_core::observation::phase_timing::time(
+                                "stage.lab.source_materialization.handoff_validation",
+                                || self.operations.validate_handoff_identity(request),
+                            )?;
                             let (source_snapshot_id, workspace_id) =
                                 self.operations.materialize_workspace(
                                     request,
