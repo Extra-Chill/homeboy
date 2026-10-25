@@ -2339,6 +2339,101 @@ mod lab_gate_binding_tests {
         });
     }
 
+    /// The operator commits the staged candidate by hand: HEAD leaves the
+    /// base, but the tree is still the candidate's (#16441).
+    fn hand_commit_candidate(repo: &Path) -> crate::agent_task::AgentTaskCandidate {
+        std::fs::write(repo.join("candidate.txt"), "changed\n").unwrap();
+        homeboy_core::test_support::run_git_fixture_command(repo, &["add", "."]);
+        let candidate = harvested_candidate(repo);
+        homeboy_core::test_support::run_git_fixture_command(repo, &["commit", "-qm", "hand"]);
+        assert_ne!(
+            git_output(repo, &["rev-parse", "HEAD"]).unwrap(),
+            candidate.base_sha
+        );
+        candidate
+    }
+
+    #[test]
+    fn hand_committed_candidate_tree_resolves_to_the_candidate_and_runs_gates() {
+        with_git_candidate(|repo, store| {
+            let candidate = hand_commit_candidate(repo);
+            let fingerprint =
+                crate::agent_task_promotion::candidate_fingerprint(&repo.display().to_string())
+                    .unwrap();
+            let run = store
+                .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
+                .unwrap();
+            let options: AgentTaskPromotionRequest = serde_json::from_value(json!({
+                "source":"{}", "source_run_id":run.id, "to_worktree":"fixture", "gates":{
+                    "verify":["printf gated"], "hydrate_dependencies":false,
+                    "gate_environment":{"hydrate_rust_cache":false}
+                }
+            }))
+            .unwrap();
+
+            let report = run_promotion_gates(
+                &options,
+                repo,
+                Some(&fingerprint),
+                Some(&candidate),
+                None,
+                store,
+            )
+            .expect("a hand commit of the candidate tree is the candidate");
+
+            let checkout = report.candidate_checkout.as_ref().unwrap();
+            assert_eq!(checkout.commit, candidate.candidate_sha);
+            assert_eq!(checkout.tree, candidate.tree_sha);
+            assert_eq!(report.deterministic_gates.len(), 1);
+            assert_eq!(
+                report.deterministic_gates[0].status,
+                AgentTaskGateStatus::Succeeded
+            );
+            assert_eq!(report.deterministic_gates[0].stdout, "gated");
+        });
+    }
+
+    #[test]
+    fn hand_committed_destination_with_a_different_tree_is_a_tree_mismatch() {
+        with_git_candidate(|repo, store| {
+            let candidate = hand_commit_candidate(repo);
+            std::fs::write(repo.join("candidate.txt"), "diverged\n").unwrap();
+
+            let error = CandidateGateCheckout::materialize(
+                repo,
+                "candidate-fixture",
+                None,
+                Some(&candidate),
+                store,
+            )
+            .err()
+            .expect("a diverged destination tree must not be gated");
+
+            let mismatch = std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<CandidateTreeMismatch>())
+                .expect("typed candidate tree mismatch");
+            assert_eq!(mismatch.candidate_sha, candidate.candidate_sha);
+            assert_ne!(mismatch.destination_tree, candidate.tree_sha);
+        });
+    }
+
+    #[test]
+    fn missing_candidate_commit_names_it_and_the_recover_command() {
+        with_git_candidate(|repo, store| {
+            let mut candidate = hand_commit_candidate(repo);
+            candidate.candidate_sha = "0".repeat(40);
+
+            let error =
+                CandidateGateCheckout::materialize(repo, "run-7", None, Some(&candidate), store)
+                    .err()
+                    .expect("an absent candidate commit cannot be gated");
+
+            assert!(error.message.contains(&candidate.candidate_sha));
+            assert!(error.message.contains("homeboy agent-task recover run-7"));
+            assert!(!error.message.contains("run a new Cook"));
+        });
+    }
+
     #[test]
     fn executed_lab_tree_mismatch_is_rejected_at_real_checkout_binding_boundary() {
         with_git_candidate(|repo, store| {
@@ -2726,27 +2821,19 @@ impl CandidateGateCheckout {
         else {
             return Ok(None);
         };
-        // The harvested commit is this destination's candidate when it is
-        // reachable here and descends from the destination HEAD. A destination
-        // caught up to a moved base is a different candidate (S2 of #16303).
-        let git_succeeds = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .current_dir(source_root)
-                .status()
-                .is_ok_and(|status| status.success())
-        };
+        // The candidate's identity is its tree: the harvested commit is this
+        // destination's candidate whenever its tree is the destination tree,
+        // whether HEAD is the base or an operator's commit of that tree.
         let reachable = committed_candidate.filter(|committed| {
-            git_succeeds(&[
-                "cat-file",
-                "-e",
-                &format!("{}^{{commit}}", committed.candidate_sha),
-            ]) && git_succeeds(&[
-                "merge-base",
-                "--is-ancestor",
-                &fingerprint.head,
-                &committed.candidate_sha,
-            ])
+            git_output(
+                source_root,
+                &[
+                    "cat-file",
+                    "-e",
+                    &format!("{}^{{commit}}", committed.candidate_sha),
+                ],
+            )
+            .is_ok()
         });
         let commit = match reachable {
             // The harvested candidate commit is the gated identity (#16303).
@@ -2762,12 +2849,16 @@ impl CandidateGateCheckout {
                 .into())
             }
             None => {
+                let missing = committed_candidate.map_or_else(
+                    || format!("candidate ref refs/homeboy/candidates/{run_id}"),
+                    |committed| format!("candidate commit {}", committed.candidate_sha),
+                );
                 return Err(Error::validation_invalid_argument(
                     "candidate",
-                    "non-recoverable: no reachable immutable candidate; run a new Cook",
+                    format!("{missing} is missing from the destination repository; restore it, then run `homeboy agent-task recover {run_id}`"),
+                    Some(source_root.display().to_string()),
                     None,
-                    None,
-                ))
+                ));
             }
         };
         let data_root = observation_store.data_root().ok_or_else(|| {
