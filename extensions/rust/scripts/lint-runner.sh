@@ -120,7 +120,7 @@ with open(output_file, encoding="utf-8") as handle:
     lines = handle.read().splitlines()
 
 if tool == "rustfmt":
-    pattern = re.compile(r"^Diff in (?P<file>.+) at line (?P<line>\d+):")
+    pattern = re.compile(r"^Diff in (?P<file>.+):(?P<line>\d+):$")
     for raw in lines:
         match = pattern.match(raw)
         if not match:
@@ -281,7 +281,7 @@ if should_run_step "fmt"; then
             fi
 
             # Write annotations sidecar for fmt issues
-            # Parse "Diff in /path/to/file.rs at line N:" format
+            # Parse rustfmt's "Diff in /path/to/file.rs:N:" format
             if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
                 if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
                     echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write annotations" >&2
@@ -289,10 +289,11 @@ if should_run_step "fmt"; then
                 fi
                 FMT_ANNOTATIONS_TMP="$(mktemp)"
                 echo "$FMT_OUTPUT" | awk -v comp_path="${PROJECT_PATH}/" '
-                    /^Diff in .+ at line [0-9]+:/ {
-                        file = $3
-                        line = $6
-                        sub(/:$/, "", line)
+                    match($0, /^Diff in .+:[0-9]+:$/) {
+                        loc = substr($0, 9, length($0) - 9)
+                        file = loc
+                        sub(/:[0-9]+$/, "", file)
+                        line = substr(loc, length(file) + 2)
                         # Strip component path prefix
                         sub(comp_path, "", file)
                         gsub(/"/, "\\\"", file)

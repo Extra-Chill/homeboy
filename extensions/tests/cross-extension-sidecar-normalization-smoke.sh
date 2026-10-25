@@ -93,7 +93,7 @@ EOF
 cat > "$RUST_BIN/cargo" <<'EOF'
 #!/usr/bin/env bash
 if [ "$1" = "fmt" ]; then
-  printf 'Diff in %s/src/lib.rs at line 1:\n' "$HOMEBOY_COMPONENT_PATH"
+  printf 'Diff in %s/src/lib.rs:1:\n' "$HOMEBOY_COMPONENT_PATH"
   exit 1
 fi
 if [ "$1" = "test" ]; then
