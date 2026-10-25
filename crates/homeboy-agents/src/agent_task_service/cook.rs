@@ -9874,6 +9874,7 @@ fn record_active_cook_worktree_warning(
     })?;
     let mut active = lifecycle_store
         .read_active_records()?
+        .0
         .into_iter()
         .filter(|record| record.run_id != options.identity.initial_run_id)
         .filter(|record| record.metadata.get("cook_id").is_some())

@@ -402,10 +402,13 @@ pub fn discover_runs_page(
         .map(|cursor| decode_page_cursor(cursor, &scope))
         .transpose()?;
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let mut active_health = None;
     let (records, physical_count, physical_truncated, next) =
         if filter == AgentTaskDiscoveryFilter::Active {
-            let records = store.read_active_records()?;
-            let physical_count = records.len();
+            let (records, health) = store.read_active_records()?;
+            let physical_count =
+                health.healthy + health.malformed + health.conflicting + health.fixture;
+            active_health = Some(health);
             let records = records
                 .into_iter()
                 .map(|record| {
@@ -474,14 +477,12 @@ pub fn discover_runs_page(
         .into_iter()
         .map(|page_record| discovery_run(page_record.record, live.as_ref(), now))
         .collect::<Vec<_>>();
-    // The page cursor bounds storage reads, but selectors apply after that read.
-    // Do not present malformed rows from the physical page as health of the
-    // filtered page the caller actually received.
-    let record_health = AgentTaskRecordHealthSummary {
+    // Active health covers the indexed set; other pages report the filtered rows.
+    let record_health = active_health.unwrap_or_else(|| AgentTaskRecordHealthSummary {
         schema: agent_task_lifecycle::AGENT_TASK_RECORD_HEALTH_SCHEMA.to_string(),
         healthy: runs.len(),
         ..Default::default()
-    };
+    });
     Ok(AgentTaskDiscoveryPage {
         schema: "homeboy/agent-task-discovery-page/v1",
         filter: filter_name(filter),
@@ -561,12 +562,9 @@ pub(crate) fn discover_runs_in_store(
     options: AgentTaskDiscoveryOptions,
 ) -> Result<AgentTaskDiscoveryReport> {
     let (records, record_health) = if filter == AgentTaskDiscoveryFilter::Active {
-        let records = lifecycle_store.read_active_records()?;
-        let mut health = AgentTaskRecordHealthSummary::healthy();
-        health.healthy = records.len();
-        (records, health)
+        lifecycle_store.read_active_records()?
     } else {
-        agent_task_lifecycle::read_records_with_health_in_store(lifecycle_store)?
+        lifecycle_store.read_records_with_health_bounded(1000)?
     };
     discovery_report(filter, options, records, record_health)
 }
@@ -1044,7 +1042,32 @@ impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionP
     }
 
     fn controller_upgrade_admission(&self) -> Result<ControllerUpgradeAdmission> {
-        let (records, health) = agent_task_lifecycle::read_records_with_health()?;
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let (mut records, health) = store.read_active_records()?;
+        let references = records
+            .iter()
+            .flat_map(|record| {
+                [
+                    record.metadata.get("cook_id"),
+                    record
+                        .metadata
+                        .pointer("/detached_cook_handoff/attempt_run_id"),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+            })
+            .collect::<BTreeSet<_>>();
+        for id in references {
+            if !records.iter().any(|record| record.run_id == id) {
+                match store.read_record(&id) {
+                    Ok(record) => records.push(record),
+                    Err(_) if !store.record_exists_readonly(&id)? => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         Ok(filter_idle_runner_stale_blockers(admission, |runner_id| {
@@ -1500,6 +1523,10 @@ fn metadata_string(metadata: &Value, key: &str) -> Option<String> {
 fn metadata_bool(metadata: &Value, key: &str) -> Option<bool> {
     metadata.get(key).and_then(Value::as_bool)
 }
+
+#[cfg(test)]
+#[path = "discovery_tests.rs"]
+mod admission_tests;
 
 #[cfg(test)]
 mod tests {

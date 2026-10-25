@@ -3024,7 +3024,8 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
         }
         index_cook_attempt(cook_id, &attempt_id);
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
@@ -3065,7 +3066,8 @@ fn upgrade_admission_allows_unmaterialized_cook_blocked_on_runner_convergence() 
             "blocked_runner_stale"
         );
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
 
@@ -3100,7 +3102,8 @@ fn upgrade_admission_inspects_an_ambiguous_removed_runner_record_locally() {
         ));
         record_stale_accepted_lab_handoff(cook_id, "fixture-lab");
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
@@ -3124,7 +3127,8 @@ fn upgrade_admission_keeps_configured_disconnected_runner_ownership() {
         ));
         record_stale_accepted_lab_handoff(cook_id, "fixture-lab");
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
@@ -3170,7 +3174,8 @@ fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reco
         let queued = agent_task_lifecycle::exact_record(&run_id).expect("queued record");
         assert!(queued.is_ownerless_zero_artifact_queued_runner_record());
         assert!(queued.is_locally_reconcilable_after_runner_idle());
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let blocked =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(blocked.blockers.len(), 1);
@@ -3206,7 +3211,8 @@ fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reco
             "a successful runner-owned reconciliation must not survive rediscovery"
         );
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admitted =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert!(admitted.allows_controller_replacement(), "{admitted:?}");
@@ -3585,7 +3591,8 @@ fn upgrade_admission_keeps_ownerless_queued_runner_record_on_runner_plane_withou
         })
         .expect("record ownerless queued runner child");
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
@@ -3661,7 +3668,8 @@ fn upgrade_admission_keeps_provider_unavailable_runner_ownership() {
         ));
         record_stale_accepted_lab_handoff(cook_id, "fixture-lab");
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
@@ -3762,7 +3770,8 @@ fn upgrade_admission_keeps_an_unindexed_handoff_child_independent_with_executabl
         })
         .expect("unindexed child");
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 2);
@@ -4497,7 +4506,8 @@ fn upgrade_admission_ignores_terminal_records_with_stale_owner_metadata() {
             .expect("terminal record stored");
         }
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert!(admission.allows_controller_replacement());
@@ -4527,7 +4537,8 @@ fn upgrade_admission_ignores_a_runner_owned_attempt_of_a_terminal_cook() {
         })
         .expect("stranded attempt stored");
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
 
@@ -4555,7 +4566,8 @@ fn upgrade_admission_still_blocks_an_attempt_whose_cook_is_not_terminal() {
         })
         .expect("attempt stored");
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
 
@@ -4571,7 +4583,7 @@ fn upgrade_admission_still_blocks_an_attempt_whose_cook_is_not_terminal() {
 }
 
 #[test]
-fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
+fn controller_upgrade_admission_uses_liveness_and_active_record_health() {
     with_isolated_home(|_| {
         for run_id in ["stale-local", "live-owner", "unverified-runner"] {
             agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
@@ -4609,7 +4621,7 @@ fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
                 .expect("insert malformed record");
         }
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("read");
+        let (records, health) = test_lifecycle_store().read_active_records().expect("read");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
 
@@ -4698,7 +4710,8 @@ fn upgrade_admission_keeps_a_live_provider_owner_active_despite_heartbeat_lag() 
         })
         .expect("lagging heartbeat fixture");
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
 
@@ -4738,7 +4751,8 @@ fn upgrade_admission_keeps_ambiguous_provider_evidence_fail_closed_and_read_only
         })
         .expect("ambiguous owner fixture");
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
 
@@ -4784,7 +4798,8 @@ fn upgrade_admission_classifies_a_proven_dead_provider_owner_as_stale() {
         owner.kill().expect("stop owner");
         owner.wait().expect("reap owner");
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
 
@@ -4835,7 +4850,8 @@ fn fixture_runner_records_are_quarantined_without_hiding_unknown_runner_ownershi
         assert_eq!(discovery.total, 1);
         assert_eq!(discovery.runs[0].run_id, unknown_run_id);
 
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
@@ -4908,7 +4924,8 @@ fn verified_target_bootstrap_recovers_only_fixture_residue_and_keeps_live_or_unk
                 .expect("target recovery"),
             1
         );
-        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let (records, health) =
+            agent_task_lifecycle::read_all_records_with_health().expect("records");
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 2);

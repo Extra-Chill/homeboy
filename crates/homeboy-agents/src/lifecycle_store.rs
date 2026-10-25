@@ -946,19 +946,14 @@ impl AgentTaskLifecycleStore {
         observation_runs_bounded_in_store(self, 1000)
     }
 
-    /// Read this store's bounded durable registry snapshot with the health
-    /// summary of the records that could not be parsed.
-    pub fn read_records_with_health(
-        &self,
-    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-        self.read_records_with_health_bounded(1000)
-    }
-
     pub fn read_records_with_health_bounded(
         &self,
         limit: usize,
     ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-        records_with_health(observation_runs_bounded_in_store(self, limit)?)
+        let (mut records, health) =
+            records_with_health(observation_runs_bounded_in_store(self, limit)?)?;
+        super::lifecycle_ops::sort_records_newest_first(&mut records);
+        Ok((records, health))
     }
 
     /// Read every durable registry record in this store without a display bound.
@@ -975,18 +970,18 @@ impl AgentTaskLifecycleStore {
     /// Non-terminal agent-task records. Queued and running states persist as
     /// a `running` run, so the indexed status query replaces decoding the
     /// whole historical registry to find the few live records.
-    pub fn read_active_records(&self) -> Result<Vec<AgentTaskRunRecord>> {
+    pub fn read_active_records(
+        &self,
+    ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
         let store = self.open_observation_readonly()?;
         let active: Vec<RunRecord> = store
             .list_active_runs()?
             .into_iter()
             .filter(|run| run.kind == "agent-task")
             .collect();
-        Ok(records_with_health(active)?
-            .0
-            .into_iter()
-            .filter(|record| !record.state().is_terminal())
-            .collect())
+        let (mut records, health) = records_with_health(active)?;
+        records.retain(|record| !record.state().is_terminal());
+        Ok((records, health))
     }
 
     /// Read one immutable-keyset page of typed agent-task records without

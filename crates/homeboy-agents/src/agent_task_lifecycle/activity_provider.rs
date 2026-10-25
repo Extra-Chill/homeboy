@@ -49,7 +49,8 @@ impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
         detail: ActivityDetail,
     ) -> Result<(Vec<ActivityItem>, Value)> {
         let (records, health) = compact_health_samples(
-            agent_task_lifecycle::read_records_with_health_bounded(limit)?,
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?
+                .read_records_with_health_bounded(limit)?,
             detail,
         );
         let items = records.into_iter().map(item_from_agent_task).collect();

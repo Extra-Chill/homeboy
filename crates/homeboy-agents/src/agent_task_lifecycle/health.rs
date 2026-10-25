@@ -108,7 +108,7 @@ pub(crate) fn record_health_item(
 pub fn record_health_summary_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<AgentTaskRecordHealthSummary> {
-    Ok(lifecycle_store.read_records_with_health()?.1)
+    Ok(lifecycle_store.read_records_with_health_bounded(1000)?.1)
 }
 
 /// Quarantine only records whose durable plan and accepted handoff prove they
