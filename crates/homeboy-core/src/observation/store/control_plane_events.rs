@@ -21,8 +21,10 @@ pub const CONTROL_PLANE_EVENT_RETENTION_LIMIT: i64 = 100;
 /// keeping them does not unbound storage the way progress events would.
 pub const DURABLE_CONTROL_PLANE_EVENT_KINDS: [&str; 3] =
     ["run.cancelled", "run.transitioned", "run.phase_spans"];
-/// At most 64 timing reports survive progress pruning for a run.
-pub const PHASE_REPORT_RETENTION_LIMIT: u64 = 64;
+/// At most 1024 timing reports survive progress pruning for a run. Each timed
+/// phase is one report; a Lab Cook spends dozens on repeated leaf spans before
+/// its gate, publish and terminal owners, which must still fit (#16443).
+pub const PHASE_REPORT_RETENTION_LIMIT: u64 = 1024;
 
 pub fn is_durable_control_plane_event_kind(kind: &str) -> bool {
     DURABLE_CONTROL_PLANE_EVENT_KINDS.contains(&kind)
