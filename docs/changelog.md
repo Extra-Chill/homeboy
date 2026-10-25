@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.27] - 2026-10-25
+
+### Changed
+- Lab materialization: stream the commit archive without macOS metadata members and surface runner errors
+- Make CandidateRecoverable the one recoverable run state; delete PartialRecoverable (#15718 step 5)
+
 ## [0.433.26] - 2026-10-25
 
 ### Changed
