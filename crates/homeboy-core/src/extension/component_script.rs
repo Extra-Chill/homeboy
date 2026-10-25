@@ -226,7 +226,7 @@ pub(crate) fn run_component_scripts_with_run_dir_and_timeout(
     component: &Component,
     request: ComponentScriptRunRequest<'_>,
 ) -> Result<ComponentScriptOutput> {
-    let mut env = request.run_dir.legacy_env_vars();
+    let mut env = request.run_dir.sidecar_env_vars(&[]);
     let invocation = InvocationGuard::acquire(request.run_dir, &InvocationRequirements::default())?;
     env.extend(invocation.env_vars());
     env.extend(request.extra_env.iter().cloned());

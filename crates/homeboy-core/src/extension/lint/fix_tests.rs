@@ -65,6 +65,7 @@ fn write_routed_lint_extension(home: &Path, id: &str, mutates: bool) {
         serde_json::json!({
             "name": "Routed lint fixture",
             "version": "0.0.0",
+            "structured_sidecars": { "lint.findings": true },
             "lint": {
                 "extension_script": "lint.sh",
                 "changed_file_routes": [{
@@ -91,6 +92,7 @@ fn write_multi_producer_lint_extension(home: &Path, id: &str) {
         serde_json::json!({
             "name": "Multi producer lint fixture",
             "version": "0.0.0",
+            "structured_sidecars": { "lint.findings": true },
             "lint": {
                 "extension_script": "lint.sh",
                 "changed_file_routes": [

@@ -40,6 +40,16 @@ pub struct StructuredSidecarSchema {
 
 pub const REGISTRY: &[StructuredSidecarSchema] = &[
     StructuredSidecarSchema {
+        key: "phase.timings",
+        env: Some("PHASE_TIMINGS_FILE"),
+        schema_version: "v1",
+        path: run_dir::files::PHASE_TIMINGS,
+        producer: None,
+        shape: StructuredSidecarShape::Array,
+        required_fields: &[],
+        seed_on_start: false,
+    },
+    StructuredSidecarSchema {
         key: "lint.findings",
         env: Some("LINT_FINDINGS_FILE"),
         schema_version: "v1",
@@ -496,6 +506,21 @@ mod tests {
             validate_payload(key, &empty_payload(key).expect("registry key"))
                 .unwrap_or_else(|err| panic!("empty payload for {key} must validate: {err}"));
         }
+    }
+
+    #[test]
+    fn phase_timings_matches_the_reader_array_shape() {
+        let timing = json!([{"name": "compile", "duration_ms": 12}]);
+        validate_payload("phase.timings", &timing).unwrap();
+        assert_eq!(
+            default_path("phase.timings"),
+            Some(run_dir::files::PHASE_TIMINGS)
+        );
+        assert_eq!(
+            schema("phase.timings").unwrap().env,
+            Some("PHASE_TIMINGS_FILE")
+        );
+        assert!(!schema("phase.timings").unwrap().seed_on_start);
     }
 
     #[test]

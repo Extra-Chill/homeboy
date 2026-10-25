@@ -13,7 +13,7 @@ fn write_logging_bench_extension(home: &TempDir, log_path: &std::path::Path) {
     fs::create_dir_all(&extension_dir).expect("mkdir extension");
     fs::write(
         extension_dir.join("fixture-bench.json"),
-        r#"{"name":"Fixture Bench","version":"0.0.0","bench":{"extension_script":"bench-runner.sh"}}"#,
+        r#"{"name":"Fixture Bench","version":"0.0.0","structured_sidecars":{"bench.results":true},"bench":{"extension_script":"bench-runner.sh"}}"#,
     )
     .expect("write extension manifest");
 

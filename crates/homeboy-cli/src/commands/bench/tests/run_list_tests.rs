@@ -327,6 +327,7 @@ fn write_empty_bench_extension(home: &TempDir) {
         r#"{
                 "name": "Fixture Bench",
                 "version": "0.0.0",
+                "structured_sidecars": { "bench.results": true },
                 "bench": { "extension_script": "bench-runner.sh" }
             }"#,
     )

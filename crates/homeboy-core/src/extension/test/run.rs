@@ -2542,19 +2542,19 @@ fn run_declared_result_parser(
         &context.extension_path,
         std::path::Path::new(&component.local_path),
         settings_json,
-        &run_dir.legacy_env_vars(),
+        &run_dir.sidecar_env_vars(&[
+            homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration {
+                name: "test.results".to_string(),
+                path: run_dir::files::TEST_RESULTS.to_string(),
+                schema_version: None,
+                producer: None,
+            },
+        ]),
     )?;
     let write_results_helper = write_test_results_helper(run_dir)?;
     env_vars.push((
         WRITE_TEST_RESULTS_ENV.to_string(),
         write_results_helper.to_string_lossy().to_string(),
-    ));
-    env_vars.push((
-        "HOMEBOY_TEST_RESULTS_FILE".to_string(),
-        run_dir
-            .step_file(run_dir::files::TEST_RESULTS)
-            .to_string_lossy()
-            .to_string(),
     ));
     env_vars.push((
         "HOMEBOY_RESULT_PARSE_ADAPTERS".to_string(),

@@ -13,7 +13,7 @@ fn write_ordering_bench_extension(home: &TempDir) {
     fs::create_dir_all(&extension_dir).expect("mkdir extension");
     fs::write(
         extension_dir.join("fixture-bench.json"),
-        r#"{"name":"Fixture Bench","version":"0.0.0","bench":{"extension_script":"bench-runner.sh"}}"#,
+        r#"{"name":"Fixture Bench","version":"0.0.0","structured_sidecars":{"bench.results":true},"bench":{"extension_script":"bench-runner.sh"}}"#,
     )
     .expect("write extension manifest");
 
