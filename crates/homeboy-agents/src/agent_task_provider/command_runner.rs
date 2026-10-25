@@ -825,7 +825,6 @@ fn run_materialized_provider_command_once_with_credentials(
     execution: &AgentTaskExecutionContext,
     credential_env: Option<&[(String, String)]>,
 ) -> AgentTaskOutcome {
-    let _timing = crate::agent_task_schedule::for_execution_timing(execution);
     let mut containment_report = ProviderContainmentReport::default();
     let mut outcome = homeboy_core::observation::phase_timing::time_with_outcome(
         "provider.command",

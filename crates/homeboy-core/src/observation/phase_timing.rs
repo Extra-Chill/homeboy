@@ -33,6 +33,38 @@ pub fn for_run(store: &ObservationStore, run_id: &str) -> Scope {
     )))
 }
 
+/// Capture the current run at submission, not when the worker starts.
+/// Use this for both named and scoped thread builders.
+pub fn inherit<F, T>(operation: F) -> impl FnOnce() -> T
+where
+    F: FnOnce() -> T,
+{
+    let context = current();
+    move || {
+        let _scope = enter(context);
+        operation()
+    }
+}
+
+/// Best-effort phase scope for early-returning synchronous work.
+pub struct PhaseGuard {
+    phase: String,
+    started: std::time::Instant,
+}
+
+pub fn guard(phase: &str) -> PhaseGuard {
+    PhaseGuard {
+        phase: phase.into(),
+        started: std::time::Instant::now(),
+    }
+}
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        finish(&self.phase, self.started, std::thread::panicking());
+    }
+}
+
 /// Finish work whose lifetime cannot be enclosed in a closure.
 pub fn finish(phase: &str, started: std::time::Instant, failed: bool) {
     if let Some((path, run_id)) = current() {
@@ -85,17 +117,65 @@ mod tests {
             assert!(current().is_none());
         }
         assert_eq!(current(), context);
-        std::thread::spawn(move || {
-            assert!(current().is_none());
-            let _scope = enter(context);
+        std::thread::spawn(inherit(move || {
+            assert_eq!(current(), context);
             time_with_outcome("worker", || Ok(false), |ok| !ok).unwrap();
-        })
+        }))
         .join()
         .unwrap();
         let spans = store.phase_spans(&run.id).unwrap().spans;
         assert_eq!(spans[0].id, "worker");
         assert_eq!(spans[0].status, crate::phase_timing::PhaseStatus::Failed);
         assert!(spans[0].duration_ms.is_some());
+    }
+
+    #[test]
+    fn execution_boundary_records_post_terminal_recovery_leaves_and_worker_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(dir.path().join("timing.db")).unwrap();
+        let run = store
+            .start_run(super::super::NewRunRecord::builder("agent-task").build())
+            .unwrap();
+        // Only the execution boundary knows about the store. Recovery and gates
+        // (including a named worker) use the same context-free leaf API.
+        store
+            .time_run_phase(&run.id, "cook.execution", || {
+                time("terminal.decision", || Ok(()))?;
+                time("promote.recover.candidate", || {
+                    time("promote.recover.controller_gates", || Ok(()))
+                })?;
+                time("gate.destination_setup", || Ok(()))?;
+                std::thread::Builder::new()
+                    .name("destination-gate".into())
+                    .spawn(inherit(|| {
+                        time("gate.destination_execute", || {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            Ok(())
+                        })
+                    }))
+                    .unwrap()
+                    .join()
+                    .unwrap()?;
+                time("mission.finalization", || {
+                    store.finish_run(&run.id, super::super::RunStatus::Pass, None)
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(current().is_none());
+        let spans = store.phase_spans(&run.id).unwrap().spans;
+        for phase in [
+            "terminal.decision",
+            "promote.recover.candidate",
+            "promote.recover.controller_gates",
+            "gate.destination_setup",
+            "gate.destination_execute",
+            "mission.finalization",
+        ] {
+            assert!(spans.iter().any(|span| span.id == phase), "missing {phase}");
+        }
+        let coverage = store.phase_coverage(&run.id, 10).unwrap();
+        assert!(coverage.covered_percentage >= 95.0, "{coverage:?}");
     }
 
     #[test]

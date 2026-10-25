@@ -931,53 +931,54 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
                 let probe_request_key = request_key.clone();
                 let probe_mode = mode.map(str::to_string);
                 let persistent_fanout = generated_fanout_context;
-                let timing = homeboy_core::observation::phase_timing::current();
                 drop(state);
                 let spawn_result = std::thread::Builder::new()
                     .name("provider-readiness-probe".to_string())
-                    .spawn(move || {
-                        let _timing = homeboy_core::observation::phase_timing::enter(timing);
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            if persistent_fanout {
-                                run_durable_fanout_readiness_probe(
-                                    &provider,
-                                    &config,
-                                    &credential_env,
-                                    probe_gate.as_ref(),
-                                    probe_deadline,
-                                    probe_timeout_ms,
-                                    probe_mode.as_deref(),
-                                    &probe_request_key,
-                                )
-                            } else {
-                                run_readiness_probe_with_gate(
-                                    &provider,
-                                    &config,
-                                    &credential_env,
-                                    probe_gate.as_ref(),
-                                    probe_deadline,
-                                    probe_timeout_ms,
-                                    probe_mode.as_deref(),
-                                )
-                            }
-                        }))
-                        .unwrap_or_else(|_| {
-                            Err("provider readiness invocation panicked".to_string())
-                        });
+                    .spawn(homeboy_core::observation::phase_timing::inherit(
+                        move || {
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    if persistent_fanout {
+                                        run_durable_fanout_readiness_probe(
+                                            &provider,
+                                            &config,
+                                            &credential_env,
+                                            probe_gate.as_ref(),
+                                            probe_deadline,
+                                            probe_timeout_ms,
+                                            probe_mode.as_deref(),
+                                            &probe_request_key,
+                                        )
+                                    } else {
+                                        run_readiness_probe_with_gate(
+                                            &provider,
+                                            &config,
+                                            &credential_env,
+                                            probe_gate.as_ref(),
+                                            probe_deadline,
+                                            probe_timeout_ms,
+                                            probe_mode.as_deref(),
+                                        )
+                                    }
+                                }))
+                                .unwrap_or_else(|_| {
+                                    Err("provider readiness invocation panicked".to_string())
+                                });
 
-                        if deadline_limited
-                            && result
-                                .as_ref()
-                                .err()
-                                .is_some_and(|error| error.contains("timed out"))
-                        {
-                            // The result is about one caller's exhausted deadline,
-                            // not this provider's reusable readiness state.
-                            discard_readiness_result(&shared, &probe_request_key);
-                        } else {
-                            publish_readiness_result(&shared, probe_request_key, result);
-                        }
-                    });
+                            if deadline_limited
+                                && result
+                                    .as_ref()
+                                    .err()
+                                    .is_some_and(|error| error.contains("timed out"))
+                            {
+                                // The result is about one caller's exhausted deadline,
+                                // not this provider's reusable readiness state.
+                                discard_readiness_result(&shared, &probe_request_key);
+                            } else {
+                                publish_readiness_result(&shared, probe_request_key, result);
+                            }
+                        },
+                    ));
                 if let Err(error) = spawn_result {
                     publish_readiness_result(
                         &cache.shared,

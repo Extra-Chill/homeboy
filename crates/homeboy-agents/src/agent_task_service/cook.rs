@@ -842,32 +842,42 @@ fn run_cook_startup_phase<T>(
         Some("starting; elapsed=0s"),
     )?;
     let (stop, wait) = mpsc::channel();
-    let timing_store = lifecycle_store.open_observation_initialized()?;
-    timing_store.time_run_phase(run_id, &format!("stage.{phase}"), || {
+    let timing_store = lifecycle_store
+        .open_observation_initialized()
+        .map_err(|error| {
+            homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
+        })
+        .ok();
+    let _phase = timing_store
+        .as_ref()
+        .map(|store| store.run_phase_guard(run_id, &format!("stage.{phase}")));
+    {
         std::thread::scope(|scope| {
-            scope.spawn(move || loop {
-                match wait.recv_timeout(COOK_HEARTBEAT_INTERVAL) {
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        let detail =
-                            format!("still running; elapsed={}s", started.elapsed().as_secs());
-                        let _ = report_cook_progress(
-                            lifecycle_store,
-                            observer,
-                            cook_id,
-                            run_id,
-                            phase,
-                            1,
-                            Some(&detail),
-                        );
+            scope.spawn(homeboy_core::observation::phase_timing::inherit(
+                move || loop {
+                    match wait.recv_timeout(COOK_HEARTBEAT_INTERVAL) {
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            let detail =
+                                format!("still running; elapsed={}s", started.elapsed().as_secs());
+                            let _ = report_cook_progress(
+                                lifecycle_store,
+                                observer,
+                                cook_id,
+                                run_id,
+                                phase,
+                                1,
+                                Some(&detail),
+                            );
+                        }
                     }
-                }
-            });
+                },
+            ));
             let result = operation();
             let _ = stop.send(());
             result
         })
-    })
+    }
 }
 
 /// Durable operation key for finalizing one cook candidate. Keyed by the run id
@@ -5254,6 +5264,15 @@ fn run_cook_reported(
     durable_observer: Option<&CookProgressObserver<'_>>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let timing_store = lifecycle_store
+        .open_observation_initialized()
+        .map_err(|error| {
+            homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
+        })
+        .ok();
+    let _execution = timing_store
+        .as_ref()
+        .map(|store| store.run_phase_guard(&options.identity.initial_run_id, "cook.execution"));
     let mut failure_options = options.clone();
     let mut result = match run_cook_spine(
         store,
@@ -5867,15 +5886,6 @@ fn run_cook_spine(
     // Canonicalization and native-worktree discovery can block on provider
     // runtime state. The recipe and lifecycle attempt above must therefore own
     // their result before either check begins.
-    let timing_store = lifecycle_store
-        .open_observation_initialized()
-        .map_err(|error| {
-            homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
-        })
-        .ok();
-    let _timing = timing_store.as_ref().map(|store| {
-        homeboy_core::observation::phase_timing::for_run(store, &options.identity.initial_run_id)
-    });
     let startup_cook_id = options.identity.cook_id.clone();
     let startup_run_id = options.identity.initial_run_id.clone();
     run_cook_startup_phase(
@@ -6143,51 +6153,53 @@ fn run_cook_spine(
         // capture the store itself by value rather than this borrow.
         let lookup_lifecycle_store = &lifecycle_store;
         let lookup_result = std::thread::scope(|scope| {
-            scope.spawn(move || {
-                let mut next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
-                loop {
-                    match lookup_wait.recv_timeout(COOK_PROVIDER_TERMINAL_POLL_INTERVAL) {
-                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    }
-                    if lookup_lifecycle_store
-                        .read_record(&lookup_run_id)
-                        .ok()
-                        .is_some_and(|record| {
-                            record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
-                        })
-                    {
-                        break;
-                    }
-                    if Instant::now() >= next_heartbeat {
-                        next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
-                        let phase = lookup_lifecycle_store
+            scope.spawn(homeboy_core::observation::phase_timing::inherit(
+                move || {
+                    let mut next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
+                    loop {
+                        match lookup_wait.recv_timeout(COOK_PROVIDER_TERMINAL_POLL_INTERVAL) {
+                            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        }
+                        if lookup_lifecycle_store
                             .read_record(&lookup_run_id)
                             .ok()
-                            .and_then(|record| {
-                                record.metadata["cook_progress"]["phase"]
-                                    .as_str()
-                                    .map(str::to_string)
+                            .is_some_and(|record| {
+                                record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
                             })
-                            .filter(|phase| {
-                                matches!(
-                                    phase.as_str(),
-                                    "worktree_provider_lookup" | "worktree_provider_ensure"
-                                )
-                            })
-                            .unwrap_or_else(|| "worktree_provider_lookup".to_string());
-                        let _ = report_cook_progress(
-                            lookup_lifecycle_store,
-                            durable_observer,
-                            &lookup_cook_id,
-                            &lookup_run_id,
-                            &phase,
-                            1,
-                            Some("bounded provider workspace lookup is still running"),
-                        );
+                        {
+                            break;
+                        }
+                        if Instant::now() >= next_heartbeat {
+                            next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
+                            let phase = lookup_lifecycle_store
+                                .read_record(&lookup_run_id)
+                                .ok()
+                                .and_then(|record| {
+                                    record.metadata["cook_progress"]["phase"]
+                                        .as_str()
+                                        .map(str::to_string)
+                                })
+                                .filter(|phase| {
+                                    matches!(
+                                        phase.as_str(),
+                                        "worktree_provider_lookup" | "worktree_provider_ensure"
+                                    )
+                                })
+                                .unwrap_or_else(|| "worktree_provider_lookup".to_string());
+                            let _ = report_cook_progress(
+                                lookup_lifecycle_store,
+                                durable_observer,
+                                &lookup_cook_id,
+                                &lookup_run_id,
+                                &phase,
+                                1,
+                                Some("bounded provider workspace lookup is still running"),
+                            );
+                        }
                     }
-                }
-            });
+                },
+            ));
             let result = materialize_pending_cook_workspace(lifecycle_store, &mut options);
             let _ = lookup_stop.send(());
             result
@@ -6757,7 +6769,7 @@ fn run_cook_spine(
                     // this borrow.
                     let heartbeat_lifecycle_store = &lifecycle_store;
                     std::thread::scope(|scope| {
-                        scope.spawn(move || {
+                        scope.spawn(homeboy_core::observation::phase_timing::inherit(move || {
                             let mut supervisor =
                                 CookSupervisor::new(supervision_policy, supervision_backend);
                             let provider_started_at = Instant::now();
@@ -6925,7 +6937,7 @@ fn run_cook_spine(
                                         );
                                 }
                             }
-                        });
+                        }));
                         let baseline = effective_baseline.map(CookFollowUpBaseline::capability);
                         let harvest_context =
                             Some(cook_attempt_harvest_context(&options.harvest_context));

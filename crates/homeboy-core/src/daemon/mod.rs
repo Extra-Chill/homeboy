@@ -4757,6 +4757,16 @@ fn dispatch_claimed_controller_job(
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             let _ = start_rx.recv();
+            let timing_store = crate::observation::ObservationStore::open_initialized()
+                .map_err(|error| {
+                    crate::log_status!("observe", "phase timing persistence failed: {}", error);
+                })
+                .ok();
+            let timing_run_id = driver.linked_durable_run_id(&state.request);
+            let _execution = timing_store
+                .as_ref()
+                .zip(timing_run_id.as_deref())
+                .map(|(store, run_id)| store.run_phase_guard(run_id, "controller.job"));
             let job = job_store.handle(job_id);
             if job.is_cancelled() {
                 let checkpoint = if recovery {
@@ -4869,14 +4879,15 @@ fn dispatch_claimed_controller_job(
                 controller_job_driver::ControllerJobHandle::new(job.clone(), Arc::clone(&driver));
             let execute_prepared = prepared.clone();
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-            let execute = std::thread::spawn(move || {
-                let result = if recovery {
-                    execute_driver.resume(execute_prepared, driver_job)
-                } else {
-                    execute_driver.execute(execute_prepared, driver_job)
-                };
-                let _ = sender.send(result);
-            });
+            let execute =
+                std::thread::spawn(crate::observation::phase_timing::inherit(move || {
+                    let result = if recovery {
+                        execute_driver.resume(execute_prepared, driver_job)
+                    } else {
+                        execute_driver.execute(execute_prepared, driver_job)
+                    };
+                    let _ = sender.send(result);
+                }));
             let mut cancellation_failed = false;
             loop {
                 if !cancellation_failed && (job.is_cancelled() || cancel_rx.try_recv().is_ok()) {

@@ -19502,6 +19502,11 @@ fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
             crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0);
         persist_initial_recipe(&options).unwrap();
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
+        let fixture_observation = test_lifecycle_store()
+            .open_observation_initialized()
+            .unwrap();
+        let fixture_setup =
+            fixture_observation.run_phase_guard(&run_id, "fixture.prepare_recovery");
         agent_task_lifecycle::record_cook_attempt_in_store(
             &test_lifecycle_store(),
             cook_id,
@@ -19568,6 +19573,7 @@ fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
             }
             Ok(())
         };
+        drop(fixture_setup);
         let result = run_cook(CookContext {
             side_effects: Some(CookSideEffects::new(
                 move |_, _, received_run, promotion| {
@@ -19588,6 +19594,32 @@ fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
                             .result,
                         crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
                     );
+                    // Exercise post-terminal recovery leaves through the real
+                    // Cook spine. None of these callers bind timing context.
+                    homeboy_core::observation::phase_timing::time(
+                        "promote.recover.candidate",
+                        || {
+                            homeboy_core::observation::phase_timing::time(
+                                "promote.recover.controller_gates",
+                                || Ok(()),
+                            )
+                        },
+                    )?;
+                    homeboy_core::observation::phase_timing::time(
+                        "gate.destination_setup",
+                        || Ok(()),
+                    )?;
+                    std::thread::spawn(homeboy_core::observation::phase_timing::inherit(|| {
+                        homeboy_core::observation::phase_timing::time(
+                            "gate.destination_execute",
+                            || {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                Ok(())
+                            },
+                        )
+                    }))
+                    .join()
+                    .unwrap()?;
                     Ok(serde_json::json!({"status": "review_ready"}))
                 },
             )),
@@ -19638,6 +19670,29 @@ fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
             spans.span("terminal.decision").is_some(),
             "post-gate finalization is durable"
         );
+        for phase in ["cook.execution", "mission.finalization"] {
+            assert!(spans.span(phase).is_some(), "missing {phase}");
+        }
+        if accept_inherited {
+            for phase in [
+                "promote.recover.candidate",
+                "promote.recover.controller_gates",
+                "gate.destination_setup",
+                "gate.destination_execute",
+            ] {
+                assert!(spans.span(phase).is_some(), "missing {phase}");
+            }
+            // Fixture setup before the first span varies with machine speed;
+            // every real phase must hand off to the next without an untimed gap.
+            let coverage = observation.phase_coverage(&run_id, 10).unwrap();
+            assert!(
+                coverage.gaps.iter().all(|gap| gap
+                    .preceding_span
+                    .as_deref()
+                    .is_none_or(|span| span.starts_with("fixture."))),
+                "{coverage:?}"
+            );
+        }
         assert_eq!(
             spans.span("publish").is_some(),
             accept_inherited,

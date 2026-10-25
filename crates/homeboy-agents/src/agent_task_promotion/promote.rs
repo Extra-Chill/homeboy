@@ -249,6 +249,9 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
     observation_store: &homeboy_core::observation::ObservationStore,
     before_gates: impl FnOnce() -> Result<()> + 'a,
 ) -> Result<AgentTaskPromotionReport> {
+    let _timing = options.source_run_id.as_deref().map(|run_id| {
+        observation_store.run_phase_guard(run_id, "promote.recover.replacement_gates")
+    });
     resume_promoted_patch_internal(
         options,
         target_path,
@@ -688,10 +691,6 @@ fn promote_with_provider_and_checkpoint_internal(
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
-    let _timing = options
-        .source_run_id
-        .as_deref()
-        .map(|run_id| homeboy_core::observation::phase_timing::for_run(observation_store, run_id));
     emit_promotion_progress(
         "apply",
         None,
@@ -1689,10 +1688,6 @@ fn run_promotion_gates(
     gate_workspace: Option<&Path>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PromotionGateRun> {
-    let _timing = options
-        .source_run_id
-        .as_deref()
-        .map(|run_id| homeboy_core::observation::phase_timing::for_run(observation_store, run_id));
     let operation = || {
         run_promotion_gates_inner(
             options,
@@ -1756,95 +1751,103 @@ fn run_promotion_gates_inner(
     let candidate_setup = Vec::new();
     let gate_workspace = promotion_gate_workspace(options, worktree_path, gate_workspace);
     let lab_placement = options.gates.gate_environment.lab_runner.is_some();
-    let destination_gate_setup = if lab_placement {
-        // A Lab gate runs in the runner's materialized workspace, so the
-        // controller checkout is never hydrated for Lab placement: the runner
-        // hydrates that workspace before the gate command, and its receipts
-        // carry the setup evidence that this report projects (#16262).
-        Vec::new()
-    } else if gate_workspace.is_dir() {
-        // Local setup runs under the gates' environment (#16024).
-        let gate_hydration = Some(crate::agent_task_gate::GateHydrationEnvironment::prepare(
-            &options.gates.gate_environment,
-        ))
-        .transpose()?;
-        let hydration_policy = homeboy_core::deps::DependencyHydrationPolicy {
-            timeout: options.gates.gate_timeout(),
-            no_progress_timeout: options.gates.gate_no_progress_timeout(),
-            heartbeat_interval: options.gates.gate_heartbeat_interval(),
-            is_cancelled: promotion_cancellation(),
-            on_progress: Arc::new(|progress| {
-                emit_promotion_progress(
-                    "hydration",
-                    None,
-                    Some(format!(
-                        "provider={} phase={} last-progress={}ms",
-                        progress.provider_id,
-                        progress.phase,
-                        progress.last_progress_ms_ago.unwrap_or_default(),
-                    )),
-                );
-            }),
-            environment: gate_hydration
-                .as_ref()
-                .map(|hydration| hydration.environment())
-                .unwrap_or_default(),
-        };
-        // Detached gate workspaces have no submodules until initialized
-        // (#15355). Recorded with the setup evidence; a failure here does not
-        // fail setup on its own, since gates that need a missing submodule
-        // fail with their own diagnostics.
-        let submodule_setup = options
-            .gates
-            .hydrate_dependencies
-            .then(|| {
-                homeboy_core::deps::hydrate_git_submodules(
+    let destination_gate_setup =
+        homeboy_core::observation::phase_timing::time("gate.destination_setup", || {
+            Ok(if lab_placement {
+                // A Lab gate runs in the runner's materialized workspace, so the
+                // controller checkout is never hydrated for Lab placement: the runner
+                // hydrates that workspace before the gate command, and its receipts
+                // carry the setup evidence that this report projects (#16262).
+                Vec::new()
+            } else if gate_workspace.is_dir() {
+                // Local setup runs under the gates' environment (#16024).
+                let gate_hydration =
+                    Some(crate::agent_task_gate::GateHydrationEnvironment::prepare(
+                        &options.gates.gate_environment,
+                    ))
+                    .transpose()?;
+                let hydration_policy = homeboy_core::deps::DependencyHydrationPolicy {
+                    timeout: options.gates.gate_timeout(),
+                    no_progress_timeout: options.gates.gate_no_progress_timeout(),
+                    heartbeat_interval: options.gates.gate_heartbeat_interval(),
+                    is_cancelled: promotion_cancellation(),
+                    on_progress: Arc::new(|progress| {
+                        emit_promotion_progress(
+                            "hydration",
+                            None,
+                            Some(format!(
+                                "provider={} phase={} last-progress={}ms",
+                                progress.provider_id,
+                                progress.phase,
+                                progress.last_progress_ms_ago.unwrap_or_default(),
+                            )),
+                        );
+                    }),
+                    environment: gate_hydration
+                        .as_ref()
+                        .map(|hydration| hydration.environment())
+                        .unwrap_or_default(),
+                };
+                // Detached gate workspaces have no submodules until initialized
+                // (#15355). Recorded with the setup evidence; a failure here does not
+                // fail setup on its own, since gates that need a missing submodule
+                // fail with their own diagnostics.
+                let submodule_setup = options
+                    .gates
+                    .hydrate_dependencies
+                    .then(|| {
+                        homeboy_core::deps::hydrate_git_submodules(
+                            &gate_workspace,
+                            None,
+                            "destination_gate_workspace",
+                            homeboy_core::deps::SUBMODULE_HYDRATION_TIMEOUT,
+                        )
+                    })
+                    .flatten();
+                let setup = crate::agent_task_gate::hydrate_gate_dependency_roots_for_component(
                     &gate_workspace,
-                    None,
+                    options.gates.hydrate_dependencies,
                     "destination_gate_workspace",
-                    homeboy_core::deps::SUBMODULE_HYDRATION_TIMEOUT,
+                    &hydration_policy,
+                    options
+                        .gates
+                        .gate_environment
+                        .admitted_component_id
+                        .as_deref(),
                 )
+                .map_err(|error| {
+                    gate_setup_failure(
+                        "destination_gate_setup",
+                        "destination_gate_workspace",
+                        error,
+                    )
+                });
+                if let Some(gate_hydration) = gate_hydration {
+                    gate_hydration.finish(setup.as_ref().is_ok_and(|setup| {
+                        setup.iter().all(|outcome| {
+                            outcome.status != homeboy_core::deps::DependencyHydrationStatus::Failed
+                        })
+                    }));
+                }
+                let setup = setup?;
+                if let Some(failed) = setup.iter().find(|outcome| {
+                    outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed
+                }) {
+                    return Err(gate_setup_outcome_failure("destination_gate_setup", failed));
+                }
+                submodule_setup.into_iter().chain(setup).collect()
+            } else {
+                // An opaque provider destination cannot be hydrated locally. Its gate
+                // provider remains the authority, and the report makes no local
+                // materialization claim.
+                Vec::new()
             })
-            .flatten();
-        let setup = crate::agent_task_gate::hydrate_gate_dependency_roots_for_component(
-            &gate_workspace,
-            options.gates.hydrate_dependencies,
-            "destination_gate_workspace",
-            &hydration_policy,
-            options
-                .gates
-                .gate_environment
-                .admitted_component_id
-                .as_deref(),
-        )
-        .map_err(|error| {
-            gate_setup_failure(
-                "destination_gate_setup",
-                "destination_gate_workspace",
-                error,
-            )
-        });
-        if let Some(gate_hydration) = gate_hydration {
-            gate_hydration.finish(setup.as_ref().is_ok_and(|setup| {
-                setup.iter().all(|outcome| {
-                    outcome.status != homeboy_core::deps::DependencyHydrationStatus::Failed
-                })
-            }));
-        }
-        let setup = setup?;
-        if let Some(failed) = setup
-            .iter()
-            .find(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed)
-        {
-            return Err(gate_setup_outcome_failure("destination_gate_setup", failed));
-        }
-        submodule_setup.into_iter().chain(setup).collect()
+        })?;
+    let _execution = homeboy_core::observation::phase_timing::guard(if lab_placement {
+        "gate.lab_wait"
     } else {
-        // An opaque provider destination cannot be hydrated locally. Its gate
-        // provider remains the authority, and the report makes no local
-        // materialization claim.
-        Vec::new()
-    };
+        "gate.destination_execute"
+    });
     let declared_gates = options
         .gates
         .verify
@@ -2185,8 +2188,11 @@ mod lab_gate_binding_tests {
             let candidate =
                 crate::agent_task_promotion::candidate_fingerprint(&repo.display().to_string())
                     .unwrap();
+            let run = store
+                .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
+                .unwrap();
             let options: AgentTaskPromotionRequest = serde_json::from_value(json!({
-                "source":"{}", "to_worktree":"fixture", "gates":{
+                "source":"{}", "source_run_id":run.id, "to_worktree":"fixture", "gates":{
                     "verify":["printf must-not-run"],
                     "gate_environment":{"hydrate_rust_cache":false}
                 }
@@ -2209,6 +2215,10 @@ mod lab_gate_binding_tests {
             )
             .expect("local gates run against the destination workspace");
 
+            let spans = store.phase_spans(&run.id).unwrap();
+            for phase in ["gate", "gate.destination_setup", "gate.destination_execute"] {
+                assert!(spans.span(phase).is_some(), "missing {phase}");
+            }
             assert!(repo.join("hydration-count").is_file());
             assert!(report
                 .destination_gate_setup
