@@ -1784,6 +1784,30 @@ pub struct GenerationReconcilePolicy {
     pub release_stopped_generation_jobs: bool,
 }
 
+fn verify_controller_copy(
+    source: &homeboy_core::observation::ArtifactRecord,
+    local: &[homeboy_core::observation::ArtifactRecord],
+) -> Result<()> {
+    let copied = local.iter().find(|artifact| artifact.id == source.id)
+        .and_then(|artifact| {
+            if artifact.artifact_type == "remote_file" {
+                local.iter().find(|mirror| {
+                    mirror.artifact_type == "file"
+                        && mirror.metadata_json["agent_task"]["projection"] == "runner_mirrored"
+                        && mirror.sha256 == artifact.sha256
+                        && mirror.size_bytes == artifact.size_bytes
+                })
+            } else {
+                Some(artifact)
+            }
+        })
+        .filter(|copy| copy.sha256 == source.sha256 && copy.size_bytes == source.size_bytes)
+        .ok_or_else(|| Error::internal_unexpected(format!(
+            "retained evidence {}: controller copy or matching runner_mirrored file is missing or differs from source", source.id
+        )))?;
+    crate::evidence::validate_controller_artifact_bytes(copied)
+}
+
 /// Result references are provenance, not a reason to keep a process alive.
 /// Deleted controller runs have released their evidence obligation. Retained
 /// runs must be terminal with verified controller-owned bytes and complete
@@ -1840,9 +1864,6 @@ fn verify_retained_evidence(
             return Err(invalid(id, "controller run is not terminal"));
         }
         let local_artifacts = store.list_artifacts(id)?;
-        for artifact in &local_artifacts {
-            crate::evidence::validate_controller_artifact_bytes(&artifact)?;
-        }
         // A valid local file does not prove the whole remote result was copied.
         // Compare exhaustive source inventories before releasing its daemon.
         let encoded = homeboy_core::execution_contract::encode_uri_component(id);
@@ -1857,13 +1878,7 @@ fn verify_retained_evidence(
             let source: homeboy_core::observation::ArtifactRecord =
                 serde_json::from_value(source.clone())
                     .map_err(|_| invalid(id, "source artifact metadata invalid"))?;
-            let copied = local_artifacts
-                .iter()
-                .find(|artifact| artifact.id == source.id)
-                .ok_or_else(|| invalid(id, "source artifact has not been copied"))?;
-            if copied.sha256 != source.sha256 || copied.size_bytes != source.size_bytes {
-                return Err(invalid(id, "source artifact differs from controller copy"));
-            }
+            verify_controller_copy(&source, &local_artifacts)?;
         }
         let remote = operations
             .evidence(endpoint, &format!("/runs/{encoded}/findings"))
@@ -1897,9 +1912,7 @@ fn verify_retained_evidence(
                 "artifact has no retained run owned by this generation",
             ));
         }
-        if !released_runs.contains(artifact.run_id.as_str()) {
-            crate::evidence::validate_controller_artifact_bytes(&artifact)?;
-        }
+        verify_controller_copy(&artifact, &store.list_artifacts(&artifact.run_id)?)?;
     }
     Ok(())
 }
@@ -3676,6 +3689,100 @@ mod tests {
         });
     }
 
+    fn runner_mirror_retirement(mirror_bytes: Option<&[u8]>, expected_retired: bool) {
+        crate::test_support::with_isolated_home(|home| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+            let run = homeboy_core::observation::RunRecord {
+                id: "mirrored-run".into(),
+                kind: "agent-task".into(),
+                status: "pass".into(),
+                started_at: "2026-10-23T00:00:00Z".into(),
+                finished_at: Some("2026-10-23T00:00:01Z".into()),
+                metadata_json: serde_json::json!({"lab":{"runner":{"id":"runner-a"}}}),
+                ..Default::default()
+            };
+            store.import_run(&run).unwrap();
+            let path = home.path().join("source");
+            std::fs::write(&path, b"verified evidence").unwrap();
+            let source = store
+                .record_artifact_with_id(
+                    &run.id,
+                    "evidence",
+                    &path,
+                    "source-id",
+                    serde_json::json!({}),
+                )
+                .unwrap();
+            // Replace the source record with the projection's remote reference.
+            store.delete_artifact_record(&source.id).unwrap();
+            let mut reference = source.clone();
+            reference.artifact_type = "remote_file".into();
+            reference.path = "runner-artifact://source-id".into();
+            store.import_artifact(&reference).unwrap();
+            if let Some(bytes) = mirror_bytes {
+                std::fs::write(&path, bytes).unwrap();
+                store
+                    .record_artifact_with_id(
+                        &run.id,
+                        "evidence",
+                        &path,
+                        "mirror-id",
+                        serde_json::json!({"agent_task":{"projection":"runner_mirrored"}}),
+                    )
+                    .unwrap();
+            }
+            let idle = session("lease-idle", "daemon-idle", Some(101));
+            let current = session("lease-current", "daemon-current", Some(303));
+            let mut generations = RollingGenerations::new("lease-current".to_string(), current);
+            generations.begin("lease-idle", idle);
+            generations
+                .run_owners
+                .insert(run.id.clone(), "lease-idle".into());
+            generations
+                .artifact_owners
+                .insert(reference.id, "lease-idle".into());
+            write("runner-a", &generations).unwrap();
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .extend([("lease-idle".into(), 0), ("lease-current".into(), 0)]);
+            operations.evidence.borrow_mut().extend([
+                (
+                    "/runs/mirrored-run/artifacts".into(),
+                    serde_json::json!({"data":{"body":{"artifacts":[source]}}}),
+                ),
+                (
+                    "/runs/mirrored-run/findings".into(),
+                    serde_json::json!({"data":{"body":{"findings":[]}}}),
+                ),
+            ]);
+            let result = reconcile_with("runner-a", &operations).unwrap();
+            if expected_retired {
+                assert_eq!(result.retired_generation_ids, ["lease-idle"]);
+            } else {
+                assert!(result.retired_generation_ids.is_empty());
+                assert!(result.retirement_blockers["lease-idle"]
+                    .contains("matching runner_mirrored file is missing"));
+            }
+        });
+    }
+
+    #[test]
+    fn runner_mirrored_remote_file_is_retirable() {
+        runner_mirror_retirement(Some(b"verified evidence"), true);
+    }
+
+    #[test]
+    fn remote_file_without_mirror_blocks_retirement() {
+        runner_mirror_retirement(None, false);
+    }
+
+    #[test]
+    fn remote_file_with_different_sha256_mirror_blocks_retirement() {
+        runner_mirror_retirement(Some(b"different content"), false);
+    }
+
     #[test]
     fn controller_directory_artifact_is_verified_by_tree_classification() {
         crate::test_support::with_isolated_home(|home| {
@@ -3740,11 +3847,11 @@ mod tests {
                 b"tampered",
             )
             .unwrap();
-            assert!(reconcile_with("runner-a", &operations)
-                .unwrap()
-                .retired_generation_ids
-                .is_empty());
-            assert!(retirement_readiness("runner-a").unwrap()["lease-idle"]
+            let result = reconcile_with("runner-a", &operations).unwrap();
+            assert!(result.retired_generation_ids.is_empty());
+            assert!(result
+                .retirement_blockers
+                .get("lease-idle")
                 .as_deref()
                 .unwrap()
                 .contains("directory evidence is unavailable"));
