@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.28] - 2026-10-25
+
+### Changed
+- Read upgrade admission from the indexed active set and its referenced records
+
 ## [0.433.27] - 2026-10-25
 
 ### Changed
