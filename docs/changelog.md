@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.24] - 2026-10-25
+
+### Changed
+- Bind run timing at execution entries; span post-terminal recovery, destination gates and finalization
+- Walk each Lab workspace root once and reuse its manifest for metadata
+- Read active agent-task discovery from the indexed active set
+
 ## [0.433.23] - 2026-10-24
 
 ### Changed
