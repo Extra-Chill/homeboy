@@ -1591,10 +1591,7 @@ where
     // own the work it replaces (#7505).
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let source = agent_task_lifecycle::normalize_local_execution_placement_in_store(
-        &lifecycle_store,
-        run_id,
-    )?;
+    let source = lifecycle_store.read_record(run_id)?;
     let mut source_plan =
         agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, &source.run_id)?;
     agent_task_lifecycle::restore_retry_plan_workspace_in_store(
@@ -2902,10 +2899,7 @@ where
 {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let source = agent_task_lifecycle::normalize_local_execution_placement_in_store(
-        &lifecycle_store,
-        run_id,
-    )?;
+    let source = lifecycle_store.read_record(run_id)?;
     let retry = retry_admission_in_store(&lifecycle_store, &source, true)?;
     if let Some(retry) = retry {
         preflight(&retry.plan)?;
