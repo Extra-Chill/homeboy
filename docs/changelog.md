@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.33] - 2026-10-25
+
+### Changed
+- Lift the replacement-gate fence when gates return so a finished run is not treated as interrupted
+- Let a supplied review form publish a verified candidate whose agent form is malformed
+- Make the structured-sidecar registry the only env export table
+
 ## [0.433.32] - 2026-10-25
 
 ### Changed
