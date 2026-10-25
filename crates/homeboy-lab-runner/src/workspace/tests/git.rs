@@ -766,6 +766,48 @@ fn controller_git_bundle_transfers_only_commits_missing_from_runner_cache() {
     });
 }
 
+/// The bundle boundary is decided for the whole runner cache in a fixed number
+/// of processes: excluded are exactly the cached commits known locally that do
+/// not contain `HEAD`, in cache order, deduplicated.
+#[test]
+fn bundle_prerequisites_classify_every_cached_commit_at_once() {
+    let source = tempfile::tempdir().unwrap();
+    git(source.path(), &["init", "-q", "-b", "main"]);
+    git(source.path(), &["config", "user.email", "t@example.com"]);
+    git(source.path(), &["config", "user.name", "T"]);
+    let commit = |name: &str| {
+        fs::write(source.path().join(name), name).unwrap();
+        git(source.path(), &["add", name]);
+        git(source.path(), &["commit", "-q", "-m", name]);
+        git_output(source.path(), &["rev-parse", "HEAD"]).unwrap()
+    };
+    let base = commit("base");
+    let head = commit("head");
+    let descendant = commit("descendant");
+    git(source.path(), &["checkout", "-q", "-b", "side", &base]);
+    let side = commit("side");
+    git(source.path(), &["checkout", "-q", "main"]);
+    let missing = "0123456789abcdef0123456789abcdef01234567".to_string();
+    let cached = vec![
+        side.clone(),
+        missing,
+        head.clone(),
+        descendant,
+        base.clone(),
+        side.clone(),
+    ];
+    let control = crate::workspace::WorkspaceControl::default();
+    let prerequisites =
+        crate::workspace::git::bundle_prerequisites(source.path(), &head, &cached, &control)
+            .unwrap();
+    assert_eq!(prerequisites, vec![side, base]);
+    assert!(
+        crate::workspace::git::bundle_prerequisites(source.path(), &head, &[], &control)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[test]
 fn controller_routed_git_sync_rejects_shallow_source_checkout() {
     crate::test_support::with_isolated_home(|_| {

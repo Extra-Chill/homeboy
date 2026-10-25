@@ -2638,6 +2638,29 @@ const LAB_STAGING_POLL_FALLBACK_BUDGET: Duration = Duration::from_secs(6 * 60 * 
 
 // Source construction is not observation of a long-running provider job.
 const LAB_SOURCE_MATERIALIZATION_FALLBACK_BUDGET: Duration = Duration::from_secs(20 * 60);
+/// Workspace control checks cancellation before and after every child process
+/// and on every 25 ms poll while one runs. Cancellation sources read the durable
+/// store, so they are consulted at most this often; a request is still observed
+/// within this interval, and once observed it is never forgotten.
+const LAB_SOURCE_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+fn throttled_cancellation(
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    interval: Duration,
+) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    let last = Mutex::new(None::<(Instant, bool)>);
+    Arc::new(move || {
+        let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((at, answer)) = *last {
+            if answer || at.elapsed() < interval {
+                return answer;
+            }
+        }
+        let answer = cancelled();
+        *last = Some((Instant::now(), answer));
+        answer
+    })
+}
 
 /// Floor applied to a plan-derived budget. When the plan deadline has already
 /// expired the remote job is being torn down anyway, and the useful thing to do
@@ -2671,7 +2694,7 @@ pub(crate) fn workspace_stage_control(
     crate::workspace::WorkspaceControl::new(
         homeboy_core::cooperative_control::CooperativeControl::new(
             Instant::now() + remaining,
-            cancelled,
+            throttled_cancellation(cancelled, LAB_SOURCE_CANCELLATION_POLL_INTERVAL),
         ),
     )
 }
@@ -4913,6 +4936,36 @@ mod tests {
             }))
             .expect("task")],
         )
+    }
+
+    /// Workspace control checks cancellation on every 25 ms child poll; the
+    /// durable source behind it is read at most once per interval, and a
+    /// cancellation, once seen, stays observed.
+    #[test]
+    fn throttled_cancellation_reads_the_source_once_per_interval() {
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let check = throttled_cancellation(
+            {
+                let reads = reads.clone();
+                let cancelled = cancelled.clone();
+                Arc::new(move || {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                })
+            },
+            Duration::from_millis(50),
+        );
+        for _ in 0..100 {
+            assert!(!check());
+        }
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(check());
+        cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(check());
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// A sealed source artifact excludes `.git` and is extracted on the runner
