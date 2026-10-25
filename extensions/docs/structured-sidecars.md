@@ -2,15 +2,20 @@
 
 Extension manifests declare structured sidecar support in `structured_sidecars`.
 
-Each key names a stable sidecar contract and each value is a boolean indicating whether the extension can emit that sidecar today.
+Each key names a stable sidecar contract and each value is a boolean indicating whether the extension's runners read or write that sidecar. Declare every sidecar a runner touches, including ones it only reads through a shared helper (for example `scripts/lib/fix-results.sh`): Homeboy core is moving to export sidecar env vars only for declared keys (Extra-Chill/homeboy#16451).
 
 Supported keys:
 
 - `lint.findings` — writes normalized lint findings to `HOMEBOY_LINT_FINDINGS_FILE`.
+- `lint.producers` — writes the lint producers that ran to `HOMEBOY_LINT_PRODUCERS_FILE`.
+- `fix.results` — writes a JSON array of applied fix records to `HOMEBOY_FIX_RESULTS_FILE`.
 - `test.results` — writes normalized test result counts to `HOMEBOY_TEST_RESULTS_FILE`.
 - `test.failures` — writes parsed test failure details to `HOMEBOY_TEST_FAILURES_FILE`.
-- `test.coverage` — writes normalized coverage data.
+- `test.coverage` — writes normalized coverage data to `HOMEBOY_COVERAGE_FILE`.
 - `bench.results` — writes benchmark result envelopes to `HOMEBOY_BENCH_RESULTS_FILE`.
+- `bench.responsiveness` — appends one JSON object per line (JSONL) to `HOMEBOY_BENCH_RESPONSIVENESS_FILE`.
+- `fuzz.results` — writes the fuzz campaign result object to `HOMEBOY_FUZZ_RESULTS_FILE`.
+- `fuzz.artifacts` — writes fuzz artifacts into the `HOMEBOY_FUZZ_ARTIFACTS_DIR` directory.
 - `trace.results` — writes trace result envelopes to `HOMEBOY_TRACE_RESULTS_FILE`.
 - `trace.artifacts` — writes trace artifacts to `HOMEBOY_TRACE_ARTIFACT_DIR`.
 - `annotations` — writes inline-review annotation JSON files to `HOMEBOY_ANNOTATIONS_DIR`.

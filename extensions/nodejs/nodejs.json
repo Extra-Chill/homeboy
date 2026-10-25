@@ -24,6 +24,9 @@
     "bench.results": true,
     "trace.results": true,
     "trace.artifacts": true,
+    "fix.results": true,
+    "fuzz.results": true,
+    "fuzz.artifacts": true,
     "annotations": false
   },
   "diagnostics": {

@@ -31,8 +31,12 @@
     "test.failures": true,
     "test.coverage": false,
     "bench.results": true,
+    "bench.responsiveness": true,
     "trace.results": true,
-    "annotations": false
+    "fix.results": true,
+    "fuzz.results": true,
+    "fuzz.artifacts": true,
+    "annotations": true
   },
   "diagnostics": {
     "tools": [
