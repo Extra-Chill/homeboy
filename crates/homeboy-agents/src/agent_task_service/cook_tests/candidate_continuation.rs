@@ -254,3 +254,71 @@ fn replacement_gates_recover_attaches_proof_to_candidate_sha_without_artifacts()
         assert_eq!(stored.deterministic_gates[0].exit_code, 0);
     });
 }
+
+/// #16441: the candidate's own continuation gates, green and bound to its
+/// fingerprint, with no operator replacement proof. The provider runtime
+/// failed but recorded its concrete model.
+fn with_own_green_gates(test: impl FnOnce(CookRequest, std::path::PathBuf)) {
+    with_corrected_gate_candidate(|options, target, replacement| {
+        let mut own = replacement;
+        own.provenance
+            .as_object_mut()
+            .unwrap()
+            .remove("replacement_gate_proof");
+        let store = test_lifecycle_store();
+        let run_id = &options.identity.initial_run_id;
+        store
+            .record_promotion(run_id, serde_json::to_value(&own).unwrap())
+            .unwrap();
+        let record = store.read_record(run_id).unwrap();
+        assert_eq!(
+            record.lifecycle.execution.state,
+            RunExecutionState::CandidateRecoverable
+        );
+        assert_eq!(
+            record.lifecycle.provider_runtime[0].state,
+            ProviderRuntimeState::Failed
+        );
+        test(options, target);
+    });
+}
+
+fn continue_terminal(
+    options: &CookRequest,
+    backend: &mut CaptureBackend,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let recipe_store = CookRecipeStore::from_current_data_root().unwrap();
+    let lifecycle_store = test_lifecycle_store();
+    let runtime = CookRuntime::with_finalizer(
+        Arc::new(UnusedExecutor),
+        &recipe_store,
+        &lifecycle_store,
+        |store, options, run_id, promotion| {
+            finalize_or_load_cook_pr_with_backend_with_stores(
+                &recipe_store,
+                store,
+                options,
+                run_id,
+                promotion,
+                backend,
+            )
+        },
+        &noop_cook_progress_observer,
+    );
+    CookService::run(options.clone(), runtime, CookMode::ContinueTerminal)
+}
+
+#[test]
+fn candidate_recoverable_with_own_green_bound_gates_publishes() {
+    with_own_green_gates(|options, _| {
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(options.identity.initial_run_id.clone()),
+            ..Default::default()
+        };
+        let result = continue_terminal(&options, &mut backend).unwrap();
+        assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(backend.create_count, 1);
+        assert!(backend.body.contains("gpt-6.1-sol"));
+    });
+}

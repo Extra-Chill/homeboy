@@ -8,7 +8,9 @@ use crate::agent_task_review_dossier::{
 use homeboy_core::error::{Error, Result};
 use homeboy_core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use homeboy_core::proof::HomeboyProof;
-use homeboy_core::run_lifecycle_record::{ProviderRuntimeState, RunLifecycleRecord};
+use homeboy_core::run_lifecycle_record::{
+    ProviderRuntimeState, RunExecutionState, RunLifecycleRecord,
+};
 
 pub const AGENT_TASK_PR_FINALIZATION_SCHEMA: &str = "homeboy/agent-task-pr-finalization/v1";
 pub const AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA: &str =
@@ -225,7 +227,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 &gate_proof.promotion.changed_files,
             ));
         }
-        let recovered_model_task = authorized_replacement_gate_proof(&gate_proof.promotion)
+        // A partial or recoverable run names the model of the runtime that produced its candidate.
+        let recovered_model_task = (lifecycle.execution.state != RunExecutionState::Succeeded)
             .then_some(gate_proof.promotion.source.task_id.as_str());
         options.normalized_gate_results = gate_proof.promotion.gate_results;
         if options.normalized_gate_results.is_empty() {
@@ -1608,7 +1611,6 @@ fn validate_durable_publication_eligibility(
     lifecycle: &RunLifecycleRecord,
     promotion: &AgentTaskPromotionReport,
 ) -> Result<DurablePublicationEligibility> {
-    use homeboy_core::run_lifecycle_record::{ProviderRuntimeState, RunExecutionState};
     let producing_runtime = lifecycle
         .provider_runtime
         .iter()
@@ -1622,44 +1624,42 @@ fn validate_durable_publication_eligibility(
         ),
         Ok(crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { .. })
     );
-    // Retry history is durable and intentionally retains failed attempts. It
-    // must not veto publication when the canonical receipt for the task that
-    // produced this promoted candidate records a successful attempt. Bind that
-    // receipt to a fingerprinted candidate and green applied promotion; do not
-    // infer success from the aggregate or promotion alone.
-    let successful_provider_produced_candidate = lifecycle.execution.state
-        == RunExecutionState::Succeeded
-        && producing_runtime_succeeded
-        && fingerprinted_candidate
-        && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
-        && !promotion.gate_results.is_empty()
+    let green_gates = !promotion.gate_results.is_empty()
         && promotion
             .gate_results
             .iter()
             .all(|gate| gate.status == HomeboyGateStatus::Passed);
+    let green_fingerprinted_candidate = fingerprinted_candidate
+        && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        && green_gates;
+    // Retry history is durable and intentionally retains failed attempts. It
+    // must not veto publication when the canonical receipt for the task that
+    // produced this promoted candidate records a successful attempt.
     let all_provider_runtimes_succeeded = !lifecycle.provider_runtime.is_empty()
         && lifecycle
             .provider_runtime
             .iter()
             .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
-    let authenticated_partial_provider_recovery = matches!(
+    // A partial or candidate-recoverable run publishes the candidate its gates
+    // verified (#16441). Homeboy's own promotion binds its gates to the
+    // fingerprint it records with them; an operator replacement binds them
+    // through its authorized proof.
+    let verified_candidate_recovery = matches!(
         lifecycle.execution.state,
         RunExecutionState::PartialFailure | RunExecutionState::CandidateRecoverable
-    ) && ((all_provider_runtimes_succeeded
-        && lifecycle
-            .provider_runtime
-            .iter()
-            .all(|runtime| runtime.metadata["evidence_source"] == "durable_provider_execution"))
-        || (fingerprinted_candidate
-            && producing_runtime.is_some_and(|runtime| {
-                runtime.metadata["model"]
-                    .as_str()
-                    .is_some_and(is_concrete_model)
-            })
-            && authorized_replacement_gate_proof(promotion)));
+    ) && producing_runtime.is_some_and(|runtime| {
+        runtime.metadata["model"]
+            .as_str()
+            .is_some_and(is_concrete_model)
+    }) && match promotion.provenance.get("replacement_gate_proof")
+    {
+        None => green_fingerprinted_candidate,
+        Some(_) => fingerprinted_candidate && authorized_replacement_gate_proof(promotion),
+    };
     if (lifecycle.execution.state == RunExecutionState::Succeeded
-        && (all_provider_runtimes_succeeded || successful_provider_produced_candidate))
-        || authenticated_partial_provider_recovery
+        && (all_provider_runtimes_succeeded
+            || (producing_runtime_succeeded && green_fingerprinted_candidate)))
+        || verified_candidate_recovery
     {
         return Ok(DurablePublicationEligibility::ProviderRun);
     }
@@ -1683,11 +1683,7 @@ fn validate_durable_publication_eligibility(
         && recovery.is_some_and(|recovery| {
             crate::agent_task_lifecycle::candidate_adoption_recovery_eligibility(recovery).is_some()
         })
-        && !promotion.gate_results.is_empty()
-        && promotion
-            .gate_results
-            .iter()
-            .all(|gate| gate.status == HomeboyGateStatus::Passed);
+        && green_gates;
     if authenticated_adoption {
         return Ok(DurablePublicationEligibility::PreProviderCandidateAdoptionRecovery);
     }
@@ -1722,16 +1718,12 @@ fn validate_durable_publication_eligibility(
         && candidate_is_bound
         && adoption_model.is_some_and(is_concrete_model)
         && committed_change_provenance
-        && !promotion.gate_results.is_empty()
-        && promotion
-            .gate_results
-            .iter()
-            .all(|gate| gate.status == HomeboyGateStatus::Passed);
+        && green_gates;
     if authenticated_external_adoption {
         return Ok(DurablePublicationEligibility::AuthenticatedExternalCandidateAdoption);
     }
 
-    Err(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime before publication; the only exceptions are an applied, green, fingerprinted candidate-adoption recovery with durable zero-execution pre-provider transport provenance or an applied, green, committed-change-provenance-bound authenticated external candidate adoption", None, None))
+    Err(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime, or be a partial or candidate-recoverable run whose applied, fingerprinted candidate has green gates bound to it and whose producing runtime records a concrete model, before publication; the only other exceptions are an applied, green, fingerprinted candidate-adoption recovery with durable zero-execution pre-provider transport provenance or an applied, green, committed-change-provenance-bound authenticated external candidate adoption", None, None))
 }
 
 fn no_real_provider_execution(lifecycle: &RunLifecycleRecord) -> bool {
