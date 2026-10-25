@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.3] - 2026-10-25
+
+### Changed
+- Declare every structured sidecar the runners read
+
 ## [3.53.2] - 2026-10-21
 
 ### Changed
