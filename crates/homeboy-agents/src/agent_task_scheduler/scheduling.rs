@@ -19,7 +19,8 @@ use super::outcome::{
     invalid_required_typed_artifacts, missing_required_typed_artifacts,
     missing_typed_artifacts_failure, nested_failed_executor_status,
     provider_run_result_is_empty_incomplete, runtime_result_is_materializable,
-    typed_artifact_from_artifact, typed_artifact_from_evidence, typed_artifact_from_outcome,
+    typed_artifact_from_artifact, typed_artifact_from_candidate, typed_artifact_from_evidence,
+    typed_artifact_from_outcome,
 };
 use super::resources::{
     resource_capacity_available, resource_is_busy, select_artifact_payload, workspace_is_busy,
@@ -611,6 +612,16 @@ impl AgentTaskScheduleSupport {
                 .any(|artifact| artifact.name == name)
             {
                 continue;
+            }
+
+            // Homeboy's harvested candidate commit is the change set (#16303).
+            if name == "patch" {
+                if let Some(candidate) = outcome.candidate.as_ref() {
+                    outcome
+                        .typed_artifacts
+                        .push(typed_artifact_from_candidate(candidate));
+                    continue;
+                }
             }
 
             if let Some(artifact) = outcome
