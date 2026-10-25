@@ -2353,107 +2353,216 @@ fn status_and_continuation_materialize_recipe_only_attempt_without_provider_work
     });
 }
 
+/// A terminal candidate-recoverable Cook attempt whose outcome holds no
+/// immutable candidate, with a local continuation placement decision.
+/// `runtime_generation` overrides the Homeboy build the recipe records.
+fn persist_legacy_candidate_cook(cook_id: &str, run_id: &str, runtime_generation: Option<&str>) {
+    let plan = AgentTaskPlan::new(
+        "cook-legacy-null-model-plan",
+        vec![serde_json::from_value(json!({
+            "task_id": "provider",
+            "executor": { "backend": "fixture" },
+            "instructions": "legacy candidate"
+        }))
+        .expect("provider task")],
+    );
+    let options = homeboy::agents::agent_task_service::CookRequest {
+        identity: homeboy::agents::agent_task_service::CookIdentity {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: plan.clone(),
+        },
+        workspace: homeboy::agents::agent_task_service::CookWorkspace {
+            to_worktree: "fixture@legacy-null-model".to_string(),
+            source_worktree_path: None,
+            task_base_sha: None,
+            source_refs: Vec::new(),
+        },
+        provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
+            provider_invocation: None,
+            attempt_dispatcher: None,
+        },
+        gates: Default::default(),
+        retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
+        finalization: homeboy::agents::agent_task_service::CookFinalization {
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".to_string(),
+            head: None,
+            title: "Legacy candidate".to_string(),
+            commit_message: "Legacy candidate".to_string(),
+            protected_branches: Vec::new(),
+        },
+        ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
+            ai_tool: "fixture".to_string(),
+            ai_model: None,
+            ai_used_for: "test".to_string(),
+        },
+        harvest_context:
+            homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("harvest context"),
+    };
+    homeboy::agents::agent_task_service::persist_initial_recipe(&options)
+        .expect("persist legacy recipe");
+    agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit legacy attempt");
+    agent_task_lifecycle::record_cook_attempt_in_store(&test_lifecycle_store(), cook_id, 1, run_id)
+        .expect("bind attempt to recipe");
+    agent_task_lifecycle::record_run_aggregate(
+        run_id,
+        &plan,
+        &AgentTaskAggregate {
+            schema: "homeboy/agent-task-aggregate/v1".to_string(),
+            plan_id: plan.plan_id.clone(),
+            totals: Default::default(),
+            outcomes: vec![AgentTaskOutcome {
+                task_id: "provider".to_string(),
+                status: AgentTaskOutcomeStatus::CandidateRecoverable,
+                summary: Some("legacy candidate".to_string()),
+                ..Default::default()
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        },
+    )
+    .expect("persist terminal legacy candidate");
+    test_lifecycle_store()
+        .mutate_record(run_id, |record| {
+            let identity = homeboy_lab_contract::ExecutionPlacementIdentity {
+                repository: "fixture".to_string(),
+                workspace: "fixture".to_string(),
+                task: "provider".to_string(),
+                candidate: None,
+                base: None,
+            };
+            record.metadata["execution_placement_decision"] = serde_json::to_value(
+                homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
+                    "fixture",
+                    "v1",
+                    identity,
+                    homeboy_lab_contract::Placement::Local,
+                ),
+            )
+            .unwrap();
+            true
+        })
+        .expect("persist local continuation placement");
+    if let Some(runtime_generation) = runtime_generation {
+        let recipe_path = homeboy::core::paths::homeboy_data()
+            .expect("data root")
+            .join("agent-task-cooks")
+            .join(cook_id)
+            .join("recipe.json");
+        let mut recipe: Value =
+            serde_json::from_slice(&std::fs::read(&recipe_path).expect("read persisted recipe"))
+                .expect("parse persisted recipe");
+        recipe["runtime_generation"] = runtime_generation.into();
+        std::fs::write(
+            &recipe_path,
+            serde_json::to_vec_pretty(&recipe).expect("encode recipe"),
+        )
+        .expect("persist recipe recorded by an older build");
+    }
+}
+
+/// #16441: a Cook recorded by an older Homeboy build is not pinned to it.
+/// `recover --preflight` passes its recipe phase and the recipe reconstructs
+/// through the same strict dispatcher-bound path continuation and retry use.
+#[test]
+fn recover_preflight_admits_a_candidate_recorded_by_an_older_homeboy_build() {
+    with_temp_home(|| {
+        let cook_id = "cook-older-runtime";
+        let run_id = "cook-older-runtime-attempt-1";
+        let older = "homeboy 0.433.16+880cf5ac";
+        persist_legacy_candidate_cook(cook_id, run_id, Some(older));
+        let recipe =
+            homeboy::agents::agent_task_service::load_recipe(cook_id).expect("load older recipe");
+        assert_eq!(recipe.runtime_generation, older);
+        assert_ne!(older, homeboy::core::build_identity::current().display);
+
+        let (probe, _) = recover_preflight_probe(cook_id);
+        assert_eq!(probe["status"], "candidate_recoverable", "{probe:#}");
+        assert_eq!(probe["step"], json!({ "kind": "continue" }));
+        let phases = probe["admission"]["phases"].as_array().expect("phases");
+        assert!(
+            phases
+                .iter()
+                .any(|phase| phase["phase"] == "recipe" && phase["status"] == "passed"),
+            "{probe:#}"
+        );
+        assert!(
+            phases
+                .iter()
+                .all(|phase| phase["phase"] != "recipe" || phase["status"] == "passed"),
+            "the recipe phase must not block on the recorded runtime: {probe:#}"
+        );
+        assert!(!probe.to_string().contains("pinned to Homeboy runtime"));
+
+        let options =
+            homeboy::agents::agent_task_service::reconstruct_options_with_dispatcher(&recipe, None)
+                .expect("an older build's recipe reconstructs");
+        assert_eq!(options.identity.cook_id, cook_id);
+        assert_eq!(options.identity.initial_run_id, run_id);
+        assert_eq!(
+            homeboy::agents::agent_task_service::load_recipe(cook_id)
+                .expect("recipe remains")
+                .runtime_generation,
+            older,
+            "runtime_generation stays recorded as provenance"
+        );
+    });
+}
+
+/// #16441: a refused `recover` names its blocking phase's message in the
+/// command summary instead of "exited 1 without reporting a failure cause".
+#[test]
+fn blocked_recover_reports_the_blocking_message_in_its_summary() {
+    with_temp_home(|| {
+        let cook_id = "cook-blocked-recover-summary";
+        let run_id = "cook-blocked-recover-summary-attempt-1";
+        persist_legacy_candidate_cook(cook_id, run_id, None);
+        let (probe, exit_code) = recover_preflight_probe(cook_id);
+        assert_eq!(exit_code, 1, "{probe:#}");
+        assert_eq!(probe["admission"]["admitted"], false);
+        let blocker = "non-recoverable: outcome has no immutable candidate";
+        assert_eq!(probe["failure"]["code"], "agent_task.recover_blocked");
+        assert_eq!(probe["failure"]["details"]["phase"], "candidate_admission");
+        assert!(
+            probe["failure"]["message"]
+                .as_str()
+                .expect("declared cause")
+                .contains(blocker),
+            "{probe:#}"
+        );
+
+        let response = crate::commands::utils::response::cli_response_for_json_result_for_identity(
+            &Ok(probe),
+            exit_code,
+            &crate::commands::utils::response::CommandIdentity::with_operation(
+                "agent-task",
+                "recover",
+            ),
+            None,
+        );
+        let response = serde_json::to_value(response).expect("serialize response");
+        let summary = response["summary"].as_str().expect("summary");
+        assert!(summary.contains(blocker), "{summary}");
+        assert!(summary.contains("candidate_admission"), "{summary}");
+        assert!(
+            !summary.contains("without reporting a failure cause"),
+            "{summary}"
+        );
+    });
+}
+
 #[test]
 fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
     with_temp_home(|| {
         let cook_id = "cook-legacy-null-model";
         let run_id = "cook-legacy-null-model-attempt-1";
-        let plan = AgentTaskPlan::new(
-            "cook-legacy-null-model-plan",
-            vec![serde_json::from_value(json!({
-                "task_id": "provider",
-                "executor": { "backend": "fixture" },
-                "instructions": "legacy candidate"
-            }))
-            .expect("provider task")],
-        );
-        let options = homeboy::agents::agent_task_service::CookRequest {
-            identity: homeboy::agents::agent_task_service::CookIdentity {
-                cook_id: cook_id.to_string(),
-                initial_run_id: run_id.to_string(),
-                initial_plan: plan.clone(),
-            },
-            workspace: homeboy::agents::agent_task_service::CookWorkspace {
-                to_worktree: "fixture@legacy-null-model".to_string(),
-                source_worktree_path: None,
-                task_base_sha: None,
-                source_refs: Vec::new(),
-            },
-            provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_invocation: None,
-                attempt_dispatcher: None,
-            },
-            gates: Default::default(),
-            retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
-            finalization: homeboy::agents::agent_task_service::CookFinalization {
-                no_finalize: true,
-                draft_pr: false,
-                base: "main".to_string(),
-                head: None,
-                title: "Legacy candidate".to_string(),
-                commit_message: "Legacy candidate".to_string(),
-                protected_branches: Vec::new(),
-            },
-            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: "fixture".to_string(),
-                ai_model: None,
-                ai_used_for: "test".to_string(),
-            },
-            harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
-                .expect("harvest context"),
-        };
-        homeboy::agents::agent_task_service::persist_initial_recipe(&options)
-            .expect("persist legacy recipe");
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit legacy attempt");
-        agent_task_lifecycle::record_cook_attempt_in_store(
-            &test_lifecycle_store(),
-            cook_id,
-            1,
-            run_id,
-        )
-        .expect("bind attempt to recipe");
-        agent_task_lifecycle::record_run_aggregate(
-            run_id,
-            &plan,
-            &AgentTaskAggregate {
-                schema: "homeboy/agent-task-aggregate/v1".to_string(),
-                plan_id: plan.plan_id.clone(),
-                totals: Default::default(),
-                outcomes: vec![AgentTaskOutcome {
-                    task_id: "provider".to_string(),
-                    status: AgentTaskOutcomeStatus::CandidateRecoverable,
-                    summary: Some("legacy candidate".to_string()),
-                    ..Default::default()
-                }],
-                events: Vec::new(),
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            },
-        )
-        .expect("persist terminal legacy candidate");
-        test_lifecycle_store()
-            .mutate_record(run_id, |record| {
-                let identity = homeboy_lab_contract::ExecutionPlacementIdentity {
-                    repository: "fixture".to_string(),
-                    workspace: "fixture".to_string(),
-                    task: "provider".to_string(),
-                    candidate: None,
-                    base: None,
-                };
-                record.metadata["execution_placement_decision"] = serde_json::to_value(
-                    homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
-                        "fixture",
-                        "v1",
-                        identity,
-                        homeboy_lab_contract::Placement::Local,
-                    ),
-                )
-                .unwrap();
-                true
-            })
-            .expect("persist local continuation placement");
+        persist_legacy_candidate_cook(cook_id, run_id, None);
         let before = filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root"));
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),
@@ -2671,45 +2780,6 @@ fn continuation_preflight_bypasses_model_provenance_for_retryable_pre_execution_
             &Error::internal_unexpected("launcher exited before provider execution"),
         )
         .expect("record legacy pre-execution failure without retryable metadata");
-        let persisted_record = test_lifecycle_store()
-            .read_record(run_id)
-            .expect("read persisted failure");
-        let loaded_recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
-            .expect("load historical recipe");
-        assert!(
-            homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
-                &loaded_recipe,
-                &persisted_record,
-            )
-        );
-        let mut executed = persisted_record.clone();
-        executed.metadata["provider_executions_consumed"] = json!(1);
-        assert!(
-            !homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
-                &loaded_recipe,
-                &executed,
-            ),
-            "executed provider work retains its immutable runtime pin"
-        );
-        let mut in_flight = persisted_record.clone();
-        in_flight.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Running);
-        assert!(
-            !homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
-                &loaded_recipe,
-                &in_flight,
-            ),
-            "in-flight work retains its immutable runtime pin"
-        );
-        let mut ambiguous = persisted_record.clone();
-        ambiguous.metadata["runner_job_id"] = json!("still-owned-runner-job");
-        assert!(
-            !homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
-                &loaded_recipe,
-                &ambiguous,
-            ),
-            "ambiguous runner ownership retains its immutable runtime pin"
-        );
-
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),
             rearm: false,
@@ -2739,42 +2809,11 @@ fn continuation_preflight_bypasses_model_provenance_for_retryable_pre_execution_
             "execution_only",
             "{report:#}"
         );
-
-        test_lifecycle_store()
-            .mutate_record(run_id, |record| {
-                record.metadata["runner_job_id"] = json!("still-owned-runner-job");
-                true
-            })
-            .expect("persist ambiguous provider ownership");
-        let retry_error = homeboy::agents::agent_task_service::retry(
-            run_id,
-            Some("cook-pre-execution-null-model-attempt-2"),
-            false,
-            false,
-        )
-        .expect_err("ambiguous zero-execution ownership cannot rebind to this runtime");
-        assert!(
-            retry_error
-                .to_string()
-                .contains("No retry identity was reserved"),
-            "{retry_error:?}"
-        );
-        assert_eq!(
-            homeboy::agents::agent_task_service::load_recipe(cook_id)
-                .expect("recipe remains unchanged")
-                .attempts
-                .len(),
-            1
-        );
-        assert!(!agent_task_lifecycle::run_record_exists_readonly(
-            "cook-pre-execution-null-model-attempt-2"
-        )
-        .expect("inspect unreserved attempt"));
     });
 }
 
 #[test]
-fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_executions() {
+fn cook_retry_run_recovers_a_historical_transport_recipe_after_zero_provider_executions() {
     with_temp_home(|| {
         let root = tempfile::tempdir().expect("workspace root");
         let primary = root.path().join("primary");
@@ -2888,12 +2927,6 @@ fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_ex
             serde_json::to_vec_pretty(&persisted_recipe).expect("encode historical recipe"),
         )
         .expect("persist historical transport recipe");
-        let previous_runtime = test_lifecycle_store()
-            .read_record(run_id)
-            .expect("read historical transport attempt")
-            .metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
-            .clone();
-
         let executor = Arc::new(CountingCookExecutor::default());
         let dispatcher = Arc::new(CountingCookDispatcher::default());
         let (_, _) = retry_with(
@@ -2905,7 +2938,6 @@ fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_ex
                 idempotency_key: Some("historical-retry-1".to_string()),
             },
             executor.clone(),
-            |_| Ok(Some(dispatcher.clone())),
         )
         .expect("queued retry recovers under the current runtime");
 
@@ -2944,14 +2976,10 @@ fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_ex
             .expect("read recovered replacement");
         assert_eq!(recovered.metadata["retry_of"], run_id);
         assert_eq!(recovered.metadata["provider_executions_consumed"], 0);
-        assert_eq!(
-            recovered.metadata["controller_runtime_recovery"]["previous"],
-            previous_runtime
-        );
-        assert_eq!(
-            recovered.metadata["controller_runtime_recovery"]["current"],
-            recovered.metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
-        );
+        assert!(recovered
+            .metadata
+            .get("controller_runtime_recovery")
+            .is_none());
         assert_eq!(
             recovered.metadata["controller_identity"],
             homeboy::core::build_identity::current().display
@@ -6085,7 +6113,6 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
                 idempotency_key: Some("cook-retry-run-1".to_string()),
             },
             executor.clone(),
-            |_| Ok(Some(Arc::new(RetryRunDispatcher))),
         )
         .expect("retry --run resumes the Cook lifecycle");
 

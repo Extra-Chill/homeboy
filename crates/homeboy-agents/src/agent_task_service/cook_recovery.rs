@@ -685,6 +685,9 @@ fn finish_performed_step(
 ) -> (CookRecoveryReport, i32) {
     match result {
         Ok((value, exit_code)) => {
+            if exit_code != 0 {
+                report.failure = blocked_phase_failure(&value);
+            }
             if report.preflight {
                 report.admission = Some(value);
             } else {
@@ -701,6 +704,26 @@ fn finish_performed_step(
             (report, 1)
         }
     }
+}
+
+/// A refused step reports its blocking phase deep in its payload. Lift that
+/// phase's message as the recovery's declared cause, so the command summary
+/// states why recovery stopped.
+fn blocked_phase_failure(value: &Value) -> Option<Value> {
+    let phase = value["phases"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|phase| phase["status"] == "blocked")?;
+    let message = phase["message"]
+        .as_str()
+        .filter(|message| !message.trim().is_empty())?;
+    let name = phase["phase"].as_str().unwrap_or("admission");
+    Some(serde_json::json!({
+        "code": "agent_task.recover_blocked",
+        "message": format!("recover blocked at `{name}`: {message}"),
+        "details": { "phase": name, "reason": phase["reason"] },
+    }))
 }
 
 fn replace_gates_inputs_required(run_id: &str) -> Error {

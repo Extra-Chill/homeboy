@@ -3903,7 +3903,7 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
             None,
         )
     })?;
-    let mut options = super::cook_recipe::reconstruct_adoption_options(&recipe)?;
+    let mut options = super::cook_recipe::reconstruct_options_without_dispatcher(&recipe)?;
     if recovered_retry {
         let verified_base = promotion.verified_base.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -4101,7 +4101,7 @@ fn recover_verified_no_change_finalization(
             None,
         )
     })?;
-    let options = super::cook_recipe::reconstruct_adoption_options(recipe)?;
+    let options = super::cook_recipe::reconstruct_options_without_dispatcher(recipe)?;
     let _verified_base = promotion
         .verified_base
         .as_ref()
@@ -7065,7 +7065,7 @@ fn dirty_candidate_adoption_recovery_actions(
     let workspace = record.metadata["pre_execution_failure"]["details"]["dirty_candidate_adoption"]
         ["workspace"]
         .as_str()?;
-    let options = super::cook_recipe::reconstruct_adoption_options(recipe).ok()?;
+    let options = super::cook_recipe::reconstruct_options_without_dispatcher(recipe).ok()?;
     let model = options.ai_disclosure.ai_model?;
     let prefix = prefix.unwrap_or_else(|| super::cook_recovery_command_prefix(run_id));
     let actions = vec![
@@ -7334,9 +7334,10 @@ fn delivered_candidate_facts(
     else {
         return DeliveredCandidateFacts::default();
     };
-    let accept_inherited_failures = super::cook_recipe::reconstruct_adoption_options(recipe)
-        .map(|options| options.gates.accept_inherited_failures)
-        .unwrap_or(false);
+    let accept_inherited_failures =
+        super::cook_recipe::reconstruct_options_without_dispatcher(recipe)
+            .map(|options| options.gates.accept_inherited_failures)
+            .unwrap_or(false);
     let applied_gate_failure =
         applied_candidate_needs_replacement_gates(&promotion, accept_inherited_failures);
     let verified_unpublished = matches!(

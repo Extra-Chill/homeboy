@@ -775,14 +775,6 @@ pub fn run_next_with_cook_dispatcher(
         scoped_run_ids,
         |record, plan| {
             validate_queued_cook_identity(record)?;
-            if let Some(cook_id) = record.metadata["cook_id"].as_str() {
-                let recipe = super::load_recipe(cook_id)?;
-                super::rebind_queued_cook_runtime_in_store(
-                    &recipe,
-                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
-                    &record.run_id,
-                )?;
-            }
             preflight_plan_provider_eligibility(plan)
         },
     )
@@ -933,11 +925,7 @@ fn execute_claimed_queue_record(
                 )
             })?;
         let attempt_dispatcher = dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
-        let mut options = super::reconstruct_options_for_record_with_dispatcher(
-            &recipe,
-            &record,
-            attempt_dispatcher,
-        )?;
+        let mut options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
         options.identity.initial_run_id = attempt.run_id.clone();
         options.identity.initial_plan = attempt.plan.clone();
         let lifecycle_store =
@@ -993,10 +981,6 @@ pub(super) fn execute_exact_queued_intent(
         intent,
         |record, plan| {
             validate_queued_cook_identity(record)?;
-            if let Some(cook_id) = record.metadata["cook_id"].as_str() {
-                let recipe = super::load_recipe(cook_id)?;
-                super::rebind_queued_cook_runtime_in_store(&recipe, store, &record.run_id)?;
-            }
             transport.queued_preflight(record, plan, intent)?;
             preflight_plan_provider_eligibility(plan)
         },
@@ -2525,21 +2509,6 @@ fn retryable_cook_attempt(
         ));
     };
     let retryable_pre_execution_failure = super::retryable_pre_execution_failure(source);
-    if recipe.runtime_generation != homeboy_core::build_identity::current().display
-        && !super::pre_execution_runtime_recovery_is_eligible(&recipe, source)
-    {
-        return Err(Error::validation_invalid_argument(
-            "cook_recipe.runtime_generation",
-            format!(
-                "Cook retry must run with its pinned Homeboy runtime `{}` unless canonical zero-execution recovery is eligible; this process is `{}`. No retry identity was reserved.",
-                recipe.runtime_generation,
-                homeboy_core::build_identity::current().display
-            ),
-            Some(source.run_id.clone()),
-            None,
-        )
-        .with_retryable(true));
-    }
     agent_task_lifecycle::admit_lab_pre_execution_replay(source, &source_recipe_attempt.plan)?;
     if source.metadata["pre_execution_failure"].is_object() && !retryable_pre_execution_failure {
         return Ok(None);
