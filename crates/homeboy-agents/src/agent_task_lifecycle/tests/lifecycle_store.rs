@@ -105,6 +105,7 @@ fn active_records_are_exactly_the_non_terminal_agent_task_runs() {
     let mut active = store
         .read_active_records()
         .expect("read active records")
+        .0
         .into_iter()
         .map(|record| record.run_id)
         .collect::<Vec<_>>();

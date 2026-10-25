@@ -3916,7 +3916,7 @@ fn runner_cancellation_is_stored_and_every_read_agrees_without_writing() {
             AgentTaskRunState::Cancelled
         );
     }
-    let (listed, _) = store.read_records_with_health().unwrap();
+    let (listed, _) = store.read_all_records_with_health().unwrap();
     assert_eq!(
         listed
             .iter()

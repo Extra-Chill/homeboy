@@ -3138,7 +3138,9 @@ fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root(
             .expect("retry successor lookup")
             .is_none()
     );
-    let (records, _) = read_records_with_health_in_store(&seeded).expect("registry snapshot");
+    let (records, _) = seeded
+        .read_records_with_health_bounded(1000)
+        .expect("registry snapshot");
     assert_eq!(
         records
             .iter()
@@ -3146,8 +3148,9 @@ fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root(
             .collect::<Vec<_>>(),
         vec![attempt_run_id]
     );
-    let (bounded, _) =
-        read_records_with_health_bounded_in_store(&seeded, 10).expect("bounded registry snapshot");
+    let (bounded, _) = seeded
+        .read_records_with_health_bounded(10)
+        .expect("bounded registry snapshot");
     assert_eq!(bounded.len(), 1);
     let (all_records, _) =
         read_all_records_with_health_in_store(&seeded).expect("unbounded registry snapshot");
@@ -3192,11 +3195,13 @@ fn lifecycle_read_siblings_answer_from_the_injected_store_and_not_a_second_root(
             .expect("retry successor lookup in second root")
             .is_none()
     );
-    assert!(read_records_with_health_in_store(&empty)
+    assert!(empty
+        .read_records_with_health_bounded(1000)
         .expect("registry snapshot in second root")
         .0
         .is_empty());
-    assert!(read_records_with_health_bounded_in_store(&empty, 10)
+    assert!(empty
+        .read_records_with_health_bounded(10)
         .expect("bounded registry snapshot in second root")
         .0
         .is_empty());

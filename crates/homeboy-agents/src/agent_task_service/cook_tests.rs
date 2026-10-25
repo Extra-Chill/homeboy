@@ -9770,7 +9770,7 @@ fn generic_lab_replay_service_retry_is_rejected_before_reserving_a_successor() {
             &replay_plan,
         )
         .expect("persist generic Lab replay plan");
-        let before = agent_task_lifecycle::read_records_with_health()
+        let before = agent_task_lifecycle::read_all_records_with_health()
             .expect("read source record")
             .0
             .len();
@@ -9787,7 +9787,7 @@ fn generic_lab_replay_service_retry_is_rejected_before_reserving_a_successor() {
             .message
             .contains("generic Lab replay requires controller workspace preflight"));
         assert_eq!(
-            agent_task_lifecycle::read_records_with_health()
+            agent_task_lifecycle::read_all_records_with_health()
                 .expect("read records after rejected retry")
                 .0
                 .len(),

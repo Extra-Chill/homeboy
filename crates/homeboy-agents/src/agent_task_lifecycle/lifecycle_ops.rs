@@ -6034,40 +6034,6 @@ pub fn list_records_with_health_in_store(
     read_all_records_with_health_in_store(lifecycle_store)
 }
 
-/// Read the durable registry snapshot without runner reconciliation. Bounded
-/// recovery readers use this path so disconnected historical runner mirrors
-/// cannot delay access to controller-owned state.
-pub(crate) fn read_records_with_health(
-) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
-    read_records_with_health_bounded(1000)
-}
-
-/// [`read_records_with_health`] against explicitly injected durable lifecycle
-/// roots.
-pub fn read_records_with_health_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
-    read_records_with_health_bounded_in_store(lifecycle_store, 1000)
-}
-
-pub(crate) fn read_records_with_health_bounded(
-    limit: usize,
-) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    read_records_with_health_bounded_in_store(&lifecycle_store, limit)
-}
-
-/// [`read_records_with_health_bounded`] against explicitly injected durable
-/// lifecycle roots.
-pub fn read_records_with_health_bounded_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    limit: usize,
-) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
-    let (mut records, health) = lifecycle_store.read_records_with_health_bounded(limit)?;
-    sort_records_newest_first(&mut records);
-    Ok((records, health))
-}
-
 /// Read every durable registry record without runner reconciliation.
 ///
 /// Exact-match discovery uses this path so filtering happens before a result is
@@ -6088,7 +6054,7 @@ pub fn read_all_records_with_health_in_store(
     Ok((records, health))
 }
 
-fn sort_records_newest_first(records: &mut [AgentTaskRunRecord]) {
+pub(crate) fn sort_records_newest_first(records: &mut [AgentTaskRunRecord]) {
     records.sort_by(|left, right| {
         right
             .updated_at
