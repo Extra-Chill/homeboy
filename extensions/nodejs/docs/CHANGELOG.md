@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.8.3] - 2026-10-25
+
+### Changed
+- Declare every structured sidecar the runners read
+
 ## [3.8.2] - 2026-10-24
 
 ### Fixed
