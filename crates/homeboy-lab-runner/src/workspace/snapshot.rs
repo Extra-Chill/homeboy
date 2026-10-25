@@ -1444,7 +1444,8 @@ fn materialize_changed_paths_controlled(
             .map_err(|err| Error::internal_io(err.to_string(), Some(action.to_string())))?;
     }
     let command = format!(
-        "COPYFILE_DISABLE=1 tar --no-xattrs -h -C {} --null -T {} -cf - | {}",
+        "{} -h -C {} --null -T {} -cf - | {}",
+        super::util::PORTABLE_TAR_CREATE,
         shell::quote_arg(&local_path.display().to_string()),
         shell::quote_arg(&list.path().display().to_string()),
         target_command,
@@ -2538,7 +2539,8 @@ fn snapshot_staged_materialization_command(
     scratch: Option<&Path>,
 ) -> String {
     let command = format!(
-        "COPYFILE_DISABLE=1 tar --no-xattrs -C {stage} -cf - . | {target_command}",
+        "{tar} -C {stage} -cf - . | {target_command}",
+        tar = super::util::PORTABLE_TAR_CREATE,
         stage = shell::quote_arg(&stage.display().to_string()),
     );
     scratch.map_or(command.clone(), |scratch| {

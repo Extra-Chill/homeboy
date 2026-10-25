@@ -457,13 +457,14 @@ pub(super) fn invoke(
         .as_deref()
         .ok_or_else(|| io("runner has no workspace root"))?;
     let remote = format!(
-        "set -eu; mkdir -p {root}; stage=$(mktemp -d {template}); trap 'rm -rf \"$stage\"' EXIT HUP INT TERM; tar -p -C \"$stage\" -xf -; {binary} runner workspace materialization --input \"$stage{input}\" --response \"$stage/response.json\" {commit} >/dev/null; cat \"$stage/response.json\"",
+        "set -eu; mkdir -p {root}; stage=$(mktemp -d {template}); trap 'rm -rf \"$stage\"' EXIT HUP INT TERM; tar -p -C \"$stage\" -xf -; {binary} runner workspace materialization --input \"$stage{input}\" --response \"$stage/response.json\" {commit} >&2; cat \"$stage/response.json\"",
         root = shell::quote_arg(root), template = shell::quote_arg(&format!("{root}/.materialization.XXXXXXXX")),
         binary = shell::quote_arg(binary), input = if commit { "" } else { "/plan.json" }, commit = if commit { "--commit" } else { "" },
     );
     let target = super::super::util::shell_command_for_runner(runner, &remote)?;
     let command = format!(
-        "tar -C {} -cf - {} | {}",
+        "{} -C {} -cf - {} | {}",
+        super::super::util::PORTABLE_TAR_CREATE,
         shell::quote_arg(&directory.display().to_string()),
         if commit { "." } else { "plan.json" },
         target
