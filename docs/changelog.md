@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.34] - 2026-10-25
+
+### Changed
+- Count a mission's attempt spans in its coverage
+
 ## [0.433.33] - 2026-10-25
 
 ### Changed
