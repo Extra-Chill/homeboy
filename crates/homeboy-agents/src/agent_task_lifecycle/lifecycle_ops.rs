@@ -2072,47 +2072,6 @@ pub fn transition_execution_placement_for_continuation_in_store(
     lifecycle_store.commit_record(&mut record)
 }
 
-// The ambient `normalize_local_execution_placement()` shim that used to sit here is gone;
-// its two normalization tests now normalize inside a store they resolve (#7505).
-
-/// Restore an explicit plan placement decision onto a legacy record inside an
-/// explicitly rooted store.
-///
-/// The plan read moves with the record. `load_plan` resolves a Cook alias
-/// against the ambient index and then reads the ambient run directory, so an
-/// ambient reach here could copy another home's plan decision onto this store's
-/// record — the one restoration this operation exists to make trustworthy.
-pub fn normalize_local_execution_placement_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskRunRecord> {
-    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    if record
-        .metadata
-        .get("execution_placement_decision")
-        .is_some_and(|value| !value.is_null())
-    {
-        return Ok(record);
-    }
-    let plan = load_controller_plan_in_store(lifecycle_store, &record.run_id)?;
-    let Some(decision) = plan
-        .metadata
-        .get("execution_placement_decision")
-        .filter(|value| !value.is_null())
-    else {
-        return Ok(record);
-    };
-    record
-        .ensure_metadata_object()
-        .insert("execution_placement_decision".to_string(), decision.clone());
-    record.ensure_metadata_object().insert(
-        "execution_placement_normalization".to_string(),
-        json!({ "source": "controller_plan", "reason": "legacy_or_null_record_decision" }),
-    );
-    lifecycle_store.commit_record(&mut record)?;
-    Ok(record)
-}
-
 #[cfg(test)]
 mod execution_placement_tests {
 
@@ -2487,21 +2446,15 @@ mod execution_placement_tests {
     }
 
     #[test]
-    fn normalization_preserves_submission_stamp_and_projects_explicit_plan_decision() {
+    fn controller_local_submission_records_a_canonical_placement_stamp() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            // One store for the whole test: both normalizations and the record
-            // they read must name one installation.
-            let store =
-                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
             let plan = super::super::tests::test_plan();
             let record =
                 submit_plan_with_runtime_admission(&plan, Some("placement-run"), |_| Ok(json!({})))
                     .expect("submit plan");
 
-            let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
-                .expect("submission stamp remains authoritative");
             let submission_decision: homeboy_lab_contract::ExecutionPlacementDecision =
-                serde_json::from_value(normalized.metadata["execution_placement_decision"].clone())
+                serde_json::from_value(record.metadata["execution_placement_decision"].clone())
                     .expect("controller-local submission records a canonical decision");
             assert!(submission_decision.is_submission_stamp());
             assert_eq!(
@@ -2509,31 +2462,7 @@ mod execution_placement_tests {
                 EffectiveExecutionPlacement::Local
             );
             assert!(submission_decision.permits_local_execution());
-            assert!(normalized
-                .metadata
-                .get("execution_placement_normalization")
-                .is_none());
             assert_eq!(load_plan(&record.run_id).expect("durable plan"), plan);
-
-            let mut plan = plan;
-            plan.metadata = json!({ "execution_placement_decision": decision() });
-            let record =
-                submit_plan_with_runtime_admission(&plan, Some("placement-projection-run"), |_| {
-                    Ok(json!({}))
-                })
-                .expect("submit plan with placement decision");
-            let mut legacy_record = store::read_record(&record.run_id).expect("durable record");
-            legacy_record
-                .ensure_metadata_object()
-                .remove("execution_placement_decision");
-            store::write_record(&legacy_record).expect("remove legacy record projection");
-
-            let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
-                .expect("explicit plan decision is restored");
-            assert_eq!(
-                normalized.metadata["execution_placement_decision"]["decision_id"],
-                decision().decision_id
-            );
         });
     }
 }
