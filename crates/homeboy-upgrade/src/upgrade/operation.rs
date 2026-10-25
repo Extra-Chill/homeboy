@@ -495,12 +495,9 @@ impl UpgradeOperation {
         let updated = observation
             .store()
             .update_running_run_metadata(observation.run_id(), self.metadata.clone())?;
-        updated.map(|_| ()).ok_or_else(|| {
-            Error::internal_unexpected(format!(
-                "upgrade operation is no longer running: {}",
-                observation.run_id()
-            ))
-        })
+        updated
+            .map(|_| ())
+            .ok_or_else(|| no_longer_running(observation.run_id()))
     }
 
     fn finish(&mut self, status: RunStatus) {
@@ -904,9 +901,16 @@ pub fn persist_upgrade_heartbeat(run_id: &str, elapsed: Duration) -> Result<()> 
     store
         .update_running_run_metadata(run_id, metadata)?
         .map(|_| ())
-        .ok_or_else(|| {
-            Error::internal_unexpected(format!("upgrade operation is no longer running: {run_id}"))
-        })
+        .ok_or_else(|| no_longer_running(run_id))
+}
+
+/// Another owner terminalized this operation. The id lets the waiting CLI
+/// report the durable terminal status instead of this local refusal.
+fn no_longer_running(run_id: &str) -> Error {
+    let mut error =
+        Error::internal_unexpected(format!("upgrade operation is no longer running: {run_id}"));
+    error.details["operation_id"] = json!(run_id);
+    error
 }
 
 pub(crate) fn emit_upgrade_phase(phase: &str) {
@@ -974,9 +978,7 @@ fn patch_metadata(run_id: &str, patch: impl FnOnce(&mut Value)) -> Result<()> {
     store
         .update_running_run_metadata(run_id, metadata)?
         .map(|_| ())
-        .ok_or_else(|| {
-            Error::internal_unexpected(format!("upgrade operation is no longer running: {run_id}"))
-        })
+        .ok_or_else(|| no_longer_running(run_id))
 }
 
 fn merge_drain_metadata(target: &mut Value, source: &Value) {
@@ -2147,6 +2149,30 @@ mod tests {
             assert!(error.message.contains("after 3 attempts"));
             assert!(error.message.contains("elapsed_seconds=41"));
             assert!(error.message.contains("extensions=pending"));
+        });
+    }
+
+    #[test]
+    fn writes_after_another_owner_terminalizes_name_the_operation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            // The replacement binary finishes the operation in its own process.
+            ObservationStore::open_initialized()
+                .unwrap()
+                .finish_running_run(&id, RunStatus::Pass, None)
+                .unwrap();
+            for error in [
+                persist_upgrade_heartbeat(&id, Duration::from_secs(1)).unwrap_err(),
+                persist_runner_progress(&id, Duration::from_secs(1)).unwrap_err(),
+            ] {
+                assert!(error.message.contains("no longer running"));
+                assert_eq!(error.details["operation_id"], json!(id));
+            }
+            assert_eq!(
+                load_upgrade_operation_status(Some(&id)).unwrap().status,
+                "pass"
+            );
         });
     }
 
