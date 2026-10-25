@@ -2,6 +2,12 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.9] - 2026-10-25
+
+### Changed
+- Declare every structured sidecar the runners read
+- Parse rustfmt's current diff header in rust lint findings and annotations
+
 ## [1.37.8] - 2026-10-11
 
 ### Changed
