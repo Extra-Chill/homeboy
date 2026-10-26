@@ -212,8 +212,8 @@ Components are local checkouts used by pipeline steps. Portable package rigs can
 | `remote_url` | string | Optional source repository URL. |
 | `lab_stack` | object | Immutable repository stack for Lab materialization without a controller checkout. It declares `repository`, a `base` `{ reference, sha }`, and ordered PR entries with `{ number, head: { reference, sha }, merge_mainline? }`. |
 | `branch` | string | Expected branch hint surfaced to humans in status/spec output. |
-| `ref` | string | Explicit pinned ref for Lab dependency materialization. |
-| `default_ref` | string | Default Lab dependency ref used when `ref` is omitted. |
+| `ref` | string | PR URL/number, branch, or SHA to materialize for local `rig up` and Lab dependencies. Local `--ref <component>=<ref>` overrides it for one run. |
+| `default_ref` | string | Fallback materialization ref when `ref` is omitted. See [rig up](rig.md#up) for detached-worktree reuse and retention. |
 | `extensions` | object | Optional rig-owned scoped extension config, mainly for rig-pinned bench dispatch. |
 
 Example:

@@ -48,6 +48,7 @@ fn minimal_spec(id: &str) -> RigSpec {
     RigSpec {
         workloads: Default::default(),
         id: id.to_string(),
+        effective_component_paths: Default::default(),
         description: format!("{} fixture", id),
         components: HashMap::new(),
         services: HashMap::new(),
@@ -94,6 +95,7 @@ fn unix_symlink(target: &std::path::Path, link: &std::path::Path) {
 #[test]
 fn test_up_report_serializes_success_flag() {
     let report = UpReport {
+        component_refs: Default::default(),
         rig_id: "test".to_string(),
         run_id: None,
         pipeline: empty_pipeline("up"),
@@ -108,6 +110,7 @@ fn test_up_report_serializes_success_flag() {
 #[test]
 fn test_check_report_serializes_success_flag() {
     let report = CheckReport {
+        component_refs: Default::default(),
         rig_id: "test".to_string(),
         run_id: None,
         pipeline: empty_pipeline("check"),
@@ -121,6 +124,7 @@ fn test_check_report_serializes_success_flag() {
 #[test]
 fn test_status_report_empty_services_serializes() {
     let report = RigStatusReport {
+        component_refs: Default::default(),
         rig_id: "test".to_string(),
         description: "empty rig".to_string(),
         components: Vec::<RigComponentStatusReport>::new(),
@@ -1041,6 +1045,7 @@ fn test_run_down_cleans_state_owned_shared_paths() {
         );
         let rig = RigSpec {
             workloads: Default::default(),
+            effective_component_paths: Default::default(),
             id: "run-down-shared-path-fixture".to_string(),
             description: String::new(),
             components: HashMap::new(),
@@ -1118,6 +1123,7 @@ fn test_run_status() {
         );
         let rig = RigSpec {
             workloads: Default::default(),
+            effective_component_paths: Default::default(),
             id: "run-status-service-fixture".to_string(),
             description: "service status".to_string(),
             components: HashMap::new(),
@@ -1295,6 +1301,7 @@ fn test_snapshot_state() {
     );
     let rig = RigSpec {
         workloads: Default::default(),
+        effective_component_paths: Default::default(),
         id: "snapshot-fixture".to_string(),
         description: String::new(),
         components,

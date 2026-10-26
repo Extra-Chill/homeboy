@@ -20,6 +20,7 @@ fn test_config_root() -> std::path::PathBuf {
 
 fn rig_with(id: &str, components: HashMap<String, ComponentSpec>) -> RigSpec {
     RigSpec {
+        effective_component_paths: Default::default(),
         workloads: Default::default(),
         id: id.to_string(),
         description: String::new(),

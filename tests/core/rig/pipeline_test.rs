@@ -869,6 +869,7 @@ mod dag {
         pipeline.insert("up".to_string(), steps);
         RigSpec {
             workloads: Default::default(),
+            effective_component_paths: Default::default(),
             id: "dag-test".to_string(),
             description: String::new(),
             components,
@@ -1150,6 +1151,7 @@ mod git_steps {
 
         RigSpec {
             workloads: Default::default(),
+            effective_component_paths: Default::default(),
             id: "git-step-test".to_string(),
             description: String::new(),
             components,
@@ -1270,6 +1272,7 @@ mod extension_lifecycle {
 
         RigSpec {
             workloads: Default::default(),
+            effective_component_paths: Default::default(),
             id: "extension-step-test".to_string(),
             description: String::new(),
             components,
@@ -1324,6 +1327,16 @@ mod extension_lifecycle {
     fn test_extension_build_uses_rig_component_path_and_extension_config() {
         test_support::with_isolated_home(|home| {
             write_fixture_build_extension(home.path());
+            // This fixture writes two tiny markers; do not require the host's
+            // production build reserve (which can exceed a CI tmpfs).
+            homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
+                retention: homeboy_core::defaults::RetentionConfig {
+                    reconstructable_artifact_reserve_bytes: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("fixture retention config");
             let component_dir = tempfile::tempdir().expect("component dir");
             let component_path = component_dir.path().to_string_lossy().to_string();
             let rig = rig_with_step(
@@ -1411,6 +1424,7 @@ mod command_env {
 
         RigSpec {
             workloads: Default::default(),
+            effective_component_paths: Default::default(),
             id: "command-env-test".to_string(),
             description: String::new(),
             components: Default::default(),

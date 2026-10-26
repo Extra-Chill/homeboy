@@ -27,6 +27,7 @@ fn rig_with_patch(component_path: &str, step: PipelineStep) -> RigSpec {
     let mut pipeline = HashMap::new();
     pipeline.insert("up".to_string(), vec![step]);
     RigSpec {
+        effective_component_paths: Default::default(),
         workloads: Default::default(),
         id: "patch-test".to_string(),
         description: String::new(),

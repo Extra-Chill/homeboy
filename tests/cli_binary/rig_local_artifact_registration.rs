@@ -87,6 +87,7 @@ fn failed_nested_cli_registration_is_visible_to_runs_artifacts() {
 
 fn rig_spec(id: &str) -> RigSpec {
     RigSpec {
+        effective_component_paths: Default::default(),
         id: id.to_string(),
         description: "nested CLI artifact fixture".to_string(),
         components: HashMap::new(),

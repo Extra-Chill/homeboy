@@ -28,6 +28,10 @@ pub fn resolve_component(rig: &RigSpec, component_id: &str) -> Result<Component>
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(component_id);
 
+    if let Some(path) = rig.effective_component_paths.get(component_id) {
+        return Ok(component_from_spec(component_id, spec, path.clone(), None));
+    }
+
     let mut attempts = Vec::new();
 
     if let Some(path) = super::expand::component_path_override_from_env(&rig.id, component_id) {

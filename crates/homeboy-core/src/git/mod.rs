@@ -92,7 +92,8 @@ pub use pr_policy::{
     PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules, PrPolicyTargetRefs,
 };
 pub use pr_refresh::{
-    pr_refresh, PrRefreshCheck, PrRefreshOptions, PrRefreshOutput, PrRefreshStrategy,
+    normalize_pr_ref, pr_refresh, PrRefreshCheck, PrRefreshOptions, PrRefreshOutput,
+    PrRefreshStrategy,
 };
 pub(crate) use primitives::list_tracked_markdown_files;
 pub use primitives::{

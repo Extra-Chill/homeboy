@@ -108,6 +108,36 @@ needs to migrate to this command or core API.
 homeboy rig up studio
 ```
 
+Run a component at a PR head, branch, or SHA without changing its registered checkout:
+
+```sh
+homeboy rig up preview --ref app=https://github.com/owner/repository/pull/42
+homeboy rig up preview --ref app=42 --ref api=feature-branch
+```
+
+`--ref COMPONENT=REF` is repeatable (one override per declared component). It
+wins over the component's `ref`, then `default_ref`; without any ref the existing
+path resolution is unchanged. PR URLs and numbers fetch `refs/pull/<n>/head`
+from the base repository, so fork PR heads work without adding fork remotes.
+Spec-level refs materialize on local `up` too.
+
+Homeboy fetches the current head into a detached Git worktree under its config
+root's `worktrees/rig-refs/<repository-key>/<sha>`. An unchanged head reuses the
+worktree; a pushed head gets a new path. `${components.<id>.path}` resolves to
+that worktree for all pipeline and service expansion in this invocation. The
+installed spec and registered checkout are not rewritten. `rig up` JSON and
+`rig status` include `component_refs` with the requested/resolved ref, PR number,
+head SHA, base repository, GitHub head repository (fork included), and worktree
+path. GitHub PR resolution uses the existing `gh` authentication. When the
+selected worktree changes, previously supervised rig services are stopped before
+the `up` pipeline starts them at the new head.
+
+Retention is explicit: `rig down` stops services but retains these checkouts for
+reuse and inspection. After stopping users of a checkout, remove it with
+`git -C <registered-checkout> worktree remove <reported-worktree-path>`; Git
+refuses dirty removals unless explicitly forced. Homeboy never automatically
+prunes checkouts that may hold uncommitted build/test artifacts.
+
 Runs the `up` pipeline. Mutating rig commands acquire a resource lease first when the rig declares `resources`, so two active rig commands cannot mutate the same declared paths, ports, process patterns, or exclusive tokens at once.
 
 `rig up` also participates in resource-policy warnings. If the machine is

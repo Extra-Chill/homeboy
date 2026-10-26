@@ -923,7 +923,30 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
     let mut lab_stack_materializations = Vec::new();
     let mut component_path_env = Vec::new();
     let mut seen = HashSet::new();
-    for dependency in dependencies {
+    for mut dependency in dependencies {
+        let declared_local_checkout_root = dependency.local_checkout_root.clone();
+        if dependency.lab_stack.is_none() {
+            if let Some(reference) = dependency.pinned_ref.as_deref() {
+                let head = homeboy_core::git::run_git(
+                    Path::new(&dependency.local_checkout_root),
+                    &["rev-parse", "HEAD"],
+                    "resolve dependency head",
+                )?;
+                // Already-pinned Lab snapshots retain their declared mapping.
+                if reference != head.trim() {
+                    let materialized = homeboy_rig::ref_materialization::materialize_ref(
+                        Path::new(&dependency.local_checkout_root),
+                        reference,
+                    )?;
+                    dependency.local_checkout_root = materialized.worktree_path;
+                    dependency.remote_checkout_root = format!(
+                        "{}-{}",
+                        dependency.remote_checkout_root, materialized.head_sha
+                    );
+                    dependency.pinned_ref = Some(materialized.head_sha);
+                }
+            }
+        }
         // Always record the runner-side effective component path so a remote
         // rig check resolves `${components.<id>.path}` to the materialized path,
         // even when the checkout root is the already-synced primary workspace
@@ -953,7 +976,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         if !seen.insert(dependency.remote_checkout_root.clone()) {
             continue;
         }
-        let materialization = materialize_git_dependency(
+        let mut materialization = materialize_git_dependency(
             &runner,
             RunnerGitDependencyMaterializationOptions {
                 local_path: dependency.local_checkout_root,
@@ -964,6 +987,9 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
                 allow_dirty: allow_dirty_lab_workspace,
             },
         )?;
+        // Argument remapping follows the original controller checkout, even
+        // when the snapshot source is an immutable ref worktree.
+        materialization.local_path = declared_local_checkout_root;
         synced.push(materialization);
     }
     Ok(LabOffloadRigComponentSync {
