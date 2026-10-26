@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.6] - 2026-10-26
+
+### Fixed
+- accept a commit-pinned WP Codebox build whose provenance ref is a branch name
+
 ## [3.53.5] - 2026-10-26
 
 ### Changed
