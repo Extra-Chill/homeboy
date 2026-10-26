@@ -14,14 +14,9 @@ pub fn projects() -> Result<PathBuf> {
     Ok(projects_in_root(&homeboy()?))
 }
 
-/// Project directory path below an already-resolved config root.
-pub fn project_dir_in_root(config_root: &Path, id: &str) -> PathBuf {
-    projects_in_root(config_root).join(id)
-}
-
 /// Project directory path (e.g., ~/.config/homeboy/projects/{id}/)
 pub fn project_dir(id: &str) -> Result<PathBuf> {
-    Ok(project_dir_in_root(&homeboy()?, id))
+    Ok(projects()?.join(id))
 }
 
 /// Project config file path below an already-resolved config root.
@@ -74,13 +69,8 @@ pub fn extension_sources_in_root(config_root: &Path) -> PathBuf {
 }
 
 /// Durable source root registered for one linked extension.
-pub fn extension_source_root_in_root(config_root: &Path, id: &str) -> PathBuf {
-    extension_sources_in_root(config_root).join(id)
-}
-
-/// Durable source root registered for one linked extension.
 pub fn extension_source_root(id: &str) -> Result<PathBuf> {
-    Ok(extension_source_root_in_root(&homeboy()?, id))
+    Ok(extension_sources_in_root(&homeboy()?).join(id))
 }
 
 /// Agent runtime package directory below an already-resolved config root.
@@ -99,11 +89,6 @@ pub fn agent_runtimes() -> Result<PathBuf> {
 /// Keys directory below an already-resolved config root.
 pub fn keys_in_root(config_root: &Path) -> PathBuf {
     config_root.join("keys")
-}
-
-/// Keys directory
-pub fn keys() -> Result<PathBuf> {
-    Ok(keys_in_root(&homeboy()?))
 }
 
 /// Backups directory below an already-resolved config root.
