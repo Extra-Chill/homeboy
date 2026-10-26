@@ -1293,6 +1293,7 @@ mod committed_harvest_tests {
             let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
             outcome.status = AgentTaskOutcomeStatus::Succeeded;
             std::fs::write(workspace.join("file.txt"), "candidate\n").unwrap();
+            git(&workspace, &["commit", "-am", "initial agent candidate"]);
             harvest_candidate_commit_with_bundle(&mut outcome, &running, true).unwrap();
             git(&workspace, &["reset", "--hard", &base]);
             let plan = AgentTaskPlan::new("first-plan", vec![running.request.clone()]);
@@ -1355,6 +1356,13 @@ mod committed_harvest_tests {
             .unwrap();
             let attempt_root = PathBuf::from(request.workspace.root.as_deref().unwrap());
             std::fs::write(attempt_root.join("file.txt"), "corrected\n").unwrap();
+            git(&attempt_root, &["add", "file.txt"]);
+            git(&attempt_root, &["commit", "-m", "fix deterministic gate"]);
+            assert_eq!(
+                git(&attempt_root, &["rev-parse", "HEAD^"]),
+                outcome.candidate.as_ref().unwrap().candidate_sha
+            );
+            let corrected_tree = git(&attempt_root, &["rev-parse", "HEAD^{tree}"]);
             running.request = request;
             // The real follow-up can start from a clean derived checkout of
             // attempt 1, so its task base is the internal candidate commit.
@@ -1370,6 +1378,16 @@ mod committed_harvest_tests {
             preview.dry_run = true;
             promote(preview).expect("corrected feedback candidate is admissible");
             assert_eq!(outcome.candidate.as_ref().unwrap().base_sha, base);
+            assert_eq!(outcome.candidate.as_ref().unwrap().tree_sha, corrected_tree);
+            assert!(!git(
+                &attempt_root,
+                &[
+                    "diff",
+                    &base,
+                    &outcome.candidate.as_ref().unwrap().candidate_sha
+                ]
+            )
+            .is_empty());
             assert_eq!(
                 git(
                     &attempt_root,
