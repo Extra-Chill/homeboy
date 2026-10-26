@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.4] - 2026-10-26
+
+### Fixed
+- report failing standalone PHP smokes as failed test IDs
+
 ## [3.53.3] - 2026-10-25
 
 ### Changed
