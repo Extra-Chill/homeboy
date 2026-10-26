@@ -824,7 +824,7 @@ fn promote_candidate(
             None,
         )
     })?;
-    super::candidate_bundle::validate_destination(&path, commit)?;
+    let destination_head = super::candidate_bundle::validate_destination(&path, commit)?;
     let base_tree = git_output(
         &path,
         &["rev-parse", &format!("{}^{{tree}}", commit.base_sha)],
@@ -834,19 +834,21 @@ fn promote_candidate(
         &[
             "diff",
             "--name-only",
-            &commit.base_sha,
+            &destination_head,
             &commit.candidate_sha,
         ],
     )?
     .lines()
     .map(str::to_string)
     .collect();
+    // Finalization commits onto the destination HEAD; after a gate-fix it is
+    // an ancestor of the candidate base, never the earlier candidate commit.
     let pre_apply_verified_base = Some(AgentTaskPromotionVerifiedBase {
         base: options
             .base_ref
             .clone()
-            .unwrap_or_else(|| commit.base_sha.clone()),
-        sha: commit.base_sha.clone(),
+            .unwrap_or_else(|| destination_head.clone()),
+        sha: destination_head.clone(),
     });
     if !options.dry_run {
         capture_gate_verified_base(&path, options.base_ref.as_deref())?;

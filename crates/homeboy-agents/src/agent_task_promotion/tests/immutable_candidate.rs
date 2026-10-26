@@ -160,6 +160,94 @@ fn fresh_candidate_without_patch_promotes_provider_commits_and_dirty_state_as_on
     });
 }
 
+/// A gate-fix candidate builds on the earlier candidate, which the destination
+/// still holds uncommitted on the original base (#16453).
+#[test]
+fn gate_fix_candidate_promotes_over_the_earlier_uncommitted_candidate() {
+    fixture(|repo, first, store| {
+        // The earlier promotion left its tree in the destination, with
+        // `dirty` untracked rather than staged.
+        git(
+            repo,
+            &["read-tree", "-u", "-m", "HEAD", &first.candidate_sha],
+        );
+        git(repo, &["rm", "--cached", "--quiet", "dirty"]);
+        // The gate fix edits `provider` and deletes `dirty`.
+        let scratch = tempfile::tempdir().unwrap();
+        let index = scratch.path().join("index");
+        let with_index = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .env("GIT_INDEX_FILE", &index)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        with_index(&["read-tree", &first.candidate_sha]);
+        with_index(&["rm", "--cached", "--quiet", "dirty"]);
+        let blob = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(b"fixed\n")?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        let blob = String::from_utf8(blob.stdout).unwrap().trim().to_string();
+        with_index(&[
+            "update-index",
+            "--cacheinfo",
+            &format!("100644,{blob},provider"),
+        ]);
+        let tree_sha = with_index(&["write-tree"]);
+        let candidate_sha = with_index(&[
+            "commit-tree",
+            &tree_sha,
+            "-p",
+            &first.candidate_sha,
+            "-m",
+            "gate fix",
+        ]);
+        let second = AgentTaskCandidate {
+            base_sha: first.candidate_sha.clone(),
+            candidate_sha,
+            tree_sha,
+        };
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(repo.into()),
+            ..Default::default()
+        };
+        let report = promote_with_provider_and_checkpoint_in_observation_store(
+            request(repo, Some(second.clone())),
+            &mut provider,
+            &mut |_| Ok(()),
+            store,
+        )
+        .unwrap();
+        assert_eq!(
+            report.status,
+            super::super::AgentTaskPromotionStatus::Applied
+        );
+        assert_eq!(git_head(repo, "HEAD"), first.base_sha);
+        assert_eq!(
+            crate::agent_task_candidate_tree::workspace_tree(repo).unwrap(),
+            second.tree_sha
+        );
+        assert!(!repo.join("dirty").exists());
+        assert_eq!(report.changed_files, vec!["provider"]);
+        assert_eq!(
+            report.verified_base.as_ref().map(|base| base.sha.as_str()),
+            Some(first.base_sha.as_str())
+        );
+    });
+}
+
 #[test]
 fn moved_destination_is_a_typed_error_and_never_materializes() {
     fixture(|repo, candidate, store| {

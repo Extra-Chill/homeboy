@@ -112,31 +112,62 @@ pub fn verify_candidate_ref(
     Ok(())
 }
 
-pub(crate) fn validate_destination(repo: &Path, candidate: &AgentTaskCandidate) -> Result<()> {
+/// Verify the destination holds exactly the candidate's base and return the
+/// destination HEAD the promoted change set is measured from.
+///
+/// The destination is either clean at the base commit, or, after a gate-fix
+/// attempt, still holds the earlier candidate that the new candidate builds
+/// on: HEAD is an ancestor of that base and the working tree equals its tree,
+/// uncommitted (#16453). Any other state is a moved destination.
+pub(crate) fn validate_destination(repo: &Path, candidate: &AgentTaskCandidate) -> Result<String> {
     super::validate_candidate_commit(repo, candidate)?;
     let head = git(repo, &["rev-parse", "HEAD"])?;
-    if head != candidate.base_sha {
+    if head == candidate.base_sha {
+        if !git(repo, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "candidate destination must be clean",
+                None,
+                None,
+            ));
+        }
+        return Ok(head);
+    }
+    let holds_base = git(
+        repo,
+        &["merge-base", "--is-ancestor", &head, &candidate.base_sha],
+    )
+    .is_ok()
+        && crate::agent_task_candidate_tree::workspace_tree(repo)?
+            == git(
+                repo,
+                &["rev-parse", &format!("{}^{{tree}}", candidate.base_sha)],
+            )?;
+    if !holds_base {
         return Err(super::promote::CandidateDestinationMoved {
             expected: candidate.base_sha.clone(),
             actual: head,
         }
         .into());
     }
-    if !git(repo, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "to_worktree",
-            "candidate destination must be clean",
-            None,
-            None,
-        ));
-    }
-    Ok(())
+    Ok(head)
 }
+/// Replace the destination's index and working tree with the candidate tree,
+/// leaving HEAD where it is.
 pub fn materialize_candidate_tree(repo: &Path, candidate: &AgentTaskCandidate) -> Result<()> {
     validate_destination(repo, candidate)?;
+    // Track exactly the base tree first (a no-op on a clean base checkout),
+    // so the two-tree merge below also removes files the base held untracked.
+    git(repo, &["read-tree", "--reset", "-u", &candidate.base_sha])?;
     git(
         repo,
-        &["read-tree", "-u", "-m", "HEAD", &candidate.candidate_sha],
+        &[
+            "read-tree",
+            "-u",
+            "-m",
+            &candidate.base_sha,
+            &candidate.candidate_sha,
+        ],
     )?;
     Ok(())
 }
