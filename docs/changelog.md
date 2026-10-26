@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.1] - 2026-10-26
+
+### Changed
+- Retry a Cook-owned attempt through its Cook dispatch
+- Bind the injected Cook lint gate to the Cook's placement
+- Collapse unused lifecycle_ops twins
+- rig up: materialize a component at a ref locally, including a PR URL
+
 ## [0.434.0] - 2026-10-26
 
 ### Added
