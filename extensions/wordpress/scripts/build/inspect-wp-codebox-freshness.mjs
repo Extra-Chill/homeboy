@@ -92,7 +92,7 @@ function inspect() {
   if (!expected.ref) {
     return rejected('expected_source_ref_unavailable', observed);
   }
-  if (observed.ref !== expected.ref) {
+  if (observed.ref !== expected.ref && !isCommitPinnedRef(expected, observed)) {
     return rejected('source_ref_mismatch', observed);
   }
   if (expected.commit && observed.commit !== expected.commit) {
@@ -124,6 +124,20 @@ function isBehindUpstreamAdvisory(source, provenance) {
   if (ahead !== 0) return false;
   const evidence = source.details?.git?.evidence;
   return evidence !== undefined && evidence !== 'unavailable';
+}
+
+/**
+ * A managed source ref may be pinned to a commit SHA rather than a branch.
+ * The build then records the checkout's branch name (e.g. `main`) as its git
+ * ref, so the ref strings never match even though the build is exactly the
+ * pinned commit. Treat a full-SHA ref as satisfied when the expected commit is
+ * that SHA and the build's immutable provenance commit equals it.
+ */
+function isCommitPinnedRef(expectedIdentity, observedIdentity) {
+  const ref = String(expectedIdentity.ref || '');
+  if (!/^[0-9a-f]{40}$/i.test(ref)) return false;
+  if (!expectedIdentity.commit || expectedIdentity.commit.toLowerCase() !== ref.toLowerCase()) return false;
+  return typeof observedIdentity.commit === 'string' && observedIdentity.commit.toLowerCase() === ref.toLowerCase();
 }
 
 function accepted(observed) {

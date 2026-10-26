@@ -101,4 +101,15 @@ expect_reject behind-upstream-no-evidence provenance_unavailable --candidate man
 DOCTOR_OUTPUT="$(doctor_json warning 0.23.3 fresh-dist main fresh-commit local-tracking-ref 2 1)"
 expect_reject behind-and-ahead provenance_unavailable --candidate managed --mode source --expected-ref main --expected-commit fresh-commit
 
+# Managed source pinned to a commit SHA: the build records its branch name as
+# the git ref, so accept on the exact provenance commit instead of the ref name.
+PIN=3ba4c07409ed60812cd87b1c223881425cff0f48
+OTHER=1111111111111111111111111111111111111111
+DOCTOR_OUTPUT="$(doctor_json ok 0.23.3 fresh-dist main "${PIN}")"
+expect_accept sha-pinned-ref --candidate managed --mode source --expected-ref "${PIN}" --expected-commit "${PIN}"
+expect_reject sha-pinned-wrong-commit source_ref_mismatch --candidate managed --mode source --expected-ref "${OTHER}" --expected-commit "${OTHER}"
+expect_reject sha-ref-without-commit source_ref_mismatch --candidate managed --mode source --expected-ref "${PIN}"
+DOCTOR_OUTPUT="$(doctor_json ok 0.23.3 fresh-dist feature "${PIN}")"
+expect_reject branch-ref-mismatch source_ref_mismatch --candidate managed --mode source --expected-ref main --expected-commit "${PIN}"
+
 echo "WP Codebox freshness inspector smoke passed"
