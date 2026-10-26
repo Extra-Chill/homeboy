@@ -562,14 +562,6 @@ fn require_run_reads_terminal_lab_review_alias_while_runner_probe_is_stalled() {
             unreachable!("local lookup must not hydrate artifacts")
         }
 
-        fn runner_job_cancel(
-            &self,
-            _runner_id: &str,
-            _job_id: &str,
-        ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
-            unreachable!("local lookup must not mutate runner jobs")
-        }
-
         fn refresh_run(
             &self,
             _: &ObservationStore,

@@ -2824,3 +2824,42 @@ fn sample_finding(run_id: &str, tool: &str, rule: &str, file: &str) -> NewFindin
         metadata_json: serde_json::json!({ "source": "http-api-test" }),
     }
 }
+
+#[test]
+fn runner_job_cancel_records_who_asked() {
+    let store = JobStore::default();
+    let cancel = |body: Option<serde_json::Value>| {
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        let response = http_api::handle_with_jobs(
+            HttpApiRequest {
+                method: HttpMethod::Post,
+                path: format!("/jobs/{}/cancel", job.id),
+                body,
+            },
+            &store,
+        )
+        .expect("cancel job");
+        assert_eq!(response.body["job"]["status"], "cancelled");
+        store
+            .events(job.id)
+            .expect("events")
+            .into_iter()
+            .rev()
+            .find_map(|event| event.message)
+            .expect("cancelled event message")
+    };
+
+    let request =
+        crate::api_jobs::RunnerJobCancelRequest::from_controller("gate observation failed");
+    let message = cancel(Some(serde_json::to_value(&request).expect("request body")));
+    assert!(
+        message.starts_with("cancel requested via HTTP API: gate observation failed (controller "),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("pid {}", std::process::id())),
+        "{message}"
+    );
+    assert_eq!(cancel(None), "cancel requested via HTTP API");
+}

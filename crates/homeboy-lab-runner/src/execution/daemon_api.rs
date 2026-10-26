@@ -101,7 +101,7 @@ pub(crate) fn daemon_api_post_for_session(session: &RunnerSession, path: &str) -
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;
-    daemon_post(&client, local_url, path)
+    daemon_post(&client, local_url, path, &json!({}))
 }
 
 /// Total deadline for small control-plane daemon calls (status, capabilities,
@@ -199,7 +199,7 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
     if let Some(local_url) = session.local_url.as_deref() {
         return match method {
             "GET" => daemon_get(&client, local_url, path),
-            "POST" => daemon_post(&client, local_url, path),
+            "POST" => daemon_post(&client, local_url, path, &json!({})),
             _ => Err(unsupported_daemon_api_method(method)),
         };
     }
@@ -331,6 +331,7 @@ mod tests {
             &client,
             &format!("http://{address}"),
             "/runner/staging/submit",
+            &json!({}),
         )
         .expect_err("typed daemon error");
         server.join().expect("daemon fixture server");
@@ -344,12 +345,17 @@ mod tests {
     }
 }
 
-pub(super) fn daemon_post(client: &Client, local_url: &str, path: &str) -> Result<Value> {
+pub(super) fn daemon_post(
+    client: &Client,
+    local_url: &str,
+    path: &str,
+    payload: &Value,
+) -> Result<Value> {
     let response = daemon_post_json_text(
         client,
         local_url,
         path,
-        &json!({}),
+        payload,
         DaemonPostOptions::default(),
     )?;
     let status_code = response.status_code;

@@ -2815,16 +2815,6 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
             fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
                 Ok(Value::Null)
             }
-            fn runner_job_cancel(
-                &self,
-                _: &str,
-                _: &str,
-            ) -> Result<(
-                homeboy_core::api_jobs::Job,
-                Vec<homeboy_core::api_jobs::JobEvent>,
-            )> {
-                unreachable!()
-            }
             fn mirrored_runner_job_identity(
                 &self,
                 _: &homeboy_core::observation::RunRecord,

@@ -156,7 +156,7 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
     }
 
     fn cancel_drain_job(&self, runner: &str, job: &str) -> Result<()> {
-        crate::execution::daemon_api_post(runner, &format!("/jobs/{job}/cancel"))?;
+        crate::execution::runner_job_cancel(runner, job, "upgrade --cancel-active drain")?;
         Ok(())
     }
 

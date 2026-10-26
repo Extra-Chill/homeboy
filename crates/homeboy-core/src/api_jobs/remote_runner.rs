@@ -39,6 +39,51 @@ const MAX_COMMAND_ASSETS_BASE64_BYTES: usize = 4_200_000;
 
 pub use homeboy_runner_contract::{JobArtifactMetadata, RunnerJobLifecycleMetadata};
 
+/// Message the runner records for a cancel whose caller sent no reason.
+const RUNNER_JOB_CANCEL_DEFAULT_MESSAGE: &str = "cancel requested via HTTP API";
+const MAX_RUNNER_JOB_CANCEL_REASON_CHARS: usize = 512;
+
+/// Body of `POST /jobs/:id/cancel`. Several controller paths cancel runner
+/// jobs; the reason names the path and the controller host so the job's
+/// `cancelled` event says who stopped it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerJobCancelRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl RunnerJobCancelRequest {
+    /// A cancel issued by this controller process for `cause`.
+    pub fn from_controller(cause: &str) -> Self {
+        let host = crate::process::host_identity().unwrap_or_else(|| "unknown-host".to_string());
+        Self {
+            reason: Some(format!(
+                "{cause} (controller {host}, pid {})",
+                std::process::id()
+            )),
+        }
+    }
+
+    /// The message recorded on the cancelled job.
+    pub fn event_message(&self) -> String {
+        match self
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+        {
+            Some(reason) => format!(
+                "{RUNNER_JOB_CANCEL_DEFAULT_MESSAGE}: {}",
+                reason
+                    .chars()
+                    .take(MAX_RUNNER_JOB_CANCEL_REASON_CHARS)
+                    .collect::<String>()
+            ),
+            None => RUNNER_JOB_CANCEL_DEFAULT_MESSAGE.to_string(),
+        }
+    }
+}
+
 /// Caller-owned identity required to cancel one daemon-local runner projection.
 /// This is deliberately distinct from the operator-facing job cancellation API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
