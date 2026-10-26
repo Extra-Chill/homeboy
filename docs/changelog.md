@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.37] - 2026-10-26
+
+### Changed
+- Bound runner eligibility waits with backoff and refusal reasons
+
 ## [0.433.36] - 2026-10-26
 
 ### Changed
