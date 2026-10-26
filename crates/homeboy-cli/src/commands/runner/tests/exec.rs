@@ -64,8 +64,8 @@ fn runner_exec_generates_a_persisted_run_for_declared_outputs() {
     });
 }
 use homeboy::runner::runners::{
-    self as runner, promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts_in_store,
-    RunnerExecMode, RunnerExecOutput,
+    self as runner, promote_runner_exec_artifact_dirs_in_store,
+    promote_runner_exec_artifacts_in_store, RunnerExecMode, RunnerExecOutput,
 };
 
 #[test]
@@ -1240,7 +1240,9 @@ fn runner_exec_promotes_artifact_dir_children_to_run_store() {
         .expect("generic runner-exec run");
 
         let promoted =
-            promote_runner_exec_artifact_dirs(&run.id, &output, &["outputs".to_string()])
+            promote_runner_exec_artifact_dirs_in_store(
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store"),
+                &run.id, &output, &["outputs".to_string()])
                 .expect("promote artifact dir children");
 
         assert_eq!(promoted.len(), 3);
@@ -1442,7 +1444,9 @@ fn runner_exec_promotes_artifact_dir_typed_schema_children() {
         .expect("generic runner-exec run");
 
         let promoted =
-            promote_runner_exec_artifact_dirs(&run.id, &output, &["outputs".to_string()])
+            promote_runner_exec_artifact_dirs_in_store(
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store"),
+                &run.id, &output, &["outputs".to_string()])
                 .expect("promote artifact dir children");
 
         assert_eq!(promoted.len(), 3);

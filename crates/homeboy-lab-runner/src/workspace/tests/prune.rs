@@ -71,25 +71,22 @@ fn rooted_local_runner(roots: &homeboy_core::paths::PathRoots, id: &str, workspa
 
 #[test]
 fn prune_workspaces_previews_orphans_without_deleting_by_default() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("orphan-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(&source).expect("source dir");
         fs::write(source.join("file.txt"), "hello\n").expect("source file");
         rooted_local_runner(&roots, "lab-local-prune-preview", runner_root.path());
-        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (synced, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-preview",
             sync_options(source.display().to_string()),
         )
         .expect("sync workspace");
         fs::remove_dir_all(&source).expect("remove source");
 
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
             "lab-local-prune-preview",
             RunnerWorkspacePruneOptions {
                 apply: false,
@@ -118,90 +115,87 @@ fn prune_workspaces_previews_orphans_without_deleting_by_default() {
             "stale_materialized_workspace_lifecycle"
         );
         assert!(Path::new(&synced.remote_path).exists());
-    }
+    });
 }
 
 #[test]
 fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        let source_parent = tempfile::tempdir().expect("source parent");
-        let orphan_source = source_parent.path().join("orphan-source");
-        let live_source = source_parent.path().join("live-source");
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        fs::create_dir_all(&orphan_source).expect("orphan source dir");
-        fs::create_dir_all(&live_source).expect("live source dir");
-        fs::write(orphan_source.join("file.txt"), "orphan\n").expect("orphan file");
-        fs::write(live_source.join("file.txt"), "live\n").expect("live file");
-        rooted_local_runner(&roots, "lab-local-prune-apply", runner_root.path());
-        let (orphan, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
-            "lab-local-prune-apply",
-            sync_options(orphan_source.display().to_string()),
-        )
-        .expect("sync orphan workspace");
-        let (live, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
-            "lab-local-prune-apply",
-            sync_options(live_source.display().to_string()),
-        )
-        .expect("sync live workspace");
-        let unmanaged = runner_root
-            .path()
-            .join("_lab_workspaces")
-            .join("unmanaged-old-workspace");
-        fs::create_dir_all(&unmanaged).expect("unmanaged workspace");
-        fs::write(unmanaged.join("file.txt"), "do not delete\n").expect("unmanaged file");
-        fs::remove_dir_all(&orphan_source).expect("remove orphan source");
+    crate::test_support::with_isolated_home(|_| {
+        {
+            let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+            let source_parent = tempfile::tempdir().expect("source parent");
+            let orphan_source = source_parent.path().join("orphan-source");
+            let live_source = source_parent.path().join("live-source");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            fs::create_dir_all(&orphan_source).expect("orphan source dir");
+            fs::create_dir_all(&live_source).expect("live source dir");
+            fs::write(orphan_source.join("file.txt"), "orphan\n").expect("orphan file");
+            fs::write(live_source.join("file.txt"), "live\n").expect("live file");
+            rooted_local_runner(&roots, "lab-local-prune-apply", runner_root.path());
+            let (orphan, _) = crate::workspace::sync::sync_workspace(
+                "lab-local-prune-apply",
+                sync_options(orphan_source.display().to_string()),
+            )
+            .expect("sync orphan workspace");
+            let (live, _) = crate::workspace::sync::sync_workspace(
+                "lab-local-prune-apply",
+                sync_options(live_source.display().to_string()),
+            )
+            .expect("sync live workspace");
+            let unmanaged = runner_root
+                .path()
+                .join("_lab_workspaces")
+                .join("unmanaged-old-workspace");
+            fs::create_dir_all(&unmanaged).expect("unmanaged workspace");
+            fs::write(unmanaged.join("file.txt"), "do not delete\n").expect("unmanaged file");
+            fs::remove_dir_all(&orphan_source).expect("remove orphan source");
 
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
-            "lab-local-prune-apply",
-            RunnerWorkspacePruneOptions {
-                apply: true,
-                min_age_hours: 0,
-                limit: 10,
-                passes: 1,
-                cursor: None,
-                ..RunnerWorkspacePruneOptions::default()
-            },
-        )
-        .expect("prune apply");
+            let (output, exit_code) = crate::workspace::sync::prune_workspaces(
+                "lab-local-prune-apply",
+                RunnerWorkspacePruneOptions {
+                    apply: true,
+                    min_age_hours: 0,
+                    limit: 10,
+                    passes: 1,
+                    cursor: None,
+                    ..RunnerWorkspacePruneOptions::default()
+                },
+            )
+            .expect("prune apply");
 
-        assert_eq!(exit_code, 0);
-        assert!(!output.dry_run);
-        assert_eq!(output.removed.len(), 2, "{}", prune_diagnosis(&output));
-        assert_eq!(output.total_candidate_count, 2);
-        assert!(output.total_candidate_bytes >= output.total_removed_bytes);
-        assert_eq!(output.remaining_candidate_count, 0);
-        // The metadata-free directory is reported, not deleted, and does not
-        // keep the drain open: rerunning cannot prove its ownership.
-        assert!(!output.has_more);
-        assert_eq!(output.skipped_unknown_count, 1);
-        assert_eq!(
-            output.skipped[0].remote_path,
-            unmanaged.display().to_string()
-        );
-        assert!(output.skipped[0]
-            .reason
-            .contains("workspace_metadata_missing"));
-        assert!(output
-            .removed
-            .iter()
-            .any(|entry| entry.remote_path == orphan.remote_path));
-        assert!(!Path::new(&orphan.remote_path).exists());
-        assert!(!Path::new(&live.remote_path).exists());
-        assert!(unmanaged.exists());
-    }
+            assert_eq!(exit_code, 0);
+            assert!(!output.dry_run);
+            assert_eq!(output.removed.len(), 2, "{}", prune_diagnosis(&output));
+            assert_eq!(output.total_candidate_count, 2);
+            assert!(output.total_candidate_bytes >= output.total_removed_bytes);
+            assert_eq!(output.remaining_candidate_count, 0);
+            // The metadata-free directory is reported, not deleted, and does not
+            // keep the drain open: rerunning cannot prove its ownership.
+            assert!(!output.has_more);
+            assert_eq!(output.skipped_unknown_count, 1);
+            assert_eq!(
+                output.skipped[0].remote_path,
+                unmanaged.display().to_string()
+            );
+            assert!(output.skipped[0]
+                .reason
+                .contains("workspace_metadata_missing"));
+            assert!(output
+                .removed
+                .iter()
+                .any(|entry| entry.remote_path == orphan.remote_path));
+            assert!(!Path::new(&orphan.remote_path).exists());
+            assert!(!Path::new(&live.remote_path).exists());
+            assert!(unmanaged.exists());
+        }
+    });
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspace = runner_root.path().join("_lab_workspaces/process-owned");
         write_orphan_workspace(&workspace);
@@ -214,8 +208,7 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
             .expect("hold workspace cwd");
 
         for apply in [false, true] {
-            let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
-                &roots,
+            let (output, exit_code) = crate::workspace::sync::prune_workspaces(
                 "lab-local-prune-process-owned",
                 RunnerWorkspacePruneOptions {
                     apply,
@@ -234,14 +227,13 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
         }
         child.kill().expect("stop held process");
         child.wait().expect("reap held process");
-    }
+    });
 }
 
 #[test]
 fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspace = runner_root.path().join("_lab_workspaces/active-lease");
         write_orphan_workspace(&workspace);
@@ -268,8 +260,7 @@ fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
         fs::write(&metadata_path, metadata.to_string()).expect("write metadata");
         rooted_local_runner(&roots, "lab-local-prune-active-lease", runner_root.path());
 
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
             "lab-local-prune-active-lease",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -293,7 +284,7 @@ fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
         assert_eq!(output.withheld_by_liveness_reason[0].workspace_count, 1);
         assert!(output.withheld_by_liveness_reason[0].bytes > 0);
         assert!(workspace.exists());
-    }
+    });
 }
 
 #[test]
@@ -688,17 +679,15 @@ fn absent_job_error() -> homeboy_core::Error {
 
 #[test]
 fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("live-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(&source).expect("source dir");
         fs::write(source.join("file.txt"), "live\n").expect("source file");
         rooted_local_runner(&roots, "lab-local-prune-ttl", runner_root.path());
-        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (synced, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-ttl",
             sync_options(source.display().to_string()),
         )
@@ -711,8 +700,7 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
         metadata["resource_lifecycle"]["ttl"] = serde_json::json!("2020-01-01T00:00:00Z");
         fs::write(&metadata_path, metadata.to_string()).expect("write metadata");
 
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
             "lab-local-prune-ttl",
             RunnerWorkspacePruneOptions {
                 apply: false,
@@ -731,29 +719,26 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
         assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
         assert!(Path::new(&synced.remote_path).exists());
         assert!(source.exists());
-    }
+    });
 }
 
 #[test]
 fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("live-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(&source).expect("source dir");
         fs::write(source.join("file.txt"), "live\n").expect("source file");
         rooted_local_runner(&roots, "lab-local-prune-materialized", runner_root.path());
-        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (synced, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-materialized",
             sync_options(source.display().to_string()),
         )
         .expect("sync workspace");
 
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
             "lab-local-prune-materialized",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -774,14 +759,13 @@ fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
         );
         assert!(!Path::new(&synced.remote_path).exists());
         assert!(source.exists());
-    }
+    });
 }
 
 #[test]
 fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source_parent = tempfile::tempdir().expect("source parent");
         let source = source_parent.path().join("removed-source");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -792,16 +776,14 @@ fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing(
             "lab-local-prune-materialized-missing",
             runner_root.path(),
         );
-        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (synced, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-materialized-missing",
             sync_options(source.display().to_string()),
         )
         .expect("sync workspace");
         fs::remove_dir_all(&source).expect("remove source");
 
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
             "lab-local-prune-materialized-missing",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -821,7 +803,7 @@ fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing(
             "stale_materialized_workspace_lifecycle"
         );
         assert!(!Path::new(&synced.remote_path).exists());
-    }
+    });
 }
 
 #[test]
@@ -980,9 +962,8 @@ fn uncertain_handoff_disarms_ttl_pruning() {
 
 #[test]
 fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspace = runner_root
             .path()
@@ -1008,8 +989,7 @@ fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
         .expect("write metadata");
         rooted_local_runner(&roots, "lab-local-prune-odd-preview", runner_root.path());
 
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
             "lab-local-prune-odd-preview",
             RunnerWorkspacePruneOptions {
                 apply: false,
@@ -1035,14 +1015,13 @@ fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
         assert_eq!(output.candidates[0].reason, "source_path_missing");
         assert!(workspace.exists());
         assert!(output.removed.is_empty());
-    }
+    });
 }
 
 #[test]
 fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source_parent = tempfile::tempdir().expect("source parent");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let source_a = source_parent.path().join("orphan-source-a");
@@ -1052,14 +1031,12 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
         fs::write(source_a.join("file.txt"), "a\n").expect("source a file");
         fs::write(source_b.join("file.txt"), "larger b\n").expect("source b file");
         rooted_local_runner(&roots, "lab-local-prune-limited", runner_root.path());
-        crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        crate::workspace::sync::sync_workspace(
             "lab-local-prune-limited",
             sync_options(source_a.display().to_string()),
         )
         .expect("sync source a");
-        crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        crate::workspace::sync::sync_workspace(
             "lab-local-prune-limited",
             sync_options(source_b.display().to_string()),
         )
@@ -1067,8 +1044,7 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
         fs::remove_dir_all(&source_a).expect("remove source a");
         fs::remove_dir_all(&source_b).expect("remove source b");
 
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
             "lab-local-prune-limited",
             RunnerWorkspacePruneOptions {
                 apply: false,
@@ -1099,14 +1075,13 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
             .as_deref()
             .is_some_and(|command| command.contains(&format!("--cursor {cursor}"))));
         assert!(output.drain_command.contains(&format!("--cursor {cursor}")));
-    }
+    });
 }
 
 #[test]
 fn prune_workspaces_apply_passes_drain_until_empty() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source_parent = tempfile::tempdir().expect("source parent");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let source_a = source_parent.path().join("drain-source-a");
@@ -1116,14 +1091,12 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
         fs::write(source_a.join("file.txt"), "a\n").expect("source a file");
         fs::write(source_b.join("file.txt"), "b\n").expect("source b file");
         rooted_local_runner(&roots, "lab-local-prune-drain", runner_root.path());
-        let (workspace_a, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (workspace_a, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-drain",
             sync_options(source_a.display().to_string()),
         )
         .expect("sync source a");
-        let (workspace_b, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (workspace_b, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-drain",
             sync_options(source_b.display().to_string()),
         )
@@ -1131,8 +1104,7 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
         fs::remove_dir_all(&source_a).expect("remove source a");
         fs::remove_dir_all(&source_b).expect("remove source b");
 
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
             "lab-local-prune-drain",
             RunnerWorkspacePruneOptions {
                 apply: true,
@@ -1156,122 +1128,121 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
         assert!(output.next_command.is_none());
         assert!(!Path::new(&workspace_a.remote_path).exists());
         assert!(!Path::new(&workspace_b.remote_path).exists());
-    }
+    });
 }
 
 #[test]
 fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        const REMOVABLE_COUNT: usize = 23;
-        const WORKSPACE_COUNT: usize = REMOVABLE_COUNT + 2;
-        let runner_root = tempfile::tempdir().expect("runner root");
-        let workspaces_root = runner_root.path().join("_lab_workspaces");
-        for index in 0..REMOVABLE_COUNT {
-            write_orphan_workspace(&workspaces_root.join(format!("removable-{index:02}")));
+    crate::test_support::with_isolated_home(|_| {
+        {
+            let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+            const REMOVABLE_COUNT: usize = 23;
+            const WORKSPACE_COUNT: usize = REMOVABLE_COUNT + 2;
+            let runner_root = tempfile::tempdir().expect("runner root");
+            let workspaces_root = runner_root.path().join("_lab_workspaces");
+            for index in 0..REMOVABLE_COUNT {
+                write_orphan_workspace(&workspaces_root.join(format!("removable-{index:02}")));
+            }
+            let active = workspaces_root.join("active-process");
+            write_orphan_workspace(&active);
+            let unknown = workspaces_root.join("unknown-authority");
+            write_orphan_workspace(&unknown);
+            let metadata_path = workspace_metadata_file(&unknown);
+            let mut metadata: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
+                    .expect("metadata JSON");
+            metadata["run_id"] = serde_json::json!("authority-unavailable");
+            metadata["resource_lifecycle"] = serde_json::json!({
+                "owner": "runner.workspace",
+                "run_id": "authority-unavailable",
+                "runner_id": null,
+                "path": unknown.display().to_string(),
+                "root_bound": workspaces_root.display().to_string(),
+                "kind": "runner_workspace",
+                "ttl": null,
+                "status": "active",
+                "cleanup_policy": "delete_on_success",
+                "evidence_retention": "metadata",
+                "cleanup_intent": "dry_run",
+                "cleanup_command": null,
+            });
+            fs::write(&metadata_path, metadata.to_string()).expect("write unknown metadata");
+            rooted_local_runner(&roots, "lab-local-prune-convergence", runner_root.path());
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg("sleep 30")
+                .current_dir(&active)
+                .spawn()
+                .expect("hold active workspace cwd");
+
+            let (interrupted, _) = crate::workspace::sync::prune_workspaces(
+                "lab-local-prune-convergence",
+                RunnerWorkspacePruneOptions {
+                    apply: true,
+                    min_age_hours: 0,
+                    limit: 1,
+                    passes: 7,
+                    converge: true,
+                    ..RunnerWorkspacePruneOptions::default()
+                },
+            )
+            .expect("bounded convergence");
+            assert_eq!(interrupted.skipped_live_count, 1);
+            let interrupted = interrupted.convergence.expect("convergence evidence");
+            assert_eq!(interrupted.pass_count, 7);
+            assert_eq!(interrupted.terminal_reason, "max_passes");
+            assert!(interrupted.resume_command.is_some());
+            assert!(Path::new(&interrupted.receipt_path).is_file());
+            assert_eq!(interrupted.cursor_history.len(), interrupted.pass_count * 2);
+
+            let (resumed, _) = crate::workspace::sync::prune_workspaces(
+                "lab-local-prune-convergence",
+                RunnerWorkspacePruneOptions {
+                    apply: true,
+                    min_age_hours: 0,
+                    limit: 1,
+                    passes: 30,
+                    converge: true,
+                    resume: true,
+                    ..RunnerWorkspacePruneOptions::default()
+                },
+            )
+            .expect("resume convergence");
+            assert_eq!(resumed.skipped_unknown_count, 1);
+            let resumed = resumed.convergence.expect("resumed convergence evidence");
+            // `limit` bounds candidates, so withheld workspaces never end a pass:
+            // one pass per removable workspace plus the pass that reaches the end.
+            assert_eq!(resumed.pass_count, REMOVABLE_COUNT + 1);
+            // Each retained workspace also carries its `-homeboy-state` sibling,
+            // inventoried as owned by its checkout; removed workspaces take their
+            // sibling with them before the scan reaches it.
+            assert_eq!(resumed.inspected_count, WORKSPACE_COUNT + 2);
+            assert_eq!(resumed.applied_count, REMOVABLE_COUNT);
+            assert_eq!(resumed.skipped_count, 2);
+            assert_eq!(resumed.terminal_reason, "scan_complete");
+            assert!(resumed.resume_command.is_none());
+            assert_eq!(resumed.cursor_history.len(), resumed.pass_count * 2);
+            assert_eq!(
+                resumed.verified_reclaimed_bytes,
+                resumed
+                    .page_receipts
+                    .iter()
+                    .map(|receipt| receipt.reclaimed_bytes)
+                    .sum::<u64>()
+            );
+            assert!(resumed.verified_reclaimed_bytes > 0);
+            assert!(active.exists());
+            assert!(unknown.exists());
+            assert_eq!(
+                fs::read_dir(workspaces_root)
+                    .expect("remaining workspaces")
+                    .count(),
+                4
+            );
+            child.kill().expect("stop active workspace holder");
+            child.wait().expect("reap active workspace holder");
         }
-        let active = workspaces_root.join("active-process");
-        write_orphan_workspace(&active);
-        let unknown = workspaces_root.join("unknown-authority");
-        write_orphan_workspace(&unknown);
-        let metadata_path = workspace_metadata_file(&unknown);
-        let mut metadata: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
-                .expect("metadata JSON");
-        metadata["run_id"] = serde_json::json!("authority-unavailable");
-        metadata["resource_lifecycle"] = serde_json::json!({
-            "owner": "runner.workspace",
-            "run_id": "authority-unavailable",
-            "runner_id": null,
-            "path": unknown.display().to_string(),
-            "root_bound": workspaces_root.display().to_string(),
-            "kind": "runner_workspace",
-            "ttl": null,
-            "status": "active",
-            "cleanup_policy": "delete_on_success",
-            "evidence_retention": "metadata",
-            "cleanup_intent": "dry_run",
-            "cleanup_command": null,
-        });
-        fs::write(&metadata_path, metadata.to_string()).expect("write unknown metadata");
-        rooted_local_runner(&roots, "lab-local-prune-convergence", runner_root.path());
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("sleep 30")
-            .current_dir(&active)
-            .spawn()
-            .expect("hold active workspace cwd");
-
-        let (interrupted, _) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
-            "lab-local-prune-convergence",
-            RunnerWorkspacePruneOptions {
-                apply: true,
-                min_age_hours: 0,
-                limit: 1,
-                passes: 7,
-                converge: true,
-                ..RunnerWorkspacePruneOptions::default()
-            },
-        )
-        .expect("bounded convergence");
-        assert_eq!(interrupted.skipped_live_count, 1);
-        let interrupted = interrupted.convergence.expect("convergence evidence");
-        assert_eq!(interrupted.pass_count, 7);
-        assert_eq!(interrupted.terminal_reason, "max_passes");
-        assert!(interrupted.resume_command.is_some());
-        assert!(Path::new(&interrupted.receipt_path).is_file());
-        assert_eq!(interrupted.cursor_history.len(), interrupted.pass_count * 2);
-
-        let (resumed, _) = crate::workspace::sync::prune_workspaces_in_roots(
-            &roots,
-            "lab-local-prune-convergence",
-            RunnerWorkspacePruneOptions {
-                apply: true,
-                min_age_hours: 0,
-                limit: 1,
-                passes: 30,
-                converge: true,
-                resume: true,
-                ..RunnerWorkspacePruneOptions::default()
-            },
-        )
-        .expect("resume convergence");
-        assert_eq!(resumed.skipped_unknown_count, 1);
-        let resumed = resumed.convergence.expect("resumed convergence evidence");
-        // `limit` bounds candidates, so withheld workspaces never end a pass:
-        // one pass per removable workspace plus the pass that reaches the end.
-        assert_eq!(resumed.pass_count, REMOVABLE_COUNT + 1);
-        // Each retained workspace also carries its `-homeboy-state` sibling,
-        // inventoried as owned by its checkout; removed workspaces take their
-        // sibling with them before the scan reaches it.
-        assert_eq!(resumed.inspected_count, WORKSPACE_COUNT + 2);
-        assert_eq!(resumed.applied_count, REMOVABLE_COUNT);
-        assert_eq!(resumed.skipped_count, 2);
-        assert_eq!(resumed.terminal_reason, "scan_complete");
-        assert!(resumed.resume_command.is_none());
-        assert_eq!(resumed.cursor_history.len(), resumed.pass_count * 2);
-        assert_eq!(
-            resumed.verified_reclaimed_bytes,
-            resumed
-                .page_receipts
-                .iter()
-                .map(|receipt| receipt.reclaimed_bytes)
-                .sum::<u64>()
-        );
-        assert!(resumed.verified_reclaimed_bytes > 0);
-        assert!(active.exists());
-        assert!(unknown.exists());
-        assert_eq!(
-            fs::read_dir(workspaces_root)
-                .expect("remaining workspaces")
-                .count(),
-            4
-        );
-        child.kill().expect("stop active workspace holder");
-        child.wait().expect("reap active workspace holder");
-    }
+    });
 }
 
 /// Age a Lab workspace entry past the prune age gate.
@@ -1327,184 +1298,183 @@ fn write_family_workspace(path: &Path, local_path: &Path, run_id: Option<&str>) 
 /// no ownership proof are reported as unknown with a reason.
 #[test]
 fn prune_page_inventories_every_lab_workspace_family_behind_a_retained_prefix() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let roots = context.path_roots();
-    let runner_root = tempfile::tempdir().expect("runner root");
-    let sources = tempfile::tempdir().expect("sources");
-    let live_source = sources.path().join("live-source");
-    fs::create_dir_all(&live_source).expect("live source");
-    let missing_source = sources.path().join("removed-source");
-    let root = runner_root.path().join("_lab_workspaces");
-    fs::create_dir_all(&root).expect("lab workspaces root");
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let sources = tempfile::tempdir().expect("sources");
+        let live_source = sources.path().join("live-source");
+        fs::create_dir_all(&live_source).expect("live source");
+        let missing_source = sources.path().join("removed-source");
+        let root = runner_root.path().join("_lab_workspaces");
+        fs::create_dir_all(&root).expect("lab workspaces root");
 
-    // A retained prefix larger than the page size, sorted ahead of everything.
-    for index in 0..30 {
-        write_family_workspace(
-            &root.join(format!("aaa-retained-{index:02}")),
-            &live_source,
-            None,
-        );
-    }
-    // Stale orphans of the live name families.
-    let agent =
-        root.join("agent-0de3a73a49b8-9f98df59-c4d4-4101-a210-af5f018c6e0a-1792021408680403000");
-    let baseline = root.join(
+        // A retained prefix larger than the page size, sorted ahead of everything.
+        for index in 0..30 {
+            write_family_workspace(
+                &root.join(format!("aaa-retained-{index:02}")),
+                &live_source,
+                None,
+            );
+        }
+        // Stale orphans of the live name families.
+        let agent = root
+            .join("agent-0de3a73a49b8-9f98df59-c4d4-4101-a210-af5f018c6e0a-1792021408680403000");
+        let baseline = root.join(
         "baseline-185d71f1-19bf-41c6-8abf-934993d7d5fc-46522c0b2765-28cf9b26-1791387195668401000",
     );
-    let fix_issue =
-        root.join("homeboy-fix-issue-14832-homeboy-75f172ad2571-0f62e000-1792000000000000000");
-    for path in [&agent, &baseline, &fix_issue] {
-        write_family_workspace(path, &missing_source, None);
-    }
-    // Run-owned lease whose run authority is unavailable: withheld, reported.
-    let declared = root.join("declared-gate-resources-9f1ff7e143d7-1f241e11-91b7-47b9-b6ff-aa28b5f6e127-1792021117096117000");
-    write_family_workspace(
-        &declared,
-        &missing_source,
-        Some("run-authority-unavailable"),
-    );
-    // Artifact sibling whose checkout is gone, and one whose checkout lives.
-    let orphan_artifacts = root.join("zz-gone-checkout-homeboy-artifacts");
-    fs::create_dir_all(orphan_artifacts.join("provenance")).expect("orphan artifacts");
-    fs::write(orphan_artifacts.join("provenance/receipt.json"), "{}").expect("receipt");
-    let kept = root.join("zz-kept-checkout");
-    write_family_workspace(&kept, &live_source, None);
-    let kept_artifacts = root.join("zz-kept-checkout-homeboy-artifacts");
-    fs::create_dir_all(kept_artifacts.join("provenance")).expect("kept artifacts");
-    // No ownership proof at all.
-    let manual = root.join("manual-checkout");
-    fs::create_dir_all(manual.join(".git")).expect("manual checkout");
-    let stray = root.join("stray-file");
-    fs::write(&stray, "stray").expect("stray file");
-    for entry in fs::read_dir(&root).expect("read root") {
-        age_entry(&entry.expect("entry").path());
-    }
-    // Fresh orphan: below the age gate.
-    let young = root.join("young-orphan");
-    write_family_workspace(&young, &missing_source, None);
-    let entry_count = fs::read_dir(&root).expect("read root").count();
-    rooted_local_runner(&roots, "lab-local-prune-families", runner_root.path());
-
-    let (output, _) = crate::workspace::sync::prune_workspaces_in_roots(
-        &roots,
-        "lab-local-prune-families",
-        RunnerWorkspacePruneOptions {
-            apply: false,
-            min_age_hours: 1,
-            limit: 25,
-            passes: 1,
-            cursor: None,
-            ..RunnerWorkspacePruneOptions::default()
-        },
-    )
-    .expect("prune preview");
-
-    let mut planned = output
-        .candidates
-        .iter()
-        .map(|candidate| (candidate.remote_path.clone(), candidate.reason.clone()))
-        .collect::<Vec<_>>();
-    planned.sort();
-    let path = |path: &Path| path.display().to_string();
-    assert_eq!(
-        planned,
-        vec![
-            (path(&agent), "source_path_missing".to_string()),
-            (path(&baseline), "source_path_missing".to_string()),
-            (path(&fix_issue), "source_path_missing".to_string()),
-            (
-                path(&orphan_artifacts),
-                "artifact_dir_checkout_missing".to_string()
-            ),
-        ],
-        "{}",
-        prune_diagnosis(&output)
-    );
-    assert_eq!(
-        output.scanned_workspace_count,
-        entry_count,
-        "{}",
-        prune_diagnosis(&output)
-    );
-    assert!(output.scan_complete, "{}", prune_diagnosis(&output));
-    let skipped_reason = |target: &Path| {
-        output
-            .skipped
-            .iter()
-            .find(|entry| entry.remote_path == path(target))
-            .map(|entry| entry.reason.clone())
-            .unwrap_or_default()
-    };
-    assert!(
-        skipped_reason(&declared).contains("active_resource_lifecycle_authority_unavailable"),
-        "{}",
-        prune_diagnosis(&output)
-    );
-    assert!(
-        skipped_reason(&manual).contains("workspace_metadata_missing"),
-        "{}",
-        prune_diagnosis(&output)
-    );
-    assert!(
-        skipped_reason(&stray).contains("not_a_directory"),
-        "{}",
-        prune_diagnosis(&output)
-    );
-    assert_eq!(output.skipped.len(), 3, "{}", prune_diagnosis(&output));
-    assert_eq!(output.skipped_unknown_count, 3);
-    let retained = output
-        .retained_by_reason
-        .iter()
-        .map(|retained| (retained.reason.as_str(), retained.workspace_count))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        retained,
-        vec![
-            ("artifact_dir_owned_by_checkout", 1),
-            ("source_path_present", 31),
-            // Every metadata-backed workspace's `-homeboy-state` sibling
-            // (30 retained prefix + 3 stale + declared + kept) follows its
-            // checkout; the young orphan's sibling is gated by age.
-            ("state_dir_owned_by_checkout", 35),
-            ("younger_than_min_age", 2),
-        ]
-    );
-    // Every inspected entry is accounted for exactly once.
-    assert_eq!(
-        output.candidates.len()
-            + output.skipped.len()
-            + retained.iter().map(|(_, count)| count).sum::<usize>(),
-        entry_count
-    );
-    assert!(young.exists() && orphan_artifacts.exists() && manual.exists());
-
-    let (applied, _) = crate::workspace::sync::prune_workspaces_in_roots(
-        &roots,
-        "lab-local-prune-families",
-        RunnerWorkspacePruneOptions {
-            apply: true,
-            min_age_hours: 1,
-            limit: 25,
-            passes: 1,
-            cursor: None,
-            ..RunnerWorkspacePruneOptions::default()
-        },
-    )
-    .expect("prune apply");
-    assert_eq!(applied.removed.len(), 4, "{}", prune_diagnosis(&applied));
-    for removed in [&agent, &baseline, &fix_issue, &orphan_artifacts] {
-        assert!(!removed.exists(), "{}", removed.display());
-    }
-    for removed in [&agent, &baseline, &fix_issue] {
-        assert!(
-            !workspace_metadata_file(removed).parent().unwrap().exists(),
-            "state sibling of {} goes with its checkout",
-            removed.display()
+        let fix_issue =
+            root.join("homeboy-fix-issue-14832-homeboy-75f172ad2571-0f62e000-1792000000000000000");
+        for path in [&agent, &baseline, &fix_issue] {
+            write_family_workspace(path, &missing_source, None);
+        }
+        // Run-owned lease whose run authority is unavailable: withheld, reported.
+        let declared = root.join("declared-gate-resources-9f1ff7e143d7-1f241e11-91b7-47b9-b6ff-aa28b5f6e127-1792021117096117000");
+        write_family_workspace(
+            &declared,
+            &missing_source,
+            Some("run-authority-unavailable"),
         );
-    }
-    for kept in [&declared, &kept, &kept_artifacts, &manual, &stray, &young] {
-        assert!(kept.exists(), "{}", kept.display());
-    }
+        // Artifact sibling whose checkout is gone, and one whose checkout lives.
+        let orphan_artifacts = root.join("zz-gone-checkout-homeboy-artifacts");
+        fs::create_dir_all(orphan_artifacts.join("provenance")).expect("orphan artifacts");
+        fs::write(orphan_artifacts.join("provenance/receipt.json"), "{}").expect("receipt");
+        let kept = root.join("zz-kept-checkout");
+        write_family_workspace(&kept, &live_source, None);
+        let kept_artifacts = root.join("zz-kept-checkout-homeboy-artifacts");
+        fs::create_dir_all(kept_artifacts.join("provenance")).expect("kept artifacts");
+        // No ownership proof at all.
+        let manual = root.join("manual-checkout");
+        fs::create_dir_all(manual.join(".git")).expect("manual checkout");
+        let stray = root.join("stray-file");
+        fs::write(&stray, "stray").expect("stray file");
+        for entry in fs::read_dir(&root).expect("read root") {
+            age_entry(&entry.expect("entry").path());
+        }
+        // Fresh orphan: below the age gate.
+        let young = root.join("young-orphan");
+        write_family_workspace(&young, &missing_source, None);
+        let entry_count = fs::read_dir(&root).expect("read root").count();
+        rooted_local_runner(&roots, "lab-local-prune-families", runner_root.path());
+
+        let (output, _) = crate::workspace::sync::prune_workspaces(
+            "lab-local-prune-families",
+            RunnerWorkspacePruneOptions {
+                apply: false,
+                min_age_hours: 1,
+                limit: 25,
+                passes: 1,
+                cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
+            },
+        )
+        .expect("prune preview");
+
+        let mut planned = output
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.remote_path.clone(), candidate.reason.clone()))
+            .collect::<Vec<_>>();
+        planned.sort();
+        let path = |path: &Path| path.display().to_string();
+        assert_eq!(
+            planned,
+            vec![
+                (path(&agent), "source_path_missing".to_string()),
+                (path(&baseline), "source_path_missing".to_string()),
+                (path(&fix_issue), "source_path_missing".to_string()),
+                (
+                    path(&orphan_artifacts),
+                    "artifact_dir_checkout_missing".to_string()
+                ),
+            ],
+            "{}",
+            prune_diagnosis(&output)
+        );
+        assert_eq!(
+            output.scanned_workspace_count,
+            entry_count,
+            "{}",
+            prune_diagnosis(&output)
+        );
+        assert!(output.scan_complete, "{}", prune_diagnosis(&output));
+        let skipped_reason = |target: &Path| {
+            output
+                .skipped
+                .iter()
+                .find(|entry| entry.remote_path == path(target))
+                .map(|entry| entry.reason.clone())
+                .unwrap_or_default()
+        };
+        assert!(
+            skipped_reason(&declared).contains("active_resource_lifecycle_authority_unavailable"),
+            "{}",
+            prune_diagnosis(&output)
+        );
+        assert!(
+            skipped_reason(&manual).contains("workspace_metadata_missing"),
+            "{}",
+            prune_diagnosis(&output)
+        );
+        assert!(
+            skipped_reason(&stray).contains("not_a_directory"),
+            "{}",
+            prune_diagnosis(&output)
+        );
+        assert_eq!(output.skipped.len(), 3, "{}", prune_diagnosis(&output));
+        assert_eq!(output.skipped_unknown_count, 3);
+        let retained = output
+            .retained_by_reason
+            .iter()
+            .map(|retained| (retained.reason.as_str(), retained.workspace_count))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            retained,
+            vec![
+                ("artifact_dir_owned_by_checkout", 1),
+                ("source_path_present", 31),
+                // Every metadata-backed workspace's `-homeboy-state` sibling
+                // (30 retained prefix + 3 stale + declared + kept) follows its
+                // checkout; the young orphan's sibling is gated by age.
+                ("state_dir_owned_by_checkout", 35),
+                ("younger_than_min_age", 2),
+            ]
+        );
+        // Every inspected entry is accounted for exactly once.
+        assert_eq!(
+            output.candidates.len()
+                + output.skipped.len()
+                + retained.iter().map(|(_, count)| count).sum::<usize>(),
+            entry_count
+        );
+        assert!(young.exists() && orphan_artifacts.exists() && manual.exists());
+
+        let (applied, _) = crate::workspace::sync::prune_workspaces(
+            "lab-local-prune-families",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 1,
+                limit: 25,
+                passes: 1,
+                cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
+            },
+        )
+        .expect("prune apply");
+        assert_eq!(applied.removed.len(), 4, "{}", prune_diagnosis(&applied));
+        for removed in [&agent, &baseline, &fix_issue, &orphan_artifacts] {
+            assert!(!removed.exists(), "{}", removed.display());
+        }
+        for removed in [&agent, &baseline, &fix_issue] {
+            assert!(
+                !workspace_metadata_file(removed).parent().unwrap().exists(),
+                "state sibling of {} goes with its checkout",
+                removed.display()
+            );
+        }
+        for kept in [&declared, &kept, &kept_artifacts, &manual, &stray, &young] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+    });
 }
 
 #[test]

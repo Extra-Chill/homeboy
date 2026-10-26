@@ -11,7 +11,7 @@ pub(crate) fn sync_workspace_batch_controlled(
 ) -> Result<Vec<RunnerWorkspaceSyncOutput>> {
     control.checkpoint()?;
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
-    let runner = load_in_roots(&roots, runner_id)?;
+    let runner = load(runner_id)?;
     sync_workspace_batch_in_roots(&roots, &runner, requests, control)
 }
 

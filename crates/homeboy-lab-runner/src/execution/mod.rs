@@ -129,9 +129,8 @@ pub use request::{exec_request, RunnerExecRequest};
 // Public surface re-exported by the parent `runner` module. These mirror the
 // pre-split `pub` items so external callers keep referencing them unchanged.
 pub use artifact_promotion::{
-    promote_runner_exec_artifact_dirs, promote_runner_exec_artifact_dirs_in_store,
-    promote_runner_exec_artifacts_in_store, promote_runner_exec_summaries_in_store,
-    promoted_output, runner_exec_structured_summary,
+    promote_runner_exec_artifact_dirs_in_store, promote_runner_exec_artifacts_in_store,
+    promote_runner_exec_summaries_in_store, promoted_output, runner_exec_structured_summary,
 };
 pub use daemon_api::daemon_api_post;
 pub(crate) use daemon_api::daemon_api_post_for_session;
@@ -854,24 +853,6 @@ pub(crate) fn exec_with_status_snapshot(
     options: RunnerExecOptions,
     status_snapshot: Option<RunnerStatusReport>,
 ) -> Result<(RunnerExecOutput, i32)> {
-    exec_with_status_snapshot_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-        options,
-        status_snapshot,
-    )
-}
-
-/// [`exec_with_status_snapshot`] against an explicitly injected root.
-///
-/// Process preparation otherwise re-resolves the runner ambiently, which would
-/// discard the injected root mid-execution (#14362).
-pub(crate) fn exec_with_status_snapshot_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-    options: RunnerExecOptions,
-    status_snapshot: Option<RunnerStatusReport>,
-) -> Result<(RunnerExecOutput, i32)> {
     homeboy_core::runtime_promotion::ensure_runner_upgrade_drain_admission(
         options.run_id.as_deref(),
         runner_id,
@@ -910,7 +891,7 @@ pub(crate) fn exec_with_status_snapshot_in_roots(
             "preflight",
         )?;
     }
-    let result = exec_with_status_snapshot_attempt(roots, runner_id, options, status_snapshot);
+    let result = exec_with_status_snapshot_attempt(runner_id, options, status_snapshot);
     if let (Some(run_id), Err(error)) = (explicit_generic_run_id.as_deref(), &result) {
         let accepted = error.details.get("runner_exec_accepted_handoff").is_some();
         if let Err(persistence_error) =
@@ -953,7 +934,6 @@ pub(super) fn accepted_handoff_persistence_error(
 }
 
 fn exec_with_status_snapshot_attempt(
-    roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     options: RunnerExecOptions,
     status_snapshot: Option<RunnerStatusReport>,
@@ -977,7 +957,7 @@ fn exec_with_status_snapshot_attempt(
     let secret_env_names = secret_env_plan.secret_env_names();
     let mut plan = prepare_runner_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
-        runner: Some(crate::load_in_roots(roots, runner_id)?),
+        runner: Some(crate::load(runner_id)?),
         cwd: options.cwd.clone(),
         project_id: options.project_id.clone(),
         command: options.command.clone(),
@@ -1032,7 +1012,7 @@ fn exec_with_status_snapshot_attempt(
         let secret_env_names = secret_env_plan.secret_env_names();
         plan = prepare_runner_process(RunnerProcessRequest {
             runner_id: runner_id.to_string(),
-            runner: Some(crate::load_in_roots(roots, runner_id)?),
+            runner: Some(crate::load(runner_id)?),
             cwd: options.cwd.clone(),
             project_id: options.project_id.clone(),
             command: options.command.clone(),

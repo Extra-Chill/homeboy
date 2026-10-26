@@ -905,8 +905,6 @@ fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion(
             let _ = homeboy_core::daemon::serve_listener(listener);
         });
         let daemon_url = format!("http://{addr}");
-        let started_at = std::time::Instant::now();
-
         let (output, exit_code) = exec_via_daemon(
             &ssh_runner(),
             &daemon_url,
@@ -939,10 +937,8 @@ fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion(
         .expect("detached direct-daemon handoff");
 
         assert_eq!(exit_code, 0);
-        assert!(
-            started_at.elapsed() < Duration::from_secs(1),
-            "detached handoff waited for the blocked workload"
-        );
+        // The child remains blocked on `release` below. The live-job assertion
+        // proves detachment without a host-load-dependent wall-clock budget.
         let job_id = output.job_id.expect("durably accepted daemon job");
         let controller_record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)
             .expect("controller record remains observable after accepted handoff");

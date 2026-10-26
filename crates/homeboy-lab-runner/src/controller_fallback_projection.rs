@@ -2,7 +2,7 @@
 //! ledger is a pending-receipt queue only: the agent-task lifecycle owns
 //! terminal projection.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
@@ -134,16 +134,8 @@ impl ControllerFallbackProjectionStore {
     /// Shared controller queue survives daemon restarts independently of the
     /// runner-owned staging store.
     pub fn open_default() -> Result<Self> {
-        Self::open_in_roots(homeboy_core::paths::PathRoots::from_environment()?.data())
-    }
-
-    /// [`open_default`](Self::open_default) against an explicitly injected data
-    /// root: the observation database below it holds the queue and cursor, so
-    /// nothing on this type reaches back into ambient state once constructed.
-    /// The reconciliation *callbacks* are a separate matter: they are supplied
-    /// by the caller and are ambient in the production wiring — see
-    /// [`reconcile_on_controller_startup`].
-    pub fn open_in_roots(data_root: &Path) -> Result<Self> {
+        let roots = homeboy_core::paths::PathRoots::from_environment()?;
+        let data_root = roots.data();
         Ok(Self::open_at(homeboy_core::paths::observation_db_in_root(
             data_root,
         )))
@@ -668,44 +660,46 @@ mod tests {
     fn startup_reconciliation_without_a_ledger_writes_nothing() {
         // Every mutating command schedules this pass; with no deferred
         // receipts it must not create the observation database or cursor.
-        let root = tempdir().expect("data root");
-        let store = ControllerFallbackProjectionStore::open_in_roots(root.path())
-            .expect("open projection store");
+        crate::test_support::with_isolated_home(|_| {
+            let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+            let root = roots.data();
+            std::fs::create_dir_all(root).expect("data root");
+            let store =
+                ControllerFallbackProjectionStore::open_default().expect("open projection store");
 
-        let finalized = store
-            .reconcile_after_controller_restart_with(
-                8,
-                |_, _| panic!("no receipts means no runner query"),
-                |_, _| panic!("no receipts means no finalization"),
+            let finalized = store
+                .reconcile_after_controller_restart_with(
+                    8,
+                    |_, _| panic!("no receipts means no runner query"),
+                    |_, _| panic!("no receipts means no finalization"),
+                )
+                .expect("reconcile empty ledger");
+
+            assert!(finalized.is_empty());
+            assert_eq!(
+                std::fs::read_dir(root).expect("read data root").count(),
+                0,
+                "an empty data root stays empty"
+            );
+
+            // An existing database with no receipts gains no cursor record.
+            let observations = ObservationStore::open_initialized_for_lifecycle_at(
+                homeboy_core::paths::observation_db_in_root(root),
             )
-            .expect("reconcile empty ledger");
-
-        assert!(finalized.is_empty());
-        assert_eq!(
-            std::fs::read_dir(root.path())
-                .expect("read data root")
-                .count(),
-            0,
-            "an empty data root stays empty"
-        );
-
-        // An existing database with no receipts gains no cursor record.
-        let observations = ObservationStore::open_initialized_for_lifecycle_at(
-            homeboy_core::paths::observation_db_in_root(root.path()),
-        )
-        .expect("create observation store");
-        assert!(store
-            .reconcile_after_controller_restart_with(
-                8,
-                |_, _| panic!("no receipts means no runner query"),
-                |_, _| panic!("no receipts means no finalization"),
-            )
-            .expect("reconcile empty queue")
-            .is_empty());
-        assert!(observations
-            .coordination_records(NAMESPACE)
-            .expect("namespace records")
-            .is_empty());
+            .expect("create observation store");
+            assert!(store
+                .reconcile_after_controller_restart_with(
+                    8,
+                    |_, _| panic!("no receipts means no runner query"),
+                    |_, _| panic!("no receipts means no finalization"),
+                )
+                .expect("reconcile empty queue")
+                .is_empty());
+            assert!(observations
+                .coordination_records(NAMESPACE)
+                .expect("namespace records")
+                .is_empty());
+        });
     }
 
     #[test]
