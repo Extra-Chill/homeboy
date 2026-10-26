@@ -85,18 +85,7 @@ fn resolve_attachment(
 /// precedence over a standalone file with the same ID, which in turn takes
 /// precedence over CWD discovery.
 pub fn inventory() -> Result<Vec<Component>> {
-    inventory_core(None)
-}
-
-/// [`inventory`] against an already-resolved config root (#7505).
-///
-/// CWD portable discovery is unchanged: it is a fact about the invocation
-/// directory, not about a config root, and reads no Homeboy state.
-pub fn inventory_in_root(config_root: &Path) -> Result<Vec<Component>> {
-    inventory_core(Some(config_root))
-}
-
-fn inventory_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
+    let config_root = None;
     let mut components = registered_core(config_root)?;
     let mut seen: HashSet<String> = components
         .iter()
@@ -139,11 +128,6 @@ pub fn registered() -> Result<Vec<Component>> {
 /// that need repo-owned portable fields must explicitly use [`registered`].
 pub fn registered_base() -> Result<Vec<Component>> {
     registered_base_at(None)
-}
-
-/// [`registered`] against an already-resolved config root (#7505).
-pub fn registered_in_root(config_root: &Path) -> Result<Vec<Component>> {
-    registered_core(Some(config_root))
 }
 
 fn registered_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
@@ -295,11 +279,6 @@ pub fn registered_primary() -> Result<Vec<Component>> {
     standalone_base_at(None)
 }
 
-/// [`registered_by_id`] against an already-resolved config root (#7505).
-pub fn registered_by_id_in_root(config_root: &Path, id: &str) -> Result<Option<Component>> {
-    registered_by_id_core(Some(config_root), id)
-}
-
 fn registered_by_id_core(config_root: Option<&Path>, id: &str) -> Result<Option<Component>> {
     crate::engine::identifier::validate_component_id(id)?;
     let projects = projects_at(config_root).unwrap_or_default();
@@ -326,21 +305,7 @@ fn registered_by_id_core(config_root: Option<&Path>, id: &str) -> Result<Option<
 /// Resolve one persisted component whose configured checkout is `path` without
 /// materializing unrelated component configurations.
 pub fn registered_by_local_path(path: &Path) -> Result<Option<Component>> {
-    registered_by_local_path_core(None, path)
-}
-
-/// [`registered_by_local_path`] against an already-resolved config root (#7505).
-pub fn registered_by_local_path_in_root(
-    config_root: &Path,
-    path: &Path,
-) -> Result<Option<Component>> {
-    registered_by_local_path_core(Some(config_root), path)
-}
-
-fn registered_by_local_path_core(
-    config_root: Option<&Path>,
-    path: &Path,
-) -> Result<Option<Component>> {
+    let config_root = None;
     let Ok(path) = std::fs::canonicalize(path) else {
         return Ok(None);
     };
@@ -623,35 +588,16 @@ fn discover_sibling_portable_components(
 
 /// Check if any linked extension provides an artifact pattern.
 pub fn extension_provides_artifact_pattern(component: &Component) -> bool {
-    extension_provides_artifact_pattern_core(None, component)
-}
-
-/// [`extension_provides_artifact_pattern`] against an already-resolved config
-/// root (#7505).
-pub fn extension_provides_artifact_pattern_in_root(
-    config_root: &Path,
-    component: &Component,
-) -> bool {
-    extension_provides_artifact_pattern_core(Some(config_root), component)
-}
-
-fn extension_provides_artifact_pattern_core(
-    config_root: Option<&Path>,
-    component: &Component,
-) -> bool {
     component
         .extensions
         .as_ref()
         .map(|extensions| {
             extensions.keys().any(|extension_id| {
-                crate::extension::catalog::load_extension_in_optional_root(
-                    config_root,
-                    extension_id,
-                )
-                .ok()
-                .and_then(|m| m.build)
-                .and_then(|b| b.artifact_pattern)
-                .is_some()
+                crate::extension::catalog::load_extension(extension_id)
+                    .ok()
+                    .and_then(|m| m.build)
+                    .and_then(|b| b.artifact_pattern)
+                    .is_some()
             })
         })
         .unwrap_or(false)
@@ -687,21 +633,8 @@ pub fn list() -> Result<Vec<Component>> {
     inventory()
 }
 
-/// [`list`] against an already-resolved config root (#7505).
-pub fn list_in_root(config_root: &Path) -> Result<Vec<Component>> {
-    inventory_in_root(config_root)
-}
-
 pub fn list_ids() -> Result<Vec<String>> {
     Ok(inventory()?
-        .into_iter()
-        .map(|component| component.id)
-        .collect())
-}
-
-/// [`list_ids`] against an already-resolved config root (#7505).
-pub fn list_ids_in_root(config_root: &Path) -> Result<Vec<String>> {
-    Ok(inventory_in_root(config_root)?
         .into_iter()
         .map(|component| component.id)
         .collect())
@@ -793,11 +726,6 @@ fn registered_id_candidates_core(config_root: Option<&Path>) -> Vec<String> {
 
 pub fn exists(id: &str) -> bool {
     load(id).is_ok()
-}
-
-/// [`exists`] against an already-resolved config root (#7505).
-pub fn exists_in_root(config_root: &Path, id: &str) -> bool {
-    load_in_root(config_root, id).is_ok()
 }
 
 /// Read a standalone registration file for a component ID without loading

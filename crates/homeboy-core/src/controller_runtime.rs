@@ -798,14 +798,8 @@ pub fn prune_pins(
 /// Inventory and reclaim immutable runtime identities. The admission lock makes
 /// the final reachability check atomic with activation and materialization.
 pub fn cleanup(options: ControllerRuntimeCleanupOptions) -> Result<ControllerRuntimePruneResult> {
-    cleanup_in_root(&runtime_root()?, options)
-}
-
-/// [`cleanup`] under an already-resolved runtime root.
-pub fn cleanup_in_root(
-    root: &Path,
-    options: ControllerRuntimeCleanupOptions,
-) -> Result<ControllerRuntimePruneResult> {
+    let root = runtime_root()?;
+    let root = root.as_path();
     // Lifecycle inventory may migrate legacy records, which itself needs the
     // admission lock. Collect reachability before taking the runtime lock.
     let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
@@ -1087,18 +1081,7 @@ fn pin_current_unlocked(root: &Path) -> Result<Value> {
     )
 }
 
-/// Pin the currently executing controller while participating in the FIFO
-/// admission queue.  Use this instead of `pin_current()` when concurrent cook
-/// requests must wait their turn rather than fast-fail.
-#[cfg(test)]
-pub fn pin_current_queued(
-    request_id: &str,
-    cancellation_requested: impl Fn() -> Result<bool>,
-) -> Result<Value> {
-    pin_current_queued_in_root(&runtime_root()?, request_id, cancellation_requested)
-}
-
-/// [`pin_current_queued`] under an already-resolved runtime root.
+/// Pin the executing controller in the FIFO queue under a resolved runtime root.
 pub fn pin_current_queued_in_root(
     root: &Path,
     request_id: &str,
@@ -1405,25 +1388,11 @@ pub fn admit_current() -> Result<RuntimeAdmission> {
 /// waiting admission after the original process has exited.
 #[cfg(test)]
 pub fn admit_current_for(request_id: &str) -> Result<RuntimeAdmission> {
-    admit_current_for_with_cancellation_check(request_id, || Ok(false))
+    admit_current_for_with_cancellation_check_in_root(&runtime_root()?, request_id, || Ok(false))
 }
 
-/// Admit a request while checking the caller's durable lifecycle state at the
-/// queue claim boundary. The check runs under the queue lock, after the
-/// advisory lock is acquired and before ownership can be published.
-#[cfg(test)]
-pub fn admit_current_for_with_cancellation_check(
-    request_id: &str,
-    cancellation_requested: impl Fn() -> Result<bool>,
-) -> Result<RuntimeAdmission> {
-    admit_current_for_with_cancellation_check_in_root(
-        &runtime_root()?,
-        request_id,
-        cancellation_requested,
-    )
-}
-
-/// [`admit_current_for_with_cancellation_check`] under an already-resolved runtime root.
+/// Admit a request under a resolved runtime root, checking cancellation at the
+/// queue claim boundary before ownership can be published.
 pub fn admit_current_for_with_cancellation_check_in_root(
     root: &Path,
     request_id: &str,
@@ -1458,12 +1427,6 @@ pub fn admit_current_for_with_cancellation_check_in_root(
         _lock: lock,
         runtime,
     })
-}
-
-/// Return the durable admission view used by lifecycle status output.
-#[cfg(test)]
-pub fn admission_status(request_id: &str) -> Result<Value> {
-    admission_status_at(&runtime_root()?, request_id)
 }
 
 /// Read the durable admission view from an explicitly selected
@@ -1509,13 +1472,6 @@ fn admission_status_at_lock_path(lock_path: &Path, request_id: &str) -> Result<V
     }))
 }
 
-/// Remove a waiting request. An owner is intentionally never force-released:
-/// the advisory lock remains the authority while a process is alive.
-#[cfg(test)]
-pub fn cancel_admission(request_id: &str) -> Result<()> {
-    cancel_admission_at(&runtime_root()?, request_id)
-}
-
 /// Remove a waiting request from an explicitly selected controller-runtime
 /// store. Lifecycle stores use this to keep same-ID isolated roots independent.
 pub fn cancel_admission_at(runtime_root: &Path, request_id: &str) -> Result<()> {
@@ -1553,11 +1509,8 @@ pub fn activate_current_generation() -> Result<Value> {
 /// does not use the upgrading process's executable: after an on-disk swap that
 /// process can still be running the previous generation.
 pub fn activate_installed_generation(executable: &Path) -> Result<Value> {
-    activate_installed_generation_in_root(&runtime_root()?, executable)
-}
-
-/// [`activate_installed_generation`] under an already-resolved runtime root.
-pub fn activate_installed_generation_in_root(root: &Path, executable: &Path) -> Result<Value> {
+    let root = runtime_root()?;
+    let root = root.as_path();
     let lock_path = root.join(ADMISSION_LOCK_FILE);
     let _lock = acquire_admission_lock(&lock_path)?;
     let runtime = pin_executable_with_source_in_root(
@@ -1669,17 +1622,8 @@ pub fn recover_pin_and_persist(
     source: Option<&Path>,
     persist: impl FnOnce(&Value) -> Result<()>,
 ) -> Result<Value> {
-    recover_pin_and_persist_in_root(&runtime_root()?, runtime, artifact, source, persist)
-}
-
-/// [`recover_pin_and_persist`] under an already-resolved runtime root.
-pub fn recover_pin_and_persist_in_root(
-    runtime_root: &Path,
-    runtime: &Value,
-    artifact: Option<&Path>,
-    source: Option<&Path>,
-    persist: impl FnOnce(&Value) -> Result<()>,
-) -> Result<Value> {
+    let runtime_root = runtime_root()?;
+    let runtime_root = runtime_root.as_path();
     let _lock = acquire_admission_lock(&runtime_root.join(ADMISSION_LOCK_FILE))?;
     let recovered = recover_pin_unlocked(runtime_root, runtime, artifact, source)?;
     persist(&recovered)?;
@@ -3248,11 +3192,6 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
     }
 }
 
-#[cfg(test)]
-fn pinned_path(identity: &str, digest: &str) -> Result<PathBuf> {
-    Ok(pinned_path_in_root(&runtime_root()?, identity, digest))
-}
-
 fn pinned_path_in_root(root: &Path, identity: &str, digest: &str) -> PathBuf {
     root.join(format!(
         "{}-{}",
@@ -4338,7 +4277,8 @@ mod tests {
 
             let waiting = (0..40)
                 .map(|_| {
-                    let status = admission_status("second").expect("second status");
+                    let status = admission_status_at(&runtime_root().unwrap(), "second")
+                        .expect("second status");
                     if status["state"] == "waiting" {
                         Some(status)
                     } else {
@@ -4350,7 +4290,8 @@ mod tests {
                 .expect("second admission waits behind first");
             assert_eq!(waiting["position"], 2);
             assert_eq!(
-                admission_status("first").expect("first status")["state"],
+                admission_status_at(&runtime_root().unwrap(), "first").expect("first status")
+                    ["state"],
                 "admitted"
             );
 
@@ -4362,16 +4303,19 @@ mod tests {
                 Ok(())
             );
             assert_eq!(
-                admission_status("second").expect("second admitted")["state"],
+                admission_status_at(&runtime_root().unwrap(), "second").expect("second admitted")
+                    ["state"],
                 "admitted"
             );
             release.send(()).expect("release second admission");
             waiter.join().expect("waiter exits");
 
             enqueue_admission_request(&lock, "cancelled").expect("enqueue cancellation target");
-            cancel_admission("cancelled").expect("cancel waiting request");
+            cancel_admission_at(&runtime_root().unwrap(), "cancelled")
+                .expect("cancel waiting request");
             assert_eq!(
-                admission_status("cancelled").expect("cancelled status")["state"],
+                admission_status_at(&runtime_root().unwrap(), "cancelled")
+                    .expect("cancelled status")["state"],
                 "none"
             );
 
@@ -4385,7 +4329,8 @@ mod tests {
             })
             .expect("persist stale waiter");
             assert_eq!(
-                admission_status("stale-waiter").expect("reclaim stale waiter")["state"],
+                admission_status_at(&runtime_root().unwrap(), "stale-waiter")
+                    .expect("reclaim stale waiter")["state"],
                 "none"
             );
         });
@@ -4402,7 +4347,8 @@ mod tests {
                 queue["owner"]["lease_expires_at_ms"] = json!(0);
             })
             .expect("expire diagnostic lease");
-            let status = admission_status("long-owner").expect("read live owner status");
+            let status = admission_status_at(&runtime_root().unwrap(), "long-owner")
+                .expect("read live owner status");
 
             assert_eq!(status["state"], "admitted");
             assert_eq!(status["owner"]["request_id"], "long-owner");
@@ -4441,7 +4387,8 @@ mod tests {
             .expect("persist crashed queue head");
 
             assert_eq!(
-                admission_status("later").expect("reclaim crashed head")["position"],
+                admission_status_at(&runtime_root().unwrap(), "later")
+                    .expect("reclaim crashed head")["position"],
                 1
             );
             let admission = acquire_queued_admission_lock(&lock, "later", &|| Ok(false))
@@ -4469,7 +4416,8 @@ mod tests {
             assert_eq!(error.retryable, Some(true));
             assert!(error.message.contains("queue wait exceeded 0ms"));
             assert_eq!(
-                admission_status("timed-out").expect("timed-out request removed")["state"],
+                admission_status_at(&runtime_root().unwrap(), "timed-out")
+                    .expect("timed-out request removed")["state"],
                 "none"
             );
             drop(first);
@@ -4537,7 +4485,8 @@ mod tests {
                 error.message
             );
             assert_eq!(
-                admission_status("queued-behind").expect("waiter removed")["state"],
+                admission_status_at(&runtime_root().unwrap(), "queued-behind")
+                    .expect("waiter removed")["state"],
                 "none"
             );
             drop(first);
@@ -4602,15 +4551,18 @@ mod tests {
             }
 
             assert_eq!(
-                admission_status("head").expect("head status")["position"],
+                admission_status_at(&runtime_root().unwrap(), "head").expect("head status")
+                    ["position"],
                 1
             );
             assert_eq!(
-                admission_status("middle").expect("middle status")["position"],
+                admission_status_at(&runtime_root().unwrap(), "middle").expect("middle status")
+                    ["position"],
                 2
             );
             assert_eq!(
-                admission_status("tail").expect("tail status")["position"],
+                admission_status_at(&runtime_root().unwrap(), "tail").expect("tail status")
+                    ["position"],
                 3
             );
 
@@ -4623,7 +4575,9 @@ mod tests {
                     "{barging} must not claim admission ahead of the queue head"
                 );
                 assert!(
-                    admission_status(barging).expect("queue unchanged")["owner"].is_null(),
+                    admission_status_at(&runtime_root().unwrap(), barging)
+                        .expect("queue unchanged")["owner"]
+                        .is_null(),
                     "a rejected claim must not publish an owner"
                 );
             }
@@ -4634,7 +4588,8 @@ mod tests {
                 "the queue head must be admitted"
             );
             assert_eq!(
-                admission_status("head").expect("head admitted")["state"],
+                admission_status_at(&runtime_root().unwrap(), "head").expect("head admitted")
+                    ["state"],
                 "admitted"
             );
         });
@@ -4756,7 +4711,8 @@ mod tests {
 
             drop(first);
             barrier.wait();
-            cancel_admission("racing").expect("remove cancelled waiter");
+            cancel_admission_at(&runtime_root().unwrap(), "racing")
+                .expect("remove cancelled waiter");
             barrier.wait();
 
             let error = match waiter.join().expect("waiter exits") {
@@ -4765,13 +4721,13 @@ mod tests {
             };
             assert_eq!(error.details["outcome"], "cancelled");
             assert_eq!(
-                admission_status("racing").expect("cancelled request is absent")["state"],
+                admission_status_at(&runtime_root().unwrap(), "racing")
+                    .expect("cancelled request is absent")["state"],
                 "none"
             );
-            assert!(
-                admission_status("racing").expect("cancelled request has no owner")["owner"]
-                    .is_null()
-            );
+            assert!(admission_status_at(&runtime_root().unwrap(), "racing")
+                .expect("cancelled request has no owner")["owner"]
+                .is_null());
             *TEST_ADMISSION_HEAD_BARRIER
                 .get_or_init(|| Mutex::new(None))
                 .lock()
@@ -4786,9 +4742,11 @@ mod tests {
     fn cancellation_after_owner_publication_does_not_steal_live_lock() {
         crate::test_support::with_isolated_home(|_| {
             let admission = admit_current_for("owner").expect("admit owner");
-            cancel_admission("owner").expect("cancel admitted request");
+            cancel_admission_at(&runtime_root().unwrap(), "owner")
+                .expect("cancel admitted request");
 
-            let status = admission_status("owner").expect("owner remains observable");
+            let status = admission_status_at(&runtime_root().unwrap(), "owner")
+                .expect("owner remains observable");
             assert_eq!(status["state"], "admitted");
             assert_eq!(status["owner"]["request_id"], "owner");
             drop(admission);
@@ -5492,8 +5450,8 @@ mod tests {
             let identity_b = "homeboy test+runtime-b";
             let digest_a = fake_controller(&artifact_a, identity_a, "runtime A");
             let digest_b = fake_controller(&artifact_b, identity_b, "runtime B");
-            let pin_a = pinned_path(identity_a, &digest_a).expect("runtime A path");
-            let pin_b = pinned_path(identity_b, &digest_b).expect("runtime B path");
+            let pin_a = pinned_path_in_root(&runtime_root().unwrap(), identity_a, &digest_a);
+            let pin_b = pinned_path_in_root(&runtime_root().unwrap(), identity_b, &digest_b);
             publish_pin(&artifact_a, &pin_a, &digest_a).expect("publish runtime A");
             let runtime_a = json!({ "originating": {
                 "build_identity": identity_a,
@@ -5556,13 +5514,13 @@ mod tests {
             let stale = temporary.path().join("stale");
             let current_digest = fake_controller(&current, "homeboy test+current", "current");
             let stale_digest = fake_controller(&stale, "homeboy test+stale", "stale");
-            let current_pin =
-                pinned_path("homeboy test+current", &current_digest).expect("current path");
-            let stale_pin = pinned_path("homeboy test+stale", &stale_digest).expect("stale path");
+            let root = runtime_root().unwrap();
+            let current_pin = pinned_path_in_root(&root, "homeboy test+current", &current_digest);
+            let stale_pin = pinned_path_in_root(&root, "homeboy test+stale", &stale_digest);
             publish_pin(&current, &current_pin, &current_digest).expect("publish current");
             publish_pin(&stale, &stale_pin, &stale_digest).expect("publish stale");
             write_active_generation(
-                &runtime_root().expect("root").join(ACTIVE_GENERATION_FILE),
+                &root.join(ACTIVE_GENERATION_FILE),
                 &json!({ "originating": { "pinned_executable": current_pin } }),
             )
             .expect("activate current");
@@ -5614,12 +5572,11 @@ mod tests {
             let in_flight_digest =
                 fake_controller(&in_flight, "homeboy test+in-flight", "in-flight");
             let pending_digest = fake_controller(&pending, "homeboy test+pending", "pending");
-            let current_pin =
-                pinned_path("homeboy test+current", &current_digest).expect("current path");
+            let root = runtime_root().unwrap();
+            let current_pin = pinned_path_in_root(&root, "homeboy test+current", &current_digest);
             let in_flight_pin =
-                pinned_path("homeboy test+in-flight", &in_flight_digest).expect("in-flight path");
-            let pending_pin =
-                pinned_path("homeboy test+pending", &pending_digest).expect("pending path");
+                pinned_path_in_root(&root, "homeboy test+in-flight", &in_flight_digest);
+            let pending_pin = pinned_path_in_root(&root, "homeboy test+pending", &pending_digest);
             publish_pin(&current, &current_pin, &current_digest).expect("publish current");
             publish_pin(&in_flight, &in_flight_pin, &in_flight_digest).expect("publish in-flight");
             publish_pin(&pending, &pending_pin, &pending_digest).expect("publish pending");
@@ -5745,7 +5702,7 @@ mod tests {
             let temporary = tempfile::tempdir().expect("temporary controller directory");
             let stale = temporary.path().join("stale");
             let digest = fake_controller(&stale, "homeboy test+stale", "stale");
-            let pin = pinned_path("homeboy test+stale", &digest).expect("stale path");
+            let pin = pinned_path_in_root(&runtime_root().unwrap(), "homeboy test+stale", &digest);
             publish_pin(&stale, &pin, &digest).expect("publish stale");
 
             // Unreferenced, but still inside the operator's configured age and
@@ -5892,13 +5849,13 @@ mod tests {
             let stale = temporary.path().join("stale");
             let current_digest = fake_controller(&current, "homeboy test+current", "current");
             let stale_digest = fake_controller(&stale, "homeboy test+stale", "stale");
-            let current_pin =
-                pinned_path("homeboy test+current", &current_digest).expect("current path");
-            let stale_pin = pinned_path("homeboy test+stale", &stale_digest).expect("stale path");
+            let root = runtime_root().unwrap();
+            let current_pin = pinned_path_in_root(&root, "homeboy test+current", &current_digest);
+            let stale_pin = pinned_path_in_root(&root, "homeboy test+stale", &stale_digest);
             publish_pin(&current, &current_pin, &current_digest).expect("publish current");
             publish_pin(&stale, &stale_pin, &stale_digest).expect("publish stale");
             write_active_generation(
-                &runtime_root().expect("root").join(ACTIVE_GENERATION_FILE),
+                &root.join(ACTIVE_GENERATION_FILE),
                 &json!({ "originating": { "pinned_executable": current_pin } }),
             )
             .expect("activate current");
@@ -5968,7 +5925,7 @@ mod tests {
                 let artifact = temporary.path().join(format!("stale-{index}"));
                 let identity = format!("homeboy test+stale-{index}");
                 let digest = fake_controller(&artifact, &identity, &format!("stale {index}"));
-                let pin = pinned_path(&identity, &digest).expect("stale path");
+                let pin = pinned_path_in_root(&runtime_root().unwrap(), &identity, &digest);
                 publish_pin(&artifact, &pin, &digest).expect("publish stale");
             }
 
@@ -6017,7 +5974,7 @@ mod tests {
                     let artifact = temporary.path().join(format!("stale-{index}"));
                     let identity = format!("homeboy test+stale-{index}");
                     let digest = fake_controller(&artifact, &identity, &format!("stale {index}"));
-                    let pin = pinned_path(&identity, &digest).expect("stale path");
+                    let pin = pinned_path_in_root(&runtime_root().unwrap(), &identity, &digest);
                     publish_pin(&artifact, &pin, &digest).expect("publish stale");
                     pin
                 })
@@ -6078,7 +6035,8 @@ mod tests {
 
             let waiting_a = (0..40)
                 .map(|_| {
-                    let status = admission_status("seal-a").expect("seal-a status");
+                    let status = admission_status_at(&runtime_root().unwrap(), "seal-a")
+                        .expect("seal-a status");
                     if status["state"] == "waiting" {
                         Some(status)
                     } else {
@@ -6107,7 +6065,8 @@ mod tests {
 
             let waiting_b = (0..40)
                 .map(|_| {
-                    let status = admission_status("seal-b").expect("seal-b status");
+                    let status = admission_status_at(&runtime_root().unwrap(), "seal-b")
+                        .expect("seal-b status");
                     if status["state"] == "waiting" {
                         Some(status)
                     } else {
@@ -6128,7 +6087,8 @@ mod tests {
                 Ok(())
             );
             assert_eq!(
-                admission_status("seal-a").expect("seal-a admitted")["state"],
+                admission_status_at(&runtime_root().unwrap(), "seal-a").expect("seal-a admitted")
+                    ["state"],
                 "admitted"
             );
             a_release.send(()).expect("release seal-a");
@@ -6141,7 +6101,8 @@ mod tests {
                 Ok(())
             );
             assert_eq!(
-                admission_status("seal-b").expect("seal-b admitted")["state"],
+                admission_status_at(&runtime_root().unwrap(), "seal-b").expect("seal-b admitted")
+                    ["state"],
                 "admitted"
             );
             b_release.send(()).expect("release seal-b");

@@ -88,7 +88,8 @@ fn temp_home_dir() -> TempDir {
 }
 
 fn registered_components_in_home(home: &std::path::Path) -> crate::error::Result<Vec<Component>> {
-    registered_in_root(&home.join(".config").join("homeboy"))
+    let _home = with_home_override(home);
+    registered()
 }
 
 /// Helper: create a standalone component JSON file in a directory.
@@ -1067,7 +1068,7 @@ fn write_standalone_creates_and_reads_back() {
     );
 
     // Verify we can read it back
-    let read_result = registered_components_in_home(dir.path());
+    let read_result = registered();
 
     assert!(read_result.is_ok());
     let components = read_result.unwrap();

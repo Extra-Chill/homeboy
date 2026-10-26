@@ -8674,10 +8674,16 @@ mod tests {
             .as_deref(),
             Some(gate_config_root.as_path())
         );
-        assert_eq!(
-            homeboy_core::extension::catalog::available_extension_ids_in_root(&gate_config_root),
-            vec!["selected-fixture"]
-        );
+        {
+            let _env = EnvVarGuard::set(&[(
+                homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+                gate_config_root.as_path(),
+            )]);
+            assert_eq!(
+                homeboy_core::extension::catalog::available_extension_ids(),
+                vec!["selected-fixture"]
+            );
+        }
         assert_eq!(
             candidate.environment.extension_inputs,
             baseline.environment.extension_inputs
