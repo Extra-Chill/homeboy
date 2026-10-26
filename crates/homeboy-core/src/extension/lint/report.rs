@@ -232,19 +232,11 @@ fn lint_phase_failure(
         return PhaseFailure {
             phase: VerificationPhase::Format,
             category: PhaseFailureCategory::Findings,
-            summary: if count == 0 {
-                format!(
-                    "format check failed; run `{}`",
-                    formatting.suggested_command
-                )
-            } else {
-                format!(
-                    "format check found {} unformatted file(s): {}; run `{}`",
-                    count,
-                    formatting.files.join(", "),
-                    formatting.suggested_command
-                )
-            },
+            summary: format!(
+                "format check found {} unformatted file(s): {}",
+                count,
+                formatting.files.join(", ")
+            ),
         };
     }
     let category = if infrastructure_failure {
@@ -400,8 +392,6 @@ mod tests {
             baseline_provenance: None,
             formatting_findings: Some(FormattingFindings {
                 files: vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
-                summary: Some("FMT SUMMARY: 2 files need formatting".to_string()),
-                suggested_command: "cargo fmt".to_string(),
             }),
             findings: Some(Vec::new()),
             producer_summaries: Vec::new(),
@@ -419,7 +409,7 @@ mod tests {
         assert_eq!(failure.category, PhaseFailureCategory::Findings);
         assert_eq!(
             failure.summary,
-            "format check found 2 unformatted file(s): src/lib.rs, src/main.rs; run `cargo fmt`"
+            "format check found 2 unformatted file(s): src/lib.rs, src/main.rs"
         );
     }
 

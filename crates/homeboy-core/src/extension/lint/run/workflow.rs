@@ -215,8 +215,7 @@ pub fn run_main_lint_workflow(
         lint_findings.extend(route_findings);
         producer_summaries.extend(route_producers);
     }
-    let formatting_findings =
-        extract_formatting_findings(&output.stdout, &output.stderr, source_path);
+    let formatting_findings = extract_formatting_findings(&lint_findings, source_path);
 
     let mut hints = Vec::new();
 
@@ -612,8 +611,6 @@ Re-run `homeboy review lint {}` or skip only this gate with `--skip-checks=lint`
         output.exit_code,
         Some("self-check"),
     );
-    let formatting_findings =
-        extract_formatting_findings(&output.stdout, &output.stderr, source_path);
 
     Ok(LintRunWorkflowResult {
         status,
@@ -625,7 +622,7 @@ Re-run `homeboy review lint {}` or skip only this gate with `--skip-checks=lint`
         hints,
         baseline_comparison: None,
         baseline_provenance: None,
-        formatting_findings,
+        formatting_findings: None,
         findings: Some(Vec::new()),
         producer_summaries: producer_summaries.clone(),
         summary: if json_summary {

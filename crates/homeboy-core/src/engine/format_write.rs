@@ -4,9 +4,7 @@
 //! call `format_after_write()` after writing files. This runs the project's
 //! extension-owned formatter to ensure generated code matches project style.
 //!
-//! Formatting failure is non-fatal — it logs a warning but never rolls back.
-//! Generated code that compiles but isn't formatted is better than no code at
-//! all.
+//! Formatting failure is returned to the caller; lint fix treats it as fatal.
 //!
 //! Formatter ownership is resolved through Extension API v1. The selected
 //! manifest remains a private execution detail for locating `scripts.format`.
@@ -15,7 +13,11 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use crate::component::Component;
+use crate::error::Result;
+use crate::extension::invoke::{
+    build_capability_env, execute_capability_script, CapabilityScriptOptions,
+};
 use homeboy_extension_contract::api::v1::FORMAT_FILE_CAPABILITY_PREFIX;
 
 /// Result of a post-write format operation.
@@ -64,52 +66,58 @@ impl FormatResult {
 
 /// Format written files using the project's language-specific formatter.
 ///
-/// Non-fatal: formatting failure logs a warning but does not roll back or fail.
+/// Returns formatter failure for the caller to handle; lint fix fails on it.
 ///
 /// # Arguments
+/// * `component` - Resolved component identity for the extension environment
 /// * `root` - Project root directory
 /// * `changed_files` - Files that were modified/created (absolute paths)
-pub fn format_after_write(root: &Path, changed_files: &[PathBuf]) -> Result<FormatResult> {
+pub fn format_after_write(
+    component: &Component,
+    root: &Path,
+    changed_files: &[PathBuf],
+) -> Result<FormatResult> {
     if changed_files.is_empty() {
         return Ok(FormatResult::skipped(0));
     }
 
-    let format_command = match resolve_format_command(root, changed_files) {
-        Some(cmd) => cmd,
-        None => return Ok(FormatResult::skipped(changed_files.len())),
+    let Some((extension_id, extension_path, script)) = resolve_format_command(changed_files) else {
+        return Ok(FormatResult::skipped(changed_files.len()));
     };
-
-    crate::log_status!("format", "Running post-write formatter: {}", format_command);
-
-    let output = std::process::Command::new("sh")
-        .args(["-c", &format_command])
-        .current_dir(root)
-        .output()
-        .map_err(|e| {
-            Error::internal_io(
-                format!("Failed to run format command: {}", e),
-                Some("format_after_write".to_string()),
-            )
-        })?;
-
-    if output.status.success() {
-        crate::log_status!("format", "Formatting complete");
+    let args = changed_files
+        .iter()
+        .map(|path| scoped_format_arg(root, path))
+        .collect::<Vec<_>>();
+    let format_command = format!(
+        "{} {}",
+        crate::engine::shell::quote_path(&extension_path.join(&script).to_string_lossy()),
+        crate::engine::shell::quote_args(&args)
+    );
+    let env = build_capability_env(
+        &extension_id,
+        &component.id,
+        &extension_path,
+        root,
+        "{}",
+        &crate::extension::component_script::component_env_vars(component),
+    )?;
+    let output = execute_capability_script(
+        &extension_path,
+        &script,
+        &args,
+        &env,
+        Some(&root.to_string_lossy()),
+        None,
+        CapabilityScriptOptions {
+            passthrough: false,
+            stderr_passthrough: false,
+            timeout: None,
+        },
+    )?;
+    if output.success {
         return Ok(FormatResult::passed(format_command, changed_files.len()));
     }
-
-    // Formatting failed — log warning but do NOT rollback
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let error_output = if stderr.trim().is_empty() {
-        stdout.trim().to_string()
-    } else {
-        stderr.trim().to_string()
-    };
-
-    crate::log_status!(
-        "format",
-        "Warning: formatter exited non-zero (continuing anyway)"
-    );
+    let error_output = format!("{}{}", output.stdout, output.stderr);
 
     Ok(FormatResult::failed(
         format_command,
@@ -121,7 +129,7 @@ pub fn format_after_write(root: &Path, changed_files: &[PathBuf]) -> Result<Form
 /// Resolve the format command for a set of changed files.
 ///
 /// Selects installed extensions through their v1 `format.<extension>` capability.
-fn resolve_format_command(root: &Path, changed_files: &[PathBuf]) -> Option<String> {
+fn resolve_format_command(changed_files: &[PathBuf]) -> Option<(String, PathBuf, String)> {
     // Collect unique file extensions
     let mut extensions: Vec<String> = changed_files
         .iter()
@@ -151,18 +159,11 @@ fn resolve_format_command(root: &Path, changed_files: &[PathBuf]) -> Option<Stri
             let script_path = std::path::Path::new(ext_path).join(script_rel);
 
             if script_path.exists() {
-                // Invoke the script directly so its shebang resolves the interpreter.
-                // Wrapping with `sh <script>` bypasses `#!/usr/bin/env bash` and runs
-                // under POSIX sh — which breaks scripts using bash-only features. See #1276.
-                let scoped_args = changed_files
-                    .iter()
-                    .map(|path| scoped_format_arg(root, path))
-                    .map(|path| crate::engine::shell::quote_arg(&path))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let script =
-                    crate::engine::shell::quote_path(&script_path.to_string_lossy()).to_string();
-                return Some(format!("{script} {scoped_args}"));
+                return Some((
+                    extension_id,
+                    PathBuf::from(ext_path),
+                    script_rel.to_string(),
+                ));
             }
         }
     }
@@ -186,7 +187,17 @@ mod tests {
     #[test]
     fn skipped_when_no_files() {
         let dir = TempDir::new().expect("temp dir");
-        let result = format_after_write(dir.path(), &[]).unwrap();
+        let result = format_after_write(
+            &Component::new(
+                "fixture".into(),
+                dir.path().to_string_lossy().into(),
+                "fixture".into(),
+                None,
+            ),
+            dir.path(),
+            &[],
+        )
+        .unwrap();
         assert!(result.success);
         assert!(result.command.is_none());
         assert_eq!(result.files_in_scope, 0);
@@ -196,19 +207,32 @@ mod tests {
     fn skipped_when_no_formatter_found() {
         let dir = TempDir::new().expect("temp dir");
         let files = vec![dir.path().join("unknown.xyz")];
-        let result = format_after_write(dir.path(), &files).unwrap();
+        let result = format_after_write(
+            &Component::new(
+                "fixture".into(),
+                dir.path().to_string_lossy().into(),
+                "fixture".into(),
+                None,
+            ),
+            dir.path(),
+            &files,
+        )
+        .unwrap();
         assert!(result.success);
         assert!(result.command.is_none());
     }
 
     #[test]
-    fn resolves_formatter_from_v1_file_capability() {
+    fn formatter_receives_runtime_helper_and_component_context() {
         crate::test_support::with_isolated_home(|_| {
             let extension_dir = crate::paths::extensions()
                 .expect("extensions path")
                 .join("rust");
             std::fs::create_dir_all(&extension_dir).expect("extension directory");
-            std::fs::write(extension_dir.join("format.sh"), "#!/bin/sh\n").expect("format script");
+            use std::os::unix::fs::PermissionsExt;
+            let script = extension_dir.join("format.sh");
+            std::fs::write(&script, "#!/bin/sh\nset -eu\ntest -f \"${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?required}\"\ntest \"${HOMEBOY_COMPONENT_PATH:?required}\" = \"$PWD\"\ntest \"$1\" = 'src/changed file.rs'\nprintf formatted > formatted.txt\n").expect("format script");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
             std::fs::write(
                 extension_dir.join("rust.json"),
                 serde_json::json!({
@@ -223,10 +247,19 @@ mod tests {
 
             let root = TempDir::new().expect("project root");
             let changed = root.path().join("src/changed file.rs");
-            let command = resolve_format_command(root.path(), &[changed]).expect("format command");
-
-            assert!(command.contains("format.sh"));
-            assert!(command.ends_with("'src/changed file.rs'"));
+            let component = Component::new(
+                "fixture".into(),
+                root.path().to_string_lossy().into(),
+                "rust".into(),
+                None,
+            );
+            let result = format_after_write(&component, root.path(), &[changed]).unwrap();
+            assert!(result.success, "{:?}", result.output);
+            assert!(result.command.unwrap().contains("format.sh"));
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("formatted.txt")).unwrap(),
+                "formatted"
+            );
         });
     }
 

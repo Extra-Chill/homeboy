@@ -1,22 +1,28 @@
 use super::super::formatting::{extract_formatting_findings, self_check_output_is_harness_failure};
 
 #[test]
-fn formatting_findings_parse_diff_paths_and_summary() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let stdout = format!(
-        "FMT SUMMARY: 2 files need formatting\nDiff in {} at line 12:\nDiff in src/lib.rs:1:\n",
-        dir.path().join("src/main.rs").display()
-    );
-
-    let findings = extract_formatting_findings(&stdout, "", dir.path())
-        .expect("formatting findings should parse");
-
-    assert_eq!(findings.files, vec!["src/lib.rs", "src/main.rs"]);
-    assert_eq!(
-        findings.summary.as_deref(),
-        Some("FMT SUMMARY: 2 files need formatting")
-    );
-    assert_eq!(findings.suggested_command, "cargo fmt");
+fn formatting_findings_use_distinct_declared_format_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let finding = |category, file: String| {
+        homeboy_finding::HomeboyFinding::builder("fixture", "message")
+            .category(category)
+            .file(file)
+            .build()
+    };
+    let findings = extract_formatting_findings(
+        &[
+            finding(
+                "format",
+                dir.path().join("src/main.js").to_string_lossy().into(),
+            ),
+            finding("format", "./src/main.js".into()),
+            finding("lint", "other.js".into()),
+        ],
+        dir.path(),
+    )
+    .unwrap();
+    assert_eq!(findings.files, vec!["src/main.js"]);
+    assert!(extract_formatting_findings(&[], dir.path()).is_none());
 }
 
 #[test]

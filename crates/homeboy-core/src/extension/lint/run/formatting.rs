@@ -6,60 +6,25 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 pub(crate) fn extract_formatting_findings(
-    stdout: &str,
-    stderr: &str,
+    findings: &[homeboy_finding::HomeboyFinding],
     source_path: &Path,
 ) -> Option<FormattingFindings> {
-    let mut files = BTreeSet::new();
-    let mut summary = None;
-
-    for line in stdout.lines().chain(stderr.lines()) {
-        let trimmed = line.trim();
-        if trimmed.contains("FMT SUMMARY:") {
-            summary = Some(trimmed.to_string());
-        }
-        if let Some(path) = trimmed
-            .strip_prefix("Diff in ")
-            .and_then(|rest| formatting_diff_path(rest, source_path))
-        {
-            files.insert(path);
-        }
-    }
-
-    if files.is_empty() && summary.is_none() {
-        return None;
-    }
-
-    Some(FormattingFindings {
+    let files: BTreeSet<_> = findings
+        .iter()
+        .filter(|finding| finding.category.as_deref() == Some("format"))
+        .filter_map(|finding| finding.location.file.as_deref())
+        .map(|file| {
+            Path::new(file)
+                .strip_prefix(source_path)
+                .unwrap_or(Path::new(file))
+                .to_string_lossy()
+                .trim_start_matches("./")
+                .to_string()
+        })
+        .collect();
+    (!files.is_empty()).then(|| FormattingFindings {
         files: files.into_iter().collect(),
-        summary,
-        suggested_command: "cargo fmt".to_string(),
     })
-}
-
-fn formatting_diff_path(raw: &str, source_path: &Path) -> Option<String> {
-    let candidate = raw
-        .split_once(" at line ")
-        .map(|(path, _)| path)
-        .or_else(|| raw.split_once(":").map(|(path, _)| path))
-        .unwrap_or(raw)
-        .trim()
-        .trim_matches('`')
-        .trim_matches('"');
-    if candidate.is_empty() {
-        return None;
-    }
-
-    let path = Path::new(candidate);
-    let relative = path
-        .strip_prefix(source_path)
-        .ok()
-        .and_then(|path| path.to_str())
-        .unwrap_or(candidate)
-        .trim_start_matches("./")
-        .to_string();
-
-    (!relative.is_empty()).then_some(relative)
 }
 
 /// Decide whether a non-zero lint exit with zero findings is a harness/infra
