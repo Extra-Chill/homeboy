@@ -170,7 +170,33 @@ PY
     fi
 }
 
-if [ "$#" -gt 0 ]; then
+# Standalone scripts are not PHPUnit tests. Reconcile their observed markers
+# with the backend counts rather than letting the first matching adapter hide
+# either half of a mixed (possibly failing) shard.
+standalone_counts="$(python3 - "$OUTPUT_FILE" <<'PY'
+import re
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+if not re.search(r'^TEST_SHARD_SUMMARY:.* status=passed$', text, re.M):
+    passed = len(re.findall(r'^PHP_SMOKE_OK:.+$', text, re.M))
+    failed = len(re.findall(r'^PHP_SMOKE_FAIL:.+:exit=\d+$', text, re.M))
+    if passed + failed:
+        print(passed, failed)
+PY
+)"
+if [ -n "$standalone_counts" ] && type homeboy_write_test_results >/dev/null 2>&1; then
+    backend_counts="$(
+        homeboy_write_test_results() { printf '%s %s %s %s\n' "$1" "$2" "$3" "$4"; }
+        if [ "$#" -gt 0 ]; then
+            homeboy_wordpress_parse_with_adapters "$OUTPUT_FILE" "$@"
+        else
+            homeboy_wordpress_parse_with_adapters "$OUTPUT_FILE" wp-codebox-json host-smoke phpunit phpunit-testdox
+        fi
+    )"
+    read -r smoke_passed smoke_failed <<< "$standalone_counts"
+    read -r total passed failed skipped <<< "${backend_counts:-0 0 0 0}"
+    homeboy_write_test_results "$((total + smoke_passed + smoke_failed))" "$((passed + smoke_passed))" "$((failed + smoke_failed))" "${skipped:-0}" "standalone-php-and-backend"
+elif [ "$#" -gt 0 ]; then
     homeboy_wordpress_parse_with_adapters "$OUTPUT_FILE" "$@"
 else
     homeboy_wordpress_parse_with_adapters "$OUTPUT_FILE" wp-codebox-json host-smoke phpunit phpunit-testdox

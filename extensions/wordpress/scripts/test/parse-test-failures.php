@@ -322,6 +322,31 @@ function host_smoke_failure_message( array $context, string $file, int $exit_cod
 // Output
 // ============================================================================
 
+// The outer runner's standalone scripts can fail alongside PHPUnit. Keep
+// their inventory identity, and append rather than replacing backend evidence.
+$smoke_passed = preg_match_all( '/^PHP_SMOKE_OK:.+$/m', $raw );
+$smoke_failed = preg_match_all( '/^PHP_SMOKE_FAIL:(.+):exit=(\d+)$/m', $raw, $smoke_matches, PREG_SET_ORDER );
+foreach ( $smoke_matches as $match ) {
+	$file = $match[1];
+	$message = 'standalone PHP smoke exited ' . $match[2];
+	$failures[] = [
+		'test_name' => $file,
+		'test_id' => $file,
+		'test_file' => $file,
+		'file' => $file,
+		'line' => 0,
+		'suite' => 'standalone-php',
+		'message' => $message,
+		'error_type' => 'test_failure',
+		'failure_type' => 'test_failure',
+		'fingerprint' => make_failure_fingerprint( $file, $file, 0, 'test_failure', $message ),
+		'stdout_excerpt' => $match[0],
+		'stderr_excerpt' => '',
+	];
+}
+$total += $smoke_passed + $smoke_failed;
+$passed += $smoke_passed;
+
 $output = [
 	'failures' => $failures,
 	'total'    => $total,
