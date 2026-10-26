@@ -258,13 +258,23 @@ pub(in crate::workspace) fn pipe<T: Send>(
     let writer = unsafe { fs::File::from_raw_fd(writer.into_raw_fd()) };
     std::thread::scope(|scope| {
         let producer = scope.spawn(move || produce(writer));
-        let result = consume(reader);
+        let mut result = consume(reader);
         let produced = producer
             .join()
             .map_err(|_| io("blob stream producer panicked"))?;
         if let Err(error) = produced {
             if error.details["classification"] == "snapshot_construction" || result.is_ok() {
                 return Err(error);
+            }
+            // A rejected/truncated archive can make the consumer fail too.
+            // Keep transport classification and commit uncertainty, but never
+            // discard the controller-side cause (including missing files).
+            if let Err(consumer) = &mut result {
+                consumer.details["blob_stream_producer"] = serde_json::json!({
+                    "code": error.code.as_str(),
+                    "message": error.message,
+                    "details": error.details,
+                });
             }
         }
         result

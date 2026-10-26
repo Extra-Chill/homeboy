@@ -429,7 +429,7 @@ pub(super) fn sync_workspace_batch_in_roots(
     .map_err(|mut error| {
         error.details["workspace_effect"] = serde_json::json!({
             "runner_id": runner_id, "status": "commit_interrupted_or_unobserved",
-            "roots": outputs.iter().map(|output| &output.remote_path).collect::<Vec<_>>(),
+            "roots": plan.roots.iter().map(|root| &root.remote_path).collect::<Vec<_>>(),
         });
         error
     })?;
@@ -525,9 +525,9 @@ pub(super) fn invoke(
                 materialization_commit_controlled(incoming.path(), control)
             } else {
                 let binary = crate::remote_runner_homeboy_path(runner, "materialize Lab sources")?;
-                let remote = format!("set -eu; mkdir -p {root}; stage=$(mktemp -d {template}); trap 'rm -rf \"$stage\"' EXIT HUP INT TERM; tar -p -C \"$stage\" -xf -; {binary} runner workspace materialization --input \"$stage{input}\" --response \"$stage/response.json\" {commit} >&2; cat \"$stage/response.json\"", root = shell::quote_arg(root), template = shell::quote_arg(&format!("{root}/.materialization.XXXXXXXX")), binary = shell::quote_arg(binary), input = if blobs.is_some() { "" } else { "/plan.json" }, commit = if blobs.is_some() { "--commit" } else { "" });
+                let remote = materialization_script(root, binary, blobs.is_some());
                 let command = super::super::util::shell_command_for_runner(runner, &remote)?;
-                let output = control
+                let mut output = control
                     .output_with_stdin(
                         Command::new("bash").args(["-o", "pipefail", "-c", &command]),
                         reader,
@@ -543,6 +543,12 @@ pub(super) fn invoke(
                         error
                     })?;
                 if !output.status.success() {
+                    if output.stdout.is_empty() && output.stderr.is_empty() {
+                        output.stderr = format!(
+                            "materialization transport exited {} without a remote failure marker; runner={}; operation={}; remote script was not observed (check SSH wrapper and blob_stream_producer evidence)",
+                            output.status, runner.id, if blobs.is_some() { "commit" } else { "plan" },
+                        ).into_bytes();
+                    }
                     return super::super::util::shell_output_failure(output, "runner materialization call").map(|()| serde_json::Value::Null).map_err(|mut error| {
                     if blobs.is_some() && error.code == ErrorCode::RunnerLabTransportFailure { error.details["workspace_sync"] = serde_json::json!({"command_started": true, "remote_effect_uncertain": true}); }
                     error
@@ -554,6 +560,19 @@ pub(super) fn invoke(
     )?;
     control.checkpoint()?;
     Ok(response)
+}
+
+/// The EXIT trap covers setup, extraction, binary execution and response read.
+/// Preserve the original status even if evidence collection or cleanup fails.
+pub(super) fn materialization_script(root: &str, binary: &str, commit: bool) -> String {
+    format!(
+        "set -eu; stage=''; phase=setup; trap 'rc=$?; trap - EXIT; if [ \"$rc\" -ne 0 ]; then printf \"materialization failed rc=%s phase=%s stage=%s\\n\" \"$rc\" \"$phase\" \"$stage\" >&2; if [ -n \"$stage\" ]; then ls -la \"$stage\" >&2 || :; if [ -f \"$stage/response.json\" ]; then cat \"$stage/response.json\" >&2 || :; fi; fi; fi; if [ -n \"$stage\" ]; then rm -rf \"$stage\" || :; fi; exit \"$rc\"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; mkdir -p {root}; stage=$(mktemp -d {template}); phase=extract; tar -p -C \"$stage\" -xf -; phase=execute; {binary} runner workspace materialization --input \"$stage{input}\" --response \"$stage/response.json\" {commit} >&2; phase=response; cat \"$stage/response.json\"",
+        root = shell::quote_arg(root),
+        template = shell::quote_arg(&format!("{root}/.materialization.XXXXXXXX")),
+        binary = shell::quote_arg(binary),
+        input = if commit { "" } else { "/plan.json" },
+        commit = if commit { "--commit" } else { "" },
+    )
 }
 
 #[cfg(test)]

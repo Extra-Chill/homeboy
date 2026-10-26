@@ -289,12 +289,16 @@ pub(super) fn materialization_commit_controlled(
         // Never replace another job's live execution view. An interrupted
         // publish is accepted only if its exact bytes are already complete.
         if destination.exists() {
-            let previous: RunnerWorkspaceMetadata =
-                json(&fs::read(workspace_metadata_path(&root.summary.remote_path)).map_err(io)?)?;
-            if previous.workspace_lease != root.metadata.workspace_lease
-                && root.source_evidence.is_none()
-            {
-                return Err(io("existing materialization belongs to another lease"));
+            // The review/git sync path publishes prepared dependency siblings
+            // with source evidence, not workspace lease metadata. Both paths
+            // share these siblings: require a lease only for job-owned roots.
+            if root.source_evidence.is_none() {
+                let previous: RunnerWorkspaceMetadata = json(
+                    &fs::read(workspace_metadata_path(&root.summary.remote_path)).map_err(io)?,
+                )?;
+                if previous.workspace_lease != root.metadata.workspace_lease {
+                    return Err(io("existing materialization belongs to another lease"));
+                }
             }
             if root.install_git.is_some() || root.prepared_git {
                 let expected = control.git(&source, &["rev-parse", "HEAD"])?;
