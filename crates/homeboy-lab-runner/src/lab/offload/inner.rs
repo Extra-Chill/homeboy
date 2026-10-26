@@ -1206,38 +1206,6 @@ where
     probe()
 }
 
-fn carry_forward_prepared_configured_identity(
-    prepared: &RunnerStatusReport,
-    current: &mut RunnerStatusReport,
-) {
-    if current.configured_job_binary_build_identity.is_some()
-        || prepared.admission_blocking_stale_daemon().is_some()
-        || current.admission_blocking_stale_daemon().is_some()
-        || prepared.runner_id != current.runner_id
-    {
-        return;
-    }
-    let (Some(prepared_session), Some(current_session)) =
-        (prepared.session.as_ref(), current.session.as_ref())
-    else {
-        return;
-    };
-    let same_direct_daemon = prepared_session.mode == RunnerTunnelMode::DirectSsh
-        && current_session.mode == RunnerTunnelMode::DirectSsh
-        && prepared_session.remote_daemon_lease_id.is_some()
-        && prepared_session.remote_daemon_lease_id == current_session.remote_daemon_lease_id
-        && prepared_session.remote_daemon_address.is_some()
-        && prepared_session.remote_daemon_address == current_session.remote_daemon_address
-        && prepared_session.remote_daemon_pid.is_some()
-        && prepared_session.remote_daemon_pid == current_session.remote_daemon_pid
-        && prepared_session.homeboy_build_identity.is_some()
-        && prepared_session.homeboy_build_identity == current_session.homeboy_build_identity;
-    if same_direct_daemon {
-        current.configured_job_binary_build_identity =
-            prepared.configured_job_binary_build_identity.clone();
-    }
-}
-
 fn apply_direct_ssh_configured_identity_freshness(
     status: &mut RunnerStatusReport,
     runner_id: &str,
@@ -1609,7 +1577,6 @@ pub(crate) fn run_lab_offload_inner(
     mut plan: HomeboyPlan,
     mut messages: Vec<String>,
     mut observation: OffloadObservation,
-    prepared_runner_status: RunnerStatusReport,
 ) -> Result<LabOffloadOutcome> {
     // One store for the whole offload. Every phase record, plan read,
     // admission reservation and pre-execution failure below describes one
@@ -1620,7 +1587,6 @@ pub(crate) fn run_lab_offload_inner(
     let runner_id = &selection.runner_id;
     let mut runner = load(runner_id)?;
     let mut runner_status = status_for_admission(runner_id)?;
-    carry_forward_prepared_configured_identity(&prepared_runner_status, &mut runner_status);
     if runner.kind != super::super::super::RunnerKind::Ssh {
         return Err(Error::validation_invalid_argument(
             "runner",
@@ -3408,43 +3374,6 @@ mod tests {
 
         require_available_lab_runner("homeboy-lab", &status, None, "cook")
             .expect("matching authoritative status evidence admits the offload");
-    }
-
-    #[test]
-    fn direct_ssh_admission_carries_prepared_identity_across_the_same_daemon_generation() {
-        let identity = "homeboy 0.339.0+83a9bd058619";
-        let prepared = direct_identity_status(Some(identity), "lease-a");
-        let mut current = direct_identity_status(None, "lease-a");
-
-        carry_forward_prepared_configured_identity(&prepared, &mut current);
-
-        assert_eq!(
-            current.configured_job_binary_build_identity.as_deref(),
-            Some(identity)
-        );
-    }
-
-    #[test]
-    fn direct_ssh_admission_does_not_carry_identity_across_daemon_generations() {
-        let prepared = direct_identity_status(Some("homeboy 0.339.0+prepared"), "lease-a");
-        let mut current = direct_identity_status(None, "lease-b");
-
-        carry_forward_prepared_configured_identity(&prepared, &mut current);
-
-        assert!(current.configured_job_binary_build_identity.is_none());
-    }
-
-    #[test]
-    fn direct_ssh_admission_does_not_replace_an_observed_mismatch() {
-        let prepared = direct_identity_status(Some("homeboy 0.339.0+prepared"), "lease-a");
-        let mut current = direct_identity_status(Some("homeboy 0.339.0+current"), "lease-a");
-
-        carry_forward_prepared_configured_identity(&prepared, &mut current);
-
-        assert_eq!(
-            current.configured_job_binary_build_identity.as_deref(),
-            Some("homeboy 0.339.0+current")
-        );
     }
 
     #[test]

@@ -4312,6 +4312,7 @@ impl StageExecutionAdapter {
     where
         F: FnMut(&LabStagingCheckpoint) -> Result<()>,
     {
+        let _identities = crate::connection::StagingIdentityScope::enter();
         // Bind the run's timing context so sub-phases timed inside staging
         // operations (source materialization, hydration) reach the run timeline.
         let _timing = homeboy_core::observation::store::database_path()
@@ -5799,6 +5800,7 @@ mod tests {
     #[derive(Default)]
     struct RecordedStageOperations {
         calls: Mutex<Vec<&'static str>>,
+        identity_probe: Option<(crate::Runner, String)>,
         reject_handoff_identity: Mutex<bool>,
         fail_hydration: Mutex<bool>,
         cancel_during_hydration: Mutex<bool>,
@@ -5824,6 +5826,18 @@ mod tests {
 
         fn record(&self, name: &'static str) {
             self.calls.lock().expect("calls lock").push(name);
+            if let Some((runner, path)) = &self.identity_probe {
+                assert!(
+                    crate::configured_runner_homeboy_build_identity(runner, path)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    crate::connection::configured_runner_homeboy_handshake_evidence(runner, path)
+                        .unwrap()
+                        .is_some()
+                );
+            }
         }
 
         fn fail_hydration_once(&self) {
@@ -7025,6 +7039,58 @@ mod tests {
                         LabStagingPhase::ObserveRunner,
                         LabStagingPhase::Completed,
                     ]
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn lab_staging_probes_identity_once_per_operation() {
+        crate::test_support::with_isolated_home(|home| {
+            let binary = home.path().join("homeboy");
+            let calls = home.path().join("identity-calls");
+            homeboy_test_support::write_executable(&binary, format!(
+                "#!/bin/sh\necho probe >> '{}'\necho '{{\"version\":\"1.2.3\",\"display\":\"homeboy 1.2.3+first\"}}'\n", calls.display()), 0o755).unwrap();
+            homeboy_core::server::create(
+                r#"{"id":"identity-lab","host":"localhost","user":"test"}"#,
+                false,
+            )
+            .unwrap();
+            let runner = serde_json::from_value(json!({
+                "id": "identity-lab", "kind": "ssh", "server_id": "identity-lab"
+            }))
+            .unwrap();
+            let operations = RecordedStageOperations {
+                identity_probe: Some((runner, binary.display().to_string())),
+                ..Default::default()
+            };
+            let adapter = StageExecutionAdapter::new(Arc::new(operations));
+            let request = execution_request();
+            submit_recipe_run(&request.recipe.run_id);
+            for staging in 1..=2 {
+                adapter
+                    .execute_with_checkpoint(
+                        &request,
+                        LabStagingCheckpoint::initial(&envelope()),
+                        &LabStagingCancellationToken::default(),
+                        |_| Ok(()),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(&calls).unwrap().lines().count(),
+                    staging
+                );
+                let spans = homeboy_core::observation::ObservationStore::open_initialized()
+                    .unwrap()
+                    .phase_spans(&request.recipe.run_id)
+                    .unwrap()
+                    .spans;
+                assert_eq!(
+                    spans
+                        .iter()
+                        .filter(|span| span.id == "resolve.readonly_probe.runner_homeboy_identity")
+                        .count(),
+                    staging
                 );
             }
         });

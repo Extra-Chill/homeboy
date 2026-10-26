@@ -37,6 +37,41 @@ pub(crate) fn resolve_ssh_runner(runner: &Runner) -> Result<Option<(String, Serv
     Ok(Some((server_id, server, client)))
 }
 
+type SshIdentityTarget = (String, String, u16, Option<String>);
+type StagingIdentities =
+    std::collections::HashMap<(Option<String>, String, SshIdentityTarget), RemoteHomeboyIdentity>;
+
+// The synchronous staging operation owns this scope; no observation survives it.
+// Nested offload calls share it. Refresh suspends it and resumes with empty evidence.
+thread_local! {
+    static STAGING_IDENTITIES: std::cell::RefCell<Option<StagingIdentities>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) struct StagingIdentityScope(Option<bool>);
+
+impl StagingIdentityScope {
+    pub(crate) fn enter() -> Self {
+        Self(STAGING_IDENTITIES.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let owner = slot.is_none();
+            slot.get_or_insert_with(Default::default);
+            owner.then_some(true)
+        }))
+    }
+
+    pub(crate) fn suspend() -> Self {
+        Self(STAGING_IDENTITIES.with(|slot| slot.borrow_mut().take().map(|_| false)))
+    }
+}
+
+impl Drop for StagingIdentityScope {
+    fn drop(&mut self) {
+        if let Some(clear) = self.0 {
+            STAGING_IDENTITIES.with(|slot| *slot.borrow_mut() = (!clear).then(Default::default));
+        }
+    }
+}
+
 /// Read the remote Homeboy version on a lifecycle (write) path.
 ///
 /// Retains the retrying, unbounded execution used by `connect`, where a
@@ -72,10 +107,14 @@ fn parse_remote_homeboy_version(
     Ok(version)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct RemoteHomeboyIdentity {
     pub(super) version: String,
     pub(super) build_identity: Option<String>,
+    pub(super) handoff: Option<(
+        homeboy_lab_contract::LabRuntimeIdentity,
+        Vec<LabCapabilityVersion>,
+    )>,
     /// The daemon-recovery capabilities the remote advertised in its typed
     /// self-identity report. `None` means the remote is an older binary that
     /// never advertised the field; controllers must fall back to scraping the
@@ -101,8 +140,7 @@ pub(super) fn remote_homeboy_identity(
     let version = remote_homeboy_version(client, homeboy)?;
     Ok(RemoteHomeboyIdentity {
         version: normalize_homeboy_version_owned(&version),
-        build_identity: None,
-        daemon_recovery_capabilities: None,
+        ..Default::default()
     })
 }
 
@@ -126,6 +164,39 @@ pub(super) fn bounded_remote_homeboy_identity(
 }
 
 pub(super) fn bounded_remote_homeboy_identity_until(
+    client: &SshClient,
+    homeboy: &str,
+    runner_id: Option<&str>,
+    deadline: std::time::Instant,
+) -> std::result::Result<RemoteHomeboyIdentity, String> {
+    let key = (
+        runner_id.map(str::to_owned),
+        homeboy.to_owned(),
+        (
+            client.user.clone(),
+            client.host.clone(),
+            client.port,
+            client.identity_file.clone(),
+        ),
+    );
+    if let Some(identity) = STAGING_IDENTITIES.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|cache| cache.get(&key).cloned())
+    }) {
+        return Ok(identity);
+    }
+    let identity = probe_remote_homeboy_identity_until(client, homeboy, runner_id, deadline)?;
+    // Only an observed identity is reused; a failed probe is retried by the next stage.
+    STAGING_IDENTITIES.with(|slot| {
+        if let Some(cache) = slot.borrow_mut().as_mut() {
+            cache.insert(key, identity.clone());
+        }
+    });
+    Ok(identity)
+}
+
+fn probe_remote_homeboy_identity_until(
     client: &SshClient,
     homeboy: &str,
     runner_id: Option<&str>,
@@ -182,8 +253,7 @@ pub(super) fn bounded_remote_homeboy_identity_until(
     let version = parse_remote_homeboy_version(&output)?;
     Ok(RemoteHomeboyIdentity {
         version: normalize_homeboy_version_owned(&version),
-        build_identity: None,
-        daemon_recovery_capabilities: None,
+        ..Default::default()
     })
 }
 
@@ -194,25 +264,20 @@ fn remote_homeboy_identity_command(homeboy: &str) -> String {
 pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyIdentity> {
     let body: Value = parse_json_from_mixed_stdout(output).ok()?;
     let data = body.get("data").unwrap_or(&body);
-    let version = data.get("version")?.as_str()?.trim();
-    let display = data
-        .get("display")
-        .and_then(Value::as_str)
+    let version = data["version"].as_str()?.trim();
+    let display = data["display"]
+        .as_str()
         .map(str::trim)
         .filter(|value| immutable_build_identity(value));
     if version.is_empty() {
         return None;
     }
     let build_identity = display.map(str::to_string).or_else(|| {
-        let commit = data
-            .get("git_commit")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())?;
-        let dirty = data
-            .get("git_dirty")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let commit = data["git_commit"].as_str()?.trim();
+        if commit.is_empty() {
+            return None;
+        }
+        let dirty = data["git_dirty"].as_bool().unwrap_or(false);
         Some(format!(
             "homeboy {}+{}{}",
             normalize_homeboy_version_owned(version),
@@ -220,12 +285,19 @@ pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyId
             if dirty { "-dirty" } else { "" }
         ))
     });
-    let daemon_recovery_capabilities = data
-        .get("daemon_recovery_capabilities")
-        .and_then(parse_daemon_recovery_capabilities);
+    let daemon_recovery_capabilities =
+        parse_daemon_recovery_capabilities(&data["daemon_recovery_capabilities"]);
     Some(RemoteHomeboyIdentity {
         version: version.to_string(),
         build_identity,
+        handoff: Some((
+            homeboy_lab_contract::LabRuntimeIdentity {
+                build_identity: data["display"].as_str().unwrap_or_default().to_string(),
+                source_revision: data["git_commit"].as_str().unwrap_or_default().to_string(),
+                clean: data["git_dirty"].as_bool() == Some(false),
+            },
+            serde_json::from_value(data["lab_handoff_capabilities"].clone()).unwrap_or_default(),
+        )),
         daemon_recovery_capabilities,
     })
 }
@@ -237,9 +309,6 @@ pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyId
 /// those binaries cannot perform typed remote recovery. Unknown ids and future
 /// versions are preserved verbatim: matching is by id.
 fn parse_daemon_recovery_capabilities(value: &Value) -> Option<Vec<LabCapabilityVersion>> {
-    if value.is_null() {
-        return None;
-    }
     serde_json::from_value(value.clone()).ok()
 }
 
@@ -1605,6 +1674,55 @@ mod tests {
     use homeboy_core::server;
 
     use std::time::Instant;
+
+    #[test]
+    fn staging_identity_scope_keys_observations_and_retries_failures() {
+        crate::test_support::with_isolated_home(|home| {
+            let binary = home.path().join("homeboy");
+            let calls = home.path().join("calls");
+            homeboy_test_support::write_executable(&binary, format!(
+                "#!/bin/sh\necho probe >> '{}'\necho '{{\"version\":\"1.2.3\",\"display\":\"homeboy 1.2.3+first\"}}'\n", calls.display()), 0o755).unwrap();
+            server::create(
+                r#"{"id":"identity-lab","host":"localhost","user":"test"}"#,
+                false,
+            )
+            .unwrap();
+            let server = server::load("identity-lab").unwrap();
+            let mut client = SshClient::from_server(&server, "identity-lab").unwrap();
+            let path = binary.to_str().unwrap();
+            let scope = StagingIdentityScope::enter();
+            assert!(bounded_remote_homeboy_identity_until(
+                &client,
+                path,
+                Some("a"),
+                Instant::now()
+            )
+            .is_err());
+            // A failed probe is not reused: the next stage observes the identity.
+            assert!(bounded_remote_homeboy_identity(&client, path, Some("a")).is_ok());
+            assert!(bounded_remote_homeboy_identity(&client, path, Some("a")).is_ok());
+            assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+            drop(scope);
+            let _scope = StagingIdentityScope::enter();
+            assert!(bounded_remote_homeboy_identity(&client, path, Some("a")).is_ok());
+            {
+                let _nested = StagingIdentityScope::enter();
+                assert!(bounded_remote_homeboy_identity(&client, path, Some("a")).is_ok());
+            }
+            assert!(bounded_remote_homeboy_identity(&client, path, Some("a")).is_ok());
+            assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2);
+            assert!(bounded_remote_homeboy_identity(&client, path, Some("b")).is_ok());
+            let other = home.path().join("other-homeboy");
+            std::fs::copy(&binary, &other).unwrap();
+            assert!(
+                bounded_remote_homeboy_identity(&client, other.to_str().unwrap(), Some("a"))
+                    .is_ok()
+            );
+            client.user = "other-target".to_string();
+            assert!(bounded_remote_homeboy_identity(&client, path, Some("a")).is_ok());
+            assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 5);
+        });
+    }
 
     #[test]
     fn bounded_status_records_a_timed_out_remote_daemon_probe() {
