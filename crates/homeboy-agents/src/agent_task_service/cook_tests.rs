@@ -10090,28 +10090,68 @@ fn repeated_zero_execution_replacements_keep_one_semantic_attempt_and_unique_lin
     });
 }
 
+fn recover_preflight_step(cook_id: &str) -> crate::agent_task_service::CookRecoveryStep {
+    let (report, exit_code) = crate::agent_task_service::recover_cook(
+        cook_id,
+        crate::agent_task_service::CookRecoveryRequest {
+            preflight: true,
+            ..Default::default()
+        },
+        &ReplacementOnlyRecoveryPerformer,
+    )
+    .expect("recover --preflight");
+    assert_eq!(report.status, "pre_execution_failure");
+    assert_eq!(exit_code, 0);
+    report.step
+}
+
 #[test]
-fn non_retryable_pre_execution_failure_does_not_advertise_a_cook_losing_retry() {
+fn zero_execution_pre_execution_failure_recovers_by_retrying_its_recipe() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let options = retryable_pre_provider_cook("cook-non-retryable-pre-execution", 1);
+        // A runner materialization failure (#16441) is recorded non-retryable,
+        // yet no provider ran, so it holds no candidate to lose.
+        let options = retryable_pre_provider_cook("cook-materialization-failure", 1);
         agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
             record.metadata["pre_execution_failure"]["retryable"] = serde_json::json!(false);
         })
         .expect("mark pre-execution failure non-retryable");
 
-        assert!(
-            crate::agent_task_service::retry_admission(&options.identity.initial_run_id).is_err()
+        assert_eq!(
+            recover_preflight_step(&options.identity.cook_id),
+            crate::agent_task_service::CookRecoveryStep::Retry
         );
-        let context = super::super::cook_failure_context(
-            &options.identity.cook_id,
-            Some(&options.identity.initial_run_id),
-            "pre_execution_failure",
-        )
-        .expect("Cook failure context");
-        assert!(context
-            .next_actions
-            .iter()
-            .all(|action| !action.command.contains("agent-task retry")));
+        let retry =
+            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
+                .expect("retry replays the durable recipe attempt");
+        assert_eq!(retry.record.metadata["cook_id"], options.identity.cook_id);
+        assert_eq!(retry.record.metadata["cook_attempt"], 1);
+        assert_eq!(
+            retry.record.metadata["retry_of"],
+            options.identity.initial_run_id
+        );
+    });
+}
+
+#[test]
+fn refused_pre_execution_retry_names_the_admission_refusal() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-refused-pre-execution-retry", 1);
+        agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
+            record.metadata["pre_execution_failure"]["retryable"] = serde_json::json!(false);
+            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+        })
+        .expect("record a consumed provider execution");
+        let refusal = crate::agent_task_service::retry_admission(&options.identity.initial_run_id)
+            .expect_err("a consumed provider execution is not replayed")
+            .message;
+
+        let crate::agent_task_service::CookRecoveryStep::None { reason } =
+            recover_preflight_step(&options.identity.cook_id)
+        else {
+            panic!("refused retry must not advertise a step");
+        };
+        assert!(reason.contains(&refusal), "{reason}");
+        assert!(!reason.contains("admits no recovery step"), "{reason}");
     });
 }
 
@@ -13154,7 +13194,7 @@ fn cook_persists_controller_runtime_mismatch_before_provider_execution() {
 }
 
 #[test]
-fn cook_lab_workspace_stage_failure_advertises_diagnostics_not_retry() {
+fn cook_lab_workspace_stage_failure_advertises_runtime_refresh_and_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-invalid-input-attempt-1";
         let mut options = batch_cook_options(
@@ -13203,14 +13243,11 @@ fn cook_lab_workspace_stage_failure_advertises_diagnostics_not_retry() {
             runtime_actions[0].command,
             "homeboy runner refresh-homeboy homeboy-lab --ref required --reconnect"
         );
-        assert!(context
-            .legal_actions
-            .iter()
-            .all(|action| action.action != "retry"));
-        assert!(context
-            .next_actions
-            .iter()
-            .all(|action| action.action != "retry"));
+        // No provider ran, so the recipe replays the attempt once repaired.
+        assert_eq!(
+            context.recovery_step,
+            Some(crate::agent_task_service::CookRecoveryStep::Retry)
+        );
         assert!(context
             .next_actions
             .iter()
@@ -13230,7 +13267,7 @@ fn cook_lab_workspace_stage_failure_advertises_diagnostics_not_retry() {
 }
 
 #[test]
-fn cook_pre_provider_worktree_lookup_failure_advertises_diagnostics_not_retry() {
+fn cook_pre_provider_worktree_lookup_failure_advertises_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-worktree-lookup-attempt-1";
         let mut options = batch_cook_options(
@@ -13262,17 +13299,9 @@ fn cook_pre_provider_worktree_lookup_failure_advertises_diagnostics_not_retry() 
             Some("pre_provider_worktree_lookup")
         );
         assert_eq!(
-            context
-                .legal_actions
-                .iter()
-                .map(|action| action.action.as_str())
-                .collect::<Vec<_>>(),
-            vec!["status", "diagnose"]
+            context.recovery_step,
+            Some(crate::agent_task_service::CookRecoveryStep::Retry)
         );
-        assert!(context
-            .next_actions
-            .iter()
-            .all(|action| action.action != "retry"));
     });
 }
 

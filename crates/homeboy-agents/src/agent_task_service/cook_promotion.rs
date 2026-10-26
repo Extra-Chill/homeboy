@@ -6747,12 +6747,14 @@ pub(crate) fn cook_failure_context_with_stores(
             )
         })
         .unwrap_or_else(|| {
-            let retry_admitted = record.as_ref().is_some_and(|record| {
+            let retry_refusal = record.as_ref().map(|record| {
                 lifecycle_store
                     .map(|store| super::retry_admission_in_root(store, &record.run_id))
                     .unwrap_or_else(|| super::retry_admission(&record.run_id))
-                    .is_ok()
+                    .err()
+                    .map(|error| error.message)
             });
+            let retry_admitted = matches!(retry_refusal, Some(None));
             let continuation_state = record.as_ref().and_then(|record| {
                 lifecycle_store
                     .map(|store| {
@@ -6784,6 +6786,7 @@ pub(crate) fn cook_failure_context_with_stores(
                     .and_then(|record| record.metadata.get("cook_continuation_admission")),
                 retry_admitted || (cook_status.is_gate_failure() && continuation_pending),
             );
+            let retry_refusal = retry_refusal.flatten();
             let delivered_candidate =
                 delivered_candidate_facts(&recipe, record.as_ref(), delivery.as_ref());
             // The adopt observation only matters for a terminal `no_changes`
@@ -6797,6 +6800,7 @@ pub(crate) fn cook_failure_context_with_stores(
                 recovery_legal,
                 blocking_claim.is_some(),
                 continuation_admitted,
+                retry_refusal.as_deref(),
                 exact_checkpoint_candidate_mismatch(&diagnostic),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Completed),
@@ -7376,6 +7380,7 @@ fn cook_recovery_actions(
         recovery_legal,
         blocking_claim,
         retry_admitted,
+        None,
         exact_checkpoint_candidate_mismatch,
         false,
         false,
@@ -7393,6 +7398,7 @@ fn cook_recovery_actions_with_prefix(
     recovery_legal: bool,
     blocking_claim: bool,
     retry_admitted: bool,
+    retry_refusal: Option<&str>,
     exact_checkpoint_candidate_mismatch: bool,
     continuation_rearm_required: bool,
     continuation_completed: bool,
@@ -7410,6 +7416,7 @@ fn cook_recovery_actions_with_prefix(
             recovery_legal,
             blocking_claim,
             retry_admitted,
+            retry_refusal,
             exact_checkpoint_candidate_mismatch,
             continuation_rearm_required,
             continuation_completed,

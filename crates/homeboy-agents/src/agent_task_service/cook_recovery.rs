@@ -124,6 +124,8 @@ pub(crate) struct CookRecoveryInputs<'a> {
     pub blocking_claim: bool,
     /// Retry (or continuation) admission accepted this attempt.
     pub retry_admitted: bool,
+    /// Why retry admission refused this attempt, when it did.
+    pub retry_refusal: Option<&'a str>,
     /// The checkpoint's typed recovery action is `fork_replacement`.
     pub exact_checkpoint_candidate_mismatch: bool,
     /// The attempt's terminal continuation failed and must be rearmed.
@@ -197,8 +199,15 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
             };
         }
     }
-    if status == CookStatus::PreExecutionFailure && inputs.retry_admitted {
-        return CookRecoveryStep::Retry;
+    if status == CookStatus::PreExecutionFailure {
+        if inputs.retry_admitted {
+            return CookRecoveryStep::Retry;
+        }
+        if let Some(refusal) = inputs.retry_refusal {
+            return CookRecoveryStep::none(format!(
+                "Retry admission refused this `pre_execution_failure` attempt: {refusal}. Inspect it with `agent-task diagnose`."
+            ));
+        }
     }
     let continuation_eligible = match &status {
         CookStatus::Completed
