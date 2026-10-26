@@ -110,6 +110,34 @@ fn harvest_candidate_commit_with_bundle(
         return Ok(());
     };
     let candidate_sha = candidate.candidate_sha.clone();
+    // The commit is promotion authority, but callers still need durable,
+    // inspectable patch evidence after the attempt checkout has been reaped.
+    // Derive it from the immutable candidate, never a later worktree diff.
+    let patch = git_output_bytes_with_env(
+        root,
+        &["diff", "--binary", "--full-index", base, &candidate_sha],
+        &[],
+    )?;
+    let patch_dir = candidate_bundle_path(running)?.with_extension("");
+    std::fs::create_dir_all(&patch_dir).map_err(|error| HarvestError::ArtifactDirectory {
+        path: patch_dir.clone(),
+        message: error.to_string(),
+    })?;
+    let patch_path = patch_dir.join("changes.patch");
+    std::fs::write(&patch_path, &patch).map_err(|error| HarvestError::ArtifactWrite {
+        path: patch_path.clone(),
+        message: error.to_string(),
+    })?;
+    outcome.artifacts.push(AgentTaskArtifact {
+        id: format!("{}-attempt-{}-patch", running.task_id, running.attempt),
+        kind: "patch".to_string(),
+        name: Some("changes.patch".to_string()),
+        path: Some(patch_path.display().to_string()),
+        size_bytes: Some(patch.len() as u64),
+        sha256: Some(patch_sha256(&patch)),
+        metadata: serde_json::json!({ "candidate_sha": candidate_sha, "base_ref": base }),
+        ..AgentTaskArtifact::default()
+    });
     if !outcome.metadata.is_object() {
         outcome.metadata = serde_json::json!({});
     }
@@ -410,6 +438,14 @@ fn git_output_raw_with_env(
     args: &[&str],
     env: &[(&str, &str)],
 ) -> Result<String, HarvestError> {
+    Ok(String::from_utf8_lossy(&git_output_bytes_with_env(cwd, args, env)?).to_string())
+}
+
+fn git_output_bytes_with_env(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<Vec<u8>, HarvestError> {
     let output = Command::new("git")
         .args(args)
         .envs(env.iter().copied())
@@ -427,7 +463,7 @@ fn git_output_raw_with_env(
             message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(output.stdout)
 }
 
 #[derive(Debug)]
@@ -930,6 +966,32 @@ mod committed_harvest_tests {
         assert!(matches!(error, HarvestError::DirtyWorkspace { .. }));
     }
 
+    fn assert_candidate_patch(outcome: &AgentTaskOutcome, repository: &Path) {
+        let candidate = outcome.candidate.as_ref().expect("candidate");
+        assert_eq!(outcome.artifacts.len(), 1, "patch only, no local bundle");
+        let patch = &outcome.artifacts[0];
+        assert_eq!(patch.kind, "patch");
+        assert_eq!(patch.name.as_deref(), Some("changes.patch"));
+        let bytes =
+            std::fs::read(patch.path.as_ref().expect("patch path")).expect("retained bytes");
+        let expected = git_output_raw(
+            repository,
+            &[
+                "diff",
+                "--binary",
+                "--full-index",
+                &candidate.base_sha,
+                &candidate.candidate_sha,
+            ],
+        )
+        .expect("candidate diff");
+        assert!(!bytes.is_empty());
+        assert_eq!(bytes, expected.as_bytes());
+        assert_eq!(patch.size_bytes, Some(bytes.len() as u64));
+        assert_eq!(patch.sha256.as_deref(), Some(patch_sha256(&bytes).as_str()));
+        assert_eq!(patch.metadata["candidate_sha"], candidate.candidate_sha);
+    }
+
     #[test]
     fn uncommitted_harvest_ignores_the_linked_index_lock_and_preserves_commits() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1036,7 +1098,7 @@ mod committed_harvest_tests {
         harvest_candidate_commit(&mut outcome, &running).expect("harvest candidate");
         assert!(index_lock.exists());
         assert_eq!(git(&workspace, &["diff", "--cached", "--name-only"]), "");
-        assert!(outcome.artifacts.is_empty());
+        assert_candidate_patch(&outcome, &workspace);
         let candidate = outcome.candidate.unwrap();
         let diff = git(
             &workspace,
@@ -1270,7 +1332,7 @@ mod committed_harvest_tests {
             Some("output 'review_form' did not satisfy its declared schema".to_string());
 
         harvest_candidate_commit(&mut outcome, &running).expect("harvest candidate");
-        assert!(outcome.artifacts.is_empty());
+        assert_candidate_patch(&outcome, &workspace);
         let candidate = outcome.candidate.as_ref().unwrap();
         assert!(git(
             &workspace,
@@ -1711,7 +1773,12 @@ mod committed_harvest_tests {
             outcome.metadata["candidate_harvest_root"]["kind"],
             "source_workspace"
         );
-        assert!(outcome.artifacts.is_empty(), "no patch artifact");
+        assert_candidate_patch(&outcome, &source);
+        let patch = std::fs::read_to_string(outcome.artifacts[0].path.as_ref().unwrap()).unwrap();
+        assert!(
+            !patch.contains("operator.txt"),
+            "exclude later operator edits"
+        );
     }
 
     #[test]

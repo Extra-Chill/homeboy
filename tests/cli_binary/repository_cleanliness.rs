@@ -15,8 +15,12 @@ use std::process::Output;
 use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary};
 
 const COMPONENT_ID: &str = "fixture";
-const HOMEBOY_JSON: &str =
-    r#"{"id":"fixture","scripts":{"lint":["true"],"test":["true"],"build":["true"]}}"#;
+// Do not advertise lint: script-only lint is not supported (#16196). Cook
+// automatically adds a `homeboy review lint` gate when lint is declared, which
+// resolves an ambient Homeboy on PATH rather than this test's fixture binary.
+// Keep the explicit `--verify true` gate below; this fixture guards checkout
+// cleanliness, not extension-backed lint capability.
+const HOMEBOY_JSON: &str = r#"{"id":"fixture","scripts":{"test":["true"],"build":["true"]}}"#;
 /// The single source file. Its content matches the deterministic fixture
 /// provider's default patch (`docs/agent-task-smoke.md`: `before` -> `after`),
 /// so a Cook run has exactly one intended edit.
@@ -162,7 +166,22 @@ fn repository_cleanliness_fixture_cook_leaves_only_the_provider_edit() {
     .map(OsString::from)
     .to_vec();
     let rendered = render_command(&cook);
+    // Reproduce the Release wrapper's ambient Homeboy on PATH. A cleanliness
+    // fixture must not acquire an undeclared nested lint gate from that binary.
+    let ambient_bin = context.root().join("ambient-bin");
+    std::fs::create_dir(&ambient_bin).expect("ambient bin directory");
+    homeboy_test_support::write_executable(
+        &ambient_bin.join("homeboy"),
+        "#!/bin/sh\nprintf 'unexpected ambient Homeboy invocation\\n' >&2\nexit 93\n",
+        0o755,
+    )
+    .expect("poison ambient Homeboy");
+    let path = std::env::join_paths(std::iter::once(ambient_bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").expect("test PATH"),
+    )))
+    .expect("fixture PATH");
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    command.env("PATH", path);
     // Pin a quiet load reading so local admission does not depend on how busy
     // the host is (see cook_lab_handoff_test, homeboy#14984).
     command

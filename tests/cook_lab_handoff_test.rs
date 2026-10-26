@@ -922,11 +922,18 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     )
     .expect("disable host-capacity admission for fixture worktree");
     let cook_id = "foreground-client-termination";
+    let release_socket = context
+        .invocation_runtime_dir()
+        .join("provider-release.sock");
+    let release = std::os::unix::net::UnixListener::bind(&release_socket)
+        .expect("bind provider release socket");
     let client_stdout = context.root().join("foreground-client.stdout");
     let client_stderr = context.root().join("foreground-client.stderr");
     let mut client = context.controller_runtime_command(TestBinary::HomeboyFixture);
     client
-        .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "5000")
+        .env("HOMEBOY_FIXTURE_PROVIDER_RELEASE_SOCKET", &release_socket)
+        .env("GITHUB_ACTIONS", "true")
+        .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
         .args([
             "--wait",
             "--placement",
@@ -994,6 +1001,13 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
 
     client.kill().expect("terminate observing client");
     client.wait().expect("reap observing client");
+    // The provider cannot finish before the client is gone. This is a
+    // synchronization barrier, not a timing window under CI load.
+    use std::io::Write;
+    let (mut provider, _) = release.accept().expect("accept running provider");
+    provider
+        .write_all(&[1])
+        .expect("release provider after client exit");
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let (output, completed, completed_json) = loop {

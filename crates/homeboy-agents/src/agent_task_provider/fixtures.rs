@@ -17,6 +17,19 @@ pub(super) fn run_fixture_provider(
     if let Some(path) = std::env::var_os("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE") {
         let _ = std::fs::write(path, "started\n");
     }
+    // A test can hold actual provider work until its observing client exits,
+    // without assuming the client can inspect and terminate within a delay.
+    #[cfg(unix)]
+    if let Some(path) = std::env::var_os("HOMEBOY_FIXTURE_PROVIDER_RELEASE_SOCKET") {
+        use std::io::Read;
+        let mut stream = std::os::unix::net::UnixStream::connect(path)
+            .expect("connect fixture provider release socket");
+        let mut release = [0];
+        stream
+            .read_exact(&mut release)
+            .expect("release fixture provider");
+        assert_eq!(release, [1], "fixture provider release token");
+    }
     if let Some(delay_ms) = std::env::var("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())

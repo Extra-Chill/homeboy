@@ -14,6 +14,13 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
             .expect("initialize observation store");
         let promotion_namespace = home.path().join("nested-promotion-gate-data");
         let _promotion_namespace = TestPromotionNamespace::new(&promotion_namespace);
+        // Drain and promotion use separate persistent lock inodes. Initialize
+        // both before the snapshot: lazy lock-file creation is not a change to
+        // the held lease, and removing lock files would split lock ownership.
+        drop(
+            homeboy::core::runtime_promotion::begin_upgrade_drain("fixture-init", vec![], vec![])
+                .expect("initialize upgrade drain lock"),
+        );
         let git_before = git_metadata_snapshot(&repository);
         let _promotion = homeboy::core::runtime_promotion::acquire("test promotion", "test")
             .expect("hold runtime promotion lease");
@@ -95,8 +102,13 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
             "blocked refresh changed the held promotion lease",
         );
 
+        // Binary upgrades resolve and stage a published candidate before
+        // promotion admission. This test guards mutation exclusion, not release
+        // discovery: force the packaged method past the version check so it
+        // reaches the same mutation fence without GitHub or an installed brew.
+        // The held lease must reject it before any package manager can run.
         let output = run_with_timeout(
-            &["upgrade", "--method", "binary"],
+            &["upgrade", "--method", "homebrew", "--force"],
             home,
             Duration::from_secs(10),
         );

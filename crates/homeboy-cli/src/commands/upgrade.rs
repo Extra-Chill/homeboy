@@ -166,6 +166,14 @@ fn waiting_upgrade_response(
             if let Some(id) = error.details["operation_id"].as_str() {
                 let status = upgrade::load_upgrade_operation_status(Some(id))?;
                 if status.status != "running" {
+                    // A failed admission still carries a typed contention error.
+                    // Do not turn it into a generic failed status envelope when
+                    // consulting the durable operation after terminalization.
+                    if status.failed
+                        && error.code == homeboy::core::error::ErrorCode::RuntimePromotionContended
+                    {
+                        return Err(error);
+                    }
                     let exit = i32::from(status.failed);
                     let json = serde_json::to_value(status)
                         .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;

@@ -198,8 +198,8 @@ mod timeout_tests {
             outcome.metadata["timeout_recovery"]["incomplete"],
             Value::Bool(true)
         );
-        assert!(outcome.artifacts.is_empty());
         let candidate = outcome.candidate.as_ref().expect("immutable candidate");
+        assert_retained_candidate_patch(outcome, candidate);
         assert!(git_output(
             &source,
             &[
@@ -255,8 +255,8 @@ mod timeout_tests {
                     .expect("persisted aggregate");
             let outcome = &aggregate.outcomes[0];
             assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
-            assert!(outcome.artifacts.is_empty());
             let candidate = outcome.candidate.as_ref().expect("immutable candidate");
+            assert_retained_candidate_patch(outcome, candidate);
             assert_eq!(
                 git_output(
                     &source,
@@ -555,14 +555,33 @@ mod timeout_tests {
                 ),
                 candidate.tree_sha
             );
-            assert!(!outcome
-                .artifacts
-                .iter()
-                .any(|artifact| artifact.kind == "patch"));
+            let bytes = assert_retained_candidate_patch(outcome, candidate);
+            assert!(String::from_utf8_lossy(&bytes).contains("+new"));
             assert!(!outcome.diagnostics.iter().any(|diagnostic| {
                 diagnostic.class == "agent_task.required_typed_artifacts_missing"
             }));
         });
+    }
+
+    /// A timed-out candidate keeps its immutable base..candidate diff as the
+    /// one durable patch artifact.
+    fn assert_retained_candidate_patch(
+        outcome: &AgentTaskOutcome,
+        candidate: &crate::agent_task::AgentTaskCandidate,
+    ) -> Vec<u8> {
+        let patches = outcome
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == "patch")
+            .collect::<Vec<_>>();
+        assert_eq!(patches.len(), 1, "retain candidate diff as evidence");
+        let patch = patches[0];
+        assert_eq!(patch.metadata["candidate_sha"], candidate.candidate_sha);
+        let bytes = std::fs::read(patch.path.as_ref().expect("patch path"))
+            .expect("retained timeout patch");
+        assert!(!bytes.is_empty());
+        assert_eq!(patch.size_bytes, Some(bytes.len() as u64));
+        bytes
     }
 
     fn git_stdout(root: &std::path::Path, args: &[&str]) -> String {
