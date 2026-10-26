@@ -80,7 +80,7 @@ impl PathRoots {
     pub fn from_environment() -> Result<Self> {
         let config = homeboy()?;
         let data = homeboy_data()?;
-        let artifacts = artifact_root_in_root(&data);
+        let artifacts = resolved_artifact_root_override().unwrap_or_else(|| data.join("artifacts"));
         Ok(Self::new(config, data, artifacts))
     }
 
@@ -396,17 +396,12 @@ pub fn observation_db() -> Result<PathBuf> {
     Ok(observation_db_in_root(&homeboy_data()?))
 }
 
-/// Resolve a named store below an already-resolved Homeboy data root.
-pub fn homeboy_data_store_in_root(data_root: &Path, name: &str) -> PathBuf {
-    data_root.join(name)
-}
-
 /// Resolve a named store below the Homeboy data root.
 ///
 /// Storage owners use this rather than rebuilding paths so reporting and future
 /// placement policy can refer to the same stable store identities.
 pub fn homeboy_data_store(name: &str) -> Result<PathBuf> {
-    Ok(homeboy_data_store_in_root(&homeboy_data()?, name))
+    Ok(homeboy_data()?.join(name))
 }
 
 /// Content-addressed cargo target cache.
@@ -418,26 +413,14 @@ pub fn cargo_targets_store() -> Result<PathBuf> {
     homeboy_data_store(CARGO_TARGETS_STORE)
 }
 
-/// Content-addressed controller runtime store.
-///
-/// Deliberately NOT given a root-taking sibling, for the same reason as
-/// [`cargo_targets_store`].
-pub fn controller_runtimes_store() -> Result<PathBuf> {
-    homeboy_data_store(CONTROLLER_RUNTIMES_STORE)
-}
-
 /// Controller runtimes store below an already-resolved data root.
 pub fn controller_runtimes_store_in_root(data_root: &Path) -> PathBuf {
-    homeboy_data_store_in_root(data_root, CONTROLLER_RUNTIMES_STORE)
+    data_root.join(CONTROLLER_RUNTIMES_STORE)
 }
 
-/// Controller scratch store below an already-resolved data root.
-pub fn controller_scratch_store_in_root(data_root: &Path) -> PathBuf {
-    homeboy_data_store_in_root(data_root, CONTROLLER_SCRATCH_STORE)
-}
-
+/// Controller scratch store.
 pub fn controller_scratch_store() -> Result<PathBuf> {
-    Ok(controller_scratch_store_in_root(&homeboy_data()?))
+    homeboy_data_store(CONTROLLER_SCRATCH_STORE)
 }
 
 /// Root directory for copied run artifacts.
@@ -457,22 +440,8 @@ pub fn artifact_root() -> Result<PathBuf> {
     }
 }
 
-/// Root directory for copied run artifacts, defaulting below an
-/// already-resolved *data* root.
-///
-/// The CLI override, `HOMEBOY_ARTIFACT_ROOT`, and the config-level resolver all
-/// still outrank the supplied root, exactly as they outrank `homeboy_data()` on
-/// the ambient path — the injected root replaces only the historical default.
-///
-/// This shares [`resolved_artifact_root_override`] with [`artifact_root`], so
-/// the pair cannot disagree about override precedence.
-pub fn artifact_root_in_root(data_root: &Path) -> PathBuf {
-    resolved_artifact_root_override()
-        .unwrap_or_else(|| homeboy_data_store_in_root(data_root, "artifacts"))
-}
-
-/// Tiers 1-3 of the artifact-root precedence chain, shared by the ambient and
-/// rooted resolvers so neither can drift from the other.
+/// Tiers 1-3 of the artifact-root precedence chain, shared by `artifact_root`
+/// and `PathRoots::from_environment`.
 fn resolved_artifact_root_override() -> Option<PathBuf> {
     if let Some(path) = artifact_root_override()
         .lock()
@@ -689,14 +658,9 @@ pub fn agent_runtime_manifest_in_root(config_root: &Path, id: &str) -> PathBuf {
         .join(format!("{}.json", id))
 }
 
-/// Key file path below an already-resolved config root.
-pub fn key_in_root(config_root: &Path, server_id: &str) -> PathBuf {
-    keys_in_root(config_root).join(format!("{}_id_rsa", server_id))
-}
-
 /// Key file path
 pub fn key(server_id: &str) -> Result<PathBuf> {
-    Ok(key_in_root(&homeboy()?, server_id))
+    Ok(keys_in_root(&homeboy()?).join(format!("{}_id_rsa", server_id)))
 }
 
 /// Resolve path that may be absolute or relative to base.
@@ -1508,6 +1472,7 @@ mod home_root_override_tests {
     /// without a `setenv` that other threads race.
     #[test]
     fn an_override_outranks_the_environment() {
+        let _lock = super::config_root_tests::env_lock().lock().unwrap();
         set_home_root_override(Some(PathBuf::from("/tmp/homeboy-override-root")));
         let resolved = homeboy().expect("config root");
         set_home_root_override(None);
@@ -1524,6 +1489,7 @@ mod home_root_override_tests {
     /// later resolution pointing at a deleted tempdir.
     #[test]
     fn clearing_the_override_restores_environment_resolution() {
+        let _lock = super::config_root_tests::env_lock().lock().unwrap();
         set_home_root_override(Some(PathBuf::from("/tmp/homeboy-override-root")));
         set_home_root_override(None);
 
@@ -1546,6 +1512,7 @@ mod home_root_override_tests {
     /// valid root — never an error — while the root is repointed underneath.
     #[test]
     fn concurrent_readers_never_observe_a_missing_home_root() {
+        let _lock = super::config_root_tests::env_lock().lock().unwrap();
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
@@ -1594,7 +1561,7 @@ mod config_root_tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
+    pub(super) fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
@@ -1654,6 +1621,36 @@ mod config_root_tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         EnvGuard::new(lock)
+    }
+
+    #[test]
+    fn ambient_config_paths_use_the_selected_root() {
+        let env = guard();
+        env.set(HOMEBOY_CONFIG_ROOT_ENV, "/tmp/hb-path-root");
+        assert_eq!(
+            project_dir("demo").unwrap(),
+            PathBuf::from("/tmp/hb-path-root/projects/demo")
+        );
+        assert_eq!(
+            key("server").unwrap(),
+            PathBuf::from("/tmp/hb-path-root/keys/server_id_rsa")
+        );
+        assert_eq!(
+            extension_source_root("demo").unwrap(),
+            PathBuf::from("/tmp/hb-path-root/extension-sources/demo")
+        );
+        assert_eq!(
+            runner_session_file("runner").unwrap(),
+            PathBuf::from("/tmp/hb-path-root/runner-sessions/runner.json")
+        );
+        assert_eq!(
+            preview_ingress_routes_dir().unwrap(),
+            PathBuf::from("/tmp/hb-path-root/preview-ingress/routes")
+        );
+        assert_eq!(
+            preview_ingress_route_file("a/b").unwrap(),
+            PathBuf::from("/tmp/hb-path-root/preview-ingress/routes/a_b.json")
+        );
     }
 
     /// Tier 1: `HOMEBOY_CONFIG_ROOT` is used verbatim as the complete config

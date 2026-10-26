@@ -96,48 +96,21 @@ pub fn runtime_promotion_dir() -> Result<PathBuf> {
     Ok(runtime_promotion_dir_in_root(&homeboy_data()?))
 }
 
-/// Latest bounded launcher-owned termination evidence below an already-resolved
-/// config root.
-pub fn daemon_termination_file_in_root(config_root: &Path) -> PathBuf {
-    daemon_state_dir_in_root(config_root).join("termination.json")
-}
-
 /// Latest bounded launcher-owned termination evidence for this daemon store.
 pub fn daemon_termination_file() -> Result<PathBuf> {
-    Ok(daemon_termination_file_in_root(
-        &ambient_daemon_config_root()?,
-    ))
-}
-
-/// Exact state-loss recovery receipt below an already-resolved config root.
-pub fn daemon_state_loss_recovery_receipt_file_in_root(
-    config_root: &Path,
-    lease_id: &str,
-) -> PathBuf {
-    daemon_state_dir_in_root(config_root)
-        .join("state-loss-recovery")
-        .join(format!("{}.json", sanitize_path_segment(lease_id)))
+    Ok(daemon_state_dir_in_root(&ambient_daemon_config_root()?).join("termination.json"))
 }
 
 /// Exact state-loss recovery receipt keyed by the operator-supplied lease.
 pub fn daemon_state_loss_recovery_receipt_file(lease_id: &str) -> Result<PathBuf> {
-    Ok(daemon_state_loss_recovery_receipt_file_in_root(
-        &ambient_daemon_config_root()?,
-        lease_id,
-    ))
-}
-
-/// Exact replacement receipt for an approved lease-less recovery, below an
-/// already-resolved config root.
-pub fn daemon_leaseless_recovery_receipt_file_in_root(config_root: &Path) -> PathBuf {
-    daemon_state_dir_in_root(config_root).join("leaseless-recovery.json")
+    Ok(daemon_state_dir_in_root(&ambient_daemon_config_root()?)
+        .join("state-loss-recovery")
+        .join(format!("{}.json", sanitize_path_segment(lease_id))))
 }
 
 /// Exact replacement receipt for an approved lease-less recovery.
 pub fn daemon_leaseless_recovery_receipt_file() -> Result<PathBuf> {
-    Ok(daemon_leaseless_recovery_receipt_file_in_root(
-        &ambient_daemon_config_root()?,
-    ))
+    Ok(daemon_state_dir_in_root(&ambient_daemon_config_root()?).join("leaseless-recovery.json"))
 }
 
 /// Runner connection session state directory below an already-resolved config root.
@@ -150,14 +123,9 @@ pub fn runner_sessions_dir() -> Result<PathBuf> {
     Ok(runner_sessions_dir_in_root(&homeboy()?))
 }
 
-/// Runner connection session state file below an already-resolved config root.
-pub fn runner_session_file_in_root(config_root: &Path, id: &str) -> PathBuf {
-    runner_sessions_dir_in_root(config_root).join(format!("{}.json", id))
-}
-
 /// Runner connection session state file (~/.config/homeboy/runner-sessions/{id}.json).
 pub fn runner_session_file(id: &str) -> Result<PathBuf> {
-    Ok(runner_session_file_in_root(&homeboy()?, id))
+    Ok(runner_sessions_dir()?.join(format!("{}.json", id)))
 }
 
 /// Controller-local runner connection state below an already-resolved config root.
@@ -181,49 +149,24 @@ pub fn runner_controller_session_file(id: &str, controller_id: &str) -> Result<P
     ))
 }
 
-/// Managed service tunnel runtime state directory below an already-resolved
-/// data root.
-pub fn service_tunnel_runtime_dir_in_root(data_root: &Path, id: &str) -> PathBuf {
-    data_root
-        .join("service-tunnels")
-        .join(sanitize_path_segment(id))
-}
-
 /// Managed service tunnel runtime state directory (~/.local/share/homeboy/service-tunnels/{id}/).
 pub fn service_tunnel_runtime_dir(id: &str) -> Result<PathBuf> {
-    Ok(service_tunnel_runtime_dir_in_root(&homeboy_data()?, id))
-}
-
-/// Managed service tunnel runtime state file below an already-resolved data root.
-pub fn service_tunnel_runtime_state_file_in_root(data_root: &Path, id: &str) -> PathBuf {
-    service_tunnel_runtime_dir_in_root(data_root, id).join("state.json")
+    Ok(homeboy_data()?
+        .join("service-tunnels")
+        .join(sanitize_path_segment(id)))
 }
 
 /// Managed service tunnel runtime state file.
 pub fn service_tunnel_runtime_state_file(id: &str) -> Result<PathBuf> {
-    Ok(service_tunnel_runtime_state_file_in_root(
-        &homeboy_data()?,
-        id,
-    ))
-}
-
-/// Preview ingress route declarations below an already-resolved config root.
-pub fn preview_ingress_routes_dir_in_root(config_root: &Path) -> PathBuf {
-    config_root.join("preview-ingress").join("routes")
+    Ok(service_tunnel_runtime_dir(id)?.join("state.json"))
 }
 
 /// Preview ingress route declarations (~/.config/homeboy/preview-ingress/routes/).
 pub fn preview_ingress_routes_dir() -> Result<PathBuf> {
-    Ok(preview_ingress_routes_dir_in_root(&homeboy()?))
-}
-
-/// Preview ingress route declaration file below an already-resolved config root.
-pub fn preview_ingress_route_file_in_root(config_root: &Path, id: &str) -> PathBuf {
-    preview_ingress_routes_dir_in_root(config_root)
-        .join(format!("{}.json", sanitize_path_segment(id)))
+    Ok(homeboy()?.join("preview-ingress").join("routes"))
 }
 
 /// Preview ingress route declaration file.
 pub fn preview_ingress_route_file(id: &str) -> Result<PathBuf> {
-    Ok(preview_ingress_route_file_in_root(&homeboy()?, id))
+    Ok(preview_ingress_routes_dir()?.join(format!("{}.json", sanitize_path_segment(id))))
 }

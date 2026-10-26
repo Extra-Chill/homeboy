@@ -7041,13 +7041,14 @@ mod tests {
             // Current controllers publish every pin into the managed runtime
             // store at `<identity>-<digest>/homeboy`; a pin outside that store
             // is legacy data and is no longer relocated (#15742).
-            let pinned_runtime_a = homeboy_core::paths::controller_runtimes_store()
-                .expect("controller runtime store")
-                .join(format!(
-                    "{}-{digest}",
-                    homeboy_core::paths::sanitize_path_segment(identity)
-                ))
-                .join("homeboy");
+            let pinned_runtime_a = homeboy_core::paths::controller_runtimes_store_in_root(
+                &homeboy_core::paths::homeboy_data().expect("data root"),
+            )
+            .join(format!(
+                "{}-{digest}",
+                homeboy_core::paths::sanitize_path_segment(identity)
+            ))
+            .join("homeboy");
             std::fs::create_dir_all(pinned_runtime_a.parent().expect("pin directory"))
                 .expect("create managed pin directory");
             std::fs::copy(&runtime_a, &pinned_runtime_a).expect("publish runtime-A pin");
