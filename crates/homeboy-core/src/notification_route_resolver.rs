@@ -129,8 +129,13 @@ pub fn resolve_from_cli_or_env_with_evidence(
         .map_err(with_invalid_resolution_evidence)?;
     let mut resolved = match context {
         NotificationRouteContext::Route(route) => {
-            crate::notify::declared_transport(&load_all_extensions()?, &route.transport)
-                .map_err(with_invalid_resolution_evidence)?;
+            // Only argv is operator input. A propagated environment route was
+            // validated by the ancestor that bound it, and a child such as a
+            // gate may run in a home without that transport installed.
+            if cli_transport.is_some() {
+                crate::notify::declared_transport(&load_all_extensions()?, &route.transport)
+                    .map_err(with_invalid_resolution_evidence)?;
+            }
             let mut evidence = NotificationRouteResolution::new(if cli_transport.is_some() {
                 "explicit"
             } else {
@@ -598,12 +603,26 @@ mod tests {
                 assert!(error.message.contains("synthetic.completed"));
                 assert!(error.message.contains("unknown"));
             }
-            std::env::set_var("HOMEBOY_NOTIFICATION_TRANSPORT", "unknown");
-            std::env::set_var("HOMEBOY_NOTIFICATION_ROUTE", "opaque");
-            let error = resolve_from_cli_or_env_with_evidence(None, None).unwrap_err();
-            std::env::remove_var("HOMEBOY_NOTIFICATION_TRANSPORT");
-            std::env::remove_var("HOMEBOY_NOTIFICATION_ROUTE");
-            assert!(error.message.contains("synthetic.completed"));
+        });
+    }
+
+    #[test]
+    fn propagated_environment_route_is_not_revalidated_in_a_child_home() {
+        crate::test_support::with_isolated_home(|_| {
+            let _transport = crate::test_support::EnvVarGuard::set(
+                "HOMEBOY_NOTIFICATION_TRANSPORT",
+                "discord.run-completion",
+            );
+            let _route = crate::test_support::EnvVarGuard::set(
+                "HOMEBOY_NOTIFICATION_ROUTE",
+                "discord:v1:thread:1",
+            );
+            let resolved = resolve_from_cli_or_env_with_evidence(None, None)
+                .expect("a propagated route stays usable where its transport is not installed");
+            assert_eq!(
+                resolved.route.map(|route| route.transport),
+                Some("discord.run-completion".to_string())
+            );
         });
     }
 
