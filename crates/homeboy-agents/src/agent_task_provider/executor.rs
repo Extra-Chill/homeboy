@@ -1725,7 +1725,10 @@ mod tests {
             }
             .into(),
         );
-        let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
+        let mut executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
+        // This fixture expires readiness to simulate account rotation. Keep that
+        // invalidation local rather than expiring other tests' process cache.
+        executor.evidence = Arc::new(Mutex::new(ProviderEvidenceStore::default()));
         let request = readiness_request("model");
         let readiness = executor.provider_route_readiness(&request);
         assert!(readiness.ready);

@@ -294,6 +294,55 @@ fn push_options_remote_url_refspec_and_strip_extraheader_push_to_bare_remote() {
 }
 
 #[test]
+fn token_push_reaches_repository_without_leaking_credential() {
+    let (_dir, path) = init_repo_with_initial_commit();
+    let remote = tempfile::tempdir().unwrap();
+    assert!(Command::new("git")
+        .args(["init", "--bare"])
+        .arg(remote.path())
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let token = "minted-installation-secret";
+    let authenticated_url = format!("https://x-access-token:{token}@github.com/owner/repo.git");
+    // Local rewrite intercepts the exact authenticated destination; no network.
+    assert!(Command::new("git")
+        .args([
+            "config",
+            &format!("url.{}.insteadOf", remote.path().display()),
+            &authenticated_url
+        ])
+        .current_dir(&path)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let output = push_at(
+        None,
+        PushOptions {
+            remote_url: Some("https://github.com/owner/repo.git".into()),
+            token: Some(token.into()),
+            refspec: Some("HEAD:refs/heads/cook".into()),
+            non_interactive: true,
+            strip_extraheader: true,
+            ..Default::default()
+        },
+        Some(&path),
+    )
+    .unwrap();
+    assert!(output.success, "{}", output.stderr);
+    assert!(!serde_json::to_string(&output).unwrap().contains(token));
+    assert!(Command::new("git")
+        .args(["show-ref", "--verify", "refs/heads/cook"])
+        .current_dir(remote.path())
+        .output()
+        .unwrap()
+        .status
+        .success());
+}
+
+#[test]
 fn push_token_requires_github_remote_url() {
     let (_dir, path) = init_repo_with_initial_commit();
 

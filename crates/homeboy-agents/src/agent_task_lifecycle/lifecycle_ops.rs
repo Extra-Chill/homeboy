@@ -2595,10 +2595,13 @@ where
 {
     let workspace_claim_store = lifecycle_store.workspace_claim_store();
     let mut normalized_plan = plan.clone();
-    if std::env::var("HOMEBOY_CALLER_CONTEXT")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .is_some()
+    if ["HOMEBOY_CALLER_CONTEXT", "HOMEBOY_REQUESTER"]
+        .iter()
+        .any(|key| {
+            std::env::var(key)
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
     {
         let context = crate::caller_context::capture(
             normalized_plan
@@ -2669,10 +2672,15 @@ where
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
-    // Persist only the compact ownership projection; the complete client
-    // context remains in the immutable plan rather than the hot lookup row.
-    if let Some(caller) = plan.metadata.pointer("/client_context/caller_context") {
-        metadata["client_context"] = json!({"caller_context": caller});
+    // Persist compact ownership and attribution independently of the plan file.
+    if let Some(context) = plan.metadata.get("client_context") {
+        let mut projection = serde_json::Map::new();
+        for field in ["caller_context", "requester"] {
+            if let Some(value) = context.get(field) {
+                projection.insert(field.into(), value.clone());
+            }
+        }
+        metadata["client_context"] = Value::Object(projection);
     }
     if let Some(workspace) = plan.metadata.get("caller_workspace") {
         metadata["caller_workspace"] = workspace.clone();

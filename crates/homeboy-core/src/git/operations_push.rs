@@ -72,10 +72,43 @@ pub fn push_at(
     options: PushOptions,
     path_override: Option<&str>,
 ) -> Result<GitOutput> {
+    let token = options.token.clone();
+    let result = push_at_inner(component_id, options, path_override);
+    match (result, token) {
+        (Ok(mut output), Some(token)) => {
+            output.stdout = output.stdout.replace(&token, "[REDACTED]");
+            output.stderr = output.stderr.replace(&token, "[REDACTED]");
+            Ok(output)
+        }
+        (Err(error), Some(token)) => {
+            if format!("{error:?}").contains(&token) {
+                Err(Error::git_command_failed("Authenticated git push failed"))
+            } else {
+                Err(error)
+            }
+        }
+        (result, None) => result,
+    }
+}
+
+fn push_at_inner(
+    component_id: Option<&str>,
+    options: PushOptions,
+    path_override: Option<&str>,
+) -> Result<GitOutput> {
     let (id, path) = resolve_target(component_id, path_override)?;
     let remote_url =
         resolve_push_remote_url(options.remote_url.as_deref(), options.token.as_deref())?;
     let mut args: Vec<String> = Vec::new();
+    if options.token.is_some() {
+        // Keep an authenticated push from consulting personal credential helpers.
+        args.extend([
+            "-c".into(),
+            "credential.helper=".into(),
+            "-c".into(),
+            "http.extraHeader=".into(),
+        ]);
+    }
     if options.strip_extraheader {
         // Clear the auth header injected by actions/checkout so URL auth wins.
         // The header key is host-specific; derive it from the remote URL so

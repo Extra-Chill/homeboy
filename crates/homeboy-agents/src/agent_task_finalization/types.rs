@@ -446,6 +446,13 @@ pub trait AgentTaskPrFinalizationBackend {
             None,
         ))
     }
+    fn publication_context(
+        &mut self,
+        _run_id: &str,
+        _store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
+    ) -> Result<(String, Option<String>)> {
+        Ok(("ambient_gh".into(), None))
+    }
     fn current_branch(&mut self, path: &str) -> Result<String>;
     fn changed_files(&mut self, path: &str) -> Result<Vec<String>>;
     fn resolve_base(&mut self, _path: &str, base: &str) -> Result<AgentTaskPrResolvedBase> {

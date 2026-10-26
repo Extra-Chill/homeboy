@@ -6,6 +6,11 @@ before dispatch; native submission freezes it in the original controller plan
 and durable run. An explicit `client_context.caller_context` takes precedence.
 The reference is routing metadata, not a permission grant.
 
+`HOMEBOY_REQUESTER` independently captures an opaque requester in
+`client_context.requester` for durable PR attribution. See
+[GitHub App publication](github-app-publication.md) for configuration and merge
+protection requirements.
+
 Controller workspace resolution publishes the authoritative repository and
 checkout in the existing plan/run `caller_workspace` projection. This is kept
 separate from a runner's execution directory and persists across transport.

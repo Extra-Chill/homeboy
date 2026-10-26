@@ -20,6 +20,7 @@ test-support = ["dep:homeboy-test-support"]
 
 [dependencies]
 homeboy-test-support = { path = "../homeboy-test-support", optional = true }
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 homeboy-control-plane-contract = { version = "0.1.0", path = "../contracts/homeboy-control-plane-contract" }
 homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }

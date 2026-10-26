@@ -7,19 +7,75 @@ use super::{
 use crate::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotionReport};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{
-    classify_git_push_failure, commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find,
-    pr_view, push_at, remote_branch_head_over_push_transport, resolve_default_remote,
-    resolve_effective_push_url, run_git, CommitOptions, GitPushRemote, GitPushTransportClass,
-    GitPushTransportKind, PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
+    classify_git_push_failure, commit_at, get_uncommitted_changes, pr_create_with_token,
+    pr_edit_with_token, pr_find_with_token, pr_view_with_token, push_at,
+    remote_branch_head_over_push_transport, resolve_default_remote, resolve_effective_push_url,
+    run_git, CommitOptions, GitPushRemote, GitPushTransportClass, GitPushTransportKind,
+    PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
     DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
 };
 use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
 use serde::de::DeserializeOwned;
 use std::path::Path;
 
+fn publication_credential(
+    path: &str,
+) -> Result<
+    Option<(
+        homeboy_core::git::release_download::GitHubRepo,
+        homeboy_core::git::github_app::PublicationCredential,
+    )>,
+> {
+    let config = homeboy_core::defaults::load_config_for_read()?;
+    if config.github_app.is_none() {
+        return Ok(None);
+    }
+    let remote = homeboy_core::git::release_download::detect_remote_url(Path::new(path))
+        .and_then(|url| homeboy_core::git::release_download::parse_github_url(&url))
+        .ok_or_else(|| Error::git_command_failed("Cannot resolve publication repository"))?;
+    let credential = homeboy_core::git::github_app::mint(config.github_app.as_ref(), &remote)?;
+    Ok(credential.map(|credential| (remote, credential)))
+}
+
 pub struct RealAgentTaskPrFinalizationBackend;
 
 impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
+    fn publication_context(
+        &mut self,
+        run_id: &str,
+        store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
+    ) -> Result<(String, Option<String>)> {
+        let config = homeboy_core::defaults::load_config_for_read()?;
+        let identity = homeboy_core::git::github_app::identity(config.github_app.as_ref());
+        let record = match match store {
+            Some(store) => store.read_record(run_id),
+            None => crate::agent_task_lifecycle::status(run_id),
+        } {
+            Ok(record) => record,
+            Err(error) if error.message.contains("agent-task run record not found") => {
+                return Ok((identity, None))
+            }
+            Err(error) => return Err(error),
+        };
+        let requester = record
+            .metadata
+            .pointer("/client_context/requester")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        match store {
+            Some(store) => store.record_metadata_value(
+                run_id,
+                "publication_identity",
+                serde_json::json!(identity),
+            )?,
+            None => crate::agent_task_lifecycle::record_metadata_value(
+                run_id,
+                "publication_identity",
+                serde_json::json!(identity),
+            )?,
+        }
+        Ok((identity, requester))
+    }
     fn hydrate_run(&mut self, run_id: &str) -> Result<RunLifecycleRecord> {
         Ok(crate::agent_task_lifecycle::reconcile_status(run_id)?.lifecycle)
     }
@@ -428,9 +484,17 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         // failure can report it (#10734).
         let push_remote = resolve_default_remote(Path::new(path));
         let effective_remote = resolve_effective_push_url(Path::new(path), &push_remote).ok();
+        let credential = publication_credential(path)?;
         let output = push_at(
             None,
             PushOptions {
+                remote_url: credential.as_ref().map(|(repo, _)| {
+                    format!("https://{}/{}/{}.git", repo.host, repo.owner, repo.repo)
+                }),
+                token: credential
+                    .as_ref()
+                    .map(|(_, credential)| credential.token().to_string()),
+                strip_extraheader: credential.is_some(),
                 refspec: Some(format!("{commit_sha}:refs/heads/{head}")),
                 non_interactive: true,
                 timeout: Some(DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT),
@@ -498,7 +562,8 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         base: &str,
         head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
-        let output = pr_find(
+        let credential = publication_credential(path)?;
+        let output = pr_find_with_token(
             component_id,
             PrFindOptions {
                 base: Some(base.to_string()),
@@ -507,6 +572,9 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 limit: 10,
                 path: Some(path.to_string()),
             },
+            credential
+                .as_ref()
+                .map(|(_, credential)| credential.token()),
         )?;
         Ok(output.items.into_iter().next().map(|item| AgentTaskPrRef {
             number: item.number,
@@ -522,7 +590,8 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         base: &str,
         head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
-        let output = pr_find(
+        let credential = publication_credential(path)?;
+        let output = pr_find_with_token(
             component_id,
             PrFindOptions {
                 base: Some(base.to_string()),
@@ -531,6 +600,9 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 limit: 10,
                 path: Some(path.to_string()),
             },
+            credential
+                .as_ref()
+                .map(|(_, credential)| credential.token()),
         )?;
         Ok(output.items.into_iter().next().map(|item| AgentTaskPrRef {
             number: item.number,
@@ -545,7 +617,16 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         path: &str,
         number: u64,
     ) -> Result<Option<String>> {
-        Ok(pr_view(component_id, number, Some(path.to_string()))?.title)
+        let credential = publication_credential(path)?;
+        Ok(pr_view_with_token(
+            component_id,
+            number,
+            Some(path.to_string()),
+            credential
+                .as_ref()
+                .map(|(_, credential)| credential.token()),
+        )?
+        .title)
     }
 
     fn verify_remote_candidate(
@@ -585,7 +666,8 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         body: &str,
         draft: bool,
     ) -> Result<AgentTaskPrRef> {
-        let output = pr_create(
+        let credential = publication_credential(path)?;
+        let output = pr_create_with_token(
             component_id,
             PrCreateOptions {
                 base: base.to_string(),
@@ -595,6 +677,9 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 draft,
                 path: Some(path.to_string()),
             },
+            credential
+                .as_ref()
+                .map(|(_, credential)| credential.token()),
         )?;
         Ok(AgentTaskPrRef {
             number: output.number.unwrap_or_default(),
@@ -611,7 +696,8 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         title: &str,
         body: &str,
     ) -> Result<AgentTaskPrRef> {
-        let output = pr_edit(
+        let credential = publication_credential(path)?;
+        let output = pr_edit_with_token(
             component_id,
             PrEditOptions {
                 number,
@@ -619,6 +705,9 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 body: Some(body.to_string()),
                 path: Some(path.to_string()),
             },
+            credential
+                .as_ref()
+                .map(|(_, credential)| credential.token()),
         )?;
         Ok(AgentTaskPrRef {
             number,
@@ -629,11 +718,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     }
 
     fn mark_pr_ready(&mut self, path: &str, pr: &AgentTaskPrRef) -> Result<AgentTaskPrRef> {
-        let output = std::process::Command::new("gh")
-            .args(["pr", "ready", &pr.number.to_string()])
-            .current_dir(path)
-            .output()
-            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        let output = publication_gh_output(path, &["pr", "ready", &pr.number.to_string()])?;
         if !output.status.success() {
             return Err(Error::git_command_failed(format!(
                 "gh pr ready failed: {}",
@@ -742,11 +827,8 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 ))
             }
         };
-        let output = std::process::Command::new("gh")
-            .args(&args)
-            .current_dir(path)
-            .output()
-            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        let output =
+            publication_gh_output(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         if !output.status.success() {
             return Err(Error::git_command_failed(format!(
                 "gh {} failed while quarantining publication drift: {}",
@@ -810,6 +892,40 @@ fn committed_changed_files(path: &str, base: &str) -> Result<Vec<String>> {
 /// unclassified failure.
 fn remote_branch_head(path: &str, head: &str) -> Result<Option<String>> {
     let git_root = Path::new(path);
+    if let Some((repo, credential)) = publication_credential(path)? {
+        let url = format!(
+            "https://x-access-token:{}@{}/{}/{}.git",
+            credential.token(),
+            repo.host,
+            repo.owner,
+            repo.repo
+        );
+        let output = homeboy_core::git::run_git_output_with_env_timeout(
+            git_root,
+            &[
+                "-c",
+                "credential.helper=",
+                "-c",
+                "http.extraHeader=",
+                "ls-remote",
+                &url,
+                &format!("refs/heads/{head}"),
+            ],
+            "read GitHub App publication head",
+            &[("GIT_TERMINAL_PROMPT".into(), "0".into())],
+            DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
+        )
+        .map_err(|_| Error::git_command_failed("GitHub App remote head read failed"))?;
+        if !output.status.success() {
+            return Err(Error::git_command_failed(
+                "GitHub App remote head read failed",
+            ));
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .map(str::to_owned));
+    }
     let remote = resolve_default_remote(git_root);
     let read = remote_branch_head_over_push_transport(git_root, &remote, head)?;
     if !read.success {
@@ -976,11 +1092,32 @@ fn git_output(path: &str, args: &[&str]) -> Result<String> {
     .map(|stdout| stdout.trim().to_string())
 }
 
-fn gh_json(path: &str, args: &[&str]) -> Result<serde_json::Value> {
-    let output = std::process::Command::new("gh")
-        .args(args)
-        .current_dir(path)
+fn publication_gh_output(path: &str, args: &[&str]) -> Result<std::process::Output> {
+    let credential = publication_credential(path)?;
+    let mut command = std::process::Command::new("gh");
+    command.args(args).current_dir(path);
+    if let Some((repo, credential)) = &credential {
+        command
+            .env("GH_TOKEN", credential.token())
+            .env("GH_ENTERPRISE_TOKEN", credential.token())
+            .env("GH_HOST", &repo.host);
+    }
+    let mut output = command
         .output()
+        .map_err(|_| Error::git_command_failed("Could not invoke gh"))?;
+    if let Some((_, credential)) = credential {
+        output.stdout = String::from_utf8_lossy(&output.stdout)
+            .replace(credential.token(), "[REDACTED]")
+            .into_bytes();
+        output.stderr = String::from_utf8_lossy(&output.stderr)
+            .replace(credential.token(), "[REDACTED]")
+            .into_bytes();
+    }
+    Ok(output)
+}
+
+fn gh_json(path: &str, args: &[&str]) -> Result<serde_json::Value> {
+    let output = publication_gh_output(path, args)
         .map_err(|error| Error::git_command_failed(error.to_string()))?;
     if !output.status.success() {
         return Err(Error::git_command_failed(format!(
