@@ -579,9 +579,7 @@ fn finish_stale_runner_child_run(store: &ObservationStore, job: &StaleRunnerJobI
     let Ok(Some(run)) = store.get_run(run_id) else {
         return;
     };
-    if run.status != RunStatus::Running.as_str()
-        || run.metadata_json.get("agent_task_run").is_some()
-    {
+    if run.status != RunStatus::Running.as_str() {
         return;
     }
     let mut metadata = run.metadata_json;

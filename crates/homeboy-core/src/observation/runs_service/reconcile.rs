@@ -90,9 +90,7 @@ pub fn reconcile_owned_stale_running_run_with_snapshot(
     run: &RunRecord,
     job: Option<&crate::api_jobs::Job>,
 ) -> Result<Option<ReconciledRunSummary>> {
-    if run.status != RunStatus::Running.as_str()
-        || run.metadata_json.get("agent_task_run").is_some()
-    {
+    if run.status != RunStatus::Running.as_str() {
         return Ok(None);
     }
     if let Some(expired) = store.expire_running_run_handoff(&run.id)? {
@@ -171,9 +169,6 @@ where
 {
     let mut reconciled = Vec::new();
     for run in &running {
-        if run.metadata_json.get("agent_task_run").is_some() {
-            continue;
-        }
         // Match focused watch reconciliation: a pending detached handoff owns
         // the row until it is accepted or its durable deadline settles it.
         if !dry_run && store.expire_running_run_handoff(&run.id)?.is_some() {
