@@ -6070,6 +6070,20 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
             None,
         ));
     }
+    let source = lifecycle_store.read_record(&source_run_id)?;
+    if let Some(cook_id) = source.metadata["cook_id"].as_str() {
+        if crate::agent_task_service::CookRecipeStore::for_lifecycle_store(&lifecycle_store)
+            .recipe_exists(cook_id)
+        {
+            return crate::agent_task_service::retry(
+                &source_run_id,
+                requested_run_id,
+                false,
+                false,
+            )
+            .map(|retry| retry.record);
+        }
+    }
     retry_with_force_in_store(&lifecycle_store, run_id, requested_run_id, false)
 }
 
@@ -6463,9 +6477,13 @@ where
                 .as_ref()
                 .is_none_or(|metadata| !metadata.contains_key("execution_retry_preparation"))
         {
-            return Err(Error::validation_invalid_argument("retry_preparation",
-                "recipe-owned Cook retries require complete agents execution preparation before reservation",
-                Some(source.run_id.clone()), None));
+            let command = format!("homeboy agent-task recover {cook_id}");
+            return Err(Error::validation_invalid_argument(
+                "retry_preparation",
+                format!("recipe-owned Cook retries require complete agents execution preparation before reservation; run `{command}`"),
+                Some(source.run_id.clone()),
+                Some(vec![command]),
+            ));
         }
     }
     if source.acceptance.as_ref().is_some_and(|acceptance| {
