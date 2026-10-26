@@ -65,7 +65,7 @@ pub struct DiscoveryMarkerConfig {
 pub struct ScriptsConfig {
     /// Script that formats source code after automated writes.
     /// Runs from the project root. Exit 0 on success, non-zero on failure.
-    /// Formatting failure is non-fatal — it logs a warning but never rolls back.
+    /// Lint fix treats formatting failure as fatal; writes are not rolled back.
     ///
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,

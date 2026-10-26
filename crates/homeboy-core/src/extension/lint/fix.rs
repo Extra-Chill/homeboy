@@ -102,6 +102,7 @@ pub fn run_lint_fix(request: LintFixRequest) -> homeboy_core::Result<LintFixRun>
             .map(|file| request.root.join(file))
             .collect();
         require_successful_format(homeboy_core::engine::format_write::format_after_write(
+            &request.component,
             &request.root,
             &abs_changed,
         )?)?;

@@ -276,31 +276,18 @@ mod detail {
         }
 
         let files = string_array(&formatting, "files");
-        let command = string_value(&formatting, "suggested_command")
-            .unwrap_or_else(|| "cargo fmt".to_string());
-        let summary = string_value(&formatting, "summary");
 
-        out.push_str("- Formatting findings:");
-        if let Some(summary) = summary {
-            let _ = write!(out, " {}", summary);
+        out.push_str("- Formatting findings:\n  - Files needing formatting:\n");
+        for file in files.iter().take(LINT_FINDING_DIGEST_LIMIT) {
+            let _ = writeln!(out, "    - `{}`", file);
         }
-        out.push('\n');
-        if files.is_empty() {
-            out.push_str("  - Files needing formatting: unavailable from formatter output\n");
-        } else {
-            out.push_str("  - Files needing formatting:\n");
-            for file in files.iter().take(LINT_FINDING_DIGEST_LIMIT) {
-                let _ = writeln!(out, "    - `{}`", file);
-            }
-            if files.len() > LINT_FINDING_DIGEST_LIMIT {
-                let _ = writeln!(
+        if files.len() > LINT_FINDING_DIGEST_LIMIT {
+            let _ = writeln!(
                 out,
                 "    - {} more file(s) omitted from this comment; see `lint.json` or the full lint log.",
                 files.len() - LINT_FINDING_DIGEST_LIMIT
             );
-            }
         }
-        let _ = writeln!(out, "  - Suggested command: `{}`", command);
     }
 
     pub(crate) fn render_test_section(out: &mut String, output_dir: &Path, run_url: &str) {

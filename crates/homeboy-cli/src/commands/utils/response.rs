@@ -1858,24 +1858,16 @@ fn bounded_text(value: &str, max_chars: usize) -> String {
 fn formatting_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
     let formatting = find_object_key(data, "formatting_findings")?;
     let files = formatting_files(formatting);
-    let command = string_at_object(formatting, "suggested_command")?;
-    let summary = if files.is_empty() {
-        format!("FORMAT: format check failed; run `{command}`")
-    } else {
-        format!(
-            "FORMAT: format check found {} unformatted file(s): {}; run `{}`",
-            files.len(),
-            files.join(", "),
-            command
-        )
-    };
     Some(CommandFailureDigest {
-        summary,
+        summary: format!(
+            "FORMAT: format check found {} unformatted file(s): {}",
+            files.len(),
+            files.join(", ")
+        ),
         stdout_tail: raw_output_tail(data, "stdout_tail"),
         stderr_tail: raw_output_tail(data, "stderr_tail"),
         artifact_refs: Vec::new(),
-        next_actions: vec![CommandNextAction::new("fix formatting", command)
-            .with_kind(CommandNextActionKind::Repair)],
+        next_actions: Vec::new(),
         retryable: Some(false),
     })
 }

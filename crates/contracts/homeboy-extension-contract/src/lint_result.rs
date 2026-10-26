@@ -42,7 +42,4 @@ pub struct LintSummaryOutput {
 pub struct FormattingFindings {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    pub suggested_command: String,
 }
