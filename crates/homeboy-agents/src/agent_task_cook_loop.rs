@@ -562,6 +562,7 @@ fn build_follow_up_request(
             "failure_progression": failure_progression,
             "retry_policy": retry_policy(failure_progression),
             "current_diff": options.current_diff,
+            "candidate_commit": options.promotion_report.provenance.get("candidate_commit"),
         }
     });
     restore_homeboy_facts(&mut request, homeboy_facts);

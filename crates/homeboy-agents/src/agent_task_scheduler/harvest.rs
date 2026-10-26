@@ -49,8 +49,11 @@ fn harvest_candidate_commit_with_bundle(
     running: &RunningTask,
     bundle: bool,
 ) -> Result<(), HarvestError> {
-    // Only Homeboy's harvest may assert a candidate.
+    // Only Homeboy's harvest may assert a candidate or its continuation baseline.
     outcome.candidate = None;
+    if let Some(metadata) = outcome.metadata.as_object_mut() {
+        metadata.remove("gate_feedback_baseline");
+    }
     let Some(base) = running.task_base_sha.as_deref() else {
         return Ok(());
     };
@@ -58,9 +61,38 @@ fn harvest_candidate_commit_with_bundle(
         return Ok(());
     };
     let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
+    let feedback = (running.request.metadata["cook_loop"]["kind"] == "deterministic-gate-feedback")
+        .then(|| {
+            serde_json::json!({
+                "candidate_commit": running.request.inputs["cook_loop"]["candidate_commit"],
+            })
+        });
+    let feedback_candidate = feedback
+        .as_ref()
+        .map(|baseline| {
+            serde_json::from_value::<crate::agent_task::AgentTaskCandidate>(
+                baseline["candidate_commit"].clone(),
+            )
+            .map_err(|_| HarvestError::CandidateTreeMismatch {
+                message: "gate feedback has no immutable candidate".into(),
+            })
+        })
+        .transpose()?;
+    // A derived feedback checkout starts at the previous internal candidate,
+    // but promotion still owns the original destination base. Flatten only
+    // this continuation; ordinary harvest retains the provider's HEAD parent.
+    let base = feedback_candidate
+        .as_ref()
+        .map(|c| c.base_sha.as_str())
+        .unwrap_or(base);
     let mut harvested_from_source = false;
     let root = if git_is_repository(attempt_root)? {
-        outcome.candidate = candidate_from_workspace(attempt_root, base, run_id)?;
+        outcome.candidate = candidate_from_workspace_with_parent(
+            attempt_root,
+            base,
+            run_id,
+            feedback.as_ref().map(|_| base),
+        )?;
         attempt_root
     } else if let Some(source_root) = reaped_attempt_source_root(running, attempt_root)? {
         // The attempt checkout was reaped (#15980). Its committed change set
@@ -82,6 +114,9 @@ fn harvest_candidate_commit_with_bundle(
         outcome.metadata = serde_json::json!({});
     }
     outcome.metadata["source_provenance"] = serde_json::json!(running.source_provenance);
+    if let Some(feedback) = feedback {
+        outcome.metadata["gate_feedback_baseline"] = feedback;
+    }
     if harvested_from_source {
         outcome.metadata["candidate_harvest_root"] = serde_json::json!({
             "kind": "source_workspace",
@@ -190,10 +225,20 @@ pub(crate) fn candidate_from_workspace(
     base: &str,
     run_id: &str,
 ) -> Result<Option<crate::agent_task::AgentTaskCandidate>, HarvestError> {
+    candidate_from_workspace_with_parent(root, base, run_id, None)
+}
+
+fn candidate_from_workspace_with_parent(
+    root: &Path,
+    base: &str,
+    run_id: &str,
+    parent: Option<&str>,
+) -> Result<Option<crate::agent_task::AgentTaskCandidate>, HarvestError> {
     if !git_is_repository(root)? {
         return Ok(None);
     }
     let head = ensure_head_descends_from_base(root, base)?;
+    let parent = parent.unwrap_or(&head);
     let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
         command: "create candidate harvest Git index".to_string(),
         cwd: root.to_path_buf(),
@@ -225,7 +270,7 @@ pub(crate) fn candidate_from_workspace(
         "commit-tree",
         tree.as_str(),
         "-p",
-        head.as_str(),
+        parent,
         "-m",
         "homeboy: cook candidate",
     ];
@@ -1233,6 +1278,169 @@ mod committed_harvest_tests {
         )
         .contains("agent change"));
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+    }
+
+    #[test]
+    fn gate_feedback_harvest_promotes_over_the_staged_baseline_only() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            use crate::agent_task_promotion::{
+                promote, AgentTaskPromotionRequest, AgentTaskPromotionStatus,
+            };
+            let temp = tempfile::tempdir().unwrap();
+            let (workspace, base) = candidate_attempt_repo(temp.path());
+            let mut running =
+                committed_harvest_running_task(temp.path(), &workspace, None, base.clone());
+            let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+            outcome.status = AgentTaskOutcomeStatus::Succeeded;
+            std::fs::write(workspace.join("file.txt"), "candidate\n").unwrap();
+            harvest_candidate_commit_with_bundle(&mut outcome, &running, true).unwrap();
+            git(&workspace, &["reset", "--hard", &base]);
+            let plan = AgentTaskPlan::new("first-plan", vec![running.request.clone()]);
+            let first = crate::agent_task_lifecycle::submit_plan(&plan, Some("first-run")).unwrap();
+            let options =
+                |outcome: &AgentTaskOutcome, run_id: &str, fail: bool| AgentTaskPromotionRequest {
+                    source: serde_json::to_string(outcome).unwrap(),
+                    source_run_id: Some(run_id.into()),
+                    source_path: None,
+                    source_worktree_path: Some(workspace.clone()),
+                    base_ref: None,
+                    task_base_sha: Some(base.clone()),
+                    candidate_ref: None,
+                    to_worktree: workspace.display().to_string(),
+                    task_id: None,
+                    artifact_id: None,
+                    dry_run: false,
+                    gates: crate::agent_task_gate::VerifyGateOptions {
+                        verify: vec![if fail {
+                            "test \"$(cat file.txt)\" != candidate"
+                        } else {
+                            "exit 0"
+                        }
+                        .into()],
+                        ..Default::default()
+                    },
+                    provider_invocation: None,
+                    repository_integrity_evidence: None,
+                };
+            let failed = promote(options(&outcome, &first.run_id, true)).unwrap();
+            assert_eq!(failed.status, AgentTaskPromotionStatus::GateFailed);
+            assert_eq!(git(&workspace, &["rev-parse", "HEAD"]), base);
+            assert!(!failed.provenance["gate_feedback_baseline"]["current_diff"]
+                .as_str()
+                .unwrap()
+                .is_empty());
+
+            let mut request = gate_feedback_request(
+                &workspace,
+                failed.provenance["gate_feedback_baseline"]["current_diff"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                &temp.path().join("unused.patch"),
+                "unused",
+            );
+            request.inputs["cook_loop"]["candidate_commit"] =
+                failed.provenance["candidate_commit"].clone();
+            let preflight =
+                prepare_committed_harvest(&request, None, &HarvestExecutionContext::default())
+                    .unwrap();
+            let scratch = tempfile::tempdir().unwrap();
+            let attempt = prepare_attempt_workspace(
+                &mut request,
+                preflight.base_sha.as_deref(),
+                preflight.candidate_baseline.as_ref(),
+                scratch.path(),
+            )
+            .unwrap()
+            .unwrap();
+            let attempt_root = PathBuf::from(request.workspace.root.as_deref().unwrap());
+            std::fs::write(attempt_root.join("file.txt"), "corrected\n").unwrap();
+            running.request = request;
+            // The real follow-up can start from a clean derived checkout of
+            // attempt 1, so its task base is the internal candidate commit.
+            running.task_base_sha = Some(attempt.base_sha().into());
+            running.run_id = Some("second-run".into());
+            running.attempt = 2;
+            harvest_candidate_commit_with_bundle(&mut outcome, &running, true).unwrap();
+            let plan = AgentTaskPlan::new("second-plan", vec![running.request.clone()]);
+            let second =
+                crate::agent_task_lifecycle::submit_plan(&plan, Some("second-run")).unwrap();
+
+            let mut preview = options(&outcome, &second.run_id, false);
+            preview.dry_run = true;
+            promote(preview).expect("corrected feedback candidate is admissible");
+            assert_eq!(outcome.candidate.as_ref().unwrap().base_sha, base);
+            assert_eq!(
+                git(
+                    &attempt_root,
+                    &[
+                        "rev-parse",
+                        &format!("{}^", outcome.candidate.as_ref().unwrap().candidate_sha)
+                    ]
+                ),
+                base
+            );
+
+            std::fs::write(workspace.join("unrelated.txt"), "user bytes\n").unwrap();
+            let error = promote(options(&outcome, &second.run_id, false)).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("differs from the adopted immutable commit"),
+                "{error}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("unrelated.txt")).unwrap(),
+                "user bytes\n"
+            );
+            std::fs::remove_file(workspace.join("unrelated.txt")).unwrap();
+            // The same bytes unstaged are not the recorded promotion baseline.
+            git(&workspace, &["reset", "--mixed", &base]);
+            assert!(promote(options(&outcome, &second.run_id, false))
+                .unwrap_err()
+                .message
+                .contains("index differs"));
+            git(&workspace, &["add", "--all"]);
+            // A real branch commit is a HEAD move, not feedback.
+            git(
+                &workspace,
+                &["commit", "--allow-empty", "-m", "external move"],
+            );
+            assert!(promote(options(&outcome, &second.run_id, false))
+                .unwrap_err()
+                .message
+                .contains("HEAD moved"));
+            git(&workspace, &["reset", "--soft", &base]);
+            let promoted = promote(options(&outcome, &second.run_id, false)).unwrap();
+            assert_eq!(promoted.status, AgentTaskPromotionStatus::Applied);
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("file.txt")).unwrap(),
+                "corrected\n"
+            );
+            assert_eq!(
+                git(&workspace, &["write-tree"]),
+                outcome.candidate.as_ref().unwrap().tree_sha
+            );
+            assert_eq!(git(&workspace, &["rev-parse", "HEAD"]), base);
+            assert!(git(
+                &workspace,
+                &["log", "--format=%s", &format!("{base}..HEAD")]
+            )
+            .is_empty());
+            git(&workspace, &["commit", "-m", "corrected"]);
+            assert_eq!(
+                git(
+                    &workspace,
+                    &["log", "--format=%s", &format!("{base}..HEAD")]
+                ),
+                "corrected"
+            );
+            assert!(!git(
+                &workspace,
+                &["log", "--format=%ae", &format!("{base}..HEAD")]
+            )
+            .contains("homeboy@localhost"));
+        });
     }
 
     fn candidate_attempt_repo(temp: &Path) -> (PathBuf, String) {
