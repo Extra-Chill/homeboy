@@ -6786,6 +6786,10 @@ pub(crate) fn cook_failure_context_with_stores(
                     .and_then(|record| record.metadata.get("cook_continuation_admission")),
                 retry_admitted || (cook_status.is_gate_failure() && continuation_pending),
             );
+            let involuntary_cancellation_retry_admitted = retry_admitted
+                && record
+                    .as_ref()
+                    .is_some_and(cancelled_without_operator_request);
             let retry_refusal = retry_refusal.flatten();
             let delivered_candidate =
                 delivered_candidate_facts(&recipe, record.as_ref(), delivery.as_ref());
@@ -6801,6 +6805,7 @@ pub(crate) fn cook_failure_context_with_stores(
                 blocking_claim.is_some(),
                 continuation_admitted,
                 retry_refusal.as_deref(),
+                involuntary_cancellation_retry_admitted,
                 exact_checkpoint_candidate_mismatch(&diagnostic),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Completed),
@@ -6970,6 +6975,17 @@ mod gate_failure_diagnostic_tests {
             .contains("no progress"));
         assert!(!diagnostic.to_string().contains("provider transcript"));
     }
+}
+
+/// A cancelled attempt whose recorded provenance is anything but an operator's
+/// `agent-task cancel` request.
+fn cancelled_without_operator_request(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
+        && record
+            .metadata
+            .pointer("/cancellation_provenance/cause")
+            .and_then(Value::as_str)
+            .is_some_and(|cause| cause != "operator_requested")
 }
 
 fn continuation_action_admitted(admission: Option<&Value>, fallback: bool) -> bool {
@@ -7381,6 +7397,7 @@ fn cook_recovery_actions(
         blocking_claim,
         retry_admitted,
         None,
+        false,
         exact_checkpoint_candidate_mismatch,
         false,
         false,
@@ -7399,6 +7416,7 @@ fn cook_recovery_actions_with_prefix(
     blocking_claim: bool,
     retry_admitted: bool,
     retry_refusal: Option<&str>,
+    involuntary_cancellation_retry_admitted: bool,
     exact_checkpoint_candidate_mismatch: bool,
     continuation_rearm_required: bool,
     continuation_completed: bool,
@@ -7417,6 +7435,7 @@ fn cook_recovery_actions_with_prefix(
             blocking_claim,
             retry_admitted,
             retry_refusal,
+            involuntary_cancellation_retry_admitted,
             exact_checkpoint_candidate_mismatch,
             continuation_rearm_required,
             continuation_completed,

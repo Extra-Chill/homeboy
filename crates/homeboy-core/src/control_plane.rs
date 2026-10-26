@@ -460,9 +460,9 @@ fn append_delegated_action_event(
 
 fn map_store_error(error: crate::Error) -> ControlPlaneError {
     if error.code == crate::ErrorCode::ValidationInvalidArgument {
-        ControlPlaneError::invalid_argument(error.message)
+        ControlPlaneError::invalid_argument(error.message_with_cause())
     } else {
-        ControlPlaneError::unavailable(error.message)
+        ControlPlaneError::unavailable(error.message_with_cause())
     }
 }
 

@@ -244,7 +244,9 @@ impl LifecycleStoreLookup {
                         .message
                         .contains("unsupported agent-task execution budget version") =>
             {
-                Err(ControlPlaneError::invalid_argument(error.message))
+                Err(ControlPlaneError::invalid_argument(
+                    error.message_with_cause(),
+                ))
             }
             Err(_) => Ok(None),
         }
@@ -261,7 +263,7 @@ impl RunLookup for LifecycleStoreLookup {
         {
             Ok(record) => record,
             Err(error) if is_run_not_found(&error) => return Ok(None),
-            Err(error) => return Err(ControlPlaneError::unavailable(error.message)),
+            Err(error) => return Err(ControlPlaneError::unavailable(error.message_with_cause())),
         };
         self.snapshot(record).map(Some)
     }
@@ -1169,7 +1171,7 @@ fn project_task(
     let task_id = TaskId::new(&task.task_id)
         .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
     let mission = crate::agent_task_lifecycle::canonical_mission(record)
-        .map_err(|error| ControlPlaneError::invalid_argument(error.message))?;
+        .map_err(|error| ControlPlaneError::invalid_argument(error.message_with_cause()))?;
     Ok(ControlPlaneTask {
         schema: CONTROL_PLANE_TASK_SCHEMA.to_string(),
         mission,
@@ -2083,7 +2085,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             ControlPlaneActionOutcome::Failed,
                             project_record(&record, None)?,
                             ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            Some(redacted_bounded(&error.message_with_cause(), MESSAGE_BOUND)),
                         ),
                     }
                 }
@@ -2124,7 +2126,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             ControlPlaneActionOutcome::Failed,
                             project_record(&record, None)?,
                             ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            Some(redacted_bounded(&error.message_with_cause(), MESSAGE_BOUND)),
                         ),
                     }
                 }
@@ -2168,7 +2170,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             ControlPlaneActionOutcome::Failed,
                             project_record(&record, None)?,
                             ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            Some(redacted_bounded(&error.message_with_cause(), MESSAGE_BOUND)),
                         ),
                     }
                 }
@@ -2206,7 +2208,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             ControlPlaneActionOutcome::Failed,
                             project_record(&record, None)?,
                             ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            Some(redacted_bounded(&error.message_with_cause(), MESSAGE_BOUND)),
                         ),
                     }
                 }
@@ -2237,7 +2239,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             ControlPlaneActionOutcome::Failed,
                             project_record(&record, None)?,
                             ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            Some(redacted_bounded(&error.message_with_cause(), MESSAGE_BOUND)),
                         ),
                     }
                 }
@@ -2259,7 +2261,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             ControlPlaneActionOutcome::Failed,
                             project_record(&record, None)?,
                             ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            Some(redacted_bounded(&error.message_with_cause(), MESSAGE_BOUND)),
                         ),
                     }
                 }
@@ -2323,7 +2325,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                     schema: "homeboy/control-plane-action-failure/v1".to_string(),
                                     data: diagnostic,
                                 },
-                                Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                Some(redacted_bounded(&error.message_with_cause(), MESSAGE_BOUND)),
                             )
                         }
                     }
@@ -2410,7 +2412,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 ControlPlaneActionOutcome::Failed,
                                 project_record(&record, None)?,
                                 ControlPlaneActionPayload::empty(),
-                                Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                                Some(redacted_bounded(&error.message_with_cause(), MESSAGE_BOUND)),
                             ),
                         }
                     }
@@ -2493,7 +2495,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             ControlPlaneActionOutcome::Failed,
                             project_record(&record, None)?,
                             ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            Some(redacted_bounded(&error.message_with_cause(), MESSAGE_BOUND)),
                         ),
                     }
                 }
@@ -3530,7 +3532,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             &observed,
                             started.elapsed(),
                             polls,
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            Some(redacted_bounded(&error.message_with_cause(), MESSAGE_BOUND)),
                         ),
                     );
                 }
@@ -3718,9 +3720,9 @@ const fn action_name(action: ControlPlaneAction) -> &'static str {
 
 fn map_lifecycle_error(error: homeboy_core::Error) -> ControlPlaneError {
     if error.code == homeboy_core::ErrorCode::ValidationInvalidArgument {
-        ControlPlaneError::invalid_argument(error.message)
+        ControlPlaneError::invalid_argument(error.message_with_cause())
     } else {
-        ControlPlaneError::unavailable(error.message)
+        ControlPlaneError::unavailable(error.message_with_cause())
     }
 }
 
@@ -4433,12 +4435,12 @@ fn identities_for_record(
     record: &AgentTaskRunRecord,
 ) -> Result<Option<CanonicalControlPlaneIdentities>, ControlPlaneError> {
     canonical_control_plane_identities(record)
-        .map_err(|error| ControlPlaneError::invalid_argument(error.message))
+        .map_err(|error| ControlPlaneError::invalid_argument(error.message_with_cause()))
 }
 
 fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, ControlPlaneError> {
     crate::agent_task_lifecycle::canonical_fanout_mission(&record.metadata)
-        .map_err(|error| ControlPlaneError::invalid_argument(error.message))
+        .map_err(|error| ControlPlaneError::invalid_argument(error.message_with_cause()))
 }
 
 pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
@@ -5611,7 +5613,7 @@ fn generic_observation_execution(
 /// of a single run, from the CLI or the daemon, resolves through here.
 fn canonical_run(requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
     let store = AgentTaskLifecycleStore::from_environment()
-        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
     let observation = store
         .open_observation_readonly()
         .map_err(map_lifecycle_error)?;
@@ -5649,7 +5651,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         task: &TaskId,
     ) -> Result<bool, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let plan = store
             .read_controller_plan(run.as_str())
             .map_err(map_lifecycle_error)?;
@@ -5678,7 +5680,7 @@ impl ControlPlaneProvider for RegisteredProvider {
 
     fn mission(&self, requested_id: &MissionId) -> Result<ControlPlaneMission, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).mission(requested_id)
     }
 
@@ -5687,7 +5689,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         request: &ControlPlaneMissionListRequest,
     ) -> Result<ControlPlaneMissionPage, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).missions(request)
     }
 
@@ -5697,7 +5699,7 @@ impl ControlPlaneProvider for RegisteredProvider {
     ) -> Result<ControlPlaneRunPage, ControlPlaneError> {
         request.validate()?;
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let decoded = request.cursor.as_ref().map(decode_run_cursor).transpose()?;
         if let Some((_, cursor_mission)) = &decoded {
             if cursor_mission.as_ref() != request.mission.as_ref() {
@@ -5759,7 +5761,7 @@ impl ControlPlaneProvider for RegisteredProvider {
 
     fn task(&self, run: &RunId, task: &TaskId) -> Result<ControlPlaneTask, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let observation = store
             .open_observation_readonly()
             .map_err(map_lifecycle_error)?;
@@ -5781,7 +5783,7 @@ impl ControlPlaneProvider for RegisteredProvider {
     ) -> Result<ControlPlaneTaskPage, ControlPlaneError> {
         request.validate()?;
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let observation = store
             .open_observation_readonly()
             .map_err(map_lifecycle_error)?;
@@ -5824,7 +5826,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         attempt_number: u32,
     ) -> Result<ControlPlaneAttempt, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let observation = store
             .open_observation_readonly()
             .map_err(map_lifecycle_error)?;
@@ -5856,7 +5858,7 @@ impl ControlPlaneProvider for RegisteredProvider {
     ) -> Result<ControlPlaneAttemptPage, ControlPlaneError> {
         request.validate()?;
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let observation = store
             .open_observation_readonly()
             .map_err(map_lifecycle_error)?;
@@ -5896,7 +5898,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         execution: &ExecutionId,
     ) -> Result<ControlPlaneExecution, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let observation = store
             .open_observation_readonly()
             .map_err(map_lifecycle_error)?;
@@ -5934,7 +5936,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         attempt_number: u32,
     ) -> Result<ControlPlaneExecutionPage, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let observation = store
             .open_observation_readonly()
             .map_err(map_lifecycle_error)?;
@@ -5972,7 +5974,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         reference: &ReferenceId,
     ) -> Result<ControlPlaneReference, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).reference(
             run,
             reference_type,
@@ -5986,7 +5988,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         reference_type: ControlPlaneReferenceType,
     ) -> Result<ControlPlaneReferencePage, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).references(run, reference_type)
     }
 
@@ -5997,7 +5999,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         request: &ControlPlaneReferenceRegistration,
     ) -> Result<ControlPlaneReference, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).register_reference(
             run,
             reference_type,
@@ -6018,7 +6020,7 @@ impl ControlPlaneProvider for RegisteredProvider {
             ));
         }
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let plan_path = store.controller_plan_path(request.run.as_str());
         match plan_path.try_exists() {
             Ok(true) => {}
@@ -6066,7 +6068,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         request: &ControlPlaneRunReviewRequest,
     ) -> Result<ControlPlaneRunReview, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).review(requested_id, request)
     }
 
@@ -6076,7 +6078,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         cursor: Option<&homeboy_control_plane_contract::EventCursor>,
     ) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).events(requested_id, cursor)
     }
 
@@ -6087,7 +6089,7 @@ impl ControlPlaneProvider for RegisteredProvider {
     ) -> Result<homeboy_control_plane_contract::ControlPlaneEvent, ControlPlaneError> {
         validate_external_event_append_request(request)?;
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         append_event_in_store(&store, requested_id, request)
     }
 
@@ -6096,7 +6098,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         requested_id: &RunId,
     ) -> Result<ControlPlaneEventRetention, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store)).event_retention(requested_id)
     }
 
@@ -6108,7 +6110,7 @@ impl ControlPlaneProvider for RegisteredProvider {
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
         validate_action_request(request)?;
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let observation = store
             .open_observation_initialized()
             .map_err(map_lifecycle_error)?;
@@ -6170,7 +6172,7 @@ impl ControlPlaneProvider for RegisteredProvider {
         effect_id: &EffectId,
     ) -> Result<ControlPlaneEffectStatus, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         OrchestrationService::new(LifecycleStoreLookup::new(store))
             .effect_status(requested_id, effect_id)
     }
