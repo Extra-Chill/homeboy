@@ -835,7 +835,8 @@ mod tests {
             .expect("run");
 
             let tree = homeboy_core::observation::directory_tree_sha256(&directory).expect("tree");
-            homeboy_agents::agent_task_lifecycle::checkpoint_runner_exec_directory_tree(
+            homeboy_agents::agent_task_lifecycle::checkpoint_runner_exec_directory_tree_in_store(
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap(),
                 run_id, "evidence", &tree,
             )
             .expect("tree checkpoint");
@@ -850,7 +851,8 @@ mod tests {
                     serde_json::json!({}),
                 )
                 .expect("first artifact before simulated crash");
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_directory_child_promotion(
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_directory_child_promotion_in_store(
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap(),
                 run_id,
                 "evidence",
                 "first.txt",

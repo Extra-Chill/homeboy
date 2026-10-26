@@ -350,177 +350,146 @@ fn durable_terminal_run_preserves_parent_mission_and_explicit_handoff_identity()
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). Acceptance is a durable transfer of one run to one runner daemon:
-/// the pending handoff, the typed acceptance, the reload that models caller
-/// loss, and the snapshot validated against it all name `lifecycle_store`, so
-/// "the accepted identity survived" is asserted about one home rather than
-/// about whichever home the process environment happened to point at.
-///
-/// `bind_accepted_lab_runner_job_in_store` still carries the default Lab
-/// offload submission, but it cannot be reached here: the pending handoff above
-/// has already written the record, so the acceptance path reads it rather than
-/// falling through to `submit_plan_in_store`.
+/// Acceptance, reload after caller loss, and snapshot validation all use the
+/// isolated home. Stub admission keeps setup off the controller-runtime queue.
 #[test]
 fn accepted_runner_identity_binds_before_snapshot_validation_and_survives_caller_loss() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "cook-9567-pre-provider-race";
-    let plan = test_plan();
-    record_lab_offload_phase_with_submission_in_store(
-        &lifecycle_store,
-        LabOffloadPhaseRecord {
-            requested_run_id: run_id,
-            runner_id: "homeboy-lab",
-            phase: "provider_dispatch",
-            remote_workspace: Some("/runner/workspace/homeboy"),
-            source_checkout: None,
-            provider_rotation: None,
-            durable_plan: Some(&plan),
-        },
-        &stub_lab_offload_submission,
-    )
-    .expect("persist pending handoff before daemon acceptance");
-    let identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
-        run_id,
-        "homeboy-lab",
-        "00000000-0000-0000-0000-000000009567",
-    );
-
-    // Daemon admission persists the typed accepted identity before a
-    // foreground caller can observe a snapshot or disappear.
-    let accepted = bind_accepted_lab_runner_job_in_store(
-        &lifecycle_store,
-        &identity,
-        "/runner/workspace/homeboy",
-        &[],
-    )
-    .expect("bind accepted daemon job");
-    let replay = bind_accepted_lab_runner_job_in_store(
-        &lifecycle_store,
-        &identity,
-        "/runner/workspace/homeboy",
-        &[],
-    )
-    .expect("repeated acceptance is idempotent");
-    assert_eq!(accepted, replay);
-
-    let foreign = bind_accepted_lab_runner_job_in_store(
-        &lifecycle_store,
-        &homeboy_core::lab_contract::RunnerJobIdentity::new(
+    with_isolated_home(|_| {
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let run_id = "cook-9567-pre-provider-race";
+        let plan = test_plan();
+        record_lab_offload_phase_with_submission_in_store(
+            &lifecycle_store,
+            LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id: "homeboy-lab",
+                phase: "provider_dispatch",
+                remote_workspace: Some("/runner/workspace/homeboy"),
+                source_checkout: None,
+                provider_rotation: None,
+                durable_plan: Some(&plan),
+            },
+            &stub_lab_offload_submission,
+        )
+        .expect("persist pending handoff before daemon acceptance");
+        let identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
             run_id,
             "homeboy-lab",
-            "00000000-0000-0000-0000-000000009568",
-        ),
-        "/runner/workspace/homeboy",
-        &[],
-    )
-    .expect_err("a foreign daemon job cannot replace accepted identity");
-    assert_eq!(foreign.code, ErrorCode::ValidationInvalidArgument);
+            "00000000-0000-0000-0000-000000009567",
+        );
 
-    // Reloading models controller/caller loss after daemon acceptance. A
-    // status reconciliation validates the accepted job directly and never
-    // needs to replay the provider command.
-    let mut recovered = reconcile_status_in_store(
-        &lifecycle_store,
-        run_id,
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("reload accepted handoff")
-    .record;
-    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
-    snapshot.job.id = uuid::Uuid::parse_str(&identity.runner_job_id).expect("valid job id");
-    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
-    snapshot.events.clear();
-    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut recovered, &snapshot)
-        .expect("accepted identity validates recovered runner snapshot");
-    assert_eq!(
-        recovered.runner_job_id(),
-        Some(identity.runner_job_id.as_str())
-    );
-    assert_eq!(recovered.state(), AgentTaskRunState::Running);
+        // Daemon admission persists the typed accepted identity before a
+        // foreground caller can observe a snapshot or disappear.
+        let accepted = bind_accepted_lab_runner_job(&identity, "/runner/workspace/homeboy", &[])
+            .expect("bind accepted daemon job");
+        let replay = bind_accepted_lab_runner_job(&identity, "/runner/workspace/homeboy", &[])
+            .expect("repeated acceptance is idempotent");
+        assert_eq!(accepted, replay);
+
+        let foreign = bind_accepted_lab_runner_job(
+            &homeboy_core::lab_contract::RunnerJobIdentity::new(
+                run_id,
+                "homeboy-lab",
+                "00000000-0000-0000-0000-000000009568",
+            ),
+            "/runner/workspace/homeboy",
+            &[],
+        )
+        .expect_err("a foreign daemon job cannot replace accepted identity");
+        assert_eq!(foreign.code, ErrorCode::ValidationInvalidArgument);
+
+        // Reloading models controller/caller loss after daemon acceptance. A
+        // status reconciliation validates the accepted job directly and never
+        // needs to replay the provider command.
+        let mut recovered = reconcile_status_in_store(
+            &lifecycle_store,
+            run_id,
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("reload accepted handoff")
+        .record;
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+        snapshot.job.id = uuid::Uuid::parse_str(&identity.runner_job_id).expect("valid job id");
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.events.clear();
+        reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut recovered, &snapshot)
+            .expect("accepted identity validates recovered runner snapshot");
+        assert_eq!(
+            recovered.runner_job_id(),
+            Some(identity.runner_job_id.as_str())
+        );
+        assert_eq!(recovered.state(), AgentTaskRunState::Running);
+    });
 }
 
 #[test]
 fn accepted_runner_binding_fails_if_terminalization_wins_before_identity_persistence() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "cook-12926-accepted-before-binding";
-    let plan = test_plan();
-    record_lab_offload_phase_with_submission_in_store(
-        &lifecycle_store,
-        LabOffloadPhaseRecord {
-            requested_run_id: run_id,
-            runner_id: "homeboy-lab",
-            phase: "provider_dispatch",
-            remote_workspace: Some("/runner/workspace/homeboy"),
-            source_checkout: None,
-            provider_rotation: None,
-            durable_plan: Some(&plan),
-        },
-        &stub_lab_offload_submission,
-    )
-    .expect("persist planned handoff before daemon acceptance");
-    let mut terminal = lifecycle_store
-        .read_record(run_id)
-        .expect("planned handoff");
-    set_run_state(&mut terminal, AgentTaskRunState::Cancelled);
-    terminal.metadata["cancel_reason"] = json!("missing_runner_pid");
-    lifecycle_store
-        .write_record(&terminal)
-        .expect("terminalization wins before accepted identity is bound");
-    let identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
-        run_id,
-        "homeboy-lab",
-        "00000000-0000-0000-0000-000000012926",
-    );
+    with_isolated_home(|_| {
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let run_id = "cook-12926-accepted-before-binding";
+        let plan = test_plan();
+        record_lab_offload_phase_with_submission_in_store(
+            &lifecycle_store,
+            LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id: "homeboy-lab",
+                phase: "provider_dispatch",
+                remote_workspace: Some("/runner/workspace/homeboy"),
+                source_checkout: None,
+                provider_rotation: None,
+                durable_plan: Some(&plan),
+            },
+            &stub_lab_offload_submission,
+        )
+        .expect("persist planned handoff before daemon acceptance");
+        let mut terminal = lifecycle_store
+            .read_record(run_id)
+            .expect("planned handoff");
+        set_run_state(&mut terminal, AgentTaskRunState::Cancelled);
+        terminal.metadata["cancel_reason"] = json!("missing_runner_pid");
+        lifecycle_store
+            .write_record(&terminal)
+            .expect("terminalization wins before accepted identity is bound");
+        let identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
+            run_id,
+            "homeboy-lab",
+            "00000000-0000-0000-0000-000000012926",
+        );
 
-    let error = bind_accepted_lab_runner_job_in_store(
-        &lifecycle_store,
-        &identity,
-        "/runner/workspace/homeboy",
-        &[],
-    )
-    .expect_err("accepted work cannot proceed without a durable runner identity");
+        let error = bind_accepted_lab_runner_job(&identity, "/runner/workspace/homeboy", &[])
+            .expect_err("accepted work cannot proceed without a durable runner identity");
 
-    assert_eq!(error.code, ErrorCode::InternalUnexpected);
-    let persisted = lifecycle_store
-        .read_record(run_id)
-        .expect("terminal record remains readable");
-    assert_eq!(persisted.state(), AgentTaskRunState::Cancelled);
-    assert!(accepted_lab_runner_job_identity_from_record(&persisted).is_none());
-    assert!(persisted.runner_job_id().is_none());
+        assert_eq!(error.code, ErrorCode::InternalUnexpected);
+        let persisted = lifecycle_store
+            .read_record(run_id)
+            .expect("terminal record remains readable");
+        assert_eq!(persisted.state(), AgentTaskRunState::Cancelled);
+        assert!(accepted_lab_runner_job_identity_from_record(&persisted).is_none());
+        assert!(persisted.runner_job_id().is_none());
+    });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The mutable metadata is written into, and the typed-handoff read is
-/// taken out of, one store — which is the whole claim: "metadata is not
-/// acceptance" is only meaningful when the read half and the write half name
-/// the same record. The stub admission keeps submission off the machine-global
-/// controller-runtime queue; nothing here asserts on runtime provenance.
+/// Mutable metadata and typed-handoff reads use the same isolated home.
+/// Stub admission keeps setup off the controller-runtime queue.
 #[test]
 fn accepted_runner_identity_rejects_mutable_metadata_without_typed_handoff() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "cook-9567-metadata-is-not-acceptance";
-    let mut record = lifecycle_store
-        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
-        .expect("persist run");
-    record.metadata["runner_id"] = json!("homeboy-lab");
-    record.metadata["runner_job_id"] = json!("foreign-job");
-    lifecycle_store
-        .write_record(&record)
-        .expect("persist mutable metadata");
+    with_isolated_home(|_| {
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let run_id = "cook-9567-metadata-is-not-acceptance";
+        let mut record = lifecycle_store
+            .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+            .expect("persist run");
+        record.metadata["runner_id"] = json!("homeboy-lab");
+        record.metadata["runner_job_id"] = json!("foreign-job");
+        lifecycle_store
+            .write_record(&record)
+            .expect("persist mutable metadata");
 
-    assert!(
-        accepted_lab_runner_job_identity_in_store(&lifecycle_store, run_id)
+        assert!(accepted_lab_runner_job_identity(run_id)
             .expect("read typed handoff")
-            .is_none()
-    );
+            .is_none());
+    });
 }
 
 #[test]

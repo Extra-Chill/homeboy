@@ -51,27 +51,7 @@ pub fn bind_accepted_lab_runner_job(
     remote_workspace: &str,
     remote_command: &[String],
 ) -> Result<AgentTaskRunRecord> {
-    bind_accepted_lab_runner_job_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        identity,
-        remote_workspace,
-        remote_command,
-    )
-}
-
-/// The store-rooted counterpart of [`bind_accepted_lab_runner_job`].
-///
-/// Acceptance is a durable transfer of one run to one runner daemon, so the
-/// validation, the record it is validated against, and the accepted handoff
-/// written back all have to name the same installation. Rooting only the
-/// wrapper would leave the daemon's authoritative binding landing wherever the
-/// process environment happened to point (#7505).
-pub fn bind_accepted_lab_runner_job_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    identity: &homeboy_core::lab_contract::RunnerJobIdentity,
-    remote_workspace: &str,
-    remote_command: &[String],
-) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = &AgentTaskLifecycleStore::from_current_environment()?;
     if !identity.is_complete() {
         return Err(Error::validation_invalid_argument(
             "runner_job_identity",
@@ -282,23 +262,7 @@ pub fn record_local_lab_identity_fallback(
     identity_drift: &Value,
     fallback_reason: &str,
 ) -> Result<AgentTaskRunRecord> {
-    record_local_lab_identity_fallback_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        runner_id,
-        identity_drift,
-        fallback_reason,
-    )
-}
-
-/// The store-rooted counterpart of [`record_local_lab_identity_fallback`].
-pub fn record_local_lab_identity_fallback_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    runner_id: &str,
-    identity_drift: &Value,
-    fallback_reason: &str,
-) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if record.state().is_terminal() {
         return Ok(record);
