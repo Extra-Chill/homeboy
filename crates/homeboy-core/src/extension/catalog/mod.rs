@@ -112,40 +112,16 @@ pub(crate) fn load_extension_in_optional_root(
     }
 }
 
-/// Valid manifests only, from an already-produced discovery result.
-///
-/// Shared by the ambient and rooted list loaders so the two cannot drift in
-/// which discovery outcomes they consider loadable.
-fn valid_manifests(discovered: Vec<DiscoveredExtension>) -> Vec<ExtensionManifest> {
-    discovered
+/// Every loadable installed extension. An unresolvable config root yields an
+/// empty list rather than an error.
+pub fn load_all_extensions() -> Result<Vec<ExtensionManifest>> {
+    Ok(discover_extensions()
         .into_iter()
         .filter_map(|extension| match extension {
             DiscoveredExtension::Valid(manifest) => Some(*manifest),
             DiscoveredExtension::Invalid(_) => None,
         })
-        .collect()
-}
-
-/// Every loadable installed extension below an already-resolved config root.
-pub fn load_all_extensions_in_root(config_root: &Path) -> Result<Vec<ExtensionManifest>> {
-    Ok(valid_manifests(discover_extensions_in_root(config_root)))
-}
-
-/// Ambient sibling of [`load_all_extensions_in_root`].
-///
-/// Deliberately routed through the ambient [`discover_extensions`] rather than
-/// resolving the root with `?`: an unresolvable config root has always yielded
-/// an empty extension list here, not an error, and several callers depend on
-/// that degrade.
-pub fn load_all_extensions() -> Result<Vec<ExtensionManifest>> {
-    Ok(valid_manifests(discover_extensions()))
-}
-
-/// Discover every installed extension directory below an already-resolved
-/// config root, including manifests that are malformed or incompatible with
-/// this Homeboy version.
-pub fn discover_extensions_in_root(config_root: &Path) -> Vec<DiscoveredExtension> {
-    discover_extensions_at(&paths::extensions_in_root(config_root))
+        .collect())
 }
 
 /// Discover every installed extension directory, including manifests that are
@@ -154,12 +130,7 @@ pub fn discover_extensions() -> Vec<DiscoveredExtension> {
     let Ok(extensions_dir) = paths::extensions() else {
         return Vec::new();
     };
-    discover_extensions_at(&extensions_dir)
-}
 
-/// Discovery over an already-resolved extensions directory. The one place the
-/// directory walk lives, so ambient and rooted discovery cannot diverge.
-fn discover_extensions_at(extensions_dir: &Path) -> Vec<DiscoveredExtension> {
     let Ok(entries) = std::fs::read_dir(extensions_dir) else {
         return Vec::new();
     };
@@ -359,15 +330,6 @@ fn broken_extension_link_in_root(config_root: &Path, id: &str) -> Option<BrokenE
     broken_extension_link_at(&paths::extension_in_root(config_root, id), id)
 }
 
-/// Ambient sibling of [`broken_extension_link_in_root`], used only by this
-/// module's tests. `#[cfg(test)]` for the same reason as
-/// `load_standalone_components`: its one remaining caller is a test, so a lib
-/// build sees dead code under `-D warnings` (#7505).
-#[cfg(test)]
-fn broken_extension_link(id: &str) -> Option<BrokenExtensionLink> {
-    broken_extension_link_at(&paths::extension(id).ok()?, id)
-}
-
 /// The link diagnosis for an already-resolved extension directory path.
 fn broken_extension_link_at(path: &Path, id: &str) -> Option<BrokenExtensionLink> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
@@ -411,14 +373,6 @@ fn provides_tool(manifest: &ExtensionManifest, tool: &str) -> bool {
     manifest.cli.as_ref().is_some_and(|c| c.tool == tool)
 }
 
-/// Find an extension by CLI tool below an already-resolved config root.
-pub fn find_extension_by_tool_in_root(config_root: &Path, tool: &str) -> Option<ExtensionManifest> {
-    load_all_extensions_in_root(config_root)
-        .ok()?
-        .into_iter()
-        .find(|m| provides_tool(m, tool))
-}
-
 pub fn find_extension_by_tool(tool: &str) -> Option<ExtensionManifest> {
     load_all_extensions()
         .ok()?
@@ -428,11 +382,6 @@ pub fn find_extension_by_tool(tool: &str) -> Option<ExtensionManifest> {
 
 pub fn extension_path(id: &str) -> PathBuf {
     paths::extension(id).unwrap_or_else(|_| PathBuf::from(id))
-}
-
-/// Installed extension ids below an already-resolved config root.
-pub fn available_extension_ids_in_root(config_root: &Path) -> Vec<String> {
-    config::list_ids_in_root::<ExtensionManifest>(config_root).unwrap_or_default()
 }
 
 pub fn available_extension_ids() -> Vec<String> {
@@ -682,7 +631,11 @@ mod tests {
             let target = extensions_dir.join("missing-sample-runtime");
             std::os::unix::fs::symlink(&target, &link).unwrap();
 
-            let broken = broken_extension_link("sample-runtime").expect("broken link");
+            let broken = broken_extension_link_in_root(
+                &paths::homeboy().expect("config root"),
+                "sample-runtime",
+            )
+            .expect("broken link");
             assert_eq!(broken.id, "sample-runtime");
             assert_eq!(broken.path, link);
             assert_eq!(broken.target, target);
