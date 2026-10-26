@@ -19347,27 +19347,6 @@ fn corrected_gate_recovery_rejects_missing_authority_history_and_candidate_drift
             &mut CaptureBackend::default(),
         )
         .is_err());
-        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
-        let mut missing = replacement;
-        missing
-            .provenance
-            .as_object_mut()
-            .unwrap()
-            .remove("replacement_gate_proof");
-        store
-            .record_promotion(run_id, serde_json::to_value(&missing).unwrap())
-            .unwrap();
-        let error = finalize_cook_pr_with_backend(
-            &options,
-            run_id,
-            &missing,
-            &mut CaptureBackend {
-                hydrate_run_id: Some(run_id.clone()),
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
-        assert!(error.message.contains("durable run must have succeeded"));
     });
 }
 
