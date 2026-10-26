@@ -3284,6 +3284,8 @@ mod tests {
 
     #[test]
     fn inner_uses_authoritative_preflight_status_not_conflicting_cwd_projection() {
+        // Admission reads the controller drain ledger; keep it hermetic.
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let preflight_status = runner_status(true);
         let conflicting_cwd_projection = runner_status(false);
 
@@ -3300,6 +3302,8 @@ mod tests {
 
     #[test]
     fn post_rotation_admission_counts_draining_generation_capacity() {
+        // Admission reads the controller drain ledger; keep it hermetic.
+        let _home = homeboy_core::test_support::HomeGuard::new();
         // The replacement daemon is idle after a generation rotation, but the
         // authoritative aggregate retains work owned by the draining daemon.
         let mut post_rotation = runner_status(true);
@@ -3345,6 +3349,8 @@ mod tests {
 
     #[test]
     fn direct_ssh_admission_reuses_matching_status_identity_when_a_second_probe_fails() {
+        // Admission reads the controller drain ledger; keep it hermetic.
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let identity = "homeboy 0.339.0+83a9bd058619";
         let mut status = runner_status(true);
         status.session = Some(admission_session(
@@ -3378,6 +3384,8 @@ mod tests {
 
     #[test]
     fn direct_readiness_retries_once_after_a_generation_change_and_admits_the_stable_generation() {
+        // Admission reads the controller drain ledger; keep it hermetic.
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let status_a = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-a");
         let status_b = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-b");
         let mut refreshed = VecDeque::from([
@@ -3764,6 +3772,8 @@ mod tests {
 
     #[test]
     fn detached_staging_refuses_capability_or_strict_ancestry_drift_before_submission() {
+        // Admission reads the controller drain ledger; keep it hermetic.
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let args = Vec::new();
         let request = LabOffloadRequest {
             normalized_args: &args,

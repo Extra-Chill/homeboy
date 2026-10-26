@@ -1925,6 +1925,8 @@ mod status_serialization_tests {
 
     #[test]
     fn unclaimed_retained_state_does_not_fence_admission() {
+        // Admission reads the controller drain ledger; keep it hermetic.
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
         report.active_job_source = Some(RunnerActiveJobSource::DirectDaemon);
@@ -1986,6 +1988,8 @@ mod status_serialization_tests {
 
     #[test]
     fn runner_owned_idle_observation_is_not_overwritten_by_retained_ledger() {
+        // Admission reads the controller drain ledger; keep it hermetic.
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
         report.active_job_source = Some(RunnerActiveJobSource::DirectDaemon);
@@ -2026,6 +2030,8 @@ mod status_serialization_tests {
 
     #[test]
     fn delayed_zero_projection_does_not_override_live_daemon_count_with_owner() {
+        // Admission reads the controller drain ledger; keep it hermetic.
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
         report.active_job_source = Some(RunnerActiveJobSource::DirectDaemon);
@@ -2069,6 +2075,8 @@ mod status_serialization_tests {
 
     #[test]
     fn non_authoritative_draining_projection_guides_reconciliation_without_fencing_admission() {
+        // Admission reads the controller drain ledger; keep it hermetic.
+        let _home = homeboy_core::test_support::HomeGuard::new();
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
         report.daemon_freshness = Some(fresh_daemon_freshness());
