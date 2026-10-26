@@ -10,6 +10,7 @@ homeboy_discover_repository_files() {
 
     if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         while IFS= read -r -d '' path; do
+            [ -e "$root/$path" ] || continue
             case "${path#./}" in
                 artifacts/*|*/artifacts/*)
                     ;;
