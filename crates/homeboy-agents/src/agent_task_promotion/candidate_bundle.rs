@@ -182,6 +182,7 @@ pub(crate) fn fetch_run_candidates(
     plan: &crate::agent_tasks::scheduler::AgentTaskPlan,
     aggregate: &crate::agent_tasks::scheduler::AgentTaskAggregate,
 ) -> Result<()> {
+    let _identities = crate::agent_task_gate::placement::runner_identity_scope();
     // Telemetry setup must not prevent candidate recovery.
     let store = match lifecycle_store.open_observation_initialized() {
         Ok(store) => Some(store),

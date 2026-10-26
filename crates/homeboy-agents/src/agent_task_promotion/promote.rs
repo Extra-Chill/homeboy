@@ -1689,6 +1689,8 @@ fn run_promotion_gates(
     gate_workspace: Option<&Path>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PromotionGateRun> {
+    // One gate round: toolchain admission and every gate command share it.
+    let _identities = crate::agent_task_gate::placement::runner_identity_scope();
     let operation = || {
         run_promotion_gates_inner(
             options,
@@ -2486,6 +2488,182 @@ mod lab_gate_binding_tests {
                 bind_lab_gate_candidate_checkout(&mut gate, &checkout.identity()).is_err(),
                 "non-execution evidence cannot make an executed passing gate green"
             );
+        });
+    }
+
+    const IDENTITY_PROBE: &str = "resolve.readonly_probe.runner_homeboy_identity";
+
+    thread_local! {
+        // Mirrors the Lab runner's staging scope: successful observations live
+        // only while the outermost guard is held on this thread.
+        static OBSERVED: std::cell::RefCell<Option<std::collections::BTreeSet<String>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    struct ObservedScope(bool);
+    impl Drop for ObservedScope {
+        fn drop(&mut self) {
+            if self.0 {
+                OBSERVED.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+    }
+
+    /// A Lab runner whose admission observes the runner identity, as the
+    /// native transport does for each preflight and gate command.
+    struct IdentityProbingTransport {
+        previous: Arc<dyn crate::agent_task_gate::placement::LabGateTransport>,
+    }
+
+    impl crate::agent_task_gate::placement::LabGateTransport for IdentityProbingTransport {
+        fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+            self.previous.declared_runner(command)
+        }
+        fn execute(
+            &self,
+            cwd: &Path,
+            request: &crate::agent_task_gate::placement::LabGateRequest,
+            supervision: Option<&crate::agent_task_gate::GateSupervision>,
+        ) -> Result<crate::agent_task_gate::placement::LabGateReceipt> {
+            if !request.runner_id.starts_with("identity-round-") {
+                return self.previous.execute(cwd, request, supervision);
+            }
+            let cached = OBSERVED.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let cached = slot
+                    .as_ref()
+                    .is_some_and(|observed| observed.contains(&request.runner_id));
+                if let Some(observed) = slot.as_mut() {
+                    observed.insert(request.runner_id.clone());
+                }
+                cached
+            });
+            if !cached {
+                homeboy_core::observation::phase_timing::finish(
+                    IDENTITY_PROBE,
+                    std::time::Instant::now(),
+                    false,
+                );
+            }
+            let mut environment = request.environment.clone();
+            environment.lab_runner = None;
+            let mut report = crate::agent_task_gate::run_gate_command_with_supervision(
+                cwd,
+                request.index,
+                if request.preflight_only {
+                    "true"
+                } else {
+                    &request.label
+                },
+                request.visibility,
+                request.reveal_policy,
+                None,
+                supervision,
+                &environment,
+                &[],
+            )?;
+            report.environment.lab_runner = Some(request.runner_id.clone());
+            if request.preflight_only {
+                report.status = AgentTaskGateStatus::Skipped;
+            }
+            Ok(crate::agent_task_gate::placement::LabGateReceipt {
+                schema: crate::agent_task_gate::placement::LAB_GATE_RECEIPT_SCHEMA.to_string(),
+                request_sha256: request.identity()?,
+                candidate: request.candidate.clone(),
+                execution_context:
+                    homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+                        Some("controller-run"),
+                        &request.runner_id,
+                        "job",
+                        "homeboy",
+                        "reservation",
+                    )?
+                    .evidence_record()?,
+                report,
+                setup: vec![],
+                readiness: request
+                    .preflight_only
+                    .then(|| json!({"status":"ready"})),
+                materialization: None,
+                artifact_ref: None,
+            })
+        }
+    }
+
+    /// #16503: a gate round observes each runner's Homeboy identity once,
+    /// across its toolchain admission and every gate command; the next round
+    /// observes it again.
+    #[test]
+    fn one_gate_round_probes_each_runner_identity_once() {
+        use crate::agent_task_gate::placement;
+        placement::register_lab_gate_transport(Arc::new(IdentityProbingTransport {
+            previous: placement::active_transport(),
+        }));
+        placement::register_runner_identity_scope(|| {
+            Box::new(ObservedScope(OBSERVED.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let owner = slot.is_none();
+                slot.get_or_insert_with(Default::default);
+                owner
+            })))
+        });
+        with_git_candidate(|repo, store| {
+            let candidate =
+                crate::agent_task_promotion::candidate_fingerprint(&repo.display().to_string())
+                    .unwrap();
+            let snapshot = crate::agent_task_promotion::tests::candidate_snapshot::snapshot(
+                repo,
+                &git_output(repo, &["rev-parse", "HEAD"]).unwrap(),
+                "gate-test",
+            );
+            for (round, runner) in ["identity-round-a", "identity-round-b"]
+                .into_iter()
+                .cycle()
+                .take(4)
+                .enumerate()
+            {
+                let run = store
+                    .start_run(
+                        homeboy_core::observation::NewRunRecord::builder("agent-task").build(),
+                    )
+                    .unwrap();
+                let _timing = homeboy_core::observation::phase_timing::for_run(store, &run.id);
+                let options: AgentTaskPromotionRequest = serde_json::from_value(json!({
+                    "source":"{}", "source_run_id":run.id, "to_worktree":"fixture", "gates":{
+                        "verify":["true", "true", "true"], "hydrate_dependencies":false,
+                        "gate_environment":{"lab_runner":runner, "hydrate_rust_cache":false}
+                    }
+                }))
+                .unwrap();
+                let report = run_promotion_gates(
+                    &options,
+                    repo,
+                    Some(&candidate),
+                    Some(&snapshot),
+                    None,
+                    store,
+                )
+                .unwrap();
+                assert_eq!(report.deterministic_gates.len(), 3, "round {round}");
+                assert!(report
+                    .deterministic_gates
+                    .iter()
+                    .all(|gate| gate.status == AgentTaskGateStatus::Succeeded));
+                let spans = store.phase_spans(&run.id).unwrap().spans;
+                let admission = spans
+                    .iter()
+                    .filter(|span| span.id == "admit.gate_toolchains")
+                    .count();
+                assert_eq!(admission, 3, "round {round} admits every gate");
+                assert_eq!(
+                    spans
+                        .iter()
+                        .filter(|span| span.id == IDENTITY_PROBE)
+                        .count(),
+                    1,
+                    "round {round} probes runner `{runner}` once"
+                );
+            }
         });
     }
 }

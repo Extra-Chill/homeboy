@@ -675,6 +675,9 @@ pub fn register() {
     homeboy_agents::agent_tasks::gate::placement::register_lab_gate_transport(Arc::new(
         NativeLabGateTransport,
     ));
+    homeboy_agents::agent_tasks::gate::placement::register_runner_identity_scope(|| {
+        Box::new(crate::connection::StagingIdentityScope::enter())
+    });
 }
 
 #[cfg(test)]

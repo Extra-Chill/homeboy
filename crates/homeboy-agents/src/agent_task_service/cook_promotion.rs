@@ -994,6 +994,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
     let _recovery = timing_store
         .as_ref()
         .map(|store| store.run_phase_guard(run_id, "promote.recover.candidate"));
+    let _identities = crate::agent_task_gate::placement::runner_identity_scope();
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
         if promotion.status != AgentTaskPromotionStatus::VerificationPending {
             if promotion.provenance.get("replacement_gate_proof").is_some() {

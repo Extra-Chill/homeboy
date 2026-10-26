@@ -6232,6 +6232,8 @@ fn run_cook_spine(
         }
     }
     record_active_cook_worktree_warning(lifecycle_store, &options)?;
+    // Admission through the first dispatch observes each runner identity once.
+    let mut admission_identities = crate::agent_task_gate::placement::runner_identity_scope();
     if options.gates.has_npm_run_declaration() {
         let gate_workspace = super::cook_promotion::component_workspace_path(&options)?
             .or_else(|| options.workspace.source_worktree_path.clone())
@@ -7052,6 +7054,8 @@ fn run_cook_spine(
                 continue;
             }
         }
+        // Provider waits, promotion and gate rounds observe identity afresh.
+        drop(admission_identities.take());
         lifecycle_store.record_cook_attempt(&cook_id, attempt, &run_id)?;
         let rooted_promotion_continuation = verification_pending_continuation;
         let mut record = if rooted_promotion_continuation {
