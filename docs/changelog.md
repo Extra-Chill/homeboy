@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.46] - 2026-10-26
+
+### Changed
+- Reuse runner identity across Lab gate rounds, admission and promotion
+
 ## [0.433.45] - 2026-10-26
 
 ### Changed
