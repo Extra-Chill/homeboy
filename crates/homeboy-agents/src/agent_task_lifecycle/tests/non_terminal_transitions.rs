@@ -8,7 +8,7 @@
 use super::stub_lab_offload_submission;
 use crate::agent_task_lifecycle::{
     record_detached_lab_run_in_store, record_lab_offload_planned_with_submission_in_store,
-    recover_transport_proxy_in_store, rewrite_record_for_test_in_store, AgentTaskLabHandoffState,
+    recover_transport_proxy_in_store, rewrite_record_for_test, AgentTaskLabHandoffState,
     AgentTaskLifecycleStore, AgentTaskRunState, DetachedLabRunRecord, LabOffloadProxyPlan,
     RunnerAuthority, RunnerContinuationProvider, RunnerContinuationTestGuard,
     AGENT_TASK_TRANSITION_CONFLICT,
@@ -106,10 +106,20 @@ fn stale_proxy_recovery_cannot_unbind_a_concurrent_lab_handoff_acceptance() {
     .expect("controller proxy planned before acceptance");
     // The stub admission pins no real controller runtime; recovery validates
     // the pin, so the fixture carries none.
-    rewrite_record_for_test_in_store(&store, RUN_ID, |record| {
-        if let Some(metadata) = record.metadata.as_object_mut() {
-            metadata.remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
-        }
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            store.roots().data(),
+        );
+        rewrite_record_for_test(RUN_ID, |record| {
+            if let Some(metadata) = record.metadata.as_object_mut() {
+                metadata.remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+            }
+        })
     })
     .expect("drop the stub runtime pin");
     let planned = store.read_record(RUN_ID).expect("planned proxy");
@@ -274,10 +284,20 @@ fn a_late_lab_acceptance_after_expiry_keeps_the_receipt_and_every_view_agreeing(
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     planned_proxy(&store);
-    rewrite_record_for_test_in_store(&store, RUN_ID, |record| {
-        if let Some(metadata) = record.metadata.as_object_mut() {
-            metadata.remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
-        }
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            store.roots().data(),
+        );
+        rewrite_record_for_test(RUN_ID, |record| {
+            if let Some(metadata) = record.metadata.as_object_mut() {
+                metadata.remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+            }
+        })
     })
     .expect("drop the stub runtime pin");
     let mut pending = store.read_record(RUN_ID).expect("queued proxy");

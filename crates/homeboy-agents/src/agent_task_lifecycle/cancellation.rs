@@ -1644,7 +1644,10 @@ mod tests {
                 error.code,
                 homeboy_core::ErrorCode::ValidationInvalidArgument
             );
-            assert!(!cook_index_exists(cook_id).expect("inspect absent Cook index"));
+            assert!(
+                !cook_index_exists_in_store(&test_lifecycle_store(), cook_id)
+                    .expect("inspect absent Cook index")
+            );
         });
     }
 
@@ -1730,7 +1733,8 @@ mod tests {
                 .expect("cancel submitted reserved child"),
                 "the reservation reaches the child that was not present during parent cancellation"
             );
-            assert!(cook_index_exists(cook_id).expect("inspect durable Cook index"));
+            assert!(cook_index_exists_in_store(&test_lifecycle_store(), cook_id)
+                .expect("inspect durable Cook index"));
             assert_eq!(
                 exact_record(attempt_id)
                     .expect("read durable child outcome")
@@ -1781,7 +1785,8 @@ mod tests {
 
             assert_eq!(cancelled.run_id, attempt_id);
             assert_eq!(cancelled.state(), AgentTaskRunState::Succeeded);
-            assert!(cook_index_exists(cook_id).expect("inspect durable Cook index"));
+            assert!(cook_index_exists_in_store(&test_lifecycle_store(), cook_id)
+                .expect("inspect durable Cook index"));
         });
     }
 
@@ -1974,7 +1979,10 @@ mod tests {
                 cook_id
             )
             .is_err());
-            assert!(!cook_index_exists(cook_id).expect("inspect absent Cook index"));
+            assert!(
+                !cook_index_exists_in_store(&test_lifecycle_store(), cook_id)
+                    .expect("inspect absent Cook index")
+            );
             assert!(
                 !run_record_exists(&cook_attempt_run_id(cook_id, 1))
                     .expect("inspect absent materialized attempt"),

@@ -9701,7 +9701,9 @@ fn snapshot_divergence_opens_a_per_cook_circuit_until_source_identity_changes() 
             "repair_lab_pre_execution_and_retry"
         );
         assert_eq!(
-            agent_task_lifecycle::list_records().expect("records").len(),
+            agent_task_lifecycle::list_records_in_store(&test_lifecycle_store())
+                .expect("records")
+                .len(),
             1
         );
         assert_eq!(
@@ -10242,7 +10244,7 @@ fn retryable_pre_provider_retry_repairs_lifecycle_reserved_attempts_idempotently
             2
         );
         assert_eq!(
-            agent_task_lifecycle::list_records()
+            agent_task_lifecycle::list_records_in_store(&test_lifecycle_store())
                 .expect("durable lifecycle records")
                 .len(),
             2,
@@ -10424,7 +10426,12 @@ fn execution_step_reservation_before_recipe_and_index_repairs_and_executes_provi
             store.read_record(&reserved).unwrap().metadata["provider_executions_consumed"],
             1
         );
-        assert_eq!(agent_task_lifecycle::list_records().unwrap().len(), 2);
+        assert_eq!(
+            agent_task_lifecycle::list_records_in_store(&test_lifecycle_store())
+                .unwrap()
+                .len(),
+            2
+        );
     });
 }
 
@@ -10464,7 +10471,7 @@ fn retryable_pre_provider_retry_concurrently_claims_one_successor() {
         assert_eq!(index.attempts.len(), 2);
         assert_eq!(index.latest_run_id, run_ids[0].0.as_str());
         assert_eq!(
-            agent_task_lifecycle::list_records()
+            agent_task_lifecycle::list_records_in_store(&test_lifecycle_store())
                 .expect("durable lifecycle records")
                 .len(),
             2,
@@ -10501,7 +10508,7 @@ fn retryable_pre_provider_retry_concurrently_claims_one_successor_across_process
         assert_eq!(index.attempts.len(), 2);
         assert_eq!(recipe.attempts[1].run_id, index.latest_run_id);
         assert_eq!(
-            agent_task_lifecycle::list_records()
+            agent_task_lifecycle::list_records_in_store(&test_lifecycle_store())
                 .expect("durable lifecycle records")
                 .len(),
             2,
@@ -11817,9 +11824,11 @@ fn normal_cook_repairs_a_transient_initial_index_write() {
         persist_initial_recipe(&options).expect("persist immutable recipe");
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
             .expect("persist lifecycle before Cook registration");
-        assert!(
-            !agent_task_lifecycle::cook_index_exists(cook_id).expect("Cook index starts absent")
-        );
+        assert!(!agent_task_lifecycle::cook_index_exists_in_store(
+            &test_lifecycle_store(),
+            cook_id
+        )
+        .expect("Cook index starts absent"));
 
         agent_task_lifecycle::fail_next_record_write_for_test();
         let report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
@@ -12074,10 +12083,11 @@ fn strict_cross_cook_run_ownership_rejection_leaves_state_unchanged() {
                 agent_task_lifecycle::cook_index("cook-cross-owner-a").expect("first index after"),
                 before_index
             );
-            assert!(
-                !agent_task_lifecycle::cook_index_exists("cook-cross-owner-b")
-                    .expect("second index remains absent")
-            );
+            assert!(!agent_task_lifecycle::cook_index_exists_in_store(
+                &test_lifecycle_store(),
+                "cook-cross-owner-b"
+            )
+            .expect("second index remains absent"));
         });
     });
 }
@@ -15492,9 +15502,12 @@ fn adoption_by_cook_id_selects_the_latest_substantive_candidate_not_a_newer_empt
         assert_eq!(
             source_path,
             Some(
-                agent_task_lifecycle::aggregate_source(second_run_id)
-                    .unwrap()
-                    .1
+                agent_task_lifecycle::aggregate_source_in_store(
+                    &test_lifecycle_store(),
+                    second_run_id
+                )
+                .unwrap()
+                .1
             )
         );
 
@@ -21917,8 +21930,7 @@ fn verified_existing_candidate_no_change_recovery_finalizes_once() {
             "candidate\n",
         );
         let mut aggregate =
-            agent_task_lifecycle::read_attempt_aggregate_in_store(&test_lifecycle_store(), run_id)
-                .expect("read aggregate");
+            agent_task_lifecycle::read_attempt_aggregate(run_id).expect("read aggregate");
         aggregate.outcomes[0].outputs = serde_json::json!({
             "review_form": test_review_form(),
             "provider_run_result": { "intentional_no_change": {
@@ -22011,11 +22023,8 @@ fn empty_intentional_no_change_remediation_preserves_applied_candidate_recovery(
             &target.path().join("candidate.patch"),
             "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
         );
-        let mut source_aggregate = agent_task_lifecycle::read_attempt_aggregate_in_store(
-            &test_lifecycle_store(),
-            source_run_id,
-        )
-        .expect("read source aggregate");
+        let mut source_aggregate = agent_task_lifecycle::read_attempt_aggregate(source_run_id)
+            .expect("read source aggregate");
         source_aggregate.outcomes[0].outputs = serde_json::json!({
             "review_form": test_review_form(),
         });

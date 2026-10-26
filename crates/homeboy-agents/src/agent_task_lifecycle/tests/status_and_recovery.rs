@@ -243,12 +243,22 @@ fn cook_alias_status_selects_latest_terminal_adoption_then_index_order() {
         "2026-07-20T12:00:01+00:00",
         "2026-07-20T12:00:03+00:00",
     ]) {
-        rewrite_record_for_test_in_store(&lifecycle_store, &run.run_id, |record| {
-            record
-                .candidate_adoption
-                .as_mut()
-                .expect("terminal adoption")
-                .updated_at = timestamp.to_string();
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let _config = homeboy_core::test_support::EnvVarGuard::set(
+                homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+                lifecycle_store.roots().config(),
+            );
+            let _data = homeboy_core::test_support::EnvVarGuard::set(
+                homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+                lifecycle_store.roots().data(),
+            );
+            rewrite_record_for_test(&run.run_id, |record| {
+                record
+                    .candidate_adoption
+                    .as_mut()
+                    .expect("terminal adoption")
+                    .updated_at = timestamp.to_string();
+            })
         })
         .expect("set deterministic adoption timestamp");
     }
@@ -394,12 +404,22 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     .expect_err("live duplicate is rejected");
     assert_eq!(duplicate.details["field"], "candidate_ref");
 
-    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
-        record
-            .candidate_adoption
-            .as_mut()
-            .expect("attempt")
-            .owner_pid = u32::MAX;
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(&record.run_id, |record| {
+            record
+                .candidate_adoption
+                .as_mut()
+                .expect("attempt")
+                .owner_pid = u32::MAX;
+        })
     })
     .expect("make owner stale without sleeping");
     let interrupted = reconcile_status_in_store(
@@ -523,12 +543,22 @@ fn candidate_adoption_start_reconciles_dead_owner_without_status_poll() {
         false,
     )
     .expect("start adoption");
-    rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
-        record
-            .candidate_adoption
-            .as_mut()
-            .expect("adoption")
-            .owner_pid = u32::MAX;
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(run_id, |record| {
+            record
+                .candidate_adoption
+                .as_mut()
+                .expect("adoption")
+                .owner_pid = u32::MAX;
+        })
     })
     .expect("simulate dead owner");
 
@@ -586,12 +616,22 @@ fn interrupted_candidate_adoption_can_be_explicitly_replaced_with_audit_history(
     )
     .is_err());
 
-    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
-        record
-            .candidate_adoption
-            .as_mut()
-            .expect("original adoption")
-            .owner_pid = u32::MAX;
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(&record.run_id, |record| {
+            record
+                .candidate_adoption
+                .as_mut()
+                .expect("original adoption")
+                .owner_pid = u32::MAX;
+        })
     })
     .unwrap();
     reconcile_status_in_store(
@@ -881,12 +921,22 @@ fn candidate_adoption_reconciles_and_cancels_an_orphaned_gate_group() {
         1800,
     )
     .expect("persist gate identity");
-    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
-        record
-            .candidate_adoption
-            .as_mut()
-            .expect("adoption")
-            .owner_pid = u32::MAX;
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(&record.run_id, |record| {
+            record
+                .candidate_adoption
+                .as_mut()
+                .expect("adoption")
+                .owner_pid = u32::MAX;
+        })
     })
     .expect("simulate controller interruption");
 
@@ -1695,186 +1745,188 @@ fn transport_proxy_snapshot_reconciliation_advances_queued_lifecycle() {
 /// split #7505 exists to stop.
 #[test]
 fn terminal_executor_artifacts_are_projected_under_logical_ids() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let root = tempfile::tempdir().expect("executor artifact root");
-    let patch = root.path().join("patch.diff");
-    std::fs::write(&patch, "patch bytes").expect("write patch");
-    let plan = test_plan();
-    let mut aggregate = succeeded_aggregate(&plan);
-    let task_selector =
-        homeboy_core::execution_contract::encode_uri_component(&aggregate.outcomes[0].task_id);
-    aggregate.outcomes[0].evidence_refs.push(crate::agent_task::AgentTaskEvidenceRef {
+    with_isolated_home(|_| {
+        let lifecycle_store = test_lifecycle_store();
+        let root = tempfile::tempdir().expect("executor artifact root");
+        let patch = root.path().join("patch.diff");
+        std::fs::write(&patch, "patch bytes").expect("write patch");
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        let task_selector =
+            homeboy_core::execution_contract::encode_uri_component(&aggregate.outcomes[0].task_id);
+        aggregate.outcomes[0].evidence_refs.push(crate::agent_task::AgentTaskEvidenceRef {
         kind: "patch".to_string(),
         uri: format!("homeboy://agent-task/run/projection-parity/artifacts#task={task_selector}&artifact=patch"),
         label: None,
     });
-    aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
-        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-        id: "patch".to_string(),
-        kind: "patch".to_string(),
-        name: None,
-        label: None,
-        role: None,
-        semantic_key: None,
-        path: Some(patch.display().to_string()),
-        url: None,
-        mime: Some("text/x-patch".to_string()),
-        size_bytes: Some(11),
-        sha256: Some(homeboy_core::artifact_metadata::sha256_file(&patch).expect("sha")),
-        metadata: json!({ "executor_artifact_finalized": true }),
-    });
-    for (id, kind, bytes) in [
-        ("transcript", "transcript", b"transcript bytes".as_slice()),
-        (
-            "agent-result",
-            "agent-result",
-            b"agent result bytes".as_slice(),
-        ),
-    ] {
-        let artifact = root.path().join(id);
-        std::fs::write(&artifact, bytes).expect("write terminal artifact");
         aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
             schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: id.to_string(),
-            kind: kind.to_string(),
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
             name: None,
             label: None,
             role: None,
             semantic_key: None,
-            path: Some(artifact.display().to_string()),
+            path: Some(patch.display().to_string()),
             url: None,
-            mime: Some("text/plain".to_string()),
-            size_bytes: Some(bytes.len() as u64),
-            sha256: Some(homeboy_core::artifact_metadata::sha256_file(&artifact).expect("sha")),
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(11),
+            sha256: Some(homeboy_core::artifact_metadata::sha256_file(&patch).expect("sha")),
             metadata: json!({ "executor_artifact_finalized": true }),
         });
-    }
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "projection-parity", |_| Ok(json!({})))
-        .expect("submit");
-    record_run_aggregate_in_store(&lifecycle_store, "projection-parity", &plan, &aggregate)
-        .expect("record aggregate");
-    reconcile_terminal_artifact_projection_in_store(&lifecycle_store, "projection-parity")
-        .expect("idempotent projection");
-    let record = reconcile_status_in_store(
-        &lifecycle_store,
-        "projection-parity",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("terminal record")
-    .record;
-    assert_eq!(
-        record.metadata["artifact_projection"]["status"], "complete",
-        "{:#}",
-        record.metadata
-    );
+        for (id, kind, bytes) in [
+            ("transcript", "transcript", b"transcript bytes".as_slice()),
+            (
+                "agent-result",
+                "agent-result",
+                b"agent result bytes".as_slice(),
+            ),
+        ] {
+            let artifact = root.path().join(id);
+            std::fs::write(&artifact, bytes).expect("write terminal artifact");
+            aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+                schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: id.to_string(),
+                kind: kind.to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: Some(artifact.display().to_string()),
+                url: None,
+                mime: Some("text/plain".to_string()),
+                size_bytes: Some(bytes.len() as u64),
+                sha256: Some(homeboy_core::artifact_metadata::sha256_file(&artifact).expect("sha")),
+                metadata: json!({ "executor_artifact_finalized": true }),
+            });
+        }
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, "projection-parity", |_| Ok(json!({})))
+            .expect("submit");
+        record_run_aggregate_in_store(&lifecycle_store, "projection-parity", &plan, &aggregate)
+            .expect("record aggregate");
+        reconcile_terminal_artifact_projection("projection-parity").expect("idempotent projection");
+        let record = reconcile_status_in_store(
+            &lifecycle_store,
+            "projection-parity",
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("terminal record")
+        .record;
+        assert_eq!(
+            record.metadata["artifact_projection"]["status"], "complete",
+            "{:#}",
+            record.metadata
+        );
 
-    let store = homeboy_core::observation::ObservationStore::open_initialized_in_roots(
-        &context.path_roots(),
-    )
-    .expect("store");
-    let artifact = homeboy_core::observation::runs_service::resolve_artifact_for_run(
-        &store,
-        "projection-parity",
-        "patch",
-    )
-    .expect("resolve logical patch id");
-    assert_eq!(artifact.run_id, "projection-parity");
-    assert_eq!(artifact.kind, "patch");
-    let canonical_id = artifact.id.clone();
-    let digest = artifact.sha256.clone().expect("retained digest");
-    // The reference service owns pointer identities; the byte selector consumes
-    // its actual metadata rather than assuming a content-ID hashing convention.
-    use homeboy_control_plane_contract::{ControlPlaneReferenceType, ReferenceId, RunId};
-    let service = crate::orchestration::OrchestrationService::new(
-        crate::orchestration::LifecycleStoreLookup::new(lifecycle_store),
-    );
-    let run = RunId::new("projection-parity").expect("run");
-    let status = service.run(&run).expect("status resource");
-    let reference = status
-        .artifacts
-        .iter()
-        .find(|reference| {
-            reference
-                .uri
-                .starts_with("homeboy://agent-task/run/projection-parity/artifacts#")
-        })
-        .expect("status producer reference");
-    assert_ne!(reference.id, canonical_id);
-    let records = store.list_artifacts(run.as_str()).expect("inventory");
-    std::fs::remove_file(&patch).expect("remove original producer path");
-    for token in [reference.id.clone(), format!("artifact/{}", reference.id)] {
-        let selected = homeboy_core::observation::runs_service::select_artifact_record(
-            run.as_str(),
-            &token,
-            &records,
-            |id| {
-                service
-                    .reference(
-                        &run,
-                        ControlPlaneReferenceType::Artifact,
-                        &ReferenceId::new(id).expect("reference id"),
-                    )
-                    .map_err(|error| homeboy_core::Error::internal_unexpected(error.to_string()))
-            },
+        let store = homeboy_core::observation::ObservationStore::open_initialized_in_roots(
+            lifecycle_store.roots(),
         )
-        .expect("select status reference")
-        .expect("canonical bytes record");
-        assert_eq!(selected.id, canonical_id);
-        let destination = root.path().join(format!(
-            "reference-{}.patch",
-            token.starts_with("artifact/")
-        ));
-        homeboy_core::observation::runs_service::copy_local_file_artifact(
-            selected,
-            Some(destination.clone()),
-        )
-        .expect("copy retained bytes");
-        assert_eq!(
-            std::fs::read(&destination).expect("destination"),
-            b"patch bytes"
-        );
-        assert_eq!(
-            homeboy_core::artifact_metadata::sha256_file(&destination).expect("independent digest"),
-            digest
-        );
-    }
-    assert_eq!(
-        std::fs::read(&artifact.path).expect("projected bytes"),
-        b"patch bytes"
-    );
-    let fetched = homeboy_core::observation::runs_service::copy_local_file_artifact(
-        homeboy_core::observation::runs_service::resolve_artifact_for_run(
+        .expect("store");
+        let artifact = homeboy_core::observation::runs_service::resolve_artifact_for_run(
             &store,
             "projection-parity",
             "patch",
         )
-        .expect("resolve runs artifact token"),
-        Some(root.path().join("retrieved.patch")),
-    )
-    .expect("retrieve projected artifact");
-    assert_eq!(
-        std::fs::read(fetched.output_path).expect("retrieved bytes"),
-        b"patch bytes"
-    );
-    for (id, bytes) in [
-        ("transcript", b"transcript bytes".as_slice()),
-        ("agent-result", b"agent result bytes".as_slice()),
-    ] {
-        let artifact = homeboy_core::observation::runs_service::resolve_artifact_for_run(
-            &store,
-            "projection-parity",
-            id,
-        )
-        .expect("resolve logical terminal artifact");
-        assert_eq!(
-            std::fs::read(artifact.path).expect("projected bytes"),
-            bytes
+        .expect("resolve logical patch id");
+        assert_eq!(artifact.run_id, "projection-parity");
+        assert_eq!(artifact.kind, "patch");
+        let canonical_id = artifact.id.clone();
+        let digest = artifact.sha256.clone().expect("retained digest");
+        // The reference service owns pointer identities; the byte selector consumes
+        // its actual metadata rather than assuming a content-ID hashing convention.
+        use homeboy_control_plane_contract::{ControlPlaneReferenceType, ReferenceId, RunId};
+        let service = crate::orchestration::OrchestrationService::new(
+            crate::orchestration::LifecycleStoreLookup::new(lifecycle_store),
         );
-    }
+        let run = RunId::new("projection-parity").expect("run");
+        let status = service.run(&run).expect("status resource");
+        let reference = status
+            .artifacts
+            .iter()
+            .find(|reference| {
+                reference
+                    .uri
+                    .starts_with("homeboy://agent-task/run/projection-parity/artifacts#")
+            })
+            .expect("status producer reference");
+        assert_ne!(reference.id, canonical_id);
+        let records = store.list_artifacts(run.as_str()).expect("inventory");
+        std::fs::remove_file(&patch).expect("remove original producer path");
+        for token in [reference.id.clone(), format!("artifact/{}", reference.id)] {
+            let selected = homeboy_core::observation::runs_service::select_artifact_record(
+                run.as_str(),
+                &token,
+                &records,
+                |id| {
+                    service
+                        .reference(
+                            &run,
+                            ControlPlaneReferenceType::Artifact,
+                            &ReferenceId::new(id).expect("reference id"),
+                        )
+                        .map_err(|error| {
+                            homeboy_core::Error::internal_unexpected(error.to_string())
+                        })
+                },
+            )
+            .expect("select status reference")
+            .expect("canonical bytes record");
+            assert_eq!(selected.id, canonical_id);
+            let destination = root.path().join(format!(
+                "reference-{}.patch",
+                token.starts_with("artifact/")
+            ));
+            homeboy_core::observation::runs_service::copy_local_file_artifact(
+                selected,
+                Some(destination.clone()),
+            )
+            .expect("copy retained bytes");
+            assert_eq!(
+                std::fs::read(&destination).expect("destination"),
+                b"patch bytes"
+            );
+            assert_eq!(
+                homeboy_core::artifact_metadata::sha256_file(&destination)
+                    .expect("independent digest"),
+                digest
+            );
+        }
+        assert_eq!(
+            std::fs::read(&artifact.path).expect("projected bytes"),
+            b"patch bytes"
+        );
+        let fetched = homeboy_core::observation::runs_service::copy_local_file_artifact(
+            homeboy_core::observation::runs_service::resolve_artifact_for_run(
+                &store,
+                "projection-parity",
+                "patch",
+            )
+            .expect("resolve runs artifact token"),
+            Some(root.path().join("retrieved.patch")),
+        )
+        .expect("retrieve projected artifact");
+        assert_eq!(
+            std::fs::read(fetched.output_path).expect("retrieved bytes"),
+            b"patch bytes"
+        );
+        for (id, bytes) in [
+            ("transcript", b"transcript bytes".as_slice()),
+            ("agent-result", b"agent result bytes".as_slice()),
+        ] {
+            let artifact = homeboy_core::observation::runs_service::resolve_artifact_for_run(
+                &store,
+                "projection-parity",
+                id,
+            )
+            .expect("resolve logical terminal artifact");
+            assert_eq!(
+                std::fs::read(artifact.path).expect("projected bytes"),
+                bytes
+            );
+        }
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -2213,7 +2265,9 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
 
         let loaded = reconcile_status("local-sparse-run").expect("status loaded");
         let artifacts = artifacts("local-sparse-run").expect("artifacts loaded");
-        let (raw_aggregate, _) = aggregate_source("local-sparse-run").expect("aggregate source");
+        let (raw_aggregate, _) =
+            aggregate_source_in_store(&test_lifecycle_store(), "local-sparse-run")
+                .expect("aggregate source");
 
         assert_eq!(loaded.tasks[0].task_id, "cook-conductor");
         assert_eq!(loaded.tasks[0].backend, "fixture.agent-task-executor");
@@ -2231,145 +2285,132 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). Status may persist current admission and reconciliation projections;
-/// the invariant here is that existing terminal provider evidence is unchanged.
-///
-/// `record_completed_run_in_store` reaches automatic artifact retention only
-/// when a task declares a workspace root that exists; `test_plan()` declares
-/// none, so no ambient retention pass is entered here.
+/// Existing terminal provider evidence survives status reconciliation.
 #[test]
 fn status_preserves_existing_terminal_runtime_evidence() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let mut plan = test_plan();
-    plan.tasks[0].executor.backend = "pi".to_string();
-    let aggregate = succeeded_aggregate(&plan);
-    let record = record_completed_run_in_store(
-        &lifecycle_store,
-        &plan,
-        &aggregate,
-        Some("existing-runtime"),
-    )
-    .expect("terminal record");
-    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
-        record.lifecycle.provider_runtime[0].metadata = json!({
-            "evidence_source": "native_provider",
-            "manual": true,
-        });
-    })
-    .expect("native evidence persisted");
-    let before = lifecycle_store
-        .read_record(&record.run_id)
-        .expect("record before status");
+    with_isolated_home(|_| {
+        let lifecycle_store = test_lifecycle_store();
+        let mut plan = test_plan();
+        plan.tasks[0].executor.backend = "pi".to_string();
+        let aggregate = succeeded_aggregate(&plan);
+        let record = record_completed_run(&plan, &aggregate, Some("existing-runtime"))
+            .expect("terminal record");
+        {
+            let _config = homeboy_core::test_support::EnvVarGuard::set(
+                homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+                lifecycle_store.roots().config(),
+            );
+            let _data = homeboy_core::test_support::EnvVarGuard::set(
+                homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+                lifecycle_store.roots().data(),
+            );
+            rewrite_record_for_test(&record.run_id, |record| {
+                record.lifecycle.provider_runtime[0].metadata = json!({
+                    "evidence_source": "native_provider",
+                    "manual": true,
+                });
+            })
+        }
+        .expect("native evidence persisted");
+        let before = lifecycle_store
+            .read_record(&record.run_id)
+            .expect("record before status");
 
-    let loaded = reconcile_status_in_store(
-        &lifecycle_store,
-        &record.run_id,
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("status preserves runtime evidence")
-    .record;
-    let after = lifecycle_store
-        .read_record(&record.run_id)
-        .expect("record after status");
+        let loaded = reconcile_status_in_store(
+            &lifecycle_store,
+            &record.run_id,
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("status preserves runtime evidence")
+        .record;
+        let after = lifecycle_store
+            .read_record(&record.run_id)
+            .expect("record after status");
 
-    assert_eq!(
-        loaded.lifecycle.provider_runtime,
-        before.lifecycle.provider_runtime
-    );
-    assert_eq!(
-        after.lifecycle.provider_runtime,
-        before.lifecycle.provider_runtime
-    );
-    assert_eq!(
-        loaded.lifecycle.provider_runtime[0].metadata["manual"],
-        true
-    );
+        assert_eq!(
+            loaded.lifecycle.provider_runtime,
+            before.lifecycle.provider_runtime
+        );
+        assert_eq!(
+            after.lifecycle.provider_runtime,
+            before.lifecycle.provider_runtime
+        );
+        assert_eq!(
+            loaded.lifecycle.provider_runtime[0].metadata["manual"],
+            true
+        );
+    });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). `records.len() == 1` is a population count over one installation's
-/// run directory — read ambiently it would count the operator's real runs — and
-/// the four projections (status, logs, artifacts, existence) are all asserted
-/// to describe the single run this test recorded under an unsanitized id.
-///
-/// `record_completed_run_in_store` reaches automatic artifact retention only
-/// when a task declares a workspace root that exists; this plan declares only a
-/// cleanup mode, so no ambient retention pass is entered here.
+/// Status, logs, artifacts and existence describe the same sanitized run identity.
 #[test]
 fn lifecycle_store_round_trips_record_log_artifacts_and_lifecycle_contract() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let mut plan = test_plan();
-    plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
-    let mut aggregate = succeeded_aggregate(&plan);
-    aggregate.outcomes[0].artifacts = vec![artifact_ref_artifact(
-        "patch",
-        "patch",
-        None,
-        Some("/tmp/patch.diff"),
-    )];
-    aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
-        kind: "transcript".to_string(),
-        uri: "file:///tmp/transcript.json".to_string(),
-        label: Some("provider transcript".to_string()),
-    }];
+    with_isolated_home(|_| {
+        let lifecycle_store = test_lifecycle_store();
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].artifacts = vec![artifact_ref_artifact(
+            "patch",
+            "patch",
+            None,
+            Some("/tmp/patch.diff"),
+        )];
+        aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
+            kind: "transcript".to_string(),
+            uri: "file:///tmp/transcript.json".to_string(),
+            label: Some("provider transcript".to_string()),
+        }];
 
-    let record = record_completed_run_in_store(
-        &lifecycle_store,
-        &plan,
-        &aggregate,
-        Some("run/store-contract"),
-    )
-    .expect("completed run recorded");
-    let loaded = reconcile_status_in_store(
-        &lifecycle_store,
-        "run/store-contract",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("status loaded by unsanitized id")
-    .record;
-    let log = logs_in_store(&lifecycle_store, "run/store-contract")
-        .expect("logs loaded by unsanitized id");
-    let artifact_report = artifacts_in_store(&lifecycle_store, "run/store-contract")
-        .expect("artifacts loaded by unsanitized id");
-    let records = list_records_in_store(&lifecycle_store).expect("records listed");
+        let record = record_completed_run(&plan, &aggregate, Some("run/store-contract"))
+            .expect("completed run recorded");
+        let loaded = reconcile_status_in_store(
+            &lifecycle_store,
+            "run/store-contract",
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("status loaded by unsanitized id")
+        .record;
+        let log = logs_in_store(&lifecycle_store, "run/store-contract")
+            .expect("logs loaded by unsanitized id");
+        let artifact_report = artifacts_in_store(&lifecycle_store, "run/store-contract")
+            .expect("artifacts loaded by unsanitized id");
+        let records = list_records_in_store(&lifecycle_store).expect("records listed");
 
-    assert_eq!(record.run_id, "run_store-contract");
-    assert!(
-        run_record_exists_in_store(&lifecycle_store, "run/store-contract").expect("record exists")
-    );
-    assert_eq!(loaded.state(), AgentTaskRunState::Succeeded);
-    assert_eq!(loaded.lifecycle.schema, RUN_LIFECYCLE_RECORD_SCHEMA);
-    assert_eq!(
-        loaded.lifecycle.execution.state,
-        RunExecutionState::Succeeded
-    );
-    assert_eq!(loaded.lifecycle.cleanup.state, CleanupState::Preserved);
-    assert_eq!(
-        loaded.lifecycle.artifact_retention.status,
-        ArtifactRetentionStatus::Retained
-    );
-    assert_eq!(
-        log.schema,
-        homeboy_control_plane_contract::CONTROL_PLANE_EVENT_PAGE_SCHEMA
-    );
-    assert!(
-        log.events
-            .iter()
-            .any(|event| event.data["state"] == "succeeded"),
-        "canonical logs retain the terminal aggregate state"
-    );
-    assert_eq!(artifact_report.schema, schemas::RUN_ARTIFACTS);
-    assert_eq!(artifact_report.artifacts[0].id, "patch");
-    assert_eq!(artifact_report.evidence_refs[0].kind, "transcript");
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].run_id, "run_store-contract");
+        assert_eq!(record.run_id, "run_store-contract");
+        assert!(
+            run_record_exists_in_store(&lifecycle_store, "run/store-contract")
+                .expect("record exists")
+        );
+        assert_eq!(loaded.state(), AgentTaskRunState::Succeeded);
+        assert_eq!(loaded.lifecycle.schema, RUN_LIFECYCLE_RECORD_SCHEMA);
+        assert_eq!(
+            loaded.lifecycle.execution.state,
+            RunExecutionState::Succeeded
+        );
+        assert_eq!(loaded.lifecycle.cleanup.state, CleanupState::Preserved);
+        assert_eq!(
+            loaded.lifecycle.artifact_retention.status,
+            ArtifactRetentionStatus::Retained
+        );
+        assert_eq!(
+            log.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_EVENT_PAGE_SCHEMA
+        );
+        assert!(
+            log.events
+                .iter()
+                .any(|event| event.data["state"] == "succeeded"),
+            "canonical logs retain the terminal aggregate state"
+        );
+        assert_eq!(artifact_report.schema, schemas::RUN_ARTIFACTS);
+        assert_eq!(artifact_report.artifacts[0].id, "patch");
+        assert_eq!(artifact_report.evidence_refs[0].kind, "transcript");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].run_id, "run_store-contract");
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -2655,78 +2696,65 @@ fn artifact_refs_treat_empty_url_as_missing_and_fall_back_to_path() {
     assert_eq!(refs[0].uri, "/tmp/artifacts/dir");
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The log projection reads back the aggregate the completed run
-/// wrote, so `log.events.len() == 2` and the per-event envelope fields
-/// describe the aggregate this test recorded rather than whatever an ambient
-/// home holds under this run id.
-///
-/// `record_completed_run_in_store` reaches automatic artifact retention only
-/// when a task declares a workspace root that exists; `test_plan()` declares
-/// none, so no ambient retention pass is entered here.
+/// Log events preserve the completed aggregate's per-event envelope.
 #[test]
 fn logs_return_the_canonical_control_plane_event_page() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    let mut aggregate = succeeded_aggregate(&plan);
-    aggregate.events = vec![
-        AgentTaskProgressEvent {
-            task_id: "task-a".to_string(),
-            state: AgentTaskState::Running,
-            attempt: 1,
-            message: Some("started".to_string()),
-        },
-        AgentTaskProgressEvent {
-            task_id: "task-a".to_string(),
-            state: AgentTaskState::Succeeded,
-            attempt: 1,
-            message: Some("ok".to_string()),
-        },
-    ];
-    aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
-        kind: "transcript".to_string(),
-        uri: "file:///tmp/transcript.json".to_string(),
-        label: Some("Transcript".to_string()),
-    }];
+    with_isolated_home(|_| {
+        let lifecycle_store = test_lifecycle_store();
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.events = vec![
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Running,
+                attempt: 1,
+                message: Some("started".to_string()),
+            },
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Succeeded,
+                attempt: 1,
+                message: Some("ok".to_string()),
+            },
+        ];
+        aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
+            kind: "transcript".to_string(),
+            uri: "file:///tmp/transcript.json".to_string(),
+            label: Some("Transcript".to_string()),
+        }];
 
-    record_completed_run_in_store(
-        &lifecycle_store,
-        &plan,
-        &aggregate,
-        Some("run-event-envelope"),
-    )
-    .expect("recorded");
+        record_completed_run(&plan, &aggregate, Some("run-event-envelope")).expect("recorded");
 
-    let log = logs_in_store(&lifecycle_store, "run-event-envelope").expect("logs");
+        let log = logs_in_store(&lifecycle_store, "run-event-envelope").expect("logs");
 
-    assert_eq!(
-        log.schema,
-        homeboy_control_plane_contract::CONTROL_PLANE_EVENT_PAGE_SCHEMA
-    );
-    let running = log
-        .events
-        .iter()
-        .find(|event| event.data["state"] == "running")
-        .expect("running progress");
-    let succeeded = log
-        .events
-        .iter()
-        .find(|event| event.data["message"] == "ok")
-        .expect("terminal progress");
-    assert_eq!(
-        running.schema,
-        homeboy_control_plane_contract::CONTROL_PLANE_EVENT_SCHEMA
-    );
-    assert_eq!(running.run.as_str(), "run-event-envelope");
-    assert_eq!(running.task.as_ref().map(|id| id.as_str()), Some("task-a"));
-    let _ = succeeded;
-    let artifacts = artifacts_in_store(&lifecycle_store, "run-event-envelope").expect("artifacts");
-    assert!(artifacts
-        .evidence_refs
-        .iter()
-        .any(|evidence| evidence.kind == "transcript"));
+        assert_eq!(
+            log.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_EVENT_PAGE_SCHEMA
+        );
+        let running = log
+            .events
+            .iter()
+            .find(|event| event.data["state"] == "running")
+            .expect("running progress");
+        let succeeded = log
+            .events
+            .iter()
+            .find(|event| event.data["message"] == "ok")
+            .expect("terminal progress");
+        assert_eq!(
+            running.schema,
+            homeboy_control_plane_contract::CONTROL_PLANE_EVENT_SCHEMA
+        );
+        assert_eq!(running.run.as_str(), "run-event-envelope");
+        assert_eq!(running.task.as_ref().map(|id| id.as_str()), Some("task-a"));
+        let _ = succeeded;
+        let artifacts =
+            artifacts_in_store(&lifecycle_store, "run-event-envelope").expect("artifacts");
+        assert!(artifacts
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "transcript"));
+    });
 }
 
 #[test]
@@ -2751,13 +2779,23 @@ fn set_run_state_stamps_finished_at_for_candidate_recoverable_terminal_runs() {
             |_| Ok(json!({})),
         )
         .expect("submit");
-    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
-        set_run_state(record, AgentTaskRunState::CandidateRecoverable);
-        assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
-        assert!(
-            record.lifecycle.execution.finished_at.is_some(),
-            "a terminal CandidateRecoverable run must stamp finished_at"
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
         );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(&record.run_id, |record| {
+            set_run_state(record, AgentTaskRunState::CandidateRecoverable);
+            assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
+            assert!(
+                record.lifecycle.execution.finished_at.is_some(),
+                "a terminal CandidateRecoverable run must stamp finished_at"
+            );
+        })
     })
     .expect("rewrite record");
 
@@ -2976,38 +3014,37 @@ fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe(
 ///
 #[test]
 fn durable_aggregate_read_does_not_pair_a_record_with_an_unmirrored_cache() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let record = lifecycle_store
-        .submit_plan_with_runtime_admission(&test_plan(), "oversized-durable-aggregate", |_| {
-            Ok(json!({}))
-        })
-        .expect("durable record");
-    let path = lifecycle_store.aggregate_path(&record.run_id);
-    std::fs::write(
-        &path,
-        vec![b'x'; (store::DURABLE_AGGREGATE_MAX_BYTES + 1) as usize],
-    )
-    .expect("oversized aggregate fixture");
+    with_isolated_home(|_| {
+        let lifecycle_store = test_lifecycle_store();
+        let record = lifecycle_store
+            .submit_plan_with_runtime_admission(&test_plan(), "oversized-durable-aggregate", |_| {
+                Ok(json!({}))
+            })
+            .expect("durable record");
+        let path = lifecycle_store.aggregate_path(&record.run_id);
+        std::fs::write(
+            &path,
+            vec![b'x'; (store::DURABLE_AGGREGATE_MAX_BYTES + 1) as usize],
+        )
+        .expect("oversized aggregate fixture");
 
-    let snapshot = durable_local_read_in_store(&lifecycle_store, &record.run_id)
-        .expect("partial durable read");
+        let snapshot = durable_local_read(&record.run_id).expect("partial durable read");
 
-    assert_eq!(snapshot.record.run_id, record.run_id);
-    assert!(snapshot.aggregate.is_none());
-    assert!(
-        lifecycle_store
-            .read_aggregate_readonly(&record.run_id)
-            .is_err(),
-        "read-only admission must not fall back to independently cached aggregate bytes"
-    );
-    assert_eq!(snapshot.unavailable_sources.len(), 1);
-    assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
-    assert_eq!(
-        snapshot.unavailable_sources[0].reason_code,
-        "durable_read.authoritative_aggregate_absent"
-    );
+        assert_eq!(snapshot.record.run_id, record.run_id);
+        assert!(snapshot.aggregate.is_none());
+        assert!(
+            lifecycle_store
+                .read_aggregate_readonly(&record.run_id)
+                .is_err(),
+            "read-only admission must not fall back to independently cached aggregate bytes"
+        );
+        assert_eq!(snapshot.unavailable_sources.len(), 1);
+        assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
+        assert_eq!(
+            snapshot.unavailable_sources[0].reason_code,
+            "durable_read.authoritative_aggregate_absent"
+        );
+    });
 }
 
 #[test]
@@ -3077,21 +3114,31 @@ fn live_verification_pending_promotion_heartbeat_is_visible_to_logs_and_status()
         let run_id = "live-verification-pending-heartbeat";
         let plan = test_plan();
         submit_plan(&plan, Some(run_id)).expect("submit run");
-        rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
-            set_run_state(record, AgentTaskRunState::Running);
-            crate::agent_task_service::set_cook_delivery_artifact_for_test(
-                &mut record.metadata,
-                "/promotion",
-                json!({
-                    "status": "verification_pending"
-                }),
+        {
+            let _config = homeboy_core::test_support::EnvVarGuard::set(
+                homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+                lifecycle_store.roots().config(),
             );
-            record.metadata["provider_executions"] = json!([{
-                "state": "succeeded",
-                "task_id": "task-a"
-            }]);
-            record.metadata["runner_pid"] = json!(std::process::id());
-        })
+            let _data = homeboy_core::test_support::EnvVarGuard::set(
+                homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+                lifecycle_store.roots().data(),
+            );
+            rewrite_record_for_test(run_id, |record| {
+                set_run_state(record, AgentTaskRunState::Running);
+                crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut record.metadata,
+                    "/promotion",
+                    json!({
+                        "status": "verification_pending"
+                    }),
+                );
+                record.metadata["provider_executions"] = json!([{
+                    "state": "succeeded",
+                    "task_id": "task-a"
+                }]);
+                record.metadata["runner_pid"] = json!(std::process::id());
+            })
+        }
         .expect("prepare verification pending record");
 
         record_promotion_progress_in_store(

@@ -6137,13 +6137,19 @@ mod tests {
                 Some("run"),
             )
             .expect("materialize provider attempt");
-            crate::agent_task_lifecycle::rewrite_record_for_test_in_store(
-                &lifecycle_store,
-                "run",
-                |record| {
+            {
+                let _config = homeboy_core::test_support::EnvVarGuard::set(
+                    homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+                    lifecycle_store.roots().config(),
+                );
+                let _data = homeboy_core::test_support::EnvVarGuard::set(
+                    homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+                    lifecycle_store.roots().data(),
+                );
+                crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
                     record.metadata["provider_executions_consumed"] = serde_json::json!(1);
-                },
-            )
+                })
+            }
             .expect("record provider execution");
 
             let mut corrected = reconstruct_options(&original).expect("reconstruct options");
@@ -6245,17 +6251,23 @@ mod tests {
         let mut corrected = recipe.clone();
         corrected.finalization["to_worktree"] = serde_json::json!("other-target");
         for status in ["dry_run", "no_changes", "no_changes_gate_failed"] {
-            crate::agent_task_lifecycle::rewrite_record_for_test_in_store(
-                &lifecycle_store,
-                "run",
-                |record| {
+            homeboy_core::test_support::with_isolated_home(|_| {
+                let _config = homeboy_core::test_support::EnvVarGuard::set(
+                    homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+                    lifecycle_store.roots().config(),
+                );
+                let _data = homeboy_core::test_support::EnvVarGuard::set(
+                    homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+                    lifecycle_store.roots().data(),
+                );
+                crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
                     crate::agent_task_service::set_cook_delivery_artifact_for_test(
                         &mut record.metadata,
                         "/promotion",
                         promotion_value(status, serde_json::json!([])),
                     );
-                },
-            )
+                })
+            })
             .expect("record non-applied promotion");
             // Same store the promotion was just written to. If this read used a
             // different home the loop would pass without ever seeing it.

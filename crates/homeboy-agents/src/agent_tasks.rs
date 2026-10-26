@@ -168,8 +168,7 @@ pub mod gate {
 /// Durable run lifecycle: submit, run-record state, log/artifact loaders.
 pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
-        aggregate_source, artifacts, cancel_run, cook_index, durable_local_read,
-        fail_detached_cook_handoff_parent, list_records, load_plan, logs,
+        artifacts, cancel_run, cook_index, durable_local_read, load_plan, logs,
         reconcile_terminal_artifact_projection, record_cook_finalization,
         record_execution_placement_outcome, recover_unmaterialized_cook_input_publication, retry,
         run_id_for_aggregate_path, run_record_exists, run_record_exists_readonly, submit_plan,
@@ -203,10 +202,6 @@ pub mod lifecycle {
         LabOffloadProxyPlan, RunnerPinnedRuntime,
     };
     pub use super::super::agent_task_lifecycle::{
-        cook_index_exists, mark_running, record_run_aggregate, record_runner_job_identity,
-        verified_controller_artifact_projection_path,
-    };
-    pub use super::super::agent_task_lifecycle::{
         exact_record, load_controller_plan, record_detached_lab_run, record_lab_offload_phase,
         record_lab_offload_planned, record_pre_dispatch_failure, record_pre_execution_failure,
         record_remote_dispatch_failure, status,
@@ -214,6 +209,10 @@ pub mod lifecycle {
     #[cfg(feature = "test-support")]
     pub use super::super::agent_task_lifecycle::{
         fail_next_record_write_for_test, rewrite_record_for_test, seed_queued_run_for_tests,
+    };
+    pub use super::super::agent_task_lifecycle::{
+        mark_running, record_run_aggregate, record_runner_job_identity,
+        verified_controller_artifact_projection_path,
     };
     pub use super::super::agent_task_lifecycle::{record_completed_run, record_promotion};
 }
