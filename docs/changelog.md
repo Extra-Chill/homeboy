@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.2] - 2026-10-26
+
+### Changed
+- Finalize a Cook's run rows only at its terminal disposition
+
 ## [0.434.1] - 2026-10-26
 
 ### Changed
