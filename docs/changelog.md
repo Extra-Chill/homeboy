@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.3] - 2026-10-26
+
+### Changed
+- Make the four release-blocking cook and orchestration tests deterministic
+- Collapse unused lifecycle failure, runner-exec, and Lab offload twins
+
 ## [0.434.2] - 2026-10-26
 
 ### Changed
