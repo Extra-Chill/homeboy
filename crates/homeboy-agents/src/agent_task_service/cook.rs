@@ -5167,6 +5167,24 @@ fn run_cook_with_runtime(
             result.exit_code != 0,
         );
         if result.value.disposition.is_terminal() {
+            // Inclusive whole-Cook timing belongs to the mission, never its
+            // attempts. This boundary also sees failed and cancelled reports.
+            let timing = lifecycle_store
+                .open_observation_initialized()
+                .and_then(|observation| {
+                    observation.record_run_phase(
+                        &result.value.cook_id,
+                        "cook",
+                        result.exit_code != 0,
+                    )
+                });
+            if let Err(error) = timing {
+                homeboy_core::log_status!(
+                    "agent-task",
+                    "Cook timing persistence failed: {}",
+                    error
+                );
+            }
             crate::agent_task_notify::cook_terminal(
                 &result.value,
                 cook_component(&notification_options).as_deref(),
