@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.36] - 2026-10-26
+
+### Changed
+- Retry a pre-execution failure that consumed no provider execution, and name a refused retry's reason
+- Publish a candidate-recoverable Cook whose own green gates are bound to its candidate
+- Identify a Cook candidate by its tree so a hand commit of it still runs gates
+
+### Fixed
+- let cook gate sync reuse source-evidenced dependency siblings and surface materialization failure evidence
+
 ## [0.433.35] - 2026-10-25
 
 ### Changed
