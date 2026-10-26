@@ -62,6 +62,8 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 mod blob_tests;
 pub(super) mod blobs;
+#[cfg(test)]
+mod materialization_failure_tests;
 mod protocol;
 mod protocol_controller;
 #[cfg(test)]

@@ -59,6 +59,55 @@ fn cancelling_either_runner_call_reaps_its_child_scope() {
     });
 }
 
+#[test]
+fn silent_ssh_wrapper_failure_identifies_transport_and_operation() {
+    crate::test_support::with_isolated_home(|_| {
+        let fixture = tempfile::tempdir().unwrap();
+        let bin = fixture.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        homeboy_test_support::write_executable(
+            bin.join("ssh"),
+            "#!/bin/sh\ncat >/dev/null\nexit 1\n",
+            0o755,
+        )
+        .unwrap();
+        homeboy_core::server::create(
+            r#"{"id":"silent-materialization","host":"materialization.invalid","user":"test"}"#,
+            false,
+        )
+        .unwrap();
+        crate::create(&serde_json::json!({"id":"silent-materialization", "kind":"ssh", "server_id":"silent-materialization", "workspace_root":fixture.path(), "homeboy_path":"/runner/homeboy"}).to_string(), false).unwrap();
+        let runner = load("silent-materialization").unwrap();
+        fs::write(fixture.path().join("plan.json"), b"{}").unwrap();
+        fs::write(fixture.path().join("commit.json"), b"{}").unwrap();
+        let old_path = std::env::var("PATH").unwrap();
+        std::env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+        let sources = std::collections::BTreeMap::new();
+        let errors = [false, true].map(|commit| {
+            protocol_controller::invoke(
+                &runner,
+                fixture.path(),
+                commit.then_some((&sources, &[])),
+                &WorkspaceControl::default(),
+            )
+            .unwrap_err()
+        });
+        std::env::set_var("PATH", old_path);
+        for (error, operation) in errors.iter().zip(["plan", "commit"]) {
+            assert!(error.message.contains("remote failure marker"), "{error:?}");
+            assert!(
+                error.message.contains(&format!("operation={operation}")),
+                "{error:?}"
+            );
+            assert!(
+                error.message.contains("runner=silent-materialization"),
+                "{error:?}"
+            );
+            assert!(!error.message.contains("exited without stdout or stderr"));
+        }
+    });
+}
+
 /// Member names and pax records of a ustar stream, read without a tar
 /// implementation of the host platform (macOS `bsdtar -t` hides AppleDouble
 /// members that GNU tar on a Linux runner extracts as ordinary files).

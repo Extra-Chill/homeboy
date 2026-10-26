@@ -131,6 +131,39 @@ fn interrupted_commit_replay_converges_without_replacing_another_lease() {
 }
 
 #[test]
+fn two_root_commit_reuses_review_dependency_without_lease_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let incoming = tempfile::tempdir_in(root.path()).unwrap();
+    let candidate = root.path().join("candidate");
+    let dependency = root.path().join("dependency");
+    // The Git/review path materializes dependency snapshots and source evidence
+    // but does not create a RunnerWorkspaceMetadata record for that sibling.
+    fs::create_dir(&dependency).unwrap();
+    fs::write(dependency.join("file"), b"old prepared dependency").unwrap();
+    let mut request = fixture(incoming.path(), &candidate);
+    let mut second: CommitRoot =
+        serde_json::from_value(serde_json::to_value(&request.roots[0]).unwrap()).unwrap();
+    second.summary.remote_path = dependency.display().to_string();
+    second.metadata.remote_path = second.summary.remote_path.clone();
+    second.source_evidence = Some("dependency-source-evidence".into());
+    request.roots.push(second);
+    write_json(&incoming.path().join("commit.json"), &request).unwrap();
+    materialization_commit(incoming.path()).unwrap();
+    for path in [&candidate, &dependency] {
+        assert_eq!(fs::read(path.join("file")).unwrap(), b"exact\0bytes\xff");
+    }
+    let evidence = homeboy_lab_contract::lab::handoff::runner_workspace_lab_source_evidence_path(
+        dependency.to_str().unwrap(),
+    );
+    assert_eq!(
+        fs::read_to_string(evidence).unwrap(),
+        "dependency-source-evidence"
+    );
+    // Repeated Cook preflights accept the same complete sibling too.
+    materialization_commit(incoming.path()).unwrap();
+}
+
+#[test]
 fn commit_refuses_identity_drift_since_plan() {
     let root = tempfile::tempdir().unwrap();
     let incoming = tempfile::tempdir_in(root.path()).unwrap();

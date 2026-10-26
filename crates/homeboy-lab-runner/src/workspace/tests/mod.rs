@@ -6,6 +6,7 @@ mod reap;
 mod snapshot;
 mod snapshots;
 mod update;
+mod validation_dependencies;
 
 /// Run a git command in `path`, asserting success. Shared test helper.
 use homeboy_core::test_support::run_git_command as git;
