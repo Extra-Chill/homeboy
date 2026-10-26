@@ -31,8 +31,10 @@ pub mod lease;
 pub mod lint;
 mod local_artifact;
 mod materialized_rig;
+pub mod origin_refs;
 mod pipeline;
 pub mod provider;
+pub mod ref_materialization;
 mod resource_lifecycle;
 mod runner;
 mod service;
@@ -78,8 +80,8 @@ pub use runner::{
     head_sha_and_branch, preflight_effective_component_checkouts, record_effective_component_path,
     run_bench_prepare, run_check, run_check_groups, run_check_groups_with_settings,
     run_check_with_settings, run_down_with_settings, run_fuzz_prepare, run_lint, run_repair,
-    run_status, run_up, snapshot_state, BenchPrepareReport, CheckReport, DownReport,
-    FuzzPrepareReport, RepairReport, RigStatusReport, UpReport,
+    run_status, run_up, run_up_with_refs, snapshot_state, BenchPrepareReport, CheckReport,
+    DownReport, FuzzPrepareReport, RepairReport, RigStatusReport, UpReport,
 };
 // Reachable through `RepairReport`/`RigStatusReport` public fields.
 #[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root

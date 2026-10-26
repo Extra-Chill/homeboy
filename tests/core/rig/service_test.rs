@@ -31,6 +31,7 @@ mod lifecycle {
             },
         );
         RigSpec {
+            effective_component_paths: Default::default(),
             workloads: Default::default(),
             id: id.to_string(),
             description: String::new(),
@@ -63,6 +64,7 @@ mod lifecycle {
         let mut services = HashMap::new();
         services.insert("svc".to_string(), service);
         RigSpec {
+            effective_component_paths: Default::default(),
             workloads: Default::default(),
             id: id.to_string(),
             description: String::new(),

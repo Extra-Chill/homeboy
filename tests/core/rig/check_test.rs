@@ -20,6 +20,7 @@ fn set_modified(path: &std::path::Path, seconds_since_epoch: u64) {
 
 fn minimal_rig() -> RigSpec {
     RigSpec {
+        effective_component_paths: Default::default(),
         workloads: Default::default(),
         id: "t".to_string(),
         description: String::new(),

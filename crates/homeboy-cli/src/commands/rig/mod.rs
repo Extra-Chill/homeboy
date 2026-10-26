@@ -62,7 +62,8 @@ impl RigArgs {
             RigCommand::Up {
                 rig_id,
                 dry_run: true,
-            } => Some(rig_id),
+                refs,
+            } if refs.is_empty() => Some(rig_id),
             _ => None,
         }
     }
@@ -138,6 +139,9 @@ enum RigCommand {
     Up {
         /// Rig ID
         rig_id: String,
+        /// Materialize a component at a PR URL/number, branch, or SHA (repeatable).
+        #[arg(long = "ref", value_name = "COMPONENT=REF")]
+        refs: Vec<String>,
         /// Build an execution plan without running the rig.
         #[arg(long)]
         dry_run: bool,
@@ -373,7 +377,11 @@ pub fn run(args: RigArgs) -> CmdResult<RigCommandOutput> {
             rig_path,
             source_root,
         } => materialize(&rig_path, source_root.as_deref()),
-        RigCommand::Up { rig_id, dry_run } => up(config_root, &rig_id, dry_run),
+        RigCommand::Up {
+            rig_id,
+            dry_run,
+            refs,
+        } => up(config_root, &rig_id, dry_run, &refs),
         RigCommand::Check { target, id, path } => {
             check(config_root, &target, id.as_deref(), path.as_deref())
         }
@@ -449,6 +457,7 @@ fn package_lint(manifest_path: &std::path::Path) -> CmdResult<RigCommandOutput> 
         RigCommandOutput::Check(RigCheckOutput {
             command: "rig.package.lint",
             report: homeboy::rig::CheckReport {
+                component_refs: Default::default(),
                 rig_id: lint_root.to_string_lossy().to_string(),
                 run_id: None,
                 pipeline: report,
@@ -608,7 +617,12 @@ fn show(config_root: &Path, rig_id: &str) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn up(config_root: &Path, rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
+fn up(
+    config_root: &Path,
+    rig_id: &str,
+    dry_run: bool,
+    refs: &[String],
+) -> CmdResult<RigCommandOutput> {
     let rig = rig::load(config_root, rig_id)?;
     if dry_run {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -618,7 +632,32 @@ fn up(config_root: &Path, rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOu
             None,
         ));
     }
-    let report = rig::run_up(&rig)?;
+    let mut overrides = std::collections::BTreeMap::new();
+    for value in refs {
+        let (id, reference) = value
+            .split_once('=')
+            .filter(|(id, reference)| !id.is_empty() && !reference.is_empty())
+            .ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "ref",
+                    "expected COMPONENT=REF",
+                    Some(value.clone()),
+                    None,
+                )
+            })?;
+        if overrides
+            .insert(id.to_string(), reference.to_string())
+            .is_some()
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "ref",
+                "duplicate component ref override",
+                Some(id.to_string()),
+                None,
+            ));
+        }
+    }
+    let report = rig::run_up_with_refs(&rig, &overrides)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
         RigCommandOutput::Up(RigUpOutput {
@@ -817,6 +856,7 @@ fn lint(
             RigCommandOutput::Check(RigCheckOutput {
                 command: "rig.lint",
                 report: homeboy::rig::CheckReport {
+                    component_refs: Default::default(),
                     rig_id: target.to_string(),
                     run_id: None,
                     pipeline: report,
@@ -1135,6 +1175,34 @@ mod tests {
             cli.rig.runner_install_request(),
             Some(("/tmp/rig-package", Some("fixture-matrix"), false))
         );
+    }
+
+    #[test]
+    fn up_accepts_repeated_component_refs() {
+        let cli = TestCli::try_parse_from([
+            "homeboy",
+            "up",
+            "preview",
+            "--ref",
+            "app=https://github.com/owner/repo/pull/42",
+            "--ref",
+            "api=feature",
+        ])
+        .expect("rig up refs should parse");
+        let RigCommand::Up {
+            rig_id,
+            refs,
+            dry_run,
+        } = cli.rig.command
+        else {
+            panic!("expected rig up command");
+        };
+        assert_eq!(rig_id, "preview");
+        assert_eq!(
+            refs,
+            ["app=https://github.com/owner/repo/pull/42", "api=feature"]
+        );
+        assert!(!dry_run);
     }
 
     #[test]

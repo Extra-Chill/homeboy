@@ -325,7 +325,7 @@ fn run_check(root: &Path, command: &str) -> Result<PrRefreshCheck> {
     })
 }
 
-fn normalize_pr_ref(pr: &str) -> Result<String> {
+pub fn normalize_pr_ref(pr: &str) -> Result<String> {
     let trimmed = pr.trim();
     if trimmed.is_empty() {
         return Err(Error::validation_invalid_argument(

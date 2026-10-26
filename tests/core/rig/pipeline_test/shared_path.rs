@@ -21,6 +21,7 @@ fn rig_with_shared_path(id: &str, shared: SharedPathSpec, op: SharedPathOp) -> R
         }],
     );
     RigSpec {
+        effective_component_paths: Default::default(),
         workloads: Default::default(),
         id: id.to_string(),
         description: String::new(),

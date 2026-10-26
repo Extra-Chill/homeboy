@@ -19,6 +19,8 @@ use super::spec::RigResourcesSpec;
 /// Snapshot of a rig's running state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct RigState {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub component_refs: BTreeMap<String, crate::ref_materialization::ComponentRefMaterialization>,
     /// Timestamp of last successful `rig up`, RFC3339.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_up: Option<String>,

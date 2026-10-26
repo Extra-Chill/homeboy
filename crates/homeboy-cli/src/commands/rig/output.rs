@@ -207,6 +207,7 @@ mod tests {
         let output = RigShowOutput {
             command: "rig.show",
             rig: RigSpec {
+                effective_component_paths: Default::default(),
                 id: "studio-bfb".to_string(),
                 description: String::new(),
                 components: Default::default(),

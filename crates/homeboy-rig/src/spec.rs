@@ -46,6 +46,9 @@ pub use trace::{
 /// Lives at `~/.config/homeboy/rigs/{id}.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RigSpec {
+    /// Invocation-only immutable component checkouts; never part of the spec.
+    #[serde(skip)]
+    pub effective_component_paths: HashMap<String, String>,
     /// Rig identifier. Populated from filename if empty in JSON.
     #[serde(default)]
     pub id: String,

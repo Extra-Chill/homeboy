@@ -45,6 +45,7 @@ impl Drop for EnvVarGuard {
 
 fn rig(id: &str, resources: RigResourcesSpec) -> RigSpec {
     RigSpec {
+        effective_component_paths: Default::default(),
         workloads: Default::default(),
         id: id.to_string(),
         description: String::new(),

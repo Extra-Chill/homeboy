@@ -27,6 +27,7 @@ fn rig_with_launcher(install_dir: &str) -> RigSpec {
     );
 
     RigSpec {
+        effective_component_paths: Default::default(),
         workloads: Default::default(),
         id: "studio-dev".to_string(),
         description: String::new(),

@@ -25,6 +25,7 @@ fn test_state_round_trips_empty() {
 #[test]
 fn test_state_round_trips_with_service() {
     let mut state = RigState {
+        component_refs: Default::default(),
         last_up: Some("2026-04-24T13:00:00Z".to_string()),
         last_check: None,
         last_check_result: None,

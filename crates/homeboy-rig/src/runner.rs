@@ -54,6 +54,7 @@ use homeboy_core::resource_lifecycle_index::{
 /// spelling at each call site and in `RigUpOutput` / `RigCheckOutput`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RigPipelineReport {
+    pub component_refs: BTreeMap<String, crate::ref_materialization::ComponentRefMaterialization>,
     pub rig_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
@@ -136,6 +137,7 @@ pub(crate) const REPAIR_STATUS_SKIPPED: &str = "skipped";
 /// Report from `rig status`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RigStatusReport {
+    pub component_refs: BTreeMap<String, crate::ref_materialization::ComponentRefMaterialization>,
     pub rig_id: String,
     pub description: String,
     /// Current component checkout resolution, independent of historical
@@ -195,6 +197,13 @@ pub enum SymlinkStatusState {
 
 /// Materialize a rig: run the `up` pipeline, stash timestamp in state.
 pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
+    run_up_with_refs(rig, &BTreeMap::new())
+}
+
+pub fn run_up_with_refs(rig: &RigSpec, overrides: &BTreeMap<String, String>) -> Result<UpReport> {
+    let (effective, component_refs) =
+        crate::ref_materialization::materialize_components(rig, overrides)?;
+    let rig = &effective;
     preflight_effective_component_checkouts(rig)?;
     // One rig run is one unit of work, so the entry point resolves the roots
     // once and the lease and observer both carry them for the rest of it
@@ -203,6 +212,47 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let _lease = acquire_active_run_lease(roots.config(), rig, "up")?;
     let state_store = RigStateStore::in_roots(&roots);
+    let mut state = state_store.load(&rig.id)?;
+    let previous_paths: BTreeMap<_, _> = state
+        .component_refs
+        .iter()
+        .map(|(id, record)| (id, &record.worktree_path))
+        .collect();
+    let current_paths: BTreeMap<_, _> = component_refs
+        .iter()
+        .map(|(id, record)| (id, &record.worktree_path))
+        .collect();
+    if previous_paths != current_paths {
+        // An idempotent service start must not keep serving the previous head.
+        for id in rig
+            .services
+            .keys()
+            .filter(|id| state.services.contains_key(*id))
+        {
+            service::stop(&state_store, rig, id)?;
+        }
+        state = state_store.load(&rig.id)?;
+    }
+    for id in state.component_refs.keys() {
+        state.last_effective_components.remove(id);
+    }
+    for (id, record) in &component_refs {
+        state.last_effective_components.insert(
+            id.clone(),
+            ComponentSnapshot {
+                path: rig
+                    .effective_component_paths
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| record.worktree_path.clone()),
+                declared_path: None,
+                sha: Some(record.head_sha.clone()),
+                branch: None,
+            },
+        );
+    }
+    state.component_refs = component_refs.clone();
+    state_store.save(&rig.id, &state)?;
     let observer = RigRunObserver::start(rig, "up", &roots);
 
     let execute = || {
@@ -223,6 +273,7 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
         }
 
         Ok(UpReport {
+            component_refs: component_refs.clone(),
             rig_id: rig.id.clone(),
             run_id: None,
             success: outcome.is_success(),
@@ -279,6 +330,7 @@ pub fn run_check_with_settings(
         state_store.save(&rig.id, &state)?;
 
         Ok(CheckReport {
+            component_refs: BTreeMap::new(),
             rig_id: rig.id.clone(),
             run_id: None,
             success: outcome.is_success(),
@@ -323,6 +375,7 @@ pub fn run_lint(rig: &RigSpec) -> Result<CheckReport> {
     let outcome = run_package_lint(rig)?;
 
     Ok(CheckReport {
+        component_refs: BTreeMap::new(),
         rig_id: rig.id.clone(),
         run_id: None,
         success: outcome.is_success(),
@@ -371,6 +424,7 @@ pub fn run_check_groups_with_settings(
     let outcome = run_pipeline_check_groups(&state_store, rig, groups, false, settings)?;
 
     Ok(CheckReport {
+        component_refs: BTreeMap::new(),
         rig_id: rig.id.clone(),
         run_id: None,
         success: outcome.is_success(),
@@ -453,6 +507,7 @@ pub fn run_fuzz_prepare(
             };
         let outcome = merge_prepare_outcomes("fuzz_prepare", dependency_outcome, pipeline_outcome);
         Ok(FuzzPrepareReport {
+            component_refs: BTreeMap::new(),
             rig_id: rig.id.clone(),
             run_id: None,
             success: outcome.is_success(),
@@ -1226,6 +1281,7 @@ pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
         last_up: state.last_up,
         last_check: state.last_check,
         last_check_result: state.last_check_result,
+        component_refs: state.component_refs,
         materialized: state.materialized,
     })
 }
@@ -1376,7 +1432,11 @@ pub fn snapshot_state(rig: &RigSpec) -> RigStateSnapshot {
     let mut components = BTreeMap::new();
     for (id, comp) in &rig.components {
         let expanded = expand_vars(rig, &comp.path);
-        let resolved = shellexpand::tilde(&expanded).into_owned();
+        let resolved = rig
+            .effective_component_paths
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| shellexpand::tilde(&expanded).into_owned());
         let (sha, branch) = head_sha_and_branch(&resolved);
         components.insert(
             id.clone(),
