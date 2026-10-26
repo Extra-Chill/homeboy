@@ -5150,6 +5150,15 @@ fn run_cook_with_runtime(
             cook_repository_identity_component_id(&options.identity.initial_plan);
     }
     let notification_options = options.clone();
+    let timing_store = lifecycle_store
+        .open_observation_initialized()
+        .map_err(|error| {
+            homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
+        })
+        .ok();
+    let _execution = timing_store
+        .as_ref()
+        .map(|store| store.run_phase_guard(&options.identity.initial_run_id, "cook.execution"));
     let mut result = run_cook_reported(
         store,
         lifecycle_store,
@@ -5167,6 +5176,37 @@ fn run_cook_with_runtime(
             result.exit_code != 0,
         );
         if result.value.disposition.is_terminal() {
+            let finalized =
+                lifecycle_store
+                    .open_observation_initialized()
+                    .and_then(|observation| {
+                        let status = if result.exit_code == 0 {
+                            homeboy_core::observation::RunStatus::Pass
+                        } else {
+                            homeboy_core::observation::RunStatus::Fail
+                        };
+                        let mut run_ids = result.value.history_run_ids.clone();
+                        run_ids.extend(result.value.invocation_run_ids.iter().cloned());
+                        run_ids.push(result.value.cook_id.clone());
+                        run_ids.extend(result.value.latest_run_id.iter().cloned());
+                        run_ids.sort();
+                        run_ids.dedup();
+                        for run_id in run_ids {
+                            if let Err(error) =
+                                observation.finish_running_run(&run_id, status, None)
+                            {
+                                homeboy_core::log_status!(
+                                    "agent-task",
+                                    "Cook run persistence failed for {run_id}: {}",
+                                    error
+                                );
+                            }
+                        }
+                        Ok(())
+                    });
+            if let Err(error) = finalized {
+                homeboy_core::log_status!("agent-task", "Cook run persistence failed: {}", error);
+            }
             // Inclusive whole-Cook timing belongs to the mission, never its
             // attempts. This boundary also sees failed and cancelled reports.
             let timing = lifecycle_store
@@ -5251,15 +5291,6 @@ fn run_cook_reported(
     durable_observer: Option<&CookProgressObserver<'_>>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let timing_store = lifecycle_store
-        .open_observation_initialized()
-        .map_err(|error| {
-            homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
-        })
-        .ok();
-    let _execution = timing_store
-        .as_ref()
-        .map(|store| store.run_phase_guard(&options.identity.initial_run_id, "cook.execution"));
     let mut failure_options = options.clone();
     let mut result = match run_cook_spine(
         store,
@@ -5448,40 +5479,9 @@ fn run_cook_reported(
                     error,
                 );
             }
-            if result.exit_code != 0 {
-                correct_settled_pass_observation(lifecycle_store, run_id, &result.value.status);
-            }
         }
     }
     Ok(result)
-}
-
-/// A detached Cook's handoff observation can settle `pass` (the runner job
-/// finished) before the controller's continuation fails. The observation and
-/// its completion notification must follow the Cook's real outcome, so a
-/// failed Cook corrects such a run to `fail`, which also re-arms the
-/// completion notification (Extra-Chill/homeboy#15393). Best effort: the
-/// lifecycle record already holds the authoritative outcome.
-fn correct_settled_pass_observation(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    cook_status: &str,
-) {
-    let corrected = lifecycle_store
-        .open_observation_initialized()
-        .and_then(|observation| {
-            observation.correct_passed_run_to_failed(
-                run_id,
-                &format!("cook finished {cook_status} after the run was recorded pass"),
-            )
-        });
-    if let Err(error) = corrected {
-        homeboy_core::log_status!(
-            "agent-task",
-            "Could not correct the observation status of {run_id}: {}",
-            error.message
-        );
-    }
 }
 
 /// Convert an error that occurs after recipe materialization into the normal

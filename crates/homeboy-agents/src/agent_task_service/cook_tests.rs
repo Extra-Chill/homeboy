@@ -3318,6 +3318,71 @@ fn delivery_of(run_id: &str) -> crate::agent_task_service::CookDelivery {
 /// #16049: a clean rebase that leaves the verified tree byte-identical keeps
 /// the candidate's gate proof and publishes without re-running the gates.
 #[test]
+fn agent_task_cook_rows_wait_for_verification_and_terminal_disposition() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-observation-verification";
+        let run_id = "cook-observation-verification-attempt-1";
+        let (options, applied) = seed_moving_base_attempt(cook_id, run_id);
+        let lifecycle_store = test_lifecycle_store();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&options.identity.initial_plan, cook_id, |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        let mut pending = applied.clone();
+        pending.status = AgentTaskPromotionStatus::VerificationPending;
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(pending).unwrap())
+            .unwrap();
+        let report = run_cook(CookContext {
+            side_effects: Some(CookSideEffects::for_test(
+                move |store, _, id| {
+                    let record = store.read_record(id).unwrap();
+                    assert_eq!(
+                        record.state(),
+                        agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                    );
+                    assert_eq!(store.read_aggregate(id).unwrap().totals.succeeded, 1);
+                    assert_eq!(
+                        super::super::recorded_promotion_report(&record.metadata).unwrap()
+                            ["status"],
+                        "verification_pending"
+                    );
+                    let observation = store.open_observation_initialized().unwrap();
+                    for id in [cook_id, run_id] {
+                        let row = observation.get_run(id).unwrap().unwrap();
+                        assert_eq!(row.status, "running");
+                        assert!(row.finished_at.is_none());
+                    }
+                    assert!(observation.phase_spans(cook_id).unwrap().spans.is_empty());
+                    agent_task_lifecycle::record_promotion(
+                        id,
+                        serde_json::to_value(&applied).unwrap(),
+                    )
+                    .unwrap();
+                    Ok(applied.clone())
+                },
+                |_, _, _| Ok(BaseCatchUp::Current),
+                |_, _, _, _| Ok(serde_json::json!({"status":"review_ready", "run_id":run_id})),
+            )),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .unwrap();
+        assert_eq!(report.exit_code, 0, "{report:#?}");
+        let observation = lifecycle_store.open_observation_initialized().unwrap();
+        for id in [cook_id, run_id] {
+            let row = observation.get_run(id).unwrap().unwrap();
+            assert_eq!(row.status, "pass");
+            assert!(row.finished_at.is_some());
+        }
+        let spans = observation.phase_spans(cook_id).unwrap();
+        assert_eq!(
+            spans.spans.iter().filter(|span| span.id == "cook").count(),
+            1
+        );
+    });
+}
+
+#[test]
 fn moved_base_with_identical_tree_publishes_without_regating() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-16049-identical-attempt-1";
