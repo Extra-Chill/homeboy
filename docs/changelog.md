@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.39] - 2026-10-26
+
+### Changed
+- Run format scripts through the canonical extension runner; derive formatting findings from lint.findings
+- End a Cook continuation whose publication is refused instead of re-running its gates
+
 ## [0.433.38] - 2026-10-26
 
 ### Changed
