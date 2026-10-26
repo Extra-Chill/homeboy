@@ -3378,9 +3378,22 @@ fn consume_claimed_with_dispatcher_policy(
             Ok(0)
         }
         Ok(exit_code) => {
-            claim.finish_unsuccessful(&format!(
-                "Cook continuation exited unsuccessfully with status {exit_code}"
-            ))?;
+            // A refused publication is deterministic: another generation would
+            // re-run the same gates and be refused again (#16441).
+            let refusal = lifecycle_store
+                .read_record(&claim.continuation().run_id)
+                .ok()
+                .and_then(|record| super::CookDelivery::from_run_metadata(&record.metadata))
+                .and_then(|delivery| delivery.blocker)
+                .filter(|blocker| blocker.code == super::CookDeliveryBlockerCode::PublishRefused);
+            match refusal {
+                Some(blocker) => {
+                    claim.fail(&format!("{}: {}", blocker.code.as_str(), blocker.message))?
+                }
+                None => claim.finish_unsuccessful(&format!(
+                    "Cook continuation exited unsuccessfully with status {exit_code}"
+                ))?,
+            }
             Ok(exit_code)
         }
         Err(error) if error.retryable == Some(true) => {
