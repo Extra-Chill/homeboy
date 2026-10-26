@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.42] - 2026-10-26
+
+### Changed
+- Record whole-Cook duration as a cook phase span
+- Isolate lab-runner admission tests from the controller drain ledger
+- Record who cancelled a runner job
+- Name failure causes at the control plane and recover involuntarily cancelled Cooks
+- Collapse config CRUD root twins
+
 ## [0.433.41] - 2026-10-26
 
 ### Changed
