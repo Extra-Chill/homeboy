@@ -611,6 +611,13 @@ pub fn discover_filtered_latest_run(
     Ok(report)
 }
 
+/// Scoped reconciliation must classify the lifecycle owner, not the scalar
+/// observation status: an observer may have marked that projection stale while
+/// the embedded lifecycle record still needs explicit cancellation.
+pub(super) fn discover_reconcile_run(record: AgentTaskRunRecord) -> AgentTaskDiscoveryRun {
+    discovery_run(record, Some(&live_supervisor_jobs()), chrono::Utc::now())
+}
+
 fn discovery_report(
     filter: AgentTaskDiscoveryFilter,
     options: AgentTaskDiscoveryOptions,

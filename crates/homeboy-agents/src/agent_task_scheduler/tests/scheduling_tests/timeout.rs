@@ -555,10 +555,19 @@ mod timeout_tests {
                 ),
                 candidate.tree_sha
             );
-            assert!(!outcome
+            let patches = outcome
                 .artifacts
                 .iter()
-                .any(|artifact| artifact.kind == "patch"));
+                .filter(|artifact| artifact.kind == "patch")
+                .collect::<Vec<_>>();
+            assert_eq!(patches.len(), 1, "retain candidate diff as evidence");
+            let patch = patches[0];
+            assert_eq!(patch.metadata["candidate_sha"], candidate.candidate_sha);
+            let bytes = std::fs::read(patch.path.as_ref().expect("patch path"))
+                .expect("retained timeout patch");
+            assert!(!bytes.is_empty());
+            assert_eq!(patch.size_bytes, Some(bytes.len() as u64));
+            assert!(String::from_utf8_lossy(&bytes).contains("+new"));
             assert!(!outcome.diagnostics.iter().any(|diagnostic| {
                 diagnostic.class == "agent_task.required_typed_artifacts_missing"
             }));
