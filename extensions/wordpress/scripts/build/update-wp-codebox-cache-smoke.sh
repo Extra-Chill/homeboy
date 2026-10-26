@@ -7,7 +7,9 @@ REAL_NODE="$(command -v node)"
 export REAL_NODE
 TMPDIR="${TMPDIR:-/tmp}"
 WORK_DIR="$(mktemp -d "${TMPDIR%/}/homeboy-wp-codebox-cache.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
+trap '[ -z "${READER_PID:-}" ] || kill "$READER_PID" 2>/dev/null || true; rm -rf "$WORK_DIR"' EXIT
+NPM_CALLS="${WORK_DIR}/npm-calls"
+export NPM_CALLS
 
 REMOTE_REPO="${WORK_DIR}/wp-codebox.git"
 SOURCE_WORK="${WORK_DIR}/source-work"
@@ -69,6 +71,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$prefix" ] || { echo "missing --prefix" >&2; exit 2; }
+printf '%s\n' "${args[*]}" >> "$NPM_CALLS"
 if [ -n "${EXPECTED_WP_CODEBOX_SOURCE_SHA:-}" ]; then
     [ "${WP_CODEBOX_SOURCE_SHA:-}" = "$EXPECTED_WP_CODEBOX_SOURCE_SHA" ] || { echo "npm inherited stale WP_CODEBOX_SOURCE_SHA: ${WP_CODEBOX_SOURCE_SHA:-}" >&2; exit 2; }
     [ "${WP_CODEBOX_SOURCE_REF:-}" = "$EXPECTED_WP_CODEBOX_SOURCE_REF" ] || { echo "npm did not receive requested WP_CODEBOX_SOURCE_REF: ${WP_CODEBOX_SOURCE_REF:-}" >&2; exit 2; }
@@ -174,6 +177,11 @@ INITIAL_CLI_SHA="$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk
 [ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || { echo "Initial exact SHA was not selected" >&2; exit 1; }
 "${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.23.4' || { echo "Current WP Codebox fixture was not admitted" >&2; exit 1; }
 
+CALLS_BEFORE="$(wc -l < "$NPM_CALLS")"
+PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" >/dev/null
+[ "$(readlink "$CACHE_DIR")" = "$INITIAL_RELEASE" ] || { echo "Same SHA created a duplicate release" >&2; exit 1; }
+[ "$(wc -l < "$NPM_CALLS")" = "$CALLS_BEFORE" ] || { echo "Same SHA ran npm again" >&2; exit 1; }
+
 IDENTITY_BEFORE_UPDATE="$(cat "${CACHE_DIR}/.homeboy-runtime-identity.json")"
 if OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" 2>&1)"; then
     echo "Expected incompatible WP Codebox update to fail" >&2
@@ -243,12 +251,31 @@ grep -q "\"source_sha\":\"${COMPATIBLE_SHA}\"" "${CACHE_DIR}/.homeboy-runtime-id
 "${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.21.0' || { echo "Minimum compatible WP Codebox fixture was not admitted" >&2; exit 1; }
 "${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" runtime descriptor --json | grep -q 'browser-contained-site-open' || { echo "Successful exact-SHA update left managed CLI unready" >&2; exit 1; }
 
-# A reader may still hold A after two later atomic promotions. Retaining only
-# the immediately previous release would reclaim A during this C promotion.
+# Recent releases survive even after they are no longer current or previous.
 PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$FINAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" >/dev/null
 [ "$(git -C "$CACHE_DIR" rev-parse HEAD)" = "$FINAL_SHA" ] || { echo "Final exact-SHA update did not replace managed HEAD" >&2; exit 1; }
 [ -e "$INITIAL_RELEASE" ] || { echo "A release was reclaimed after A-to-B-to-C promotion" >&2; exit 1; }
 "${FAKE_BIN}/node" "$READER_CLI" --version | grep -q '0.23.4' || { echo "A reader could not execute after A-to-B-to-C promotion" >&2; exit 1; }
+
+# Age every entry so the grace period cannot mask retention or live-reader bugs.
+command -v lsof >/dev/null || { echo "Retention smoke requires lsof" >&2; exit 1; }
+FINAL_RELEASE="$(readlink "$CACHE_DIR")"
+find "${CACHE_DIR}.releases" -exec touch -t 200001010000 {} +
+bash -c 'exec 3<"$1"; touch "$2"; exec sleep 300' reader "$INITIAL_READER_CLI" "${WORK_DIR}/reader-ready" &
+READER_PID=$!
+for _ in $(seq 1 500); do [ -f "${WORK_DIR}/reader-ready" ] && break; sleep 0.01; done
+[ -f "${WORK_DIR}/reader-ready" ] || { echo "Reader did not open release" >&2; exit 1; }
+CALLS_BEFORE="$(wc -l < "$NPM_CALLS")"
+PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$COMPATIBLE_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" >/dev/null
+[ -d "$INITIAL_RELEASE" ] || { echo "Release held open by a live reader was reclaimed" >&2; exit 1; }
+[ -d "$FINAL_RELEASE" ] || { echo "Previous release was reclaimed" >&2; exit 1; }
+kill "$READER_PID"
+wait "$READER_PID" 2>/dev/null || true
+READER_PID=""
+PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$FINAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" >/dev/null
+[ "$(wc -l < "$NPM_CALLS")" = "$CALLS_BEFORE" ] || { echo "Non-current verified releases were rebuilt" >&2; exit 1; }
+[ ! -e "$INITIAL_RELEASE" ] || { echo "Unused aged release was not reclaimed" >&2; exit 1; }
+[ "$(find "${CACHE_DIR}.releases" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = 2 ] || { echo "Expected only current and previous releases" >&2; exit 1; }
 
 cat > "${FAKE_BIN}/homeboy" <<'HOMEBOY'
 #!/usr/bin/env bash

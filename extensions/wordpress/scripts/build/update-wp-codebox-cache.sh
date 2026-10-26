@@ -150,6 +150,31 @@ git -C "$CANDIDATE_DIR" clean -ffdx --quiet || fail "failed to clean untracked b
 
 [ -f "$CANDIDATE_DIR/package-lock.json" ] || [ -f "$CANDIDATE_DIR/npm-shrinkwrap.json" ] || fail "WP Codebox source cache requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci: $SOURCE"
 
+# Reuse only releases whose recorded source and CLI bytes still match.
+for EXISTING_RELEASE in "${CACHE_DIR}.releases/"*; do
+    [ -d "$EXISTING_RELEASE" ] && [ ! -L "$EXISTING_RELEASE" ] || continue
+    if node - "$EXISTING_RELEASE" "$SHA" <<'NODE'
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const [release, sha] = process.argv.slice(2);
+try {
+  const identity = JSON.parse(fs.readFileSync(`${release}/.homeboy-runtime-identity.json`, 'utf8'));
+  const cli = `${release}/packages/cli/dist/index.js`;
+  fs.accessSync(cli, fs.constants.X_OK);
+  const hash = crypto.createHash('sha256').update(fs.readFileSync(cli)).digest('hex');
+  if (identity.schema !== 'homeboy/wp-codebox-managed-runtime-identity/v1' || identity.source_sha !== sha || identity.cli_sha256 !== hash) process.exit(1);
+} catch { process.exit(1); }
+NODE
+    then
+        RELEASE_DIR="$EXISTING_RELEASE"
+        rm -rf "$CANDIDATE_DIR"
+        CANDIDATE_DIR=""
+        echo "Reusing verified WP Codebox release: $RELEASE_DIR"
+        break
+    fi
+done
+
+if [ -z "$RELEASE_DIR" ]; then
 echo "Installing WP Codebox dependencies..."
 "$NPM_BIN" --prefix "$CANDIDATE_DIR" ci --include=optional --no-fund --no-audit || fail "npm ci failed in $CANDIDATE_DIR"
 
@@ -185,13 +210,14 @@ NODE
 CLI_SHA256="$(sha256_file "$CLI")" || fail "failed to hash built WP Codebox CLI"
 printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$SHA\",\"cli_sha256\":\"$CLI_SHA256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$CANDIDATE_DIR/.homeboy-runtime-identity.json" || fail "failed to record staged WP Codebox runtime identity"
 
-# The stable cache path is atomically replaced with a sibling symlink to an
-# immutable release. Keep every verified release: a reader can resolve any
-# prior target before one or more promotions and execute it afterward.
+# Publish new builds as immutable releases; reused releases take the same
+# atomic promotion path below.
 RELEASE_DIR="${CACHE_DIR}.releases/${SHA}.$$"
 mkdir -p "$(dirname "$RELEASE_DIR")" || fail "failed to create WP Codebox release directory"
 mv "$CANDIDATE_DIR" "$RELEASE_DIR" || fail "failed to stage immutable WP Codebox release"
 CANDIDATE_DIR=""
+fi
+PREVIOUS_RELEASE="$(readlink "$CACHE_DIR" 2>/dev/null || true)"
 NEXT_LINK="${CACHE_DIR}.next.$$"
 ln -s "$RELEASE_DIR" "$NEXT_LINK" || fail "failed to create WP Codebox cache pointer"
 if [ ! -L "$CACHE_DIR" ] && [ -e "$CACHE_DIR" ]; then
@@ -209,10 +235,20 @@ fi
 # `mv` follows a destination symlink-to-directory on some platforms. Node's
 # rename maps directly to rename(2), replacing the symlink entry itself.
 node -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$NEXT_LINK" "$CACHE_DIR" || fail "failed to promote WP Codebox cache pointer"
-# Release reclamation is deliberately deferred. A safe cleanup mechanism needs
-# reader leases (or equivalent reclamation) before it can remove immutable
-# targets that a process may have resolved before later promotions. Operators
-# may clean verified releases only with a reader-safe retention procedure.
+# Under the update lock, keep current and previous targets, releases modified
+# in the last hour, and releases with live open files/cwd/executables. Without
+# lsof (or when inspection fails), retain releases rather than risk readers.
+if command -v lsof >/dev/null 2>&1; then
+    for OLD_RELEASE in "${CACHE_DIR}.releases/"*; do
+        [ -d "$OLD_RELEASE" ] && [ ! -L "$OLD_RELEASE" ] || continue
+        [ "$OLD_RELEASE" != "$RELEASE_DIR" ] && [ "$OLD_RELEASE" != "$PREVIOUS_RELEASE" ] || continue
+        RECENT="$(find "$OLD_RELEASE" -mmin -60 -print -quit 2>&1)" || continue
+        [ -z "$RECENT" ] || continue
+        OPEN_FILES="$(lsof -w -nP +D "$OLD_RELEASE" 2>&1)" && continue
+        [ "$?" -eq 1 ] && [ -z "$OPEN_FILES" ] || continue
+        rm -rf "$OLD_RELEASE"
+    done
+fi
 echo "WP Codebox cache SHA: $SHA"
 REMOTE_SCRIPT
 }
