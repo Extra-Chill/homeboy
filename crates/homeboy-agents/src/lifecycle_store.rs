@@ -2804,11 +2804,6 @@ pub(super) fn read_cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
     default_store()?.read_cook_index(cook_id)
 }
 
-pub(super) fn cook_index_exists(cook_id: &str) -> Result<bool> {
-    let store = default_store()?;
-    Ok(projected_cook_index_in_store(&store, cook_id)?.is_some())
-}
-
 fn projected_cook_index_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,

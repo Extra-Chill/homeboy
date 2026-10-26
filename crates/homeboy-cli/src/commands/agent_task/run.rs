@@ -4650,9 +4650,14 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
                     .as_str()
                     .is_some_and(|value| value.contains("--task-url") && value.contains(handle))
             }));
-            assert!(agent_task_lifecycle::list_records()
+            assert!(
+                homeboy::agents::agent_task_lifecycle::list_records_in_store(
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                        .unwrap()
+                )
                 .expect("read lifecycle records")
-                .is_empty());
+                .is_empty()
+            );
         });
     }
 
@@ -12627,14 +12632,14 @@ mod tests {
     #[test]
     fn continuation_preflight_reports_a_read_only_rejection_without_creating_a_run() {
         crate::test_support::with_isolated_home(|_| {
-            let before = homeboy::agents::agent_tasks::lifecycle::list_records()
+            let before = homeboy::agents::agent_task_lifecycle::list_records_in_store(&homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap())
                 .expect("read initial lifecycle records");
             let (report, exit_code) = preflight_continue_cook(CookContinueArgs {
                 cook_or_attempt_id: "missing-cook".to_string(),
                 ..Default::default()
             })
             .expect("preflight returns a machine-readable rejection");
-            let after = homeboy::agents::agent_tasks::lifecycle::list_records()
+            let after = homeboy::agents::agent_task_lifecycle::list_records_in_store(&homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap())
                 .expect("read lifecycle records after preflight");
 
             assert_eq!(exit_code, 1);

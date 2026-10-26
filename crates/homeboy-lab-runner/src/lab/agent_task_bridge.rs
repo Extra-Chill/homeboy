@@ -1328,7 +1328,12 @@ mod tests {
                 agent_task_lifecycle::reconcile_status("run-completed-noop").expect("status");
             let artifacts =
                 agent_task_lifecycle::artifacts("run-completed-noop").expect("artifacts");
-            let (_, aggregate_path) = agent_task_lifecycle::aggregate_source("run-completed-noop")
+            let (_, aggregate_path) =
+                homeboy_agents::agent_task_lifecycle::aggregate_source_in_store(
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                        .expect("lifecycle store"),
+                    "run-completed-noop",
+                )
                 .expect("aggregate source");
             let aggregate: AgentTaskAggregate =
                 serde_json::from_str(&fs::read_to_string(aggregate_path).expect("aggregate"))

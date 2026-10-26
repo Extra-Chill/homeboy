@@ -74,9 +74,13 @@ fn validate_plan_reports_invalid_input_without_creating_a_lifecycle_record() {
         assert_eq!(value["scope"], "local_controller");
         assert_eq!(value["valid"], false);
         assert_eq!(value["failures"][0]["kind"], "invalid_input");
-        assert!(agent_task_lifecycle::list_records()
+        assert!(
+            homeboy::agents::agent_task_lifecycle::list_records_in_store(
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap()
+            )
             .expect("records")
-            .is_empty());
+            .is_empty()
+        );
     });
 }
 
@@ -2276,7 +2280,11 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() 
         );
         assert!(!agent_task_lifecycle::run_record_exists_readonly(run_id)
             .expect("preflight did not admit"));
-        assert!(!agent_task_lifecycle::cook_index_exists(cook_id).expect("preflight did not index"));
+        assert!(!agent_task_lifecycle::cook_index_exists_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap(),
+            cook_id
+        )
+        .expect("preflight did not index"));
 
         let (recovered, recovered_exit_code) = super::super::recover::recover_with(
             super::super::RecoverArgs {
@@ -2325,7 +2333,11 @@ fn status_and_continuation_materialize_recipe_only_attempt_without_provider_work
         );
         assert!(!agent_task_lifecycle::run_record_exists_readonly(run_id)
             .expect("status did not admit"));
-        assert!(!agent_task_lifecycle::cook_index_exists(cook_id).expect("status did not index"));
+        assert!(!agent_task_lifecycle::cook_index_exists_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap(),
+            cook_id
+        )
+        .expect("status did not index"));
         let executor = Arc::new(CountingCookExecutor::default());
         let continued = continue_cook_with(
             CookContinueArgs {
@@ -6035,7 +6047,11 @@ fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
         .0;
         assert_eq!(replay, value);
         assert_eq!(
-            agent_task_lifecycle::list_records().expect("records").len(),
+            homeboy::agents::agent_task_lifecycle::list_records_in_store(
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap()
+            )
+            .expect("records")
+            .len(),
             2,
             "replay must not reserve another successor"
         );

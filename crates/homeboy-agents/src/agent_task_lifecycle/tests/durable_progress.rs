@@ -402,15 +402,25 @@ fn logs_read_does_not_append_historical_metadata_progress() {
     lifecycle_store
         .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
         .expect("submitted");
-    rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
-        record.metadata["provider_executions"] = json!([{
-            "key": "task-a:1",
-            "task_id": "task-a",
-            "attempt": 1,
-            "backend": "pi",
-            "state": "running",
-            "started_at": "2026-07-24T00:00:00Z"
-        }]);
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"] = json!([{
+                "key": "task-a:1",
+                "task_id": "task-a",
+                "attempt": 1,
+                "backend": "pi",
+                "state": "running",
+                "started_at": "2026-07-24T00:00:00Z"
+            }]);
+        })
     })
     .expect("rewrote historical metadata");
 
@@ -771,14 +781,35 @@ fn provider_success_and_enrichment_keep_stable_receipts() {
         .expect("submitted");
     reserve_provider_execution_in_store(&lifecycle_store, run_id, &plan.tasks[0], 1)
         .expect("reserved");
-    rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
-        record.metadata["provider_executions"][0]["owner_pid"] = json!(0);
-        record.metadata["provider_executions"][0]["launch_context"] = json!({"ok": true});
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"][0]["owner_pid"] = json!(0);
+            record.metadata["provider_executions"][0]["launch_context"] = json!({"ok": true});
+        })
     })
     .expect("enriched running execution");
-    rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
-        record.metadata["provider_executions"][0]["state"] = json!("succeeded");
-        record.metadata["provider_executions"][0]["finished_at"] = json!("2026-07-24T00:01:00Z");
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"][0]["state"] = json!("succeeded");
+            record.metadata["provider_executions"][0]["finished_at"] =
+                json!("2026-07-24T00:01:00Z");
+        })
     })
     .expect("succeeded");
     let states: Vec<_> = durable_events(&lifecycle_store, run_id)
@@ -795,68 +826,60 @@ fn provider_success_and_enrichment_keep_stable_receipts() {
 
 #[test]
 fn aggregate_progress_appends_once() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    let aggregate = succeeded_aggregate(&plan);
-    record_completed_run_in_store(
-        &lifecycle_store,
-        &plan,
-        &aggregate,
-        Some("durable-aggregate"),
-    )
-    .expect("completed");
-    let events = durable_events(&lifecycle_store, "durable-aggregate");
-    assert!(events
-        .iter()
-        .any(|event| event.data["state"] == "queued" && event.data["message"] == "task submitted"));
-    assert!(events
-        .iter()
-        .any(|event| event.data["state"] == "succeeded" && event.data["message"] == "ok"));
+    with_isolated_home(|_| {
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let plan = test_plan();
+        let aggregate = succeeded_aggregate(&plan);
+        record_completed_run(&plan, &aggregate, Some("durable-aggregate")).expect("completed");
+        let events = durable_events(&lifecycle_store, "durable-aggregate");
+        assert!(events
+            .iter()
+            .any(|event| event.data["state"] == "queued"
+                && event.data["message"] == "task submitted"));
+        assert!(events
+            .iter()
+            .any(|event| event.data["state"] == "succeeded" && event.data["message"] == "ok"));
+    });
 }
 
 #[test]
 fn aggregate_repeated_same_state_messages_keep_distinct_receipts() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    let mut aggregate = succeeded_aggregate(&plan);
-    aggregate.events = vec![
-        AgentTaskProgressEvent {
-            task_id: "task-a".to_string(),
-            state: AgentTaskState::Running,
-            attempt: 1,
-            message: Some("first".to_string()),
-        },
-        AgentTaskProgressEvent {
-            task_id: "task-a".to_string(),
-            state: AgentTaskState::Running,
-            attempt: 1,
-            message: Some("second".to_string()),
-        },
-        AgentTaskProgressEvent {
-            task_id: "task-a".to_string(),
-            state: AgentTaskState::Succeeded,
-            attempt: 1,
-            message: Some("ok".to_string()),
-        },
-    ];
-    record_completed_run_in_store(
-        &lifecycle_store,
-        &plan,
-        &aggregate,
-        Some("durable-aggregate-repeat"),
-    )
-    .expect("completed");
-    let running: Vec<_> = durable_events(&lifecycle_store, "durable-aggregate-repeat")
-        .into_iter()
-        .filter(|event| event.data["state"] == "running")
-        .collect();
-    assert_eq!(running.len(), 2);
-    assert_eq!(running[0].data["message"], "first");
-    assert_eq!(running[1].data["message"], "second");
-    assert_eq!(running[0].data["task_id"], "task-a");
-    assert_ne!(running[0].sequence, running[1].sequence);
+    with_isolated_home(|_| {
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.events = vec![
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Running,
+                attempt: 1,
+                message: Some("first".to_string()),
+            },
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Running,
+                attempt: 1,
+                message: Some("second".to_string()),
+            },
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Succeeded,
+                attempt: 1,
+                message: Some("ok".to_string()),
+            },
+        ];
+        record_completed_run(&plan, &aggregate, Some("durable-aggregate-repeat"))
+            .expect("completed");
+        let running: Vec<_> = durable_events(&lifecycle_store, "durable-aggregate-repeat")
+            .into_iter()
+            .filter(|event| event.data["state"] == "running")
+            .collect();
+        assert_eq!(running.len(), 2);
+        assert_eq!(running[0].data["message"], "first");
+        assert_eq!(running[1].data["message"], "second");
+        assert_eq!(running[0].data["task_id"], "task-a");
+        assert_ne!(running[0].sequence, running[1].sequence);
+    });
 }
 
 #[test]
@@ -918,8 +941,18 @@ fn queued_identity_survives_submitted_at_revision() {
     lifecycle_store
         .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
         .expect("submitted");
-    rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
-        record.submitted_at = "2020-01-01T00:00:00Z".to_string();
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(run_id, |record| {
+            record.submitted_at = "2020-01-01T00:00:00Z".to_string();
+        })
     })
     .expect("aged submitted_at");
     let events = durable_events(&lifecycle_store, run_id);
@@ -936,17 +969,37 @@ fn provider_state_survives_model_correction() {
     lifecycle_store
         .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
         .expect("submitted");
-    rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
-        record.metadata["provider_executions"] = json!([{
-            "task_id": "task-a",
-            "attempt": 1,
-            "state": "succeeded",
-            "model": null
-        }]);
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"] = json!([{
+                "task_id": "task-a",
+                "attempt": 1,
+                "state": "succeeded",
+                "model": null
+            }]);
+        })
     })
     .expect("terminal without model");
-    rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
-        record.metadata["provider_executions"][0]["model"] = json!("openai/gpt-5.6-terra");
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"][0]["model"] = json!("openai/gpt-5.6-terra");
+        })
     })
     .expect("model correction");
     let succeeded: Vec<_> = durable_events(&lifecycle_store, run_id)
@@ -959,40 +1012,40 @@ fn provider_state_survives_model_correction() {
 
 #[test]
 fn aggregate_replacement_replays_reordered_same_content() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    let mut first = succeeded_aggregate(&plan);
-    first.events = vec![
-        AgentTaskProgressEvent {
-            task_id: "task-a".to_string(),
-            state: AgentTaskState::Running,
-            attempt: 1,
-            message: Some("alpha".to_string()),
-        },
-        AgentTaskProgressEvent {
-            task_id: "task-a".to_string(),
-            state: AgentTaskState::Running,
-            attempt: 1,
-            message: Some("beta".to_string()),
-        },
-    ];
-    record_completed_run_in_store(&lifecycle_store, &plan, &first, Some("durable-reorder"))
-        .expect("first aggregate");
-    let mut reordered = first.clone();
-    reordered.events.reverse();
-    let record = lifecycle_store
-        .read_record("durable-reorder")
-        .expect("record");
-    lifecycle_store
-        .write_aggregate_and_record(&record, &reordered)
-        .expect("reordered aggregate replay");
-    let running: Vec<_> = durable_events(&lifecycle_store, "durable-reorder")
-        .into_iter()
-        .filter(|event| event.data["state"] == "running")
-        .map(|event| event.data["message"].as_str().unwrap_or("").to_string())
-        .collect();
-    assert_eq!(running, ["alpha", "beta"]);
+    with_isolated_home(|_| {
+        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let plan = test_plan();
+        let mut first = succeeded_aggregate(&plan);
+        first.events = vec![
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Running,
+                attempt: 1,
+                message: Some("alpha".to_string()),
+            },
+            AgentTaskProgressEvent {
+                task_id: "task-a".to_string(),
+                state: AgentTaskState::Running,
+                attempt: 1,
+                message: Some("beta".to_string()),
+            },
+        ];
+        record_completed_run(&plan, &first, Some("durable-reorder")).expect("first aggregate");
+        let mut reordered = first.clone();
+        reordered.events.reverse();
+        let record = lifecycle_store
+            .read_record("durable-reorder")
+            .expect("record");
+        lifecycle_store
+            .write_aggregate_and_record(&record, &reordered)
+            .expect("reordered aggregate replay");
+        let running: Vec<_> = durable_events(&lifecycle_store, "durable-reorder")
+            .into_iter()
+            .filter(|event| event.data["state"] == "running")
+            .map(|event| event.data["message"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(running, ["alpha", "beta"]);
+    });
 }
 
 #[test]

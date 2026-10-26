@@ -496,7 +496,12 @@ fn pinned_runtime_recovery_retains_the_existing_lab_proxy_identity() {
         assert!(pinned.is_file());
         assert_eq!(record.run_id, "runtime-a-lab-proxy");
         assert_eq!(record.state(), AgentTaskRunState::Queued);
-        assert_eq!(list_records().expect("one durable record").len(), 1);
+        assert_eq!(
+            list_records_in_store(&test_lifecycle_store())
+                .expect("one durable record")
+                .len(),
+            1
+        );
         assert!(record.provider_handles.is_empty());
     });
 }
@@ -2224,8 +2229,18 @@ fn accepted_runner_cancellation_does_not_signal_a_controller_local_pid() {
         .arg("60")
         .spawn()
         .expect("start controller-local sentinel");
-    rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
-        record.metadata["runner_pid"] = json!(local_controller.id());
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_pid"] = json!(local_controller.id());
+        })
     })
     .expect("persist stale controller pid");
 
@@ -3482,8 +3497,11 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
         let log = logs("conductor-full-loop-proof-retry2-20260611").expect("logs loaded");
         let artifacts =
             artifacts("conductor-full-loop-proof-retry2-20260611").expect("artifacts loaded");
-        let (raw_aggregate, _) = aggregate_source("conductor-full-loop-proof-retry2-20260611")
-            .expect("aggregate source");
+        let (raw_aggregate, _) = aggregate_source_in_store(
+            &test_lifecycle_store(),
+            "conductor-full-loop-proof-retry2-20260611",
+        )
+        .expect("aggregate source");
 
         assert_eq!(record.run_id, "conductor-full-loop-proof-retry2-20260611");
         assert_eq!(loaded.state(), AgentTaskRunState::Failed);
@@ -3678,54 +3696,53 @@ fn cancel_marks_queued_run_and_tasks_cancelled() {
 /// that gets deleted has to be the path the loader would have used, so the
 /// completed run, the deletion target and the loader all name one installation.
 ///
-/// `record_completed_run_in_store` reaches automatic artifact retention only
+/// `record_completed_run` reaches automatic artifact retention only
 /// when a task declares a workspace root that exists; `test_plan()` declares
 /// none, so the ambient retention pass this file's sibling test depends on is
 /// never entered here.
 #[test]
 fn aggregate_source_loads_completed_run_without_path_spelunking() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    let aggregate = AgentTaskAggregate {
-        schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-        plan_id: plan.plan_id.clone(),
-        totals: AgentTaskAggregateTotals {
-            queued: 1,
-            succeeded: 1,
-            ..AgentTaskAggregateTotals::default()
-        },
-        outcomes: vec![AgentTaskOutcome {
-            task_id: "task-a".to_string(),
-            status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
-            summary: Some("ok".to_string()),
-            ..Default::default()
-        }],
-        events: Vec::new(),
-        artifact_lineage: Vec::new(),
-        child_runs: Vec::new(),
-        artifact_bindings: Vec::new(),
-        queue: Default::default(),
-    };
-    record_completed_run_in_store(&lifecycle_store, &plan, &aggregate, Some("run-source"))
-        .expect("recorded");
-    let local_path = lifecycle_store.aggregate_path("run-source");
-    let mut record = lifecycle_store
-        .read_record("run-source")
-        .expect("record loaded");
-    record.aggregate_path = Some("/home/user/remote/aggregate.json".to_string());
-    lifecycle_store
-        .write_record(&record)
-        .expect("remote aggregate path stored");
-    std::fs::remove_file(&local_path).expect("local aggregate removed");
+    with_isolated_home(|_| {
+        let lifecycle_store = test_lifecycle_store();
+        let plan = test_plan();
+        let aggregate = AgentTaskAggregate {
+            schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: plan.plan_id.clone(),
+            totals: AgentTaskAggregateTotals {
+                queued: 1,
+                succeeded: 1,
+                ..AgentTaskAggregateTotals::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                task_id: "task-a".to_string(),
+                status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("ok".to_string()),
+                ..Default::default()
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        };
+        record_completed_run(&plan, &aggregate, Some("run-source")).expect("recorded");
+        let local_path = lifecycle_store.aggregate_path("run-source");
+        let mut record = lifecycle_store
+            .read_record("run-source")
+            .expect("record loaded");
+        record.aggregate_path = Some("/home/user/remote/aggregate.json".to_string());
+        lifecycle_store
+            .write_record(&record)
+            .expect("remote aggregate path stored");
+        std::fs::remove_file(&local_path).expect("local aggregate removed");
 
-    let (raw, path) =
-        aggregate_source_in_store(&lifecycle_store, "run-source").expect("aggregate source");
+        let (raw, path) =
+            aggregate_source_in_store(&lifecycle_store, "run-source").expect("aggregate source");
 
-    assert!(path.ends_with("aggregate.json"));
-    assert_ne!(path, PathBuf::from("/home/user/remote/aggregate.json"));
-    assert!(raw.contains("task-a"));
+        assert!(path.ends_with("aggregate.json"));
+        assert_ne!(path, PathBuf::from("/home/user/remote/aggregate.json"));
+        assert!(raw.contains("task-a"));
+    });
 }
 
 /// A run started through the production `Start` advance.
@@ -5168,101 +5185,90 @@ fn dead_retry_launcher_persists_terminal_failure_under_strict_config_locking() {
 
 #[test]
 fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
-    // Reproduces #9377: a Cook attempt completes its provider execution on Lab
-    // (accepted handoff, recorded runner job, succeeded candidate), then a
-    // detached post-provider handoff cannot resolve the controller-only runner
-    // ("runner is not connected to a daemon"). The transport error must NOT be
-    // recorded as a pre-execution failure — doing so would overwrite the
-    // succeeded candidate with a Failed, zero-artifact,
-    // provider_executions_consumed:0 terminal record and strand the work.
-    //
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). "The durable record on disk agrees" is the closing assertion, so
-    // the handoff, the succeeded candidate, the transport failure and the
-    // re-read all have to name the same installation — a reload from an ambient
-    // home could report a candidate this test never wrote.
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "cook-9377-post-provider-transport";
-    let plan = test_plan();
+    with_isolated_home(|_| {
+        // Reproduces #9377: a Cook attempt completes its provider execution on Lab
+        // (accepted handoff, recorded runner job, succeeded candidate), then a
+        // detached post-provider handoff cannot resolve the controller-only runner
+        // ("runner is not connected to a daemon"). The transport error must NOT be
+        // recorded as a pre-execution failure — doing so would overwrite the
+        // succeeded candidate with a Failed, zero-artifact,
+        // provider_executions_consumed:0 terminal record and strand the work.
+        let lifecycle_store = test_lifecycle_store();
+        let run_id = "cook-9377-post-provider-transport";
+        let plan = test_plan();
 
-    // Provider dispatched + succeeded on the runner: accepted handoff with a
-    // recorded runner job and a succeeded aggregate.
-    record_detached_lab_run_in_store(
-        &lifecycle_store,
-        DetachedLabRunRecord {
+        // Provider dispatched + succeeded on the runner: accepted handoff with a
+        // recorded runner job and a succeeded aggregate.
+        record_detached_lab_run_in_store(
+            &lifecycle_store,
+            DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: "job-9377",
+                remote_workspace: "/runner/workspace/wp-build",
+                remote_command: &["agent-task".to_string(), "run-plan".to_string()],
+            },
+        )
+        .expect("accepted runner handoff");
+        record_completed_run(&plan, &succeeded_aggregate(&plan), Some(run_id))
+            .expect("succeeded candidate");
+
+        let before = reconcile_status_in_store(
+            &lifecycle_store,
             run_id,
-            runner_id: "homeboy-lab",
-            runner_job_id: "job-9377",
-            remote_workspace: "/runner/workspace/wp-build",
-            remote_command: &["agent-task".to_string(), "run-plan".to_string()],
-        },
-    )
-    .expect("accepted runner handoff");
-    record_completed_run_in_store(
-        &lifecycle_store,
-        &plan,
-        &succeeded_aggregate(&plan),
-        Some(run_id),
-    )
-    .expect("succeeded candidate");
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("candidate record")
+        .record;
+        assert_eq!(before.state(), AgentTaskRunState::Succeeded);
+        assert!(before.has_recorded_provider_progress());
 
-    let before = reconcile_status_in_store(
-        &lifecycle_store,
-        run_id,
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("candidate record")
-    .record;
-    assert_eq!(before.state(), AgentTaskRunState::Succeeded);
-    assert!(before.has_recorded_provider_progress());
+        // The exact failure from the field: post-provider detached handoff
+        // re-resolves the controller-only runner and fails.
+        let transport_error = Error::validation_invalid_argument(
+            "runner",
+            "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` first",
+            Some("homeboy-lab".to_string()),
+            None,
+        );
+        let preserved = record_pre_execution_failure_in_store(
+            &lifecycle_store,
+            run_id,
+            &plan,
+            "detached_lab_handoff_preacceptance",
+            &transport_error,
+        )
+        .expect("transport failure recorded without terminalizing the candidate");
 
-    // The exact failure from the field: post-provider detached handoff
-    // re-resolves the controller-only runner and fails.
-    let transport_error = Error::validation_invalid_argument(
-        "runner",
-        "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` first",
-        Some("homeboy-lab".to_string()),
-        None,
-    );
-    let preserved = record_pre_execution_failure_in_store(
-        &lifecycle_store,
-        run_id,
-        &plan,
-        "detached_lab_handoff_preacceptance",
-        &transport_error,
-    )
-    .expect("transport failure recorded without terminalizing the candidate");
+        // Candidate preserved: state stays Succeeded, never regressed to Failed,
+        // and the pre-execution failure shape (zero-artifact, consumed:0) is NOT
+        // stamped over it.
+        assert_eq!(preserved.state(), AgentTaskRunState::Succeeded);
+        assert!(preserved.metadata.get("pre_execution_failure").is_none());
+        let marker = &preserved.metadata["transport_follow_up_failure"];
+        assert_eq!(marker["reason"], "post_provider_transport_failure");
+        assert_eq!(marker["phase"], "detached_lab_handoff_preacceptance");
+        assert_eq!(marker["candidate_preserved"], true);
+        assert_eq!(marker["retryable"], true);
+        assert_eq!(preserved.metadata["candidate_preserved"], true);
 
-    // Candidate preserved: state stays Succeeded, never regressed to Failed,
-    // and the pre-execution failure shape (zero-artifact, consumed:0) is NOT
-    // stamped over it.
-    assert_eq!(preserved.state(), AgentTaskRunState::Succeeded);
-    assert!(preserved.metadata.get("pre_execution_failure").is_none());
-    let marker = &preserved.metadata["transport_follow_up_failure"];
-    assert_eq!(marker["reason"], "post_provider_transport_failure");
-    assert_eq!(marker["phase"], "detached_lab_handoff_preacceptance");
-    assert_eq!(marker["candidate_preserved"], true);
-    assert_eq!(marker["retryable"], true);
-    assert_eq!(preserved.metadata["candidate_preserved"], true);
-
-    // The durable record on disk agrees — recovery can adopt this candidate
-    // without rerunning the provider.
-    let reloaded = reconcile_status_in_store(
-        &lifecycle_store,
-        run_id,
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("reloaded candidate")
-    .record;
-    assert_eq!(reloaded.state(), AgentTaskRunState::Succeeded);
-    assert_eq!(
-        reloaded.metadata["transport_follow_up_failure"]["reason"],
-        "post_provider_transport_failure"
-    );
+        // The durable record on disk agrees — recovery can adopt this candidate
+        // without rerunning the provider.
+        let reloaded = reconcile_status_in_store(
+            &lifecycle_store,
+            run_id,
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("reloaded candidate")
+        .record;
+        assert_eq!(reloaded.state(), AgentTaskRunState::Succeeded);
+        assert_eq!(
+            reloaded.metadata["transport_follow_up_failure"]["reason"],
+            "post_provider_transport_failure"
+        );
+    });
 }
 
 /// The model a provider actually ran is aggregate evidence, so the terminal
@@ -5274,37 +5280,36 @@ fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
 /// reconciling read in between.
 #[test]
 fn terminal_write_persists_the_aggregate_provider_model() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let mut plan = test_plan();
-    plan.tasks[0].executor.backend = "pi".to_string();
-    plan.tasks[0].executor.model = None;
-    let mut aggregate = succeeded_aggregate(&plan);
-    // Authoritative: the aggregate outcome recorded the selected model.
-    aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
+    with_isolated_home(|_| {
+        let lifecycle_store = test_lifecycle_store();
+        let mut plan = test_plan();
+        plan.tasks[0].executor.backend = "pi".to_string();
+        plan.tasks[0].executor.model = None;
+        let mut aggregate = succeeded_aggregate(&plan);
+        // Authoritative: the aggregate outcome recorded the selected model.
+        aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
 
-    let run_id = "terminal-null-model-9411";
-    record_completed_run_in_store(&lifecycle_store, &plan, &aggregate, Some(run_id))
-        .expect("terminal record");
+        let run_id = "terminal-null-model-9411";
+        record_completed_run(&plan, &aggregate, Some(run_id)).expect("terminal record");
 
-    let persisted = lifecycle_store
-        .read_record(run_id)
-        .expect("persisted record");
-    assert!(persisted.state().is_terminal(), "terminal state committed");
-    assert_eq!(
-        persisted.tasks[0].model.as_deref(),
-        Some("openai/gpt-5.6-terra")
-    );
-    let runtime = persisted
-        .lifecycle
-        .provider_runtime
-        .first()
-        .expect("provider runtime");
-    assert_eq!(runtime.metadata["model"], "openai/gpt-5.6-terra");
-    for handle in &persisted.provider_handles {
-        assert_eq!(handle.metadata["model"], "openai/gpt-5.6-terra");
-    }
+        let persisted = lifecycle_store
+            .read_record(run_id)
+            .expect("persisted record");
+        assert!(persisted.state().is_terminal(), "terminal state committed");
+        assert_eq!(
+            persisted.tasks[0].model.as_deref(),
+            Some("openai/gpt-5.6-terra")
+        );
+        let runtime = persisted
+            .lifecycle
+            .provider_runtime
+            .first()
+            .expect("provider runtime");
+        assert_eq!(runtime.metadata["model"], "openai/gpt-5.6-terra");
+        for handle in &persisted.provider_handles {
+            assert_eq!(handle.metadata["model"], "openai/gpt-5.6-terra");
+        }
+    });
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -5313,38 +5318,38 @@ fn terminal_write_persists_the_aggregate_provider_model() {
 /// one home.
 #[test]
 fn status_leaves_terminal_record_untouched_when_aggregate_has_no_model() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let mut plan = test_plan();
-    plan.tasks[0].executor.backend = "pi".to_string();
-    plan.tasks[0].executor.model = None;
-    // Aggregate records no model — nothing authoritative to reproject.
-    let aggregate = succeeded_aggregate(&plan);
+    with_isolated_home(|_| {
+        let lifecycle_store = test_lifecycle_store();
+        let mut plan = test_plan();
+        plan.tasks[0].executor.backend = "pi".to_string();
+        plan.tasks[0].executor.model = None;
+        // Aggregate records no model — nothing authoritative to reproject.
+        let aggregate = succeeded_aggregate(&plan);
 
-    let run_id = "terminal-no-model-9411";
-    let record = record_completed_run_in_store(&lifecycle_store, &plan, &aggregate, Some(run_id))
-        .expect("terminal record");
-    assert!(record.state().is_terminal());
+        let run_id = "terminal-no-model-9411";
+        let record =
+            record_completed_run(&plan, &aggregate, Some(run_id)).expect("terminal record");
+        assert!(record.state().is_terminal());
 
-    let before = lifecycle_store.read_record(run_id).expect("record before");
-    let reconciled = reconcile_status_in_store(
-        &lifecycle_store,
-        run_id,
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("status")
-    .record;
+        let before = lifecycle_store.read_record(run_id).expect("record before");
+        let reconciled = reconcile_status_in_store(
+            &lifecycle_store,
+            run_id,
+            AgentTaskStatusOptions::default(),
+            false,
+        )
+        .expect("status")
+        .record;
 
-    // No model to reproject: task model stays absent and the run stays terminal.
-    assert!(reconciled.state().is_terminal());
-    assert!(reconciled.tasks[0]
-        .model
-        .as_deref()
-        .map(str::trim)
-        .is_none_or(str::is_empty));
-    assert_eq!(before.tasks[0].model, reconciled.tasks[0].model);
+        // No model to reproject: task model stays absent and the run stays terminal.
+        assert!(reconciled.state().is_terminal());
+        assert!(reconciled.tasks[0]
+            .model
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty));
+        assert_eq!(before.tasks[0].model, reconciled.tasks[0].model);
+    });
 }
 
 #[test]

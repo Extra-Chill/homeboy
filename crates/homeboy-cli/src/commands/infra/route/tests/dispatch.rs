@@ -2713,7 +2713,9 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
         staged.retain_for_recovery();
         agent_task_lifecycle::recover_unmaterialized_cook_input_publication("failed-run")
             .expect("publish replay inputs");
-        agent_task_lifecycle::fail_detached_cook_handoff_parent(
+        agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
             "failed-run",
             "bounded Lab admission retry budget exhausted",
         )

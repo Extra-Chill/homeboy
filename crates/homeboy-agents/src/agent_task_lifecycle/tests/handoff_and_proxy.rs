@@ -2140,10 +2140,20 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
     let aggregate = succeeded_aggregate(&plan);
     record_run_aggregate_in_store(&lifecycle_store, &record.run_id, &plan, &aggregate)
         .expect("runner result mirrored to the controller");
-    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |record| {
-        record.plan_path =
-            "/home/chubes/.local/share/homeboy/agent-task-runs/cook-lab-attempt/plan.json"
-                .to_string();
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(&record.run_id, |record| {
+            record.plan_path =
+                "/home/chubes/.local/share/homeboy/agent-task-runs/cook-lab-attempt/plan.json"
+                    .to_string();
+        })
     })
     .expect("runner transport projection replaces display path");
 
@@ -2199,8 +2209,18 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
         &stub_lab_offload_submission,
     )
     .expect("missing-plan fixture persists its controller plan");
-    rewrite_record_for_test_in_store(&lifecycle_store, &missing_plan.run_id, |record| {
-        record.plan_path = "/runner/workspace/plan.json".to_string();
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            lifecycle_store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            lifecycle_store.roots().data(),
+        );
+        rewrite_record_for_test(&missing_plan.run_id, |record| {
+            record.plan_path = "/runner/workspace/plan.json".to_string();
+        })
     })
     .expect("project runner-local plan path");
     std::fs::remove_file(missing_plan.plan_path)
@@ -2573,8 +2593,7 @@ fn terminal_reconciliation_rejects_conflicting_directly_imported_artifact() {
 /// this store never recorded.
 ///
 /// `record_completed_run` is spelled out as its own two rooted halves —
-/// submission then `record_aggregate_in_store` — which is exactly the body of
-/// `record_completed_run_in_store`. The difference is the admission: that
+/// submission then `record_aggregate_in_store`. The difference is the admission: that
 /// sibling submits through `submit_plan_in_store`, which resolves the
 /// controller-runtime admission queue under `paths::controller_runtimes_store()`.
 /// That store is machine-global by design, so calling it from a test that no
@@ -2691,7 +2710,7 @@ fn run_record_exists_resolves_a_cook_id_to_its_latest_run() {
     // Rooted in an explicit store rather than a mutated process environment
     // (#7505). `record_completed_run` is spelled out as its own two rooted
     // halves — submission then `record_aggregate_in_store` — which is exactly
-    // the body of `record_completed_run_in_store`. The difference is the
+    // the body of `record_completed_run`. The difference is the
     // admission: that sibling submits through `submit_plan_in_store`, which
     // resolves the controller-runtime admission queue under
     // `paths::controller_runtimes_store()`. That store is machine-global by
@@ -2828,7 +2847,8 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
         let loaded = reconcile_status("local-run").expect("status loaded");
         let log = logs("local-run").expect("logs loaded");
         let artifacts = artifacts("local-run").expect("artifacts loaded");
-        let (raw_aggregate, _) = aggregate_source("local-run").expect("aggregate source");
+        let (raw_aggregate, _) = aggregate_source_in_store(&test_lifecycle_store(), "local-run")
+            .expect("aggregate source");
 
         assert_eq!(record.run_id, "local-run");
         assert_eq!(loaded.state(), AgentTaskRunState::Failed);
@@ -2864,8 +2884,7 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
 /// projections of the same home.
 ///
 /// `record_completed_run` is spelled out as its own two rooted halves —
-/// submission then `record_aggregate_in_store` — which is exactly the body of
-/// `record_completed_run_in_store`. The difference is the admission: that
+/// submission then `record_aggregate_in_store`. The difference is the admission: that
 /// sibling submits through `submit_plan_in_store`, which resolves the
 /// controller-runtime admission queue under `paths::controller_runtimes_store()`.
 /// That store is machine-global by design, so calling it from a test that no

@@ -1860,7 +1860,9 @@ mod tests {
             )
             .expect("publish durable Cook attempt ownership");
 
-            agent_task_lifecycle::fail_detached_cook_handoff_parent(
+            agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store"),
                 cook_id,
                 "stale detached child exit observation",
             )
@@ -1906,7 +1908,9 @@ mod tests {
             agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
                 .expect("persist attempt before ownership arbitration");
 
-            agent_task_lifecycle::fail_detached_cook_handoff_parent(
+            agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store"),
                 cook_id,
                 "detached Cook exited before materializing its first attempt",
             )
@@ -1930,8 +1934,12 @@ mod tests {
                 "redirected"
             );
             assert!(
-                agent_task_lifecycle::cook_index_exists(cook_id)
-                    .expect("materialization published the Cook index"),
+                agent_task_lifecycle::cook_index_exists_in_store(
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                        .expect("lifecycle store"),
+                    cook_id
+                )
+                .expect("materialization published the Cook index"),
                 "the queued attempt remains continuable through its Cook alias"
             );
         });
@@ -2031,8 +2039,12 @@ mod tests {
                 "cancelled"
             );
             assert!(
-                !agent_task_lifecycle::cook_index_exists(cook_id)
-                    .expect("cancel winner left no Cook index"),
+                !agent_task_lifecycle::cook_index_exists_in_store(
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                        .expect("lifecycle store"),
+                    cook_id
+                )
+                .expect("cancel winner left no Cook index"),
                 "a cancelled placeholder cannot resurrect a Cook alias"
             );
         });

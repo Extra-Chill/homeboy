@@ -858,7 +858,8 @@ pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight(
         });
     }
     let claim =
-        agent_task_lifecycle::claim_next_eligible_queued_run_with_preflight_and_filter_and_limit(
+        agent_task_lifecycle::claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
             |record| scoped_run_ids.is_none_or(|run_ids| run_ids.contains(&record.run_id)),
             remaining_budget,
             |record, plan| queue_preflight(record, plan),
@@ -3650,20 +3651,30 @@ mod tests {
             agent_task_lifecycle::record_cook_attempt_in_store(&store, cook_id, 1, run_id)
                 .expect("index Cook attempt");
             agent_task_lifecycle::mark_running_in_store(&store, run_id).expect("running");
-            agent_task_lifecycle::rewrite_record_for_test_in_store(&store, run_id, |record| {
-                let metadata = record.metadata.as_object_mut().expect("metadata object");
-                metadata.remove("runner_pid");
-                metadata.remove("runner_process_start_identity");
-                record.metadata["cook_id"] = json!(cook_id);
-                record.metadata["cook_attempt"] = json!(1);
-                // The runner job this Lab attempt named is gone from the
-                // daemon's job store, and its projection heartbeat aged out.
-                record.metadata["runner_job_id"] = json!(uuid::Uuid::new_v4().to_string());
-                record.updated_at = Some(
-                    (chrono::Utc::now() - chrono::Duration::hours(2))
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            {
+                let _config = homeboy_core::test_support::EnvVarGuard::set(
+                    homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+                    store.roots().config(),
                 );
-            })
+                let _data = homeboy_core::test_support::EnvVarGuard::set(
+                    homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+                    store.roots().data(),
+                );
+                agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                    let metadata = record.metadata.as_object_mut().expect("metadata object");
+                    metadata.remove("runner_pid");
+                    metadata.remove("runner_process_start_identity");
+                    record.metadata["cook_id"] = json!(cook_id);
+                    record.metadata["cook_attempt"] = json!(1);
+                    // The runner job this Lab attempt named is gone from the
+                    // daemon's job store, and its projection heartbeat aged out.
+                    record.metadata["runner_job_id"] = json!(uuid::Uuid::new_v4().to_string());
+                    record.updated_at = Some(
+                        (chrono::Utc::now() - chrono::Duration::hours(2))
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    );
+                })
+            }
             .expect("stale runner-backed Cook attempt");
             let recipe_store =
                 super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(&store);
