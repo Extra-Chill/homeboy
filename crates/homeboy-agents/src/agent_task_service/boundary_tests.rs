@@ -474,7 +474,11 @@ fn execution_step_runner_ineligible_then_eligible_across_daemon_restart_executes
         let observed = eligible.clone();
         step_job::register_step_runner_eligibility(Arc::new(move |runner| {
             assert_eq!(runner, "boundary-runner");
-            observed.load(Ordering::SeqCst)
+            if observed.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err("boundary runner is not eligible yet".into())
+            }
         }));
         let marker = home.path().join("accepted-provider");
         let mut request = intent.step.clone();
@@ -567,6 +571,6 @@ fn execution_step_runner_ineligible_then_eligible_across_daemon_restart_executes
         )
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        step_job::register_step_runner_eligibility(Arc::new(|_| true));
+        step_job::register_step_runner_eligibility(Arc::new(|_| Ok(())));
     });
 }
