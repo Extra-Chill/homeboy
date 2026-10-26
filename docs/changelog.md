@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.38] - 2026-10-26
+
+### Changed
+- Return eligibility reasons from boundary test probes
+
 ## [0.433.37] - 2026-10-26
 
 ### Changed
