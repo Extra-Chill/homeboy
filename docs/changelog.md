@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.40] - 2026-10-26
+
+### Changed
+- Break sidecar exports over to manifest declarations
+- Probe runner Homeboy identity once per Lab staging
+
 ## [0.433.39] - 2026-10-26
 
 ### Changed
