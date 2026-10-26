@@ -5192,9 +5192,23 @@ fn run_cook_with_runtime(
                         run_ids.sort();
                         run_ids.dedup();
                         for run_id in run_ids {
-                            if let Err(error) =
-                                observation.finish_running_run(&run_id, status, None)
-                            {
+                            // A detached handoff can settle `pass` before a failing
+                            // continuation (Extra-Chill/homeboy#15393).
+                            let finished = observation
+                                .finish_running_run(&run_id, status, None)
+                                .and_then(|_| {
+                                    if status == homeboy_core::observation::RunStatus::Fail {
+                                        observation.correct_passed_run_to_failed(
+                                            &run_id,
+                                            &format!(
+                                                "cook finished {} after the run was recorded pass",
+                                                result.value.status
+                                            ),
+                                        )?;
+                                    }
+                                    Ok(())
+                                });
+                            if let Err(error) = finished {
                                 homeboy_core::log_status!(
                                     "agent-task",
                                     "Cook run persistence failed for {run_id}: {}",
