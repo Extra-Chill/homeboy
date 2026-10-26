@@ -8839,6 +8839,107 @@ fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
 }
 
 #[test]
+fn admission_refused_lifecycle_retry_dispatches_through_its_cook() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-admission-refused-retry";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+        options.retry_policy.max_attempts = 2;
+        super::super::persist_initial_recipe(&options).unwrap();
+        super::super::materialize_initial_cook_attempt(&options).unwrap();
+        let first_run_id = &options.identity.initial_run_id;
+        agent_task_lifecycle::record_pre_execution_failure(
+            first_run_id,
+            &options.identity.initial_plan,
+            "lab_admission",
+            &Error::validation_invalid_argument(
+                "controller_draining",
+                "controller_draining: upgrade drain refuses admission before dispatch",
+                None,
+                None,
+            )
+            .with_retryable(true),
+        )
+        .unwrap();
+
+        let before = crate::orchestration::run_from_current_environment(cook_id).unwrap();
+        assert!(serde_json::to_string(&before.blocker)
+            .unwrap()
+            .contains("controller_draining"));
+        let retry = agent_task_lifecycle::retry(first_run_id, None).unwrap();
+        assert_ne!(retry.run_id, *first_run_id);
+        assert_eq!(retry.metadata["cook_id"], cook_id);
+        assert_eq!(retry.metadata["retry_of"], *first_run_id);
+        let intent = current_intent(&test_lifecycle_store(), &retry.run_id);
+        assert!(matches!(
+            intent.mode,
+            crate::agent_task_service::ExecutionStepMode::QueuedRun {
+                retry_preparation: Some(_)
+            }
+        ));
+        let starts = Arc::new(AtomicUsize::new(0));
+        execute_reserved_retry_fixture(
+            &retry.run_id,
+            Arc::new(RecordingImmediateSuccessExecutor {
+                starts: starts.clone(),
+            }),
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        let status = agent_task_lifecycle::reconcile_status(cook_id).unwrap();
+        assert_eq!(status.run_id, retry.run_id);
+        assert_eq!(
+            status.state(),
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+        );
+        assert!(status.metadata["pre_execution_failure"].is_null());
+        assert_eq!(status.metadata["provider_executions_consumed"], 1);
+        let projected = crate::orchestration::run_from_current_environment(cook_id).unwrap();
+        assert_eq!(projected.run.as_str(), retry.run_id);
+        assert!(!serde_json::to_string(&projected.blocker)
+            .unwrap()
+            .contains("controller_draining"));
+        assert_eq!(
+            super::super::load_recipe(cook_id).unwrap().attempts.len(),
+            2
+        );
+        let original = agent_task_lifecycle::exact_record(first_run_id).unwrap();
+        assert_eq!(
+            original.state(),
+            agent_task_lifecycle::AgentTaskRunState::Failed
+        );
+        assert!(
+            serde_json::to_string(&original.metadata["pre_execution_failure"])
+                .unwrap()
+                .contains("controller_draining")
+        );
+    });
+}
+
+#[test]
+fn rooted_lifecycle_retry_refuses_to_bypass_cook_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-rooted-retry-refusal", 2);
+        let error = agent_task_lifecycle::retry_in_store(
+            &test_lifecycle_store(),
+            &options.identity.initial_run_id,
+            None,
+        )
+        .unwrap_err();
+        assert!(error
+            .message
+            .contains("homeboy agent-task recover cook-rooted-retry-refusal"));
+        assert_eq!(
+            super::super::load_recipe(&options.identity.cook_id)
+                .unwrap()
+                .attempts
+                .len(),
+            1
+        );
+    });
+}
+
+#[test]
 fn retryable_pre_provider_retry_stays_attached_to_its_cook() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-pre-provider-retry";
