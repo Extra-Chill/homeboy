@@ -161,6 +161,14 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     let mut durable_changed_files = Vec::new();
     let (publication_identity, requester) =
         backend.publication_context(&options.run_id, lifecycle_store)?;
+    // Recorded before preflight so the validated intent and the published
+    // receipt carry the same dossier (manual receipts must match exactly).
+    options.review_dossier.evidence.push(
+        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
+            summary: format!("Publication identity: {publication_identity}"),
+            url: None,
+        },
+    );
     let durable_acceptance;
     if options.manual_finalization {
         durable_acceptance = validate_manual_finalization_policy(&options.run_id)?;
@@ -621,12 +629,6 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     if let Some(verified_base) = options.review_dossier.verified_base.as_mut() {
         verified_base.publication_sha = publication_base_sha;
     }
-    options.review_dossier.evidence.push(
-        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
-            summary: format!("Publication identity: {publication_identity}"),
-            url: None,
-        },
-    );
     let mut body = render_review_dossier(&options.review_dossier, &options.review_profile);
     append_requester(&mut body, requester.as_deref());
     // The lookup and base observation may take long enough for another writer to
