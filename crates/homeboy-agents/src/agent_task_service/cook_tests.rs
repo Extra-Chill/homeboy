@@ -18412,12 +18412,42 @@ fn production_cook_loop_loads_terminal_promotion_without_source_aggregate() {
         let store = CookRecipeStore::from_current_data_root().expect("recipe store");
         let lifecycle_store = test_lifecycle_store();
         assert!(lifecycle_store.read_aggregate(run_id).is_err());
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&options.identity.initial_plan, cook_id, |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
         let result = CookService::run(
-            options,
+            options.clone(),
             CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
             CookMode::Resume,
         )
         .expect("production Cook loop loads persisted promotion");
+        CookService::run(
+            options,
+            CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
+            CookMode::Resume,
+        )
+        .expect("terminal retry is idempotent");
+        let observation = lifecycle_store.open_observation_initialized().unwrap();
+        let spans = observation.phase_spans(cook_id).unwrap();
+        assert_eq!(spans.spans.len(), 1);
+        assert_eq!(spans.spans[0].id, "cook");
+        assert_eq!(serde_json::to_value(spans.spans[0].status).unwrap(), "ok");
+        assert_eq!(
+            spans.spans[0].started_at,
+            chrono::DateTime::parse_from_rfc3339(
+                &observation.get_run(cook_id).unwrap().unwrap().started_at
+            )
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        );
+        assert!(!observation
+            .phase_spans(run_id)
+            .unwrap()
+            .spans
+            .iter()
+            .any(|span| span.id == "cook"));
 
         assert_eq!(result.exit_code, 0, "{result:#?}");
         assert_eq!(result.value.status, "green_no_finalize");
@@ -18431,6 +18461,73 @@ fn production_cook_loop_loads_terminal_promotion_without_source_aggregate() {
             AgentTaskPromotionStatus::Applied
         );
         assert!(lifecycle_store.read_aggregate(run_id).is_err());
+    });
+}
+
+#[test]
+fn production_cook_terminal_failure_and_cancellation_record_mission_span() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        for (cook_id, state) in [
+            (
+                "cook-timing-failed",
+                agent_task_lifecycle::AgentTaskRunState::Failed,
+            ),
+            (
+                "cook-timing-cancelled",
+                agent_task_lifecycle::AgentTaskRunState::Cancelled,
+            ),
+        ] {
+            let run_id = format!("{cook_id}-attempt-1");
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.identity.initial_run_id = run_id.clone();
+            options.provider_transport.attempt_dispatcher = None;
+            super::super::persist_initial_recipe(&options).unwrap();
+            let lifecycle_store = test_lifecycle_store();
+            for id in [cook_id, run_id.as_str()] {
+                lifecycle_store
+                    .submit_plan_with_runtime_admission(&options.identity.initial_plan, id, |_| {
+                        Ok(serde_json::json!({}))
+                    })
+                    .unwrap();
+            }
+            lifecycle_store
+                .record_cook_attempt(cook_id, 1, &run_id)
+                .unwrap();
+            if state == agent_task_lifecycle::AgentTaskRunState::Cancelled {
+                agent_task_lifecycle::cancel_run(&run_id, Some("timing fixture")).unwrap();
+            } else {
+                agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+                    record.set_state_for_test(state);
+                })
+                .unwrap();
+            }
+            let store = CookRecipeStore::from_current_data_root().unwrap();
+            for _ in 0..2 {
+                let result = CookService::run(
+                    options.clone(),
+                    CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
+                    CookMode::Resume,
+                )
+                .unwrap();
+                assert!(result.value.disposition.is_terminal(), "{result:#?}");
+                assert_ne!(result.exit_code, 0);
+            }
+            let observation = lifecycle_store.open_observation_initialized().unwrap();
+            let spans = observation.phase_spans(cook_id).unwrap();
+            assert_eq!(spans.spans.len(), 1);
+            assert_eq!(spans.spans[0].id, "cook");
+            assert_eq!(
+                serde_json::to_value(spans.spans[0].status).unwrap(),
+                "failed"
+            );
+            assert!(!observation
+                .phase_spans(&run_id)
+                .unwrap()
+                .spans
+                .iter()
+                .any(|span| span.id == "cook"));
+        }
     });
 }
 
