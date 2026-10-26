@@ -556,21 +556,10 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
 
     /// Returns the config directory below an already-resolved config root.
     ///
-    /// This is the rooted primitive every other path resolution derives from.
-    /// Override *this*, never the ambient [`ConfigEntity::config_dir`]: an
-    /// override that resolves its own root would silently ignore the root the
-    /// generic CRUD layer hands it, which is invisible at the call site and
-    /// indistinguishable from working code (#7505, #12595).
+    /// Every config path derives from this rooted primitive. Overrides must
+    /// honor the supplied root so the generic CRUD layer stays in one home.
     fn config_dir_in_root(config_root: &Path) -> PathBuf {
         config_root.join(Self::DIR_NAME)
-    }
-
-    /// Returns the config directory path.
-    ///
-    /// Ambient sibling of [`ConfigEntity::config_dir_in_root`]: resolves the
-    /// process config root once and delegates. Do not override.
-    fn config_dir() -> Result<PathBuf> {
-        Ok(Self::config_dir_in_root(&paths::homeboy()?))
     }
 
     /// Returns the config file path for a given ID below an already-resolved
@@ -579,21 +568,8 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
     /// Default: `{config_root}/{DIR_NAME}/{id}.json`. Override *this* for
     /// non-standard layouts — for example the directory-backed
     /// `{dir}/{id}/{id}.json` shape used by projects and extensions.
-    ///
-    /// Overriding the ambient [`ConfigEntity::config_path`] instead is the
-    /// shadowing bug this rooting exists to remove: the rooted default would be
-    /// bypassed for that entity alone, so it would read and write a different
-    /// home than every other entity in the same operation.
     fn config_path_in_root(config_root: &Path, id: &str) -> PathBuf {
         Self::config_dir_in_root(config_root).join(format!("{}.json", id))
-    }
-
-    /// Returns the config file path for a given ID.
-    ///
-    /// Ambient sibling of [`ConfigEntity::config_path_in_root`]: resolves the
-    /// process config root once and delegates. Do not override.
-    fn config_path(id: &str) -> Result<PathBuf> {
-        Ok(Self::config_path_in_root(&paths::homeboy()?, id))
     }
 
     /// Whether this entity accepts `{dir}/{id}.json` entries while listing.
@@ -908,7 +884,7 @@ pub fn list<T: ConfigEntity>() -> Result<Vec<T>> {
 /// Every registered entity is probed under the one root passed in. Resolving
 /// per-entity would let the guard clear an ID in one home and the write land in
 /// another — a collision check that fails open.
-pub fn check_id_collision_in_root(config_root: &Path, id: &str, saving_type: &str) -> Result<()> {
+fn check_id_collision_in_root(config_root: &Path, id: &str, saving_type: &str) -> Result<()> {
     for metadata in config_entity_registry() {
         if metadata.entity_type == saving_type {
             continue;
@@ -1059,13 +1035,10 @@ fn create_single_from_json_in_root<T: ConfigEntity>(
     create_single_in_root(config_root, entity)
 }
 
-/// Unified create below an already-resolved config root, auto-detecting single
-/// vs bulk operations.
-pub fn create_in_root<T: ConfigEntity>(
-    config_root: &Path,
-    json_spec: &str,
-    skip_existing: bool,
-) -> Result<CreateOutput<T>> {
+/// Unified create that auto-detects single vs bulk operations.
+/// Array input triggers batch create, object input triggers single create.
+pub fn create<T: ConfigEntity>(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<T>> {
+    let config_root = &paths::homeboy()?;
     let raw = read_json_spec_to_string(json_spec)?;
 
     if is_json_array(&raw) {
@@ -1082,14 +1055,8 @@ pub fn create_in_root<T: ConfigEntity>(
     )?))
 }
 
-/// Unified create that auto-detects single vs bulk operations.
-/// Array input triggers batch create, object input triggers single create.
-pub fn create<T: ConfigEntity>(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<T>> {
-    create_in_root::<T>(&paths::homeboy()?, json_spec, skip_existing)
-}
-
 /// Delete an entity below an already-resolved config root, unconditionally.
-pub fn delete_in_root<T: ConfigEntity>(config_root: &Path, id: &str) -> Result<()> {
+fn delete_in_root<T: ConfigEntity>(config_root: &Path, id: &str) -> Result<()> {
     let path = T::config_path_in_root(config_root, id);
     if !path.exists() {
         let suggestions = find_similar_ids_in_root::<T>(config_root, id);
@@ -1154,14 +1121,14 @@ pub fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
 // Merge Operations
 // ============================================================================
 
-/// Unified merge below an already-resolved config root, auto-detecting single
-/// vs bulk operations.
-pub fn merge_in_root<T: ConfigEntity>(
-    config_root: &Path,
+/// Unified merge that auto-detects single vs bulk operations.
+/// Array input triggers batch merge, object input triggers single merge.
+pub fn merge<T: ConfigEntity>(
     id: Option<&str>,
     json_spec: &str,
     replace_fields: &[String],
 ) -> Result<MergeOutput> {
+    let config_root = &paths::homeboy()?;
     let raw = read_json_spec_to_string(json_spec)?;
 
     if is_json_array(&raw) {
@@ -1177,16 +1144,6 @@ pub fn merge_in_root<T: ConfigEntity>(
         &raw,
         replace_fields,
     )?))
-}
-
-/// Unified merge that auto-detects single vs bulk operations.
-/// Array input triggers batch merge, object input triggers single merge.
-pub fn merge<T: ConfigEntity>(
-    id: Option<&str>,
-    json_spec: &str,
-    replace_fields: &[String],
-) -> Result<MergeOutput> {
-    merge_in_root::<T>(&paths::homeboy()?, id, json_spec, replace_fields)
 }
 
 // ============================================================================
@@ -1396,12 +1353,12 @@ pub fn merge_batch_from_json<T: ConfigEntity>(raw_json: &str) -> Result<BatchRes
     merge_batch_from_json_in_root::<T>(&paths::homeboy()?, raw_json)
 }
 
-/// Remove JSON fields from one entity below an already-resolved config root.
-pub fn remove_from_json_in_root<T: ConfigEntity>(
-    config_root: &Path,
+/// Remove JSON fields from one entity under the process config root.
+pub fn remove_from_json<T: ConfigEntity>(
     id: Option<&str>,
     json_spec: &str,
 ) -> Result<RemoveResult> {
+    let config_root = &paths::homeboy()?;
     let raw = read_json_spec_to_string(json_spec)?;
     let mut parsed: serde_json::Value = from_str(&raw)?;
 
@@ -1432,13 +1389,6 @@ pub fn remove_from_json_in_root<T: ConfigEntity>(
         id: effective_id,
         removed_from: result.removed_from,
     })
-}
-
-pub fn remove_from_json<T: ConfigEntity>(
-    id: Option<&str>,
-    json_spec: &str,
-) -> Result<RemoveResult> {
-    remove_from_json_in_root::<T>(&paths::homeboy()?, id, json_spec)
 }
 
 /// Rename an entity below an already-resolved config root.
@@ -1530,18 +1480,10 @@ pub fn rename_in_root<T: ConfigEntity>(config_root: &Path, id: &str, new_id: &st
     Ok(())
 }
 
-pub fn rename<T: ConfigEntity>(id: &str, new_id: &str) -> Result<()> {
-    rename_in_root::<T>(&paths::homeboy()?, id, new_id)
-}
-
-/// Delete an entity below an already-resolved config root, with a referential
-/// integrity check.
-///
-/// The existence probe, the dependency probe, and the delete all read the one
-/// root passed in. A dependency probe answered from a different home is a gate
-/// that fails open: it reports "no dependents" for an entity that is still
-/// referenced in the home being deleted from.
-pub fn delete_safe_in_root<T: ConfigEntity>(config_root: &Path, id: &str) -> Result<()> {
+/// Delete an entity with a referential integrity check.
+/// The existence probe, dependency probe, and delete share one resolved root.
+pub fn delete_safe<T: ConfigEntity>(id: &str) -> Result<()> {
+    let config_root = &paths::homeboy()?;
     if !exists_in_root::<T>(config_root, id) {
         let suggestions = find_similar_ids_in_root::<T>(config_root, id);
         return Err(T::not_found_error(id.to_string(), suggestions));
@@ -1565,14 +1507,6 @@ pub fn delete_safe_in_root<T: ConfigEntity>(config_root: &Path, id: &str) -> Res
     delete_in_root::<T>(config_root, id)
 }
 
-/// Delete an entity with referential integrity check.
-///
-/// Verifies the entity exists, checks for dependents via the trait hook,
-/// and only deletes if nothing references it.
-pub fn delete_safe<T: ConfigEntity>(id: &str) -> Result<()> {
-    delete_safe_in_root::<T>(&paths::homeboy()?, id)
-}
-
 /// Find entity IDs similar to the given target.
 /// Uses prefix matching, suffix matching, and Levenshtein distance.
 /// Returns up to 3 matches prioritized by match quality.
@@ -1583,14 +1517,6 @@ pub fn find_similar_ids_in_root<T: ConfigEntity>(config_root: &Path, target: &st
     };
 
     find_similar_ids_in(target, &entities)
-}
-
-pub fn find_similar_ids<T: ConfigEntity>(target: &str) -> Vec<String> {
-    let Ok(config_root) = paths::homeboy() else {
-        return vec![];
-    };
-
-    find_similar_ids_in_root::<T>(&config_root, target)
 }
 
 fn find_similar_ids_in<T: ConfigEntity>(target: &str, entities: &[T]) -> Vec<String> {
@@ -1698,6 +1624,24 @@ mod tests {
             find_similar_ids_in("stag", &entities),
             vec!["beta-project (alias: staging)".to_string()]
         );
+    }
+
+    #[test]
+    fn ambient_mutations_preserve_entity_paths_and_fields() {
+        crate::test_support::with_isolated_home(|_| {
+            create::<TestEntity>(r#"{"id":"alpha","aliases":[]}"#, false).unwrap();
+            let path = paths::homeboy().unwrap().join("tests/alpha.json");
+            assert!(path.is_file());
+
+            merge::<TestEntity>(Some("alpha"), r#"{"aliases":["prod"]}"#, &[]).unwrap();
+            assert_eq!(load::<TestEntity>("alpha").unwrap().aliases, vec!["prod"]);
+            remove_from_json::<TestEntity>(Some("alpha"), r#"{"aliases":["prod"]}"#).unwrap();
+            assert!(load::<TestEntity>("alpha").unwrap().aliases.is_empty());
+
+            delete_safe::<TestEntity>("alpha").unwrap();
+            assert!(!path.exists());
+            assert!(delete::<TestEntity>("alpha").is_err());
+        });
     }
 
     #[test]
@@ -2025,20 +1969,11 @@ mod tests {
 /// `load`, `list`, `save`, `delete`, `exists`, `remove_from_json`, `create`,
 /// `rename`, `delete_safe`.
 ///
-/// Every one of them gets an `_in_root` sibling — `load_in_root`,
-/// `list_in_root`, `save_in_root`, `delete_in_root`, `exists_in_root`,
-/// `remove_from_json_in_root`, `create_in_root`, `rename_in_root`,
-/// `delete_safe_in_root` (and `list_ids_in_root` / `merge_in_root` under those
-/// features) — which resolve every path *and every cross-entity read* from the
-/// config root they are handed instead of from process-global state.
+/// Operations with explicit-root callers also expose `load_in_root`,
+/// `list_in_root`, and `exists_in_root`. These share the rooted `ConfigEntity`
+/// hooks with the ambient operations.
 ///
-/// The mutating siblings became possible once `ConfigEntity`'s cross-entity
-/// hooks were rooted. `validate_in_root`, `dependents_in_root` and
-/// `on_rename_in_root` are the only spellings the trait offers, so an entity
-/// cannot supply an ambient-only hook that a rooted wrapper would silently
-/// bypass — the half-rooted shape this campaign exists to remove (#7505).
-///
-/// `rename` calls `config::rename`, then the entity's `on_rename_in_root` hook
+/// `rename` calls `config::rename_in_root`, then the entity's `on_rename_in_root` hook
 /// (for updating references in other entities), then reloads. The ambient
 /// spelling resolves the root once and threads it through all three, so a
 /// rename can never move a file in one installation and fix up references in
@@ -2096,21 +2031,8 @@ macro_rules! entity_crud {
             $crate::config::save(entity)
         }
 
-        /// Validate and write to an already-resolved config root.
-        pub fn save_in_root(
-            config_root: &::std::path::Path,
-            entity: &$Entity,
-        ) -> $crate::Result<()> {
-            $crate::config::save_in_root(config_root, entity)
-        }
-
         pub fn delete(id: &str) -> $crate::Result<()> {
             $crate::config::delete::<$Entity>(id)
-        }
-
-        /// Delete from an already-resolved config root.
-        pub fn delete_in_root(config_root: &::std::path::Path, id: &str) -> $crate::Result<()> {
-            $crate::config::delete_in_root::<$Entity>(config_root, id)
         }
 
         pub fn exists(id: &str) -> bool {
@@ -2129,15 +2051,6 @@ macro_rules! entity_crud {
             $crate::config::remove_from_json::<$Entity>(id, json_spec)
         }
 
-        /// Remove JSON fields from an already-resolved config root.
-        pub fn remove_from_json_in_root(
-            config_root: &::std::path::Path,
-            id: Option<&str>,
-            json_spec: &str,
-        ) -> $crate::Result<$crate::RemoveResult> {
-            $crate::config::remove_from_json_in_root::<$Entity>(config_root, id, json_spec)
-        }
-
         pub fn create(
             json_spec: &str,
             skip_existing: bool,
@@ -2145,24 +2058,9 @@ macro_rules! entity_crud {
             $crate::config::create::<$Entity>(json_spec, skip_existing)
         }
 
-        /// Create into an already-resolved config root.
-        pub fn create_in_root(
-            config_root: &::std::path::Path,
-            json_spec: &str,
-            skip_existing: bool,
-        ) -> $crate::Result<$crate::CreateOutput<$Entity>> {
-            $crate::config::create_in_root::<$Entity>(config_root, json_spec, skip_existing)
-        }
-
-        /// Rename within an already-resolved config root.
-        ///
-        /// The move, the `on_rename_in_root` reference fixup, and the reload
-        /// all read the one root passed in.
-        pub fn rename_in_root(
-            config_root: &::std::path::Path,
-            id: &str,
-            new_id: &str,
-        ) -> $crate::Result<$Entity> {
+        /// Rename, fix up references, and reload under one resolved root.
+        pub fn rename(id: &str, new_id: &str) -> $crate::Result<$Entity> {
+            let config_root = &$crate::paths::homeboy()?;
             $crate::config::rename_in_root::<$Entity>(config_root, id, new_id)?;
             let resolved_id = new_id.to_lowercase();
             <$Entity as $crate::config::ConfigEntity>::on_rename_in_root(
@@ -2173,21 +2071,8 @@ macro_rules! entity_crud {
             load_in_root(config_root, &resolved_id)
         }
 
-        pub fn rename(id: &str, new_id: &str) -> $crate::Result<$Entity> {
-            rename_in_root(&$crate::paths::homeboy()?, id, new_id)
-        }
-
         pub fn delete_safe(id: &str) -> $crate::Result<()> {
             $crate::config::delete_safe::<$Entity>(id)
-        }
-
-        /// Delete from an already-resolved config root, with the referential
-        /// integrity check.
-        pub fn delete_safe_in_root(
-            config_root: &::std::path::Path,
-            id: &str,
-        ) -> $crate::Result<()> {
-            $crate::config::delete_safe_in_root::<$Entity>(config_root, id)
         }
 
         // --- Optional features ---
@@ -2199,13 +2084,6 @@ macro_rules! entity_crud {
         pub fn list_ids() -> $crate::Result<Vec<String>> {
             $crate::config::list_ids::<$Entity>()
         }
-
-        /// List IDs from an already-resolved config root.
-        pub fn list_ids_in_root(
-            config_root: &::std::path::Path,
-        ) -> $crate::Result<Vec<String>> {
-            $crate::config::list_ids_in_root::<$Entity>(config_root)
-        }
     };
 
     // Feature: merge (standard one-liner)
@@ -2216,16 +2094,6 @@ macro_rules! entity_crud {
             replace_fields: &[String],
         ) -> $crate::Result<$crate::MergeOutput> {
             $crate::config::merge::<$Entity>(id, json_spec, replace_fields)
-        }
-
-        /// Merge into an already-resolved config root.
-        pub fn merge_in_root(
-            config_root: &::std::path::Path,
-            id: Option<&str>,
-            json_spec: &str,
-            replace_fields: &[String],
-        ) -> $crate::Result<$crate::MergeOutput> {
-            $crate::config::merge_in_root::<$Entity>(config_root, id, json_spec, replace_fields)
         }
     };
 
