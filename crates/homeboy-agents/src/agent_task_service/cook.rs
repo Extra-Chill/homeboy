@@ -5176,48 +5176,46 @@ fn run_cook_with_runtime(
             result.exit_code != 0,
         );
         if result.value.disposition.is_terminal() {
-            let finalized =
-                lifecycle_store
-                    .open_observation_initialized()
-                    .and_then(|observation| {
-                        let status = if result.exit_code == 0 {
-                            homeboy_core::observation::RunStatus::Pass
-                        } else {
-                            homeboy_core::observation::RunStatus::Fail
-                        };
-                        let mut run_ids = result.value.history_run_ids.clone();
-                        run_ids.extend(result.value.invocation_run_ids.iter().cloned());
-                        run_ids.push(result.value.cook_id.clone());
-                        run_ids.extend(result.value.latest_run_id.iter().cloned());
-                        run_ids.sort();
-                        run_ids.dedup();
-                        for run_id in run_ids {
-                            // A detached handoff can settle `pass` before a failing
-                            // continuation (Extra-Chill/homeboy#15393).
-                            let finished = observation
-                                .finish_running_run(&run_id, status, None)
-                                .and_then(|_| {
-                                    if status == homeboy_core::observation::RunStatus::Fail {
-                                        observation.correct_passed_run_to_failed(
-                                            &run_id,
-                                            &format!(
-                                                "cook finished {} after the run was recorded pass",
-                                                result.value.status
-                                            ),
-                                        )?;
-                                    }
-                                    Ok(())
-                                });
-                            if let Err(error) = finished {
-                                homeboy_core::log_status!(
-                                    "agent-task",
-                                    "Cook run persistence failed for {run_id}: {}",
-                                    error
-                                );
-                            }
+            let finalized = lifecycle_store
+                .open_observation_initialized()
+                .map(|observation| {
+                    let status = if result.exit_code == 0 {
+                        homeboy_core::observation::RunStatus::Pass
+                    } else {
+                        homeboy_core::observation::RunStatus::Fail
+                    };
+                    let mut run_ids = result.value.history_run_ids.clone();
+                    run_ids.extend(result.value.invocation_run_ids.iter().cloned());
+                    run_ids.push(result.value.cook_id.clone());
+                    run_ids.extend(result.value.latest_run_id.iter().cloned());
+                    run_ids.sort();
+                    run_ids.dedup();
+                    for run_id in run_ids {
+                        // A detached handoff can settle `pass` before a failing
+                        // continuation (Extra-Chill/homeboy#15393).
+                        let finished = observation
+                            .finish_running_run(&run_id, status, None)
+                            .and_then(|_| {
+                                if status != homeboy_core::observation::RunStatus::Fail {
+                                    return Ok(false);
+                                }
+                                observation.correct_passed_run_to_failed(
+                                    &run_id,
+                                    &format!(
+                                        "cook finished {} after the run was recorded pass",
+                                        result.value.status
+                                    ),
+                                )
+                            });
+                        if let Err(error) = finished {
+                            homeboy_core::log_status!(
+                                "agent-task",
+                                "Cook run persistence failed for {run_id}: {}",
+                                error
+                            );
                         }
-                        Ok(())
-                    });
+                    }
+                });
             if let Err(error) = finalized {
                 homeboy_core::log_status!("agent-task", "Cook run persistence failed: {}", error);
             }
