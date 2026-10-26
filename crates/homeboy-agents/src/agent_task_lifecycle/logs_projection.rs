@@ -93,8 +93,8 @@ fn control_plane_event_read_error(
     if error.code == homeboy_core::ErrorCode::ValidationInvalidArgument
         && error.message.contains("not found")
     {
-        homeboy_control_plane_contract::ControlPlaneError::not_found(error.message)
+        homeboy_control_plane_contract::ControlPlaneError::not_found(error.message_with_cause())
     } else {
-        homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
+        homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message_with_cause())
     }
 }

@@ -126,6 +126,11 @@ pub(crate) struct CookRecoveryInputs<'a> {
     pub retry_admitted: bool,
     /// Why retry admission refused this attempt, when it did.
     pub retry_refusal: Option<&'a str>,
+    /// The attempt was cancelled without an operator request (a runner-side
+    /// cancel, an upgrade drain, a wait budget) and retry admission accepts a
+    /// fresh attempt from its plan. Continuation admission does not apply:
+    /// the cancelled attempt has no terminal result to continue from.
+    pub involuntary_cancellation_retry_admitted: bool,
     /// The checkpoint's typed recovery action is `fork_replacement`.
     pub exact_checkpoint_candidate_mismatch: bool,
     /// The attempt's terminal continuation failed and must be rearmed.
@@ -208,6 +213,12 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
                 "Retry admission refused this `pre_execution_failure` attempt: {refusal}. Inspect it with `agent-task diagnose`."
             ));
         }
+    }
+    // Only an operator's `agent-task cancel` settles a Cook. Any other cancel
+    // left it without a result, and `agent-task retry` already admits a fresh
+    // attempt, so `recover` performs that retry instead of reporting no step.
+    if status == CookStatus::Cancelled && inputs.involuntary_cancellation_retry_admitted {
+        return CookRecoveryStep::Retry;
     }
     let continuation_eligible = match &status {
         CookStatus::Completed

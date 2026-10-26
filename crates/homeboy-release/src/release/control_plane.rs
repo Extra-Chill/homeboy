@@ -53,10 +53,10 @@ pub(super) fn recover_deploy_action(
         ));
     }
     let roots = homeboy_core::paths::PathRoots::from_environment()
-        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
     let current = ObservationStore::open_readonly_in_roots(&roots)
         .and_then(|store| store.get_run(&run.id))
-        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
     let status = current
         .as_ref()
         .map(|current| current.status.as_str())
@@ -112,13 +112,13 @@ pub(super) fn resume_deploy_action(
             ControlPlaneError::invalid_argument("deploy run has no recovery component")
         })?;
     let roots = homeboy_core::paths::PathRoots::from_environment()
-        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
     let deployment = super::deployment::resume_deployment_for_run(&roots, component_id, &run.id)
-        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
     let Some(deployment) = deployment else {
         let current = ObservationStore::open_readonly_in_roots(&roots)
             .and_then(|store| store.get_run(&run.id))
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            .map_err(|error| ControlPlaneError::unavailable(error.message_with_cause()))?;
         let current_succeeded = current
             .as_ref()
             .is_some_and(|current| current.status == RunStatus::Pass.as_str());

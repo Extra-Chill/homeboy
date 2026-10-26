@@ -26061,3 +26061,53 @@ fn cook_pr_body_never_closes_pull_request_or_external_task_issue_relationship() 
         assert!(body.contains("Relates to"), "{task_url}: {body}");
     }
 }
+
+#[test]
+fn recover_retries_a_runner_cancelled_cook_but_not_an_operator_cancelled_one() {
+    for (cook_id, provenance, expected) in [
+        (
+            "cook-runner-cancelled",
+            Some(serde_json::json!({
+                "actor": "runner",
+                "cause": "runner_job_cancelled",
+                "reason": "runner job was cancelled",
+            })),
+            Some(crate::agent_task_service::CookRecoveryStep::Retry),
+        ),
+        ("cook-operator-cancelled", None, None),
+    ] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+            options.retry_policy.max_attempts = 2;
+            super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+            super::super::materialize_initial_cook_attempt(&options)
+                .expect("materialize first attempt");
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+            agent_task_lifecycle::cancel_exact_run_in_store_with_provenance(
+                &store,
+                &options.identity.initial_run_id,
+                Some("cancelled"),
+                provenance,
+            )
+            .expect("cancel first attempt");
+
+            let (report, _) = crate::agent_task_service::recover_cook(
+                cook_id,
+                crate::agent_task_service::CookRecoveryRequest {
+                    preflight: true,
+                    ..Default::default()
+                },
+                &ReplacementOnlyRecoveryPerformer,
+            )
+            .expect("recover --preflight");
+            assert_eq!(report.status, "cancelled", "{cook_id}");
+            match expected {
+                Some(step) => assert_eq!(report.step, step, "{cook_id}"),
+                None => assert!(report.step.is_none(), "{cook_id}: {:?}", report.step),
+            }
+        });
+    }
+}
