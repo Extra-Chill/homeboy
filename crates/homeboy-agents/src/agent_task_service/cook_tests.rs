@@ -19133,14 +19133,17 @@ fn a_finished_failing_replacement_run_is_replaced_without_interrupted_rerun_auth
 fn a_replacement_refused_before_its_gates_leaves_no_fence() {
     with_corrected_gate_failure(false, |options, target| {
         let run_id = &options.identity.initial_run_id;
-        // A hand commit moves the destination HEAD off the candidate's ancestry.
-        git_output(&target, &["commit", "--quiet", "-am", "hand salvage"]).unwrap();
+        // A destination tree that diverged from the candidate's refuses
+        // before any gate runs.
+        let tracked = target.join("tracked.txt");
+        let promoted = std::fs::read_to_string(&tracked).unwrap();
+        std::fs::write(&tracked, "diverged\n").unwrap();
         let refused = corrected_replacement_gates(run_id, "test \"$(cat tracked.txt)\" = promoted")
-            .expect_err("no reachable candidate refuses before any gate runs");
-        assert!(refused.message.contains("no reachable immutable candidate"));
+            .expect_err("a diverged destination refuses before any gate runs");
+        assert!(format!("{refused:?}").contains("but the promotion destination tree is"));
         assert!(replacement_gate_fence(run_id).is_null());
 
-        git_output(&target, &["reset", "--quiet", "HEAD~"]).unwrap();
+        std::fs::write(&tracked, promoted).unwrap();
         let replacement =
             corrected_replacement_gates(run_id, "test \"$(cat tracked.txt)\" = promoted")
                 .expect("the retry needs no interrupted-rerun authority");
