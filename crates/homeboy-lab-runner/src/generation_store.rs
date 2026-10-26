@@ -1312,7 +1312,12 @@ trait GenerationEndpointOperations {
     fn queued_jobs(&self, _session: &RunnerSession) -> Option<Vec<crate::RunnerJob>> {
         None
     }
-    fn cancel_job(&self, _session: &RunnerSession, _job_id: &str) -> bool {
+    fn cancel_job(
+        &self,
+        _session: &RunnerSession,
+        _job_id: &str,
+        _request: &homeboy_core::api_jobs::RunnerJobCancelRequest,
+    ) -> bool {
         false
     }
     fn evidence(&self, _session: &RunnerSession, _path: &str) -> Option<serde_json::Value> {
@@ -1373,7 +1378,13 @@ fn reconcile_cancelled_queued_jobs(
                 == Some(run_id)
             && is_cancelled(run_id)
         {
-            operations.cancel_job(session, &job.job_id);
+            operations.cancel_job(
+                session,
+                &job.job_id,
+                &homeboy_core::api_jobs::RunnerJobCancelRequest::from_controller(&format!(
+                    "replay controller cancellation of queued run {run_id}"
+                )),
+            );
         }
     }
 }
@@ -1411,7 +1422,12 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
         queued_generation_jobs(&response, session)
     }
 
-    fn cancel_job(&self, session: &RunnerSession, job_id: &str) -> bool {
+    fn cancel_job(
+        &self,
+        session: &RunnerSession,
+        job_id: &str,
+        request: &homeboy_core::api_jobs::RunnerJobCancelRequest,
+    ) -> bool {
         if self.active_jobs(session).is_none() {
             return false;
         }
@@ -1424,6 +1440,7 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
                 "{}/jobs/{encoded}/cancel",
                 url.trim_end_matches('/')
             ))
+            .json(request)
             .send()
             .is_ok_and(|response| response.status().is_success())
     }
@@ -1622,13 +1639,26 @@ impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
         queued_generation_jobs(&response, session)
     }
 
-    fn cancel_job(&self, session: &RunnerSession, job_id: &str) -> bool {
+    fn cancel_job(
+        &self,
+        session: &RunnerSession,
+        job_id: &str,
+        request: &homeboy_core::api_jobs::RunnerJobCancelRequest,
+    ) -> bool {
         if self.authenticated_health(session).is_none() {
             return false;
         }
         let encoded = homeboy_core::execution_contract::encode_uri_component(job_id);
-        self.request("POST", session, &format!("/jobs/{encoded}/cancel"), None)
-            .is_some()
+        let Ok(body) = serde_json::to_string(request) else {
+            return false;
+        };
+        self.request(
+            "POST",
+            session,
+            &format!("/jobs/{encoded}/cancel"),
+            Some(&body),
+        )
+        .is_some()
     }
 
     fn job_record(&self, session: &RunnerSession, job_id: &str) -> Option<serde_json::Value> {
@@ -1703,8 +1733,14 @@ where
             .or_else(|| self.fallback.queued_jobs(session))
     }
 
-    fn cancel_job(&self, session: &RunnerSession, job_id: &str) -> bool {
-        self.primary.cancel_job(session, job_id) || self.fallback.cancel_job(session, job_id)
+    fn cancel_job(
+        &self,
+        session: &RunnerSession,
+        job_id: &str,
+        request: &homeboy_core::api_jobs::RunnerJobCancelRequest,
+    ) -> bool {
+        self.primary.cancel_job(session, job_id, request)
+            || self.fallback.cancel_job(session, job_id, request)
     }
 
     fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
@@ -3461,7 +3497,12 @@ mod tests {
             Some(self.queued.borrow().clone())
         }
 
-        fn cancel_job(&self, session: &RunnerSession, job_id: &str) -> bool {
+        fn cancel_job(
+            &self,
+            session: &RunnerSession,
+            job_id: &str,
+            _request: &homeboy_core::api_jobs::RunnerJobCancelRequest,
+        ) -> bool {
             self.cancelled.borrow_mut().push((
                 session.remote_daemon_lease_id.clone().expect("lease"),
                 job_id.to_string(),
@@ -4847,7 +4888,7 @@ mod tests {
             cancellable.local_url = Some(format!("http://{address}"));
 
             let (job, _events) =
-                crate::runner_job_cancel_for_session(&cancellable, &job_id.to_string())
+                crate::runner_job_cancel_for_session(&cancellable, &job_id.to_string(), "fixture")
                     .expect("cancel queued job");
             assert_eq!(job.status, homeboy_core::api_jobs::JobStatus::Cancelled);
             server.join().expect("fixture server");

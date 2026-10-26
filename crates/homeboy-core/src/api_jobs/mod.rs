@@ -12,8 +12,8 @@ pub(crate) use persistence::timestamp_ms;
 pub(crate) use remote_runner::canonical_run_ref_metadata;
 pub use remote_runner::{
     runner_api_submission_payload_fingerprint, JobArtifactMetadata, RemoteRunnerJobRequest,
-    RemoteRunnerJobResult, RemoteRunnerObservationRunDetail, RunnerJobLifecycleMetadata,
-    RunnerJobProjectionCancelRequest,
+    RemoteRunnerJobResult, RemoteRunnerObservationRunDetail, RunnerJobCancelRequest,
+    RunnerJobLifecycleMetadata, RunnerJobProjectionCancelRequest,
 };
 pub(crate) use runner_job_preparation::with_runner_job_preparation;
 pub use runner_job_preparation::{

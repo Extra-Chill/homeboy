@@ -411,7 +411,11 @@ fn execute_owned(
         Err(error) => {
             // Cancellation goes through the admitted job owner, then wait
             // for its authoritative terminal state before releasing gates.
-            crate::runner_job_cancel(&request.runner_id, job_id)?;
+            crate::runner_job_cancel(
+                &request.runner_id,
+                job_id,
+                &format!("gate observation failed: {}", error.message),
+            )?;
             let cancelled_terminal = crate::execution::observe_daemon_job_until_terminal(
                 &request.runner_id,
                 job_id,

@@ -228,6 +228,7 @@ where
                     &flow.runner.settings,
                     flow.lab_runner_workload.as_ref(),
                 ),
+                wait_timeout,
             );
             if let WaitTimeoutCancelOutcome::Cancelled(cancelled_job) = &cancellation {
                 if cancelled_job.status.is_terminal() {

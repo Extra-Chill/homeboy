@@ -111,17 +111,6 @@ impl RunnerEvidenceProvider for RunnerEvidence {
         super::super::connection::runner_artifact_content(runner_id, job_id, artifact_id)
     }
 
-    fn runner_job_cancel(
-        &self,
-        runner_id: &str,
-        job_id: &str,
-    ) -> Result<(
-        homeboy_core::api_jobs::Job,
-        Vec<homeboy_core::api_jobs::JobEvent>,
-    )> {
-        super::super::execution::runner_job_cancel(runner_id, job_id)
-    }
-
     fn runner_job_cancel_projection(
         &self,
         runner_id: &str,

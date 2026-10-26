@@ -3,7 +3,9 @@ use std::time::Duration;
 use reqwest::blocking::Client;
 use serde_json::Value;
 
-use homeboy_core::api_jobs::{Job, JobEvent, RunnerJobProjectionCancelRequest};
+use homeboy_core::api_jobs::{
+    Job, JobEvent, RunnerJobCancelRequest, RunnerJobProjectionCancelRequest,
+};
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 
@@ -137,21 +139,34 @@ pub(super) fn attempt_wait_timeout_cancel(
     runner_id: &str,
     job_id: &str,
     enabled: bool,
+    wait_timeout: ResolvedRunnerExecWaitTimeout,
 ) -> WaitTimeoutCancelOutcome {
     if !enabled {
         return WaitTimeoutCancelOutcome::Disabled;
     }
-    match invoke_runner_job_cancel(runner_id, job_id) {
-        Ok(job) => WaitTimeoutCancelOutcome::Cancelled(job),
+    let cause = format!(
+        "controller wait timeout ({}s, {})",
+        wait_timeout.timeout.as_secs(),
+        wait_timeout.source.label()
+    );
+    match runner_job_cancel(runner_id, job_id, &cause) {
+        Ok((job, _)) => WaitTimeoutCancelOutcome::Cancelled(job),
         Err(err) => WaitTimeoutCancelOutcome::Failed(err.message),
     }
 }
 
-fn invoke_runner_job_cancel(runner_id: &str, job_id: &str) -> Result<Job> {
-    runner_job_cancel(runner_id, job_id).map(|(job, _)| job)
+fn runner_job_cancel_payload(cause: &str) -> Value {
+    serde_json::to_value(RunnerJobCancelRequest::from_controller(cause))
+        .unwrap_or_else(|_| serde_json::json!({}))
 }
 
-pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobEvent>)> {
+/// Cancel a runner job. `cause` names the controller path asking for it; the
+/// runner records it, with this controller's host, on the cancelled event.
+pub fn runner_job_cancel(
+    runner_id: &str,
+    job_id: &str,
+    cause: &str,
+) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
     let Some(current_session) = connected.session.filter(|_| connected.connected) else {
@@ -175,7 +190,7 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
         })?;
     let path = format!("/jobs/{job_id}/cancel");
     let body = if let Some(local_url) = session.local_url.as_deref() {
-        let data = daemon_post(&client, local_url, &path)?;
+        let data = daemon_post(&client, local_url, &path, &runner_job_cancel_payload(cause))?;
         canonical_daemon_body(&data, "daemon job cancel response")?.clone()
     } else {
         return Err(runner_job_cancel_unsupported(
@@ -191,6 +206,7 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
 pub fn runner_job_cancel_for_session(
     session: &crate::RunnerSession,
     job_id: &str,
+    cause: &str,
 ) -> Result<(Job, Vec<JobEvent>)> {
     let local_url = session.local_url.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -207,7 +223,12 @@ pub fn runner_job_cancel_for_session(
         .map_err(|err| {
             Error::internal_unexpected(format!("build runner job cancel client: {err}"))
         })?;
-    let data = daemon_post(&client, local_url, &format!("/jobs/{job_id}/cancel"))?;
+    let data = daemon_post(
+        &client,
+        local_url,
+        &format!("/jobs/{job_id}/cancel"),
+        &runner_job_cancel_payload(cause),
+    )?;
     let (job, events) = parse_runner_job_cancel_body(
         canonical_daemon_body(&data, "daemon job cancel response")?.clone(),
     )?;
@@ -384,8 +405,7 @@ pub(super) fn runner_exec_wait_timeout(
 /// that produced it. The source is part of the contract: when this budget
 /// expires and the controller cancels the remote job, the operator-facing
 /// message must name which budget fired and its value, because the runner-side
-/// cancellation provenance only records "cancel requested via HTTP API"
-/// (#16168).
+/// cancellation event also records the budget (#16168, #16486).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ResolvedRunnerExecWaitTimeout {
     pub(super) timeout: Duration,

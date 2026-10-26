@@ -9,7 +9,10 @@ use base64::Engine;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::api_jobs::{self, ActiveRunnerJobSummary, JobStore, RunnerJobProjectionCancelRequest};
+use crate::api_jobs::{
+    self, ActiveRunnerJobSummary, JobStore, RunnerJobCancelRequest,
+    RunnerJobProjectionCancelRequest,
+};
 use crate::error::{Error, Result};
 use crate::observation::{
     running_status_note, ArtifactListFilter, FindingListFilter, ObservationStore, RunListFilter,
@@ -702,9 +705,20 @@ where
         }
         HttpEndpoint::JobCancel { id } => {
             let job_id = parse_job_id(id)?;
+            let cancel: RunnerJobCancelRequest = serde_json::from_value(
+                request.body.unwrap_or_else(|| json!({})),
+            )
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "body",
+                    format!("invalid runner job cancellation request: {error}"),
+                    Some(id.clone()),
+                    None,
+                )
+            })?;
             json!({
                 "command": "api.jobs.cancel",
-                "job": job_store.cancel(job_id, "cancel requested via HTTP API")?,
+                "job": job_store.cancel(job_id, cancel.event_message())?,
                 "events": job_store.events(job_id)?,
             })
         }

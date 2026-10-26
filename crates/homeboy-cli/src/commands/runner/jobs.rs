@@ -276,11 +276,12 @@ fn map_daemon_job(result: CmdResult<RunnerJobOutput>) -> CmdResult<RunnerJobComm
 
 fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
     reject_unknown_daemon_owner(job_id)?;
-    let (job, events) = match runner::runner_job_cancel(runner_id, job_id) {
+    const CAUSE: &str = "operator `homeboy runner job cancel`";
+    let (job, events) = match runner::runner_job_cancel(runner_id, job_id, CAUSE) {
         Ok(result) => result,
         Err(_) => {
             let session = runner::reconnect_job_log_owner(runner_id, job_id)?;
-            let result = runner::runner_job_cancel_for_session(&session, job_id);
+            let result = runner::runner_job_cancel_for_session(&session, job_id, CAUSE);
             runner::close_reconnected_job_log_owner(&session);
             result?
         }
