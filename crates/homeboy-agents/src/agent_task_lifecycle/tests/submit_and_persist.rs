@@ -5389,7 +5389,8 @@ fn status_recovers_terminal_state_from_durable_aggregate() {
         submit_plan_in_store(&lifecycle_store, &plan, Some("run-stale-status")).expect("submitted");
         mark_running_in_store(&lifecycle_store, "run-stale-status").expect("marked running");
         let aggregate = succeeded_aggregate(&plan);
-        store::write_aggregate_in_store(&lifecycle_store, "run-stale-status", &aggregate)
+        lifecycle_store
+            .write_aggregate("run-stale-status", &aggregate)
             .expect("aggregate written");
 
         let recovered = reconcile_status_in_store(

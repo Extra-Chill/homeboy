@@ -657,19 +657,41 @@ impl AgentTaskLifecycleStore {
     }
 
     pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {
-        read_controller_plan_in_store(self, run_id)
+        let path = self.controller_plan_path(run_id);
+        let plan = read_json(&path).map_err(|error| {
+            Error::internal_io(
+                format!(
+                    "authoritative controller-owned plan for agent-task run `{run_id}` is unavailable at {}; lifecycle record plan_path is runner execution transport and cannot be used for controller readback: {}",
+                    path.display(),
+                    error.message
+                ),
+                Some(path.display().to_string()),
+            )
+        })?;
+        validate_execution_budget(&plan)?;
+        validate_managed_services(&plan)?;
+        Ok(plan)
     }
 
     pub fn write_aggregate(&self, run_id: &str, aggregate: &AgentTaskAggregate) -> Result<PathBuf> {
-        write_aggregate_in_store(self, run_id, aggregate)
+        let path = self.aggregate_path(run_id);
+        write_json(&path, aggregate)?;
+        Ok(path)
     }
 
     pub fn read_aggregate(&self, run_id: &str) -> Result<AgentTaskAggregate> {
-        read_aggregate_in_store(self, run_id)
+        match read_mirrored_aggregate_in_store(self, run_id)? {
+            Some(aggregate) => Ok(aggregate),
+            None => read_json(&self.aggregate_path(run_id)),
+        }
     }
 
     pub fn read_aggregate_bounded(&self, run_id: &str) -> Result<AgentTaskAggregate> {
-        read_aggregate_bounded_in_store(self, run_id)
+        let path = self.aggregate_path(run_id);
+        let raw = read_aggregate_bytes_bounded_in_store(self, run_id)?;
+        serde_json::from_slice(&raw).map_err(|error| {
+            Error::internal_json(error.to_string(), Some(path.display().to_string()))
+        })
     }
 
     /// Observe only the aggregate mirrored in the authoritative SQLite row,
@@ -712,7 +734,9 @@ impl AgentTaskLifecycleStore {
         recorded_at: String,
         candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
     ) -> Result<AgentTaskCookIndex> {
-        write_cook_index_attempt_in_store(self, cook_id, attempt, run_id, recorded_at, candidate)
+        self.with_config_lock(|| {
+            self.write_cook_index_attempt_locked(cook_id, attempt, run_id, recorded_at, candidate)
+        })
     }
 
     pub(crate) fn write_cook_index_attempt_locked(
@@ -723,14 +747,50 @@ impl AgentTaskLifecycleStore {
         recorded_at: String,
         candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
     ) -> Result<AgentTaskCookIndex> {
-        write_cook_index_attempt_locked_in_store(
-            self,
-            cook_id,
+        let cook_id = sanitize_run_id(cook_id);
+        let run_id = sanitize_run_id(run_id);
+        self.validate_cook_index_attempt(&cook_id, attempt, &run_id)?;
+        let mut index = if let Some(index) = projected_cook_index_in_store(self, &cook_id)? {
+            index
+        } else {
+            AgentTaskCookIndex {
+                schema: super::records::schemas::COOK_INDEX.to_string(),
+                cook_id: cook_id.clone(),
+                latest_run_id: run_id.clone(),
+                latest_substantive_candidate: None,
+                cancellation_fence: None,
+                attempts: Vec::new(),
+            }
+        };
+        index.cook_id = cook_id.clone();
+        index.attempts.retain(|entry| entry.run_id != run_id);
+        index.attempts.push(AgentTaskCookIndexAttempt {
             attempt,
             run_id,
             recorded_at,
-            candidate,
-        )
+        });
+        index.latest_run_id = index
+            .attempts
+            .iter()
+            .max_by_key(|entry| entry.attempt)
+            .expect("Cook index has the recorded attempt")
+            .run_id
+            .clone();
+        if let Some(candidate) = candidate {
+            let replace = index
+                .latest_substantive_candidate
+                .as_ref()
+                .is_none_or(|current| {
+                    candidate.attempt > current.attempt
+                        || (candidate.attempt == current.attempt
+                            && candidate.run_id >= current.run_id)
+                });
+            if replace {
+                index.latest_substantive_candidate = Some(candidate);
+            }
+        }
+        persist_cook_index_in_store(self, &index)?;
+        Ok(index)
     }
 
     pub(crate) fn validate_cook_index_attempt(
@@ -739,11 +799,46 @@ impl AgentTaskLifecycleStore {
         attempt: u32,
         run_id: &str,
     ) -> Result<()> {
-        validate_cook_index_attempt_in_store(self, cook_id, attempt, run_id)
+        let cook_id = sanitize_run_id(cook_id);
+        let run_id = sanitize_run_id(run_id);
+        // SQLite owns the Cook index; there is no filesystem copy.
+        let Some(index) = projected_cook_index_in_store(self, &cook_id)? else {
+            return Ok(());
+        };
+        if index.cook_id != cook_id {
+            return Err(Error::validation_invalid_argument(
+                "cook_id",
+                "durable Cook index belongs to a different Cook",
+                Some(cook_id),
+                None,
+            ));
+        }
+        if index
+            .attempts
+            .iter()
+            .any(|entry| entry.run_id == run_id && entry.attempt != attempt)
+        {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "durable Cook index maps this run to a different attempt",
+                Some(run_id),
+                None,
+            ));
+        }
+        Ok(())
     }
 
     pub fn read_cook_index(&self, cook_id: &str) -> Result<AgentTaskCookIndex> {
-        read_cook_index_in_store(self, cook_id)
+        let cook_id = sanitize_run_id(cook_id);
+        if let Some(index) = projected_cook_index_in_store(self, &cook_id)? {
+            return Ok(index);
+        }
+        Err(Error::validation_invalid_argument(
+            "cook_id",
+            "canonical Cook alias projection not found; initialize or repair the lifecycle store before reading it",
+            Some(cook_id),
+            None,
+        ))
     }
 
     pub(crate) fn select_cook_candidate(
@@ -781,7 +876,10 @@ impl AgentTaskLifecycleStore {
     /// Persist the latest bounded, secret-safe terminal notification outcome
     /// in this store's own Cook directory rather than the ambient one.
     pub fn write_cook_notification_outcome(&self, cook_id: &str, outcome: &Value) -> Result<()> {
-        write_cook_notification_outcome_in_store(self, cook_id, outcome)
+        let path = self
+            .cook_dir(&sanitize_run_id(cook_id))
+            .join("notification-outcome.json");
+        write_private_json(&path, outcome)
     }
 
     /// Claim the one terminal notification this store's Cook may deliver.
@@ -790,7 +888,7 @@ impl AgentTaskLifecycleStore {
     /// two stores hold two independent claims rather than contending for the
     /// ambient one.
     pub fn claim_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<bool> {
-        claim_cook_notification_in_store(self, cook_id, marker)
+        claim_cook_notification_event_in_store(self, cook_id, "notification", marker)
     }
 
     pub fn claim_cook_started_notification(&self, cook_id: &str) -> Result<bool> {
@@ -864,7 +962,7 @@ impl AgentTaskLifecycleStore {
 
     /// Commit a confirmed terminal delivery in this store's own Cook directory.
     pub fn confirm_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<()> {
-        confirm_cook_notification_in_store(self, cook_id, marker)
+        confirm_cook_notification_event_in_store(self, cook_id, "notification", marker)
     }
 
     /// Release this store's own provisional terminal-notification claim.
@@ -872,11 +970,39 @@ impl AgentTaskLifecycleStore {
     /// The claim, the confirmation, and this release are one exactly-once
     /// protocol, so all three have to name the same installation.
     pub fn release_cook_notification_claim(&self, cook_id: &str) -> Result<()> {
-        release_cook_notification_claim_in_store(self, cook_id)
+        release_cook_notification_event_claim_in_store(self, cook_id, "notification")
     }
 
     pub fn read_record(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
-        read_record_in_store(self, run_id)
+        let store = self.open_observation_initialized()?;
+        let run = store.get_run(run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!("agent-task run record not found: {run_id}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        let record = snapshot_from_run(&run)?;
+        // Existing lifecycle rows predate the resource table. Their exact run
+        // projection is backfilled once, on first read.
+        if store
+            .control_plane_resource_projection("agent_task_run", &record.run_id)?
+            .is_none()
+        {
+            let projection = agent_task_resource_projection(self, &record, None)?;
+            if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
+                store.upsert_imported_run_with_mission_and_resource_projection(
+                    &run,
+                    mission.as_str(),
+                    &projection,
+                    true,
+                )?;
+            } else {
+                store.upsert_imported_run_with_resource_projection(&run, &projection, true)?;
+            }
+        }
+        Ok(record)
     }
 
     /// List every durable agent-task record from this store's own observation
@@ -886,7 +1012,7 @@ impl AgentTaskLifecycleStore {
     /// so a scan that resolved it ambiently would inspect one queue while the
     /// claim it produced mutated another (#7505).
     pub fn read_records(&self) -> Result<Vec<AgentTaskRunRecord>> {
-        read_records_in_store(self)
+        Ok(records_with_health(observation_runs_bounded_in_store(self, 1000)?)?.0)
     }
 
     /// Read every retry successor of `source_run_id` from this store's own
@@ -895,7 +1021,19 @@ impl AgentTaskLifecycleStore {
         &self,
         source_run_id: &str,
     ) -> Result<Vec<AgentTaskRunRecord>> {
-        read_retry_successors_in_store(self, source_run_id)
+        let observation = self.open_observation_initialized()?;
+        let page = observation.list_runs_by_retry_of_page(
+            "agent-task",
+            source_run_id,
+            RETRY_SUCCESSOR_SCAN_LIMIT,
+        )?;
+        if page.truncated {
+            return Err(Error::internal_unexpected(format!(
+                "retry lineage for {source_run_id} exceeded {RETRY_SUCCESSOR_SCAN_LIMIT} successors; \
+                 refusing to answer from a truncated lineage"
+            )));
+        }
+        page.runs.iter().map(snapshot_from_run).collect()
     }
 
     pub(crate) fn record_run_aggregate(
@@ -1138,7 +1276,16 @@ impl AgentTaskLifecycleStore {
     }
 
     pub fn read_record_bounded(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
-        read_record_bounded_in_store(self, run_id)
+        let store = self.open_observation_readonly()?;
+        let run = store.get_run(run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!("agent-task run record not found: {run_id}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        snapshot_from_run(&run)
     }
 
     /// Read one record and its mirrored aggregate from the same read-only
@@ -1834,31 +1981,6 @@ pub(super) fn read_plan_path(path: &str) -> Result<AgentTaskPlan> {
     Ok(plan)
 }
 
-/// The controller-owned plan is read only through a resolved store now: the
-/// last ambient caller was record-health reconciliation, which had to read the
-/// plan and commit the record it reconstructs from that plan into the same home
-/// (#7505). There is deliberately no `store::read_controller_plan` shim left to
-/// reach for.
-fn read_controller_plan_in_store(
-    store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskPlan> {
-    let path = store.controller_plan_path(run_id);
-    let plan = read_json(&path).map_err(|error| {
-        Error::internal_io(
-            format!(
-                "authoritative controller-owned plan for agent-task run `{run_id}` is unavailable at {}; lifecycle record plan_path is runner execution transport and cannot be used for controller readback: {}",
-                path.display(),
-                error.message
-            ),
-            Some(path.display().to_string()),
-        )
-    })?;
-    validate_execution_budget(&plan)?;
-    validate_managed_services(&plan)?;
-    Ok(plan)
-}
-
 fn validate_execution_budget(plan: &AgentTaskPlan) -> Result<()> {
     match plan.options.execution_budget.version {
         crate::agent_task_scheduler::AgentTaskExecutionBudget::VERSION => Ok(()),
@@ -1882,31 +2004,11 @@ fn validate_managed_services(plan: &AgentTaskPlan) -> Result<()> {
 
 #[cfg(test)]
 pub(super) fn write_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> Result<PathBuf> {
-    write_aggregate_in_store(&default_store()?, run_id, aggregate)
-}
-
-pub(super) fn write_aggregate_in_store(
-    store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    aggregate: &AgentTaskAggregate,
-) -> Result<PathBuf> {
-    let path = store.aggregate_path(run_id);
-    write_json(&path, aggregate)?;
-    Ok(path)
+    default_store()?.write_aggregate(run_id, aggregate)
 }
 
 pub(super) fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
-    read_aggregate_in_store(&default_store()?, run_id)
-}
-
-fn read_aggregate_in_store(
-    store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskAggregate> {
-    match read_mirrored_aggregate_in_store(store, run_id)? {
-        Some(aggregate) => Ok(aggregate),
-        None => read_json(&store.aggregate_path(run_id)),
-    }
+    default_store()?.read_aggregate(run_id)
 }
 
 /// Maximum controller-local aggregate size accepted by a read-only inspection.
@@ -1921,17 +2023,7 @@ pub(super) const DURABLE_AGGREGATE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// observation row. The reader checks metadata before allocating and takes one
 /// extra byte while reading to defend against a file changing after `metadata`.
 pub(super) fn read_aggregate_bounded(run_id: &str) -> Result<AgentTaskAggregate> {
-    read_aggregate_bounded_in_store(&default_store()?, run_id)
-}
-
-pub(super) fn read_aggregate_bounded_in_store(
-    store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskAggregate> {
-    let path = store.aggregate_path(run_id);
-    let raw = read_aggregate_bytes_bounded_in_store(store, run_id)?;
-    serde_json::from_slice(&raw)
-        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
+    default_store()?.read_aggregate_bounded(run_id)
 }
 
 fn read_aggregate_bytes_bounded_in_store(
@@ -2515,7 +2607,7 @@ fn work_intents_for_record(
 /// An ordinary record write knows its own lifecycle state but nothing about
 /// which attempt currently owns the Cook alias. Recomputing the projection from
 /// the record alone would therefore publish an empty alias set and silently
-/// retract an alias that [`write_cook_index_attempt_locked_in_store`] owns, so
+/// retract an alias that [`AgentTaskLifecycleStore::write_cook_index_attempt_locked`] owns, so
 /// the current alias and Cook index carry forward unchanged.
 fn agent_task_record_write_projection(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -2591,61 +2683,10 @@ pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
     default_store()?.read_record(run_id)
 }
 
-pub(super) fn read_record_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskRunRecord> {
-    let store = lifecycle_store.open_observation_initialized()?;
-    let run = store.get_run(run_id)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            format!("agent-task run record not found: {run_id}"),
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
-    let record = snapshot_from_run(&run)?;
-    // Existing lifecycle rows predate the resource table. Their exact run
-    // projection is backfilled once, on first read.
-    if store
-        .control_plane_resource_projection("agent_task_run", &record.run_id)?
-        .is_none()
-    {
-        let projection = agent_task_resource_projection(lifecycle_store, &record, None)?;
-        if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
-            store.upsert_imported_run_with_mission_and_resource_projection(
-                &run,
-                mission.as_str(),
-                &projection,
-                true,
-            )?;
-        } else {
-            store.upsert_imported_run_with_resource_projection(&run, &projection, true)?;
-        }
-    }
-    Ok(record)
-}
-
 /// Read one durable record under the observation store's read-only busy budget.
 /// Inspection must not initialize, migrate, or contend like a writer.
 pub(super) fn read_record_bounded(run_id: &str) -> Result<AgentTaskRunRecord> {
     default_store()?.read_record_bounded(run_id)
-}
-
-pub(super) fn read_record_bounded_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskRunRecord> {
-    let store = lifecycle_store.open_observation_readonly()?;
-    let run = store.get_run(run_id)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            format!("agent-task run record not found: {run_id}"),
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
-    snapshot_from_run(&run)
 }
 
 /// Bypass typed record validation solely to seed corruption-recovery fixtures.
@@ -2667,79 +2708,6 @@ pub(super) fn inject_raw_record_metadata_for_corruption_test(
     })?;
     inject(&mut run.metadata_json);
     store.upsert_imported_run(&run)
-}
-
-pub(super) fn write_cook_index_attempt_in_store(
-    store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-    recorded_at: String,
-    candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
-) -> Result<AgentTaskCookIndex> {
-    store.with_config_lock(|| {
-        write_cook_index_attempt_locked_in_store(
-            store,
-            cook_id,
-            attempt,
-            run_id,
-            recorded_at,
-            candidate,
-        )
-    })
-}
-
-pub(super) fn write_cook_index_attempt_locked_in_store(
-    store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-    recorded_at: String,
-    candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
-) -> Result<AgentTaskCookIndex> {
-    let cook_id = sanitize_run_id(cook_id);
-    let run_id = sanitize_run_id(run_id);
-    validate_cook_index_attempt_in_store(store, &cook_id, attempt, &run_id)?;
-    let mut index = if let Some(index) = projected_cook_index_in_store(store, &cook_id)? {
-        index
-    } else {
-        AgentTaskCookIndex {
-            schema: super::records::schemas::COOK_INDEX.to_string(),
-            cook_id: cook_id.clone(),
-            latest_run_id: run_id.clone(),
-            latest_substantive_candidate: None,
-            cancellation_fence: None,
-            attempts: Vec::new(),
-        }
-    };
-    index.cook_id = cook_id.clone();
-    index.attempts.retain(|entry| entry.run_id != run_id);
-    index.attempts.push(AgentTaskCookIndexAttempt {
-        attempt,
-        run_id,
-        recorded_at,
-    });
-    index.latest_run_id = index
-        .attempts
-        .iter()
-        .max_by_key(|entry| entry.attempt)
-        .expect("Cook index has the recorded attempt")
-        .run_id
-        .clone();
-    if let Some(candidate) = candidate {
-        let replace = index
-            .latest_substantive_candidate
-            .as_ref()
-            .is_none_or(|current| {
-                candidate.attempt > current.attempt
-                    || (candidate.attempt == current.attempt && candidate.run_id >= current.run_id)
-            });
-        if replace {
-            index.latest_substantive_candidate = Some(candidate);
-        }
-    }
-    persist_cook_index_in_store(store, &index)?;
-    Ok(index)
 }
 
 /// Commit one complete Cook index: its canonical SQLite projection and the
@@ -2825,23 +2793,7 @@ pub(super) fn write_cook_index_for_test(index: &AgentTaskCookIndex) -> Result<()
 }
 
 pub(super) fn read_cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
-    read_cook_index_in_store(&default_store()?, cook_id)
-}
-
-pub(super) fn read_cook_index_in_store(
-    store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-) -> Result<AgentTaskCookIndex> {
-    let cook_id = sanitize_run_id(cook_id);
-    if let Some(index) = projected_cook_index_in_store(store, &cook_id)? {
-        return Ok(index);
-    }
-    Err(Error::validation_invalid_argument(
-        "cook_id",
-        "canonical Cook alias projection not found; initialize or repair the lifecycle store before reading it",
-        Some(cook_id),
-        None,
-    ))
+    default_store()?.read_cook_index(cook_id)
 }
 
 pub(super) fn cook_index_exists(cook_id: &str) -> Result<bool> {
@@ -2890,14 +2842,6 @@ fn continuation_failed_notification_event(run_id: &str) -> String {
         "notification-continuation-failed-{}",
         sanitize_run_id(run_id)
     )
-}
-
-pub(super) fn claim_cook_notification_in_store(
-    store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    marker: &Value,
-) -> Result<bool> {
-    claim_cook_notification_event_in_store(store, cook_id, "notification", marker)
 }
 
 fn claim_cook_notification_event_in_store(
@@ -2963,14 +2907,6 @@ fn claim_cook_notification_event_in_store(
     }
 }
 
-pub(super) fn confirm_cook_notification_in_store(
-    store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    marker: &Value,
-) -> Result<()> {
-    confirm_cook_notification_event_in_store(store, cook_id, "notification", marker)
-}
-
 fn confirm_cook_notification_event_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -2981,21 +2917,6 @@ fn confirm_cook_notification_event_in_store(
         .cook_dir(&sanitize_run_id(cook_id))
         .join(format!("{event}.json"));
     write_private_json(&delivered_path, marker)
-}
-
-/// Release a provisional claim beside the injected store's own Cook index.
-///
-/// This removes the marker `claim_cook_notification_in_store` created, so it
-/// has to follow the same root. Releasing the ambient home's marker instead
-/// would leave the injected store's claim standing — permanently blocking the
-/// later observer this release exists to unblock — while deleting a claim
-/// nobody took. Neither half fails: `remove_file` treats `NotFound` as success,
-/// so the wrong-root release returns `Ok(())` having done nothing (#7505).
-pub(super) fn release_cook_notification_claim_in_store(
-    store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-) -> Result<()> {
-    release_cook_notification_event_claim_in_store(store, cook_id, "notification")
 }
 
 fn release_cook_notification_event_claim_in_store(
@@ -3014,17 +2935,6 @@ fn release_cook_notification_event_claim_in_store(
             Some(path.display().to_string()),
         )),
     }
-}
-
-pub(super) fn write_cook_notification_outcome_in_store(
-    store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    outcome: &Value,
-) -> Result<()> {
-    let path = store
-        .cook_dir(&sanitize_run_id(cook_id))
-        .join("notification-outcome.json");
-    write_private_json(&path, outcome)
 }
 
 pub(super) fn read_cook_notification_outcome(cook_id: &str) -> Result<Option<Value>> {
@@ -3047,56 +2957,6 @@ pub(super) fn record_exists_readonly(run_id: &str) -> Result<bool> {
     default_store()?.record_exists_readonly(run_id)
 }
 
-pub(super) fn validate_cook_index_attempt_in_store(
-    store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-) -> Result<()> {
-    let cook_id = sanitize_run_id(cook_id);
-    let run_id = sanitize_run_id(run_id);
-    // SQLite owns the Cook index; there is no filesystem copy.
-    let Some(index) = projected_cook_index_in_store(store, &cook_id)? else {
-        return Ok(());
-    };
-    if index.cook_id != cook_id {
-        return Err(Error::validation_invalid_argument(
-            "cook_id",
-            "durable Cook index belongs to a different Cook",
-            Some(cook_id),
-            None,
-        ));
-    }
-    if index
-        .attempts
-        .iter()
-        .any(|entry| entry.run_id == run_id && entry.attempt != attempt)
-    {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "durable Cook index maps this run to a different attempt",
-            Some(run_id),
-            None,
-        ));
-    }
-    Ok(())
-}
-
-/// The store-rooted body of [`AgentTaskLifecycleStore::read_records`], following
-/// the same bound and the same health projection but reading this store's own
-/// observation database instead of `paths::observation_db()`.
-///
-/// The ambient `read_records()` free shim that used to sit above this is gone.
-/// Its last caller was `reconcile_active_lab_runner_handoffs_in_store`, a queue scan that
-/// mutates every row it selects — expiring, terminalizing, and reconciling them
-/// — so it now scans the store it was handed rather than deciding from one
-/// installation's queue and committing into another (#7505).
-fn read_records_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-) -> Result<Vec<AgentTaskRunRecord>> {
-    Ok(records_with_health(observation_runs_bounded_in_store(lifecycle_store, 1000)?)?.0)
-}
-
 /// Bound on a single source run's retry lineage. Deliberately far above any
 /// plausible retry count: an exceeded lineage is reported as an error, and this
 /// is the threshold at which "this is a runaway, not a lineage" becomes true.
@@ -3110,33 +2970,7 @@ const RETRY_SUCCESSOR_SCAN_LIMIT: usize = 256;
 /// truncated lineage fails loudly rather than answering wrongly (#11177).
 #[cfg(test)]
 pub(super) fn read_retry_successors(source_run_id: &str) -> Result<Vec<AgentTaskRunRecord>> {
-    read_retry_successors_in_store(&default_store()?, source_run_id)
-}
-
-/// The store-rooted counterpart of [`read_retry_successors`], reading this
-/// store's own observation database instead of the ambient one.
-///
-/// The truncation contract is the reason this matters more than a plain read:
-/// callers treat "no successor" as authority to create one, so a lineage scanned
-/// in the wrong home answers "none" for a source whose successor is durable here
-/// and double-books the reservation.
-pub(super) fn read_retry_successors_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    source_run_id: &str,
-) -> Result<Vec<AgentTaskRunRecord>> {
-    let observation = lifecycle_store.open_observation_initialized()?;
-    let page = observation.list_runs_by_retry_of_page(
-        "agent-task",
-        source_run_id,
-        RETRY_SUCCESSOR_SCAN_LIMIT,
-    )?;
-    if page.truncated {
-        return Err(Error::internal_unexpected(format!(
-            "retry lineage for {source_run_id} exceeded {RETRY_SUCCESSOR_SCAN_LIMIT} successors; \
-             refusing to answer from a truncated lineage"
-        )));
-    }
-    page.runs.iter().map(snapshot_from_run).collect()
+    default_store()?.read_retry_successors(source_run_id)
 }
 
 fn records_with_health(

@@ -1821,7 +1821,7 @@ pub fn terminal_artifact_projection_readiness_in_store(
 ///
 /// All three reads follow the injected store. The `store::` shims above are
 /// exactly `default_store()?.read_record_bounded` and
-/// `read_aggregate_bounded_in_store(&default_store()?, ..)`, and
+/// `default_store()?.read_aggregate_bounded`, and
 /// `default_store()` is `AgentTaskLifecycleStore::from_current_environment()`,
 /// so an ambient caller reaches byte-identical state through either form. The
 /// third is the projection check itself: it opens an observation store and
