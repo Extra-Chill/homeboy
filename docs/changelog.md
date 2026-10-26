@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.433.41] - 2026-10-26
+
+### Changed
+- Reject undeclared notification transports at entry; prune expired dead letters
+- Collapse single-use homeboy-paths root twins
+- Promote a gate-feedback candidate over its staged baseline instead of failing 'destination HEAD moved'
+
 ## [0.433.40] - 2026-10-26
 
 ### Changed
