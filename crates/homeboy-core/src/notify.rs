@@ -391,6 +391,40 @@ pub struct NotifyOutcome {
     pub result: Option<serde_json::Value>,
 }
 
+/// Find the unique installed declaration, shared by admission and delivery.
+pub(crate) fn declared_transport<'a>(
+    extensions: &'a [homeboy_extension_contract::ExtensionManifest],
+    id: &str,
+) -> crate::Result<(
+    &'a homeboy_extension_contract::ExtensionManifest,
+    &'a homeboy_extension_contract::NotificationTransportConfig,
+)> {
+    let transports: Vec<_> = extensions
+        .iter()
+        .flat_map(|extension| {
+            extension
+                .notification_transports
+                .iter()
+                .map(move |transport| (extension, transport))
+        })
+        .collect();
+    let mut matches = transports
+        .iter()
+        .filter(|(_, transport)| transport.id == id);
+    if let (Some(declared), None) = (matches.next(), matches.next()) {
+        return Ok(*declared);
+    }
+    let mut installed: Vec<_> = transports
+        .iter()
+        .map(|(_, transport)| transport.id.as_str())
+        .collect();
+    installed.sort_unstable();
+    installed.dedup();
+    Err(crate::Error::validation_invalid_argument("notification_transport", format!(
+        "notification transport `{id}` must be declared by exactly one installed extension; installed transport ids: {}", installed.join(", ")
+    ), None, None))
+}
+
 /// Deliver an event through the route's installed extension transport. Route-less
 /// events use only the configured operations default and otherwise do nothing.
 pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
@@ -413,29 +447,11 @@ pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
         Ok(extensions) => extensions,
         Err(err) => return missing_transport(event.kind, &transport_id, err.message),
     };
-    let matches: Vec<_> = extensions
-        .iter()
-        .flat_map(|extension| {
-            extension
-                .notification_transports
-                .iter()
-                .filter(|transport| transport.id == transport_id)
-                .map(move |transport| (extension, transport))
-        })
-        .collect();
-    let [(extension, transport)] = matches.as_slice() else {
-        let detail = if matches.is_empty() {
-            "is not declared by an installed extension".to_string()
-        } else {
-            "is declared by more than one installed extension".to_string()
-        };
-        return missing_transport(event.kind, &transport_id, detail);
+    let (extension, transport) = match declared_transport(&extensions, &transport_id) {
+        Ok(declared) => declared,
+        Err(err) => return missing_transport(event.kind, &transport_id, err.message),
     };
 
-    // Resolve `{extension_path}` in the transport's literal argv so a manifest
-    // can reference scripts it ships (e.g. `node {extension_path}/scripts/notify.mjs`)
-    // without hardcoding an absolute install path. `extension_path` is populated
-    // by the extension store when the manifest is loaded.
     let extension_path = extension.extension_path.clone().unwrap_or_default();
     let mut argv: Vec<String> = transport
         .command
@@ -456,10 +472,7 @@ pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
         command.env(name, value);
     }
 
-    // `output()` rather than `status()`: a transport reports its delivery mode,
-    // route kind, truncation, attempt count, and a classified error kind on
-    // stdout. Reading only the exit code discarded all of it, so a failed
-    // notification could not be told apart from a rate-limited one.
+    // Capture structured delivery results, not just the exit code.
     match command.output() {
         Ok(output) => {
             let delivered = output.status.success();

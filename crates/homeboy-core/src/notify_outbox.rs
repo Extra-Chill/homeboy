@@ -95,6 +95,9 @@ const MAX_DRAIN_PER_PASS: usize = 32;
 /// the daemon opens it.
 const INFLIGHT_RECLAIM_SECS: i64 = 300;
 
+/// Dead letters are terminal evidence, kept long enough to diagnose and no longer.
+const DEAD_LETTER_RETENTION: Duration = Duration::from_secs(7 * 86_400);
+
 /// The exactly-once claim a producer already won for this event's subject.
 ///
 /// Provenance only. The outbox neither establishes nor releases one of these:
@@ -553,7 +556,27 @@ pub fn drain_in_root(config_root: &Path, now: DateTime<Utc>) -> NotifyOutboxDrai
         report.attempted += 1;
         apply_attempt(config_root, &claimed, entry, now, &mut report);
     }
+    if report.dead_lettered > 0 || report.unreadable > 0 {
+        prune_dead_letters(config_root);
+    }
     report
+}
+
+/// Delete dead letters older than [`DEAD_LETTER_RETENTION`]. Runs only on a
+/// pass that added one, so the directory is bounded without a scan per drain.
+fn prune_dead_letters(config_root: &Path) {
+    let entries = std::fs::read_dir(dead_letter_dir_in_root(config_root));
+    for entry in entries.into_iter().flatten().flatten() {
+        let expired = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > DEAD_LETTER_RETENTION);
+        if expired {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn due_entries(pending: &Path, now: DateTime<Utc>) -> Vec<(DateTime<Utc>, PathBuf)> {
@@ -993,6 +1016,37 @@ mod tests {
             assert_eq!(dead.len(), 1);
             assert_eq!(dead[0].attempts, MAX_ATTEMPTS);
             assert!(dead[0].last_error.is_some());
+        });
+    }
+
+    #[test]
+    fn a_dead_lettering_pass_prunes_expired_dead_letters_only() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = home.path().join(".config/homeboy");
+            let dead_dir = dead_letter_dir_in_root(&root);
+            std::fs::create_dir_all(&dead_dir).unwrap();
+            let expired = dead_dir.join("expired.json");
+            let recent = dead_dir.join("recent.json");
+            for path in [&expired, &recent] {
+                std::fs::write(path, b"{}").unwrap();
+            }
+            std::fs::File::options()
+                .write(true)
+                .open(&expired)
+                .unwrap()
+                .set_modified(
+                    std::time::SystemTime::now() - DEAD_LETTER_RETENTION - Duration::from_secs(60),
+                )
+                .unwrap();
+            let pending = pending_dir_in_root(&root);
+            std::fs::create_dir_all(&pending).unwrap();
+            std::fs::write(pending.join("garbage.json"), b"not json").unwrap();
+
+            let report = drain_in_root(&root, Utc::now());
+            assert_eq!(report.unreadable, 1);
+            assert!(!expired.exists());
+            assert!(recent.exists());
+            assert!(dead_dir.join("garbage.json").exists());
         });
     }
 

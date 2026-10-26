@@ -5886,6 +5886,34 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn explicit_notification_transport_is_validated_at_entry() {
+        crate::test_support::with_isolated_home(|home| {
+            let sentinel = home.path().join("resolver-invoked");
+            write_notification_resolver(home.path(), &sentinel);
+            for transport in ["unknown", "test.completed"] {
+                let exit = CliRuntime::new().run_from_args(argv(&[
+                    "homeboy",
+                    "--notification-transport",
+                    transport,
+                    "--notification-route",
+                    "opaque",
+                    "status",
+                ]));
+                assert_eq!(
+                    exit,
+                    if transport == "unknown" {
+                        std::process::ExitCode::from(2)
+                    } else {
+                        std::process::ExitCode::SUCCESS
+                    }
+                );
+                assert!(!sentinel.exists());
+            }
+        });
+    }
+
     #[test]
     fn cook_preview_reaches_backend_resolution_before_runtime_validation() {
         std::thread::Builder::new()

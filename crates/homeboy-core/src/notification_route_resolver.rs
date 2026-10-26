@@ -118,17 +118,6 @@ fn select_match(
     }
 }
 
-/// Apply the explicit route precedence contract. Ambient discovery across
-/// every installed transport is intentionally owned by the Cook submission
-/// path, after request validation; a single caller-named transport's own
-/// declared resolver is not ambient and is consulted right here.
-pub fn resolve_from_cli_or_env(
-    cli_transport: Option<&str>,
-    cli_route: Option<&str>,
-) -> Result<crate::notification_route::NotificationRouteContext> {
-    crate::notification_route::from_cli_or_env(cli_transport, cli_route)
-}
-
 /// Resolve explicit argv or propagated environment context with its source.
 pub fn resolve_from_cli_or_env_with_evidence(
     cli_transport: Option<&str>,
@@ -136,10 +125,12 @@ pub fn resolve_from_cli_or_env_with_evidence(
 ) -> Result<ResolvedNotificationRoute> {
     use crate::notification_route::NotificationRouteContext;
 
-    let context = resolve_from_cli_or_env(cli_transport, cli_route)
+    let context = crate::notification_route::from_cli_or_env(cli_transport, cli_route)
         .map_err(with_invalid_resolution_evidence)?;
     let mut resolved = match context {
         NotificationRouteContext::Route(route) => {
+            crate::notify::declared_transport(&load_all_extensions()?, &route.transport)
+                .map_err(with_invalid_resolution_evidence)?;
             let mut evidence = NotificationRouteResolution::new(if cli_transport.is_some() {
                 "explicit"
             } else {
@@ -170,31 +161,12 @@ pub fn resolve_from_cli_or_env_with_evidence(
     Ok(resolved)
 }
 
-/// Consult a single caller-named transport's own declared route resolver.
-///
-/// A transport with no declared resolver, or whose resolver reports no
-/// match, resolves route-less: the transport's identity is preserved in the
-/// evidence so the caller still knows which transport was selected, and
-/// delivery proceeds to that transport's own default destination. A resolver
-/// that fails to start, times out, or returns an invalid result is a real
-/// failure here — unlike ambient discovery, there is exactly one resolver in
-/// play, selected by the caller, so there is no other candidate to fall back
-/// to.
+/// Resolve only the uniquely declared caller-selected transport. No resolver
+/// or no match preserves its identity for default delivery; failures are fatal.
 fn resolve_declared_transport_route(transport: &str) -> Result<ResolvedNotificationRoute> {
     let extensions = load_all_extensions()?;
-    let declared = extensions.iter().find_map(|extension| {
-        let resolver = extension
-            .notification_transports
-            .iter()
-            .find(|candidate| candidate.id == transport)?
-            .route_resolver
-            .as_ref()?;
-        Some((
-            resolver,
-            extension.extension_path.as_deref().unwrap_or_default(),
-        ))
-    });
-    let Some((resolver, extension_path)) = declared else {
+    let (extension, declared) = crate::notify::declared_transport(&extensions, transport)?;
+    let Some(resolver) = &declared.route_resolver else {
         let mut evidence = NotificationRouteResolution::new("route_less");
         evidence.transport = Some(transport.to_string());
         return Ok(ResolvedNotificationRoute {
@@ -205,7 +177,7 @@ fn resolve_declared_transport_route(transport: &str) -> Result<ResolvedNotificat
     match invoke(
         resolver,
         transport,
-        extension_path,
+        extension.extension_path.as_deref().unwrap_or_default(),
         AMBIENT_DISCOVERY_TIMEOUT,
     ) {
         Ok(ResolverResult::Matched(route)) => {
@@ -570,14 +542,15 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             install_resolver("resolver-test", "sleep 3");
             let started = Instant::now();
-            let route = resolve_from_cli_or_env(Some("chosen.transport"), Some("chosen-route"))
-                .expect("explicit route is valid");
+            let route = resolve_from_cli_or_env_with_evidence(
+                Some("synthetic.completed"),
+                Some("chosen-route"),
+            )
+            .expect("explicit route is valid");
             assert!(started.elapsed() < Duration::from_secs(1));
             assert_eq!(
-                route,
-                crate::notification_route::NotificationRouteContext::Route(
-                    NotificationRoute::new("chosen.transport", "chosen-route").unwrap()
-                )
+                route.route,
+                Some(NotificationRoute::new("synthetic.completed", "chosen-route").unwrap())
             );
         });
     }
@@ -615,19 +588,44 @@ mod tests {
         });
     }
 
-    #[cfg(unix)]
     #[test]
-    fn transport_only_with_no_declared_resolver_delivers_route_less() {
+    fn unknown_explicit_transport_is_rejected_with_installed_ids() {
         crate::test_support::with_isolated_home(|_| {
-            let resolution =
-                resolve_from_cli_or_env_with_evidence(Some("undeclared.transport"), None)
-                    .expect("a transport with no resolver is still route-less, not an error");
-            assert_eq!(resolution.route, None);
-            assert_eq!(resolution.evidence.classification, "route_less");
-            assert_eq!(
-                resolution.evidence.transport.as_deref(),
-                Some("undeclared.transport")
-            );
+            install_resolver("resolver-test", "exit 9");
+            for route in [None, Some("opaque")] {
+                let error =
+                    resolve_from_cli_or_env_with_evidence(Some("unknown"), route).unwrap_err();
+                assert!(error.message.contains("synthetic.completed"));
+                assert!(error.message.contains("unknown"));
+            }
+            std::env::set_var("HOMEBOY_NOTIFICATION_TRANSPORT", "unknown");
+            std::env::set_var("HOMEBOY_NOTIFICATION_ROUTE", "opaque");
+            let error = resolve_from_cli_or_env_with_evidence(None, None).unwrap_err();
+            std::env::remove_var("HOMEBOY_NOTIFICATION_TRANSPORT");
+            std::env::remove_var("HOMEBOY_NOTIFICATION_ROUTE");
+            assert!(error.message.contains("synthetic.completed"));
+        });
+    }
+
+    #[test]
+    fn duplicate_transport_declarations_are_rejected_at_entry() {
+        crate::test_support::with_isolated_home(|_| {
+            install_resolver("resolver-one", "exit 9");
+            install_resolver("resolver-two", "exit 9");
+            let error =
+                resolve_from_cli_or_env_with_evidence(Some("synthetic.completed"), Some("opaque"))
+                    .unwrap_err();
+            assert!(error.message.contains("exactly one"));
+            assert!(error.message.contains("synthetic.completed"));
+        });
+    }
+
+    #[test]
+    fn no_flags_preserves_default_path() {
+        crate::test_support::with_isolated_home(|_| {
+            let resolution = resolve_from_cli_or_env_with_evidence(None, None).unwrap();
+            assert!(resolution.route.is_none());
+            assert!(resolution.evidence.transport.is_none());
         });
     }
 
@@ -680,10 +678,17 @@ mod tests {
 
     #[test]
     fn explicit_and_environment_context_have_distinct_evidence() {
-        let explicit = resolve_from_cli_or_env_with_evidence(Some("chosen"), Some("route"))
-            .expect("explicit route");
-        assert_eq!(explicit.evidence.classification, "explicit");
-        assert_eq!(explicit.evidence.transport.as_deref(), Some("chosen"));
+        crate::test_support::with_isolated_home(|_| {
+            install_resolver("resolver-test", "exit 9");
+            let explicit =
+                resolve_from_cli_or_env_with_evidence(Some("synthetic.completed"), Some("route"))
+                    .expect("explicit route");
+            assert_eq!(explicit.evidence.classification, "explicit");
+            assert_eq!(
+                explicit.evidence.transport.as_deref(),
+                Some("synthetic.completed")
+            );
+        });
     }
 
     /// A route without a transport stays invalid: it names no owner, so there
