@@ -4164,8 +4164,7 @@ mod tests {
                     "passed": false,
                     "output": {
                         "formatting_findings": {
-                            "files": ["src/lib.rs", "src/main.rs"],
-                            "suggested_command": "cargo fmt"
+                            "files": ["src/lib.rs", "src/main.rs"]
                         }
                     }
                 }
@@ -4179,11 +4178,7 @@ mod tests {
         assert_eq!(value["success"], false);
         assert_eq!(
             value["diagnostics"]["failure_digest"]["summary"],
-            "FORMAT: format check found 2 unformatted file(s): src/lib.rs, src/main.rs; run `cargo fmt`"
-        );
-        assert_eq!(
-            value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
-            "cargo fmt"
+            "FORMAT: format check found 2 unformatted file(s): src/lib.rs, src/main.rs"
         );
     }
 
