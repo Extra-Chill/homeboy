@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::{RunnerExecMode, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
-use homeboy_core::test_support;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -72,7 +71,6 @@ fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
         .expect("create runner");
 
         let env = refreshed_runner_env_in_roots(
-            &ambient_roots(),
             "lab-local",
             "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy",
         )
@@ -93,8 +91,7 @@ fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
             "lab-local",
             "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy",
             |runner_id, homeboy_path| {
-                let patch =
-                    refreshed_runner_patch_in_roots(&ambient_roots(), runner_id, homeboy_path)?;
+                let patch = refreshed_runner_patch_in_roots(runner_id, homeboy_path)?;
                 match merge(Some(runner_id), &patch.to_string(), &[])? {
                     MergeOutput::Single(result) => Ok(result.updated_fields),
                     MergeOutput::Bulk(_) => Ok(Vec::new()),
@@ -116,7 +113,6 @@ fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
         )
         .expect("create fresh runner");
         let fresh_patch = refreshed_runner_patch_in_roots(
-            &ambient_roots(),
             "lab-fresh",
             "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy",
         )
@@ -143,8 +139,7 @@ fn create_ssh_runner_with_path_env(runner_id: &str, workspace: &std::path::Path,
 }
 
 fn merge_refresh_patch(runner_id: &str, homeboy_path: &str) -> serde_json::Value {
-    let patch = refreshed_runner_patch_in_roots(&ambient_roots(), runner_id, homeboy_path)
-        .expect("refresh patch");
+    let patch = refreshed_runner_patch_in_roots(runner_id, homeboy_path).expect("refresh patch");
     match merge(Some(runner_id), &patch.to_string(), &[]).expect("merge refresh patch") {
         MergeOutput::Single(_) => patch,
         MergeOutput::Bulk(_) => panic!("single-runner refresh merge"),
@@ -358,12 +353,8 @@ fn dev_sync_resource_keeps_last_duplicate_overlay_for_same_id() {
 
 #[test]
 fn dev_sync_resource_replacement_persists_reconciled_overlay_records() {
-    {
-        let context = test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        crate::create_in_roots(
-            &roots,
-            r#"{
+    crate::test_support::with_isolated_home(|_| {
+        crate::create(r#"{
                 "id": "lab-local",
                 "kind": "local",
                 "workspace_root": "/runner/ws",
@@ -381,36 +372,32 @@ fn dev_sync_resource_replacement_persists_reconciled_overlay_records() {
         )
         .expect("create runner");
 
-        let runner = crate::load_in_roots(&roots, "lab-local").expect("load runner");
+        let runner = crate::load("lab-local").expect("load runner");
         let dev_sync =
             updated_dev_sync_resource(runner.resources.get("dev_sync").cloned(), None, &[])
                 .expect("reconcile dev-sync resource");
         let patch = serde_json::json!({ "resources": { "dev_sync": dev_sync } });
 
-        crate::merge_in_roots(
-            &roots,
+        crate::merge(
             Some("lab-local"),
             &patch.to_string(),
             &["resources".to_string()],
         )
         .expect("replace resources");
 
-        let runner = crate::load_in_roots(&roots, "lab-local").expect("reload runner");
+        let runner = crate::load("lab-local").expect("reload runner");
         let extensions = runner.resources["dev_sync"]["extensions"]
             .as_array()
             .expect("extensions array");
         assert_eq!(extensions.len(), 1);
         assert_eq!(extensions[0]["source_path"], "/newer/nodejs");
-    }
+    });
 }
 
 #[test]
 fn extension_only_dev_sync_plan_does_not_refresh_homeboy_binary() {
-    {
-        let context = test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        crate::create_in_roots(
-            &roots,
+    crate::test_support::with_isolated_home(|_| {
+        crate::create(
             r#"{
                 "id": "lab-local",
                 "kind": "local",
@@ -431,7 +418,7 @@ fn extension_only_dev_sync_plan_does_not_refresh_homeboy_binary() {
             reconnect: false,
             dry_run: true,
         };
-        let plan = plan_runner_dev_sync_in_roots(&roots, &options).expect("plan dev-sync");
+        let plan = plan_runner_dev_sync(&options).expect("plan dev-sync");
 
         assert!(!should_sync_homeboy_binary(&options));
         assert_eq!(plan.local_binary, None);
@@ -439,7 +426,7 @@ fn extension_only_dev_sync_plan_does_not_refresh_homeboy_binary() {
         assert!(plan.followup_commands.is_empty());
         assert_eq!(plan.extensions.len(), 1);
         assert_eq!(plan.extensions[0].id, "nodejs");
-    }
+    });
 }
 
 #[test]
@@ -746,11 +733,8 @@ fn extension_overlay_lifecycle_uses_ttl_cleanup_policy() {
 
 #[test]
 fn refresh_patch_updates_the_selected_binary_and_control_plane_environment() {
-    {
-        let context = test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        crate::create_in_roots(
-            &roots,
+    crate::test_support::with_isolated_home(|_| {
+        crate::create(
             r#"{
                 "id": "lab-local",
                 "kind": "local",
@@ -765,7 +749,7 @@ fn refresh_patch_updates_the_selected_binary_and_control_plane_environment() {
         )
         .expect("create runner");
 
-        let patch = refreshed_runner_patch_in_roots(&roots, "lab-local", "/runner/ws/homeboy")
+        let patch = refreshed_runner_patch_in_roots("lab-local", "/runner/ws/homeboy")
             .expect("build refresh patch");
 
         assert_eq!(patch["homeboy_path"], "/runner/ws/homeboy");
@@ -775,7 +759,7 @@ fn refresh_patch_updates_the_selected_binary_and_control_plane_environment() {
             "refresh updates env to pin daemon startup and queued jobs to the selected binary"
         );
         assert!(patch["env"]["HOMEBOY_DAEMON_STATE_DIR"].is_null());
-    }
+    });
 }
 
 #[test]
@@ -981,7 +965,7 @@ fn equivalent_refresh_waiter_reloads_the_owner_selection_after_promotion_handoff
                 |event| queued_tx.send(event).expect("report queued owner"),
             )?;
             let status = crate::status("lab")?;
-            refresh_promotion_authorities_in_roots(&ambient_roots(), "lab", &status)?;
+            refresh_promotion_authorities_in_roots("lab", &status)?;
             crate::load("lab")
         });
         let event = queued_rx
@@ -1140,9 +1124,7 @@ fn refresh_reobserves_a_replaced_binary_inside_staging() {
 
 #[test]
 fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
-    {
-        let context = test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
         let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let stale_probes = std::sync::Arc::clone(&probes);
         let cached: String = crate::runner_probe_gate::deduplicated_probe(
@@ -1174,8 +1156,7 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
             .status()
             .expect("make selected binary executable");
         assert!(status.success());
-        crate::create_in_roots(
-            &roots,
+        crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old/homeboy"}"#,
             false,
         )
@@ -1194,8 +1175,7 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
             dry_run: false,
         };
 
-        let (selected, exit_code) =
-            refresh_homeboy_binary_in_roots(&roots, options.clone()).expect("selection");
+        let (selected, exit_code) = refresh_homeboy_binary(options.clone()).expect("selection");
         assert_eq!(exit_code, 0);
         assert_eq!(selected.updated_fields, ["env", "homeboy_path"]);
         assert_eq!(selected.selected_binary_path, binary.display().to_string());
@@ -1203,7 +1183,7 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
         assert!(selected.reconnect_required);
         assert!(selected.next_actions.is_empty());
         assert_eq!(
-            crate::load_in_roots(&roots, "lab-local")
+            crate::load("lab-local")
                 .expect("reload controller registry")
                 .settings
                 .homeboy_path
@@ -1224,14 +1204,13 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
         assert_eq!(refreshed, "present");
         assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
 
-        let (repeated, exit_code) =
-            refresh_homeboy_binary_in_roots(&roots, options).expect("repeat selection");
+        let (repeated, exit_code) = refresh_homeboy_binary(options).expect("repeat selection");
         assert_eq!(exit_code, 0);
         assert_eq!(repeated.updated_fields, ["env", "homeboy_path"]);
         assert!(!repeated.daemon_refreshed);
         assert!(repeated.reconnect_required);
         assert!(repeated.next_actions.is_empty());
-    }
+    });
 }
 
 #[test]
@@ -1457,9 +1436,8 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
 
 #[test]
 fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
-    {
-        let context = test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let fixture = tempfile::tempdir().expect("fixture");
         let second_binary = fixture.path().join("second-homeboy");
         let commit = homeboy_product_identity::build_identity()
@@ -1477,29 +1455,25 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
             .status()
             .expect("make selected binary executable")
             .success());
-        crate::create_in_roots(
-            &roots,
+        crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old/homeboy"}"#,
             false,
         )
         .expect("runner");
         let refresh = |binary: &Path| {
-            refresh_homeboy_binary_in_roots(
-                &roots,
-                HomeboyBinaryRefreshOptions {
-                    runner_id: "lab-local".to_string(),
-                    mode: HomeboyBinaryRefreshMode::Select {
-                        binary_path: binary.display().to_string(),
-                    },
-                    source: None,
-                    git_ref: None,
-                    target_dir: None,
-                    reconnect: true,
-                    force: false,
-                    allow_downgrade: true,
-                    dry_run: false,
+            refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+                runner_id: "lab-local".to_string(),
+                mode: HomeboyBinaryRefreshMode::Select {
+                    binary_path: binary.display().to_string(),
                 },
-            )
+                source: None,
+                git_ref: None,
+                target_dir: None,
+                reconnect: true,
+                force: false,
+                allow_downgrade: true,
+                dry_run: false,
+            })
         };
 
         let controller_id = crate::connection::controller_id();
@@ -1538,11 +1512,9 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
             serde_json::to_vec(&session).expect("serialize connected session"),
         )
         .expect("persist connected session");
-        assert!(
-            crate::connection::recorded_session_in_root(roots.config(), "lab-local")
-                .expect("read connected session")
-                .is_some()
-        );
+        assert!(crate::connection::recorded_session("lab-local")
+            .expect("read connected session")
+            .is_some());
 
         let (output, exit_code) = refresh(&second_binary).expect("connected refresh result");
 
@@ -1575,21 +1547,19 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
             ["homeboy runner connect lab-local"]
         );
         assert_eq!(
-            crate::load_in_roots(&roots, "lab-local")
+            crate::load("lab-local")
                 .expect("reload controller registry")
                 .settings
                 .homeboy_path
                 .as_deref(),
             second_binary.to_str()
         );
-    }
+    });
 }
 
 #[test]
 fn select_without_source_rejects_implicit_downgrade_before_selection_or_reconnect() {
-    {
-        let context = test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
         let controller_commit = homeboy_product_identity::build_identity()
             .git_commit
             .expect("test build has an immutable controller commit");
@@ -1608,8 +1578,7 @@ fn select_without_source_rejects_implicit_downgrade_before_selection_or_reconnec
             .status()
             .expect("make selected binary executable")
             .success());
-        crate::create_in_roots(
-            &roots,
+        crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/old/homeboy"}"#,
             false,
         )
@@ -1629,7 +1598,7 @@ fn select_without_source_rejects_implicit_downgrade_before_selection_or_reconnec
         };
 
         let (rejected, exit_code) =
-            refresh_homeboy_binary_in_roots(&roots, options.clone()).expect("rejection output");
+            refresh_homeboy_binary(options.clone()).expect("rejection output");
         assert_eq!(exit_code, 1);
         assert!(rejected
             .failure
@@ -1638,7 +1607,7 @@ fn select_without_source_rejects_implicit_downgrade_before_selection_or_reconnec
             .unwrap()
             .contains("allow-downgrade"));
         assert_eq!(
-            crate::load_in_roots(&roots, "lab-local")
+            crate::load("lab-local")
                 .expect("reload")
                 .settings
                 .homeboy_path
@@ -1646,14 +1615,11 @@ fn select_without_source_rejects_implicit_downgrade_before_selection_or_reconnec
             Some("/old/homeboy")
         );
 
-        let (rolled_back, exit_code) = refresh_homeboy_binary_in_roots(
-            &roots,
-            HomeboyBinaryRefreshOptions {
-                allow_downgrade: true,
-                reconnect: false,
-                ..options
-            },
-        )
+        let (rolled_back, exit_code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+            allow_downgrade: true,
+            reconnect: false,
+            ..options
+        })
         .expect("explicit rollback");
         assert_eq!(exit_code, 0);
         let rollback = rolled_back.rollback.expect("structured rollback evidence");
@@ -1665,14 +1631,12 @@ fn select_without_source_rejects_implicit_downgrade_before_selection_or_reconnec
         assert_eq!(rollback.requested, None, "select mode has no requested ref");
         assert_eq!(rollback.resolved, older);
         assert_eq!(rollback.selected, older);
-    }
+    });
 }
 
 #[test]
 fn contending_refreshes_cannot_let_an_old_materialized_request_replace_new_selection() {
-    {
-        let context = test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
         let fixture = tempfile::tempdir().expect("git fixture");
         for args in [
             vec!["init", "--quiet"],
@@ -1740,8 +1704,7 @@ fn contending_refreshes_cannot_let_an_old_materialized_request_replace_new_selec
                 .expect("chmod")
                 .success());
         }
-        crate::create_in_roots(
-            &roots,
+        crate::create(
             r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
             false,
         )
@@ -1759,31 +1722,25 @@ fn contending_refreshes_cannot_let_an_old_materialized_request_replace_new_selec
             allow_downgrade: false,
             dry_run: false,
         };
-        let refresh_roots = roots.clone();
-        let old_refresh = std::thread::spawn(move || {
-            refresh_homeboy_binary_in_roots(&refresh_roots, old_options)
-        });
+        let old_refresh = std::thread::spawn(move || refresh_homeboy_binary(old_options));
         let deadline = Instant::now() + Duration::from_secs(5);
         while !marker.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(marker.exists(), "old request materialized before selection");
-        let (new_output, new_code) = refresh_homeboy_binary_in_roots(
-            &roots,
-            HomeboyBinaryRefreshOptions {
-                runner_id: "lab-local".to_string(),
-                mode: HomeboyBinaryRefreshMode::Select {
-                    binary_path: new_binary.display().to_string(),
-                },
-                source: None,
-                git_ref: Some("new".to_string()),
-                target_dir: Some(fixture.path().display().to_string()),
-                reconnect: false,
-                force: false,
-                allow_downgrade: true,
-                dry_run: false,
+        let (new_output, new_code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+            runner_id: "lab-local".to_string(),
+            mode: HomeboyBinaryRefreshMode::Select {
+                binary_path: new_binary.display().to_string(),
             },
-        )
+            source: None,
+            git_ref: Some("new".to_string()),
+            target_dir: Some(fixture.path().display().to_string()),
+            reconnect: false,
+            force: false,
+            allow_downgrade: true,
+            dry_run: false,
+        })
         .expect("new refresh");
         assert_eq!(new_code, 0);
         let (old_output, old_code) = old_refresh
@@ -1794,7 +1751,7 @@ fn contending_refreshes_cannot_let_an_old_materialized_request_replace_new_selec
         assert!(old_output.failure.is_some());
         assert!(!old_output.daemon_refreshed);
         assert_eq!(
-            crate::load_in_roots(&roots, "lab-local")
+            crate::load("lab-local")
                 .expect("reload")
                 .settings
                 .homeboy_path
@@ -1802,12 +1759,10 @@ fn contending_refreshes_cannot_let_an_old_materialized_request_replace_new_selec
             new_binary.to_str()
         );
         assert!(!new_output.daemon_refreshed);
-        assert!(
-            crate::connection::recorded_session_in_root(roots.config(), "lab-local")
-                .expect("session")
-                .is_none()
-        );
-    }
+        assert!(crate::connection::recorded_session("lab-local")
+            .expect("session")
+            .is_none());
+    });
 }
 
 #[test]
@@ -1828,8 +1783,7 @@ fn ssh_bootstrap_select_promotes_without_materialized_source_sha() {
             || Ok(r#"{"data":{"git_commit":"abc123","git_dirty":false}}"#.to_string()),
             |path, _| {
                 homeboy_core::config::with_config_lock(|| {
-                    let patch =
-                        refreshed_runner_patch_in_roots(&ambient_roots(), "lab-local", path)?;
+                    let patch = refreshed_runner_patch_in_roots("lab-local", path)?;
                     match merge(Some("lab-local"), &patch.to_string(), &[])? {
                         MergeOutput::Single(result) => Ok((result.updated_fields, None)),
                         MergeOutput::Bulk(_) => Ok((Vec::new(), None)),
@@ -1972,8 +1926,7 @@ fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
             },
             |path, _| {
                 homeboy_core::config::with_config_lock(|| {
-                    let patch =
-                        refreshed_runner_patch_in_roots(&ambient_roots(), "lab-local", path)?;
+                    let patch = refreshed_runner_patch_in_roots("lab-local", path)?;
                     match merge(Some("lab-local"), &patch.to_string(), &[])? {
                         MergeOutput::Single(result) => Ok((result.updated_fields, None)),
                         MergeOutput::Bulk(_) => Ok((Vec::new(), None)),

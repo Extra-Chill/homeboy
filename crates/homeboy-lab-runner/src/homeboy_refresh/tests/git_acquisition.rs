@@ -668,8 +668,7 @@ fn delayed_fetch_admits_local_cook_and_real_publication_is_fenced() {
         });
         let roots = homeboy_core::paths::PathRoots::from_environment().unwrap();
         assert!(roots.data().starts_with(home.path()));
-        crate::create_in_roots(
-            &roots,
+        crate::create(
             r#"{"id":"publication-fixture","kind":"local","homeboy_path":"/old/homeboy"}"#,
             false,
         )
@@ -703,7 +702,7 @@ fn delayed_fetch_admits_local_cook_and_real_publication_is_fenced() {
         )
         .unwrap();
         assert_eq!(
-            crate::load_in_roots(&roots, "publication-fixture")
+            crate::load("publication-fixture")
                 .unwrap()
                 .settings
                 .homeboy_path

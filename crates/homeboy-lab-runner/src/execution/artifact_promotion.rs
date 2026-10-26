@@ -41,20 +41,6 @@ pub fn promote_runner_exec_artifacts_in_store(
 }
 
 /// Promote every child of each declared artifact directory into artifacts.
-pub fn promote_runner_exec_artifact_dirs(
-    run_id: &str,
-    output: &RunnerExecOutput,
-    artifact_dir_outputs: &[String],
-) -> homeboy_core::Result<Vec<ArtifactRecord>> {
-    promote_runner_exec_artifact_dirs_in_store(
-        &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        output,
-        artifact_dir_outputs,
-    )
-}
-
-/// The store-rooted counterpart of [`promote_runner_exec_artifact_dirs`].
 pub fn promote_runner_exec_artifact_dirs_in_store(
     lifecycle_store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
@@ -872,7 +858,8 @@ mod tests {
             )
             .expect("first child checkpoint");
 
-            let resumed = promote_runner_exec_artifact_dirs(
+            let resumed = promote_runner_exec_artifact_dirs_in_store(
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store"),
                 run_id,
                 &output(temp.path()),
                 &["evidence".to_string()],
@@ -883,7 +870,8 @@ mod tests {
                 resumed[0].id,
                 runner_exec_directory_child_id(run_id, "local", "evidence", "second.txt")
             );
-            assert!(promote_runner_exec_artifact_dirs(
+            assert!(promote_runner_exec_artifact_dirs_in_store(
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store"),
                 run_id,
                 &output(temp.path()),
                 &["evidence".to_string()],
@@ -893,7 +881,8 @@ mod tests {
             assert_eq!(store.list_artifacts(run_id).expect("artifacts").len(), 2);
 
             fs::write(directory.join("second.txt"), "changed").expect("mutate tree");
-            let error = promote_runner_exec_artifact_dirs(
+            let error = promote_runner_exec_artifact_dirs_in_store(
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store"),
                 run_id,
                 &output(temp.path()),
                 &["evidence".to_string()],

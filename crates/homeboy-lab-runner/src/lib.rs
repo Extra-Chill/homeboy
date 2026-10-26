@@ -384,9 +384,9 @@ pub(crate) use execution::exec_with_status_snapshot;
 pub use execution::{
     daemon_api_get, daemon_api_post, ensure_runner_extension_parity, exec, exec_request,
     finish_scheduled_terminal_runner_exec_recovery, probe_extension_parity_from_show,
-    promote_runner_exec_artifact_dirs, promote_runner_exec_artifact_dirs_in_store,
-    promote_runner_exec_artifacts_in_store, promote_runner_exec_summaries_in_store,
-    promoted_output, reconcile_runner_generation_after_evidence,
+    promote_runner_exec_artifact_dirs_in_store, promote_runner_exec_artifacts_in_store,
+    promote_runner_exec_summaries_in_store, promoted_output,
+    reconcile_runner_generation_after_evidence,
     record_scheduled_terminal_runner_exec_recovery_child_spawn_failure,
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
     run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
@@ -409,12 +409,12 @@ pub(crate) use git_dependency_materialization::{
     RunnerGitDependencyMaterializationOutput,
 };
 pub use homeboy_refresh::{
-    plan_homeboy_binary_refresh, refresh_homeboy_binary, refresh_live_progress, runner_dev_sync,
-    HomeboyBinaryRefreshArtifacts, HomeboyBinaryRefreshFailure, HomeboyBinaryRefreshMode,
-    HomeboyBinaryRefreshOptions, HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan,
-    HomeboyControllerContinuationAction, HomeboyRefreshPhase, HomeboyRefreshReadiness,
-    HomeboyRefreshReadinessState, RefreshLiveProgress, RunnerDevSyncExtensionProvenance,
-    RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
+    refresh_homeboy_binary, refresh_live_progress, runner_dev_sync, HomeboyBinaryRefreshArtifacts,
+    HomeboyBinaryRefreshFailure, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
+    HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, HomeboyControllerContinuationAction,
+    HomeboyRefreshPhase, HomeboyRefreshReadiness, HomeboyRefreshReadinessState,
+    RefreshLiveProgress, RunnerDevSyncExtensionProvenance, RunnerDevSyncOptions,
+    RunnerDevSyncOutput, RunnerDevSyncPlan,
 };
 pub use job_preparation::register as register_runner_job_preparation_provider;
 pub use lab::offload::hydrate_runner_workspace_dependencies;
@@ -714,11 +714,6 @@ pub fn load(id: &str) -> Result<Runner> {
     load_in_roots(&homeboy_core::paths::PathRoots::from_environment()?, id)
 }
 
-/// [`load`] against an explicitly injected root.
-///
-/// The registry probe, the server-backed fallback, and the alias retry all have
-/// to describe the same installation: a runner found in one home and a server
-/// record read from another is not a runner definition, it is two (#7505).
 pub fn load_in_roots(roots: &homeboy_core::paths::PathRoots, id: &str) -> Result<Runner> {
     if id == "local" {
         return Ok(builtin_local_runner());
@@ -1370,24 +1365,7 @@ fn resolve_default_lab_runner_from_candidates(
 }
 
 pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runner>> {
-    create_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        json_spec,
-        skip_existing,
-    )
-}
-
-/// [`create`] against an explicitly injected config root.
-///
-/// Existence checks and the persisted write both follow `roots`, so creating a
-/// runner in an injected root cannot observe or overwrite the ambient
-/// installation's registry (#14362).
-#[allow(dead_code)]
-pub fn create_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    json_spec: &str,
-    skip_existing: bool,
-) -> Result<CreateOutput<Runner>> {
+    let roots = &homeboy_core::paths::PathRoots::from_environment()?;
     let raw = config::read_json_spec_to_string(json_spec)?;
     let value: Value = config::from_str(&raw)?;
 
@@ -1515,58 +1493,6 @@ pub fn apply_secret_env_migration(id: &str) -> Result<RunnerSecretEnvMigrationPl
 
 fn runner_secret_name(runner_id: &str, key: &str) -> String {
     format!("runner/{runner_id}/{key}")
-}
-
-/// [`merge`] against an explicitly injected config root.
-///
-/// Resolving the runner ambiently while merging into an injected root would
-/// read one installation's registry and write another's (#14362).
-#[allow(dead_code)]
-pub fn merge_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    id: Option<&str>,
-    json_spec: &str,
-    replace_fields: &[String],
-) -> Result<MergeOutput> {
-    let raw = config::read_json_spec_to_string(json_spec)?;
-    let parsed: Value = config::from_str(&raw)?;
-
-    if parsed.is_array() {
-        return Ok(MergeOutput::Bulk(config::merge_batch_from_json_in_root::<
-            Runner,
-        >(roots.config(), &raw)?));
-    }
-
-    let effective_id = id
-        .map(String::from)
-        .or_else(|| parsed.get("id").and_then(Value::as_str).map(String::from))
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "id",
-                "Provide runner ID as argument or in JSON body",
-                None,
-                None,
-            )
-        })?;
-
-    if let Ok(runner) = config::load_in_root::<Runner>(roots.config(), &effective_id) {
-        if runner.kind == RunnerKind::Local {
-            return Ok(MergeOutput::Single(config::merge_from_json_in_root::<
-                Runner,
-            >(
-                roots.config(),
-                Some(&effective_id),
-                &raw,
-                replace_fields,
-            )?));
-        }
-    }
-
-    Ok(MergeOutput::Single(merge_server_runner(
-        &effective_id,
-        parsed,
-        replace_fields,
-    )?))
 }
 
 pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Result<MergeOutput> {

@@ -1642,7 +1642,7 @@ fn select_without_materialization_sha_promotes_the_verified_binary() {
             &plan,
             || Ok(r#"{"data":{"git_commit":"abc123","git_dirty":false}}"#.to_string()),
             |path, _| {
-                let patch = refreshed_runner_patch_in_roots(&ambient_roots(), "lab-local", path)?;
+                let patch = refreshed_runner_patch_in_roots("lab-local", path)?;
                 match merge(Some("lab-local"), &patch.to_string(), &[])? {
                     MergeOutput::Single(result) => Ok((result.updated_fields, None)),
                     MergeOutput::Bulk(_) => Ok((Vec::new(), None)),

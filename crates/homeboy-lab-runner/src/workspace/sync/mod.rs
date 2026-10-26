@@ -19,8 +19,7 @@ use super::super::validation_dependencies::{
     sync_validation_dependency_workspaces, RunnerValidationDependencySyncOutput,
 };
 use super::super::{
-    load, load_in_roots, source_materialization, Runner, RunnerKind, RunnerLifecycleOwner,
-    RunnerWorkspaceLease,
+    load, source_materialization, Runner, RunnerKind, RunnerLifecycleOwner, RunnerWorkspaceLease,
 };
 use super::control::WorkspaceControl;
 use super::git::{
@@ -153,21 +152,6 @@ pub fn sync_workspace_before(
     )
 }
 
-/// [`sync_workspace`] against explicitly injected roots.
-///
-/// The runner definition this syncs and the filesystem reservation the snapshot
-/// modes take are the same installation's state. Resolving the runner from the
-/// ambient config root while reserving space under an injected data root would
-/// sync one home's runner into another home's disk budget (#7505).
-#[allow(dead_code)]
-pub fn sync_workspace_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-    options: RunnerWorkspaceSyncOptions,
-) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
-    sync_workspace_in_roots_with_deadline(roots, runner_id, options, None)
-}
-
 fn sync_workspace_in_roots_with_deadline(
     roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
@@ -216,7 +200,7 @@ fn sync_workspace_in_roots_controlled(
     control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
     control.checkpoint()?;
-    let runner = load_in_roots(roots, runner_id)?;
+    let runner = load(runner_id)?;
     let local_path = canonical_workspace_path(&options.path)?;
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -1485,20 +1469,6 @@ pub fn prune_workspaces(
         &runner,
         options,
     )
-}
-
-/// [`prune_workspaces`] against an explicitly injected root.
-///
-/// Resolving the runner ambiently while pruning an injected root would reap one
-/// installation's workspaces on another's behalf (#14362).
-#[allow(dead_code)]
-pub fn prune_workspaces_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-    options: RunnerWorkspacePruneOptions,
-) -> Result<(RunnerWorkspacePruneOutput, i32)> {
-    let runner = load_in_roots(roots, runner_id)?;
-    prune_workspaces_for_runner(roots, &runner, options)
 }
 
 fn prune_workspaces_for_runner(
@@ -4569,89 +4539,89 @@ mod tests {
             config::ConfigEntity,
             observation::{phase_timing, NewRunRecord, ObservationStore},
         };
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        let source = tempfile::tempdir().unwrap();
-        let runner_root = tempfile::tempdir().unwrap();
-        std::fs::write(source.path().join("file.txt"), "source\n").unwrap();
-        let runner: crate::Runner = serde_json::from_value(serde_json::json!({
-            "id": "timed", "kind": "local", "workspace_root": runner_root.path()
-        }))
-        .unwrap();
-        std::fs::create_dir_all(<crate::Runner as ConfigEntity>::config_dir_in_root(
-            roots.config(),
-        ))
-        .unwrap();
-        std::fs::write(
-            <crate::Runner as ConfigEntity>::config_path_in_root(roots.config(), "timed"),
-            serde_json::to_vec(&runner).unwrap(),
-        )
-        .unwrap();
-        let timing_root = tempfile::tempdir().unwrap();
-        let store =
-            ObservationStore::open_initialized_at(timing_root.path().join("timing.db")).unwrap();
-        let run = store
-            .start_run(NewRunRecord::builder("test").build())
+        crate::test_support::with_isolated_home(|_| {
+            let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+            let source = tempfile::tempdir().unwrap();
+            let runner_root = tempfile::tempdir().unwrap();
+            std::fs::write(source.path().join("file.txt"), "source\n").unwrap();
+            let runner: crate::Runner = serde_json::from_value(serde_json::json!({
+                "id": "timed", "kind": "local", "workspace_root": runner_root.path()
+            }))
             .unwrap();
-        let _scope = phase_timing::for_run(&store, &run.id);
-        for _ in 0..2 {
-            super::sync_workspace_in_roots(
-                &roots,
-                "timed",
-                RunnerWorkspaceSyncOptions {
-                    path: source.path().display().to_string(),
-                    mode: RunnerWorkspaceSyncMode::Snapshot,
-                    controller_routed_git: false,
-                    changed_since_base: None,
-                    git_fetch_refs: Vec::new(),
-                    snapshot_includes: Vec::new(),
-                    allow_dirty_lab_workspace: false,
-                    validation_dependency_ids: None,
-                    run_isolation_token: None,
-                },
+            std::fs::create_dir_all(<crate::Runner as ConfigEntity>::config_dir_in_root(
+                roots.config(),
+            ))
+            .unwrap();
+            std::fs::write(
+                <crate::Runner as ConfigEntity>::config_path_in_root(roots.config(), "timed"),
+                serde_json::to_vec(&runner).unwrap(),
             )
             .unwrap();
-        }
-        let reopened = ObservationStore::open_initialized_at(store.database_path()).unwrap();
-        let spans = reopened.phase_spans(&run.id).unwrap().spans;
-        for name in ["content_manifest_hash", "plan", "commit"] {
-            assert_eq!(
-                spans
+            let timing_root = tempfile::tempdir().unwrap();
+            let store = ObservationStore::open_initialized_at(timing_root.path().join("timing.db"))
+                .unwrap();
+            let run = store
+                .start_run(NewRunRecord::builder("test").build())
+                .unwrap();
+            let _scope = phase_timing::for_run(&store, &run.id);
+            for _ in 0..2 {
+                super::sync_workspace(
+                    "timed",
+                    RunnerWorkspaceSyncOptions {
+                        path: source.path().display().to_string(),
+                        mode: RunnerWorkspaceSyncMode::Snapshot,
+                        controller_routed_git: false,
+                        changed_since_base: None,
+                        git_fetch_refs: Vec::new(),
+                        snapshot_includes: Vec::new(),
+                        allow_dirty_lab_workspace: false,
+                        validation_dependency_ids: None,
+                        run_isolation_token: None,
+                    },
+                )
+                .unwrap();
+            }
+            let reopened = ObservationStore::open_initialized_at(store.database_path()).unwrap();
+            let spans = reopened.phase_spans(&run.id).unwrap().spans;
+            for name in ["content_manifest_hash", "plan", "commit"] {
+                assert_eq!(
+                    spans
+                        .iter()
+                        .filter(|s| s.id == format!("stage.lab.source_materialization.{name}"))
+                        .count(),
+                    2,
+                    "one {name} per stage"
+                );
+            }
+            for retired in [
+                "snapshot_input_manifest",
+                "snapshot_stage_build",
+                "snapshot_stability_verify",
+            ] {
+                assert!(!spans
                     .iter()
-                    .filter(|s| s.id == format!("stage.lab.source_materialization.{name}"))
-                    .count(),
-                2,
-                "one {name} per stage"
-            );
-        }
-        for retired in [
-            "snapshot_input_manifest",
-            "snapshot_stage_build",
-            "snapshot_stability_verify",
-        ] {
-            assert!(!spans
-                .iter()
-                .any(|s| s.id == format!("stage.lab.source_materialization.{retired}")));
-        }
-        for name in [
-            "content_manifest_hash",
-            "plan",
-            "commit",
-            "transfer_apply_verify",
-            "record_writes",
-        ] {
-            let id = format!("stage.lab.source_materialization.{name}");
-            let span = spans
-                .iter()
-                .find(|span| span.id == id)
-                .unwrap_or_else(|| panic!("missing {id}"));
-            assert!(span.duration_ms.is_some(), "{id}");
-            assert_eq!(
-                span.status,
-                homeboy_core::phase_timing::PhaseStatus::Ok,
-                "{id}"
-            );
-        }
+                    .any(|s| s.id == format!("stage.lab.source_materialization.{retired}")));
+            }
+            for name in [
+                "content_manifest_hash",
+                "plan",
+                "commit",
+                "transfer_apply_verify",
+                "record_writes",
+            ] {
+                let id = format!("stage.lab.source_materialization.{name}");
+                let span = spans
+                    .iter()
+                    .find(|span| span.id == id)
+                    .unwrap_or_else(|| panic!("missing {id}"));
+                assert!(span.duration_ms.is_some(), "{id}");
+                assert_eq!(
+                    span.status,
+                    homeboy_core::phase_timing::PhaseStatus::Ok,
+                    "{id}"
+                );
+            }
+        });
     }
 
     use super::{

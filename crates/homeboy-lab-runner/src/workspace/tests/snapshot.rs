@@ -171,9 +171,8 @@ static SOURCE_SYNC_EXCLUDES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
 fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source = tempfile::tempdir().expect("source workspace");
         let runner_root = tempfile::tempdir().expect("runner root");
         fs::write(source.path().join("file.txt"), "committed source\n").expect("source file");
@@ -225,8 +224,7 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
             git_output(source.path(), &["rev-parse", "HEAD"]).expect("source SHA");
         rooted_local_runner(&roots, "lab-snapshot-harvest", runner_root.path());
 
-        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (synced, _) = crate::workspace::sync::sync_workspace(
             "lab-snapshot-harvest",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -329,14 +327,13 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
             error.contains("content hash") || error.contains("cleanliness does not match"),
             "unexpected source change must remain bound to provenance: {error}"
         );
-    }
+    });
 }
 
 #[test]
 fn snapshot_git_carries_a_pinned_base_absent_from_destination_history() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source = tempfile::tempdir().expect("source workspace");
         let runner_root = tempfile::tempdir().expect("runner root");
         git(source.path(), &["init", "--quiet", "-b", "main"]);
@@ -358,8 +355,7 @@ fn snapshot_git_carries_a_pinned_base_absent_from_destination_history() {
 
         rooted_local_runner(&roots, "lab-pinned-cook-base", runner_root.path());
 
-        let (synced, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (synced, _) = crate::workspace::sync::sync_workspace(
             "lab-pinned-cook-base",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -392,14 +388,13 @@ fn snapshot_git_carries_a_pinned_base_absent_from_destination_history() {
             .expect("runner pinned base"),
             pinned_base
         );
-    }
+    });
 }
 
 #[test]
 fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source = tempfile::tempdir().expect("source repository");
         let worktrees = tempfile::tempdir().expect("linked worktree root");
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -436,8 +431,7 @@ fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
         let source_revision = git_output(&linked, &["rev-parse", "HEAD"]).expect("linked HEAD");
         rooted_local_runner(&roots, "lab-linked-snapshot-git", runner_root.path());
 
-        let (synced, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (synced, exit_code) = crate::workspace::sync::sync_workspace(
             "lab-linked-snapshot-git",
             RunnerWorkspaceSyncOptions {
                 path: linked.display().to_string(),
@@ -474,7 +468,7 @@ fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
         );
         super::super::util::verify_valid_git_representation(remote)
             .expect("verified valid .git representation before handoff");
-    }
+    });
 }
 
 #[test]
@@ -825,51 +819,51 @@ fn runner_snapshot_excludes_extend_default_snapshot_policy() {
 
 #[test]
 fn runner_snapshot_transports_source_owned_homeboy_paths_as_ordinary_content() {
-    // Runner metadata lives outside the workspace tree, so a source that owns
-    // `.homeboy/runner-workspace.json` is ordinary content, not a collision.
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        let source = tempfile::tempdir().expect("source tempdir");
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        fs::create_dir_all(source.path().join(".homeboy")).expect("metadata directory");
-        fs::write(
-            source.path().join(".homeboy/runner-workspace.json"),
-            "user-owned content\n",
-        )
-        .expect("source-owned file");
-        rooted_local_runner(&roots, "lab-local-collision", runner_root.path());
+    crate::test_support::with_isolated_home(|_| {
+        // Runner metadata lives outside the workspace tree, so a source that owns
+        // `.homeboy/runner-workspace.json` is ordinary content, not a collision.
+        {
+            let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+            let source = tempfile::tempdir().expect("source tempdir");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            fs::create_dir_all(source.path().join(".homeboy")).expect("metadata directory");
+            fs::write(
+                source.path().join(".homeboy/runner-workspace.json"),
+                "user-owned content\n",
+            )
+            .expect("source-owned file");
+            rooted_local_runner(&roots, "lab-local-collision", runner_root.path());
 
-        let (output, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
-            "lab-local-collision",
-            RunnerWorkspaceSyncOptions {
-                path: source.path().display().to_string(),
-                mode: RunnerWorkspaceSyncMode::Snapshot,
-                controller_routed_git: false,
-                changed_since_base: None,
-                git_fetch_refs: Vec::new(),
-                snapshot_includes: Vec::new(),
-                allow_dirty_lab_workspace: false,
-                validation_dependency_ids: None,
-                run_isolation_token: None,
-            },
-        )
-        .expect("source-owned .homeboy content syncs");
+            let (output, exit_code) = crate::workspace::sync::sync_workspace(
+                "lab-local-collision",
+                RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Snapshot,
+                    controller_routed_git: false,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
+                    run_isolation_token: None,
+                },
+            )
+            .expect("source-owned .homeboy content syncs");
 
-        assert_eq!(exit_code, 0);
-        let remote = Path::new(&output.remote_path);
-        assert_eq!(
-            fs::read_to_string(remote.join(".homeboy/runner-workspace.json"))
-                .expect("source-owned file transported"),
-            "user-owned content\n"
-        );
-        let metadata: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(workspace_metadata_file(remote)).expect("runner metadata"),
-        )
-        .expect("parse runner metadata");
-        assert_eq!(metadata["schema"], "homeboy/runner-workspace/v1");
-    }
+            assert_eq!(exit_code, 0);
+            let remote = Path::new(&output.remote_path);
+            assert_eq!(
+                fs::read_to_string(remote.join(".homeboy/runner-workspace.json"))
+                    .expect("source-owned file transported"),
+                "user-owned content\n"
+            );
+            let metadata: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(workspace_metadata_file(remote)).expect("runner metadata"),
+            )
+            .expect("parse runner metadata");
+            assert_eq!(metadata["schema"], "homeboy/runner-workspace/v1");
+        }
+    });
 }
 
 #[test]
@@ -932,9 +926,8 @@ fn workspace_content_manifest_and_hash_share_one_traversal_instant() {
 
 #[test]
 fn test_sync_workspace() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(source.path().join("src")).expect("src dir");
@@ -965,8 +958,7 @@ fn test_sync_workspace() {
 
         rooted_local_runner(&roots, "lab-local", runner_root.path());
 
-        let (output, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (output, exit_code) = crate::workspace::sync::sync_workspace(
             "lab-local",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -1016,14 +1008,13 @@ fn test_sync_workspace() {
         assert!(Path::new(&output.remote_path)
             .join("packages/cli/tsconfig.tsbuildinfo")
             .exists());
-    }
+    });
 }
 
 #[test]
 fn snapshot_sync_uses_source_gitignore_discovered_excludes_as_fallback() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         git(source.path(), &["init"]);
@@ -1042,8 +1033,7 @@ fn snapshot_sync_uses_source_gitignore_discovered_excludes_as_fallback() {
 
         rooted_local_runner(&roots, "lab-local-gitignore", runner_root.path());
 
-        let (output, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (output, exit_code) = crate::workspace::sync::sync_workspace(
             "lab-local-gitignore",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -1073,97 +1063,97 @@ fn snapshot_sync_uses_source_gitignore_discovered_excludes_as_fallback() {
         assert!(!Path::new(&output.remote_path)
             .join("build.tsbuildinfo")
             .exists());
-    }
+    });
 }
 
 #[test]
 fn snapshot_sync_excludes_late_injected_dmc_context_from_every_manifest() {
-    if crate::test_support::isolated_process() {
-        return;
-    }
-    let _source_sync_excludes_guard = SOURCE_SYNC_EXCLUDES_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("source sync excludes lock");
-    let previous = std::env::var_os("HOMEBOY_SOURCE_SYNC_EXCLUDES");
-    std::env::set_var(
-        "HOMEBOY_SOURCE_SYNC_EXCLUDES",
-        "./docs/superpowers/plans/**",
-    );
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        let source = tempfile::tempdir().expect("clean DMC-managed worktree");
-        let runner_root = tempfile::tempdir().expect("runner root");
-        fs::create_dir_all(source.path().join("docs")).expect("docs directory");
-        fs::write(source.path().join("docs/README.md"), "tracked docs\n").expect("tracked docs");
-        fs::write(source.path().join("Cargo.toml"), "[workspace]\n").expect("worktree marker");
-        git(source.path(), &["init", "-b", "main"]);
-        git(source.path(), &["config", "user.email", "test@example.com"]);
-        git(source.path(), &["config", "user.name", "Test User"]);
-        git(source.path(), &["add", "."]);
-        git(source.path(), &["commit", "-m", "clean source"]);
-
-        rooted_local_runner(&roots, "lab-late-dmc-context", runner_root.path());
-
-        let injected_context = source
-            .path()
-            .join("docs/superpowers/plans/2026-06-25-ftp2-page-reconstruct-lift-map.md");
-        let injected_context_for_hook = injected_context.clone();
-        let _hook = register_after_snapshot_directory_discovery_hook(
-            source.path().join("docs"),
-            move || {
-                fs::create_dir_all(
-                    injected_context_for_hook
-                        .parent()
-                        .expect("context parent directory"),
-                )
-                .expect("inject DMC context directory");
-                fs::write(&injected_context_for_hook, "late DMC context\n")
-                    .expect("inject DMC context file");
-            },
+    crate::test_support::with_isolated_home(|_| {
+        if crate::test_support::isolated_process() {
+            return;
+        }
+        let _source_sync_excludes_guard = SOURCE_SYNC_EXCLUDES_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("source sync excludes lock");
+        let previous = std::env::var_os("HOMEBOY_SOURCE_SYNC_EXCLUDES");
+        std::env::set_var(
+            "HOMEBOY_SOURCE_SYNC_EXCLUDES",
+            "./docs/superpowers/plans/**",
         );
+        {
+            let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+            let source = tempfile::tempdir().expect("clean DMC-managed worktree");
+            let runner_root = tempfile::tempdir().expect("runner root");
+            fs::create_dir_all(source.path().join("docs")).expect("docs directory");
+            fs::write(source.path().join("docs/README.md"), "tracked docs\n")
+                .expect("tracked docs");
+            fs::write(source.path().join("Cargo.toml"), "[workspace]\n").expect("worktree marker");
+            git(source.path(), &["init", "-b", "main"]);
+            git(source.path(), &["config", "user.email", "test@example.com"]);
+            git(source.path(), &["config", "user.name", "Test User"]);
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", "clean source"]);
 
-        let (output, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
-            "lab-late-dmc-context",
-            RunnerWorkspaceSyncOptions {
-                path: source.path().display().to_string(),
-                mode: RunnerWorkspaceSyncMode::Snapshot,
-                ..Default::default()
-            },
-        )
-        .expect("late configured context must remain outside the snapshot");
+            rooted_local_runner(&roots, "lab-late-dmc-context", runner_root.path());
 
-        assert_eq!(exit_code, 0);
-        assert!(output
-            .excludes
-            .contains(&"./docs/superpowers/plans/**".to_string()));
-        assert!(
-            injected_context.is_file(),
-            "fixture injected context after discovery"
-        );
-        assert!(Path::new(&output.remote_path)
-            .join("docs/README.md")
-            .is_file());
-        assert!(
-            !Path::new(&output.remote_path)
-                .join("docs/superpowers/plans/2026-06-25-ftp2-page-reconstruct-lift-map.md")
-                .exists(),
-            "the injected context must be absent from the staged and materialized manifests"
-        );
-    }
-    match previous {
-        Some(value) => std::env::set_var("HOMEBOY_SOURCE_SYNC_EXCLUDES", value),
-        None => std::env::remove_var("HOMEBOY_SOURCE_SYNC_EXCLUDES"),
-    }
+            let injected_context = source
+                .path()
+                .join("docs/superpowers/plans/2026-06-25-ftp2-page-reconstruct-lift-map.md");
+            let injected_context_for_hook = injected_context.clone();
+            let _hook = register_after_snapshot_directory_discovery_hook(
+                source.path().join("docs"),
+                move || {
+                    fs::create_dir_all(
+                        injected_context_for_hook
+                            .parent()
+                            .expect("context parent directory"),
+                    )
+                    .expect("inject DMC context directory");
+                    fs::write(&injected_context_for_hook, "late DMC context\n")
+                        .expect("inject DMC context file");
+                },
+            );
+
+            let (output, exit_code) = crate::workspace::sync::sync_workspace(
+                "lab-late-dmc-context",
+                RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Snapshot,
+                    ..Default::default()
+                },
+            )
+            .expect("late configured context must remain outside the snapshot");
+
+            assert_eq!(exit_code, 0);
+            assert!(output
+                .excludes
+                .contains(&"./docs/superpowers/plans/**".to_string()));
+            assert!(
+                injected_context.is_file(),
+                "fixture injected context after discovery"
+            );
+            assert!(Path::new(&output.remote_path)
+                .join("docs/README.md")
+                .is_file());
+            assert!(
+                !Path::new(&output.remote_path)
+                    .join("docs/superpowers/plans/2026-06-25-ftp2-page-reconstruct-lift-map.md")
+                    .exists(),
+                "the injected context must be absent from the staged and materialized manifests"
+            );
+        }
+        match previous {
+            Some(value) => std::env::set_var("HOMEBOY_SOURCE_SYNC_EXCLUDES", value),
+            None => std::env::remove_var("HOMEBOY_SOURCE_SYNC_EXCLUDES"),
+        }
+    });
 }
 
 #[test]
 fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::write(source.path().join("Cargo.toml"), "[package]\nname='app'\n").expect("manifest");
@@ -1181,31 +1171,28 @@ fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
             validation_dependency_ids: None,
             run_isolation_token: None,
         };
-        let (first, _) =
-            crate::workspace::sync::sync_workspace_in_roots(&roots, "lab-local", options.clone())
-                .expect("first sync");
+        let (first, _) = crate::workspace::sync::sync_workspace("lab-local", options.clone())
+            .expect("first sync");
         let remote_path = Path::new(&first.remote_path);
         assert!(remote_path.join("Cargo.toml").exists());
 
         fs::write(remote_path.join("sentinel.txt"), "kept\n").expect("sentinel");
 
         let (second, _) =
-            crate::workspace::sync::sync_workspace_in_roots(&roots, "lab-local", options)
-                .expect("second sync");
+            crate::workspace::sync::sync_workspace("lab-local", options).expect("second sync");
         let second_remote_path = Path::new(&second.remote_path);
 
         assert_ne!(second.remote_path, first.remote_path);
         assert!(second_remote_path.join("Cargo.toml").exists());
         assert!(!second_remote_path.join("sentinel.txt").exists());
         assert!(remote_path.join("sentinel.txt").exists());
-    }
+    });
 }
 
 #[test]
 fn workspace_sync_materialization_contract_records_inputs_provenance_policy_and_paths() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         fs::create_dir_all(source.path().join("src")).expect("src dir");
@@ -1213,8 +1200,7 @@ fn workspace_sync_materialization_contract_records_inputs_provenance_policy_and_
 
         rooted_local_runner(&roots, "lab-local-contract", runner_root.path());
 
-        let (output, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
+        let (output, _) = crate::workspace::sync::sync_workspace(
             "lab-local-contract",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
@@ -1276,7 +1262,7 @@ fn workspace_sync_materialization_contract_records_inputs_provenance_policy_and_
             contract.output_paths.artifact_dir,
             RunnerWorkspaceOutputPaths::artifact_dir_for_workspace(&output.remote_path)
         );
-    }
+    });
 }
 
 #[test]
@@ -1407,101 +1393,101 @@ fn workspace_list_omits_partial_git_checkouts_without_a_valid_head() {
 
 #[test]
 fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overlay() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        let source = super::dirty_git_repo();
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        let head = git_output(source.path(), &["rev-parse", "HEAD"]).expect("source head");
-        fs::write(source.path().join("untracked.txt"), "untracked\n").expect("untracked file");
-        git(
-            source.path(),
-            &[
-                "remote",
-                "set-url",
-                "origin",
-                "file:///does-not-exist/unpublished-fixture.git",
-            ],
-        );
+    crate::test_support::with_isolated_home(|_| {
+        {
+            let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+            let source = super::dirty_git_repo();
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            let head = git_output(source.path(), &["rev-parse", "HEAD"]).expect("source head");
+            fs::write(source.path().join("untracked.txt"), "untracked\n").expect("untracked file");
+            git(
+                source.path(),
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "file:///does-not-exist/unpublished-fixture.git",
+                ],
+            );
 
-        rooted_local_runner(&roots, "lab-local-snapshot-git", runner_root.path());
+            rooted_local_runner(&roots, "lab-local-snapshot-git", runner_root.path());
 
-        let (output, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
-            "lab-local-snapshot-git",
-            RunnerWorkspaceSyncOptions {
-                path: source.path().display().to_string(),
-                mode: RunnerWorkspaceSyncMode::SnapshotGit,
-                controller_routed_git: false,
-                changed_since_base: None,
-                git_fetch_refs: Vec::new(),
-                snapshot_includes: Vec::new(),
-                allow_dirty_lab_workspace: false,
-                validation_dependency_ids: None,
-                run_isolation_token: None,
-            },
-        )
-        .expect("sync workspace");
+            let (output, exit_code) = crate::workspace::sync::sync_workspace(
+                "lab-local-snapshot-git",
+                RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::SnapshotGit,
+                    controller_routed_git: false,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
+                    run_isolation_token: None,
+                },
+            )
+            .expect("sync workspace");
 
-        let remote = Path::new(&output.remote_path);
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
-        assert_eq!(
-            output.current_workspace.sync_mode,
-            RunnerWorkspaceSyncMode::SnapshotGit
-        );
-        assert_eq!(output.current_workspace.source_dirty, Some(true));
-        assert_eq!(
-            output.workspace_cleanliness,
-            "snapshot_synthetic_git_unique_workspace"
-        );
-        assert_eq!(
-            fs::read_to_string(remote.join("file.txt")).unwrap(),
-            "dirty\n"
-        );
-        assert_eq!(
-            git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
-            "true"
-        );
-        assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
-        assert_eq!(
-            git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
-            "file:///does-not-exist/unpublished-fixture.git"
-        );
-        let status = git_output(remote, &["status", "--porcelain=v1"]).unwrap();
-        assert!(status.contains("file.txt"));
-        assert!(status.contains("?? untracked.txt"));
-        assert!(
-            !status.contains(".homeboy"),
-            "runner metadata must never appear in the workspace: {status}"
-        );
-        assert!(!remote.join(".homeboy").exists());
-        assert!(workspace_metadata_file(remote).is_file());
-        assert_eq!(
-            output.current_workspace.source_commit.as_deref(),
-            Some(head.as_str())
-        );
-        assert_eq!(
-            output
-                .materialization_plan
-                .controller_git_bundle
-                .as_ref()
-                .expect("git-backed snapshot records controller bundle provenance")
-                .source_sha,
-            head
-        );
+            let remote = Path::new(&output.remote_path);
+            assert_eq!(exit_code, 0);
+            assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
+            assert_eq!(
+                output.current_workspace.sync_mode,
+                RunnerWorkspaceSyncMode::SnapshotGit
+            );
+            assert_eq!(output.current_workspace.source_dirty, Some(true));
+            assert_eq!(
+                output.workspace_cleanliness,
+                "snapshot_synthetic_git_unique_workspace"
+            );
+            assert_eq!(
+                fs::read_to_string(remote.join("file.txt")).unwrap(),
+                "dirty\n"
+            );
+            assert_eq!(
+                git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
+                "true"
+            );
+            assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
+            assert_eq!(
+                git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
+                "file:///does-not-exist/unpublished-fixture.git"
+            );
+            let status = git_output(remote, &["status", "--porcelain=v1"]).unwrap();
+            assert!(status.contains("file.txt"));
+            assert!(status.contains("?? untracked.txt"));
+            assert!(
+                !status.contains(".homeboy"),
+                "runner metadata must never appear in the workspace: {status}"
+            );
+            assert!(!remote.join(".homeboy").exists());
+            assert!(workspace_metadata_file(remote).is_file());
+            assert_eq!(
+                output.current_workspace.source_commit.as_deref(),
+                Some(head.as_str())
+            );
+            assert_eq!(
+                output
+                    .materialization_plan
+                    .controller_git_bundle
+                    .as_ref()
+                    .expect("git-backed snapshot records controller bundle provenance")
+                    .source_sha,
+                head
+            );
 
-        // Lifecycle scripts can clean the checkout before dependency install.
-        git(remote, &["reset", "--hard", "HEAD"]);
-        git(remote, &["clean", "-ffdqx"]);
-        assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
-        assert_eq!(
-            fs::read_to_string(remote.join("file.txt")).unwrap(),
-            "base\n",
-            "Git cleanup must restore the captured baseline"
-        );
-        assert!(!remote.join("untracked.txt").exists());
-    }
+            // Lifecycle scripts can clean the checkout before dependency install.
+            git(remote, &["reset", "--hard", "HEAD"]);
+            git(remote, &["clean", "-ffdqx"]);
+            assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
+            assert_eq!(
+                fs::read_to_string(remote.join("file.txt")).unwrap(),
+                "base\n",
+                "Git cleanup must restore the captured baseline"
+            );
+            assert!(!remote.join("untracked.txt").exists());
+        }
+    });
 }
 
 #[test]
@@ -1844,9 +1830,8 @@ fn snapshot_construction_failure_does_not_start_transport_or_accept_source_drift
 
 #[test]
 fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let workspace_root = tempfile::tempdir().expect("workspace root");
         let source = workspace_root.path().join("homeboy@task");
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -1895,8 +1880,7 @@ fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
         };
 
         for attempt in 0..3 {
-            let (synced, exit_code) = crate::workspace::sync::sync_workspace_in_roots(
-                &roots,
+            let (synced, exit_code) = crate::workspace::sync::sync_workspace(
                 "lab-stable-clean-worktree",
                 options.clone(),
             )
@@ -1907,7 +1891,7 @@ fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
             assert!(!staged.join("generated/runtime/output.js").exists());
             assert!(!staged.join("target/debug/homeboy").exists());
         }
-    }
+    });
 }
 
 #[cfg(unix)]
@@ -1942,76 +1926,76 @@ fn content_hash_binds_tracked_unresolved_symlinks_deterministically() {
 
 #[test]
 fn git_backed_snapshot_preserves_tracked_internal_file_and_directory_links() {
-    use std::os::unix::fs::symlink;
+    crate::test_support::with_isolated_home(|_| {
+        use std::os::unix::fs::symlink;
 
-    {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let roots = context.path_roots();
-        let controller = tempfile::tempdir().expect("controller");
-        let source = controller.path().join("source");
-        let runner_root = tempfile::tempdir().expect("runner root");
-        fs::create_dir_all(source.join("shared")).expect("shared directory");
-        fs::create_dir_all(source.join("links")).expect("links directory");
-        fs::write(source.join("shared/helper.mjs"), "export default 1;\n").expect("helper");
-        fs::write(source.join("shared/tool.mjs"), "export default 2;\n").expect("tool");
-        symlink("../shared/helper.mjs", source.join("links/helper.mjs"))
-            .expect("internal file link");
-        symlink("../shared", source.join("links/shared")).expect("internal directory link");
-        git(&source, &["init", "-b", "main"]);
-        git(&source, &["add", "."]);
-        git(
-            &source,
-            &[
-                "-c",
-                "user.name=Homeboy Test",
-                "-c",
-                "user.email=test@homeboy.invalid",
-                "commit",
-                "-m",
-                "source",
-            ],
-        );
+        {
+            let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+            let controller = tempfile::tempdir().expect("controller");
+            let source = controller.path().join("source");
+            let runner_root = tempfile::tempdir().expect("runner root");
+            fs::create_dir_all(source.join("shared")).expect("shared directory");
+            fs::create_dir_all(source.join("links")).expect("links directory");
+            fs::write(source.join("shared/helper.mjs"), "export default 1;\n").expect("helper");
+            fs::write(source.join("shared/tool.mjs"), "export default 2;\n").expect("tool");
+            symlink("../shared/helper.mjs", source.join("links/helper.mjs"))
+                .expect("internal file link");
+            symlink("../shared", source.join("links/shared")).expect("internal directory link");
+            git(&source, &["init", "-b", "main"]);
+            git(&source, &["add", "."]);
+            git(
+                &source,
+                &[
+                    "-c",
+                    "user.name=Homeboy Test",
+                    "-c",
+                    "user.email=test@homeboy.invalid",
+                    "commit",
+                    "-m",
+                    "source",
+                ],
+            );
 
-        rooted_local_runner(&roots, "lab-internal-links", runner_root.path());
-        let (output, _) = crate::workspace::sync::sync_workspace_in_roots(
-            &roots,
-            "lab-internal-links",
-            RunnerWorkspaceSyncOptions {
-                path: source.display().to_string(),
-                mode: RunnerWorkspaceSyncMode::SnapshotGit,
-                ..Default::default()
-            },
-        )
-        .expect("materialize Git-backed snapshot");
-        let remote = Path::new(&output.remote_path);
+            rooted_local_runner(&roots, "lab-internal-links", runner_root.path());
+            let (output, _) = crate::workspace::sync::sync_workspace(
+                "lab-internal-links",
+                RunnerWorkspaceSyncOptions {
+                    path: source.display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::SnapshotGit,
+                    ..Default::default()
+                },
+            )
+            .expect("materialize Git-backed snapshot");
+            let remote = Path::new(&output.remote_path);
 
-        assert!(remote
-            .join("links/helper.mjs")
-            .symlink_metadata()
-            .expect("file link metadata")
-            .file_type()
-            .is_symlink());
-        assert!(remote
-            .join("links/shared")
-            .symlink_metadata()
-            .expect("directory link metadata")
-            .file_type()
-            .is_symlink());
-        assert_eq!(
-            fs::read_link(remote.join("links/helper.mjs")).expect("file link target"),
-            Path::new("../shared/helper.mjs")
-        );
-        assert_eq!(
-            fs::read_link(remote.join("links/shared")).expect("directory link target"),
-            Path::new("../shared")
-        );
-        assert!(
-            git_output(remote, &["status", "--porcelain=v1"])
-                .expect("remote status")
-                .is_empty(),
-            "tracked internal links must not change the exact Git checkout"
-        );
-    }
+            assert!(remote
+                .join("links/helper.mjs")
+                .symlink_metadata()
+                .expect("file link metadata")
+                .file_type()
+                .is_symlink());
+            assert!(remote
+                .join("links/shared")
+                .symlink_metadata()
+                .expect("directory link metadata")
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                fs::read_link(remote.join("links/helper.mjs")).expect("file link target"),
+                Path::new("../shared/helper.mjs")
+            );
+            assert_eq!(
+                fs::read_link(remote.join("links/shared")).expect("directory link target"),
+                Path::new("../shared")
+            );
+            assert!(
+                git_output(remote, &["status", "--porcelain=v1"])
+                    .expect("remote status")
+                    .is_empty(),
+                "tracked internal links must not change the exact Git checkout"
+            );
+        }
+    });
 }
 
 #[test]

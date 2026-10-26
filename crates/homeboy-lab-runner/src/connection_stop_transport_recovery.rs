@@ -15,15 +15,6 @@ pub(crate) fn recorded_session(runner_id: &str) -> Result<Option<RunnerSession>>
     read_session_or_live_peer(runner_id)
 }
 
-/// [`recorded_session`] below an already-resolved config root.
-#[allow(dead_code)]
-pub(crate) fn recorded_session_in_root(
-    config_root: &std::path::Path,
-    runner_id: &str,
-) -> Result<Option<RunnerSession>> {
-    crate::connection::session_store_read_session_or_live_peer_in_root(config_root, runner_id)
-}
-
 pub(crate) fn disconnect_with_force(
     runner_id: &str,
     force: bool,
@@ -115,25 +106,8 @@ pub(crate) fn disconnect_with_session(
     expected_session: Option<&RunnerSession>,
     force: bool,
 ) -> Result<RunnerDisconnectReport> {
-    disconnect_with_session_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-        expected_session,
-        force,
-    )
-}
-
-/// [`disconnect_with_session`] against an explicitly injected root.
-///
-/// The promotion lease and the session record both follow `roots`, so an
-/// isolated disconnect cannot contend the host's machine-global lease (#14362).
-pub(crate) fn disconnect_with_session_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-    expected_session: Option<&RunnerSession>,
-    force: bool,
-) -> Result<RunnerDisconnectReport> {
-    if load_in_roots(roots, runner_id)?.settings.service_managed {
+    let roots = &homeboy_core::paths::PathRoots::from_environment()?;
+    if load(runner_id)?.settings.service_managed {
         // The runner owns its daemon; disconnecting only detaches and takes
         // no promotion lease.
         return service::detach_service_runner(runner_id);

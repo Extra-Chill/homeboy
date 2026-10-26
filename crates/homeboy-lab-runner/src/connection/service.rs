@@ -320,8 +320,8 @@ struct ServiceTarget {
     client: SshClient,
 }
 
-fn service_target(roots: &paths::PathRoots, runner_id: &str) -> Result<ServiceTarget> {
-    let runner = load_in_roots(roots, runner_id)?;
+fn service_target(runner_id: &str) -> Result<ServiceTarget> {
+    let runner = load(runner_id)?;
     let Some((server_id, server, client)) = resolve_ssh_runner(&runner)? else {
         return Err(Error::validation_invalid_argument(
             "runner",
@@ -405,8 +405,7 @@ fn report_for(
 /// to it. Requires an idle runner: the controller-started daemon is stopped
 /// before the unit takes over its state directory.
 pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
-    let roots = paths::PathRoots::from_environment()?;
-    let target = service_target(&roots, runner_id)?;
+    let target = service_target(runner_id)?;
     let homeboy = remote_runner_homeboy_path(&target.runner, "runner service install")?;
     let client = &target.client;
 
@@ -473,8 +472,7 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
 
 /// Report the runner service and the daemon lease it currently holds.
 pub fn service_status(runner_id: &str) -> Result<RunnerServiceReport> {
-    let roots = paths::PathRoots::from_environment()?;
-    let target = service_target(&roots, runner_id)?;
+    let target = service_target(runner_id)?;
     let homeboy = remote_runner_homeboy_path(&target.runner, "runner service status")?;
     let daemon = remote_daemon_status(&target.client, homeboy, runner_id)
         .ok()
@@ -491,12 +489,8 @@ pub fn service_status(runner_id: &str) -> Result<RunnerServiceReport> {
 /// a unit installed before the daemon's startup token was rendered self-heals
 /// here rather than staying stuck with the empty token an older install left
 /// behind (#15087).
-pub(crate) fn repoint_and_restart(
-    roots: &paths::PathRoots,
-    runner_id: &str,
-    binary: &str,
-) -> Result<()> {
-    let target = service_target(roots, runner_id)?;
+pub(crate) fn repoint_and_restart(runner_id: &str, binary: &str) -> Result<()> {
+    let target = service_target(runner_id)?;
     let startup_token = uuid::Uuid::new_v4().to_string();
     run_remote(
         &target.client,
@@ -615,8 +609,7 @@ pub(crate) fn parse_service_inventory(stdout: &str) -> Vec<ServiceUnitObservatio
 /// Observe every runner-service unit on the runner host over SSH, read-only.
 /// Non-SSH runners have no runner-owned services and report none.
 pub(crate) fn observe_service_units(runner_id: &str) -> Result<Vec<ServiceUnitObservation>> {
-    let roots = paths::PathRoots::from_environment()?;
-    let runner = load_in_roots(&roots, runner_id)?;
+    let runner = load(runner_id)?;
     let Some((_, _, client)) = resolve_ssh_runner(&runner)? else {
         return Ok(Vec::new());
     };
@@ -652,12 +645,9 @@ pub(crate) fn probe_runner_binary_version(
 
 /// Attach to the runner's service daemon: wait for its lease, open the tunnel,
 /// and write the session. Nothing on the runner is started or stopped.
-pub(crate) fn connect_service_runner(
-    roots: &paths::PathRoots,
-    runner_id: &str,
-) -> Result<(RunnerConnectReport, i32)> {
-    let session_path = session_path_in_root(roots.config(), runner_id);
-    let target = service_target(roots, runner_id)?;
+pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
+    let session_path = session_path(runner_id)?;
+    let target = service_target(runner_id)?;
     let homeboy = remote_runner_homeboy_path(&target.runner, "runner connect")?;
     let client = &target.client;
 
@@ -1022,12 +1012,22 @@ mod tests {
         .unwrap();
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
-            .arg(install_script_for(
-                "homeboy-lab",
-                "controller-b",
-                &b_binary.display().to_string(),
-                "token-b",
-            ))
+            .arg(if cfg!(target_os = "macos") {
+                install_script_for(
+                    "homeboy-lab",
+                    "controller-b",
+                    &b_binary.display().to_string(),
+                    "token-b",
+                )
+                .replace("sed -i ", "sed -i '' ")
+            } else {
+                install_script_for(
+                    "homeboy-lab",
+                    "controller-b",
+                    &b_binary.display().to_string(),
+                    "token-b",
+                )
+            })
             .env("HOME", home.path())
             .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
             .status()
@@ -1077,7 +1077,11 @@ mod tests {
         );
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
-            .arg(repoint)
+            .arg(if cfg!(target_os = "macos") {
+                repoint.replace("sed -i ", "sed -i '' ")
+            } else {
+                repoint
+            })
             .env("HOME", home.path())
             .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
             .status()
@@ -1496,7 +1500,11 @@ mod tests {
         );
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
-            .arg(script)
+            .arg(if cfg!(target_os = "macos") {
+                script.replace("sed -i ", "sed -i '' ")
+            } else {
+                script
+            })
             .env("HOME", home.path())
             .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
             .status()

@@ -31,7 +31,7 @@ use super::session::{
     RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
     RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
 };
-use super::{load, load_in_roots, remote_runner_homeboy_path, Runner, RunnerKind};
+use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 
 /// Collision-resistant, bounded path/unit component for controller ownership.
 /// Keep this shared by every direct-SSH and service-managed daemon location.
@@ -70,13 +70,7 @@ use connection_daemon::{
 
 #[path = "connection_stop_transport_recovery.rs"]
 mod stop_transport_recovery;
-/// Rooted session read used by isolation tests; production reads go through
-/// the ambient [`recorded_session`].
-#[cfg(test)]
-pub(crate) use stop_transport_recovery::recorded_session_in_root;
-pub(crate) use stop_transport_recovery::{
-    disconnect_with_session, disconnect_with_session_in_roots, recorded_session,
-};
+pub(crate) use stop_transport_recovery::{disconnect_with_session, recorded_session};
 
 #[path = "connection_dead_lease_attestation.rs"]
 mod dead_lease_attestation;
@@ -301,19 +295,7 @@ where
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
-    connect_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-    )
-}
-
-/// [`connect`] against an explicitly injected root.
-pub fn connect_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption_and_live_lease_in_roots(
-        roots,
+    connect_with_orphan_adoption_and_live_lease(
         runner_id,
         RemoteDaemonConnectOptions {
             orphan_lease_id: None,
@@ -354,10 +336,8 @@ fn candidate_daemon_start_command_launches_a_resident_generation() {
 /// Start and validate a second daemon without touching the recorded admission
 /// daemon. Its state directory is generation-scoped while HOME and the normal
 /// runtime configuration remain shared, preserving runner credentials.
-/// [`rotate_daemon_generation`] against an explicitly injected root.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rotate_daemon_generation_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     candidate_homeboy: &str,
     candidate_version: &str,
@@ -366,16 +346,15 @@ pub(crate) fn rotate_daemon_generation_in_roots(
     candidate_binary_sha256: Option<&str>,
     draining_job_ids: &[String],
 ) -> Result<()> {
-    let current =
-        read_session_or_live_peer_in_root(roots.config(), runner_id)?.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "runner",
-                "runner has no connected daemon to rotate",
-                Some(runner_id.to_string()),
-                None,
-            )
-        })?;
-    let runner = load_in_roots(roots, runner_id)?;
+    let current = read_session_or_live_peer(runner_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "runner has no connected daemon to rotate",
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    let runner = load(runner_id)?;
     let Some((server_id, server, client)) = resolve_ssh_runner(&runner)? else {
         return Err(Error::validation_invalid_argument(
             "runner",
@@ -444,7 +423,7 @@ pub(crate) fn rotate_daemon_generation_in_roots(
         build_identity: Some(candidate_identity.to_string()),
         inspected_freshness: None,
     };
-    let session_path = session_path_in_root(roots.config(), runner_id);
+    let session_path = session_path(runner_id)?;
     let (local_port, tunnel_pid, tunnel_process_start_identity, local_url, daemon) =
         match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
             server: &server,
@@ -611,36 +590,6 @@ fn rollback_rotated_candidate(
     let _ = super::generation_store::rollback_activation(runner_id, current, generation);
 }
 
-/// Connect while explicitly adopting one recorded dead remote lease. This is an
-/// operator recovery path; ordinary reconnects never infer orphan ownership.
-/// [`connect_with_orphan_adoption`] against an explicitly injected root.
-#[allow(clippy::too_many_arguments)]
-pub fn connect_with_orphan_adoption_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-    orphan_lease_id: Option<&str>,
-    confirmed_no_pid_job_ids: &[uuid::Uuid],
-    reconcile_leaseless_orphans: bool,
-    missing_lease_id: Option<&str>,
-    recorded_pid: Option<u32>,
-    recorded_endpoint: Option<&str>,
-) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption_and_live_lease_in_roots(
-        roots,
-        runner_id,
-        RemoteDaemonConnectOptions {
-            orphan_lease_id,
-            confirmed_no_pid_job_ids,
-            reconcile_leaseless_orphans,
-            reconcile_unleased_candidates: false,
-            missing_lease_id,
-            recorded_pid,
-            recorded_endpoint,
-            live_lease_expectation: None,
-        },
-    )
-}
-
 pub fn connect_with_orphan_adoption(
     runner_id: &str,
     orphan_lease_id: Option<&str>,
@@ -713,19 +662,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     runner_id: &str,
     options: RemoteDaemonConnectOptions<'_>,
 ) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption_and_live_lease_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-        options,
-    )
-}
-
-/// [`connect_with_orphan_adoption_and_live_lease`] against an injected root.
-fn connect_with_orphan_adoption_and_live_lease_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-    options: RemoteDaemonConnectOptions<'_>,
-) -> Result<(RunnerConnectReport, i32)> {
+    let roots = &homeboy_core::paths::PathRoots::from_environment()?;
     let RemoteDaemonConnectOptions {
         orphan_lease_id,
         confirmed_no_pid_job_ids,
@@ -739,10 +676,10 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     // A service-managed runner owns its daemon, so attaching replaces no
     // runtime state and takes no promotion lease. Waiting on that lease would
     // block every reconnect behind any running Cook's generation pin.
-    if load_in_roots(roots, runner_id)?.settings.service_managed {
-        let result = service::connect_service_runner(roots, runner_id)?;
+    if load(runner_id)?.settings.service_managed {
+        let result = service::connect_service_runner(runner_id)?;
         if result.1 == 0 {
-            retire_drained_generations(&load_in_roots(roots, runner_id)?)?;
+            retire_drained_generations(&load(runner_id)?)?;
         }
         return Ok(result);
     }
@@ -757,8 +694,8 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
         runner_id.to_string(),
     )?;
     promotion_lease.assert_generation()?;
-    let runner = load_in_roots(roots, runner_id)?;
-    let session_path = session_path_in_root(roots.config(), runner_id);
+    let runner = load(runner_id)?;
+    let session_path = session_path(runner_id)?;
     let homeboy = remote_runner_homeboy_path(&runner, "runner connect")?;
 
     let Some((server_id, server, client)) = resolve_ssh_runner(&runner)? else {
@@ -2035,33 +1972,12 @@ fn fenced_remote_mutation(
     }
 }
 
-pub(crate) fn session_store_read_session_or_live_peer_in_root(
-    config_root: &std::path::Path,
-    runner_id: &str,
-) -> Result<Option<RunnerSession>> {
-    session_store::read_session_or_live_peer_in_root(config_root, runner_id)
-}
-
 pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     status_with_admission_projection(runner_id).map(|(status, _, _)| status)
 }
 
 pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerStatusReport> {
     status_with_admission_projection_until(runner_id, deadline).map(|(status, _, _)| status)
-}
-
-/// [`status`] against an explicitly injected root.
-#[allow(dead_code)]
-pub fn status_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-) -> Result<RunnerStatusReport> {
-    status_with_admission_projection_until_in_roots(
-        roots,
-        runner_id,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
-    .map(|(status, _, _)| status)
 }
 
 /// Capture status and the generation ledger together so callers that need an
@@ -2090,35 +2006,13 @@ pub(crate) fn status_with_admission_projection_until(
     Vec<super::RunnerDaemonGenerationStatus>,
     Vec<super::RunnerGenerationJobOwners>,
 )> {
-    status_with_admission_projection_until_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-        deadline,
-    )
-}
-
-/// [`status_with_admission_projection_until`] against an injected root.
-///
-/// Runner resolution and the controller session record both follow `roots`, so
-/// a status observation on an injected root cannot read the ambient
-/// installation's registry or sessions (#14362).
-pub(crate) fn status_with_admission_projection_until_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-    deadline: Instant,
-) -> Result<(
-    RunnerStatusReport,
-    Vec<super::RunnerDaemonGenerationStatus>,
-    Vec<super::RunnerGenerationJobOwners>,
-)> {
-    let runner = load_in_roots(roots, runner_id)?;
-    let session_path = session_path_in_root(roots.config(), runner_id);
+    let runner = load(runner_id)?;
+    let session_path = session_path(runner_id)?;
     // Status is an observation path. In particular, a stale direct-SSH record
     // must be reported as disconnected rather than triggering tunnel recovery.
     // Recovery can wait on shared control-plane state and may open a tunnel, so
     // it belongs to explicit connect/admission operations instead.
-    let (session, state) =
-        read_session_for_status_until_in_root(roots.config(), runner_id, deadline)?;
+    let (session, state) = read_session_for_status_until(runner_id, deadline)?;
     let connected = state == RunnerSessionState::Connected;
     let (stale_daemon, configured_job_binary_build_identity) =
         stale_daemon_warning_until(&runner, session.as_ref(), connected, deadline)?;
@@ -2268,22 +2162,13 @@ pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
     reconcile_status_with_outcome(runner_id).map(|outcome| outcome.status)
 }
 
-/// [`reconcile_status`] against an explicitly injected root.
-#[allow(dead_code)]
-pub fn reconcile_status_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-) -> Result<RunnerStatusReport> {
-    reconcile_status_with_outcome_in_roots(roots, runner_id).map(|outcome| outcome.status)
-}
-
 /// Reconcile a runner and retain the exact generations this operation retired.
 /// The report is a fresh postcondition observation; retirement IDs come only
 /// from the generation reconciler's locked removal path.
 pub fn reconcile_status_with_outcome(runner_id: &str) -> Result<RunnerReconcileStatusOutcome> {
-    reconcile_status_with_outcome_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
+    reconcile_status_with_outcome_in_roots_with_policy(
         runner_id,
+        super::generation_store::GenerationReconcilePolicy::default(),
     )
 }
 
@@ -2293,23 +2178,7 @@ pub fn reconcile_status_with_outcome_with_policy(
     runner_id: &str,
     policy: super::generation_store::GenerationReconcilePolicy,
 ) -> Result<RunnerReconcileStatusOutcome> {
-    reconcile_status_with_outcome_in_roots_with_policy(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-        policy,
-    )
-}
-
-/// [`reconcile_status_with_outcome`] against an explicitly injected root.
-pub fn reconcile_status_with_outcome_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-) -> Result<RunnerReconcileStatusOutcome> {
-    reconcile_status_with_outcome_in_roots_with_policy(
-        roots,
-        runner_id,
-        super::generation_store::GenerationReconcilePolicy::default(),
-    )
+    reconcile_status_with_outcome_in_roots_with_policy(runner_id, policy)
 }
 
 /// Read-only retirement diagnostics for draining generations. A `None`
@@ -2333,12 +2202,11 @@ pub(crate) fn retire_drained_generations(runner: &Runner) -> Result<()> {
 }
 
 fn reconcile_status_with_outcome_in_roots_with_policy(
-    roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
     policy: super::generation_store::GenerationReconcilePolicy,
 ) -> Result<RunnerReconcileStatusOutcome> {
-    let runner = load_in_roots(roots, runner_id)?;
-    let mut report = status_in_roots(roots, runner_id)?;
+    let runner = load(runner_id)?;
+    let mut report = status(runner_id)?;
     if report.connected {
         reconcile_session_metadata_with_observed_daemon(&runner, &mut report.session, true)?;
     }
@@ -2362,7 +2230,7 @@ fn reconcile_status_with_outcome_in_roots_with_policy(
         }
     }
     Ok(RunnerReconcileStatusOutcome {
-        status: status_in_roots(roots, runner_id)?,
+        status: status(runner_id)?,
         retired_generation_ids: generation_reconcile.retired_generation_ids,
         retirement_blockers: generation_reconcile.retirement_blockers,
         retained_evidence_generation_count: generation_reconcile.retained_evidence_generation_count,
@@ -2750,36 +2618,21 @@ pub fn close_reconnected_job_log_owner(session: &RunnerSession) {
 /// reconnect transaction proves the remote daemon lease before replacing the
 /// local tunnel record.
 pub(crate) fn status_for_admission(runner_id: &str) -> Result<RunnerStatusReport> {
-    status_for_admission_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-    )
-}
+    status_for_admission_with(runner_id, status, |runner_id| {
+        let (report, exit_code) = connect(runner_id)?;
+        if report.connected && exit_code == 0 {
+            return Ok(());
+        }
 
-/// [`status_for_admission`] against an explicitly injected root.
-pub(crate) fn status_for_admission_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-) -> Result<RunnerStatusReport> {
-    status_for_admission_with(
-        runner_id,
-        |runner_id| status_in_roots(roots, runner_id),
-        |runner_id| {
-            let (report, exit_code) = connect_in_roots(roots, runner_id)?;
-            if report.connected && exit_code == 0 {
-                return Ok(());
-            }
-
-            Err(Error::validation_invalid_argument(
-                "runner",
-                report
-                    .failure_message
-                    .unwrap_or_else(|| "runner reconnect did not become ready".to_string()),
-                Some(runner_id.to_string()),
-                None,
-            ))
-        },
-    )
+        Err(Error::validation_invalid_argument(
+            "runner",
+            report
+                .failure_message
+                .unwrap_or_else(|| "runner reconnect did not become ready".to_string()),
+            Some(runner_id.to_string()),
+            None,
+        ))
+    })
 }
 
 /// Resolve the immutable identity of the executable that will start runner-side
