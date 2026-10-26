@@ -76,7 +76,8 @@ pub use issues::{issue_close, issue_comment, issue_create, issue_edit, issue_fin
 
 // Pull-request operations.
 pub use pulls::{
-    pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_merge, pr_ready, pr_view,
+    pr_create, pr_create_with_token, pr_edit, pr_edit_with_token, pr_files, pr_find,
+    pr_find_by_commit, pr_find_with_token, pr_merge, pr_ready, pr_view, pr_view_with_token,
 };
 
 // Fleet operations.

@@ -2339,6 +2339,14 @@ pub(super) fn write_record_guarded(
             }
         }
     }
+    if let Some(requester) =
+        existing_metadata.pointer("/agent_task_run/metadata/client_context/requester")
+    {
+        if record.metadata["client_context"].is_null() {
+            record.metadata["client_context"] = json!({});
+        }
+        record.metadata["client_context"]["requester"] = requester.clone();
+    }
     if record.metadata.get("cook_operation_claims").is_none() {
         if let Some(claims) = existing_metadata
             .pointer("/agent_task_run/metadata/cook_operation_claims")

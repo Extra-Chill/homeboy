@@ -15,11 +15,21 @@ use std::collections::HashMap;
 
 const API_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GhClient {
     host: String,
     repo: Option<String>,
     env: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for GhClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GhClient")
+            .field("host", &self.host)
+            .field("repo", &self.repo)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GhClient {
@@ -76,6 +86,15 @@ impl GhClient {
         })
     }
 
+    /// Override ambient credentials for one invocation; never put tokens in argv.
+    pub fn with_token(mut self, token: &str) -> Self {
+        self.env
+            .retain(|(key, _)| key != "GH_TOKEN" && key != "GH_ENTERPRISE_TOKEN");
+        self.env.push(("GH_TOKEN".into(), token.into()));
+        self.env.push(("GH_ENTERPRISE_TOKEN".into(), token.into()));
+        self
+    }
+
     pub fn host(&self) -> &str {
         &self.host
     }
@@ -122,7 +141,13 @@ impl GhClient {
             return Err(self.command_failed(&action, output));
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        for (key, value) in &self.env {
+            if key.ends_with("TOKEN") && !value.is_empty() {
+                stdout = stdout.replace(value, "[REDACTED]");
+            }
+        }
+        Ok(stdout)
     }
 
     pub fn output(&self, args: &[&str]) -> Result<Output> {
@@ -281,7 +306,12 @@ impl GhClient {
     fn command_failed(&self, action: &str, output: Output) -> Error {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let combined = if stderr.is_empty() { stdout } else { stderr };
+        let mut combined = if stderr.is_empty() { stdout } else { stderr };
+        for (key, value) in &self.env {
+            if key.ends_with("TOKEN") && !value.is_empty() {
+                combined = combined.replace(value, "[REDACTED]");
+            }
+        }
         Error::git_command_failed(format!("{action} failed: {combined}"))
     }
 }
@@ -443,6 +473,25 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::component::{GithubConfig, GithubHostConfig};
+
+    #[test]
+    fn invocation_token_overrides_ambient_without_entering_arguments_or_debug() {
+        let client = GhClient::for_host("github.com").with_token("minted-secret");
+        let command = client.command(&["pr", "create"]);
+        let env: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            env[std::ffi::OsStr::new("GH_TOKEN")],
+            Some(std::ffi::OsStr::new("minted-secret"))
+        );
+        assert_eq!(
+            env[std::ffi::OsStr::new("GH_ENTERPRISE_TOKEN")],
+            Some(std::ffi::OsStr::new("minted-secret"))
+        );
+        assert!(!format!("{client:?}").contains("minted-secret"));
+        assert!(!command
+            .get_args()
+            .any(|arg| arg.to_string_lossy().contains("minted-secret")));
+    }
 
     use super::{
         delete_branch_ref_api_args, github_cli_env, github_cli_env_with_global_and_inherited,
@@ -707,6 +756,24 @@ mod tests {
             ]
         );
         assert!(!args.windows(2).any(|window| window == ["pr", "merge"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_is_redacted_from_command_failure() {
+        use std::os::unix::process::ExitStatusExt;
+        let client = GhClient::for_host("github.com").with_token("minted-secret");
+        let error = client.command_failed(
+            "gh pr create",
+            std::process::Output {
+                status: std::process::ExitStatus::from_raw(256),
+                stdout: vec![],
+                stderr: b"rejected minted-secret".to_vec(),
+            },
+        );
+        let evidence = format!("{error:?}");
+        assert!(!evidence.contains("minted-secret"));
+        assert!(evidence.contains("[REDACTED]"));
     }
 
     #[test]

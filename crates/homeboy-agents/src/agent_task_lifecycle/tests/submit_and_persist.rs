@@ -377,7 +377,7 @@ fn queued_lab_admission_projects_its_verified_existing_checkout() {
         "no capacity",
         serde_json::Map::from_iter([(
             "client_context".into(),
-            json!({"caller_context": "lab-caller"}),
+            json!({"caller_context": "lab-caller", "requester": "opaque-user:42"}),
         )]),
     )
     .unwrap();
@@ -393,6 +393,17 @@ fn queued_lab_admission_projects_its_verified_existing_checkout() {
         json!(workspace)
     );
     assert_eq!(record.metadata["provider_executions_consumed"], 0);
+    let mut persisted = store.read_record("queued-lab").unwrap();
+    assert_eq!(
+        persisted.metadata["client_context"]["requester"],
+        "opaque-user:42"
+    );
+    persisted.metadata["client_context"]["requester"] = json!("worker-identity");
+    store.write_record(&persisted).unwrap();
+    assert_eq!(
+        store.read_record("queued-lab").unwrap().metadata["client_context"]["requester"],
+        "opaque-user:42"
+    );
 }
 
 #[test]

@@ -169,6 +169,13 @@ Controls where Homeboy copies persisted run artifacts from commands such as `ben
 
 Precedence is CLI flag, then environment variable, then global config, then the built-in default.
 
+### GitHub App publication
+
+Set `/github_app` to an object with `app_id`, `private_key_path`, and optional
+`installation_id` for Cook publication as an app instead of ambient `gh`.
+See [GitHub App publication](../github-app-publication.md) for key storage,
+requester attribution, fallback behavior, and required merge protection.
+
 ### GitHub Hosts
 
 Controls environment variables Homeboy adds to `gh` and remote-capable Git subprocesses for repositories on a specific host.

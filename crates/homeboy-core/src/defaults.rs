@@ -64,6 +64,10 @@ pub struct HomeboyConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub github_hosts: HashMap<String, crate::component::GithubHostConfig>,
 
+    /// GitHub App used for Cook publication. Key material is read only at use time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_app: Option<crate::git::github_app::GithubAppConfig>,
+
     /// Expected repository-local Git commit identity keyed by remote hostname.
     ///
     /// Homeboy checks this policy immediately before publication mutations. The
@@ -171,6 +175,7 @@ impl Default for HomeboyConfig {
             notifications: NotificationConfig::default(),
             automation: AutomationConfig::default(),
             github_hosts: HashMap::new(),
+            github_app: None,
             git_hosts: HashMap::new(),
             settings: HashMap::new(),
             release_gate: ReleaseGateConfig::default(),

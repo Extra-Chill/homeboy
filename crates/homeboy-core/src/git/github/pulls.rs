@@ -20,7 +20,20 @@ use super::{push_api_markdown_body_file_arg, push_markdown_body_file_arg};
 
 /// Open a new pull request.
 pub fn pr_create(component_id: Option<&str>, options: PrCreateOptions) -> Result<GithubPrOutput> {
+    pr_create_with_token(component_id, options, None)
+}
+
+/// Create a PR with an invocation-local credential, without changing host login.
+pub fn pr_create_with_token(
+    component_id: Option<&str>,
+    options: PrCreateOptions,
+    token: Option<&str>,
+) -> Result<GithubPrOutput> {
     let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    let gh = match token {
+        Some(token) => gh.with_token(token),
+        None => gh,
+    };
     gh.ensure_ready()?;
 
     if options.title.trim().is_empty() {
@@ -86,7 +99,19 @@ pub fn pr_create(component_id: Option<&str>, options: PrCreateOptions) -> Result
 /// `projectCards` field, which GitHub now rejects, failing the whole edit even
 /// though nothing project-related was requested.
 pub fn pr_edit(component_id: Option<&str>, options: PrEditOptions) -> Result<GithubPrOutput> {
+    pr_edit_with_token(component_id, options, None)
+}
+
+pub fn pr_edit_with_token(
+    component_id: Option<&str>,
+    options: PrEditOptions,
+    token: Option<&str>,
+) -> Result<GithubPrOutput> {
     let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    let gh = match token {
+        Some(token) => gh.with_token(token),
+        None => gh,
+    };
     gh.ensure_ready()?;
 
     if options.title.is_none() && options.body.is_none() {
@@ -180,7 +205,19 @@ fn pr_ready_args(repo: &str, number: u64) -> Vec<String> {
 
 /// Find PRs matching the given filter.
 pub fn pr_find(component_id: Option<&str>, options: PrFindOptions) -> Result<GithubFindOutput> {
+    pr_find_with_token(component_id, options, None)
+}
+
+pub fn pr_find_with_token(
+    component_id: Option<&str>,
+    options: PrFindOptions,
+    token: Option<&str>,
+) -> Result<GithubFindOutput> {
     let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    let gh = match token {
+        Some(token) => gh.with_token(token),
+        None => gh,
+    };
     gh.ensure_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
@@ -292,7 +329,20 @@ pub fn pr_view(
     number: u64,
     path: Option<String>,
 ) -> Result<GithubPrView> {
+    pr_view_with_token(component_id, number, path, None)
+}
+
+pub fn pr_view_with_token(
+    component_id: Option<&str>,
+    number: u64,
+    path: Option<String>,
+    token: Option<&str>,
+) -> Result<GithubPrView> {
     let (id, repo, gh) = resolve_component_github(component_id, path.as_deref())?;
+    let gh = match token {
+        Some(token) => gh.with_token(token),
+        None => gh,
+    };
     gh.ensure_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);

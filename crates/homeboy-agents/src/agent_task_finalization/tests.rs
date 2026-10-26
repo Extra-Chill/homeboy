@@ -1256,6 +1256,16 @@ fn pr_body_labels_ci_equivalent_gates() {
 }
 
 #[test]
+fn requester_is_rendered_without_ambient_worker_lookup() {
+    let mut body = "Review dossier".to_string();
+    super::append_requester(&mut body, Some("opaque-user:42"));
+    assert!(body.ends_with("Requested by: opaque-user:42\n"));
+    let original = body.clone();
+    super::append_requester(&mut body, None);
+    assert_eq!(body, original);
+}
+
+#[test]
 fn pr_body_reports_iterator_evidence_metadata() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
