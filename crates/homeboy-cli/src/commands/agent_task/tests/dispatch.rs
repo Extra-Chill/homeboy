@@ -3764,7 +3764,7 @@ fn component_lint_gate_is_added_after_file_gates_are_snapshotted() {
         let gates = serde_json::to_string(&recipe.attempts[0].plan).expect("plan json");
         assert!(gates.contains("cargo test"), "file gate retained: {gates}");
         assert!(
-            gates.contains("homeboy review lint linted --path ."),
+            gates.contains("homeboy --placement local review lint linted --path ."),
             "component lint gate added: {gates}"
         );
     });

@@ -569,10 +569,12 @@ fn component_declares_lint(component: &homeboy::core::component::Component) -> b
 
 /// The canonical lint gate for a component, run from the component workspace
 /// where Cook executes deterministic gates. It mirrors the component's CI
-/// `homeboy review lint`, including its declared baseline policy.
+/// `homeboy review lint`, including its declared baseline policy. Cook already
+/// placed this workspace, so the gate runs there instead of re-entering
+/// resource-policy placement from its sanitized gate home (#16517).
 fn component_lint_gate(component_id: &str) -> String {
     format!(
-        "homeboy review lint {} --path .",
+        "homeboy --placement local review lint {} --path .",
         quote_args(&[component_id.to_string()])
     )
 }
@@ -11860,11 +11862,14 @@ mod tests {
                 false,
                 false
             ),
-            ["homeboy review lint data-machine --path ."]
+            ["homeboy --placement local review lint data-machine --path ."]
         );
         assert_eq!(
             gates_for(false, &[], &["cargo test"], true, false, false),
-            ["cargo test", "homeboy review lint data-machine --path ."]
+            [
+                "cargo test",
+                "homeboy --placement local review lint data-machine --path ."
+            ]
         );
     }
 
@@ -11900,7 +11905,7 @@ mod tests {
     fn component_lint_gate_quotes_component_id() {
         assert_eq!(
             component_lint_gate("odd id"),
-            "homeboy review lint 'odd id' --path ."
+            "homeboy --placement local review lint 'odd id' --path ."
         );
     }
 
@@ -11925,7 +11930,7 @@ mod tests {
             args.gates.verify,
             [
                 "homeboy review test data-machine",
-                "homeboy review lint data-machine --path ."
+                "homeboy --placement local review lint data-machine --path ."
             ]
         );
         assert_eq!(args.gates.input_sources.len(), 2);
