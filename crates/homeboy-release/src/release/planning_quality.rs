@@ -624,7 +624,7 @@ mod tests {
         fs::create_dir_all(&extension_dir).expect("extension dir");
         fs::write(
             extension_dir.join("release-lint-fixture.json"),
-            r#"{"name":"Release lint fixture","version":"1.0.0","lint":{"extension_script":"lint.sh"}}"#,
+            r#"{"name":"Release lint fixture","version":"1.0.0","structured_sidecars":{"lint.findings":true},"lint":{"extension_script":"lint.sh"}}"#,
         )
         .expect("extension manifest");
         homeboy_test_support::write_executable(extension_dir.join("lint.sh"), script, 0o755)
@@ -1456,7 +1456,7 @@ exit 1
             fs::create_dir_all(&extension_dir).expect("extension dir");
             fs::write(
                 extension_dir.join("release-lint-fixture.json"),
-                r#"{"name":"Release lint fixture","version":"1.0.0","lint":{"extension_script":"lint.sh"}}"#,
+                r#"{"name":"Release lint fixture","version":"1.0.0","structured_sidecars":{"lint.findings":true},"lint":{"extension_script":"lint.sh"}}"#,
             )
             .expect("extension manifest");
             homeboy_test_support::write_executable(extension_dir.join("lint.sh"), r#"#!/bin/sh

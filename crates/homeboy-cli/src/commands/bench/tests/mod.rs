@@ -27,6 +27,7 @@ fn write_bench_extension(home: &TempDir) {
         r#"{
                 "name": "Fixture Bench",
                 "version": "0.0.0",
+                "structured_sidecars": { "bench.results": true },
                 "bench": { "extension_script": "bench-runner.sh" }
             }"#,
     )
@@ -109,6 +110,7 @@ fn write_failing_bench_extension(home: &TempDir) {
         r#"{
                 "name": "Fixture Bench",
                 "version": "0.0.0",
+                "structured_sidecars": { "bench.results": true },
                 "bench": { "extension_script": "bench-runner.sh" }
             }"#,
     )

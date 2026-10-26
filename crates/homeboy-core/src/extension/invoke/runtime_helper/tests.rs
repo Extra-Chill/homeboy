@@ -244,6 +244,43 @@ homeboy_cleanup_step_capture "$captured_path"
     }
 
     #[test]
+    fn sidecar_writer_rejects_undeclared_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("sidecar-writer.sh");
+        std::fs::write(&helper, assets::SIDECAR_WRITER_SH).unwrap();
+        for (kind, key) in [
+            ("lint.finding", "lint.findings"),
+            ("test.failure", "test.failures"),
+            ("test.result", "test.results"),
+            ("fix.result", "fix.results"),
+            ("annotation.demo", "annotations"),
+        ] {
+            for operation in ["write", "emit", "merge"] {
+                let output = std::process::Command::new("bash")
+                    .env_remove("HOMEBOY_LINT_FINDINGS_FILE")
+                    .env_remove("HOMEBOY_TEST_FAILURES_FILE")
+                    .env_remove("HOMEBOY_TEST_RESULTS_FILE")
+                    .env_remove("HOMEBOY_FIX_RESULTS_FILE")
+                    .env_remove("HOMEBOY_ANNOTATIONS_DIR")
+                    .arg("-c")
+                    .arg(format!(
+                        "source {}; homeboy_sidecar_{operation} {kind} '{{}}'",
+                        helper.display()
+                    ))
+                    .output()
+                    .unwrap();
+                assert!(!output.status.success(), "{operation} {kind}");
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(error.contains(key), "{error}");
+                assert!(
+                    error.contains("declare it in structured_sidecars"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sidecar_writer_appends_and_merges_json_arrays() {
         let dir = tempfile::tempdir().expect("tempdir");
         let helper_path = dir.path().join("sidecar-writer.sh");

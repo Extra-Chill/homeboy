@@ -4,8 +4,8 @@
 #
 # The helper owns the common "sidecar is a JSON array" file mechanics used by
 # lint findings, test failures, fix results, and annotation files. Callers still build the
-# domain-specific JSON object; this helper validates it, writes atomically, and
-# keeps empty/missing target env vars as no-ops for legacy compatibility.
+# domain-specific JSON object; this helper validates it and writes atomically.
+# Typed writes require a target declared in structured_sidecars.
 #
 # Usage:
 #   source "${HOMEBOY_RUNTIME_SIDECAR_WRITER}"
@@ -195,36 +195,40 @@ PYEOF
 }
 
 homeboy_sidecar_target_for_type() {
-    local type="${1:-}"
+    local type="${1:-}" key target
 
     case "$type" in
         lint.finding|lint.findings)
-            printf '%s\n' "${HOMEBOY_LINT_FINDINGS_FILE:-}"
+            key=lint.findings; target="${HOMEBOY_LINT_FINDINGS_FILE:-}"
             ;;
         test.failure|test.failures)
-            printf '%s\n' "${HOMEBOY_TEST_FAILURES_FILE:-}"
+            key=test.failures; target="${HOMEBOY_TEST_FAILURES_FILE:-}"
             ;;
         test.result|test.results)
-            printf '%s\n' "${HOMEBOY_TEST_RESULTS_FILE:-}"
+            key=test.results; target="${HOMEBOY_TEST_RESULTS_FILE:-}"
             ;;
         fix.result|fix.results)
-            printf '%s\n' "${HOMEBOY_FIX_RESULTS_FILE:-}"
+            key=fix.results; target="${HOMEBOY_FIX_RESULTS_FILE:-}"
             ;;
         annotation.*|annotations.*)
             local name="${type#annotation.}"
             name="${name#annotations.}"
-            if [ -z "${HOMEBOY_ANNOTATIONS_DIR:-}" ] || [ -z "$name" ]; then
-                printf '\n'
-                return 0
+            key=annotations; target="${HOMEBOY_ANNOTATIONS_DIR:-}"
+            if [ -n "$target" ]; then
+                name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9_.-' '-')"
+                target="${target%/}/$name.json"
             fi
-            name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9_.-' '-')"
-            printf '%s/%s.json\n' "${HOMEBOY_ANNOTATIONS_DIR%/}" "$name"
             ;;
         *)
             echo "[sidecar-writer] unknown sidecar type: $type" >&2
             return 1
             ;;
     esac
+    if [ -z "$target" ]; then
+        echo "[sidecar-writer] $key has no target; declare it in structured_sidecars" >&2
+        return 1
+    fi
+    printf '%s\n' "$target"
 }
 
 homeboy_sidecar_write() {

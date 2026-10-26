@@ -206,7 +206,14 @@ fn generic_trace_env(
         .path_override
         .as_deref()
         .unwrap_or(component.local_path.as_str());
-    let mut env = run_dir.legacy_env_vars();
+    let mut env = run_dir.sidecar_env_vars(&[
+        homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration {
+            name: "trace.results".to_string(),
+            path: run_dir::files::TRACE_RESULTS.to_string(),
+            schema_version: None,
+            producer: None,
+        },
+    ]);
     env.extend([
         (
             "HOMEBOY_EXTENSION_ID".to_string(),
@@ -219,13 +226,6 @@ fn generic_trace_env(
         (
             "HOMEBOY_COMPONENT_PATH".to_string(),
             component_path.to_string(),
-        ),
-        (
-            "HOMEBOY_TRACE_RESULTS_FILE".to_string(),
-            run_dir
-                .step_file(run_dir::files::TRACE_RESULTS)
-                .to_string_lossy()
-                .to_string(),
         ),
         (
             "HOMEBOY_TRACE_SCENARIO".to_string(),

@@ -278,6 +278,7 @@ fn setup_runtime_evidence_fixture(home: &Path, project: &Path) {
         r#"{
   "name": "Runtime evidence fixture",
   "version": "1.0.0",
+  "structured_sidecars": {"test.results": true, "test.failures": true},
   "test": {
     "extension_script": "test.py",
     "inventory": {

@@ -9,8 +9,9 @@
     "lint.findings": true,
     "test.results": true,
     "test.failures": true,
-    "test.coverage": false,
+    "test.coverage": true,
     "bench.results": true,
+    "fix.results": true,
     "annotations": true
   },
   "scripts": {

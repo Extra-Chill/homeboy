@@ -209,7 +209,7 @@ impl ExtensionRunner {
     /// replaced by the registry default (#11121).
     pub fn with_run_dir(mut self, run_dir: &homeboy_core::engine::run_dir::RunDir) -> Self {
         self.env_vars
-            .extend(run_dir.legacy_env_vars_for(&self.declared_structured_sidecars()));
+            .extend(run_dir.sidecar_env_vars(&self.declared_structured_sidecars()));
         self.env_vars.push((
             homeboy_core::server::DELEGATED_RUN_STATUS_FILE_ENV.to_string(),
             run_dir

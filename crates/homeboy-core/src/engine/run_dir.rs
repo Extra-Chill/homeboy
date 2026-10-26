@@ -17,12 +17,7 @@
 //!   annotations/           ← CI annotation files
 //! ```
 //!
-//! ## Backward compatibility
-//!
-//! During migration, the CLI sets both the run-dir env var and the legacy
-//! per-file env vars. The legacy vars
-//! point into the run dir, so extension scripts that use the old vars
-//! continue working. New scripts can use the run-dir env var directly.
+//! Extensions receive the run-dir env var and targets for declared sidecars only.
 
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
@@ -63,8 +58,7 @@ pub fn run_dir_env() -> String {
 /// A run directory for a single pipeline execution.
 ///
 /// Created once per `homeboy review lint`, `homeboy review test`, `homeboy review lint --fix`, etc.
-/// Provides well-known paths for step outputs and generates backward-compatible
-/// env var mappings for extension scripts.
+/// Provides well-known paths and declared sidecar env mappings for extension scripts.
 #[derive(Debug, Clone)]
 pub struct RunDir {
     path: PathBuf,
@@ -150,66 +144,13 @@ impl RunDir {
         super::temp::bind_run_dir_owner(&self.path, None, Some(invocation_id))
     }
 
-    /// The registry keys core exports a legacy sidecar env var for, whether or
-    /// not any manifest declares them.
-    ///
-    /// This is the measurable form of the narrowing question in #11121: as long
-    /// as a shipped extension's runner reads one of these without declaring it,
-    /// filtering [`Self::legacy_env_vars_for`] down to declared keys breaks
-    /// that extension. Core's extension tests pin the current gap against the
-    /// shipped manifest fixtures, so the day the gap closes the pin fails and
-    /// says so.
-    pub fn legacy_env_sidecar_keys() -> Vec<&'static str> {
-        crate::structured_sidecar::REGISTRY
-            .iter()
-            .filter(|entry| entry.env.is_some())
-            .map(|entry| entry.key)
-            .collect()
-    }
-
-    /// Generate backward-compatible env var pairs for extension scripts.
-    ///
-    /// Returns `(key, value)` pairs that map the legacy product-prefixed
-    /// file environment variables
-    /// env vars to files within this run directory. Extension scripts that
-    /// still use the old vars will read/write the correct locations.
-    pub fn legacy_env_vars(&self) -> Vec<(String, String)> {
-        self.legacy_env_vars_for(&[])
-    }
-
-    /// [`Self::legacy_env_vars`], with manifest-declared sidecar paths applied.
-    ///
-    /// A `structured_sidecars` entry may declare a non-default `path`. Until
-    /// #11121 that path was inert on this surface: core seeded and read the
-    /// registry default while telling the extension script, via these env vars,
-    /// to write the registry default too — so an extension that declared a
-    /// custom path had it silently ignored on every side. The declaration now
-    /// reaches the script.
-    ///
-    /// This is deliberately an *override*, not a filter. Narrowing the set to
-    /// only declared sidecars is the other half of #11121 and is not safe to do
-    /// here yet: shipped extensions consume env vars for sidecars they do not
-    /// declare (`rust` reads `COVERAGE_FILE` while declaring
-    /// `"test.coverage": false`, `wordpress` reads `ANNOTATIONS_DIR` while
-    /// declaring `"annotations": false`, and three extensions read
-    /// `FIX_RESULTS_FILE` without declaring `fix.results`). Narrowing before
-    /// those declarations are corrected would break shipped extensions, and an
-    /// extension declaring no sidecars at all would lose the whole set.
-    ///
-    /// That precondition is now measured rather than asserted in prose:
-    /// [`Self::legacy_env_sidecar_keys`] exposes what core exports
-    /// unconditionally, and core's extension tests pin the undeclared remainder
-    /// against the shipped manifest fixtures. When that pin reports an empty
-    /// gap, this may become a filter.
-    ///
-    /// Declared paths that are absolute or contain `..` are ignored — a
-    /// manifest is extension-authored config and this hands the result to a
-    /// child process as a write target.
-    pub fn legacy_env_vars_for(
+    /// Export the run directory and registry targets declared by the manifest.
+    /// Invalid paths fall back to the registry default to stay inside the run dir.
+    pub fn sidecar_env_vars(
         &self,
         declared: &[homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration],
     ) -> Vec<(String, String)> {
-        let mut env_vars = self.default_legacy_env_vars();
+        let mut env_vars = vec![(run_dir_env(), self.path.to_string_lossy().to_string())];
 
         for schema in crate::structured_sidecar::REGISTRY {
             let Some(env_suffix) = schema.env else {
@@ -221,17 +162,13 @@ impl RunDir {
             else {
                 continue;
             };
-            if declaration.path == schema.path {
-                continue;
-            }
-            let Some(path) = self.contained_step_file(&declaration.path) else {
-                continue;
-            };
-
-            let name = crate::product_identity::PRODUCT_IDENTITY.env_var(env_suffix);
-            if let Some(entry) = env_vars.iter_mut().find(|(key, _)| *key == name) {
-                entry.1 = path.to_string_lossy().to_string();
-            }
+            let path = self
+                .contained_step_file(&declaration.path)
+                .unwrap_or_else(|| self.step_file(schema.path));
+            env_vars.push((
+                crate::product_identity::PRODUCT_IDENTITY.env_var(env_suffix),
+                path.to_string_lossy().to_string(),
+            ));
         }
 
         env_vars
@@ -251,26 +188,6 @@ impl RunDir {
             return None;
         }
         Some(self.path.join(relative))
-    }
-
-    fn default_legacy_env_vars(&self) -> Vec<(String, String)> {
-        let mut env_vars = vec![(run_dir_env(), self.path.to_string_lossy().to_string())];
-        for entry in crate::structured_sidecar::REGISTRY {
-            if let Some(env) = entry.env {
-                env_vars.push((
-                    crate::product_identity::PRODUCT_IDENTITY.env_var(env),
-                    self.step_file(entry.path).to_string_lossy().to_string(),
-                ));
-            }
-        }
-        // PHASE_TIMINGS_FILE remains unconditionally exported until #16451's narrowing step.
-        env_vars.push((
-            crate::product_identity::PRODUCT_IDENTITY.env_var("PHASE_TIMINGS_FILE"),
-            self.step_file(files::PHASE_TIMINGS)
-                .to_string_lossy()
-                .to_string(),
-        ));
-        env_vars
     }
 
     /// Read a step output file as a JSON value, returning None if missing.
@@ -381,38 +298,15 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_env_vars() {
+    fn no_declarations_exports_only_run_dir() {
         let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
-        let env_vars = run_dir.legacy_env_vars();
-        let mut expected = vec![(
+        let env_vars = run_dir.sidecar_env_vars(&[]);
+        let expected = vec![(
             "HOMEBOY_RUN_DIR".to_string(),
             run_dir.path().to_string_lossy().to_string(),
         )];
-        for (suffix, path) in [
-            ("LINT_FINDINGS_FILE", "lint-findings.json"),
-            ("LINT_PRODUCERS_FILE", "lint-producers.json"),
-            ("TEST_RESULTS_FILE", "test-results.json"),
-            ("TEST_FAILURES_FILE", "test-failures.json"),
-            ("COVERAGE_FILE", "coverage.json"),
-            ("FIX_RESULTS_FILE", "fix-results.json"),
-            ("BENCH_RESULTS_FILE", "bench-results.json"),
-            ("BENCH_RESPONSIVENESS_FILE", "bench-responsiveness.jsonl"),
-            ("FUZZ_RESULTS_FILE", "fuzz-results.json"),
-            ("FUZZ_ARTIFACTS_DIR", "fuzz-artifacts"),
-            ("TRACE_RESULTS_FILE", "trace.json"),
-            ("PHASE_TIMINGS_FILE", "phase-timings.json"),
-            ("ANNOTATIONS_DIR", "annotations"),
-        ] {
-            expected.push((
-                format!("HOMEBOY_{suffix}"),
-                run_dir.step_file(path).to_string_lossy().to_string(),
-            ));
-        }
-        let mut actual = env_vars;
-        actual.sort();
-        expected.sort();
-        assert_eq!(actual, expected);
+        assert_eq!(env_vars, expected);
         run_dir.cleanup();
     }
 
@@ -436,17 +330,13 @@ mod tests {
             .unwrap_or_else(|| panic!("{key} must be exported"))
     }
 
-    /// A `structured_sidecars` entry may declare a non-default `path`, and
-    /// until #11121 that declaration never reached the extension: core exported
-    /// the registry default regardless, so a custom path was ignored on every
-    /// side at once.
     #[test]
     fn declared_sidecar_path_overrides_the_default_env_var() {
         let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
 
         let env_vars =
-            run_dir.legacy_env_vars_for(&[declaration("lint.findings", "custom/findings.json")]);
+            run_dir.sidecar_env_vars(&[declaration("lint.findings", "custom/findings.json")]);
 
         assert_eq!(
             value_of(&env_vars, "HOMEBOY_LINT_FINDINGS_FILE"),
@@ -455,30 +345,35 @@ mod tests {
                 .to_string_lossy()
                 .as_ref()
         );
-        // Undeclared sidecars keep their defaults: this is an override, not a
-        // filter. Narrowing the set is deferred — shipped extensions consume
-        // env vars for sidecars they do not declare.
-        assert_eq!(
-            value_of(&env_vars, "HOMEBOY_TEST_RESULTS_FILE"),
-            run_dir.step_file(files::TEST_RESULTS).to_string_lossy()
-        );
-        assert_eq!(
-            value_of(&env_vars, "HOMEBOY_COVERAGE_FILE"),
-            run_dir.step_file(files::COVERAGE).to_string_lossy()
-        );
+        assert_eq!(env_vars.len(), 2);
 
         run_dir.cleanup();
     }
 
     #[test]
-    fn declared_sidecar_path_matching_the_default_is_a_no_op() {
+    fn only_declared_lint_findings_is_exported() {
         let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
 
         let declared =
-            run_dir.legacy_env_vars_for(&[declaration("lint.findings", files::LINT_FINDINGS)]);
+            run_dir.sidecar_env_vars(&[declaration("lint.findings", files::LINT_FINDINGS)]);
 
-        assert_eq!(declared, run_dir.legacy_env_vars());
+        assert_eq!(
+            declared,
+            vec![
+                (
+                    "HOMEBOY_RUN_DIR".to_string(),
+                    run_dir.path().to_string_lossy().to_string()
+                ),
+                (
+                    "HOMEBOY_LINT_FINDINGS_FILE".to_string(),
+                    run_dir
+                        .step_file(files::LINT_FINDINGS)
+                        .to_string_lossy()
+                        .to_string()
+                ),
+            ]
+        );
 
         run_dir.cleanup();
     }
@@ -501,7 +396,7 @@ mod tests {
             "nested/../../escape.json",
             "",
         ] {
-            let env_vars = run_dir.legacy_env_vars_for(&[declaration("lint.findings", hostile)]);
+            let env_vars = run_dir.sidecar_env_vars(&[declaration("lint.findings", hostile)]);
             assert_eq!(
                 value_of(&env_vars, "HOMEBOY_LINT_FINDINGS_FILE"),
                 default,
@@ -517,7 +412,7 @@ mod tests {
         let run_dir = RunDir::from_existing(std::env::temp_dir()).expect("run dir");
         for entry in crate::structured_sidecar::REGISTRY {
             let Some(env) = entry.env else { continue };
-            let vars = run_dir.legacy_env_vars_for(&[declaration(entry.key, "custom/output")]);
+            let vars = run_dir.sidecar_env_vars(&[declaration(entry.key, "custom/output")]);
             assert_eq!(
                 value_of(&vars, &format!("HOMEBOY_{env}")),
                 run_dir.step_file("custom/output").to_string_lossy()
