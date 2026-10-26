@@ -995,20 +995,7 @@ pub struct AgentTaskPreDispatchFailure<'a> {
 pub fn record_pre_dispatch_failure(
     failure: AgentTaskPreDispatchFailure<'_>,
 ) -> Result<AgentTaskRunRecord> {
-    record_pre_dispatch_failure_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        failure,
-    )
-}
-
-/// [`record_pre_dispatch_failure`] against an explicitly injected root.
-///
-/// The prior record and the plan this failure submits describe the same run, so
-/// they have to come from and land in the same installation (#7505).
-pub fn record_pre_dispatch_failure_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    failure: AgentTaskPreDispatchFailure<'_>,
-) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = &AgentTaskLifecycleStore::from_current_environment()?;
     let run_id = sanitize_run_id(failure.identity.run_id);
     if let Ok(record) = reconcile_status_in_store(
         lifecycle_store,
@@ -1160,23 +1147,7 @@ pub fn record_remote_dispatch_failure(
     failure: AgentTaskRemoteDispatchFailure<'_>,
     envelope: &Value,
 ) -> Result<Option<AgentTaskRunRecord>> {
-    record_remote_dispatch_failure_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        failure,
-        envelope,
-    )
-}
-
-/// [`record_remote_dispatch_failure`] against an explicitly injected root.
-///
-/// The plan rewrite, the aggregate, and the record commit are one durable
-/// failure. The body used to resolve a root for the submit/aggregate pair and
-/// let four `store::` shims resolve their own for everything around it (#7505).
-pub fn record_remote_dispatch_failure_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    failure: AgentTaskRemoteDispatchFailure<'_>,
-    envelope: &Value,
-) -> Result<Option<AgentTaskRunRecord>> {
+    let lifecycle_store = &AgentTaskLifecycleStore::from_current_environment()?;
     if envelope.get("schema").and_then(Value::as_str) != Some("homeboy/agent-task-dispatch/v1") {
         return Ok(None);
     }
@@ -2750,27 +2721,6 @@ pub fn verified_controller_artifact_projection_path_in_store(
 /// Resolve a controller-retained artifact by its durable logical identity. This
 /// is intentionally independent of the runner-reported path: Lab workspaces
 /// are disposable after their aggregate has been mirrored.
-#[cfg(test)]
-pub(crate) fn verified_controller_artifact_projection(
-    run_id: &str,
-    task_id: &str,
-    logical_artifact_id: &str,
-    kind: &str,
-    expected_sha256: &str,
-    expected_record_id: Option<&str>,
-) -> Result<Option<(String, Vec<u8>)>> {
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    verified_controller_artifact_projection_in_store(
-        &store,
-        run_id,
-        task_id,
-        logical_artifact_id,
-        kind,
-        expected_sha256,
-        expected_record_id,
-    )
-}
-
 pub fn verified_controller_artifact_projection_in_store(
     store: &homeboy_core::observation::ObservationStore,
     run_id: &str,

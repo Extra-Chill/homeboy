@@ -445,7 +445,8 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
         )
         .expect("candidate survives without patch evidence");
         assert!(
-            crate::agent_task_lifecycle::verified_controller_artifact_projection(
+            crate::agent_task_lifecycle::verified_controller_artifact_projection_in_store(
+                &homeboy_core::observation::ObservationStore::open_initialized().unwrap(),
                 "baseline-run",
                 "forged-task",
                 "forged",

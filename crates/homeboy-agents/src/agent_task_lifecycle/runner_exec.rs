@@ -58,23 +58,7 @@ pub fn recorded_runner_job_identity(run_id: &str) -> Result<Option<(String, Stri
 pub fn accepted_lab_runner_job_identity(
     run_id: &str,
 ) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
-    accepted_lab_runner_job_identity_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-    )
-}
-
-/// The store-rooted counterpart of [`accepted_lab_runner_job_identity`].
-///
-/// This is the read half of Lab acceptance, and `record_detached_lab_run_in_store`
-/// is the write half. An acceptance committed into one installation and then
-/// verified against another's record would report "not accepted" for a run that
-/// is already bound — the mirror image of the double-acceptance the write side
-/// refuses — so both halves have to name the same store (#7505).
-pub fn accepted_lab_runner_job_identity_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     let record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     Ok(accepted_lab_runner_job_identity_from_record(&record))
 }
@@ -454,22 +438,6 @@ pub fn finish_runner_exec_pre_handoff_failure(
 /// Persist the output contract before submitting a daemon job. This gives a
 /// restarted controller the exact runner-side paths it must retain, rather than
 /// relying on ephemeral CLI arguments after the daemon has completed.
-pub fn record_runner_exec_artifact_declarations(
-    run_id: &str,
-    artifacts: &[String],
-    artifact_dirs: &[String],
-    summaries: &[String],
-) -> Result<()> {
-    record_runner_exec_artifact_declarations_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        artifacts,
-        artifact_dirs,
-        summaries,
-    )
-}
-
-/// The store-rooted counterpart of [`record_runner_exec_artifact_declarations`].
 ///
 /// This is a read-modify-write of one observation row: read, `kind`-checked,
 /// mutated, written back. Read and write are the same row, so they have to
@@ -734,20 +702,6 @@ pub fn runner_exec_declaration_is_promoted(
 /// Bind a directory declaration to one immutable recursive tree before any of
 /// its children are copied. A replay of changed runner-side output fails closed
 /// instead of mixing two directory versions under one declaration.
-pub fn checkpoint_runner_exec_directory_tree(
-    run_id: &str,
-    declaration: &str,
-    tree_sha256: &str,
-) -> Result<()> {
-    checkpoint_runner_exec_directory_tree_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        declaration,
-        tree_sha256,
-    )
-}
-
-/// The store-rooted counterpart of [`checkpoint_runner_exec_directory_tree`].
 ///
 /// The directory checkpoint and the per-child promotion states it guards live
 /// in the same metadata object on the same row, so they must be the same
@@ -821,24 +775,7 @@ pub fn runner_exec_directory_child_is_promoted_in_store(
         == Some("promoted"))
 }
 
-pub fn record_runner_exec_directory_child_promotion(
-    run_id: &str,
-    declaration: &str,
-    relative_child: &str,
-    artifact: &homeboy_core::observation::ArtifactRecord,
-) -> Result<()> {
-    record_runner_exec_directory_child_promotion_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        run_id,
-        declaration,
-        relative_child,
-        artifact,
-    )
-}
-
-/// The store-rooted counterpart of [`record_runner_exec_directory_child_promotion`].
-///
-/// The write half of the guard in `runner_exec_directory_child_is_promoted`.
+/// The write half of the guard in `runner_exec_directory_child_is_promoted_in_store`.
 /// Guard and write are the same metadata object, so they share a store (#7505).
 pub fn record_runner_exec_directory_child_promotion_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
