@@ -205,6 +205,26 @@ pub(crate) fn declared_runner(command: &str) -> Result<Option<String>> {
     active_transport().declared_runner(command)
 }
 
+/// Enters the Lab runner's identity scope; the scope ends when the guard drops.
+pub type RunnerIdentityScope = fn() -> Box<dyn std::any::Any>;
+static RUNNER_IDENTITY_SCOPE: std::sync::RwLock<Option<RunnerIdentityScope>> =
+    std::sync::RwLock::new(None);
+
+pub fn register_runner_identity_scope(enter: RunnerIdentityScope) {
+    *RUNNER_IDENTITY_SCOPE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(enter);
+}
+
+/// Hold for one gate round, admission pass or promotion attempt: each runner's
+/// Homeboy identity is then probed once. Refresh still suspends the scope.
+pub(crate) fn runner_identity_scope() -> Option<Box<dyn std::any::Any>> {
+    let enter = *RUNNER_IDENTITY_SCOPE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    enter.map(|enter| enter())
+}
+
 struct Unavailable;
 impl LabGateTransport for Unavailable {
     fn execute(
