@@ -824,7 +824,8 @@ fn promote_candidate(
             None,
         )
     })?;
-    super::candidate_bundle::validate_destination(&path, commit)?;
+    let feedback = outcome.metadata.get("gate_feedback_baseline");
+    super::candidate_bundle::validate_destination(&path, commit, feedback)?;
     let base_tree = git_output(
         &path,
         &["rev-parse", &format!("{}^{{tree}}", commit.base_sha)],
@@ -850,7 +851,7 @@ fn promote_candidate(
     });
     if !options.dry_run {
         capture_gate_verified_base(&path, options.base_ref.as_deref())?;
-        super::materialize_candidate_tree(&path, commit)?;
+        super::candidate_bundle::materialize_candidate_tree_with_feedback(&path, commit, feedback)?;
     }
     let applied_worktree_path = (!options.dry_run).then_some(path);
     let command_evidence = Vec::new();

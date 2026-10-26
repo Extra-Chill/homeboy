@@ -112,7 +112,14 @@ pub fn verify_candidate_ref(
     Ok(())
 }
 
-pub(crate) fn validate_destination(repo: &Path, candidate: &AgentTaskCandidate) -> Result<()> {
+/// Single admission contract for both promotion preflight and materialization:
+/// HEAD stays on the original base; feedback may replace only the recorded
+/// candidate tree in both the live index and the working tree.
+pub(crate) fn validate_destination(
+    repo: &Path,
+    candidate: &AgentTaskCandidate,
+    feedback: Option<&serde_json::Value>,
+) -> Result<()> {
     super::validate_candidate_commit(repo, candidate)?;
     let head = git(repo, &["rev-parse", "HEAD"])?;
     if head != candidate.base_sha {
@@ -121,6 +128,22 @@ pub(crate) fn validate_destination(repo: &Path, candidate: &AgentTaskCandidate) 
             actual: head,
         }
         .into());
+    }
+    if let Some(baseline) = feedback {
+        let previous = crate::agent_task_candidate_tree::validate_gate_feedback_candidate_baseline(
+            repo, baseline,
+        )?;
+        if previous.base_sha != candidate.base_sha
+            || git(repo, &["write-tree"])? != previous.tree_sha
+        {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "candidate destination index differs from gate feedback baseline",
+                None,
+                None,
+            ));
+        }
+        return Ok(());
     }
     if !git(repo, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -133,10 +156,22 @@ pub(crate) fn validate_destination(repo: &Path, candidate: &AgentTaskCandidate) 
     Ok(())
 }
 pub fn materialize_candidate_tree(repo: &Path, candidate: &AgentTaskCandidate) -> Result<()> {
-    validate_destination(repo, candidate)?;
+    materialize_candidate_tree_with_feedback(repo, candidate, None)
+}
+
+pub(crate) fn materialize_candidate_tree_with_feedback(
+    repo: &Path,
+    candidate: &AgentTaskCandidate,
+    feedback: Option<&serde_json::Value>,
+) -> Result<()> {
+    validate_destination(repo, candidate, feedback)?;
+    let previous = feedback
+        .and_then(|baseline| baseline.pointer("/candidate_commit/candidate_sha"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("HEAD");
     git(
         repo,
-        &["read-tree", "-u", "-m", "HEAD", &candidate.candidate_sha],
+        &["read-tree", "-u", "-m", previous, &candidate.candidate_sha],
     )?;
     Ok(())
 }
