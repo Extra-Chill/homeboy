@@ -1723,7 +1723,7 @@ fn validate_durable_publication_eligibility(
         return Ok(DurablePublicationEligibility::AuthenticatedExternalCandidateAdoption);
     }
 
-    Err(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime, or be a partial or candidate-recoverable run whose applied, fingerprinted candidate has green gates bound to it and whose producing runtime records a concrete model, before publication; the only other exceptions are an applied, green, fingerprinted candidate-adoption recovery with durable zero-execution pre-provider transport provenance or an applied, green, committed-change-provenance-bound authenticated external candidate adoption", None, None))
+    Err(crate::agent_task_service::CookDeliveryBlockerCode::PublishRefused.mark(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime, or be a partial or candidate-recoverable run whose applied, fingerprinted candidate has green gates bound to it and whose producing runtime records a concrete model, before publication; the only other exceptions are an applied, green, fingerprinted candidate-adoption recovery with durable zero-execution pre-provider transport provenance or an applied, green, committed-change-provenance-bound authenticated external candidate adoption", None, None)))
 }
 
 fn no_real_provider_execution(lifecycle: &RunLifecycleRecord) -> bool {

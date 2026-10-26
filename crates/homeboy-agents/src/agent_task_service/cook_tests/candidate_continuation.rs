@@ -322,3 +322,68 @@ fn candidate_recoverable_with_own_green_bound_gates_publishes() {
         assert!(backend.body.contains("gpt-6.1-sol"));
     });
 }
+
+/// #16441: a refused publication is deterministic, so a terminal continuation
+/// whose green, bound gates cannot publish ends there, naming the refusal,
+/// instead of scheduling another generation that re-runs the same gates.
+#[test]
+fn refused_publication_ends_the_terminal_continuation_without_regating() {
+    with_own_green_gates(|options, _| {
+        let (cook_id, run_id) = (&options.identity.cook_id, &options.identity.initial_run_id);
+        let store = test_lifecycle_store();
+        // The producing runtime records no concrete model: publication refuses.
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.lifecycle.provider_runtime[0].metadata = serde_json::json!({});
+        })
+        .unwrap();
+        let promotions = || {
+            store.read_record(run_id).unwrap().metadata["cook_delivery"]["artifacts"]["promotions"]
+                .clone()
+        };
+        let before = promotions();
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        recipes
+            .enqueue_terminal_continuation(cook_id, run_id)
+            .unwrap();
+        let claim = recipes
+            .claim_continuation_for(cook_id, run_id)
+            .unwrap()
+            .unwrap();
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(run_id.clone()),
+            ..Default::default()
+        };
+        let exit = crate::agent_task_service::consume_claimed_terminal_with_dispatcher(
+            claim,
+            |_| Ok(Some(Arc::new(AcceptedDetachedAttemptDispatcher))),
+            |options| continue_terminal(&options, &mut backend).map(|result| result.exit_code),
+        )
+        .unwrap();
+
+        assert_eq!(exit, 1);
+        assert_eq!(backend.create_count, 0);
+        let record = store.read_record(run_id).unwrap();
+        let continuation = &record.metadata["cook_continuation"];
+        assert_eq!(continuation["state"], "failed", "{continuation:#}");
+        assert_eq!(continuation["generation"], 0, "{continuation:#}");
+        let diagnostic = continuation["diagnostic"].as_str().unwrap();
+        assert!(
+            diagnostic.starts_with("publish_refused: ")
+                && diagnostic.contains("durable run must have succeeded"),
+            "{diagnostic}"
+        );
+        let blocker = crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
+            .and_then(|delivery| delivery.blocker)
+            .unwrap();
+        assert_eq!(
+            blocker.code,
+            crate::agent_task_service::CookDeliveryBlockerCode::PublishRefused
+        );
+        // No gate ran again, and nothing is left to claim.
+        assert_eq!(promotions(), before);
+        assert!(recipes
+            .claim_continuation_for(cook_id, run_id)
+            .unwrap()
+            .is_none());
+    });
+}

@@ -222,6 +222,17 @@ impl CookDeliveryBlockerCode {
             Self::Cancelled => "cancelled",
         }
     }
+
+    /// Mark `error` as a delivery stop of this kind, so callers read the kind
+    /// instead of its message.
+    pub(crate) fn mark(self, mut error: Error) -> Error {
+        error.details["delivery_blocker"] = Value::from(self.as_str());
+        error
+    }
+
+    pub(crate) fn of_error(error: &Error) -> Option<Self> {
+        serde_json::from_value(error.details.get("delivery_blocker")?.clone()).ok()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1256,7 +1267,20 @@ pub(super) fn ensure_published(
                     1,
                 ));
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                // A refusal is decided from durable facts the next pass reads
+                // unchanged: stop on it instead of re-running gates (#16441).
+                let Some(code) = CookDeliveryBlockerCode::of_error(&error) else {
+                    return Err(error);
+                };
+                let ControlFlow::Break(report) = ctx.blocked::<std::convert::Infallible>(
+                    code,
+                    error.message,
+                    Vec::new(),
+                    base_movements,
+                )?;
+                return Ok(report);
+            }
         }
     };
     let (final_status, published) = publication_status(&finalization);
