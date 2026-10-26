@@ -228,6 +228,7 @@ mod tests {
                 .unwrap();
             let mut timer = PhaseTimer::with_version(version);
             timer.record_ok("admit", Duration::from_millis(duration));
+            timer.record_ok("cook", Duration::from_millis(duration * 4));
             timer.record_ok("stage.transfer", Duration::from_millis(duration / 2));
             timer.record_failed("provider", Duration::from_millis(duration * 2));
             timer.record_skipped("publish");
@@ -264,6 +265,15 @@ mod tests {
         assert_eq!(admit.timing.p50_ms, 20.0);
         assert_eq!(admit.timing.p95_ms, 100.0);
         assert_eq!(admit.p95_delta_ms, Some(-80.0));
+        let cook = summary
+            .phases
+            .iter()
+            .find(|phase| phase.phase == "cook")
+            .unwrap();
+        assert_eq!(cook.timing.samples, 2);
+        assert_eq!(cook.timing.p50_ms, 80.0);
+        assert_eq!(cook.timing.p95_ms, 400.0);
+        assert_eq!(cook.p95_delta_ms, Some(-320.0));
         assert!(!summary.phases.iter().any(|phase| phase.phase == "publish"));
     }
 }
