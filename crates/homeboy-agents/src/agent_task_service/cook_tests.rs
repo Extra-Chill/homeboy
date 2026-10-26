@@ -8920,10 +8920,11 @@ fn admission_refused_lifecycle_retry_dispatches_through_its_cook() {
 fn rooted_lifecycle_retry_refuses_to_bypass_cook_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = retryable_pre_provider_cook("cook-rooted-retry-refusal", 2);
-        let error = agent_task_lifecycle::retry_in_store(
+        let error = agent_task_lifecycle::retry_with_force_in_store(
             &test_lifecycle_store(),
             &options.identity.initial_run_id,
             None,
+            false,
         )
         .unwrap_err();
         assert!(error
