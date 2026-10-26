@@ -555,6 +555,7 @@ pub fn refresh_homeboy_binary_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     options: HomeboyBinaryRefreshOptions,
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
+    let _identities = super::connection::StagingIdentityScope::suspend();
     let should_retire = !options.dry_run;
     let runner_id = options.runner_id.clone();
     let result = refresh_homeboy_binary_inner_in_roots(roots, options)?;

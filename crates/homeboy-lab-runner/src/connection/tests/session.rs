@@ -1153,6 +1153,7 @@ fn observed_matching_daemon_identity_reconciles_stale_session_metadata() {
     let configured = RemoteHomeboyIdentity {
         version: "0.298.1".to_string(),
         build_identity: Some("homeboy 0.298.1+7d7b8e656466".to_string()),
+        handoff: None,
         daemon_recovery_capabilities: None,
     };
 

@@ -1086,6 +1086,59 @@ fn strict_ancestor_refresh_candidate_is_rejected_while_owner_keeps_selection() {
 }
 
 #[test]
+fn refresh_reobserves_a_replaced_binary_inside_staging() {
+    crate::test_support::with_isolated_home(|home| {
+        let binary = home.path().join("homeboy");
+        let write_binary = |commit: &str| {
+            homeboy_test_support::write_executable(&binary, format!(
+                "#!/bin/sh\necho '{{\"version\":\"1.2.3\",\"display\":\"homeboy 1.2.3+{commit}\",\"git_commit\":\"{commit}\",\"git_dirty\":false}}'\n"), 0o755).unwrap();
+        };
+        write_binary("old");
+        homeboy_core::server::create(
+            r#"{"id":"identity-lab","host":"localhost","user":"test"}"#,
+            false,
+        )
+        .unwrap();
+        crate::create(
+            &serde_json::json!({
+                "id": "identity-lab", "kind": "ssh", "server_id": "identity-lab",
+                "homeboy_path": binary.display().to_string(), "workspace_root": home.path().display().to_string(),
+            "policy": { "allow_raw_exec": true }
+            })
+            .to_string(),
+            false,
+        )
+        .unwrap();
+        let runner = crate::load("identity-lab").unwrap();
+        let observe = || {
+            configured_runner_homeboy_build_identity(&runner, binary.to_str().unwrap())
+                .unwrap()
+                .unwrap()
+        };
+        let _staging = crate::connection::StagingIdentityScope::enter();
+        assert_eq!(observe(), "homeboy 1.2.3+old");
+        write_binary("new");
+        assert_eq!(observe(), "homeboy 1.2.3+old");
+        let (output, code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+            runner_id: "identity-lab".to_string(),
+            mode: HomeboyBinaryRefreshMode::Select {
+                binary_path: binary.display().to_string(),
+            },
+            source: None,
+            git_ref: None,
+            target_dir: None,
+            reconnect: false,
+            force: false,
+            allow_downgrade: true,
+            dry_run: false,
+        })
+        .unwrap();
+        assert_eq!(code, 0, "{output:?}");
+        assert_eq!(observe(), "homeboy 1.2.3+new");
+    });
+}
+
+#[test]
 fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
     {
         let context = test_support::HermeticTestContext::new();

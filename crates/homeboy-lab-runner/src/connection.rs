@@ -2800,6 +2800,8 @@ pub(crate) fn configured_runner_homeboy_build_identity(
     )
 }
 
+pub(crate) use remote_daemon::StagingIdentityScope;
+
 pub(crate) fn configured_runner_homeboy_handshake_evidence(
     runner: &Runner,
     homeboy: &str,
@@ -2812,40 +2814,11 @@ pub(crate) fn configured_runner_homeboy_handshake_evidence(
     let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
         return Ok(None);
     };
-    let output = client.execute_with_timeout(
-        &format!("{} self identity", shell::quote_arg(homeboy)),
-        Duration::from_secs(15),
-    );
-    if !output.success {
-        return Ok(None);
-    }
-    let body: Value = parse_json_from_mixed_stdout(&output.stdout).map_err(|error| {
-        Error::validation_invalid_argument(
-            "runner",
-            format!("parse runner Homeboy identity: {error}"),
-            Some(runner.id.clone()),
-            None,
-        )
-    })?;
-    let data = body.get("data").unwrap_or(&body);
-    let commit = data
-        .get("git_commit")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let display = data
-        .get("display")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let capabilities =
-        serde_json::from_value(data["lab_handoff_capabilities"].clone()).unwrap_or_default();
-    Ok(Some((
-        homeboy_lab_contract::LabRuntimeIdentity {
-            build_identity: display.to_string(),
-            source_revision: commit.to_string(),
-            clean: data.get("git_dirty").and_then(Value::as_bool) == Some(false),
-        },
-        capabilities,
-    )))
+    Ok(
+        bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id))
+            .ok()
+            .and_then(|identity| identity.handoff),
+    )
 }
 
 pub(crate) fn daemon_lab_handoff_capabilities(
@@ -4147,6 +4120,7 @@ pub(crate) mod remote_daemon;
 mod service;
 mod session_store;
 
+#[cfg(test)]
 pub(crate) use remote_daemon::parse_json_from_mixed_stdout;
 use remote_daemon::*;
 pub(crate) use service::repoint_and_restart as repoint_and_restart_runner_service;

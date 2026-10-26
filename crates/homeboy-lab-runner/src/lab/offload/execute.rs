@@ -24,6 +24,7 @@ pub(crate) fn record_synced_remapped_workspace_entry(
 }
 
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
+    let _identities = crate::connection::StagingIdentityScope::enter();
     let placement = request.placement_decision.requested;
     // A *pinned* runner is a caller's authority to leave this machine. A
     // *policy-selected* default runner is not — it is only a preference, and
@@ -304,15 +305,15 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     let preparation = observation.timer.time("stage.lab.preflight", || {
         prepare_lab_runner_for_offload(&selection)
     })?;
-    let runner_status = match preparation {
+    match preparation {
         LabRunnerPreparation::Ready { connect_authority } => {
             // A full runner is a readiness failure.
-            let runner_status = match preflight_lab_runner_availability(
+            match preflight_lab_runner_availability(
                 &contract,
                 &selection,
                 connect_authority.as_ref(),
             ) {
-                Ok(status) => status,
+                Ok(_) => (),
                 Err(error) => {
                     if contract.routing_policy.release_gate
                         && matches!(selection.source, LabRunnerSelectionSource::Default)
@@ -357,7 +358,6 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 plan,
                 PlanStep::ready("lab.connect_runner", "lab.connect_runner").build(),
             );
-            runner_status
         }
         LabRunnerPreparation::FallBackLocal { reason } => {
             plan = with_step(
@@ -427,15 +427,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         }
     };
 
-    run_lab_offload_inner(
-        request,
-        selection,
-        contract,
-        plan,
-        messages,
-        observation,
-        runner_status,
-    )
+    run_lab_offload_inner(request, selection, contract, plan, messages, observation)
 }
 
 pub(crate) fn record_local_outcome(request: &LabOffloadRequest<'_>) -> Result<()> {
