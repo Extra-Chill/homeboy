@@ -1,7 +1,9 @@
 mod phase_spans;
+mod reliability;
 pub use phase_spans::{
     phase_hotspots, PhaseHotspot, PhaseHotspotQuery, PhaseHotspots, PhasePercentiles,
 };
+pub use reliability::{FailingPhase, Reliability, ReliabilityComparison, VersionReliability};
 
 use std::collections::{BTreeMap, HashMap};
 
