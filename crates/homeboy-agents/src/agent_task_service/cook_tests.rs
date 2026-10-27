@@ -5538,7 +5538,6 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let marker = temp.path().join("executed.json");
-        let transcript = temp.path().join("transcript.txt");
         let readiness = temp.path().join("readiness.js");
         let provider_command = temp.path().join("provider.js");
         std::fs::write(
@@ -5549,8 +5548,8 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
         std::fs::write(
             &provider_command,
             format!(
-                "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const transcript={:?};fs.writeFileSync({:?},JSON.stringify({{model:req.executor.model,config:req.executor.config}}));fs.writeFileSync(transcript,'ready fallback executed');process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',artifacts:[{{schema:'homeboy/agent-task-artifact/v1',id:'transcript',kind:'transcript',name:'transcript',path:transcript}}]}}));",
-                transcript.display().to_string(), marker.display().to_string()
+                "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const transcript=require('path').join(req.artifacts_path,'transcript.txt');fs.writeFileSync({:?},JSON.stringify({{model:req.executor.model,config:req.executor.config}}));fs.writeFileSync(transcript,'ready fallback executed');process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',artifacts:[{{schema:'homeboy/agent-task-artifact/v1',id:'transcript',kind:'transcript',name:'transcript',path:transcript}}]}}));",
+                marker.display().to_string()
             ),
         )
         .expect("provider script");

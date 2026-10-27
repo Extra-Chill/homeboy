@@ -180,30 +180,14 @@ pub(crate) fn finalize_provider_file_artifacts(
             let Some(declared) = artifact.path.clone() else {
                 continue;
             };
-            match staged_file(root, artifact, &declared) {
-                Ok((path, size, sha256, mime)) => {
-                    artifact.path = Some(path.display().to_string());
-                    artifact.size_bytes = Some(size);
-                    artifact.sha256 = Some(sha256);
-                    artifact.mime = mime;
-                    ensure_metadata(artifact)
-                        .insert("executor_artifact_finalized".to_string(), json!(true));
-                    ensure_metadata(artifact)
-                        .insert("mime_inference".to_string(), json!("extension_only"));
-                }
-                Err(error) if is_legacy_outside_root(&error) => {
-                    artifact.size_bytes = None;
-                    artifact.sha256 = None;
-                    artifact.mime = homeboy_core::artifact_metadata::content_type_from_path(
-                        Path::new(&declared),
-                    );
-                    ensure_metadata(artifact)
-                        .insert("executor_artifact_finalized".to_string(), json!(false));
-                    ensure_metadata(artifact).insert("review_only".to_string(), json!(true));
-                    outcome.diagnostics.push(AgentTaskDiagnostic { class: "agent_task.legacy_external_artifact".to_string(), message: "Provider declared an artifact outside the Homeboy executor root; it remains review-only and is not promotable.".to_string(), data: json!({ "path": declared }) });
-                }
-                Err(error) => return Err(error),
-            }
+            let (path, size, sha256, mime) = staged_file(root, artifact, &declared)?;
+            artifact.path = Some(path.display().to_string());
+            artifact.size_bytes = Some(size);
+            artifact.sha256 = Some(sha256);
+            artifact.mime = mime;
+            ensure_metadata(artifact)
+                .insert("executor_artifact_finalized".to_string(), json!(true));
+            ensure_metadata(artifact).insert("mime_inference".to_string(), json!("extension_only"));
         }
         root.verify()?;
         let finalized = outcome.artifacts.clone();
@@ -897,12 +881,6 @@ fn mark_review_only_for_unsupported_platform(
     }
 }
 
-fn is_legacy_outside_root(error: &Error) -> bool {
-    error
-        .message
-        .contains("outside the Homeboy-owned artifact root")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1158,7 +1136,7 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
-    fn external_patch_remains_visible_without_becoming_an_aggregate_apply_candidate() {
+    fn finalization_rejects_an_artifact_outside_the_executor_root() {
         let temp = tempfile::tempdir().expect("temp dir");
         let root_path = temp.path().join("executor");
         let external = temp.path().join("external.patch");
@@ -1166,14 +1144,13 @@ mod tests {
         fs::write(&external, b"diff --git a/a b/a\n").expect("external patch");
         let root = capture(&root_path, temp.path());
         let mut value = outcome(external.display().to_string());
-        value.artifacts[0].size_bytes = Some(128);
 
-        finalize_provider_file_artifacts(&mut value, &root).expect("review-only finalization");
+        let error = finalize_provider_file_artifacts(&mut value, &root)
+            .expect_err("an artifact outside the executor root is rejected");
 
-        let report = crate::agent_task_aggregate::AgentTaskAggregateReport::from(&[value][..]);
-        assert_eq!(report.artifact_inventory.len(), 1);
-        assert!(report.apply_candidates.is_empty());
-        assert_eq!(report.summary.review_candidates, 1);
+        assert!(error
+            .message
+            .contains("outside the Homeboy-owned artifact root"));
     }
 
     #[cfg(any(unix, windows))]
