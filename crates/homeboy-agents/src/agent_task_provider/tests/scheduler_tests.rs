@@ -99,10 +99,12 @@ fn remapped_lab_cook_spawns_and_harvests_from_runner_snapshot_identity() {
         .as_ref()
         .expect("candidate commit");
     crate::agent_task_promotion::validate_candidate_commit(&source, candidate).unwrap();
+    // Harvest retains the candidate's diff as inspectable patch evidence
+    // beside the commit, so it survives the attempt checkout being reaped.
     assert!(aggregate.outcomes[0]
         .artifacts
         .iter()
-        .all(|artifact| artifact.kind != "patch"));
+        .any(|artifact| artifact.kind == "patch"));
 }
 
 #[test]
