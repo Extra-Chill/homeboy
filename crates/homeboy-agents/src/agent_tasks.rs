@@ -347,6 +347,5 @@ pub mod service {
     pub use super::super::agent_task_service::{
         artifacts, logs, persist_initial_recipe, promotion_source,
         reconcile_terminal_artifact_projection, resolve_cook_continuation_run_id, retry,
-        validate_initial_recipe_compatibility,
     };
 }

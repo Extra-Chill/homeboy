@@ -87,8 +87,10 @@ mod tests {
 
     /// A test is the entry point for its own unit of work, so resolving once
     /// here is a boundary resolution (#7505).
+    /// A fixed root: these tests check path shape, and resolving the ambient
+    /// root races tests that flip the process-global home-root override.
     fn test_config_root() -> std::path::PathBuf {
-        crate::homeboy().expect("config root")
+        std::path::PathBuf::from("/fixture/.config/homeboy")
     }
 
     #[test]

@@ -1472,7 +1472,10 @@ mod home_root_override_tests {
     /// without a `setenv` that other threads race.
     #[test]
     fn an_override_outranks_the_environment() {
-        let _lock = super::config_root_tests::env_lock().lock().unwrap();
+        // `HOMEBOY_CONFIG_ROOT` legitimately outranks the override, so clear it
+        // (restored on drop) in case the host running the tests has it set.
+        let env = super::config_root_tests::guard();
+        env.remove(HOMEBOY_CONFIG_ROOT_ENV);
         set_home_root_override(Some(PathBuf::from("/tmp/homeboy-override-root")));
         let resolved = homeboy().expect("config root");
         set_home_root_override(None);
@@ -1569,7 +1572,7 @@ mod config_root_tests {
     /// Snapshot of the three env vars this module mutates, restored on drop
     /// regardless of test outcome (including panics) so one failing assertion
     /// cannot leak state into every later test in the binary.
-    struct EnvGuard<'a> {
+    pub(super) struct EnvGuard<'a> {
         _lock: MutexGuard<'a, ()>,
         prior_config_root: Option<String>,
         prior_xdg_config_home: Option<String>,
@@ -1593,7 +1596,7 @@ mod config_root_tests {
             unsafe { env::set_var(name, value) };
         }
 
-        fn remove(&self, name: &str) {
+        pub(super) fn remove(&self, name: &str) {
             // SAFETY: see `set` above.
             unsafe { env::remove_var(name) };
         }
@@ -1616,7 +1619,7 @@ mod config_root_tests {
         }
     }
 
-    fn guard() -> EnvGuard<'static> {
+    pub(super) fn guard() -> EnvGuard<'static> {
         let lock = env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
