@@ -219,7 +219,7 @@ fn activity_context(record: &AgentTaskRunRecord) -> ActivityContext {
             identities = plan.tasks.iter().map(task_identity).collect();
         }
     }
-    let legacy = ActivityTaskIdentity {
+    let recorded = ActivityTaskIdentity {
         task_url: context
             .and_then(|value| value.get("task_url"))
             .and_then(Value::as_str)
@@ -237,13 +237,13 @@ fn activity_context(record: &AgentTaskRunRecord) -> ActivityContext {
             .map(str::to_string)
             .or_else(|| metadata_string(&record.metadata, &["remote_workspace"])),
     };
-    if identities.is_empty() && legacy != ActivityTaskIdentity::default() {
-        identities.push(legacy.clone());
+    if identities.is_empty() && recorded != ActivityTaskIdentity::default() {
+        identities.push(recorded.clone());
     }
     ActivityContext {
-        task_url: legacy.task_url,
-        repository: legacy.repository,
-        worktree: legacy.worktree,
+        task_url: recorded.task_url,
+        repository: recorded.repository,
+        worktree: recorded.worktree,
         identities,
     }
 }

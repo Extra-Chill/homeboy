@@ -197,7 +197,7 @@ impl ResolvedMetricPolicy {
         }
     }
 
-    fn legacy_p95(default_threshold_percent: f64) -> Self {
+    fn default_p95(default_threshold_percent: f64) -> Self {
         Self {
             name: "p95_ms".to_string(),
             policy: BenchMetricPolicy {
@@ -307,7 +307,7 @@ pub(crate) fn resolve_metric_policies(
         if !reports_p95 {
             return Vec::new();
         }
-        return vec![ResolvedMetricPolicy::legacy_p95(default_threshold_percent)];
+        return vec![ResolvedMetricPolicy::default_p95(default_threshold_percent)];
     }
 
     metric_policies
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_name() {
-        let resolved = ResolvedMetricPolicy::legacy_p95(5.0);
+        let resolved = ResolvedMetricPolicy::default_p95(5.0);
 
         assert_eq!(resolved.name(), "p95_ms");
     }

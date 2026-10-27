@@ -104,7 +104,7 @@ pub(super) enum RunsCommand {
         json: bool,
         // Canonical presentation vocabulary (#11138). `--format json` means
         // exactly what the `--json` bool above means; `RunsArgs`'s eligibility
-        // helpers read the two together via `PresentationArgs::json_or_legacy`.
+        // helpers read the two together via `PresentationArgs::json_or_flag`.
         #[command(flatten)]
         presentation: PresentationArgs,
         /// JSONPath selector(s) projected over the run detail so callers
@@ -483,8 +483,8 @@ pub struct RunsArtifactsOutput {
     pub runner_id: Option<String>,
     pub path_guide: RunsArtifactPathGuide,
     pub artifacts: Vec<ArtifactRecord>,
-    /// Persisted inventory page details. `--full` omits the limit so legacy
-    /// callers retain the exhaustive listing contract.
+    /// Persisted inventory page details. `--full` omits the limit and returns the
+    /// exhaustive listing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<RunsArtifactPage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -649,7 +649,7 @@ pub struct RunsArtifactsArgs {
     /// Number of matching records to skip before this page.
     #[arg(long, default_value_t = 0)]
     pub offset: i64,
-    /// Retain the exhaustive legacy listing and derived summaries.
+    /// Return the exhaustive listing and derived summaries.
     #[arg(long)]
     pub full: bool,
 }

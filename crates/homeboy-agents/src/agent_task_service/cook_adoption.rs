@@ -66,7 +66,7 @@ fn persist_adoption_terminal_result(
     )
 }
 
-fn legacy_adoption_budget_failure(
+fn adoption_budget_failure_awaiting_review(
     recipe: &super::AgentTaskCookRecipe,
     source_run_id: &str,
     result: Option<&Value>,
@@ -366,7 +366,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         })
         // Pre-authority budget failures may enter the repaired path once. The
         // failed attempt is archived when the new adoption starts.
-        && !legacy_adoption_budget_failure(&recipe, &run_id, persisted_adoption_result)
+        && !adoption_budget_failure_awaiting_review(&recipe, &run_id, persisted_adoption_result)
     {
         let persisted_promotion =
             persisted_promotion_for_attempt_in_store(lifecycle_store, &record.run_id)?;

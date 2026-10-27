@@ -1359,8 +1359,8 @@ pub enum DetailLevel {
 ///
 /// # Adoption
 ///
-/// A migrated command declares **both** spellings — the legacy boolean and
-/// this group — and reads them through [`PresentationArgs::json_or_legacy`],
+/// A migrated command declares **both** spellings — the `--json` boolean and
+/// this group — and reads them through [`PresentationArgs::json_or_flag`],
 /// so `--json` and `--format json` are exactly equivalent and either one
 /// alone is enough. Nothing is removed.
 ///
@@ -1415,7 +1415,7 @@ impl PresentationArgs {
         matches!(self.detail, DetailLevel::Summary)
     }
 
-    /// Fold a command's legacy boolean `--json` flag into this group.
+    /// Fold a command's boolean `--json` flag into this group.
     ///
     /// `bench --json`, `runs show --json`, `runs proof --json`, and
     /// `runs dossier --json` all mean *"print the full JSON payload instead
@@ -1424,12 +1424,12 @@ impl PresentationArgs {
     /// directly, which makes `--json` and `--format json` interchangeable
     /// without removing either spelling.
     ///
-    /// The fold is a logical OR on purpose: the legacy flag has no "off"
+    /// The fold is a logical OR on purpose: the `--json` flag has no "off"
     /// state to distinguish from its default, so `--json --format text`
     /// cannot mean "text". Passing both spellings with the same intent is
     /// the only combination an operator can express, and it agrees.
-    pub(crate) fn json_or_legacy(&self, legacy_json: bool) -> bool {
-        legacy_json || self.is_json()
+    pub(crate) fn json_or_flag(&self, json_flag: bool) -> bool {
+        json_flag || self.is_json()
     }
 }
 
@@ -1475,30 +1475,30 @@ mod presentation_args_tests {
     }
 
     #[test]
-    fn legacy_json_bool_alone_still_selects_json() {
+    fn json_flag_bool_alone_still_selects_json() {
         // A migrated command that saw only the old spelling must behave
         // exactly as it did before the group existed.
         let untouched = parse(&["rendered"]);
-        assert!(untouched.json_or_legacy(true));
-        assert!(!untouched.json_or_legacy(false));
+        assert!(untouched.json_or_flag(true));
+        assert!(!untouched.json_or_flag(false));
     }
 
     #[test]
     fn format_json_alone_still_selects_json() {
-        // ...and the canonical spelling works without the legacy bool.
-        assert!(parse(&["rendered", "--format=json"]).json_or_legacy(false));
+        // ...and the canonical spelling works without the `--json` bool.
+        assert!(parse(&["rendered", "--format=json"]).json_or_flag(false));
     }
 
     #[test]
     fn both_spellings_agree() {
-        assert!(parse(&["rendered", "--format=json"]).json_or_legacy(true));
+        assert!(parse(&["rendered", "--format=json"]).json_or_flag(true));
     }
 
     #[test]
     fn non_json_formats_do_not_fabricate_json() {
         for format in ["auto", "markdown", "text"] {
             assert!(
-                !parse(&["rendered", "--format", format]).json_or_legacy(false),
+                !parse(&["rendered", "--format", format]).json_or_flag(false),
                 "--format {format} must not imply JSON"
             );
         }
@@ -1506,8 +1506,8 @@ mod presentation_args_tests {
 
     #[test]
     fn detail_does_not_affect_the_format_fold() {
-        assert!(!parse(&["rendered", "--detail=summary"]).json_or_legacy(false));
-        assert!(parse(&["rendered", "--detail=summary"]).json_or_legacy(true));
+        assert!(!parse(&["rendered", "--detail=summary"]).json_or_flag(false));
+        assert!(parse(&["rendered", "--detail=summary"]).json_or_flag(true));
     }
 }
 

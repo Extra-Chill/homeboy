@@ -146,9 +146,7 @@ fn preferred_workspace_path<'a>(
 /// Per-instance results filename within the run dir.
 ///
 /// Single source of truth so the runner-side override and the parent
-/// reader agree on the path. Single-instance runs keep the legacy
-/// `bench-results.json` filename for backward compatibility with any
-/// extension that hardcodes it.
+/// reader agree on the path. Single-instance runs use `bench-results.json`.
 pub(crate) fn instance_results_filename(instance_id: u32) -> String {
     format!("bench-results-i{}.json", instance_id)
 }
@@ -157,7 +155,7 @@ pub(crate) fn instance_results_filename(instance_id: u32) -> String {
 ///
 /// `instance` is `Some((id, total))` for multi-instance runs (each gets
 /// its own results file + instance/concurrency env vars), or `None` for
-/// the legacy single-instance path.
+/// a single-instance run.
 pub(crate) fn build_runner(
     execution_context: &ExtensionExecutionContext,
     component: &Component,

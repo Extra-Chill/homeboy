@@ -357,7 +357,7 @@ pub fn apply_recorded_bench_artifact_links(
     // contract after promotion.
     artifact.artifact_type = Some(record.artifact_type.clone());
     let public_url = artifact_links::public_artifact_url(record)?;
-    if artifact_links::public_artifact_url_is_reachable_or_legacy(record) {
+    if artifact_links::public_artifact_url_is_presentable(record) {
         artifact.public_url = Some(public_url.clone());
         artifact.viewer_refs.viewer_links =
             artifact_links::cached_validated_viewer_links(record, &public_url);

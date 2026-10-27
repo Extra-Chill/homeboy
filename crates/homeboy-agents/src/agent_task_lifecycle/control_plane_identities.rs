@@ -50,7 +50,7 @@ pub fn canonical_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId
 /// A run id that does not encode an attempt is omitted rather than guessed.
 /// When the durable record already carries `cook_attempt`, a disagreement with
 /// the encoded attempt number is a typed error rather than a silent preference.
-/// Legacy retry-qualified run IDs encode their source attempt, so their durable
+/// Retry-qualified run IDs encode their source attempt, so their durable
 /// successor attempt remains authoritative.
 pub fn canonical_control_plane_identities(
     record: &AgentTaskRunRecord,
@@ -79,11 +79,11 @@ pub fn canonical_control_plane_identities_for_run(
     else {
         return Ok(None);
     };
-    let legacy_retry = run_id
+    let retry_qualified = run_id
         .trim_end_matches("-transport-retry")
         .ends_with("-retry");
     let cook_attempt_number = match recorded_attempt {
-        Some(recorded) if recorded > cook_attempt_number && legacy_retry => recorded,
+        Some(recorded) if recorded > cook_attempt_number && retry_qualified => recorded,
         Some(recorded) if recorded != cook_attempt_number => {
             return Err(Error::validation_invalid_argument(
                 "cook_attempt",

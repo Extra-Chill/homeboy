@@ -19,7 +19,7 @@ pub enum RigWorkloadKind {
 }
 
 impl RigWorkloadKind {
-    /// The kind slug this legacy workload kind reads as.
+    /// The kind slug this per-kind workload field reads as.
     pub fn as_slug(self) -> &'static str {
         match self {
             RigWorkloadKind::Bench => "bench",
@@ -208,11 +208,11 @@ fn declared_suffix(label: &str, values: &[String]) -> String {
     }
 }
 
-/// The legacy per-kind workload field for a kind slug, when the kind has
+/// The per-kind workload field for a kind slug, when the kind has
 /// one: `bench_workloads`, `fuzz_workloads`, or `trace_workloads`.
 ///
 /// This is the only place workload kind names are branched on.
-fn legacy_workload_map<'a>(
+fn per_kind_workload_map<'a>(
     rig_spec: &'a RigSpec,
     kind: &str,
 ) -> Option<&'a std::collections::HashMap<String, Vec<WorkloadSpec>>> {
@@ -227,15 +227,15 @@ fn legacy_workload_map<'a>(
 /// Rig workload entries for an arbitrary kind slug, keyed by extension id.
 ///
 /// The generic `workloads` map is the source for every kind; the three
-/// legacy per-kind fields additionally read as the kinds `bench`, `fuzz`,
-/// and `trace`, and both sources merge (legacy entries first).
+/// per-kind fields additionally read as the kinds `bench`, `fuzz`,
+/// and `trace`, and both sources merge (per-kind entries first).
 pub fn workloads_for_kind<'a>(
     rig_spec: &'a RigSpec,
     kind: &str,
 ) -> BTreeMap<String, Vec<&'a WorkloadSpec>> {
     let mut merged: BTreeMap<String, Vec<&'a WorkloadSpec>> = BTreeMap::new();
-    if let Some(legacy) = legacy_workload_map(rig_spec, kind) {
-        for (extension_id, entries) in legacy {
+    if let Some(per_kind) = per_kind_workload_map(rig_spec, kind) {
+        for (extension_id, entries) in per_kind {
             merged
                 .entry(extension_id.clone())
                 .or_default()
@@ -335,7 +335,7 @@ pub fn extension_workload_inputs(
 }
 
 /// Expanded workload paths for an arbitrary kind slug and extension id,
-/// reusing the same path expansion as the legacy per-kind readers.
+/// reusing the same path expansion as the per-kind readers.
 pub fn workload_path_expansions_for_kind(
     rig_spec: &RigSpec,
     kind: &str,
