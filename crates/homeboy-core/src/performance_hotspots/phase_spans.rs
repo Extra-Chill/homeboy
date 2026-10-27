@@ -47,6 +47,7 @@ pub struct PhaseHotspots {
     /// Runs lacking spans are not zero-duration samples.
     pub runs_without_spans: usize,
     pub phases: Vec<PhaseHotspot>,
+    pub reliability: super::Reliability,
 }
 
 #[derive(Default)]
@@ -79,18 +80,25 @@ pub fn phase_hotspots(
     store: &ObservationStore,
     query: &PhaseHotspotQuery,
 ) -> Result<PhaseHotspots> {
-    let runs = store.list_runs(RunListFilter {
+    let runs = store.list_runs_best_effort(RunListFilter {
         kind: query.kind.clone(),
         component_id: query.component.clone(),
         limit: Some(query.last.clamp(1, 1000) as i64),
         ..Default::default()
     })?;
     let runs = runs_service::dedupe_runner_execution_mirrors(runs).canonical;
+    let reliability = super::reliability::reliability(store, &runs, query);
     let mut groups: BTreeMap<String, Samples> = BTreeMap::new();
     let mut runs_with_spans = 0;
     let run_ids = runs.iter().map(|run| run.id.clone()).collect::<Vec<_>>();
     for run in runs {
-        let report = store.phase_spans(&run.id)?;
+        let report = match store.phase_spans(&run.id) {
+            Ok(report) => report,
+            Err(error) => {
+                crate::log_status!("runs", "skipping malformed phase row {}: {}", run.id, error);
+                continue;
+            }
+        };
         let mut has_spans = false;
         for span in report.spans {
             let version = if span.homeboy_version.is_empty() {
@@ -169,6 +177,7 @@ pub fn phase_hotspots(
         run_ids,
         runs_with_spans,
         phases,
+        reliability,
     })
 }
 

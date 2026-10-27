@@ -1524,6 +1524,19 @@ impl ObservationStore {
     /// row past the page, so a result that exactly fills the limit is not
     /// mistaken for a truncated one.
     pub fn list_runs_page(&self, filter: RunListFilter) -> Result<RunPage> {
+        self.list_runs_page_with_row_policy(filter, false)
+    }
+
+    /// Telemetry must not make inspection fail because one historical row is malformed.
+    pub(crate) fn list_runs_best_effort(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {
+        Ok(self.list_runs_page_with_row_policy(filter, true)?.runs)
+    }
+
+    fn list_runs_page_with_row_policy(
+        &self,
+        filter: RunListFilter,
+        skip_malformed: bool,
+    ) -> Result<RunPage> {
         let limit = filter
             .limit
             .unwrap_or(DEFAULT_RUN_PAGE_LIMIT)
@@ -1583,7 +1596,18 @@ impl ObservationStore {
             .query_map(params_from_iter(values), row_to_run_record)
             .map_err(sqlite_error("list run records"))?;
 
-        let runs = collect_rows(rows, "collect run records")?;
+        let runs = if skip_malformed {
+            rows.filter_map(|row| match row {
+                Ok(run) => Some(run),
+                Err(error) => {
+                    crate::log_status!("runs", "skipping malformed telemetry row: {}", error);
+                    None
+                }
+            })
+            .collect()
+        } else {
+            collect_rows(rows, "collect run records")?
+        };
         Ok(run_page_from_probe(runs, limit, offset))
     }
 
