@@ -4090,6 +4090,79 @@ fn moved_base_catch_up_leaves_a_follow_up_cook_pr_branch_to_finalization() {
     });
 }
 
+/// A candidate verified on a PR head depends on commits below its delta.
+/// Replaying the delta alone conflicts even though the full branch merges.
+#[test]
+fn moved_base_catch_up_preserves_history_below_the_verified_pr_head() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let repo = tempfile::tempdir().unwrap();
+        let path = repo.path().to_str().unwrap();
+        let git = |args: &[&str]| git_output(repo.path(), args).unwrap();
+        git(&["init", "--initial-branch=main"]);
+        // A local origin exposes the moved main to the normal fetch path.
+        git(&["remote", "add", "origin", path]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        let file = repo.path().join("file.txt");
+        std::fs::write(&file, "base\nanchor\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "B"]);
+        git(&["switch", "-c", "existing-pr"]);
+        std::fs::write(&file, "base\nanchor\nbranch-added\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "P"]);
+        let prior_base = git(&["rev-parse", "HEAD"]);
+        git(&["switch", "main"]);
+        std::fs::write(&file, "moved base\nanchor\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "B2"]);
+        git(&["switch", "existing-pr"]);
+        std::fs::write(&file, "base\nanchor\nbranch-edited\n").unwrap();
+        let candidate = crate::agent_task_promotion::candidate_fingerprint(path).unwrap();
+        let run_id = "verified-pr-head";
+        let options = batch_cook_options(
+            run_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        let applied: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "applied",
+            "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
+            "to_worktree": path,
+            "target": {"worktree": path, "path": path},
+            "patch_artifact": {"id": "candidate", "kind": "patch", "path": repo.path().join("candidate.patch")},
+            "changed_files": ["file.txt"],
+            "deterministic_gates": [],
+            "gate_results": [],
+            "verified_base": {"base": "main", "sha": prior_base},
+            "provenance": {"worktree_path": path, "candidate": candidate},
+            "operator_notification": {"status": "completed", "message": "green"}
+        })).unwrap();
+        let catch_up = catch_up_cook_candidate_to_base_in_store(
+            &test_lifecycle_store(),
+            &options,
+            run_id,
+            &applied,
+        )
+        .unwrap();
+        assert!(
+            matches!(&catch_up, BaseCatchUp::NotOwned(reason) if reason.contains("builds on branch history")),
+            "expected branch publication, not a spurious conflict: {catch_up:?}"
+        );
+        assert_eq!(git(&["rev-parse", "HEAD"]), prior_base);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "base\nanchor\nbranch-edited\n"
+        );
+        // The complete candidate really does merge cleanly with B2.
+        git(&["add", "."]);
+        git(&["commit", "-m", "candidate"]);
+        git(&["merge-tree", "--write-tree", "HEAD", "main"]);
+    });
+}
+
 #[derive(Debug)]
 struct AcceptedDetachedAttemptDispatcher;
 

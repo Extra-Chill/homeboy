@@ -1141,7 +1141,10 @@ fn ensure_base_current(
         }
         BaseCatchUp::NotOwned(reason) => {
             let message = format!("{}; {reason}", finalize_message().unwrap_or_default());
-            let code = CookDeliveryBlockerCode::ForeignCommits;
+            // NotOwned means Cook cannot rewrite this branch, not that its
+            // commits forbid publication. Finalization already tried publishing
+            // it as it stands; only its actual base refusal blocks delivery.
+            let code = CookDeliveryBlockerCode::BaseConflict;
             ctx.blocked(code, message, Vec::new(), *base_movements)
         }
         BaseCatchUp::Conflict { base, paths } => {
