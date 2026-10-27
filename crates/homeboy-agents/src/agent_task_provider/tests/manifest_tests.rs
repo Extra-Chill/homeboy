@@ -1111,32 +1111,15 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
 
 #[test]
 fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
-    let artifact_root = std::env::temp_dir()
-        .join("homeboy-agent-task-provider-tests")
-        .join("task-runtime-normalization");
-    std::fs::create_dir_all(&artifact_root).expect("create executor artifact root");
-    let patch = artifact_root.join("runtime.patch");
-    let report = artifact_root.join("report.json");
-    std::fs::write(&patch, "patch bytes").expect("write patch");
-    std::fs::write(&report, "{}").expect("write report");
-    let provider_output = json!({
-        "schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "task_id": "task-runtime-normalization",
-        "status": "succeeded",
-        "outputs": {
-            "runtime": {
-                "status": "done",
-                "summary": "runtime finished",
-                "artifacts": {
-                    "patch": patch,
-                    "report": { "path": report }
-                }
-            }
-        }
-    });
+    let _home = artifact_home();
+    // The runtime writes its artifacts inside the Homeboy-owned executor root
+    // it receives as `artifacts_path`; finalization stages them from there.
     let script = script(&format!(
-        "process.stdout.write(JSON.stringify({}));",
-        provider_output
+        "let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); \
+         let patch=path.join(req.artifacts_path,'runtime.patch'); let report=path.join(req.artifacts_path,'report.json'); \
+         fs.writeFileSync(patch,'patch bytes'); fs.writeFileSync(report,'{{}}'); \
+         process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:req.task_id,status:'succeeded',\
+         outputs:{{runtime:{{status:'done',summary:'runtime finished',artifacts:{{patch:patch,report:{{path:report}}}}}}}}}}));"
     ));
     let (request, mut provider) = request("task-runtime-normalization", format!("node {script}"));
     provider.runtime_contract = AgentTaskRuntimeContract {
@@ -1183,11 +1166,20 @@ fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
     assert_eq!(outcome.summary.as_deref(), Some("runtime finished"));
     assert_eq!(outcome.artifacts.len(), 2);
     assert_eq!(outcome.artifacts[0].kind, "patch");
-    assert_eq!(outcome.artifacts[0].metadata["review_only"], true);
+    assert_eq!(
+        outcome.artifacts[0].metadata["executor_artifact_finalized"],
+        true
+    );
     assert_eq!(outcome.artifacts[1].kind, "report");
-    assert_eq!(outcome.artifacts[1].metadata["review_only"], true);
-    assert_eq!(outcome.artifacts[0].size_bytes, None);
-    assert_eq!(outcome.artifacts[0].sha256, None);
+    assert_eq!(
+        outcome.artifacts[1].metadata["executor_artifact_finalized"],
+        true
+    );
+    assert_eq!(
+        outcome.artifacts[0].size_bytes,
+        Some("patch bytes".len() as u64)
+    );
+    assert!(outcome.artifacts[0].sha256.is_some());
     assert_eq!(outcome.typed_artifacts.len(), 2);
     assert_eq!(outcome.typed_artifacts[0].name, "patch");
     assert_eq!(
