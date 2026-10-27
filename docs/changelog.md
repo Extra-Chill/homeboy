@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.4] - 2026-10-27
+
+### Changed
+- Collapse unused cook_recipe store twins
+- Assert the retained patch for a persisted timeout candidate
+
 ## [0.434.3] - 2026-10-26
 
 ### Changed
