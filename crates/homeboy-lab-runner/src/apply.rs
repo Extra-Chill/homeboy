@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use homeboy_core::change_artifact::{
     ChangeApplyResult, ChangeApplyStatus, ChangeArtifact, ChangeDelta, ChangePatch,
@@ -31,26 +31,11 @@ pub struct RunnerWorkspaceApplyOutput {
     pub result: ChangeApplyResult,
 }
 
-#[derive(Debug, Deserialize)]
-struct LabPatchApplyInput {
-    #[serde(flatten)]
-    artifact: ChangeArtifact,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyLabPatchApplyInput {
-    source_snapshot: SourceSnapshot,
-    #[serde(default)]
-    patch: Option<ChangePatch>,
-    #[serde(default)]
-    delta: Option<ChangeDelta>,
-}
-
 pub fn apply_workspace_patch(
     options: RunnerWorkspaceApplyOptions,
 ) -> Result<(RunnerWorkspaceApplyOutput, i32)> {
-    let input = read_apply_input(&options.input)?;
-    let output = apply_change_artifact(input.artifact, options.force)?;
+    let artifact = read_apply_input(&options.input)?;
+    let output = apply_change_artifact(artifact, options.force)?;
 
     Ok((output, 0))
 }
@@ -116,34 +101,18 @@ pub fn apply_change_artifact(
     })
 }
 
-fn read_apply_input(path: &str) -> Result<LabPatchApplyInput> {
+fn read_apply_input(path: &str) -> Result<ChangeArtifact> {
     let contents = fs::read_to_string(path)
         .map_err(|err| Error::internal_io(err.to_string(), Some(format!("read {path}"))))?;
-    match serde_json::from_str(&contents) {
-        Ok(input) => Ok(input),
-        Err(contract_error) => {
-            let legacy: LegacyLabPatchApplyInput =
-                serde_json::from_str(&contents).map_err(|legacy_error| {
-                    Error::validation_schema_mismatch(
-                        "lab_apply_input",
-                        "current Lab patch apply input or legacy Lab patch apply input",
-                        Some(path.to_string()),
-                        contract_error.to_string(),
-                        Some(legacy_error.to_string()),
-                    )
-                })?;
-            Ok(LabPatchApplyInput {
-                artifact: ChangeArtifact {
-                    schema: homeboy_core::change_artifact::CHANGE_ARTIFACT_SCHEMA.to_string(),
-                    source_snapshot: legacy.source_snapshot,
-                    patch: legacy.patch,
-                    delta: legacy.delta,
-                    provenance: None,
-                    digest: None,
-                },
-            })
-        }
-    }
+    serde_json::from_str(&contents).map_err(|error| {
+        Error::validation_schema_mismatch(
+            "lab_apply_input",
+            "Lab patch apply input (change artifact)",
+            Some(path.to_string()),
+            error.to_string(),
+            None,
+        )
+    })
 }
 
 fn local_source_path(snapshot: &SourceSnapshot) -> Result<PathBuf> {
@@ -532,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_apply_input_preserves_current_and_legacy_schema_causes() {
+    fn invalid_apply_input_reports_the_schema_cause() {
         let input_dir = tempfile::tempdir().expect("input tempdir");
         let input = input_dir.path().join("bad-apply.json");
         fs::write(&input, "{}").expect("write input");
@@ -540,14 +509,10 @@ mod tests {
         let err = read_apply_input(input.to_str().expect("path str")).expect_err("schema error");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("current Lab patch apply input"));
+        assert!(err.message.contains("Lab patch apply input"));
         assert!(err.details["cause"]
             .as_str()
-            .expect("current schema cause")
-            .contains("missing field"));
-        assert!(err.details["fallback_cause"]
-            .as_str()
-            .expect("legacy schema cause")
+            .expect("schema cause")
             .contains("missing field"));
     }
 
