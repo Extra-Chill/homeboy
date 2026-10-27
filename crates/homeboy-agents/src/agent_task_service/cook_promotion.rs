@@ -2345,6 +2345,17 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
             "destination branch carries changes beyond this Cook's candidate; it is published on the branch as it stands",
         );
     }
+    // The verified base can itself be the PR head. Its branch-only commits
+    // are invisible to the delta check above, but the candidate depends on
+    // them: projecting just that delta onto the base would discard history.
+    if !git_status(
+        path,
+        &["merge-base", "--is-ancestor", &prior_base, &fresh_base],
+    )? {
+        return not_owned(
+            "candidate builds on branch history that is not on the resolved base; it is published on the branch as it stands",
+        );
+    }
     let tree = match apply_immutable_candidate_to_base(
         path,
         &expected,
