@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.6] - 2026-10-27
+
+### Changed
+- Retire the node_script gate execution alias
+- Read Lab patch apply input as a change artifact only
+
 ## [0.434.5] - 2026-10-27
 
 ### Changed
