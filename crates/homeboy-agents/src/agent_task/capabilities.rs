@@ -153,14 +153,14 @@ impl AgentTaskCapabilityRequirements {
 
 pub fn requirements_from_metadata(
     metadata: &Value,
-    legacy_provider: &[String],
+    executor_required: &[String],
 ) -> Result<AgentTaskCapabilityRequirements, String> {
     let Some(value) = metadata.get("capability_requirements") else {
-        // v1 had one executor-owned field. This is an explicit migration, not a
-        // cross-layer inference: old values remain provider requirements only.
+        // Without structured requirements, the executor-required capabilities
+        // are provider requirements only (no cross-layer inference).
         return Ok(AgentTaskCapabilityRequirements {
             schema: AGENT_TASK_CAPABILITY_REQUIREMENTS_SCHEMA.to_string(),
-            provider: legacy_provider.to_vec(),
+            provider: executor_required.to_vec(),
             ..Default::default()
         }
         .normalized());

@@ -72,7 +72,7 @@ pub struct BenchArgs {
 
     // Canonical presentation vocabulary (#11138). `--format json` means
     // exactly what the `--json` bool above means; `wants_full_json` reads the
-    // two together via `PresentationArgs::json_or_legacy`.
+    // two together via `PresentationArgs::json_or_flag`.
     //
     // Declaring `--format` here is safe for bench specifically: `normalize`
     // runs `mark_explicit_passthrough`, which marks `homeboy bench -- ...`, so
@@ -88,15 +88,15 @@ pub struct BenchArgs {
 impl BenchArgs {
     /// Whether the caller asked for the full JSON payload on stdout
     /// (suppressing the compact human summary presentation), via either
-    /// the legacy `--json` bool or the canonical `--format json`.
+    /// the `--json` bool or the canonical `--format json`.
     pub(crate) fn wants_full_json(&self) -> bool {
-        self.presentation.json_or_legacy(self.json)
+        self.presentation.json_or_flag(self.json)
     }
 
     /// Fold the canonical `--detail summary` onto `--json-summary`, the
     /// field every downstream bench consumer already reads (#11138).
     ///
-    /// The OR is deliberate: the legacy bool has no "off" state to
+    /// The OR is deliberate: the `--json` bool has no "off" state to
     /// distinguish from its default, so the two spellings can only ever
     /// agree. Applied once at the top of [`run`], before any dispatch, so
     /// nothing downstream has to learn a second vocabulary.

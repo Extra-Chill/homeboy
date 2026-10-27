@@ -149,7 +149,7 @@ pub struct RigSpec {
     /// keyed by kind slug and then by extension id.
     ///
     /// This is the generic counterpart of `bench_workloads`,
-    /// `trace_workloads`, and `fuzz_workloads`: the three legacy fields
+    /// `trace_workloads`, and `fuzz_workloads`: the three per-kind fields
     /// keep working unchanged and read as the kinds `bench`, `trace`, and
     /// `fuzz`. Values support the same expansion rules, including
     /// `${package.root}` for package-installed rigs.

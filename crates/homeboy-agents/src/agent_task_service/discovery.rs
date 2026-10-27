@@ -433,7 +433,7 @@ pub fn discover_runs_page(
         .as_deref()
         .map(parse_submitted_after)
         .transpose()?;
-    let legacy = AgentTaskDiscoveryOptions {
+    let filters = AgentTaskDiscoveryOptions {
         repo: options.repo,
         workspace: options.workspace,
         task_url: options.task_url,
@@ -448,7 +448,7 @@ pub fn discover_runs_page(
         .into_iter()
         .filter(|page_record| !is_fixture_runner_record(&page_record.record))
         .filter(|page_record| {
-            matches_discovery_options(&page_record.record, &legacy, submitted_after.as_ref())
+            matches_discovery_options(&page_record.record, &filters, submitted_after.as_ref())
         })
         .collect::<Vec<_>>();
     let matching_truncated = records.len() > limit;

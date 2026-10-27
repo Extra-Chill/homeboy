@@ -250,7 +250,7 @@ pub fn cached_validated_viewer_links(
     if links.is_empty() {
         return links;
     }
-    if public_artifact_url_is_reachable_or_legacy(artifact) {
+    if public_artifact_url_is_presentable(artifact) {
         links
     } else {
         Vec::new()
@@ -262,7 +262,7 @@ pub fn cached_validated_viewer_links(
 /// Records written before validation was introduced have no validation metadata
 /// and retain their persisted links. New records carry validation metadata, so
 /// malformed or failed validation suppresses their generated links.
-pub fn public_artifact_url_is_reachable_or_legacy(artifact: &ArtifactRecord) -> bool {
+pub fn public_artifact_url_is_presentable(artifact: &ArtifactRecord) -> bool {
     match artifact.metadata_json.get("public_url_validation") {
         None => true,
         Some(validation) => validation.get("reachable").and_then(Value::as_bool) == Some(true),
@@ -678,9 +678,9 @@ mod tests {
             ..viewer_artifact()
         };
 
-        assert!(public_artifact_url_is_reachable_or_legacy(&legacy));
-        assert!(public_artifact_url_is_reachable_or_legacy(&reachable));
-        assert!(!public_artifact_url_is_reachable_or_legacy(&unreachable));
+        assert!(public_artifact_url_is_presentable(&legacy));
+        assert!(public_artifact_url_is_presentable(&reachable));
+        assert!(!public_artifact_url_is_presentable(&unreachable));
     }
 
     #[test]

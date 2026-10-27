@@ -937,7 +937,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
     let mut evidence: AgentTaskPrEvidence = args.evidence.try_into()?;
     evidence.verification.dependency_hydration = dependency_hydration;
     let how_to_test = if args.test_steps.is_empty() {
-        let legacy_steps: Vec<AgentTaskReviewTestStep> = evidence
+        let derived_steps: Vec<AgentTaskReviewTestStep> = evidence
             .verification
             .targeted_checks_run
             .iter()
@@ -958,7 +958,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
                     }),
             )
             .collect();
-        legacy_steps
+        derived_steps
     } else {
         args.test_steps
             .iter()

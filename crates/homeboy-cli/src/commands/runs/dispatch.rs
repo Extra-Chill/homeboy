@@ -28,7 +28,7 @@ impl RunsArgs {
                 presentation,
                 field,
                 ..
-            } => field.is_empty() && !presentation.json_or_legacy(*json),
+            } => field.is_empty() && !presentation.json_or_flag(*json),
             _ => false,
         }
     }
@@ -40,7 +40,7 @@ impl RunsArgs {
         match &self.command {
             RunsCommand::Dossier {
                 json, presentation, ..
-            } => !presentation.json_or_legacy(*json),
+            } => !presentation.json_or_flag(*json),
             _ => false,
         }
     }
@@ -52,7 +52,7 @@ impl RunsArgs {
         match &self.command {
             RunsCommand::Proof {
                 json, presentation, ..
-            } => !presentation.json_or_legacy(*json),
+            } => !presentation.json_or_flag(*json),
             _ => false,
         }
     }

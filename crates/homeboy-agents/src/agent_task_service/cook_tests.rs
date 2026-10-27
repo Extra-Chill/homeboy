@@ -14971,7 +14971,7 @@ fn adoption_review_child_plan_remains_one_bounded_execution() {
 }
 
 #[test]
-fn legacy_adoption_budget_failure_reenters_once_through_review_authority() {
+fn adoption_budget_failure_awaiting_review_reenters_once_through_review_authority() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let fixture = CandidateAdoptionFixture::new("cook-9847-legacy-budget", 2, 0, true, None);
         agent_task_lifecycle::start_candidate_adoption(

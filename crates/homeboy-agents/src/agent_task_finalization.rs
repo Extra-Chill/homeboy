@@ -1193,41 +1193,37 @@ fn is_green_status(status: &str) -> bool {
 
 impl From<AgentTaskGateResult> for HomeboyGateResult {
     fn from(gate: AgentTaskGateResult) -> Self {
-        gate_result_from_legacy(gate)
+        let status = if is_green_status(&gate.status) {
+            HomeboyGateStatus::Passed
+        } else {
+            HomeboyGateStatus::Failed
+        };
+        let summary = match gate
+            .detail
+            .as_deref()
+            .filter(|detail| !detail.trim().is_empty())
+        {
+            Some(detail) => format!("{}: {} ({detail})", gate.name, gate.status),
+            None => format!("{}: {}", gate.name, gate.status),
+        };
+
+        HomeboyGateResult::new(
+            format!("finalization.gate.{}", gate.name),
+            gate.name.clone(),
+            HomeboyGateKind::Command,
+            status,
+        )
+        .summary(summary)
+        .evidence(json!({
+            "name": gate.name,
+            "status": gate.status,
+            "detail": gate.detail,
+        }))
+        .retryable(status == HomeboyGateStatus::Failed)
+        .provenance(json!({
+            "source_type": "AgentTaskGateResult",
+        }))
     }
-}
-
-pub(crate) fn gate_result_from_legacy(gate: AgentTaskGateResult) -> HomeboyGateResult {
-    let status = if is_green_status(&gate.status) {
-        HomeboyGateStatus::Passed
-    } else {
-        HomeboyGateStatus::Failed
-    };
-    let summary = match gate
-        .detail
-        .as_deref()
-        .filter(|detail| !detail.trim().is_empty())
-    {
-        Some(detail) => format!("{}: {} ({detail})", gate.name, gate.status),
-        None => format!("{}: {}", gate.name, gate.status),
-    };
-
-    HomeboyGateResult::new(
-        format!("finalization.gate.{}", gate.name),
-        gate.name.clone(),
-        HomeboyGateKind::Command,
-        status,
-    )
-    .summary(summary)
-    .evidence(json!({
-        "name": gate.name,
-        "status": gate.status,
-        "detail": gate.detail,
-    }))
-    .retryable(status == HomeboyGateStatus::Failed)
-    .provenance(json!({
-        "source_type": "AgentTaskGateResult",
-    }))
 }
 
 fn refuse_protected_head(head: &str, protected_branches: &[String]) -> Result<()> {

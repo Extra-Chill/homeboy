@@ -11,7 +11,7 @@ pub(crate) fn enrich_artifact_link(mut artifact: ArtifactRecord) -> ArtifactReco
         public_artifact_url(&artifact).or_else(|| public_url_for_url_artifact(&artifact));
     if let Some(url) = public_url.clone() {
         if artifact.artifact_type != "url"
-            && !crate::artifact_links::public_artifact_url_is_reachable_or_legacy(&artifact)
+            && !crate::artifact_links::public_artifact_url_is_presentable(&artifact)
         {
             return artifact;
         }
