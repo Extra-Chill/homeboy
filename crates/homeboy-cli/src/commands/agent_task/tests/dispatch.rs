@@ -563,7 +563,7 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
         add_remote(source.path(), "origin", remote);
         register_component("inferred", source.path(), remote);
         let destination_root = tempfile::tempdir().expect("destination root");
-        let destination = destination_root.path().join("task");
+        let destination = destination_root.path().join("inferred@fix-inferred");
         let status = Command::new("git")
             .args([
                 "worktree",
@@ -2365,18 +2365,18 @@ fn cook_goal_never_becomes_an_extra_prompt_when_work_is_explicit() {
 }
 
 #[test]
-fn cook_cwd_uses_native_managed_handle_before_recipe_admission() {
+fn cook_cwd_registered_checkout_survives_detached_replay() {
     with_isolated_home(|_| {
         let primary = tempfile::tempdir().expect("primary checkout");
         init_runtime_component_checkout(primary.path());
         let worktree_root = tempfile::tempdir().expect("worktree root");
-        let cwd = worktree_root.path().join("native-task");
+        let cwd = worktree_root.path().join("fixture@fix-issue-368-fixture");
         assert!(Command::new("git")
             .args([
                 "worktree",
                 "add",
                 "-b",
-                "fix/native-cook-cwd",
+                "fix/issue-368-fixture",
                 cwd.to_str().expect("worktree path"),
                 "HEAD",
             ])
@@ -2384,7 +2384,7 @@ fn cook_cwd_uses_native_managed_handle_before_recipe_admission() {
             .status()
             .expect("create linked worktree")
             .success());
-        homeboy::core::worktree::record_active_for_test("fixture@native-cook-cwd", &cwd);
+        homeboy::core::worktree::record_active_for_test("fixture@fix-issue-368-fixture", &cwd);
 
         let args = {
             let mut input = cook_args_from_cli(vec![
@@ -2409,7 +2409,30 @@ fn cook_cwd_uses_native_managed_handle_before_recipe_admission() {
             }
         }
         .expect("resolve native explicit CWD");
-        assert_eq!(args.to_worktree.as_deref(), Some("fixture@native-cook-cwd"));
+        let canonical = std::fs::canonicalize(&cwd).expect("canonical checkout");
+        let foreground = super::super::run::provision_cook_destination(&args, None, true)
+            .expect("foreground preview");
+        let replay = super::super::run::cook_replay_argv(&args);
+        assert!(replay
+            .windows(2)
+            .any(|pair| { pair[0] == "--cwd" && pair[1] == canonical.display().to_string() }));
+        let mut child = cook_args_from_cli(replay);
+        let repository =
+            super::super::run::resolve_cook_repository(&mut child).expect("child repository");
+        let child = super::super::run::resolve_cook_destination(child, repository.as_ref())
+            .expect("child destination");
+        let detached =
+            super::super::run::provision_cook_destination(&child, repository.as_ref(), false)
+                .expect("child provisioning");
+        assert_eq!(foreground["path"], canonical.display().to_string());
+        assert_eq!(detached["path"], foreground["path"]);
+
+        std::fs::remove_dir_all(&cwd).expect("remove checkout");
+        let error = super::super::run::resolve_cook_destination(child, repository.as_ref())
+            .err()
+            .expect("missing explicit checkout must be refused");
+        assert_eq!(error.details["field"], "cwd");
+        assert!(error.message.contains("cannot use --cwd checkout"));
     });
 }
 
