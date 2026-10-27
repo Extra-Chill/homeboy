@@ -5193,20 +5193,7 @@ fn run_cook_with_runtime(
                     for run_id in run_ids {
                         // A detached handoff can settle `pass` before a failing
                         // continuation (Extra-Chill/homeboy#15393).
-                        let finished = observation
-                            .finish_running_run(&run_id, status, None)
-                            .and_then(|_| {
-                                if status != homeboy_core::observation::RunStatus::Fail {
-                                    return Ok(false);
-                                }
-                                observation.correct_passed_run_to_failed(
-                                    &run_id,
-                                    &format!(
-                                        "cook finished {} after the run was recorded pass",
-                                        result.value.status
-                                    ),
-                                )
-                            });
+                        let finished = observation.settle_run(&run_id, status);
                         if let Err(error) = finished {
                             homeboy_core::log_status!(
                                 "agent-task",

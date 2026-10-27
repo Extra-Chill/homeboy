@@ -129,18 +129,23 @@ impl ObservationStore {
     /// Unlike a scoped monotonic timer this uses the durable run origin. It is
     /// explicitly an inclusive owner span, not an additional sequential phase.
     pub fn record_run_phase(&self, run_id: &str, phase: &str, failed: bool) -> Result<()> {
-        if self
-            .phase_spans(run_id)?
-            .spans
-            .iter()
-            .any(|span| span.id == phase)
-        {
+        let spans = self.phase_spans(run_id)?;
+        if spans.spans.iter().any(|span| {
+            span.id == phase
+                && (span.status == homeboy_engine_primitives::phase_timing::PhaseStatus::Failed)
+                    == failed
+        }) {
             return Ok(());
         }
         let Some(run) = self.get_run(run_id)? else {
             return Ok(());
         };
-        let origin = chrono::DateTime::parse_from_rfc3339(&run.started_at)
+        let started_at = spans
+            .spans
+            .iter()
+            .find(|span| span.id == phase)
+            .map_or(run.started_at.as_str(), |span| span.started_at.as_str());
+        let origin = chrono::DateTime::parse_from_rfc3339(started_at)
             .map_err(|error| Error::internal_unexpected(error.to_string()))?;
         let duration = chrono::Utc::now()
             .signed_duration_since(origin)
@@ -156,7 +161,11 @@ impl ObservationStore {
         }
         let mut report = timer.into_report();
         report.spans[0].started_at = origin.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        self.record_phase_spans(run_id, &format!("whole-run:{phase}"), &report)
+        self.record_phase_spans(
+            run_id,
+            &format!("whole-run:{phase}:{}", chrono::Utc::now().to_rfc3339()),
+            &report,
+        )
     }
 
     /// Append one completed timing report. The caller supplies a stable identity
@@ -202,7 +211,9 @@ impl ObservationStore {
             kind: PHASE_SPANS_EVENT_KIND.to_string(),
             source: ControlPlaneEventSource {
                 component: "phase-timer".to_string(),
-                instance: None,
+                instance: operation_id
+                    .starts_with("whole-run:")
+                    .then(|| "whole-run".to_string()),
             },
             occurred_at: None,
             task: None,
@@ -230,8 +241,53 @@ impl ObservationStore {
         for event in self.durable_control_plane_events(&run, PHASE_SPANS_EVENT_KIND)? {
             let recorded: PhaseTimingReport = serde_json::from_value(event.data)
                 .map_err(|error| Error::internal_unexpected(error.to_string()))?;
-            report.spans.extend(recorded.spans);
+            for span in recorded.spans {
+                if let Some(previous) = report.spans.iter_mut().find(|previous| {
+                    event.source.instance.as_deref() == Some("whole-run")
+                        && previous.id == span.id
+                        && previous.started_at == span.started_at
+                }) {
+                    *previous = span;
+                } else {
+                    report.spans.push(span);
+                }
+            }
         }
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whole_run_phase_tracks_latest_outcome_without_changing_matching_spans() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(dir.path().join("timing.db")).unwrap();
+        let run = store
+            .start_run(super::super::NewRunRecord::builder("test").build())
+            .unwrap();
+        for failed in [true, false, true] {
+            store.record_run_phase(&run.id, "cook", failed).unwrap();
+            let report = store.phase_spans(&run.id).unwrap();
+            assert_eq!(report.spans.len(), 1);
+            assert_eq!(
+                report.spans[0].status
+                    == homeboy_engine_primitives::phase_timing::PhaseStatus::Failed,
+                failed
+            );
+            assert_eq!(
+                report.spans[0].started_at,
+                chrono::DateTime::parse_from_rfc3339(&run.started_at)
+                    .unwrap()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            );
+            store.record_run_phase(&run.id, "cook", failed).unwrap();
+            assert_eq!(
+                serde_json::to_value(store.phase_spans(&run.id).unwrap()).unwrap(),
+                serde_json::to_value(report).unwrap()
+            );
+        }
     }
 }

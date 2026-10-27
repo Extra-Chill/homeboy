@@ -3383,6 +3383,103 @@ fn agent_task_cook_rows_wait_for_verification_and_terminal_disposition() {
 }
 
 #[test]
+fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-terminal-recovery";
+        let run_id = "cook-terminal-recovery-attempt-1";
+        let (options, applied) = seed_moving_base_attempt(cook_id, run_id);
+        let lifecycle_store = test_lifecycle_store();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&options.identity.initial_plan, cook_id, |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        let mut failed = applied.clone();
+        failed.status = AgentTaskPromotionStatus::GateFailed;
+        failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
+        failed.deterministic_gates[0].exit_code = 1;
+        let mut origin = None;
+        for (promotion, expected, exit_code) in [
+            (failed.clone(), "fail", 1),
+            (applied.clone(), "pass", 0),
+            (applied, "pass", 0),
+            (failed, "fail", 1),
+        ] {
+            if exit_code != 0 && origin.is_some() {
+                agent_task_lifecycle::record_cook_finalization(
+                    run_id,
+                    serde_json::json!({"status":"failed"}),
+                )
+                .unwrap();
+            }
+            agent_task_lifecycle::record_promotion(
+                run_id,
+                serde_json::to_value(&promotion).unwrap(),
+            )
+            .unwrap();
+            let report = run_cook(CookContext {
+                side_effects: Some(CookSideEffects::for_test(
+                    move |_, _, _| Ok(promotion.clone()),
+                    |_, _, _| Ok(BaseCatchUp::Current),
+                    |_, _, _, _| {
+                        let receipt = serde_json::json!({"status":"review_ready", "run_id":run_id, "pr_url":"https://github.com/example/repo/pull/1"});
+                        agent_task_lifecycle::record_cook_finalization(run_id, receipt.clone())?;
+                        Ok(receipt)
+                    },
+                )),
+                ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+            })
+            .unwrap();
+            assert_eq!(report.exit_code, exit_code, "{report:#?}");
+            if origin.is_none() {
+                assert_eq!(
+                    super::cook_observation_state(
+                        &lifecycle_store,
+                        &lifecycle_store.read_record(run_id).unwrap()
+                    ),
+                    agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                );
+            } else if exit_code == 0 {
+                assert_eq!(
+                    super::cook_observation_state(
+                        &lifecycle_store,
+                        &lifecycle_store.read_record(run_id).unwrap()
+                    ),
+                    agent_task_lifecycle::AgentTaskRunState::Succeeded
+                );
+            }
+            let observation = lifecycle_store.open_observation_initialized().unwrap();
+            let mut ids = report.value.history_run_ids.clone();
+            ids.extend(report.value.invocation_run_ids.iter().cloned());
+            ids.extend([cook_id.to_string(), run_id.to_string()]);
+            for id in ids {
+                assert_eq!(
+                    observation.get_run(&id).unwrap().unwrap().status,
+                    expected,
+                    "{id}"
+                );
+            }
+            let spans = observation.phase_spans(cook_id).unwrap();
+            let spans: Vec<_> = spans
+                .spans
+                .iter()
+                .filter(|span| span.id == "cook")
+                .collect();
+            assert_eq!(spans.len(), 1);
+            assert_eq!(
+                spans[0].status == homeboy_core::phase_timing::PhaseStatus::Failed,
+                exit_code != 0
+            );
+            if let Some(start) = &origin {
+                assert_eq!(&spans[0].started_at, start);
+            } else {
+                origin = Some(spans[0].started_at.clone());
+            }
+        }
+    });
+}
+
+#[test]
 fn moved_base_with_identical_tree_publishes_without_regating() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-16049-identical-attempt-1";
