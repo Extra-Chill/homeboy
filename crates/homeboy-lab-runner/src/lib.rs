@@ -939,8 +939,7 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
         .filter(|runner| runner.kind == RunnerKind::Ssh)
         .filter_map(|runner| {
             let status = status(&runner.id).ok()?;
-            let capabilities_ready = runner_capability_inventory(&runner.id)
-                .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
+            let capabilities_ready = homeboy_runtime_ready(&runner.id, &status);
             Some(lab_runner_admission_candidate(
                 &runner.id,
                 runner.settings.concurrency_limit,
@@ -1003,9 +1002,10 @@ pub fn lab_runner_readiness_for_admission(runner_id: &str) -> Result<LabRunnerRe
     let runner = load(runner_id)?;
     runner_probe_gate::invalidate_runner_probes(runner_id);
     let status = runner_admission_snapshot(runner_id)?.status;
-    let capabilities_ready = !runner_capability_inventory(runner_id)?
-        .runtime_ids
-        .is_empty();
+    let capabilities_ready = status.configured_job_binary_build_identity.is_some()
+        || !runner_capability_inventory(runner_id)?
+            .runtime_ids
+            .is_empty();
     let candidate = lab_runner_admission_candidate(
         runner_id,
         runner.settings.concurrency_limit,
@@ -1026,9 +1026,10 @@ fn observe_lab_runner_admission_candidate(
     let runner = load(runner_id)?;
     runner_probe_gate::invalidate_runner_probes(runner_id);
     let status = runner_admission_snapshot_until(runner_id, deadline)?.status;
-    let capabilities_ready = !runner_capability_inventory_until(runner_id, deadline)?
-        .runtime_ids
-        .is_empty();
+    let capabilities_ready = status.configured_job_binary_build_identity.is_some()
+        || !runner_capability_inventory_until(runner_id, deadline)?
+            .runtime_ids
+            .is_empty();
     Ok(lab_runner_admission_candidate(
         runner_id,
         runner.settings.concurrency_limit,
@@ -1036,6 +1037,14 @@ fn observe_lab_runner_admission_candidate(
         capabilities_ready,
         lab::offload::metadata::require_exact_runner_version(&runner.settings),
     ))
+}
+
+/// A status that observed the configured Homeboy binary's build identity has
+/// already executed it on the runner; only otherwise probe its capabilities.
+fn homeboy_runtime_ready(runner_id: &str, status: &RunnerStatusReport) -> bool {
+    status.configured_job_binary_build_identity.is_some()
+        || runner_capability_inventory(runner_id)
+            .is_ok_and(|inventory| !inventory.runtime_ids.is_empty())
 }
 
 fn lab_runner_admission_candidate(
@@ -1317,8 +1326,7 @@ pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability
                 return None;
             }
             let status = status(&runner.id).ok()?;
-            let capabilities_ready = runner_capability_inventory(&runner.id)
-                .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
+            let capabilities_ready = homeboy_runtime_ready(&runner.id, &status);
             let candidate = lab_runner_admission_candidate(
                 &runner.id,
                 runner.settings.concurrency_limit,
@@ -1789,6 +1797,18 @@ fn validate_server_runner(server_id: &str, runner: &ServerRunner) -> Result<()> 
 mod tests {
     use super::*;
     use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
+
+    #[test]
+    fn observed_build_identity_proves_the_homeboy_runtime_without_a_probe() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            // The runner is not configured, so any capability probe would fail.
+            let mut status = skewed_runner_status("1.0.0".to_string());
+            assert!(!homeboy_runtime_ready("unconfigured-runner", &status));
+            status.configured_job_binary_build_identity =
+                Some("homeboy 1.0.0+0123456789ab".to_string());
+            assert!(homeboy_runtime_ready("unconfigured-runner", &status));
+        });
+    }
 
     #[test]
     fn wait_target_is_the_preferred_runner_or_the_only_runner() {
