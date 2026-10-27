@@ -161,21 +161,10 @@ pub trait RunnerContinuationProvider: Send + Sync {
     /// Whether the runner currently reports a live connection.
     fn is_runner_connected(&self, runner_id: &str) -> bool;
 
-    /// Legacy two-state runner inventory retained for external provider
-    /// compatibility. New providers should implement [`Self::runner_authority`]
-    /// so an unavailable inventory remains distinct from a removed runner.
-    fn runner_exists(&self, _runner_id: &str) -> bool {
-        false
-    }
-
     /// Authoritative configuration state for a durable runner id. Providers
     /// that cannot inspect their configuration return `Unknown` fail-closed.
-    fn runner_authority(&self, runner_id: &str) -> RunnerAuthority {
-        if self.runner_exists(runner_id) {
-            RunnerAuthority::Configured
-        } else {
-            RunnerAuthority::Unknown
-        }
+    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
+        RunnerAuthority::Unknown
     }
 
     /// Live-job evidence after runner-generation reconciliation. Default is
@@ -337,11 +326,9 @@ impl Drop for RunnerContinuationTestGuard {
 mod tests {
     use super::*;
 
-    struct LegacyProvider {
-        runner_exists: bool,
-    }
+    struct DefaultProvider;
 
-    impl RunnerContinuationProvider for LegacyProvider {
+    impl RunnerContinuationProvider for DefaultProvider {
         fn runner_job_log_snapshot(
             &self,
             _runner_id: &str,
@@ -352,10 +339,6 @@ mod tests {
 
         fn is_runner_connected(&self, _runner_id: &str) -> bool {
             false
-        }
-
-        fn runner_exists(&self, _runner_id: &str) -> bool {
-            self.runner_exists
         }
 
         fn run_continuation_exec(
@@ -370,30 +353,13 @@ mod tests {
     }
 
     #[test]
-    fn default_live_job_authority_is_unknown() {
+    fn default_runner_authorities_are_unknown() {
         assert_eq!(
-            LegacyProvider {
-                runner_exists: true,
-            }
-            .runner_live_job_authority("legacy-runner"),
+            DefaultProvider.runner_live_job_authority("runner"),
             RunnerLiveJobAuthority::Unknown
         );
-    }
-
-    #[test]
-    fn legacy_runner_exists_cannot_prove_a_runner_was_removed() {
         assert_eq!(
-            LegacyProvider {
-                runner_exists: true,
-            }
-            .runner_authority("legacy-runner"),
-            RunnerAuthority::Configured
-        );
-        assert_eq!(
-            LegacyProvider {
-                runner_exists: false,
-            }
-            .runner_authority("legacy-runner"),
+            DefaultProvider.runner_authority("runner"),
             RunnerAuthority::Unknown
         );
     }
