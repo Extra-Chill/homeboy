@@ -1783,10 +1783,12 @@ fn persisted_timeout_candidate_is_admitted_for_continuation() {
         let outcome = aggregate.outcomes.first().expect("timeout outcome");
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
         assert!(outcome.candidate.is_some(), "{outcome:#?}");
+        // Harvest retains the immutable base..candidate diff as durable patch
+        // evidence for a timed-out committed candidate (#16521).
         assert!(outcome
             .artifacts
             .iter()
-            .all(|artifact| artifact.kind != "patch"));
+            .any(|artifact| artifact.kind == "patch"));
     });
 }
 
