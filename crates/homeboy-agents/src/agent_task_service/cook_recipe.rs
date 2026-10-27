@@ -370,13 +370,136 @@ impl CookRecipeStore {
         &self,
         options: &CookRequest,
     ) -> Result<InitialRecipeMaterialization> {
-        persist_initial_recipe_in_store(self, options)
+        recover_pending_supersession(self, &options.identity.cook_id)?;
+        let mut recipe = initial_recipe(options)?;
+        validate_recipe(&recipe)?;
+        let recipe_existed_before_admission = self.recipe_exists(&recipe.cook_id);
+        if let Some(existing) = compatible_existing_recipe(self, &recipe)? {
+            return Ok(InitialRecipeMaterialization {
+                recipe: existing,
+                created: false,
+            });
+        }
+        if self.recipe_exists(&recipe.cook_id) {
+            let existing = self.load_recipe(&recipe.cook_id)?;
+            if !recipe_existed_before_admission {
+                let mut error = Error::validation_invalid_argument(
+                    "cook_recipe",
+                    "concurrent Cook creation conflicts with the durable recipe",
+                    Some(recipe.cook_id),
+                    None,
+                );
+                error.details["concurrent_cook_creation_loser"] = serde_json::Value::Bool(true);
+                return Err(error);
+            }
+            let mismatches = recipe_mismatch_fields(&existing, &recipe);
+            let lifecycle_store = self.lifecycle_store();
+            ensure_correction_is_safe_in_store(&lifecycle_store, &existing, &recipe, &mismatches)?;
+            let requested_attempt = recipe.attempts.pop().expect("validated recipe has attempt");
+            let next_attempt = existing
+                .attempts
+                .iter()
+                .map(|attempt| attempt.attempt)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            recipe.attempts = existing.attempts.clone();
+            let previous = existing.attempts.last().expect("validated previous recipe");
+            if requested_attempt.run_id != previous.run_id
+                || !initial_attempt_inputs_match(previous, &requested_attempt)
+            {
+                recipe.attempts.push(AgentTaskCookRecipeAttempt {
+                    attempt: next_attempt,
+                    lineage: Some(super::cook_lineage::CookAttemptLineage::replacement(
+                        &previous.run_id,
+                    )),
+                    ..requested_attempt
+                });
+            }
+            recipe.sensitive_mappings = recipe
+                .attempts
+                .iter()
+                .map(|attempt| sensitive_mappings(&attempt.plan))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect();
+            recipe.sensitive_mappings.sort();
+            recipe.sensitive_mappings.dedup();
+            validate_recipe(&recipe)?;
+            let supersession = AgentTaskCookRecipeSupersession {
+                schema: SUPERSESSION_SCHEMA.to_string(),
+                previous: existing,
+                replacement: recipe.clone(),
+                changed_fields: mismatches
+                    .iter()
+                    .map(|field| (*field).to_string())
+                    .collect(),
+            };
+            write_supersession(self, &supersession)?;
+            complete_supersession(self, &supersession)?;
+            return Ok(InitialRecipeMaterialization {
+                recipe,
+                created: false,
+            });
+        }
+        if persist_recipe_exclusively(self, &recipe)? {
+            return Ok(InitialRecipeMaterialization {
+                recipe,
+                created: true,
+            });
+        }
+        // Another controller won creation after our read. Its immutable recipe is
+        // authoritative: a concurrent loser may reuse it only when compatible,
+        // never enter the normal correction/supersession path.
+        let winner = self.load_recipe(&recipe.cook_id)?;
+        if recipe_mismatch_fields(&winner, &recipe).is_empty() {
+            return Ok(InitialRecipeMaterialization::reused(winner));
+        }
+        let mut error = Error::validation_invalid_argument(
+            "cook_recipe",
+            "concurrent Cook creation conflicts with the durable recipe",
+            Some(recipe.cook_id),
+            None,
+        );
+        error.details["concurrent_cook_creation_loser"] = serde_json::Value::Bool(true);
+        Err(error)
     }
 
+    /// Validate a Cook recipe against durable state without writing it. Fanout
+    /// uses this before creating worktrees so incompatible replays fail before any
+    /// lifecycle resources are mutated.
     pub fn validate_initial_recipe_compatibility(&self, options: &CookRequest) -> Result<()> {
-        validate_initial_recipe_compatibility_in_store(self, options)
+        if !self.recipe_exists(&options.identity.cook_id) {
+            return Ok(());
+        }
+        let existing = self.load_recipe(&options.identity.cook_id)?;
+        let mut recipe = initial_recipe(options)?;
+        // The attempt plan is compiled only after the target worktree exists. Use
+        // the durable plan here so preflight compares every input already known
+        // without weakening persistence-time plan validation.
+        recipe.attempts = existing.attempts.clone();
+        recipe.retry_budget["execution_budget"] = existing.retry_budget["execution_budget"].clone();
+        // Recipes written before retry-policy provenance was introduced remain
+        // resumable. Their resolved execution budget is already immutable; omit
+        // the new descriptive field from the compatibility comparison until a
+        // pre-provider correction writes the current recipe shape.
+        if existing.retry_budget.get("policy").is_none() {
+            recipe
+                .retry_budget
+                .as_object_mut()
+                .expect("retry budget is an object")
+                .remove("policy");
+        }
+        let mismatches = recipe_mismatch_fields(&existing, &recipe);
+        let lifecycle_store = self.lifecycle_store();
+        ensure_correction_is_safe_in_store(&lifecycle_store, &existing, &recipe, &mismatches)?;
+        Ok(())
     }
 
+    /// Append an attempt. A remediation's lineage is read from the provenance its
+    /// plan carries; use [`CookRecipeStore::record_recipe_retry_attempt`] for a
+    /// lifecycle retry, whose plan says nothing about where it came from.
     pub fn record_recipe_attempt(
         &self,
         cook_id: &str,
@@ -384,7 +507,14 @@ impl CookRecipeStore {
         run_id: &str,
         plan: &AgentTaskPlan,
     ) -> Result<AgentTaskCookRecipe> {
-        record_recipe_attempt_in_store(self, cook_id, attempt, run_id, plan)
+        record_recipe_attempt_with_lineage_in_store(
+            self,
+            cook_id,
+            attempt,
+            run_id,
+            plan,
+            super::cook_lineage::plan_lineage(plan),
+        )
     }
 
     /// Append a lifecycle retry of `source_run_id`, recording that lineage.
@@ -414,11 +544,25 @@ impl CookRecipeStore {
         replaced_run_id: &str,
         replacement_run_id: &str,
     ) -> Result<AgentTaskCookRecipe> {
-        record_recipe_attempt_replacement_in_store(
+        let plan = self
+            .load_recipe(cook_id)?
+            .attempts
+            .last()
+            .map(|attempt| attempt.plan.clone())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cook_recipe.attempts",
+                    "durable cook recipe has no attempt to replace",
+                    Some(cook_id.to_string()),
+                    None,
+                )
+            })?;
+        record_recipe_attempt_replacement_in_store_with_plan(
             self,
             cook_id,
             replaced_run_id,
             replacement_run_id,
+            &plan,
         )
     }
 
@@ -721,106 +865,6 @@ pub fn persist_initial_recipe(options: &CookRequest) -> Result<AgentTaskCookReci
     default_store()?.persist_initial_recipe(options)
 }
 
-pub fn persist_initial_recipe_in_store(
-    store: &CookRecipeStore,
-    options: &CookRequest,
-) -> Result<InitialRecipeMaterialization> {
-    recover_pending_supersession(store, &options.identity.cook_id)?;
-    let mut recipe = initial_recipe(options)?;
-    validate_recipe(&recipe)?;
-    let recipe_existed_before_admission = store.recipe_exists(&recipe.cook_id);
-    if let Some(existing) = compatible_existing_recipe(store, &recipe)? {
-        return Ok(InitialRecipeMaterialization {
-            recipe: existing,
-            created: false,
-        });
-    }
-    if store.recipe_exists(&recipe.cook_id) {
-        let existing = store.load_recipe(&recipe.cook_id)?;
-        if !recipe_existed_before_admission {
-            let mut error = Error::validation_invalid_argument(
-                "cook_recipe",
-                "concurrent Cook creation conflicts with the durable recipe",
-                Some(recipe.cook_id),
-                None,
-            );
-            error.details["concurrent_cook_creation_loser"] = serde_json::Value::Bool(true);
-            return Err(error);
-        }
-        let mismatches = recipe_mismatch_fields(&existing, &recipe);
-        let lifecycle_store = store.lifecycle_store();
-        ensure_correction_is_safe_in_store(&lifecycle_store, &existing, &recipe, &mismatches)?;
-        let requested_attempt = recipe.attempts.pop().expect("validated recipe has attempt");
-        let next_attempt = existing
-            .attempts
-            .iter()
-            .map(|attempt| attempt.attempt)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        recipe.attempts = existing.attempts.clone();
-        let previous = existing.attempts.last().expect("validated previous recipe");
-        if requested_attempt.run_id != previous.run_id
-            || !initial_attempt_inputs_match(previous, &requested_attempt)
-        {
-            recipe.attempts.push(AgentTaskCookRecipeAttempt {
-                attempt: next_attempt,
-                lineage: Some(super::cook_lineage::CookAttemptLineage::replacement(
-                    &previous.run_id,
-                )),
-                ..requested_attempt
-            });
-        }
-        recipe.sensitive_mappings = recipe
-            .attempts
-            .iter()
-            .map(|attempt| sensitive_mappings(&attempt.plan))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        recipe.sensitive_mappings.sort();
-        recipe.sensitive_mappings.dedup();
-        validate_recipe(&recipe)?;
-        let supersession = AgentTaskCookRecipeSupersession {
-            schema: SUPERSESSION_SCHEMA.to_string(),
-            previous: existing,
-            replacement: recipe.clone(),
-            changed_fields: mismatches
-                .iter()
-                .map(|field| (*field).to_string())
-                .collect(),
-        };
-        write_supersession(store, &supersession)?;
-        complete_supersession(store, &supersession)?;
-        return Ok(InitialRecipeMaterialization {
-            recipe,
-            created: false,
-        });
-    }
-    if persist_recipe_exclusively(store, &recipe)? {
-        return Ok(InitialRecipeMaterialization {
-            recipe,
-            created: true,
-        });
-    }
-    // Another controller won creation after our read. Its immutable recipe is
-    // authoritative: a concurrent loser may reuse it only when compatible,
-    // never enter the normal correction/supersession path.
-    let winner = store.load_recipe(&recipe.cook_id)?;
-    if recipe_mismatch_fields(&winner, &recipe).is_empty() {
-        return Ok(InitialRecipeMaterialization::reused(winner));
-    }
-    let mut error = Error::validation_invalid_argument(
-        "cook_recipe",
-        "concurrent Cook creation conflicts with the durable recipe",
-        Some(recipe.cook_id),
-        None,
-    );
-    error.details["concurrent_cook_creation_loser"] = serde_json::Value::Bool(true);
-    Err(error)
-}
-
 fn persist_recipe_exclusively(
     store: &CookRecipeStore,
     recipe: &AgentTaskCookRecipe,
@@ -884,44 +928,6 @@ fn sync_directory(directory: &Path) -> Result<()> {
         .map_err(|error| {
             Error::internal_io(error.to_string(), Some(directory.display().to_string()))
         })
-}
-
-/// Validate a Cook recipe against durable state without writing it. Fanout
-/// uses this before creating worktrees so incompatible replays fail before any
-/// lifecycle resources are mutated.
-pub fn validate_initial_recipe_compatibility(options: &CookRequest) -> Result<()> {
-    default_store()?.validate_initial_recipe_compatibility(options)
-}
-
-pub fn validate_initial_recipe_compatibility_in_store(
-    store: &CookRecipeStore,
-    options: &CookRequest,
-) -> Result<()> {
-    if !store.recipe_exists(&options.identity.cook_id) {
-        return Ok(());
-    }
-    let existing = store.load_recipe(&options.identity.cook_id)?;
-    let mut recipe = initial_recipe(options)?;
-    // The attempt plan is compiled only after the target worktree exists. Use
-    // the durable plan here so preflight compares every input already known
-    // without weakening persistence-time plan validation.
-    recipe.attempts = existing.attempts.clone();
-    recipe.retry_budget["execution_budget"] = existing.retry_budget["execution_budget"].clone();
-    // Recipes written before retry-policy provenance was introduced remain
-    // resumable. Their resolved execution budget is already immutable; omit
-    // the new descriptive field from the compatibility comparison until a
-    // pre-provider correction writes the current recipe shape.
-    if existing.retry_budget.get("policy").is_none() {
-        recipe
-            .retry_budget
-            .as_object_mut()
-            .expect("retry budget is an object")
-            .remove("policy");
-    }
-    let mismatches = recipe_mismatch_fields(&existing, &recipe);
-    let lifecycle_store = store.lifecycle_store();
-    ensure_correction_is_safe_in_store(&lifecycle_store, &existing, &recipe, &mismatches)?;
-    Ok(())
 }
 
 /// Deterministic gates follow the cook's placement (#15668): a Lab-placed
@@ -1179,21 +1185,8 @@ fn reached_freeze_boundary_in_store(
     Ok(reached)
 }
 
-#[cfg(test)]
-fn ensure_correction_is_safe(
-    existing: &AgentTaskCookRecipe,
-    requested: &AgentTaskCookRecipe,
-    mismatches: &[&str],
-) -> Result<()> {
-    ensure_correction_is_safe_in_store(
-        &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
-        existing,
-        requested,
-        mismatches,
-    )
-}
-
-/// [`ensure_correction_is_safe`] against an explicitly injected lifecycle root.
+/// Refuse a recipe correction once its existing attempts have crossed the
+/// freeze boundary of a mismatched field.
 fn ensure_correction_is_safe_in_store(
     lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
     existing: &AgentTaskCookRecipe,
@@ -1484,26 +1477,6 @@ pub(crate) fn record_recipe_attempt(
     default_store()?.record_recipe_attempt(cook_id, attempt, run_id, plan)
 }
 
-/// Append an attempt. A remediation's lineage is read from the provenance its
-/// plan carries; use [`CookRecipeStore::record_recipe_retry_attempt`] for a
-/// lifecycle retry, whose plan says nothing about where it came from.
-pub fn record_recipe_attempt_in_store(
-    store: &CookRecipeStore,
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-    plan: &AgentTaskPlan,
-) -> Result<AgentTaskCookRecipe> {
-    record_recipe_attempt_with_lineage_in_store(
-        store,
-        cook_id,
-        attempt,
-        run_id,
-        plan,
-        super::cook_lineage::plan_lineage(plan),
-    )
-}
-
 /// The one writer of appended-attempt lineage (#15567): the edge lands in the
 /// same recipe write as the attempt, and `validate_recipe` checks it.
 pub(crate) fn record_recipe_attempt_with_lineage_in_store(
@@ -1569,34 +1542,6 @@ pub(crate) fn record_recipe_attempt_with_lineage_in_store(
     validate_recipe(&recipe)?;
     store.persist_recipe(&recipe)?;
     Ok(recipe)
-}
-
-pub fn record_recipe_attempt_replacement_in_store(
-    store: &CookRecipeStore,
-    cook_id: &str,
-    replaced_run_id: &str,
-    replacement_run_id: &str,
-) -> Result<AgentTaskCookRecipe> {
-    let plan = store
-        .load_recipe(cook_id)?
-        .attempts
-        .last()
-        .map(|attempt| attempt.plan.clone())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_recipe.attempts",
-                "durable cook recipe has no attempt to replace",
-                Some(cook_id.to_string()),
-                None,
-            )
-        })?;
-    record_recipe_attempt_replacement_in_store_with_plan(
-        store,
-        cook_id,
-        replaced_run_id,
-        replacement_run_id,
-        &plan,
-    )
 }
 
 fn record_recipe_attempt_replacement_in_store_with_plan(
@@ -2738,15 +2683,6 @@ pub fn preflight_continuation_claim(
     rearm: bool,
 ) -> Result<CookContinuationState> {
     let store = default_store()?;
-    preflight_continuation_claim_in_store(&store, cook_id, run_id, rearm)
-}
-
-pub fn preflight_continuation_claim_in_store(
-    store: &CookRecipeStore,
-    cook_id: &str,
-    run_id: &str,
-    rearm: bool,
-) -> Result<CookContinuationState> {
     let lifecycle_store = store.lifecycle_store();
     if let Some(driver) = store.foreign_cook_driver(cook_id)? {
         return Err(Error::validation_invalid_argument(
@@ -4139,7 +4075,9 @@ mod tests {
                 true
             })
             .unwrap();
-        record_recipe_attempt_in_store(&store, "cook", 2, "retry", &plan).unwrap();
+        store
+            .record_recipe_attempt("cook", 2, "retry", &plan)
+            .unwrap();
         lifecycle_store
             .submit_plan_with_runtime_admission(&plan, "retry", |_| Ok(serde_json::json!({})))
             .unwrap();
@@ -4211,7 +4149,9 @@ mod tests {
                     true
                 })
                 .unwrap();
-            record_recipe_attempt_in_store(&store, "cook", 2, "retry", &plan).unwrap();
+            store
+                .record_recipe_attempt("cook", 2, "retry", &plan)
+                .unwrap();
             lifecycle_store
                 .submit_plan_with_runtime_admission(&plan, "retry", |_| Ok(serde_json::json!({})))
                 .unwrap();
@@ -5137,13 +5077,18 @@ mod tests {
                 "effective": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
             });
 
-            validate_initial_recipe_compatibility(&options)
+            default_store()
+                .unwrap()
+                .validate_initial_recipe_compatibility(&options)
                 .expect("descriptive retry-policy additions preserve the frozen recipe");
 
             options.identity.initial_plan.metadata["cook_retry_policy"]["resolved"]
                 ["max_provider_executions"] = serde_json::json!(2);
             assert!(
-                validate_initial_recipe_compatibility(&options).is_err(),
+                default_store()
+                    .unwrap()
+                    .validate_initial_recipe_compatibility(&options)
+                    .is_err(),
                 "a resolved execution budget mutation remains fenced after provider execution"
             );
         });
@@ -5167,7 +5112,9 @@ mod tests {
                 "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
             });
 
-            validate_initial_recipe_compatibility(&options)
+            default_store()
+                .unwrap()
+                .validate_initial_recipe_compatibility(&options)
                 .expect("new retry-policy provenance does not reject a frozen legacy recipe");
         });
     }
@@ -5331,66 +5278,67 @@ mod tests {
 
     #[test]
     fn continuation_preflight_observes_claim_and_rearm_without_renaming_queue_state() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let store = CookRecipeStore::new(context.path_roots());
-        store.persist_recipe(&recipe()).unwrap();
-        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = default_store().unwrap();
+            store.persist_recipe(&recipe()).unwrap();
+            store.enqueue_terminal_continuation("cook", "run").unwrap();
 
-        assert_eq!(
-            preflight_continuation_claim_in_store(&store, "cook", "run", false).unwrap(),
-            CookContinuationState::Pending
-        );
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Pending
-        );
-        claim_next_from(&store)
-            .unwrap()
-            .unwrap()
-            .fail("fixture failure")
-            .unwrap();
-        assert_eq!(
-            preflight_continuation_claim_in_store(&store, "cook", "run", true).unwrap(),
-            CookContinuationState::Failed
-        );
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Failed
-        );
+            assert_eq!(
+                preflight_continuation_claim("cook", "run", false).unwrap(),
+                CookContinuationState::Pending
+            );
+            assert_eq!(
+                continuation_state_in_store(&store, "cook", "run").unwrap(),
+                CookContinuationState::Pending
+            );
+            claim_next_from(&store)
+                .unwrap()
+                .unwrap()
+                .fail("fixture failure")
+                .unwrap();
+            assert_eq!(
+                preflight_continuation_claim("cook", "run", true).unwrap(),
+                CookContinuationState::Failed
+            );
+            assert_eq!(
+                continuation_state_in_store(&store, "cook", "run").unwrap(),
+                CookContinuationState::Failed
+            );
+        });
     }
 
     #[test]
     fn continuation_preflight_rejects_a_live_execution_step_owner() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let store = CookRecipeStore::new(context.path_roots());
-        let lifecycle_store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-        store.persist_recipe(&recipe()).unwrap();
-        lifecycle_store
-            .submit_plan_with_runtime_admission(&recipe().attempts[0].plan, "run", |_| {
-                Ok(serde_json::json!({}))
-            })
-            .unwrap();
-        store.enqueue_terminal_continuation("cook", "run").unwrap();
-        lifecycle_store
-            .mutate_record("run", |record| {
-                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Succeeded);
-                record
-                    .metadata
-                    .as_object_mut()
-                    .unwrap()
-                    .extend(agent_task_lifecycle::execution_step_owner_fixture("cook"));
-                true
-            })
-            .unwrap();
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = default_store().unwrap();
+            let lifecycle_store = store.lifecycle_store();
+            store.persist_recipe(&recipe()).unwrap();
+            lifecycle_store
+                .submit_plan_with_runtime_admission(&recipe().attempts[0].plan, "run", |_| {
+                    Ok(serde_json::json!({}))
+                })
+                .unwrap();
+            store.enqueue_terminal_continuation("cook", "run").unwrap();
+            lifecycle_store
+                .mutate_record("run", |record| {
+                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Succeeded);
+                    record
+                        .metadata
+                        .as_object_mut()
+                        .unwrap()
+                        .extend(agent_task_lifecycle::execution_step_owner_fixture("cook"));
+                    true
+                })
+                .unwrap();
 
-        let error = preflight_continuation_claim_in_store(&store, "cook", "run", false)
-            .expect_err("active supervisor must retain continuation ownership");
-        assert!(error.message.contains("controller supervisor is active"));
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Pending
-        );
+            let error = preflight_continuation_claim("cook", "run", false)
+                .expect_err("active supervisor must retain continuation ownership");
+            assert!(error.message.contains("controller supervisor is active"));
+            assert_eq!(
+                continuation_state_in_store(&store, "cook", "run").unwrap(),
+                CookContinuationState::Pending
+            );
+        });
     }
 
     #[test]
@@ -6037,7 +5985,9 @@ mod tests {
             let existing = load_recipe("cook").expect("load corrected recipe");
             let mut source_corrected = existing.clone();
             source_corrected.source_refs = vec!["corrected-source".to_string()];
-            let error = ensure_correction_is_safe(
+            let error = ensure_correction_is_safe_in_store(
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .unwrap(),
                 &existing,
                 &source_corrected,
                 &recipe_mismatch_fields(&existing, &source_corrected),
@@ -6056,7 +6006,9 @@ mod tests {
             .expect("record applied promotion");
             let mut destination_corrected = existing.clone();
             destination_corrected.finalization["to_worktree"] = serde_json::json!("other-target");
-            let error = ensure_correction_is_safe(
+            let error = ensure_correction_is_safe_in_store(
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .unwrap(),
                 &existing,
                 &destination_corrected,
                 &recipe_mismatch_fields(&existing, &destination_corrected),
@@ -6075,7 +6027,9 @@ mod tests {
             .expect("record empty gate projection");
             let mut gate_corrected = existing.clone();
             gate_corrected.gate_policy["verify"] = serde_json::json!(["corrected gate"]);
-            ensure_correction_is_safe(
+            ensure_correction_is_safe_in_store(
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .unwrap(),
                 &existing,
                 &gate_corrected,
                 &recipe_mismatch_fields(&existing, &gate_corrected),
@@ -6091,7 +6045,9 @@ mod tests {
                 );
             })
             .expect("record gate execution");
-            let error = ensure_correction_is_safe(
+            let error = ensure_correction_is_safe_in_store(
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .unwrap(),
                 &existing,
                 &gate_corrected,
                 &recipe_mismatch_fields(&existing, &gate_corrected),
@@ -6110,7 +6066,9 @@ mod tests {
             .expect("record finalization");
             let mut finalization_corrected = existing;
             finalization_corrected.finalization["title"] = serde_json::json!("Different title");
-            let error = ensure_correction_is_safe(
+            let error = ensure_correction_is_safe_in_store(
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .unwrap(),
                 &load_recipe("cook").expect("load finalized recipe"),
                 &finalization_corrected,
                 &recipe_mismatch_fields(
