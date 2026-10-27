@@ -824,13 +824,6 @@ impl ClaimedCookContinuation {
         self.transition(LifecycleContinuationTransition::Fail(diagnostic))
     }
 
-    /// Close a pass that exited unsuccessfully. A Cook that changed its outcome
-    /// or candidate and asked for another pass while holding this claim re-arms
-    /// it for the next generation; otherwise it fails with `diagnostic`.
-    pub fn finish_unsuccessful(self, diagnostic: &str) -> Result<()> {
-        self.transition(LifecycleContinuationTransition::Unsuccessful(diagnostic))
-    }
-
     fn transition(mut self, transition: LifecycleContinuationTransition<'_>) -> Result<()> {
         let result = transition_lifecycle_continuation(
             &self.lifecycle_store,
@@ -1956,25 +1949,6 @@ const MAX_CONTINUATION_RETRIES: u32 = 3;
 const CONTINUATION_RETRY_BACKOFF_BASE_SECS: i64 = 60;
 const CONTINUATION_RETRY_BACKOFF_MAX_SECS: i64 = 600;
 const CONTINUATION_RETRY_AT_KEY: &str = "next_attempt_at";
-/// Set on a claimed continuation when the Cook it is driving needs another
-/// pass. The claim cannot queue a second entry for its own run, so it re-arms
-/// for its next generation when it finishes instead of failing (#15017).
-const CONTINUATION_REARM_REQUESTED_KEY: &str = "rearm_requested";
-const CONTINUATION_CLAIM_OUTCOME_KEY: &str = "claim_outcome";
-
-/// Only semantic outcome changes justify a self-request. Re-projecting a
-/// terminal result updates timestamps and diagnostics without creating work.
-fn continuation_outcome(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
-    serde_json::json!({
-        "state": record.state(),
-        "terminal_status": record.metadata["cook_progress"]["terminal_status"],
-        "candidate": record.candidate,
-        "candidate_identity": record.metadata["candidate_identity"],
-        "delivery_state": record.metadata["cook_delivery"]["delivery"]["state"],
-        "delivery_candidate": record.metadata["cook_delivery"]["delivery"]["candidate"],
-        "base_movements": record.metadata["cook_delivery"]["delivery"]["base_movements"],
-    })
-}
 
 /// Earliest time a scheduled consumer may reclaim a continuation after its
 /// `retries`-th retryable failure.
@@ -2063,9 +2037,6 @@ enum LifecycleContinuationTransition<'a> {
     Retry,
     RetryWithDiagnostic(&'a str),
     Fail(&'a str),
-    /// The Cook pass exited unsuccessfully: re-arm when it requested another
-    /// pass, otherwise fail with the diagnostic.
-    Unsuccessful(&'a str),
 }
 
 fn lifecycle_continuation(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<&Value> {
@@ -2135,30 +2106,6 @@ fn enqueue_lifecycle_continuation(
     let mut enqueued = false;
     lifecycle_store.mutate_record(&continuation.run_id, |record| {
         let state = lifecycle_continuation_state(lifecycle_continuation(record));
-        if state == CookContinuationState::Claimed {
-            // The continuation driving this Cook is the one asking for another
-            // pass. Only changed outcomes count: re-projecting the same settled
-            // result is not new work (#16514). Other owners keep their claims.
-            let outcome = continuation_outcome(record);
-            let Some(claimed) = record
-                .metadata
-                .get_mut(LIFECYCLE_CONTINUATION_KEY)
-                .filter(|value| {
-                    value.get("owner_pid").and_then(Value::as_u64)
-                        == Some(u64::from(std::process::id()))
-                })
-            else {
-                return false;
-            };
-            if claimed.get(CONTINUATION_CLAIM_OUTCOME_KEY) == Some(&outcome)
-                || claimed.get(CONTINUATION_CLAIM_OUTCOME_KEY).is_none()
-            {
-                return false;
-            }
-            claimed[CONTINUATION_REARM_REQUESTED_KEY] = serde_json::json!(true);
-            enqueued = true;
-            return true;
-        }
         if state != CookContinuationState::Absent
             && !(rearm_failed && state == CookContinuationState::Failed)
         {
@@ -2454,7 +2401,6 @@ fn claim_lifecycle_record(
             return false;
         }
         let mut value = value;
-        value[CONTINUATION_CLAIM_OUTCOME_KEY] = continuation_outcome(record);
         value["state"] = serde_json::json!("claimed");
         if let Some(value) = value.as_object_mut() {
             value.remove(CONTINUATION_RETRY_AT_KEY);
@@ -2524,14 +2470,6 @@ fn transition_lifecycle_continuation(
                 value["completed_at"] = serde_json::json!(now);
             }
             LifecycleContinuationTransition::Retry => rearm_for_retry(&mut value),
-            LifecycleContinuationTransition::Unsuccessful(_)
-                if value
-                    .get(CONTINUATION_REARM_REQUESTED_KEY)
-                    .and_then(Value::as_bool)
-                    == Some(true) =>
-            {
-                rearm_for_retry(&mut value)
-            }
             LifecycleContinuationTransition::RetryWithDiagnostic(diagnostic) => {
                 let retries = value
                     .get("retries")
@@ -2551,8 +2489,7 @@ fn transition_lifecycle_continuation(
                     value["diagnostic"] = serde_json::json!(diagnostic);
                 }
             }
-            LifecycleContinuationTransition::Fail(diagnostic)
-            | LifecycleContinuationTransition::Unsuccessful(diagnostic) => {
+            LifecycleContinuationTransition::Fail(diagnostic) => {
                 value["state"] = serde_json::json!("failed");
                 value["diagnostic"] = serde_json::json!(diagnostic);
             }
@@ -2560,8 +2497,6 @@ fn transition_lifecycle_continuation(
         let claim = value.as_object_mut().expect("continuation object");
         claim.remove("owner_pid");
         claim.remove("claim_identity");
-        claim.remove(CONTINUATION_REARM_REQUESTED_KEY);
-        claim.remove(CONTINUATION_CLAIM_OUTCOME_KEY);
         record
             .ensure_metadata_object()
             .insert(LIFECYCLE_CONTINUATION_KEY.to_string(), value);
@@ -3349,7 +3284,7 @@ fn consume_claimed_with_dispatcher_policy(
                 Some(blocker) => {
                     claim.fail(&format!("{}: {}", blocker.code.as_str(), blocker.message))?
                 }
-                None => claim.finish_unsuccessful(&format!(
+                None => claim.fail(&format!(
                     "Cook continuation exited unsuccessfully with status {exit_code}"
                 ))?,
             }
@@ -5572,148 +5507,67 @@ mod tests {
         );
     }
 
-    /// #15017: a continuation whose Cook needs another pass cannot queue a
-    /// second entry for its own run. The request lands on its own claim, which
-    /// re-arms for the next generation instead of failing.
+    /// #16514: a pass that re-projects its own terminal result asks to enqueue
+    /// its own run while still holding the claim. Whoever owns the claim, that
+    /// queues nothing: the pass ends once instead of re-driving a settled Cook.
     #[test]
-    fn continuation_requesting_another_pass_rearms_its_own_claim() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, lifecycle_store) = rooted_stores(&context);
-        store.persist_recipe(&recipe()).unwrap();
-        assert!(store.enqueue_terminal_continuation("cook", "run").unwrap());
-        let generation = |store: &agent_task_lifecycle::AgentTaskLifecycleStore| {
-            lifecycle_continuation(&store.read_record("run").unwrap())
-                .and_then(|value| value.get("generation"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-        };
-        let before = generation(&lifecycle_store);
+    fn claimed_continuation_is_not_requeued_by_its_own_pass() {
+        for own_claim in [true, false] {
+            let context = homeboy_core::test_support::HermeticTestContext::new();
+            let (store, lifecycle_store) = rooted_stores(&context);
+            store.persist_recipe(&recipe()).unwrap();
+            assert!(store.enqueue_terminal_continuation("cook", "run").unwrap());
+            let generation = |store: &agent_task_lifecycle::AgentTaskLifecycleStore| {
+                lifecycle_continuation(&store.read_record("run").unwrap())
+                    .and_then(|value| value.get("generation"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            };
+            let before = generation(&lifecycle_store);
+            let claim = store
+                .claim_continuation_for("cook", "run")
+                .unwrap()
+                .expect("targeted continuation");
+            if !own_claim {
+                lifecycle_store
+                    .mutate_record("run", |record| {
+                        let mut value = lifecycle_continuation(record)
+                            .cloned()
+                            .expect("continuation");
+                        value["owner_pid"] = serde_json::json!(u64::from(std::process::id()) + 1);
+                        record
+                            .ensure_metadata_object()
+                            .insert(LIFECYCLE_CONTINUATION_KEY.to_string(), value);
+                        true
+                    })
+                    .unwrap();
+            }
 
-        let claim = store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .expect("targeted continuation");
-        assert_eq!(
-            store
-                .consume_claimed_with_dispatcher(
-                    claim,
-                    |_| Ok(None),
-                    |_| {
-                        lifecycle_store
-                            .mutate_record("run", |record| {
-                                record.metadata["cook_progress"] = serde_json::json!({
-                                    "terminal_status": "candidate_recoverable"
-                                });
-                                true
-                            })
-                            .unwrap();
-                        assert!(store.enqueue_terminal_continuation("cook", "run").unwrap());
-                        Ok(1)
-                    },
-                )
-                .unwrap(),
-            1
-        );
-
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Pending
-        );
-        assert_eq!(generation(&lifecycle_store), before + 1);
-        let rearmed = lifecycle_store.read_record("run").unwrap();
-        assert!(lifecycle_continuation(&rearmed)
-            .and_then(|value| value.get(CONTINUATION_REARM_REQUESTED_KEY))
-            .is_none());
-    }
-
-    /// #16514: re-projecting the same settled result must not create another
-    /// generation, even when execution asks to enqueue its own run.
-    #[test]
-    fn unchanged_terminal_continuation_does_not_rearm_its_own_claim() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, lifecycle_store) = rooted_stores(&context);
-        store.persist_recipe(&recipe()).unwrap();
-        store.enqueue_terminal_continuation("cook", "run").unwrap();
-        lifecycle_store
-            .mutate_record("run", |record| {
-                record.metadata["cook_progress"] = serde_json::json!({
-                    "terminal_status": "retries_exhausted"
-                });
-                true
-            })
-            .unwrap();
-        let before = lifecycle_store.read_record("run").unwrap();
-        let claim = store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .expect("targeted continuation");
-        assert_eq!(
-            store
-                .consume_claimed_with_dispatcher(
-                    claim,
-                    |_| Ok(None),
-                    |_| {
-                        lifecycle_store.mutate_record("run", |record| {
-                            record.metadata["cook_progress"]["detail"] =
-                                serde_json::json!("terminal result re-projected");
-                            record.updated_at = Some(agent_task_lifecycle::now_timestamp());
-                            true
-                        })?;
-                        let _ = store.enqueue_terminal_continuation("cook", "run")?;
-                        Ok(1)
-                    },
-                )
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Failed
-        );
-        let after = lifecycle_store.read_record("run").unwrap();
-        assert_eq!(
-            lifecycle_continuation(&after).unwrap()["generation"],
-            lifecycle_continuation(&before).unwrap()["generation"]
-        );
-        assert!(store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .is_none());
-    }
-
-    /// A claim held by another live owner is not this Cook's to re-arm, so no
-    /// continuation is reported as queued.
-    #[test]
-    fn continuation_claimed_by_another_owner_is_not_reported_queued() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, lifecycle_store) = rooted_stores(&context);
-        store.persist_recipe(&recipe()).unwrap();
-        store.enqueue_terminal_continuation("cook", "run").unwrap();
-        let claim = store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .expect("targeted continuation");
-        lifecycle_store
-            .mutate_record("run", |record| {
-                let mut value = lifecycle_continuation(record)
-                    .cloned()
-                    .expect("continuation");
-                value["owner_pid"] = serde_json::json!(u64::from(std::process::id()) + 1);
-                record
-                    .ensure_metadata_object()
-                    .insert(LIFECYCLE_CONTINUATION_KEY.to_string(), value);
-                true
-            })
-            .unwrap();
-
-        assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
-        claim
-            .fail("Cook continuation exited unsuccessfully")
-            .unwrap();
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Failed
-        );
+            assert_eq!(
+                store
+                    .consume_claimed_with_dispatcher(
+                        claim,
+                        |_| Ok(None),
+                        |_| {
+                            assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
+                            Ok(1)
+                        },
+                    )
+                    .unwrap(),
+                1,
+                "own_claim={own_claim}"
+            );
+            assert_eq!(
+                continuation_state_in_store(&store, "cook", "run").unwrap(),
+                CookContinuationState::Failed,
+                "own_claim={own_claim}"
+            );
+            assert_eq!(
+                generation(&lifecycle_store),
+                before,
+                "own_claim={own_claim}"
+            );
+        }
     }
 
     #[test]
