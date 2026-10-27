@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.13] - 2026-10-27
+
+### Changed
+- Add per-version reliability to runs hotspots
+- Verify a stopped generation's evidence through the admitting endpoint
+- Reuse the status identity probe as proof of the runner's Homeboy runtime
+
 ## [0.434.12] - 2026-10-27
 
 ### Changed
