@@ -1,4 +1,4 @@
-use super::common::{artifact_home, request, script};
+use super::common::{request, script};
 use super::*;
 
 #[test]
@@ -158,49 +158,6 @@ fn lab_runtime_component_ids_follow_selected_agent_task_providers() {
         component_ids,
         vec!["agents-api", "php-ai-client", "sample-component"]
     );
-}
-
-#[test]
-fn repo_local_gate_execution_kind_runs_without_extension_provider() {
-    let _home = artifact_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    fs::write(
-        temp.path().join("gate.mjs"),
-        "import fs from 'node:fs'; fs.writeFileSync(process.env.RESULT_PATH, JSON.stringify({ok:true}));",
-    )
-    .expect("write script");
-    let (mut request, _) = request("repo-local-gate", "unused".to_string());
-    request.executor.backend = "agent-task".to_string();
-    request.executor.config = json!({
-        "execution_kind": "repo_local_gate",
-        "script": "gate.mjs",
-        "artifact_outputs": {
-            "result": { "schema": "example/Result/v1" }
-        }
-    });
-    request.workspace = AgentTaskWorkspace {
-        mode: AgentTaskWorkspaceMode::Existing,
-        root: Some(temp.path().display().to_string()),
-        ..AgentTaskWorkspace::default()
-    };
-    let executor = ExtensionProviderAgentTaskExecutor::with_providers(Vec::new());
-
-    let outcome = executor.execute(
-        request,
-        AgentTaskExecutionContext {
-            plan_id: "gate-plan".to_string(),
-            run_id: Some("gate-run".to_string()),
-            attempt: 1,
-            cancellation: AgentTaskCancellationToken::default(),
-            lifecycle_store: None,
-            provider_capacity_key: None,
-        },
-    );
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert_eq!(outcome.outputs["result"]["ok"], true);
-    assert_eq!(outcome.typed_artifacts.len(), 1);
-    assert_eq!(outcome.typed_artifacts[0].name, "result");
 }
 
 #[test]

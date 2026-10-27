@@ -238,7 +238,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
     }
 
     fn provider_route_readiness(&self, request: &AgentTaskRequest) -> ProviderRouteReadiness {
-        if is_fixture_backend(&request.executor.backend) || is_repo_local_gate_request(request) {
+        if is_fixture_backend(&request.executor.backend) {
             return ProviderRouteReadiness::dispatchable();
         }
         let request = request_with_effective_provider_contract(request, self.providers());
@@ -644,9 +644,6 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         // provider resolution in the shipped binary (#11118).
         if let Some(outcome) = fixture_provider_outcome(&request) {
             return outcome;
-        }
-        if is_repo_local_gate_request(&request) {
-            return run_repo_local_gate_task(&request);
         }
         let bound_credentials = self.evidence.lock().ok().and_then(|mut evidence| {
             let key = context.provider_capacity_key.as_deref()?;

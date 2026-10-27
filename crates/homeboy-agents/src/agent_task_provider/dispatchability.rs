@@ -1462,9 +1462,7 @@ fn selected_plan_provider_dispatchability_with_providers(
             // plan-level deadline, which bounds admission as a whole.
             candidate.limits.execution_deadline_unix_ms =
                 plan.options.execution_budget.deadline_unix_ms;
-            if super::is_fixture_backend(&candidate.executor.backend)
-                || crate::agent_task_gate_executor::is_repo_local_gate_request(&candidate)
-            {
+            if super::is_fixture_backend(&candidate.executor.backend) {
                 selected = Some((candidate, next_rotation_index));
                 break;
             }

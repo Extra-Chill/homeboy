@@ -3064,7 +3064,6 @@ fn preflight_plan_provider_eligibility_with_catalog(
 ) -> Result<()> {
     let catalog_owns_every_route = plan.tasks.iter().all(|task| {
         crate::agent_task_provider::is_fixture_backend(&task.executor.backend)
-            || crate::agent_task_gate_executor::is_repo_local_gate_request(task)
             || catalog
                 .providers()
                 .iter()
