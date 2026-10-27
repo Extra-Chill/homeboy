@@ -20,7 +20,6 @@ pub mod agent_task_executor_evidence;
 pub mod agent_task_feedback;
 pub(crate) mod agent_task_finalization;
 pub(crate) mod agent_task_gate;
-pub(crate) mod agent_task_gate_executor;
 pub mod agent_task_lifecycle;
 pub mod agent_task_model;
 pub mod caller_context;

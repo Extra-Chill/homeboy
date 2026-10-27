@@ -1,7 +1,7 @@
 use super::*;
 use crate::agent_task::{
     AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
-    AgentTaskWorkspaceMode, AgentToolExecutionLocation, AgentToolPolicyRule,
+    AgentToolExecutionLocation, AgentToolPolicyRule,
 };
 use crate::agent_task_scheduler::{
     AgentTaskCancellationToken, AgentTaskExecutionContext, AgentTaskPlan, AgentTaskScheduler,
