@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.12] - 2026-10-27
+
+### Changed
+- Wake the daemon listener on connections instead of sleeping
+
 ## [0.434.11] - 2026-10-27
 
 ### Changed
