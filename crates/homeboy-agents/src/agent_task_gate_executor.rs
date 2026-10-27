@@ -16,7 +16,6 @@ use crate::agent_task::{
 use homeboy_core::{Error, Result};
 
 pub const REPO_LOCAL_GATE_EXECUTION_KIND: &str = "repo_local_gate";
-const LEGACY_NODE_SCRIPT_EXECUTION_KIND: &str = "node_script";
 const GATE_ARTIFACT_KIND: &str = "repo_local_gate_output";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -43,10 +42,7 @@ pub struct RepoLocalGateArtifactOutput {
 }
 
 pub fn is_repo_local_gate_request(request: &AgentTaskRequest) -> bool {
-    matches!(
-        execution_kind(request).as_deref(),
-        Some(REPO_LOCAL_GATE_EXECUTION_KIND) | Some(LEGACY_NODE_SCRIPT_EXECUTION_KIND)
-    )
+    execution_kind(request).as_deref() == Some(REPO_LOCAL_GATE_EXECUTION_KIND)
 }
 
 pub fn run_repo_local_gate_task(request: &AgentTaskRequest) -> AgentTaskOutcome {
@@ -93,7 +89,7 @@ fn build_execution_with_artifact_root(
         config.get("cwd").and_then(Value::as_str).unwrap_or("."),
         "cwd",
     )?;
-    let argv = gate_argv(&cwd, config, &execution_kind)?;
+    let argv = gate_argv(&cwd, config)?;
     let inputs = object_field(config, "inputs")
         .map(|map| {
             map.iter()
@@ -137,7 +133,7 @@ fn build_execution_with_artifact_root(
     })
 }
 
-fn gate_argv(cwd: &Path, config: &Value, execution_kind: &str) -> Result<Vec<String>> {
+fn gate_argv(cwd: &Path, config: &Value) -> Result<Vec<String>> {
     if let Some(argv) = config.get("argv").and_then(Value::as_array) {
         let argv: Vec<String> = argv
             .iter()
@@ -172,14 +168,10 @@ fn gate_argv(cwd: &Path, config: &Value, execution_kind: &str) -> Result<Vec<Str
         ));
     }
     let script_arg = pathdiff(&script_path, cwd);
-    let program = if execution_kind == LEGACY_NODE_SCRIPT_EXECUTION_KIND {
-        "node"
-    } else {
-        config
-            .get("interpreter")
-            .and_then(Value::as_str)
-            .unwrap_or("node")
-    };
+    let program = config
+        .get("interpreter")
+        .and_then(Value::as_str)
+        .unwrap_or("node");
     Ok(vec![program.to_string(), script_arg])
 }
 
@@ -608,29 +600,6 @@ mod tests {
         let execution = build_execution(&request).expect("execution");
 
         assert_eq!(execution.artifact_root, pinned);
-    }
-
-    #[test]
-    fn legacy_node_script_uses_node_without_shell() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            temp.path().join("gate.mjs"),
-            "import fs from 'node:fs'; fs.writeFileSync(process.env.RESULT_PATH, JSON.stringify({ok:true}));",
-        )
-        .expect("write script");
-        let request = request(
-            temp.path(),
-            json!({
-                "execution_kind": "node_script",
-                "script": "gate.mjs",
-                "artifact_outputs": { "result": { "schema": "example/Result/v1" } }
-            }),
-        );
-
-        let execution = build_execution(&request).expect("execution");
-
-        assert_eq!(execution.argv[0], "node");
-        assert_eq!(execution.argv[1], "gate.mjs");
     }
 
     #[test]
