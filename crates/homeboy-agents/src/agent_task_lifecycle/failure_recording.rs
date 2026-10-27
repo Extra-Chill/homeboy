@@ -1881,7 +1881,7 @@ fn terminal_artifact_projection_readiness_for_record_with(
 
 /// Observation status for a terminal lifecycle state. A run whose observation
 /// was already corrected from `pass` to `fail` (a Cook that failed after its
-/// run settled, see `ObservationStore::correct_passed_run_to_failed`) stays
+/// run settled, see `ObservationStore::settle_run`) stays
 /// `fail`: the lifecycle record still says `Succeeded` for those, and
 /// re-projecting it must not undo the correction (Extra-Chill/homeboy#15393).
 fn terminal_observation_status(

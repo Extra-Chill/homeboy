@@ -1942,45 +1942,36 @@ impl ObservationStore {
         Ok(rows > 0)
     }
 
-    /// Correct a settled `pass` observation that a later, authoritative
-    /// terminal outcome contradicts, for example a detached Cook whose handoff
-    /// observation finished `pass` before the controller's continuation
-    /// failed (Extra-Chill/homeboy#15393).
-    ///
-    /// Only `pass` -> `fail` is allowed: a failure is never upgraded, and a run
-    /// that is still `running` is left to its own writer. The run's
-    /// `notification_delivered` marker is cleared in the same statement so the
-    /// completion watcher announces the corrected status. The previous status
-    /// and when it changed are kept under `status_correction`.
-    ///
-    /// Returns `Ok(true)` when the status was corrected.
-    pub fn correct_passed_run_to_failed(&self, run_id: &str, reason: &str) -> Result<bool> {
+    /// Settle an active or previously settled run to its owner's latest outcome.
+    /// Changed terminal outcomes re-arm completion notifications; matching rows
+    /// are untouched.
+    pub fn settle_run(&self, run_id: &str, status: RunStatus) -> Result<bool> {
         validate_required("run_id", run_id)?;
-        let correction = serde_json::json!({
-            "previous_status": "pass",
-            "status": "fail",
-            "reason": reason,
-            "at": chrono::Utc::now().to_rfc3339(),
-        });
-        let correction_str = serde_json::to_string(&correction).map_err(|e| {
-            Error::internal_json(
-                e.to_string(),
-                Some("serialize status correction".to_string()),
-            )
-        })?;
-        let rows = execute_with_retry("correct passed run to failed", || {
+        if !matches!(status, RunStatus::Pass | RunStatus::Fail) {
+            return Err(Error::validation_invalid_argument(
+                "status",
+                "settlement requires pass or fail",
+                None,
+                None,
+            ));
+        }
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let rows = execute_with_retry("settle run record", || {
             self.connection.execute(
                 r#"
                 UPDATE runs
-                SET status = 'fail',
-                    metadata_json = json_set(
-                        json_remove(COALESCE(metadata_json, '{}'), '$.notification_delivered'),
-                        '$.status_correction',
-                        json(?1)
-                    )
-                WHERE id = ?2 AND status = 'pass'
+                SET status = ?1,
+                    finished_at = ?2,
+                    metadata_json = CASE WHEN status = 'running' THEN metadata_json ELSE
+                        json_set(
+                            json_remove(COALESCE(metadata_json, '{}'), '$.notification_delivered'),
+                            '$.status_correction', json_object(
+                                'previous_status', status, 'status', ?1, 'at', ?2
+                            )
+                        ) END
+                WHERE id = ?3 AND status IN ('running', 'pass', 'fail') AND status != ?1
                 "#,
-                params![correction_str, run_id],
+                params![status.as_str(), finished_at, run_id],
             )
         })?;
         Ok(rows > 0)
@@ -2629,7 +2620,7 @@ mod tests {
     /// rewrote the observation. The correction flips it and re-arms the
     /// completion notification so the real outcome is announced.
     #[test]
-    fn a_settled_pass_is_corrected_to_fail_and_renotified() {
+    fn settlement_follows_latest_outcome_and_renotifies() {
         with_isolated_home(|_| {
             let store = ObservationStore::open_initialized().expect("store");
             store
@@ -2639,18 +2630,20 @@ mod tests {
                 .mark_notification_delivered("cook-attempt", "controller")
                 .expect("announce pass"));
 
-            assert!(store
-                .correct_passed_run_to_failed("cook-attempt", "cook finished candidate_recoverable")
-                .expect("correct"));
+            assert!(store.settle_run("cook-attempt", RunStatus::Fail).unwrap());
             let run = store.get_run("cook-attempt").unwrap().unwrap();
             assert_eq!(run.status, "fail");
             assert_eq!(
                 run.metadata_json["status_correction"]["previous_status"],
                 "pass"
             );
+            assert!(store.settle_run("cook-attempt", RunStatus::Pass).unwrap());
+            let recovered = store.get_run("cook-attempt").unwrap().unwrap();
+            assert_eq!(recovered.status, "pass");
+            assert!(!store.settle_run("cook-attempt", RunStatus::Pass).unwrap());
             assert_eq!(
-                run.metadata_json["status_correction"]["reason"],
-                "cook finished candidate_recoverable"
+                serde_json::to_value(store.get_run("cook-attempt").unwrap().unwrap()).unwrap(),
+                serde_json::to_value(recovered).unwrap()
             );
             assert!(!store.is_notification_delivered("cook-attempt").unwrap());
             assert!(store
@@ -2660,7 +2653,7 @@ mod tests {
     }
 
     #[test]
-    fn correction_never_touches_running_failed_or_missing_runs() {
+    fn settlement_finishes_running_and_preserves_matching_or_missing_runs() {
         with_isolated_home(|_| {
             let store = ObservationStore::open_initialized().expect("store");
             store
@@ -2673,17 +2666,13 @@ mod tests {
                 .mark_notification_delivered("already-failed", "controller")
                 .unwrap());
 
-            assert!(!store
-                .correct_passed_run_to_failed("still-running", "r")
-                .unwrap());
-            assert!(!store
-                .correct_passed_run_to_failed("already-failed", "r")
-                .unwrap());
-            assert!(!store.correct_passed_run_to_failed("missing", "r").unwrap());
+            assert!(store.settle_run("still-running", RunStatus::Fail).unwrap());
+            assert!(!store.settle_run("already-failed", RunStatus::Fail).unwrap());
+            assert!(!store.settle_run("missing", RunStatus::Fail).unwrap());
 
             assert_eq!(
                 store.get_run("still-running").unwrap().unwrap().status,
-                "running"
+                "fail"
             );
             assert!(store.is_notification_delivered("already-failed").unwrap());
         });
