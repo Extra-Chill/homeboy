@@ -1034,9 +1034,7 @@ Minimal task config:
 Gate scripts should read JSON from the generated input path env vars and write
 JSON to the generated output path env vars. For example,
 `IMPORT_VALIDATION_RESULT_PATH`, `VISUAL_PARITY_ARTIFACT_PATH`, and
-`STATIC_SITE_PUBLISH_GATE_PATH`. `node_script` is accepted only as a legacy alias
-for existing plans; new plans should use `repo_local_gate` so the contract stays
-portable beyond Node.
+`STATIC_SITE_PUBLISH_GATE_PATH`.
 
 `agent-task contract --format=json` returns `homeboy/agent-task-core-contract/v1`,
 the machine-readable Homeboy-owned contract export for downstream integrations.
