@@ -1850,7 +1850,14 @@ where
             // connections stay blocking (BSD sockets inherit O_NONBLOCK).
             Ok((stream, _)) => stream.set_nonblocking(false).map(|()| stream),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                // Wake on the next connection; the timeout bounds how long a
+                // shutdown request waits to be observed.
+                let mut readable = libc::pollfd {
+                    fd: std::os::fd::AsRawFd::as_raw_fd(&listener),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                unsafe { libc::poll(&mut readable, 1, 100) };
                 continue;
             }
             Err(error) => Err(error),
@@ -6798,6 +6805,45 @@ mod tests {
                     .status
                     .is_terminal()
             }));
+        });
+    }
+
+    #[test]
+    fn shutdown_capable_listener_accepts_without_a_polling_delay() {
+        with_isolated_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("listener address");
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let server_shutdown = Arc::clone(&shutdown);
+            let server = std::thread::spawn(move || {
+                serve_listener_until_shutdown(listener, server_shutdown)
+            });
+            let client = reqwest::blocking::Client::new();
+            let get = || {
+                let response = client
+                    .get(format!("http://{address}/capabilities"))
+                    .send()
+                    .expect("capabilities request");
+                assert!(response.status().is_success());
+            };
+            get();
+            // A listener that sleeps between non-blocking accepts makes each
+            // sequential request wait for the next poll tick (~100ms apiece).
+            let started = std::time::Instant::now();
+            for _ in 0..10 {
+                get();
+            }
+            let elapsed = started.elapsed();
+            shutdown.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(address);
+            server
+                .join()
+                .expect("join daemon")
+                .expect("daemon drained its helpers");
+            assert!(
+                elapsed < std::time::Duration::from_millis(500),
+                "10 sequential requests took {elapsed:?}"
+            );
         });
     }
 
