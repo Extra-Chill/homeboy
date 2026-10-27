@@ -1875,6 +1875,17 @@ fn verify_retained_evidence(
     let invalid = |id: &str, reason: &str| {
         Error::internal_unexpected(format!("retained evidence {id}: {reason}"))
     };
+    // Generations of one runner share its observation store, so the admitting
+    // endpoint serves a stopped generation's runs. Inventories must still match.
+    let admitting = generations
+        .generations
+        .get(&generations.admission_owner)
+        .map(|entry| &entry.endpoint);
+    let evidence = |path: &str| {
+        operations
+            .evidence(endpoint, path)
+            .or_else(|| operations.evidence(admitting?, path))
+    };
     let mut released_runs = std::collections::BTreeSet::new();
     for id in &runs {
         // Controller retention has already released this run's evidence.
@@ -1903,8 +1914,7 @@ fn verify_retained_evidence(
         // A valid local file does not prove the whole remote result was copied.
         // Compare exhaustive source inventories before releasing its daemon.
         let encoded = homeboy_core::execution_contract::encode_uri_component(id);
-        let remote = operations
-            .evidence(endpoint, &format!("/runs/{encoded}/artifacts"))
+        let remote = evidence(&format!("/runs/{encoded}/artifacts"))
             .ok_or_else(|| invalid(id, "source artifact inventory unavailable"))?;
         let remote_artifacts = remote
             .pointer("/data/body/artifacts")
@@ -1916,8 +1926,7 @@ fn verify_retained_evidence(
                     .map_err(|_| invalid(id, "source artifact metadata invalid"))?;
             verify_controller_copy(&source, &local_artifacts)?;
         }
-        let remote = operations
-            .evidence(endpoint, &format!("/runs/{encoded}/findings"))
+        let remote = evidence(&format!("/runs/{encoded}/findings"))
             .ok_or_else(|| invalid(id, "source findings unavailable"))?;
         let remote_findings = remote
             .pointer("/data/body/findings")
@@ -3478,6 +3487,7 @@ mod tests {
     struct FakeEndpointOperations {
         queued: RefCell<Vec<crate::RunnerJob>>,
         evidence: RefCell<std::collections::BTreeMap<String, serde_json::Value>>,
+        evidence_unreachable_leases: RefCell<std::collections::BTreeSet<String>>,
         cancelled: RefCell<Vec<(String, String)>>,
         active_jobs: RefCell<std::collections::BTreeMap<String, usize>>,
         terminal_reconcile_failures: RefCell<std::collections::BTreeSet<String>>,
@@ -3489,7 +3499,14 @@ mod tests {
     }
 
     impl GenerationEndpointOperations for FakeEndpointOperations {
-        fn evidence(&self, _: &RunnerSession, path: &str) -> Option<serde_json::Value> {
+        fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
+            if self
+                .evidence_unreachable_leases
+                .borrow()
+                .contains(session.remote_daemon_lease_id.as_deref()?)
+            {
+                return None;
+            }
             self.evidence.borrow().get(path).cloned()
         }
 
@@ -3903,6 +3920,61 @@ mod tests {
             .unwrap();
             let result = reconcile_with("runner-a", &operations).unwrap();
             assert_eq!(result.retired_generation_ids, ["lease-idle"]);
+        });
+    }
+
+    #[test]
+    fn stopped_generation_evidence_is_verified_through_the_admitting_endpoint() {
+        crate::test_support::with_isolated_home(|home| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+            let run = homeboy_core::observation::RunRecord {
+                id: "stopped-run".into(),
+                kind: "lint".into(),
+                status: "pass".into(),
+                started_at: "2026-10-23T00:00:00Z".into(),
+                finished_at: Some("2026-10-23T00:00:01Z".into()),
+                metadata_json: serde_json::json!({"lab":{"runner":{"id":"runner-a"}}}),
+                ..Default::default()
+            };
+            store.import_run(&run).unwrap();
+            let source = home.path().join("stopped-source");
+            std::fs::write(&source, b"verified evidence").unwrap();
+            let artifact = store.record_artifact(&run.id, "log", &source).unwrap();
+            let stopped = session("lease-stopped", "daemon-stopped", Some(101));
+            let current = session("lease-current", "daemon-current", Some(303));
+            let mut generations = RollingGenerations::new("lease-current".to_string(), current);
+            generations.begin("lease-stopped", stopped);
+            generations
+                .run_owners
+                .insert(run.id.clone(), "lease-stopped".into());
+            write("runner-a", &generations).unwrap();
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-current".to_string(), 0);
+            operations
+                .stopped_leases_proven
+                .borrow_mut()
+                .insert("lease-stopped".into());
+            operations
+                .evidence_unreachable_leases
+                .borrow_mut()
+                .insert("lease-stopped".into());
+            operations.evidence.borrow_mut().extend([
+                (
+                    "/runs/stopped-run/artifacts".into(),
+                    serde_json::json!({"data":{"body":{"artifacts":[artifact]}}}),
+                ),
+                (
+                    "/runs/stopped-run/findings".into(),
+                    serde_json::json!({"data":{"body":{"findings":[]}}}),
+                ),
+            ]);
+            let result = reconcile_with("runner-a", &operations).unwrap();
+            assert_eq!(result.retired_generation_ids, ["lease-stopped"]);
+            assert!(result.evidence_blocked_generation_ids.is_empty());
+            assert!(result.released_unverified_evidence.is_empty());
         });
     }
 
