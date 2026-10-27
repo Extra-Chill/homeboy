@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.8] - 2026-10-27
+
+### Changed
+- Re-arm a Cook continuation only when its outcome changed
+- Publish follow-up candidates verified on branch-only history instead of replaying them onto the base
+
 ## [0.434.7] - 2026-10-27
 
 ### Changed
