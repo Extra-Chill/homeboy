@@ -1430,6 +1430,9 @@ pub(crate) fn cook_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
     if let Some(component) = &args.component {
         argv.extend(["--component".to_string(), component.clone()]);
     }
+    if let Some(cwd) = &args.dispatch.cwd {
+        argv.extend(["--cwd".to_string(), cwd.clone()]);
+    }
     if let Some(task_url) = &args.dispatch.task_url {
         argv.extend(["--task-url".to_string(), task_url.clone()]);
     }
@@ -5954,7 +5957,6 @@ pub(crate) fn provision_cook_destination(
         ])
     })?;
     let existing = if let Some(cwd) = args.dispatch.cwd.as_deref() {
-        ensure_active_managed_cook_destination(handle)?;
         Some((PathBuf::from(cwd), Some("explicit_cwd".to_string())))
     } else if Path::new(handle).is_dir() {
         Some((
@@ -5968,7 +5970,12 @@ pub(crate) fn provision_cook_destination(
     if let Some((path, kind)) = existing {
         validate_cook_worktree_root(&path, handle)?;
         let path = std::fs::canonicalize(&path).map_err(|error| {
-            homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            homeboy::core::Error::validation_invalid_argument(
+                "to_worktree",
+                format!("cannot use Cook destination: {error}"),
+                Some(path.display().to_string()),
+                None,
+            )
         })?;
         if preview || args.dispatch.cwd.is_some() {
             validate_cook_destination_identity(args, &path)?;
@@ -5979,24 +5986,12 @@ pub(crate) fn provision_cook_destination(
         if !preview {
             validate_cook_base_before_provisioning(args, repository)?;
         }
-        let mut provision = serde_json::json!({
+        return Ok(serde_json::json!({
             "action": if preview { "planned_reuse" } else { "existing" },
             "kind": if preview { Some("preview_local") } else { kind.as_deref() },
             "handle": handle,
             "path": path,
-        });
-        if !preview
-            && args.dispatch.cwd.is_some()
-            && !Path::new(handle).is_dir()
-            && homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(handle)?
-                .is_none()
-        {
-            provision["logical_provider_provenance"] = serde_json::json!({
-                "schema": "homeboy/logical-worktree-handle-provenance/v1",
-                "handle": handle, "canonical_path": path, "validation": "exact_handle_basename",
-            });
-        }
-        return Ok(provision);
+        }));
     }
     if !preview {
         validate_cook_base_before_provisioning(args, repository)?;
@@ -6114,11 +6109,6 @@ fn cook_provision_repository(args: &AgentTaskCookArgs) -> Option<String> {
         .or_else(|| args.dispatch.repo.clone())
 }
 
-fn ensure_active_managed_cook_destination(to_worktree: &str) -> homeboy::core::Result<()> {
-    homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(to_worktree)?;
-    Ok(())
-}
-
 /// An explicit CWD is the Cook workspace authority. A co-supplied destination
 /// can only name that same existing worktree; never consult a provider merely
 /// to rediscover a path the operator already supplied.
@@ -6137,7 +6127,12 @@ fn validate_cook_cwd_destination_identity(
         Ok(cwd.to_path_buf())
     }
     .map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some(to_worktree.to_string()))
+        homeboy::core::Error::validation_invalid_argument(
+            "to_worktree",
+            format!("cannot use --to-worktree with --cwd: {error}"),
+            Some(to_worktree.to_string()),
+            None,
+        )
     })?;
     if destination != cwd {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -6188,6 +6183,28 @@ pub(crate) fn resolve_cook_destination(
     mut args: AgentTaskCookArgs,
     repository: Option<&ResolvedCookRepository>,
 ) -> homeboy::core::Result<AgentTaskCookArgs> {
+    if let Some(cwd) = args.dispatch.cwd.as_deref() {
+        let path = std::fs::canonicalize(cwd).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "cwd",
+                format!("cannot use --cwd checkout: {error}"),
+                Some(cwd.to_string()),
+                None,
+            )
+        })?;
+        // Check registry admission by exact filesystem identity, but never turn
+        // the operator's checkout into a handle to be resolved again in replay.
+        homeboy::core::worktree_provider::resolve_native_worktree_mutation_target_by_path(&path)?;
+        if let Some(destination) = args.to_worktree.as_deref() {
+            validate_cook_cwd_destination_identity(&path, destination)?;
+        }
+        let path = path.display().to_string();
+        args.dispatch.cwd = Some(path.clone());
+        args.to_worktree = Some(path);
+        resolve_cook_pull_request(&mut args)?;
+        resolve_cook_base(&mut args, repository)?;
+        return Ok(args);
+    }
     if let Some(to_worktree) = args.to_worktree.as_deref() {
         let path = Path::new(to_worktree);
         if path.is_dir() {
@@ -6202,24 +6219,6 @@ pub(crate) fn resolve_cook_destination(
     }
     resolve_cook_pull_request(&mut args)?;
     if args.to_worktree.is_some() {
-        resolve_cook_base(&mut args, repository)?;
-        return Ok(args);
-    }
-    if let Some(cwd) = args.dispatch.cwd.as_deref() {
-        let cwd = std::fs::canonicalize(cwd).map_err(|error| {
-            homeboy::core::Error::internal_io(error.to_string(), Some(cwd.to_string()))
-        })?;
-        args.to_worktree = Some(
-            if let Some(target) =
-                homeboy::core::worktree_provider::resolve_native_worktree_mutation_target_by_path(
-                    &cwd,
-                )?
-            {
-                target.handle
-            } else {
-                cwd.display().to_string()
-            },
-        );
         resolve_cook_base(&mut args, repository)?;
         return Ok(args);
     }
