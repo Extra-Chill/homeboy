@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.9] - 2026-10-27
+
+### Changed
+- Retire the repo-local gate executor
+- Expect retained patch evidence in the remapped Lab cook harvest test
+
 ## [0.434.8] - 2026-10-27
 
 ### Changed
