@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.10] - 2026-10-27
+
+### Changed
+- Expect retained patch evidence in five candidate harvest tests
+- Reject provider artifacts outside the executor root
+
 ## [0.434.9] - 2026-10-27
 
 ### Changed
