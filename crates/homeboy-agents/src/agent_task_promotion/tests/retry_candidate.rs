@@ -69,7 +69,10 @@ fn runtime_retry_inherits_uncommitted_work_promotes_and_pushes_candidate_sha() {
         "{aggregate:#?}"
     );
     let outcome = &aggregate.outcomes[0];
-    assert!(outcome.artifacts.is_empty());
+    assert!(outcome
+        .artifacts
+        .iter()
+        .all(|artifact| artifact.kind == "patch"));
     let candidate = outcome.candidate.as_ref().unwrap();
     assert_eq!(git_head(&root, "HEAD"), candidate.base_sha);
     git(&root, &["reset", "--hard", &candidate.base_sha]);

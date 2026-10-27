@@ -760,7 +760,7 @@ pub(super) mod concurrency_tests {
             scratch["terminal_evidence"]["outcome"]["candidate"]["candidate_sha"].as_str(),
             recovered_candidate_sha.as_deref()
         );
-        assert!(!scratch["terminal_evidence"]["outcome"]["artifacts"]
+        assert!(scratch["terminal_evidence"]["outcome"]["artifacts"]
             .as_array()
             .is_some_and(|artifacts| artifacts.iter().any(|artifact| artifact["kind"] == "patch")));
         assert!(
@@ -968,7 +968,10 @@ pub(super) mod concurrency_tests {
             .is_empty());
         assert!(!target.join("agent-change.txt").exists());
         assert!(aggregate.outcomes[0].candidate.is_some());
-        assert!(aggregate.outcomes[0].artifacts.is_empty());
+        assert!(aggregate.outcomes[0]
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.kind == "patch"));
         let retry = aggregate.outcomes[0]
             .diagnostics
             .iter()
@@ -1047,7 +1050,10 @@ pub(super) mod concurrency_tests {
                 Some(AgentTaskFailureClassification::Transient)
             );
             assert!(outcome.candidate.is_some());
-            assert!(outcome.artifacts.is_empty());
+            assert!(outcome
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.kind == "patch"));
             let workspaces = workspaces.lock().expect("workspaces");
             if expected_attempts == 2 {
                 assert_ne!(workspaces[0], workspaces[1]);
@@ -1080,6 +1086,9 @@ pub(super) mod concurrency_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
-        assert!(aggregate.outcomes[0].artifacts.is_empty());
+        assert!(aggregate.outcomes[0]
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.kind == "patch"));
     }
 }

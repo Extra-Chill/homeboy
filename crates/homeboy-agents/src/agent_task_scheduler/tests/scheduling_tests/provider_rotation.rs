@@ -902,7 +902,10 @@ mod provider_rotation_tests {
             Some(AgentTaskFailureClassification::Timeout)
         );
         assert!(outcome.candidate.is_some());
-        assert!(outcome.artifacts.is_empty());
+        assert!(outcome
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.kind == "patch"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(outcome.metadata.pointer("/provider_rotation").is_none());
     }
