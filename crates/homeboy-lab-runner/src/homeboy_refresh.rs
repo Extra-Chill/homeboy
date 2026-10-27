@@ -447,17 +447,33 @@ pub struct RunnerDevSyncOutput {
     pub next_actions: Vec<String>,
 }
 
-pub fn plan_homeboy_binary_refresh_in_roots(
+pub fn refresh_homeboy_binary(
+    options: HomeboyBinaryRefreshOptions,
+) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
+    let roots = &homeboy_core::paths::PathRoots::from_environment()?;
+    let _identities = super::connection::StagingIdentityScope::suspend();
+    let should_retire = !options.dry_run;
+    let runner_id = options.runner_id.clone();
+    let result = refresh_homeboy_binary_inner_in_roots(roots, options)?;
+    if should_retire && result.1 == 0 {
+        super::connection::retire_drained_generations(&load(&runner_id)?)?;
+    }
+    Ok(result)
+}
+
+fn refresh_homeboy_binary_inner_in_roots(
     roots: &homeboy_core::paths::PathRoots,
-    options: &HomeboyBinaryRefreshOptions,
-) -> Result<HomeboyBinaryRefreshPlan> {
+    options: HomeboyBinaryRefreshOptions,
+) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
+    begin_refresh_live_progress("prepare");
+    let _refresh_live = RefreshLiveGuard;
     let runner = super::load_in_roots(roots, &options.runner_id)?;
     let runner_id = runner.id;
-    match &options.mode {
+    let mut plan = match &options.mode {
         HomeboyBinaryRefreshMode::Select { binary_path } => {
             let binary_path = non_empty("select", binary_path)?;
             let script = identity_probe_script(binary_path);
-            Ok(HomeboyBinaryRefreshPlan {
+            HomeboyBinaryRefreshPlan {
                 runner_id: runner_id.clone(),
                 mode: "select".to_string(),
                 source: None,
@@ -467,7 +483,7 @@ pub fn plan_homeboy_binary_refresh_in_roots(
                 script,
                 reconnect: options.reconnect,
                 followup_commands: refresh_followups(&runner_id, options.reconnect),
-            })
+            }
         }
         HomeboyBinaryRefreshMode::Materialize => {
             let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
@@ -509,7 +525,7 @@ pub fn plan_homeboy_binary_refresh_in_roots(
                 options.allow_downgrade,
                 &[],
             );
-            Ok(HomeboyBinaryRefreshPlan {
+            HomeboyBinaryRefreshPlan {
                 runner_id: runner_id.clone(),
                 mode: "materialize".to_string(),
                 source: Some(source.to_string()),
@@ -519,32 +535,9 @@ pub fn plan_homeboy_binary_refresh_in_roots(
                 script,
                 reconnect: options.reconnect,
                 followup_commands: refresh_followups(&runner_id, options.reconnect),
-            })
+            }
         }
-    }
-}
-
-pub fn refresh_homeboy_binary(
-    options: HomeboyBinaryRefreshOptions,
-) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
-    let roots = &homeboy_core::paths::PathRoots::from_environment()?;
-    let _identities = super::connection::StagingIdentityScope::suspend();
-    let should_retire = !options.dry_run;
-    let runner_id = options.runner_id.clone();
-    let result = refresh_homeboy_binary_inner_in_roots(roots, options)?;
-    if should_retire && result.1 == 0 {
-        super::connection::retire_drained_generations(&load(&runner_id)?)?;
-    }
-    Ok(result)
-}
-
-fn refresh_homeboy_binary_inner_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    options: HomeboyBinaryRefreshOptions,
-) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
-    begin_refresh_live_progress("prepare");
-    let _refresh_live = RefreshLiveGuard;
-    let mut plan = plan_homeboy_binary_refresh_in_roots(roots, &options)?;
+    };
     if options.dry_run {
         return Ok((
             HomeboyBinaryRefreshOutput {
