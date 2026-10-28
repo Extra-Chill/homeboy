@@ -1186,10 +1186,35 @@ fn failure_from_result(
             .filter(|detail| detail.contains("observed"))
             .map(str::to_string)
     });
+    let cause = runners
+        .iter()
+        .map(|runner| {
+            let reason = runner["extensions_failed"]
+                .as_array()
+                .and_then(|failed| failed.first())
+                .map(|extension| {
+                    format!(
+                        "extension {} {}",
+                        extension["extension_id"].as_str().unwrap_or("?"),
+                        extension["detail"]
+                            .as_str()
+                            .and_then(|detail| detail.lines().next())
+                            .unwrap_or("failed")
+                    )
+                })
+                .or_else(|| runner["path_drift"].as_str().map(str::to_string))
+                .unwrap_or_else(|| "post-swap verification failed".to_string());
+            format!(
+                "runner {}: {reason}",
+                runner["runner_id"].as_str().unwrap_or("?")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
     Some(UpgradeOperationFailure {
         phase: "completed".to_string(),
         predicate: "runner_post_swap_verification".to_string(),
-        cause: None,
+        cause: Some(super::execution::bounded_upgrade_cause(&cause)),
         elapsed_seconds,
         budget_ms: None,
         expected_identity: result.new_build_identity.clone(),
