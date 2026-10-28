@@ -19,7 +19,8 @@ use crate::paths;
 
 mod upgrade_drain;
 pub use upgrade_drain::{
-    begin_upgrade_drain, ensure_upgrade_drain_admission, upgrade_drain_operation, UpgradeDrainGuard,
+    begin_upgrade_drain, ensure_upgrade_drain_admission, upgrade_blocking_workflows,
+    upgrade_drain_operation, UpgradeDrainGuard,
 };
 
 const LEASE_DIR: &str = "promotion.lock";

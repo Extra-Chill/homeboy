@@ -2723,6 +2723,33 @@ fn scoped_reconcile_applies_only_the_inspected_run_and_preserves_other_stale_rec
 }
 
 #[test]
+fn workflow_cook_outcome_uses_terminal_observation_after_failed_lifecycle_write() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-workflow-stale-write";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(cook_id)).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
+            record.metadata["cook_id"] = serde_json::json!(cook_id);
+        })
+        .unwrap();
+        let store = test_lifecycle_store();
+        store
+            .open_observation_initialized()
+            .unwrap()
+            .finish_run(cook_id, homeboy_core::observation::RunStatus::Fail, None)
+            .unwrap();
+        assert_eq!(
+            store.read_record(cook_id).unwrap().state(),
+            AgentTaskRunState::Running
+        );
+        assert_eq!(
+            super::cook_step::workflow_cook_outcome(cook_id),
+            homeboy_core::daemon::workflow_job::WorkflowRunOutcome::Settled("failed".into())
+        );
+    });
+}
+
+#[test]
 fn cancelled_workflow_cook_step_cancels_the_attempt_its_cook_redirected_to() {
     with_isolated_home(|_| {
         let cook_id = "cook-step-cancel-redirected";
