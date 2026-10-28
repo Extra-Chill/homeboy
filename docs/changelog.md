@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.23] - 2026-10-28
+
+### Changed
+- Remove homeboy activity
+- Optimize Cargo cache publication and fix lease-release race
+
 ## [0.434.22] - 2026-10-28
 
 ### Changed
