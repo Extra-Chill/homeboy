@@ -1024,7 +1024,13 @@ pub(super) fn prepare_reserved_cook_retry(
             None,
         ));
     }
-    let registration = lifecycle_store.with_config_lock(|| {
+    agent_task_lifecycle::record_cook_attempt_in_store(
+        lifecycle_store,
+        &preparation.cook_id,
+        preparation.attempt,
+        run_id,
+    )?;
+    let result = lifecycle_store.with_config_lock(|| {
         let recipes = super::CookRecipeStore::for_lifecycle_store(lifecycle_store);
         if source_recipe_revision(&recipes, &preparation.cook_id, &preparation.source_run_id)?
             != preparation.source_recipe_revision
@@ -1044,7 +1050,10 @@ pub(super) fn prepare_reserved_cook_retry(
                 run_id,
                 &preparation.plan,
             )?;
-        } else if lifecycle_store.read_controller_plan(run_id)? != preparation.plan {
+        } else if !cook_retry_plans_match(
+            &preparation.plan,
+            &lifecycle_store.read_controller_plan(run_id)?,
+        ) {
             return Err(Error::validation_invalid_argument(
                 "retry_preparation",
                 "reserved controller plan differs from the frozen retry preparation",
@@ -1068,16 +1077,18 @@ pub(super) fn prepare_reserved_cook_retry(
                 &preparation.source_run_id,
             )?;
         }
-        agent_task_lifecycle::record_cook_attempt_locked_in_store(
+        Ok(())
+    });
+    if let Err(error) = &result {
+        agent_task_lifecycle::record_pre_execution_failure_in_store(
             lifecycle_store,
-            &preparation.cook_id,
-            preparation.attempt,
             run_id,
-        )
-    })?;
-    registration
-        .project_terminal_after_unlock_in_store(lifecycle_store)
-        .map(|_| ())
+            &preparation.plan,
+            "retry_preparation",
+            error,
+        )?;
+    }
+    result
 }
 
 /// Reservation metadata freezing the retry's preparation against its source
@@ -2769,7 +2780,13 @@ pub(super) fn cook_retry_plans_match(expected: &AgentTaskPlan, observed: &AgentT
         return false;
     }
 
+    // Submission assigns fresh workspace authority to the successor. Lease
+    // tokens, expirations and lifecycle revisions identify its owner, not work.
+    // homeboy_plan is a derived, non-serialized projection and may be stale
+    // after a request override or rebuilt by a different controller build.
     let mut normalized = observed.clone();
+    normalized.workspace_owner_lease = expected.workspace_owner_lease.clone();
+    normalized.workspace_lifecycle_revision = expected.workspace_lifecycle_revision;
     for (expected_task, observed_task) in expected.tasks.iter().zip(&mut normalized.tasks) {
         let expected_identity = expected_task.metadata.get("cook_workspace_identity");
         if observed_task.metadata.get("cook_workspace_identity") == expected_identity {
@@ -2794,7 +2811,10 @@ pub(super) fn cook_retry_plans_match(expected: &AgentTaskPlan, observed: &AgentT
         );
         metadata.remove("cook_workspace_identity_predecessor");
     }
-    normalized == *expected
+    serde_json::to_value(&normalized)
+        .ok()
+        .zip(serde_json::to_value(expected).ok())
+        .is_some_and(|(observed, expected)| observed == expected)
 }
 
 struct CookRetryAttempt {
@@ -3759,77 +3779,92 @@ mod tests {
         });
     }
 
+    fn reserved_retry_fixture() -> (
+        homeboy_core::test_support::HermeticTestContext,
+        agent_task_lifecycle::AgentTaskLifecycleStore,
+        tempfile::TempDir,
+        agent_task_lifecycle::AgentTaskRunRecord,
+    ) {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cook_id = "rooted-retry-cook";
+        let run_id = "rooted-retry-attempt-1";
+        let plan = one_task_plan("rooted-retry-plan", workspace.path());
+        agent_task_lifecycle::submit_plan_in_store(&store, &plan, Some(run_id))
+            .expect("persist source attempt");
+        store
+            .mutate_record(run_id, |record| {
+                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                record.metadata["cook_id"] = json!(cook_id);
+                record.metadata["cook_attempt"] = json!(1);
+                record.metadata["provider_executions_consumed"] = json!(0);
+                record.metadata["pre_execution_failure"] = json!({
+                "phase": "runner_preflight",
+                "retryable": true,
+                });
+                true
+            })
+            .expect("mark retryable source attempt");
+        let recipe_store = super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(&store);
+        recipe_store
+            .persist_recipe(&super::super::cook_recipe::AgentTaskCookRecipe {
+                schema: super::super::cook_recipe::COOK_RECIPE_SCHEMA.to_string(),
+                cook_id: cook_id.to_string(),
+                attempts: vec![super::super::cook_recipe::AgentTaskCookRecipeAttempt {
+                    lineage: None,
+                    attempt: 1,
+                    run_id: run_id.to_string(),
+                    plan: plan.clone(),
+                }],
+                promotion_transport: json!({
+                "provider_invocation": null,
+                "attempt_dispatch": { "kind": "local" },
+                }),
+                gate_policy: json!({
+                "verify": [],
+                "private_verify": [],
+                "private_gate_reveal": "summary_only",
+                }),
+                retry_budget: json!({
+                "max_attempts": 2,
+                "execution_budget": plan.options.execution_budget,
+                }),
+                finalization: json!({
+                "no_finalize": true,
+                "base": "main",
+                "head": null,
+                "title": "title",
+                "commit_message": "message",
+                "protected_branches": [],
+                "ai_tool": "test",
+                "ai_model": null,
+                "ai_used_for": "test",
+                "to_worktree": "target",
+                "source_worktree_path": null,
+                "task_base_sha": null,
+                }),
+                source_refs: Vec::new(),
+                runtime_generation: homeboy_core::build_identity::current().display,
+                sensitive_mappings: Vec::new(),
+                harvest_context: Default::default(),
+            })
+            .expect("persist recipe in injected root");
+        agent_task_lifecycle::record_cook_attempt_in_store(&store, cook_id, 1, run_id)
+            .expect("index source attempt");
+        let source = store.read_record(run_id).expect("read source attempt");
+
+        (context, store, workspace, source)
+    }
+
     #[test]
     fn execution_step_cook_retry_reservation_freezes_preparation_before_recipe_binding_in_injected_root(
     ) {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let context = homeboy_core::test_support::HermeticTestContext::new();
-            let store = agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-            let workspace = tempfile::tempdir().expect("workspace");
+            let (_context, store, _workspace, source) = reserved_retry_fixture();
             let cook_id = "rooted-retry-cook";
-            let run_id = "rooted-retry-attempt-1";
-            let plan = one_task_plan("rooted-retry-plan", workspace.path());
-            agent_task_lifecycle::submit_plan_in_store(&store, &plan, Some(run_id))
-                .expect("persist source attempt");
-            store
-                .mutate_record(run_id, |record| {
-                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
-                    record.metadata["cook_id"] = json!(cook_id);
-                    record.metadata["cook_attempt"] = json!(1);
-                    record.metadata["provider_executions_consumed"] = json!(0);
-                    record.metadata["pre_execution_failure"] = json!({
-                        "phase": "runner_preflight",
-                        "retryable": true,
-                    });
-                    true
-                })
-                .expect("mark retryable source attempt");
             let recipe_store =
                 super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(&store);
-            recipe_store
-                .persist_recipe(&super::super::cook_recipe::AgentTaskCookRecipe {
-                    schema: super::super::cook_recipe::COOK_RECIPE_SCHEMA.to_string(),
-                    cook_id: cook_id.to_string(),
-                    attempts: vec![super::super::cook_recipe::AgentTaskCookRecipeAttempt {
-                        lineage: None,
-                        attempt: 1,
-                        run_id: run_id.to_string(),
-                        plan: plan.clone(),
-                    }],
-                    promotion_transport: json!({
-                        "provider_invocation": null,
-                        "attempt_dispatch": { "kind": "local" },
-                    }),
-                    gate_policy: json!({
-                        "verify": [],
-                        "private_verify": [],
-                        "private_gate_reveal": "summary_only",
-                    }),
-                    retry_budget: json!({
-                        "max_attempts": 2,
-                        "execution_budget": plan.options.execution_budget,
-                    }),
-                    finalization: json!({
-                        "no_finalize": true,
-                        "base": "main",
-                        "head": null,
-                        "title": "title",
-                        "commit_message": "message",
-                        "protected_branches": [],
-                        "ai_tool": "test",
-                        "ai_model": null,
-                        "ai_used_for": "test",
-                        "to_worktree": "target",
-                        "source_worktree_path": null,
-                        "task_base_sha": null,
-                    }),
-                    source_refs: Vec::new(),
-                    runtime_generation: homeboy_core::build_identity::current().display,
-                    sensitive_mappings: Vec::new(),
-                    harvest_context: Default::default(),
-                })
-                .expect("persist recipe in injected root");
-            let source = store.read_record(run_id).expect("read source attempt");
 
             let mut retry = retryable_cook_attempt(&store, &source)
                 .expect("read rooted recipe")
@@ -3838,6 +3873,9 @@ mod tests {
             assert_eq!(retry.cook_id, cook_id);
             assert_eq!(retry.attempt, 1);
             assert!(retry.replaces_source_attempt);
+            retry.plan.workspace_identity = Some(
+                homeboy_runner_contract::WorkspaceIdentity::new("test", "retry-workspace").unwrap(),
+            );
             retry.plan.tasks[0]
                 .instructions
                 .push_str("\nCook-authored frozen remediation before reservation");
@@ -3886,10 +3924,24 @@ mod tests {
             else {
                 panic!("Cook reservation must freeze its final preparation")
             };
+            // Submission changes exactly these authority fields, not the work.
+            assert!(persisted.workspace_owner_lease.is_some());
+            assert_ne!(
+                persisted.workspace_owner_lease,
+                preparation.plan.workspace_owner_lease
+            );
+            assert_ne!(
+                persisted.workspace_lifecycle_revision,
+                preparation.plan.workspace_lifecycle_revision
+            );
+            let mut work = persisted.clone();
+            work.workspace_owner_lease = preparation.plan.workspace_owner_lease.clone();
+            work.workspace_lifecycle_revision = preparation.plan.workspace_lifecycle_revision;
+            assert_eq!(work, preparation.plan);
             assert_eq!(preparation.source_run_id, source.run_id);
             assert_eq!(preparation.cook_id, cook_id);
             assert_eq!(preparation.attempt, retry.attempt);
-            assert!(cook_retry_plans_match(&preparation.plan, &retry.plan));
+            assert!(cook_retry_plans_match(&preparation.plan, &persisted));
             assert!(
                 !recipe_store
                     .load_recipe(cook_id)
@@ -3930,6 +3982,104 @@ mod tests {
                 preparation.plan
             );
         });
+    }
+
+    #[test]
+    fn retry_preparation_failure_settles_observation_and_becomes_cook_status() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let (_context, store, _workspace, source) = reserved_retry_fixture();
+            let retry = retryable_cook_attempt(&store, &source).unwrap().unwrap();
+            let reservation = reserve_cook_retry_lifecycle(
+                &store,
+                &source,
+                &retry,
+                "failed-preparation",
+                false,
+                &|_| Ok(()),
+            )
+            .unwrap();
+            let record = store.read_record(&reservation.run_id).unwrap();
+            let intent = super::super::current_execution_intent(&store, &record)
+                .unwrap()
+                .unwrap();
+            let super::super::ExecutionStepMode::QueuedRun {
+                retry_preparation: Some(preparation),
+            } = intent.mode
+            else {
+                panic!("retry preparation")
+            };
+            // Corrupt only the persisted work, before recipe/index binding.
+            let mut plan = store.read_controller_plan(&reservation.run_id).unwrap();
+            plan.tasks[0]
+                .instructions
+                .push_str(" conflicting durable work");
+            store
+                .write_controller_plan(&reservation.run_id, &plan)
+                .unwrap();
+            assert!(
+                prepare_reserved_cook_retry(&store, &reservation.run_id, &preparation).is_err()
+            );
+            let failed = store.read_record(&reservation.run_id).unwrap();
+            assert_eq!(
+                failed.state(),
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            let row = store
+                .open_observation_readonly()
+                .unwrap()
+                .get_run(&reservation.run_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.status, "fail");
+            assert!(row.finished_at.is_some());
+            let resolved =
+                agent_task_lifecycle::resolve_run_id_in_store(&store, "rooted-retry-cook").unwrap();
+            assert_eq!(resolved, reservation.run_id);
+            let status = agent_task_lifecycle::reconcile_status_in_store(
+                &store,
+                &resolved,
+                Default::default(),
+                false,
+            )
+            .unwrap()
+            .record;
+            assert_eq!(
+                status.state(),
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                status.metadata["pre_execution_failure"]["phase"],
+                "retry_preparation"
+            );
+            assert!(status.aggregate_path.is_some());
+        });
+    }
+
+    #[test]
+    fn retry_identity_ignores_rebuilt_projection_but_preserves_effective_timeout() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut overridden = one_task_plan("timeout-retry", workspace.path());
+        overridden.options.timeout_ms = Some(7_200_000);
+        overridden.tasks[0].limits.timeout_ms = Some(7_200_000);
+        // The override changes authoritative fields without refreshing the
+        // cached Homeboy projection. Deserialization always rebuilds it.
+        let frozen: AgentTaskPlan =
+            serde_json::from_value(serde_json::to_value(&overridden).unwrap()).unwrap();
+        assert_ne!(overridden.homeboy_plan.policy, frozen.homeboy_plan.policy);
+        let mut rebuilt = overridden.clone();
+        rebuilt.rebuild_homeboy_plan();
+        assert_eq!(rebuilt, frozen, "only homeboy_plan differs");
+        assert!(cook_retry_plans_match(&overridden, &frozen));
+        let mut different_work = frozen.clone();
+        different_work.tasks[0].limits.timeout_ms = Some(50);
+        assert!(!cook_retry_plans_match(&overridden, &different_work));
+        different_work = frozen.clone();
+        different_work.tasks[0].instructions.push_str("other work");
+        assert!(!cook_retry_plans_match(&overridden, &different_work));
+        different_work = frozen;
+        different_work.workspace_identity =
+            Some(homeboy_runner_contract::WorkspaceIdentity::new("test", "other").unwrap());
+        assert!(!cook_retry_plans_match(&overridden, &different_work));
     }
 
     #[test]

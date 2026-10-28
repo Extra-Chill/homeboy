@@ -3194,7 +3194,12 @@ pub(crate) fn cook_owns_observation(
     let cook_id = record.metadata["cook_id"]
         .as_str()
         .unwrap_or(&record.run_id);
+    // A preparation refusal has no Cook driver left to settle the observation.
+    // Its durable pre-execution failure owns the terminal result instead.
     store.cook_dir(cook_id).join("recipe.json").exists()
+        && !(record.state().is_terminal()
+            && record.metadata["pre_execution_failure"]["phase"] == "retry_preparation"
+            && !record.has_recorded_provider_progress())
 }
 
 fn run_status(state: AgentTaskRunState) -> &'static str {

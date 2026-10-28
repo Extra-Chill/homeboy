@@ -9505,6 +9505,14 @@ fn timeout_override_retry_is_reserved_through_the_control_plane_action() {
             },
         )
         .expect("timeout override retry action");
+        assert_eq!(
+            serde_json::to_value(acknowledgement.outcome).unwrap(),
+            "accepted_pending"
+        );
+        assert_eq!(
+            acknowledgement.message.as_deref(),
+            Some("Retry accepted; execution is pending.")
+        );
         let retry = crate::agent_task_action_result::retry(&acknowledgement).expect("retry result");
         let recipe = super::super::load_recipe(cook_id).expect("updated Cook recipe");
         assert_eq!(recipe.attempts.len(), 2);

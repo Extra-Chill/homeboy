@@ -402,6 +402,7 @@ impl ControlPlaneActionRequest {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlPlaneActionOutcome {
+    AcceptedPending,
     Succeeded,
     Failed,
     AlreadySatisfied,

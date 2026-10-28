@@ -402,6 +402,7 @@ fn ensure_delegated_action_events(
         &acknowledgement.run,
         request,
         match acknowledgement.outcome {
+            ControlPlaneActionOutcome::AcceptedPending => "action.accepted",
             ControlPlaneActionOutcome::Succeeded => "action.succeeded",
             ControlPlaneActionOutcome::AlreadySatisfied => "action.already_satisfied",
             ControlPlaneActionOutcome::Failed => "action.failed",
