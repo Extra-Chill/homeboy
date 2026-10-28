@@ -16,34 +16,6 @@ use homeboy_core::error::Result;
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
 /// the runner layer and registered at startup.
 pub trait RunnerUpgradeProvider: Send + Sync {
-    fn drain_targets(&self, _targets: &[String]) -> Result<Vec<String>> {
-        Ok(Vec::new())
-    }
-    fn set_upgrade_drain(
-        &self,
-        _targets: &[String],
-        _operation: &str,
-        _runs: &[String],
-        _resume: bool,
-    ) -> Result<()> {
-        Ok(())
-    }
-    /// Discover reservations from older controllers without a persisted inventory.
-    fn held_upgrade_drains(&self, _operation: &str) -> Result<Vec<String>> {
-        Ok(Vec::new())
-    }
-    fn verify_upgrade_admission(&self, _targets: &[String]) -> Result<()> {
-        Ok(())
-    }
-    /// Authoritative live jobs; an unavailable inventory must fail closed.
-    fn drain_jobs(&self, _targets: &[String]) -> Result<Vec<(String, String)>> {
-        Ok(Vec::new())
-    }
-    fn cancel_drain_job(&self, _runner: &str, _job: &str) -> Result<()> {
-        Err(homeboy_core::Error::internal_unexpected(
-            "runner cancellation unavailable",
-        ))
-    }
     /// Read-only admission for selected runners before any controller,
     /// extension, or runner mutation. Implementations validate source inputs
     /// when relevant and runner extension manifests against `candidate_version`.
@@ -122,22 +94,6 @@ impl RunnerUpgradeProvider for NoopRunnerUpgradeProvider {
     fn source_checkout_build_identity(&self, _source_path: &Path) -> Option<String> {
         None
     }
-}
-
-#[cfg(test)]
-pub(crate) fn with_test_provider<T>(
-    provider: Box<dyn RunnerUpgradeProvider>,
-    test: impl FnOnce() -> T,
-) -> T {
-    let previous = provider_slot().lock().unwrap().replace(provider);
-    struct Restore(Option<Box<dyn RunnerUpgradeProvider>>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            *provider_slot().lock().unwrap() = self.0.take();
-        }
-    }
-    let _restore = Restore(previous);
-    test()
 }
 
 homeboy_engine_primitives::provider_registry! {

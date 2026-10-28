@@ -32,7 +32,7 @@ controller upgrade.
 - `status [ID]`: Inspect a persisted upgrade operation. Reports whether binary promotion and optional extension/runner refresh completed. Omit `ID` to read the latest upgrade run. Also available as `homeboy runs show <id>`.
 - `--check`: Check for updates without installing. Returns version information without making changes.
 - `--force`: Force upgrade even if already at the latest version; does not cancel active work.
-- `--drain-timeout <SECONDS>`: Bound the shared controller/runner drain (default 1800). Progress identifies outstanding jobs and Cooks.
+- `--drain-timeout <SECONDS>`: Bound the controller drain (default 1800). Progress identifies outstanding jobs and Cooks.
 - `--cancel-active`: Explicitly cancel outstanding jobs and durable Cooks instead of waiting for natural completion. Exact cancelled identities are printed and retained on the upgrade operation.
 - `--skip-extensions`: Skip automatic extension updates.
 - `--skip-runners`: Upgrade the controller only; cannot be combined with `--upgrade-runner`.
@@ -143,27 +143,19 @@ homeboy upgrade --skip-runners
 - `elapsed_seconds`: Bounded elapsed time for the recorded phase
 - `controller` / `extensions` / `runners`: Independent component statuses
 - `note`: Present when a running record's owner process is no longer alive
-- `remote_drains`: Runner reservations still awaiting confirmed release
-- `release_drains_command`: `homeboy upgrade release-drains <id>` retries release for a terminal operation; live owners cannot be released
-- `drain_takeovers`: Recorded compare-and-swap requests, naming the previous owner, its terminal store status, and runner
 
 Status reads reconcile an upgrade record whose owner has exited to
 a non-success interrupted terminal state, projecting any pending binary
 replacement from its durable checkpoint. A proven controller replacement
 remains visible independently from incomplete extension or runner refresh.
 Controller replacement admission still waits for live runtime-generation pins.
-Upgrades run in the foreground through drain, promotion, reconnect and admission
-resumption. A queued worker is not reported as successful completion. Admission
-is fenced on the controller and selected connected SSH runners while existing
-Cooks finish. Unsupported or unreachable runner drain endpoints fail closed
-before binaries are replaced.
-
-Remote reservations are persisted before network requests and released on terminal
-completion, failure, interruption, and owner-exit reconciliation. Terminal status
-reads retry outstanding releases; unreachable runners remain listed for recovery.
-A new upgrade may explicitly take over a remote reservation only when its previous
-owner is a known terminal upgrade in the controller store. Unknown or live owners
-are refused; the runner compares the previous token before replacing it.
+Upgrades run in the foreground through controller drain, promotion and admission
+resumption. A queued worker is not reported as successful completion. Only the
+controller admission window is fenced while existing Cooks finish. Runner jobs
+keep running and later complete through the upgraded controller. After the
+controller upgrade, each selected runner gets a refresh request: idle runners
+refresh at once, and runners with live jobs go in `runners_deferred` with
+`runner busy: N live job(s)`. Deferred runners do not make the upgrade partial.
 
 `homeboy upgrade` data payload:
 
@@ -174,6 +166,7 @@ are refused; the runner compares the previous token before replacing it.
 - `new_version`: Version after upgrade (may be null)
 - `upgraded`: Boolean indicating if upgrade was performed
 - `partial`: Present and true when a selected runner did not converge with the controller
+- `runners_deferred`: Busy runners whose opportunistic refresh was deferred
 - `message`: Human-readable status message
 - `restart_required`: Boolean indicating if a restart is needed (true only for source installs)
 - `extensions_updated`: Extension upgrade entries when installed extensions were checked

@@ -831,10 +831,6 @@ impl RunnerStatusReport {
                 .push("daemon_freshness_unavailable".to_string());
             availability.accepts_jobs = false;
         }
-        if homeboy_core::runtime_promotion::runner_is_draining(&self.runner_id).unwrap_or(true) {
-            availability.reasons.push("runner_draining".to_string());
-            availability.accepts_jobs = false;
-        }
         availability
     }
 

@@ -2684,18 +2684,6 @@ where
                 Err(err) => error_response(404, err),
             }
         }
-        ("GET", "/upgrade/drain") => {
-            match crate::runtime_promotion::remote_upgrade_drain_owner() {
-                Ok(owner) => daemon_endpoint_response("upgrade.drain", json!({"operation_id": owner})),
-                Err(error) => error_response(400, error),
-            }
-        }
-        ("POST", "/upgrade/drain") => {
-            match with_daemon_job_admission(|| crate::runtime_promotion::remote_upgrade_drain(&body.unwrap_or(serde_json::Value::Null))) {
-                Ok(()) => daemon_endpoint_response("upgrade.drain", json!({"draining": true})),
-                Err(error) => error_response(400, error),
-            }
-        }
         ("POST", "/admissions") => {
             match with_daemon_job_admission(|| reserve_admission(body, job_store)) {
                 Ok(body) => daemon_endpoint_response("admissions.reserve", body),
@@ -2919,7 +2907,6 @@ fn reserve_admission(
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
     let body = body.unwrap_or_else(|| json!({}));
-    crate::runtime_promotion::ensure_upgrade_drain_request(&body)?;
     if body
         .get("admission_lease_protocol")
         .and_then(serde_json::Value::as_u64)
@@ -3835,7 +3822,6 @@ fn enqueue_exec_job(
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
     let request = decode_exec_request(body)?;
-    crate::runtime_promotion::ensure_upgrade_drain_request(&request.envelope.metadata)?;
     enqueue_exec_request(request, job_store, None)
 }
 
@@ -4597,7 +4583,6 @@ pub(crate) fn admit_controller_job(
     let controller_job = controller_job_state(&request)?;
     crate::runtime_promotion::ensure_upgrade_drain_admission(
         controller_job.linked_durable_run_id.as_deref(),
-        None,
     )?;
     let outcome = job_store.admit_controller_job(
         format!("controller.{}", request.job_type),

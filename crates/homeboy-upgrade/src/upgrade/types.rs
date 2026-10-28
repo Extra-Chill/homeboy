@@ -61,6 +61,8 @@ pub enum RunnerConvergenceDisposition {
     NoRunnersConfigured,
     /// Every selected configured runner converged to the controller build.
     Converged,
+    /// Busy runners keep their current runtime and refresh opportunistically.
+    Deferred,
     /// One or more selected runners did not converge.
     Partial,
 }
@@ -217,6 +219,9 @@ pub struct UpgradeResult {
     pub runners_updated: Vec<RunnerUpgradeEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runners_skipped: Vec<RunnerUpgradeEntry>,
+    /// Busy runners left running, without making the upgrade partial.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runners_deferred: Vec<RunnerUpgradeEntry>,
     /// Symlinked extension clones owned by the invoking (sudo) user that this
     /// upgrade could not refresh because it ran under a different `$HOME`.
     /// Each entry carries the exact recovery command to bring the clone current.
@@ -379,6 +384,8 @@ pub struct RunnerUpgradeEntry {
     pub homeboy_path: String,
     pub success: bool,
     pub upgraded: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deferred: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -511,6 +518,7 @@ mod tests {
             }],
             runners_updated: Vec::new(),
             runners_skipped: Vec::new(),
+            runners_deferred: Vec::new(),
             extensions_unrefreshed: Vec::new(),
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),

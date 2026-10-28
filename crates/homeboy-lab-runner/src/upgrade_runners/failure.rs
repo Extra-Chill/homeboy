@@ -30,6 +30,7 @@ pub fn runner_upgrade_failure_entry(
         homeboy_path,
         success: false,
         upgraded: false,
+        deferred: false,
         previous_version,
         new_version: None,
         bare_homeboy_version: None,
