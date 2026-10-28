@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.14] - 2026-10-28
+
+### Changed
+- Settle Cook run rows and the cook span to the latest terminal outcome
+
+### Fixed
+- skip git-ignored children when hydrating gate dependency roots
+
 ## [0.434.13] - 2026-10-27
 
 ### Changed
