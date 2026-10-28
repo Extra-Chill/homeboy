@@ -1913,6 +1913,7 @@ fn supervise_terminal_cook_worker(
     mut request: TerminalCookJobRequest,
     progress: serde_json::Value,
 ) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
+    use crate::agents::agent_task_provider::structured_error::read_runtime_stream_tail;
     use crate::agents::agent_task_service::{
         CookContinuationState, ScheduledContinuationGate, WorkJobStep,
     };
@@ -1937,7 +1938,19 @@ fn supervise_terminal_cook_worker(
             ProcessIdentityState::Dead | ProcessIdentityState::IdentityMismatch => {}
         }
         request.worker = None;
-        match read_terminal_cook_worker_outcome(&worker.outcome_path) {
+        let mut outcome = read_terminal_cook_worker_outcome(&worker.outcome_path);
+        if let (Some(outcome), Some(dir)) = (&mut outcome, worker.outcome_path.parent()) {
+            if let TerminalCookWorkerOutcome::Failed { details, .. } = outcome {
+                if let Some(tail) = read_runtime_stream_tail(&dir.join("worker.log")) {
+                    if !details.is_object() {
+                        *details = serde_json::json!({ "worker_details": details });
+                    }
+                    details["worker_log_tail"] = tail.redacted.into();
+                }
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        match outcome {
             Some(TerminalCookWorkerOutcome::Complete { result }) => {
                 return Ok(WorkJobStep::Complete(result));
             }
@@ -1970,7 +1983,7 @@ fn supervise_terminal_cook_worker(
     }
 
     let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
-    let wait = match store.scheduled_continuation_gate(&request.run_id) {
+    let wait = match store.scheduled_continuation_gate(&request.cook_id, &request.run_id) {
         ScheduledContinuationGate::RetryAfter(wait) => Some(wait.min(TERMINAL_COOK_RETRY_POLL_MAX)),
         // A worker spawned before its checkpoint was persisted (or another
         // consumer) owns the claim. Observe; never start a second consumer.
