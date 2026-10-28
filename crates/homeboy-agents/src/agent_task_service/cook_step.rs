@@ -278,11 +278,11 @@ fn workflow_cook_record(
         .ok()
         .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()));
     if let Some(attempt) = latest.and_then(|run_id| store.read_record(&run_id).ok()) {
-        return Ok(attempt);
+        return Ok(super::project_cook_observation(&store, &attempt));
     }
     match parent {
         _ if redirected => Err(WorkflowRunOutcome::Pending),
-        Some(parent) => Ok(parent),
+        Some(parent) => Ok(super::project_cook_observation(&store, &parent)),
         None => Err(WorkflowRunOutcome::Unknown),
     }
 }
@@ -290,7 +290,7 @@ fn workflow_cook_record(
 /// The settled canonical state of a Cook. A terminal attempt whose terminal
 /// continuation (promotion and PR finalization) is still queued or running has
 /// not settled: the continuation decides its final state.
-fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
+pub(super) fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
     let record = match workflow_cook_record(cook_id) {
         Ok(record) => record,
         Err(outcome) => return outcome,

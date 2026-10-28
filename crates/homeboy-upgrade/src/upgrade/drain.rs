@@ -45,6 +45,21 @@ fn local_live_jobs() -> Result<Vec<homeboy_core::api_jobs::Job>> {
         .collect())
 }
 
+fn blocking_workflows(jobs: &[homeboy_core::api_jobs::Job]) -> Result<Vec<String>> {
+    if !jobs
+        .iter()
+        .any(|job| job.operation == "controller.workflow")
+    {
+        return Ok(Vec::new());
+    }
+    let store = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+        homeboy_core::paths::observation_db()?,
+    )?;
+    Ok(homeboy_core::runtime_promotion::upgrade_blocking_workflows(
+        &store, jobs,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +114,51 @@ mod tests {
             .unwrap();
             finish.join().unwrap();
             drop(guard);
+        });
+    }
+
+    #[test]
+    fn upgrade_drain_timeout_names_blocking_workflow_and_recovery() {
+        with_isolated_home(|home| {
+            use homeboy_core::daemon::workflow_job::{
+                WorkflowJobDriver, WorkflowJobRequest, WORKFLOW_JOB_REQUEST_SCHEMA,
+            };
+            let definition =
+                homeboy_core::workflow::WorkflowDefinition::from_value(serde_json::json!({
+                    "schema": "homeboy/workflow/v1", "id": "blocking-batch",
+                    "steps": [{"id": "work", "exec": {"program": "/bin/true"}}]
+                }))
+                .unwrap();
+            let inputs = definition.resolve_inputs(&Default::default()).unwrap();
+            let instance = definition.instance_id(&inputs, None);
+            let request = WorkflowJobRequest {
+                schema: WORKFLOW_JOB_REQUEST_SCHEMA.into(),
+                instance: instance.clone(),
+                instance_name: None,
+                definition_digest: definition.digest(),
+                definition,
+                inputs,
+                homeboy_program: "/bin/true".into(),
+                cwd: home.path().display().to_string(),
+                env: Default::default(),
+                homeboy_env: Default::default(),
+                programs: Default::default(),
+            };
+            let _harness = homeboy_core::test_support::ControllerJobHarness::durable_queued(
+                std::sync::Arc::new(WorkflowJobDriver),
+                serde_json::to_value(request).unwrap(),
+                &homeboy_core::paths::observation_db().unwrap(),
+                "workflow-drain-lease",
+            )
+            .unwrap();
+            let mut operation = UpgradeOperation::start_durable("homeboy upgrade").unwrap();
+            let error = drain(&mut operation, &[], true, UpgradeDrainOptions::default())
+                .err()
+                .unwrap();
+            assert_eq!(error.details["workflows"], serde_json::json!([instance]));
+            assert!(serde_json::to_string(&error.hints)
+                .unwrap()
+                .contains(&format!("homeboy workflow cancel {instance}")));
         });
     }
 
@@ -199,14 +259,25 @@ pub(super) fn drain(
         if admission.blockers.is_empty() && local_jobs.is_empty() {
             return Ok(guard);
         }
+        let workflow_blockers = blocking_workflows(&local_jobs)?;
         super::operation::emit_upgrade_phase(&format!(
-            "draining elapsed={}s budget={}s cooks=[{}] controller_jobs={local_jobs:?}",
+            "draining elapsed={}s budget={}s cooks=[{}] controller_jobs=[{}] workflows=[{}]",
             started.elapsed().as_secs(),
             timeout.as_secs(),
             admission
                 .blockers
                 .iter()
                 .map(|blocker| blocker.run_id.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            local_jobs
+                .iter()
+                .map(|job| job.id.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            workflow_blockers
+                .iter()
+                .map(|instance| format!("{instance}: homeboy workflow cancel {instance}"))
                 .collect::<Vec<_>>()
                 .join(",")
         ));
@@ -246,6 +317,11 @@ pub(super) fn drain(
                 .iter()
                 .map(|blocker| blocker.recovery_command.clone())
                 .chain(
+                    workflow_blockers
+                        .iter()
+                        .map(|instance| format!("homeboy workflow cancel {instance}")),
+                )
+                .chain(
                     (!local_jobs.is_empty() && !options.cancel_active)
                         .then(|| "homeboy upgrade --cancel-active".to_string()),
                 )
@@ -262,6 +338,7 @@ pub(super) fn drain(
             error.details["kind"] = serde_json::json!("upgrade_drain_timeout");
             error.details["cooks"] = serde_json::json!(admission.blockers);
             error.details["controller_jobs"] = serde_json::json!(local_jobs);
+            error.details["workflows"] = serde_json::json!(workflow_blockers);
             error.details["cancelled"] = serde_json::json!(cancelled);
             return Err(error);
         }

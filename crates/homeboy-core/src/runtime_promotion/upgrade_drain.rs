@@ -113,6 +113,19 @@ pub fn ensure_upgrade_drain_admission(run_id: Option<&str>) -> Result<()> {
     )))
 }
 
+/// Workflow identities for actionable drain diagnostics.
+pub fn upgrade_blocking_workflows(
+    store: &crate::api_jobs::JobStore,
+    jobs: &[crate::api_jobs::Job],
+) -> Vec<String> {
+    store
+        .controller_jobs_of_type(crate::daemon::workflow_job::WORKFLOW_JOB_TYPE)
+        .into_iter()
+        .filter(|(job, _)| jobs.iter().any(|live| live.id == job.id))
+        .filter_map(|(_, state)| state.request["instance"].as_str().map(str::to_string))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
