@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.16] - 2026-10-28
+
+### Changed
+- Add a regression verdict and current/previous selectors to runs hotspots
+- Record each Lab command as one runner execution run
+
 ## [0.434.15] - 2026-10-28
 
 ### Changed
