@@ -19,8 +19,9 @@ pub struct UpgradeArgs {
     #[arg(long, conflicts_with = "check")]
     pub cancel_active: bool,
 
-    /// Maximum drain wait in seconds. New admissions remain paused during this wait.
-    #[arg(long, default_value_t = 1800)]
+    /// Opt in to waiting for live work in seconds (default: refuse immediately).
+    /// New admissions stay paused during this wait; --cancel-active allows 120s by default.
+    #[arg(long, default_value_t = 0)]
     pub drain_timeout: u64,
 
     /// Skip extension updates (only upgrade the binary)

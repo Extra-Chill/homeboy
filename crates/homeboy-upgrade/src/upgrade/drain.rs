@@ -20,7 +20,7 @@ pub struct UpgradeDrainOptions {
 impl Default for UpgradeDrainOptions {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(1800),
+            timeout: Duration::ZERO,
             cancel_active: false,
         }
     }
@@ -71,18 +71,26 @@ mod tests {
             .unwrap();
             let job = store.create("test.live-upgrade-job");
             let mut operation = UpgradeOperation::start_durable("homeboy upgrade").unwrap();
-            let blocked = drain(
-                &mut operation,
-                &[],
-                true,
-                UpgradeDrainOptions {
-                    timeout: Duration::ZERO,
-                    cancel_active: false,
-                },
-            )
-            .err()
-            .expect("live job blocks");
+            let started = Instant::now();
+            let blocked = drain(&mut operation, &[], true, UpgradeDrainOptions::default())
+                .err()
+                .expect("live job blocks");
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "refusal must not sleep"
+            );
             assert_eq!(blocked.details["kind"], "upgrade_drain_timeout");
+            assert_eq!(
+                blocked.details["controller_jobs"][0]["id"],
+                job.id.to_string()
+            );
+            assert!(
+                homeboy_core::runtime_promotion::ensure_upgrade_drain_admission(
+                    Some("new-cook"),
+                    None,
+                )
+                .is_ok()
+            );
             let hints = serde_json::to_string(&blocked.hints).unwrap();
             assert!(hints.contains("homeboy upgrade --cancel-active"), "{hints}");
             assert!(!hints.contains("--force"), "{hints}");
@@ -119,8 +127,8 @@ mod tests {
                 &[],
                 true,
                 UpgradeDrainOptions {
-                    timeout: Duration::from_secs(3),
                     cancel_active: true,
+                    ..UpgradeDrainOptions::default()
                 },
             )
             .unwrap();
@@ -176,6 +184,12 @@ pub(super) fn drain(
     };
     operation.reserve_remote_drains(&runners, &runs)?;
     operation.set_phase_durable("draining_controller_and_runners")?;
+    // Cancellation is asynchronous: allow it to land even without an opt-in wait.
+    let timeout = if options.cancel_active && options.timeout.is_zero() {
+        Duration::from_secs(120)
+    } else {
+        options.timeout
+    };
     let started = Instant::now();
     let mut cancelled = BTreeSet::new();
     loop {
@@ -188,7 +202,7 @@ pub(super) fn drain(
         super::operation::emit_upgrade_phase(&format!(
             "draining elapsed={}s budget={}s cooks=[{}] runner_jobs={jobs:?} controller_jobs={local_jobs:?}",
             started.elapsed().as_secs(),
-            options.timeout.as_secs(),
+            timeout.as_secs(),
             admission
                 .blockers
                 .iter()
@@ -234,7 +248,7 @@ pub(super) fn drain(
                 }
             }
         }
-        if started.elapsed() >= options.timeout {
+        if started.elapsed() >= timeout {
             let commands: Vec<String> = admission
                 .blockers
                 .iter()
@@ -250,7 +264,7 @@ pub(super) fn drain(
                 .collect();
             let mut error = Error::validation_invalid_argument(
                 "upgrade_drain",
-                "bounded upgrade drain timed out; no binaries were replaced",
+                "upgrade refused: live work present; no binaries were replaced",
                 None,
                 None,
             );
@@ -264,8 +278,6 @@ pub(super) fn drain(
             error.details["cancelled"] = serde_json::json!(cancelled);
             return Err(error);
         }
-        std::thread::sleep(
-            Duration::from_secs(1).min(options.timeout.saturating_sub(started.elapsed())),
-        );
+        std::thread::sleep(Duration::from_secs(1).min(timeout.saturating_sub(started.elapsed())));
     }
 }
