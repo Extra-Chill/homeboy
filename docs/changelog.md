@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.20] - 2026-10-28
+
+### Changed
+- Make homeboy upgrade drain only the controller
+- Admit Lab runners by contract version and capabilities, not exact build
+
+### Fixed
+- Fix retirement of draining generations with proven-stopped daemons
+
 ## [0.434.19] - 2026-10-28
 
 ### Changed
