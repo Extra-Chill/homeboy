@@ -491,9 +491,9 @@ pub fn record_runner_exec_artifact_declarations_in_store(
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
-/// Checkpoint the authoritative terminal snapshot before copying declared
-/// evidence. A restart can resume promotion from this durable boundary instead
-/// of terminalizing a run whose runner-side files were never retained.
+/// Observe the authoritative terminal snapshot. Commands without declared
+/// evidence settle immediately; declared evidence remains checkpointed until
+/// promotion completes so a restart can resume retaining runner-side files.
 pub fn record_runner_exec_terminal_checkpoint(
     run_id: &str,
     snapshot: &RunnerJobLogSnapshot,
@@ -534,6 +534,15 @@ pub fn record_runner_exec_terminal_checkpoint_in_store(
         return Ok(());
     }
     validate_runner_exec_snapshot_binding(&run, snapshot)?;
+    let pending = run
+        .metadata_json
+        .get("runner_exec_artifact_declarations")
+        .and_then(Value::as_object)
+        .is_some_and(|declarations| {
+            declarations
+                .values()
+                .any(|value| value.as_array().is_some_and(|items| !items.is_empty()))
+        });
     run.metadata_json
         .as_object_mut()
         .expect("metadata object")
@@ -541,13 +550,17 @@ pub fn record_runner_exec_terminal_checkpoint_in_store(
             "runner_terminal_projection".to_string(),
             json!({
                 "state": "terminal_checkpointed",
-                "artifact_promotion": "pending",
+                "artifact_promotion": if pending { "pending" } else { "complete" },
                 "job_id": snapshot.job.id,
                 "status": snapshot.job.status,
                 "event_count": snapshot.events.len(),
             }),
         );
-    store.upsert_imported_run_preserving_terminal(&run)
+    store.upsert_imported_run_preserving_terminal(&run)?;
+    if !pending {
+        project_terminal_runner_exec_result_in_store(lifecycle_store, &run_id, snapshot)?;
+    }
+    Ok(())
 }
 
 /// Preserve the authoritative terminal snapshot when controller-side evidence
@@ -949,7 +962,15 @@ pub fn project_terminal_runner_exec_result_in_store(
     } else {
         RunStatus::Fail
     };
-    store.finish_run(&run.id, status, Some(run.metadata_json))?;
+    run.status = status.as_str().to_string();
+    run.finished_at = snapshot
+        .job
+        .finished_at_ms
+        .and_then(|ms| i64::try_from(ms).ok())
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|time| time.to_rfc3339())
+        .or_else(|| Some(now_timestamp()));
+    store.upsert_imported_run_preserving_terminal(&run)?;
     Ok(true)
 }
 

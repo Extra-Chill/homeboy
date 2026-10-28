@@ -457,11 +457,16 @@ fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
                 ..Default::default()
             })
             .expect("runner execution records");
-        assert!(records.iter().any(|record| {
-            record.status == "fail"
-                && record.metadata_json["runner_execution_record"]["job_id"] == job_id
-                && record.metadata_json["runner_execution_record"]["status"] == "failed"
-        }));
+        assert!(records.is_empty(), "diagnostics must reuse the mirror row");
+        let run = store.get_run(&run_id).unwrap().unwrap();
+        assert_eq!(
+            run.metadata_json["runner_execution_record"]["job_id"],
+            job_id
+        );
+        assert_eq!(
+            run.metadata_json["runner_execution_record"]["status"],
+            "failed"
+        );
     });
 }
 
@@ -654,6 +659,89 @@ fn direct_daemon_preserves_declared_provider_source_through_execution() {
 }
 
 #[test]
+fn daemon_exec_reuses_one_run_and_closes_it_at_the_daemon_finish_time() {
+    crate::test_support::with_isolated_home(|_| {
+        crate::register_runner_daemon_exec_driver();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let daemon_url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+        let client = Client::builder().no_proxy().build().unwrap();
+        let store = ObservationStore::open_initialized().unwrap();
+        // Exercise both the caller-owned hydration ID and an ad hoc exec ID,
+        // including failure. Both use the real HTTP submission/poll/mirror path.
+        for (index, (run_id, code)) in [
+            (Some("attempt-lab-hydration-1"), 0),
+            (Some("attempt-lab-hydration-2"), 7),
+            (None, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (output, exit_code) = exec_via_daemon(
+                &ssh_runner(),
+                &daemon_url,
+                None,
+                workspace.path().display().to_string(),
+                None,
+                vec!["sh".to_string(), "-c".to_string(), format!("exit {code}")],
+                Default::default(),
+                Default::default(),
+                false,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                run_id.map(str::to_string),
+                run_id.is_some(),
+                false,
+                true,
+                false,
+                None,
+            )
+            .expect("daemon exec");
+            assert_eq!(exit_code, code);
+            let job_id = output.job_id.as_deref().unwrap();
+            let job = fetch_daemon_job(&client, &daemon_url, job_id).unwrap();
+            let runs = store
+                .list_runs(homeboy_core::observation::RunListFilter {
+                    kind: Some("runner_execution".to_string()),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(runs.len(), index + 1, "one row per submitted command");
+            let matching = runs
+                .iter()
+                .filter(|run| {
+                    run.metadata_json["runner_job_id"] == job_id
+                        || run.metadata_json["runner_execution_record"]["job_id"] == job_id
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1);
+            let run = matching[0];
+            if let Some(id) = run_id {
+                assert_eq!(run.id, id);
+            }
+            assert_eq!(run.status, if code == 0 { "pass" } else { "fail" });
+            let finished = chrono::DateTime::parse_from_rfc3339(
+                run.finished_at
+                    .as_deref()
+                    .expect("closed before exec returns"),
+            )
+            .unwrap();
+            assert_eq!(
+                finished.timestamp_millis() as u64,
+                job.finished_at_ms.unwrap()
+            );
+            assert!(run.metadata_json.get("homeboy_reconciled").is_none());
+        }
+    });
+}
+
+#[test]
 fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
     crate::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
@@ -699,6 +787,17 @@ fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
         let client = Client::builder().no_proxy().build().expect("daemon client");
         let job = fetch_daemon_job(&client, &daemon_url, job_id).expect("accepted daemon job");
         assert!(matches!(job.status, JobStatus::Queued | JobStatus::Running));
+        let runs = ObservationStore::open_initialized()
+            .unwrap()
+            .list_runs(homeboy_core::observation::RunListFilter {
+                kind: Some("runner_execution".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(runs.len(), 1, "submission opens exactly one run");
+        assert_eq!(runs[0].status, "running");
+        assert!(runs[0].finished_at.is_none());
+        assert_eq!(runs[0].metadata_json["runner_job_id"], job_id);
     });
 }
 

@@ -656,32 +656,6 @@ fn runner_execution_next_actions(runner_id: &str, job_id: &str) -> Vec<RunnerExe
     ]
 }
 
-fn persist_runner_execution_transition(
-    record: &RunnerExecutionRecord,
-    cwd: &str,
-    command: &[String],
-) -> Result<()> {
-    let store = ObservationStore::open_initialized()?;
-    let run = store.start_run(
-        NewRunRecord::builder("runner_execution")
-            .command(homeboy_core::redaction::redact_argv_shell_display(command))
-            .optional_cwd_path(Some(std::path::Path::new(cwd)))
-            .metadata(serde_json::json!({
-                "runner_execution_record": record,
-            }))
-            .build(),
-    )?;
-    if record.status != "planned" && record.status != "running" {
-        let status = if record.status == "succeeded" {
-            RunStatus::Pass
-        } else {
-            RunStatus::Fail
-        };
-        store.finish_run(&run.id, status, Some(run.metadata_json))?;
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RunnerExecPromotedOutput {
     pub role: String,
