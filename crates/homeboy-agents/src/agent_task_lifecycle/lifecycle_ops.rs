@@ -2732,6 +2732,9 @@ where
         }
         metadata["client_context"] = Value::Object(projection);
     }
+    if let Some(identity) = plan.metadata.get("cook_repository_identity") {
+        metadata["cook_repository_identity"] = identity.clone();
+    }
     if let Some(workspace) = plan.metadata.get("caller_workspace") {
         metadata["caller_workspace"] = workspace.clone();
     } else if plan.metadata["repo"].as_str().is_some() {
