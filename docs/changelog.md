@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.21] - 2026-10-28
+
+### Fixed
+- Fix Cook --wait hanging after run settlement
+
 ## [0.434.20] - 2026-10-28
 
 ### Changed
