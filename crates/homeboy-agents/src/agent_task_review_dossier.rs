@@ -326,12 +326,18 @@ where
 }
 
 /// Collapse line breaks, control characters, and whitespace runs into single
-/// spaces. Content is preserved; only its layout is flattened.
+/// spaces, and entity-escape the `<` of comment and closing-tag openers.
+/// Prose about a markup change (`<!-- wp:x /-->`, `</div>`) keeps its content:
+/// it renders as `<` in running text (inside a code span the entity shows
+/// literally), and the raw body never carries a comment marker or closing
+/// markup for `validate` to refuse after the candidate is verified (#16523).
 fn single_line_prose(text: &str) -> String {
     text.split(|character: char| character.is_whitespace() || character.is_control())
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+        .replace("<!--", "&lt;!--")
+        .replace("</", "&lt;/")
 }
 
 /// The inverse shape for a list field: accept a single string as one entry.
@@ -1388,14 +1394,17 @@ fn required(profile: &AgentTaskReviewProfile, id: AgentTaskReviewSectionId) -> b
     profile.required_sections.contains(&id)
 }
 fn scalar(field: &str, value: &str) -> Result<()> {
-    if value.contains(['\n', '\r'])
-        || value.chars().any(char::is_control)
-        || value.contains("<!--")
-        || value.contains("</")
-    {
+    let offending = value
+        .find(|character: char| character.is_control())
+        .or_else(|| value.find("<!--"))
+        .or_else(|| value.find("</"));
+    if let Some(start) = offending {
+        let excerpt: String = value[start..].chars().take(24).collect();
         return invalid(
             field,
-            "scalar content cannot contain control, newline, or closing markup",
+            &format!(
+                "scalar content cannot contain control, newline, or closing markup (at {excerpt:?})"
+            ),
         );
     }
     Ok(())
@@ -2137,15 +2146,16 @@ mod tests {
         form.validate().expect("a coerced form is still valid");
     }
 
-    /// Regression for #15397 / #15051: a model that writes multi-paragraph
-    /// prose must not lose a verified candidate at promotion, where the dossier
-    /// refuses newlines and control characters in these fields.
+    /// Regression for #15397 / #15051 / #16523: a model that writes
+    /// multi-paragraph prose, or prose about markup, must not lose a verified
+    /// candidate at promotion, where the dossier refuses newlines, control
+    /// characters and closing markup in these fields.
     #[test]
     fn multi_line_prose_is_flattened_so_the_dossier_accepts_it() {
         let outputs = serde_json::json!({
             "review_form": {
                 "pr_title": "Add a render-video ability",
-                "summary": "Adds a render plan.\n\nAlso adds\tsmoke tests.\r\n",
+                "summary": "Adds a render plan.\n\nAlso adds\tsmoke tests for `<!-- wp:x /-->` and </p>.\r\n",
                 "what_changed": ["First line\nwraps here", "  ", "Second"],
                 "compatibility": "Additive.\nNo existing behavior changes.",
                 "used_for": "Read the issue.\n- Wrote the plan.\n- Ran lint.",
@@ -2157,7 +2167,10 @@ mod tests {
             .expect("multi-line prose parses")
             .expect("form present");
 
-        assert_eq!(form.summary, "Adds a render plan. Also adds smoke tests.");
+        assert_eq!(
+            form.summary,
+            "Adds a render plan. Also adds smoke tests for `&lt;!-- wp:x /-->` and &lt;/p>."
+        );
         assert_eq!(
             form.what_changed,
             vec!["First line wraps here".to_string(), "Second".to_string()]
