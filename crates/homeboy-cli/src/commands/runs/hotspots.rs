@@ -1066,13 +1066,35 @@ mod tests {
         };
         let (output, exit) = runs_hotspots(&store, args.clone()).unwrap();
         assert_eq!(exit, 1);
+        let payload = serde_json::to_value(&output).unwrap();
+        let response =
+            super::super::super::utils::response::cli_response_for_json_result_for_command(
+                &Ok(payload.clone()),
+                exit,
+                "runs",
+                None,
+            );
+        assert_eq!(response.data, Some(payload));
+        let cause = response
+            .diagnostics
+            .unwrap()
+            .failure_digest
+            .unwrap()
+            .summary;
+        assert!(cause.contains("regressed"), "{cause}");
+        assert!(cause.contains("before"), "{cause}");
+        assert!(cause.contains("after"), "{cause}");
+        assert!(cause.contains("phase.regressed.p50_ms"), "{cause}");
+        assert!(cause.contains("20000"), "{cause}");
+        assert!(cause.contains("30000"), "{cause}");
+        assert_eq!(response.summary.as_deref(), Some(cause.as_str()));
         let RunsOutput::Hotspots(output) = output else {
             panic!("expected hotspots");
         };
         let phases = output.phase_hotspots.unwrap();
         assert_eq!(phases.phases.len(), 1);
         assert_eq!(phases.comparison.unwrap().regressions.len(), 2);
-        let (_, exit) = runs_hotspots(
+        let (output, exit) = runs_hotspots(
             &store,
             RunsHotspotsArgs {
                 phase_regression_relative: 1.0,
@@ -1081,6 +1103,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(exit, 0);
+        let response =
+            super::super::super::utils::response::cli_response_for_json_result_for_command(
+                &Ok(serde_json::to_value(output).unwrap()),
+                exit,
+                "runs",
+                None,
+            );
+        assert!(response.diagnostics.is_none());
         let (_, exit) = runs_hotspots(
             &store,
             RunsHotspotsArgs {
