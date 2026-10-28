@@ -934,15 +934,61 @@ fn wait_for_cancelled_daemon_job(client: &Client, daemon_url: &str, job_id: &str
     }
 }
 
+/// Shell loop every blocked workload spins on: write `started` to `$1`, then
+/// wait for the release file `$2`. The loop also ends when the directory
+/// holding `$2` disappears, so a workload whose test was killed (the harness
+/// then removes the run's temp dir) ends itself instead of spinning forever.
+pub(super) const BLOCKED_WORKLOAD_LOOP: &str =
+    "printf started > \"$1\"; while [ ! -e \"$2\" ] && [ -d \"${2%/*}\" ]; do sleep 0.01; done";
+
+/// Promotion progress frame a slow workload emits before blocking on
+/// `BLOCKED_WORKLOAD_LOOP`.
+const PROMOTION_PROGRESS_FRAME: &str = r#"printf 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"promotion","metadata":{"promotion":{"schema":"homeboy/promotion-progress-frame/v1","message":"promotion progress: applying patch"}}}\n'"#;
+
 fn blocked_workload_command(started: &std::path::Path, release: &std::path::Path) -> Vec<String> {
     vec![
         "sh".to_string(),
         "-c".to_string(),
-        "printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done".to_string(),
+        BLOCKED_WORKLOAD_LOOP.to_string(),
         "sh".to_string(),
         started.display().to_string(),
         release.display().to_string(),
     ]
+}
+
+#[test]
+fn blocked_workload_command_ends_itself_once_its_temp_directory_is_gone() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let started = workspace.path().join("started");
+    let release = workspace.path().join("release");
+
+    let argv = blocked_workload_command(&started, &release);
+    let mut child = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .spawn()
+        .expect("spawn blocked workload");
+    wait_for_path(&started, "blocked workload start");
+
+    // #16568: a killed test never runs its release Drop guard and the outer
+    // harness removes the run's temp dir, so the release file can never
+    // appear. The workload must end itself once that directory is gone.
+    workspace.close().expect("remove workspace");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll workload status") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("blocked workload outlived its removed temp directory");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        status.success(),
+        "workload must exit cleanly once its directory is gone"
+    );
 }
 
 fn assert_zero_wait_handoff(output: &RunnerExecOutput, exit_code: i32) {
@@ -1013,7 +1059,7 @@ fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion(
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"promotion\",\"metadata\":{\"promotion\":{\"schema\":\"homeboy/promotion-progress-frame/v1\",\"message\":\"promotion progress: applying patch\"}}}\\n'; printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done".to_string(),
+                format!("{PROMOTION_PROGRESS_FRAME}; {BLOCKED_WORKLOAD_LOOP}"),
                 "sh".to_string(),
                 started.display().to_string(),
                 release.display().to_string(),
@@ -1242,7 +1288,10 @@ fn foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_i
     });
 }
 
-struct ReleaseBlockedWorkload(std::path::PathBuf);
+/// Releases the shared blocked workload loop when the test ends, even on
+/// failure. The workload also ends itself when the file's directory is gone
+/// (see `BLOCKED_WORKLOAD_LOOP`), so a killed test cannot leave it orphaned.
+pub(super) struct ReleaseBlockedWorkload(pub(super) std::path::PathBuf);
 
 impl Drop for ReleaseBlockedWorkload {
     fn drop(&mut self) {
