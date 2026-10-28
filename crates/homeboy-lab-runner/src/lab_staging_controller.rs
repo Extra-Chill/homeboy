@@ -413,7 +413,8 @@ enum RuntimeSetCompatibility {
     #[default]
     UnknownLegacy,
     Exact,
-    CompatiblePatchDrift,
+    #[serde(alias = "compatible_patch_drift")]
+    ContractCompatible,
     WireOrLifecycleIncompatible,
 }
 
@@ -426,12 +427,7 @@ struct RuntimeSetPolicy {
 
 enum RuntimeSetAdmission {
     /// The payload records which compatibility level admitted the runtime set.
-    /// Every production branch matches `Ready(_)`, so nothing reads it at
-    /// runtime — but `runtime_set_admission_*` in this file's tests assert on
-    /// it to pin that the classifier reached `Exact` rather than
-    /// `CompatiblePatchDrift`. Dropping it would delete that distinction from
-    /// the test suite without changing behavior, so it is suppressed here
-    /// rather than silently at module scope.
+    /// Production branches on admission; receipts retain the compatibility level.
     #[allow(
         dead_code,
         reason = "Compatibility level is asserted by tests; production branches on the variant only."
@@ -439,7 +435,6 @@ enum RuntimeSetAdmission {
     Ready(RuntimeSetCompatibility),
     Converge,
     RefuseControllerUpgrade,
-    RefuseControllerRuntime,
     RefuseRuntime,
 }
 
@@ -468,33 +463,7 @@ fn runtime_set_compatibility(requested: &str, daemon: Option<&str>) -> RuntimeSe
     if canonical_homeboy_identity(requested) == canonical_homeboy_identity(daemon) {
         return RuntimeSetCompatibility::Exact;
     }
-    // A declared immutable build identity is lifecycle/wire provenance. Two
-    // distinct declarations never become compatible merely because their
-    // semantic versions happen to share a release line. Version-only peers
-    // retain the explicit patch-drift compatibility contract for older/offline
-    // runtimes that cannot attest a build.
-    if canonical_homeboy_identity(requested).contains('+')
-        || canonical_homeboy_identity(daemon).contains('+')
-    {
-        return RuntimeSetCompatibility::WireOrLifecycleIncompatible;
-    }
-    match (runtime_major_minor(requested), runtime_major_minor(daemon)) {
-        (Some(requested), Some(daemon)) if requested == daemon => {
-            RuntimeSetCompatibility::CompatiblePatchDrift
-        }
-        _ => RuntimeSetCompatibility::WireOrLifecycleIncompatible,
-    }
-}
-
-fn runtime_major_minor(identity: &str) -> Option<(u64, u64)> {
-    let version = canonical_homeboy_identity(identity)
-        .split_once('+')
-        .map_or_else(
-            || canonical_homeboy_identity(identity),
-            |(version, _)| version,
-        );
-    let mut parts = version.split('.');
-    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+    RuntimeSetCompatibility::WireOrLifecycleIncompatible
 }
 
 fn runtime_set_admission(
@@ -520,17 +489,11 @@ fn runtime_set_admission(
     {
         return RuntimeSetAdmission::RefuseControllerUpgrade;
     }
-    if matches!(
-        runtime_set_compatibility(requested, Some(controller)),
-        RuntimeSetCompatibility::WireOrLifecycleIncompatible
-    ) {
-        return RuntimeSetAdmission::RefuseControllerRuntime;
-    }
     let compatibility = runtime_set_compatibility(requested, daemon);
     let command_matches = configured.is_some_and(|identity| {
         matches!(
             runtime_set_compatibility(requested, Some(identity)),
-            RuntimeSetCompatibility::Exact | RuntimeSetCompatibility::CompatiblePatchDrift
+            RuntimeSetCompatibility::Exact
         )
     });
     if command_matches
@@ -678,27 +641,6 @@ fn controller_runtime_set_error(
     error
 }
 
-fn controller_runtime_identity_error(runner_id: &str, controller: &str, requested: &str) -> Error {
-    let recovery = preserved_invocation();
-    let mut error = Error::validation_invalid_argument(
-        "runtime_set",
-        format!(
-            "Durable orchestration refused before dispatch because controller `{controller}` is not wire/lifecycle-compatible with pinned runtime `{requested}`"
-        ),
-        Some(runner_id.to_string()),
-        Some(vec![recovery.clone()]),
-    );
-    error.details["runtime_set"] = json!({
-        "controller": controller,
-        "requested_runtime": requested,
-        "daemon_runtime": serde_json::Value::Null,
-        "executed_job_runtime": serde_json::Value::Null,
-        "recovery_command": recovery,
-        "preserved_invocation": preserved_invocation(),
-    });
-    error
-}
-
 fn controller_homeboy_upgrade_command() -> String {
     // Keep source-built controllers on their explicit source workflow.
     crate::lab::offload::metadata::controller_homeboy_recovery_command()
@@ -792,14 +734,14 @@ fn handoff_convergence_action(
         },
     ) {
         RuntimeSetAdmission::Ready(_) => HandoffConvergenceAction::Ready,
-        RuntimeSetAdmission::RefuseControllerUpgrade
-        | RuntimeSetAdmission::RefuseControllerRuntime
-        | RuntimeSetAdmission::RefuseRuntime => HandoffConvergenceAction::Refuse,
+        RuntimeSetAdmission::RefuseControllerUpgrade | RuntimeSetAdmission::RefuseRuntime => {
+            HandoffConvergenceAction::Refuse
+        }
         RuntimeSetAdmission::Converge => HandoffConvergenceAction::Refresh(
             if configured.is_some_and(|identity| {
                 matches!(
                     runtime_set_compatibility(requested, Some(identity)),
-                    RuntimeSetCompatibility::Exact | RuntimeSetCompatibility::CompatiblePatchDrift
+                    RuntimeSetCompatibility::Exact
                 )
             }) {
                 crate::HomeboyBinaryRefreshMode::Select {
@@ -848,13 +790,6 @@ pub(crate) fn converge_lab_handoff_runtime(
                     .version,
             ))
         }
-        RuntimeSetAdmission::RefuseControllerRuntime => {
-            return Err(controller_runtime_identity_error(
-                runner_id,
-                &controller.display,
-                requested,
-            ))
-        }
         RuntimeSetAdmission::Ready(_)
         | RuntimeSetAdmission::Converge
         | RuntimeSetAdmission::RefuseRuntime => {}
@@ -886,6 +821,31 @@ pub(crate) fn converge_lab_handoff_runtime(
             None => crate::configured_runner_homeboy_build_identity(&runner, command)?,
         };
         let daemon = session.homeboy_build_identity.clone();
+        // Build drift is not a convergence requirement. The same public Lab
+        // contract decision governs new work and durable handoff replay.
+        let admission = crate::lab::offload::metadata::direct_runner_capability_admission(
+            &runner, &status, command,
+        )?;
+        let require_exact =
+            crate::lab::offload::metadata::require_exact_runner_version(&runner.settings);
+        if crate::lab::offload::metadata::capability_admission_has_blocking_drift(
+            &admission,
+            require_exact,
+        ) {
+            return Err(crate::lab::offload::metadata::capability_admission_error(
+                runner_id,
+                &admission,
+                require_exact,
+            ));
+        }
+        if status.admission_blocking_stale_daemon().is_none() && status.daemon_fresh() {
+            return Ok(ConvergedLabHandoffRuntime {
+                homeboy_path: command.to_string(),
+                runner,
+                status,
+                configured_build_identity: configured,
+            });
+        }
         match handoff_convergence_action(
             &runner,
             &status,
@@ -2935,15 +2895,13 @@ impl ProductionLabStagingOperations {
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone());
         let configured = converged.configured_build_identity;
-        if !handoff_identities_match(requested, configured.as_deref(), daemon.as_deref()) {
-            return Err(handoff_identity_error(
-                &request.recipe.runner_id,
-                requested,
-                configured.as_deref(),
-                daemon.as_deref(),
-            ));
-        }
-        let compatibility = runtime_set_compatibility(requested, daemon.as_deref());
+        let compatibility = if configured.as_deref().is_some_and(|identity| {
+            canonical_homeboy_identity(identity) == canonical_homeboy_identity(requested)
+        }) {
+            RuntimeSetCompatibility::Exact
+        } else {
+            RuntimeSetCompatibility::ContractCompatible
+        };
         Ok(Some(LabHandoffHomeboyIdentity {
             controller_build_identity: Some(homeboy_product_identity::build_identity().display),
             latest_allowed_stable: homeboy_upgrade::update_check::latest_allowed_stable()
@@ -6511,7 +6469,7 @@ mod tests {
     }
 
     #[test]
-    fn resumed_controller_with_distinct_build_is_refused_before_runner_convergence() {
+    fn resumed_controller_build_drift_does_not_strand_pinned_runner() {
         let admission = runtime_set_admission(
             "homeboy 1.2.3+resumed-controller",
             None,
@@ -6527,7 +6485,7 @@ mod tests {
 
         assert!(matches!(
             admission,
-            RuntimeSetAdmission::RefuseControllerRuntime
+            RuntimeSetAdmission::Ready(RuntimeSetCompatibility::Exact)
         ));
     }
 
@@ -6547,26 +6505,6 @@ mod tests {
         );
 
         assert!(matches!(admission, RuntimeSetAdmission::RefuseRuntime));
-    }
-
-    #[test]
-    fn compatible_patch_daemon_is_admitted_without_dispatch_mutation() {
-        let admission = runtime_set_admission(
-            "homeboy 1.2.2",
-            Some(&stable_runtime("1.2.2", [])),
-            "homeboy 1.2.2",
-            Some("homeboy 1.2.1"),
-            Some("homeboy 1.2.1"),
-            RuntimeSetPolicy {
-                enforce_latest_stable: true,
-                controller_is_source_build: false,
-                allow_convergence: true,
-            },
-        );
-        assert!(matches!(
-            admission,
-            RuntimeSetAdmission::Ready(RuntimeSetCompatibility::CompatiblePatchDrift)
-        ));
     }
 
     #[test]

@@ -10,7 +10,6 @@ use homeboy_lab_contract::{
     LabCapabilityHandshake, LabRuntimeAncestry, LabRuntimeIdentity,
 };
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const ENV_RESOLUTION_SCHEMA: &str = "homeboy/env-resolution/v1";
 const REDACTED_ENV_VALUE: &str = "<redacted>";
@@ -26,6 +25,7 @@ pub(crate) fn direct_runner_capability_admission(
     let controller = homeboy_product_identity::build_identity();
     let controller_identity = LabRuntimeIdentity {
         build_identity: controller.display,
+        lab_contract_version: Some(homeboy_lab_contract::LAB_CONTRACT_VERSION),
         source_revision: controller.git_commit.unwrap_or_default(),
         clean: controller.git_dirty == Some(false),
     };
@@ -51,19 +51,20 @@ pub(crate) fn direct_runner_capability_admission(
         .and_then(build_commit)
         .unwrap_or_default()
         .to_string();
+    let (daemon_capabilities, daemon_contract_version) = session
+        .local_url
+        .as_deref()
+        .and_then(|url| crate::daemon_lab_handoff_capabilities(url).ok())
+        .unwrap_or_default();
     let daemon = LabRuntimeIdentity {
         build_identity: session.homeboy_build_identity.clone().unwrap_or_default(),
+        lab_contract_version: daemon_contract_version,
         source_revision: daemon_source,
         clean: !session
             .homeboy_build_identity
             .as_deref()
             .is_some_and(|value| value.ends_with("-dirty")),
     };
-    let daemon_capabilities = session
-        .local_url
-        .as_deref()
-        .and_then(|url| crate::daemon_lab_handoff_capabilities(url).ok())
-        .unwrap_or_default();
     let command_evidence = command_evidence
         .or_else(|| hash_bound_runner_command_evidence(status, homeboy, &daemon_capabilities));
     let Some((runner_command, runner_command_capabilities)) = command_evidence else {
@@ -102,7 +103,8 @@ pub(crate) fn capability_admission_has_blocking_drift(
 ) -> bool {
     !admission.compatible
         || (require_exact_runner_version
-            && admission.provenance.ancestry != LabRuntimeAncestry::ExactSource)
+            && admission.provenance.controller_requirement.build_identity
+                != admission.provenance.executed_runner_command.build_identity)
 }
 
 /// Reject a direct Lab handoff for the capability evidence actually observed.
@@ -120,23 +122,31 @@ pub(crate) fn capability_admission_error(
     let ancestry = admission.provenance.ancestry;
     let (cause_class, cause, remediation) = if !admission.compatible {
         (
-            "capability_incompatible",
+            if admission.rejection_code
+                == Some(homeboy_lab_contract::LabAdmissionRejection::LabContractVersionMismatch)
+            {
+                "lab_contract_version_mismatch"
+            } else {
+                "capability_incompatible"
+            },
             admission
                 .provenance
                 .rejection_reason
                 .as_deref()
                 .unwrap_or("the runner did not provide a capability rejection reason"),
-            "Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry.",
+            if admission.rejection_code
+                == Some(homeboy_lab_contract::LabAdmissionRejection::LabContractVersionMismatch)
+            {
+                "Refresh the runner with `homeboy runner refresh-homeboy <runner-id> --reconnect`, then retry."
+            } else {
+                "Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry."
+            },
         )
     } else {
         (
-            if ancestry == LabRuntimeAncestry::Unknown {
-                "strict_ancestry_unknown"
-            } else {
-                "strict_ancestry_not_exact"
-            },
-            "strict identity fencing requires exact-source ancestry",
-            "Reconnect the runner to collect exact source provenance, then retry.",
+            "exact_build_mismatch",
+            "require_exact_homeboy_version requires the controller's exact build",
+            "Refresh the runner with `homeboy runner refresh-homeboy <runner-id> --reconnect`, then retry.",
         )
     };
     let message = if !admission.compatible {
@@ -202,6 +212,7 @@ pub(super) fn hash_bound_runner_command_evidence(
     Some((
         LabRuntimeIdentity {
             build_identity: session_identity.to_string(),
+            lab_contract_version: None,
             source_revision: build_commit(session_identity)?.to_string(),
             clean: !session_identity.ends_with("-dirty"),
         },
@@ -223,27 +234,7 @@ fn runtime_ancestry(controller: &str, runner: &str) -> LabRuntimeAncestry {
     if controller == runner {
         return LabRuntimeAncestry::ExactSource;
     }
-    let Some(source) = std::env::current_exe()
-        .ok()
-        .and_then(|path| source_checkout_for_binary(&path))
-    else {
-        return LabRuntimeAncestry::Unknown;
-    };
-    match Command::new("git")
-        .args([
-            "-C",
-            &source.display().to_string(),
-            "merge-base",
-            "--is-ancestor",
-            controller,
-            runner,
-        ])
-        .status()
-    {
-        Ok(status) if status.success() => LabRuntimeAncestry::VerifiedNewerDescendant,
-        Ok(_) => LabRuntimeAncestry::Diverged,
-        Err(_) => LabRuntimeAncestry::Unknown,
-    }
+    LabRuntimeAncestry::Unknown
 }
 
 /// Insert generic `${components.<id>.path}` override env vars so a remote rig
@@ -475,23 +466,6 @@ pub(crate) fn lab_runner_homeboy_metadata(
 /// usual truthy spellings (`1`, `true`, `yes`, `on`).
 pub(crate) const REQUIRE_EXACT_RUNNER_VERSION_ENV: &str = "HOMEBOY_REQUIRE_EXACT_RUNNER_VERSION";
 
-/// Classification of controller↔runner Homeboy version drift for the Lab
-/// offload dispatch gate.
-///
-/// Patch-level drift within the same `MAJOR.MINOR` is wire-compatible when
-/// build provenance is unavailable. A complete build identity is authoritative:
-/// a differing identity is refused even when its semver matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunnerHomeboyVersionDrift {
-    /// Controller and runner report the same version (no drift).
-    None,
-    /// Same `MAJOR.MINOR`, patch differs — wire-compatible; proceed with a warning.
-    CompatiblePatch,
-    /// `MAJOR`/`MINOR` differs, or a version string could not be parsed while the
-    /// raw strings differ — the provider contract could genuinely differ; refuse.
-    Incompatible,
-}
-
 /// Resolve whether the controller↔runner version gate should enforce exact
 /// byte-identical match. Defaults to compatibility-aware (`false`). Operators
 /// opt into strict exact-match either per-runner (the
@@ -514,32 +488,6 @@ pub(crate) fn require_exact_runner_version(
     settings.require_exact_homeboy_version.unwrap_or(false)
 }
 
-/// Extract the `(MAJOR, MINOR)` pair from a Homeboy version string, tolerating a
-/// leading label (e.g. `homeboy 0.266.1`) and trailing build/prerelease
-/// metadata (e.g. `0.266.1+abc`). Mirrors the lenient parsing already used by
-/// the runner version probe so the gate accepts the same shapes.
-fn parse_version_triplet(version: &str) -> Option<(u64, u64, u64)> {
-    let candidate = version
-        .split_whitespace()
-        .find(|token| token.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        .unwrap_or_else(|| version.trim());
-    let mut parts = candidate.split('.');
-    let mut parse_part = || {
-        parts
-            .next()?
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .ok()
-    };
-    Some((parse_part()?, parse_part()?, parse_part()?))
-}
-
-fn parse_major_minor(version: &str) -> Option<(u64, u64)> {
-    parse_version_triplet(version).map(|(major, minor, _patch)| (major, minor))
-}
-
 fn canonical_build_identity(identity: &str) -> &str {
     identity
         .trim()
@@ -547,96 +495,31 @@ fn canonical_build_identity(identity: &str) -> &str {
         .unwrap_or(identity.trim())
 }
 
-/// Classify controller↔runner Homeboy version drift using the same drift
-/// evidence the metadata builder reports (runner session version vs the
-/// compiled controller version).
-pub(crate) fn classify_runner_homeboy_version_drift(
-    status: &RunnerStatusReport,
-) -> RunnerHomeboyVersionDrift {
+/// Build drift is informational unless exact-build fencing was requested.
+fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
     let controller = homeboy_product_identity::build_identity();
-    let Some(session) = status.session.as_ref() else {
-        // No connected session means no version evidence to compare; leave
-        // connectivity gating to the dedicated preflight checks.
-        return RunnerHomeboyVersionDrift::None;
-    };
-
-    if let Some(runner_identity) = session.homeboy_build_identity.as_deref() {
-        // Build provenance resolves representation differences between `0.x.y`
-        // and `homeboy 0.x.y+commit` without accepting distinct same-semver builds.
-        return if canonical_build_identity(runner_identity)
-            == canonical_build_identity(&controller.display)
-        {
-            RunnerHomeboyVersionDrift::None
-        } else {
-            RunnerHomeboyVersionDrift::Incompatible
-        };
-    }
-
-    let runner_version = session.homeboy_version.as_str();
-    let controller_version = controller.version.as_str();
-
-    // Version-only sessions do not prove a build, so preserve compatible patch
-    // handling for older runners that cannot report build provenance.
-    if canonical_build_identity(runner_version) == canonical_build_identity(controller_version) {
-        return RunnerHomeboyVersionDrift::None;
-    }
-
-    match (
-        parse_major_minor(controller_version),
-        parse_major_minor(runner_version),
-    ) {
-        (Some(controller), Some(runner)) if controller == runner => {
-            RunnerHomeboyVersionDrift::CompatiblePatch
-        }
-        // Same-MAJOR.MINOR was handled above; any other parseable pair differs
-        // at MAJOR/MINOR. Unparseable strings that already differ are refused
-        // conservatively.
-        _ => RunnerHomeboyVersionDrift::Incompatible,
-    }
+    status
+        .session
+        .as_ref()
+        .is_some_and(|session| match session.homeboy_build_identity.as_deref() {
+            Some(identity) => {
+                canonical_build_identity(identity) != canonical_build_identity(&controller.display)
+            }
+            None => {
+                canonical_build_identity(&session.homeboy_version)
+                    != canonical_build_identity(&controller.version)
+            }
+        })
 }
 
-/// The version `runner status --full` prints blocks cook admission when it
-/// differs from the controller at MAJOR or MINOR.
-///
-/// A matching build identity must not hide `session.homeboy_version`. Same
-/// MAJOR.MINOR patch drift stays compatible; that case is already classified
-/// by [`classify_runner_homeboy_version_drift`].
-pub(crate) fn session_reported_version_blocks_admission(status: &RunnerStatusReport) -> bool {
-    let Some(session) = status.session.as_ref() else {
-        return false;
-    };
-    let runner_version = canonical_build_identity(&session.homeboy_version);
-    let controller_version = homeboy_product_identity::product_version();
-    if runner_version.is_empty() || runner_version == canonical_build_identity(controller_version) {
-        return false;
-    }
-    match (
-        parse_major_minor(controller_version),
-        parse_major_minor(runner_version),
-    ) {
-        (Some(controller), Some(runner)) => controller != runner,
-        // Unparseable fixture versions are not a new admission fence. Existing
-        // stale-daemon warnings still refuse a proven mismatch.
-        _ => false,
-    }
-}
-
-/// Whether the status-level daemon warning blocks Lab admission under the
-/// runner's configured version policy. A patch-only controller/version warning
-/// is compatible unless exact matching was explicitly requested; every other
-/// proven daemon mismatch remains blocking.
+/// Genuine daemon faults always block; controller build drift only blocks
+/// when exact-build policy is explicitly requested.
 pub(crate) fn lab_runner_homeboy_has_blocking_status_drift(
     status: &RunnerStatusReport,
     require_exact: bool,
 ) -> bool {
-    status
-        .admission_blocking_stale_daemon()
-        .is_some_and(|warning| {
-            require_exact
-                || warning.compatibility_reason != Some("controller_configured_version_skew")
-                || classify_runner_homeboy_version_drift(status)
-                    != RunnerHomeboyVersionDrift::CompatiblePatch
-        })
+    status.admission_blocking_stale_daemon().is_some()
+        || (require_exact && lab_runner_homeboy_version_drift(status))
 }
 
 pub(crate) fn lab_runner_daemon_fresh_for_admission(
@@ -647,12 +530,6 @@ pub(crate) fn lab_runner_daemon_fresh_for_admission(
         return false;
     }
     status.daemon_fresh()
-        || status.daemon_freshness.as_ref().is_some_and(|freshness| {
-            freshness.stale_reason_code
-                == Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch)
-                && classify_runner_homeboy_version_drift(status)
-                    == RunnerHomeboyVersionDrift::CompatiblePatch
-        })
 }
 
 /// Direct SSH runners execute jobs with their configured executable rather
@@ -680,7 +557,8 @@ pub(crate) fn lab_runner_homeboy_has_blocking_drift_against_configured_identity(
             return true;
         };
         return canonical_build_identity(active_daemon_identity)
-            != canonical_build_identity(configured_build_identity);
+            != canonical_build_identity(configured_build_identity)
+            || (require_exact && lab_runner_homeboy_version_drift(status));
     }
 
     // Build-identity drift within the runner (active daemon control plane vs the
@@ -693,50 +571,7 @@ pub(crate) fn lab_runner_homeboy_has_blocking_drift_against_configured_identity(
     if lab_runner_homeboy_has_blocking_status_drift(status, require_exact) {
         return true;
     }
-    match classify_runner_homeboy_version_drift(status) {
-        RunnerHomeboyVersionDrift::None => false,
-        RunnerHomeboyVersionDrift::CompatiblePatch => require_exact,
-        RunnerHomeboyVersionDrift::Incompatible => true,
-    }
-}
-
-/// Warning to surface when the runner is on a wire-compatible patch-drifted
-/// version and the gate is allowing the run to proceed. Returns `None` when
-/// there is nothing to warn about (no drift, refused incompatibility, or strict
-/// mode where the drift is instead surfaced as an error).
-pub(crate) fn lab_runner_homeboy_compatible_drift_warning(
-    status: &RunnerStatusReport,
-    require_exact: bool,
-) -> Option<String> {
-    if require_exact {
-        return None;
-    }
-    if !matches!(
-        classify_runner_homeboy_version_drift(status),
-        RunnerHomeboyVersionDrift::CompatiblePatch
-    ) {
-        return None;
-    }
-    let controller_version = homeboy_product_identity::product_version();
-    let runner_version = status
-        .session
-        .as_ref()
-        .map(|session| session.homeboy_version.as_str())
-        .unwrap_or("<unknown>");
-    let remediation = runner_homeboy_align_to_controller_command(
-        status
-            .session
-            .as_ref()
-            .map(|session| session.runner_id.as_str())
-            .unwrap_or("<runner-id>"),
-    );
-    Some(format!(
-        "Lab offload: runner reports Homeboy `{runner_version}` while the controller is `{controller_version}`; same MAJOR.MINOR (patch drift only) is wire-compatible, proceeding. Align the runner with `{remediation}`. Set runner setting `require_exact_homeboy_version` or export `{REQUIRE_EXACT_RUNNER_VERSION_ENV}=1` to enforce exact-match."
-    ))
-}
-
-fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
-    classify_runner_homeboy_version_drift(status) != RunnerHomeboyVersionDrift::None
+    false
 }
 
 /// Recover the controller runtime when an independent handoff-stage check
@@ -1025,20 +860,6 @@ pub(crate) fn runner_homeboy_refresh_commands(
         .as_ref()
         .map(RunnerStaleDaemonWarning::safe_recovery_commands)
         .unwrap_or_default()
-}
-
-pub(crate) fn runner_homeboy_align_to_controller_command(runner_id: &str) -> String {
-    format!(
-        "homeboy runner refresh-homeboy {} --ref {} --reconnect",
-        shell::quote_arg(runner_id),
-        controller_refresh_ref()
-    )
-}
-
-fn controller_refresh_ref() -> String {
-    homeboy_product_identity::build_identity()
-        .git_commit
-        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
 }
 
 pub(crate) fn runner_session_homeboy_display(

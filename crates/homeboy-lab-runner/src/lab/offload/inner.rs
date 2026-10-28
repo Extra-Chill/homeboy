@@ -1956,12 +1956,6 @@ pub(crate) fn run_lab_offload_inner(
             &runner_status,
         ));
     }
-    if let Some(warning) =
-        lab_runner_homeboy_compatible_drift_warning(&runner_status, require_exact_runner_version)
-    {
-        eprintln!("{warning}");
-        messages.push(warning);
-    }
     let command_prefix = lab_offload_command_prefix(&source_path, &homeboy_path);
     eprintln!(
         "Lab offload preflight: source checkout `{}` at {}; active Homeboy command `{}` from runner `{}`.",
@@ -3797,14 +3791,6 @@ mod tests {
                 "capability_incompatible",
                 "Lab offload refused runner `homeboy-lab` because its capability admission is incompatible: missing capabilities. Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry.",
             ),
-            (
-                matching_capability_admission(
-                    true,
-                    homeboy_lab_contract::LabRuntimeAncestry::Unknown,
-                ),
-                "strict_ancestry_unknown",
-                "Lab offload refused runner `homeboy-lab` because strict identity fencing requires exact-source ancestry, but admission reported Unknown. Reconnect the runner to collect exact source provenance, then retry.",
-            ),
         ] {
             let error = detached_direct_staging_fallback_or_refusal(
                 "homeboy-lab",
@@ -4085,11 +4071,13 @@ mod tests {
     ) -> homeboy_lab_contract::LabCapabilityAdmission {
         let identity = homeboy_lab_contract::LabRuntimeIdentity {
             build_identity: "homeboy 0.339.0+83a9bd058619".to_string(),
+            lab_contract_version: None,
             source_revision: "83a9bd058619".to_string(),
             clean: true,
         };
         homeboy_lab_contract::LabCapabilityAdmission {
             compatible,
+            rejection_code: None,
             provenance: homeboy_lab_contract::LabCapabilityNegotiationProvenance {
                 schema: "homeboy/lab-capability-negotiation/v1".to_string(),
                 controller_requirement: identity.clone(),

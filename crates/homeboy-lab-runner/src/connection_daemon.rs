@@ -484,9 +484,14 @@ pub(super) fn daemon_http_version(local_url: &str) -> std::result::Result<String
 
 pub(crate) fn daemon_http_lab_handoff_capabilities(
     local_url: &str,
-) -> std::result::Result<Vec<LabCapabilityVersion>, String> {
+) -> std::result::Result<(Vec<LabCapabilityVersion>, Option<u32>), String> {
     let response = daemon_http_body(local_url)?;
-    daemon_lab_handoff_capabilities_from_body(&response.body)
+    let data = response.body.get("data").unwrap_or(&response.body);
+    let version = serde_json::from_value(data["lab_contract_version"].clone()).unwrap_or(None);
+    Ok((
+        daemon_lab_handoff_capabilities_from_body(&response.body)?,
+        version,
+    ))
 }
 
 pub(super) fn daemon_lab_handoff_capabilities_from_body(

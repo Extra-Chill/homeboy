@@ -293,6 +293,8 @@ pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyId
         handoff: Some((
             homeboy_lab_contract::LabRuntimeIdentity {
                 build_identity: data["display"].as_str().unwrap_or_default().to_string(),
+                lab_contract_version: serde_json::from_value(data["lab_contract_version"].clone())
+                    .unwrap_or(None),
                 source_revision: data["git_commit"].as_str().unwrap_or_default().to_string(),
                 clean: data["git_dirty"].as_bool() == Some(false),
             },
@@ -338,25 +340,6 @@ pub(super) fn compare_identities(left: Option<&str>, right: Option<&str>) -> Ide
         }
         _ => IdentityComparison::Unverifiable,
     }
-}
-
-pub(super) fn compare_build_commits(left: Option<&str>, right: Option<&str>) -> IdentityComparison {
-    match (left.and_then(build_commit), right.and_then(build_commit)) {
-        (Some(left), Some(right)) if left == right => IdentityComparison::Match,
-        (Some(_), Some(_)) => IdentityComparison::Mismatch,
-        _ => IdentityComparison::Unverifiable,
-    }
-}
-
-fn build_commit(identity: &str) -> Option<String> {
-    immutable_build_identity(identity)
-        .then(|| normalize_homeboy_version_owned(identity))
-        .and_then(|identity| {
-            identity
-                .split_once('+')
-                .map(|(_, commit)| commit.to_string())
-        })
-        .map(|commit| commit.strip_suffix("-dirty").unwrap_or(&commit).to_string())
 }
 
 pub(super) struct SshTunnelOutput {

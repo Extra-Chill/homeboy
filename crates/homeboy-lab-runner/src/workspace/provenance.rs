@@ -1693,10 +1693,14 @@ mod tests {
                 expect_patch,
                 "only changed attempts harvest a candidate"
             );
-            assert!(aggregate.outcomes[0]
-                .artifacts
-                .iter()
-                .all(|artifact| artifact.kind != "patch"));
+            assert_eq!(
+                aggregate.outcomes[0]
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.kind == "patch"),
+                expect_patch,
+                "immutable candidates retain inspectable patch evidence"
+            );
             if candidate.is_some() {
                 assert_eq!(
                     aggregate.outcomes[0].metadata["source_provenance"]["materialization_mode"],

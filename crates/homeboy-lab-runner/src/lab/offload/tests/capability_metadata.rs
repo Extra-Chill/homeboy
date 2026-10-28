@@ -613,13 +613,6 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
 fn runner_homeboy_version_drift_reports_upgrade_guidance() {
     let status = connected_status("homeboy-lab");
 
-    // `connected_status` reports runner `0.0.0` against the controller's current
-    // version, a MINOR/MAJOR mismatch.
-    assert_eq!(
-        classify_runner_homeboy_version_drift(&status),
-        RunnerHomeboyVersionDrift::Incompatible
-    );
-
     let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
 
     assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
@@ -687,11 +680,13 @@ fn strict_capability_admission_accepts_only_compatible_exact_source() {
 
     let identity = LabRuntimeIdentity {
         build_identity: "homeboy 0.348.7+5ebb24a09bc5".to_string(),
+        lab_contract_version: None,
         source_revision: "5ebb24a09bc5".to_string(),
         clean: true,
     };
     let admission = |compatible, ancestry| LabCapabilityAdmission {
         compatible,
+        rejection_code: None,
         provenance: LabCapabilityNegotiationProvenance {
             schema: "homeboy/lab-capability-negotiation/v1".to_string(),
             controller_requirement: identity.clone(),
@@ -708,7 +703,8 @@ fn strict_capability_admission_accepts_only_compatible_exact_source() {
     assert!(!capability_admission_has_blocking_drift(&exact, true));
     assert!(!capability_admission_has_blocking_drift(&exact, false));
 
-    let newer = admission(true, LabRuntimeAncestry::VerifiedNewerDescendant);
+    let mut newer = admission(true, LabRuntimeAncestry::VerifiedNewerDescendant);
+    newer.provenance.executed_runner_command.build_identity = "different".to_string();
     assert!(capability_admission_has_blocking_drift(&newer, true));
     assert!(!capability_admission_has_blocking_drift(&newer, false));
 
@@ -774,82 +770,6 @@ fn status_with_runner_version(runner_id: &str, version: &str) -> RunnerStatusRep
         session.homeboy_build_identity = None;
     }
     status
-}
-
-/// A version string sharing the controller's MAJOR.MINOR but a different patch.
-fn same_minor_patch_drift_version(prefix: &str) -> String {
-    let controller = homeboy_product_identity::product_version();
-    let mut parts = controller.split('.');
-    let major = parts.next().unwrap_or("0");
-    let minor = parts.next().unwrap_or("0");
-    let patch: u64 = parts
-        .next()
-        .and_then(|p| {
-            p.chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<String>()
-                .parse()
-                .ok()
-        })
-        .unwrap_or(0);
-    format!("{prefix}{major}.{minor}.{}", patch.wrapping_add(1))
-}
-
-#[test]
-fn same_minor_patch_drift_is_compatible_and_proceeds_with_warning() {
-    let status =
-        status_with_runner_version("homeboy-lab", &same_minor_patch_drift_version("homeboy "));
-
-    assert_eq!(
-        classify_runner_homeboy_version_drift(&status),
-        RunnerHomeboyVersionDrift::CompatiblePatch
-    );
-    // Compatibility-aware default: patch drift proceeds.
-    let warning = lab_runner_homeboy_compatible_drift_warning(&status, false)
-        .expect("compatible patch drift should warn");
-    assert!(warning.contains("wire-compatible"));
-    assert!(warning.contains(&format!(
-        "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-        expected_controller_refresh_ref()
-    )));
-    assert!(warning.contains("require_exact_homeboy_version"));
-}
-
-#[test]
-fn matching_runner_version_has_no_compatible_drift_warning() {
-    let status =
-        status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
-
-    assert_eq!(
-        classify_runner_homeboy_version_drift(&status),
-        RunnerHomeboyVersionDrift::None
-    );
-    assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
-}
-
-#[test]
-fn same_minor_patch_drift_has_no_proceeding_warning_under_strict_mode() {
-    let status = status_with_runner_version("homeboy-lab", &same_minor_patch_drift_version(""));
-
-    // No "proceeding" warning is emitted under strict mode; the drift surfaces
-    // as the refusal error instead.
-    assert!(lab_runner_homeboy_compatible_drift_warning(&status, true).is_none());
-}
-
-#[test]
-fn minor_version_drift_is_incompatible_without_a_proceeding_warning() {
-    let controller = homeboy_product_identity::product_version();
-    let mut parts = controller.split('.');
-    let major = parts.next().unwrap_or("0");
-    let minor: u64 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    let drifted = format!("{major}.{}.0", minor.wrapping_add(1));
-    let status = status_with_runner_version("homeboy-lab", &drifted);
-
-    assert_eq!(
-        classify_runner_homeboy_version_drift(&status),
-        RunnerHomeboyVersionDrift::Incompatible
-    );
-    assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
 }
 
 #[test]
@@ -946,48 +866,6 @@ fn configured_runner_binary_drift_still_converges_to_the_controller() {
 }
 
 #[test]
-fn cook_metadata_reuses_the_doctor_recovery_action_for_controller_skew() {
-    let warning = RunnerStaleDaemonWarning::new(
-        "homeboy-lab",
-        "0.327.8".to_string(),
-        "0.327.8".to_string(),
-        Some("homeboy 0.327.8+d444688d3da8".to_string()),
-        Some("homeboy 0.327.8+d444688d3da8".to_string()),
-    )
-    .with_controller_compatibility(
-        "homeboy-lab",
-        "0.327.7".to_string(),
-        "homeboy 0.327.7+e089f864df13".to_string(),
-        true,
-        true,
-        false,
-    );
-    let doctor_action = warning
-        .recovery_actions
-        .first()
-        .cloned()
-        .expect("controller skew has a typed recovery action");
-    let mut status = status_with_runner_version("homeboy-lab", "0.327.8");
-    status.stale_daemon = Some(warning);
-
-    let metadata = lab_runner_homeboy_metadata(
-        "homeboy-lab",
-        "/srv/homeboy-current/target/release/homeboy",
-        &status,
-    );
-
-    assert_eq!(
-        doctor_action.render_command(),
-        "homeboy runner refresh-homeboy homeboy-lab --ref e089f864df13 --reconnect --allow-downgrade"
-    );
-    assert_eq!(
-        metadata["primary_remediation_command"],
-        serde_json::Value::Null
-    );
-    assert_eq!(metadata["refresh_commands"], serde_json::json!([]));
-}
-
-#[test]
 fn controller_recovery_command_uses_source_checkout_for_current_build_binary() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
@@ -1029,33 +907,6 @@ fn controller_recovery_command_uses_install_method_for_known_binary_locations() 
 }
 
 #[test]
-fn exact_version_match_has_no_drift() {
-    let status =
-        status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
-
-    assert_eq!(
-        classify_runner_homeboy_version_drift(&status),
-        RunnerHomeboyVersionDrift::None
-    );
-    assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
-}
-
-#[test]
-fn matching_full_build_identities_have_no_drift_under_strict_mode() {
-    let mut status = status_with_runner_version("homeboy-lab", "homeboy 0.0.0");
-    status
-        .session
-        .as_mut()
-        .expect("runner session")
-        .homeboy_build_identity = Some(homeboy_product_identity::build_identity().display);
-
-    assert_eq!(
-        classify_runner_homeboy_version_drift(&status),
-        RunnerHomeboyVersionDrift::None
-    );
-}
-
-#[test]
 fn direct_runner_admission_compares_daemon_with_configured_runner_identity() {
     let identity = "homeboy 0.295.0+b03d659866d1";
     let mut status = status_with_runner_version("homeboy-lab", "0.295.0");
@@ -1069,7 +920,7 @@ fn direct_runner_admission_compares_daemon_with_configured_runner_identity() {
         !lab_runner_homeboy_has_blocking_drift_against_configured_identity(
             &status,
             Some(identity),
-            true,
+            false,
         )
     );
 }
@@ -1094,28 +945,6 @@ fn direct_runner_admission_fails_closed_for_mismatched_or_unverifiable_configure
 }
 
 #[test]
-fn same_semver_with_different_build_identity_is_refused() {
-    let mut status =
-        status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
-    status
-        .session
-        .as_mut()
-        .expect("runner session")
-        .homeboy_build_identity = Some(format!(
-        "homeboy {}+different-build",
-        homeboy_product_identity::product_version()
-    ));
-
-    assert_eq!(
-        classify_runner_homeboy_version_drift(&status),
-        RunnerHomeboyVersionDrift::Incompatible
-    );
-    assert!(
-        lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
-    );
-}
-
-#[test]
 fn stale_daemon_build_identity_drift_always_blocks_even_on_compatible_version() {
     // Runner version matches the controller exactly, but the runner's active
     // daemon was started by a different build than its job command binary: that
@@ -1130,10 +959,6 @@ fn stale_daemon_build_identity_drift_always_blocks_even_on_compatible_version() 
         Some("homeboy 0.229.11+new".to_string()),
     ));
 
-    assert_eq!(
-        classify_runner_homeboy_version_drift(&status),
-        RunnerHomeboyVersionDrift::None
-    );
     assert!(
         lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
     );

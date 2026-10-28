@@ -605,27 +605,16 @@ Reports with the `probe_failed` verdict carry `severity: unknown` and a read-onl
 `homeboy runner doctor <runner-id> --scope lab-offload` recovery: replacing a
 binary is not the answer to "I could not look at it".
 
-### Controller identity and a dirty working tree
+### Lab contract compatibility
 
-Runner convergence is normally proven by comparing the controller's embedded
-build commit against the runner's configured job command binary. A controller
-built from a **dirty working tree** records the last commit, not the tree it was
-actually built from, so that commit names no reproducible build and can equal no
-runner's — which is "the comparison is unavailable", not "this runner is stale".
-Homeboy reports the two states separately:
+Lab admission requires equal `lab_contract_version` and capabilities covering the
+workload, not equal Homeboy builds. A legacy runner without a contract version
+is accepted only when its capabilities cover the workload. Contract mismatch
+reports `lab_contract_version_mismatch` with runner-refresh recovery.
 
-- The controller↔runner **version** check still applies in full. A runner whose
-  configured binary is a different Homeboy version is still refused, with
-  `stale_daemon.compatibility_reason = "controller_configured_version_skew"` and
-  a runner-side `homeboy runner refresh-homeboy` recovery.
-- The **exact-commit** check is skipped while the controller cannot name its own
-  build, so a dirty controller no longer marks every runner stale. The
-  runner-internal check (its live daemon against its own configured binary) is
-  untouched and still blocking.
-- `stale_daemon.compatibility_reason = "controller_identity_unverifiable"`
-  reports an unavailable comparison. It carries no recovery command, because the
-  remediation is to commit or stash the controller working tree and rerun
-  `homeboy runner status <runner-id>` — not to reinstall the controller.
+`require_exact_homeboy_version` opts into exact-build fencing. Independently,
+a daemon that differs from its own configured binary or is unreachable still
+blocks admission. Controller build drift alone does not make a daemon stale.
 
 ```json
 {

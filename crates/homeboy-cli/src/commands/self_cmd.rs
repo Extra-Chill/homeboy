@@ -77,6 +77,7 @@ struct SelfIdentityReport {
     active_binary: String,
     #[serde(flatten)]
     build_identity: build_identity::BuildIdentity,
+    lab_contract_version: u32,
     lab_handoff_capabilities: Vec<homeboy_lab_contract::LabCapabilityVersion>,
     daemon_recovery_capabilities: Vec<homeboy_lab_contract::LabCapabilityVersion>,
 }
@@ -96,6 +97,7 @@ pub(crate) fn identity_report() -> Value {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "unknown".to_string()),
         build_identity: build_identity::current(),
+        lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
         lab_handoff_capabilities: homeboy_lab_contract::required_lab_handoff_capabilities(),
         daemon_recovery_capabilities: homeboy_lab_contract::daemon_recovery_capabilities(),
     })
