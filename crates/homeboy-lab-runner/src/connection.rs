@@ -2676,7 +2676,7 @@ pub(crate) fn configured_runner_homeboy_handshake_evidence(
 
 pub(crate) fn daemon_lab_handoff_capabilities(
     local_url: &str,
-) -> std::result::Result<Vec<homeboy_lab_contract::LabCapabilityVersion>, String> {
+) -> std::result::Result<(Vec<homeboy_lab_contract::LabCapabilityVersion>, Option<u32>), String> {
     connection_daemon::daemon_http_lab_handoff_capabilities(local_url)
 }
 
@@ -3575,7 +3575,6 @@ fn stale_daemon_warning_until(
     };
     let current_version = current_identity.version.clone();
     let configured_job_binary_build_identity = current_identity.build_identity.clone();
-    let controller_identity = crate::controller_identity::compatibility_controller_identity();
     let daemon_body = session.local_url.as_deref().and_then(|local_url| {
         remaining_observation_budget(deadline)
             .and_then(|timeout| daemon_http_version_body_with_timeout(local_url, timeout).ok())
@@ -3612,16 +3611,7 @@ fn stale_daemon_warning_until(
         &stale_runtime_paths,
         &changed_runtime_paths,
     );
-    let ControllerCompatibility {
-        reference: controller_reference,
-        version_matches: controller_version_matches,
-        current: controller_matches_configured,
-    } = controller_compatibility(
-        &current_version,
-        current_identity.build_identity.as_deref(),
-        &controller_identity,
-    );
-    if daemon_matches_configured && controller_matches_configured {
+    if daemon_matches_configured {
         return Ok((None, configured_job_binary_build_identity));
     }
     Ok((
@@ -3637,14 +3627,6 @@ fn stale_daemon_warning_until(
                 &runner.id,
                 homeboy,
                 identity_comparison == IdentityComparison::Unverifiable,
-            )
-            .with_controller_compatibility(
-                &runner.id,
-                controller_identity.version,
-                controller_identity.display,
-                controller_version_matches,
-                daemon_matches_configured,
-                controller_reference == ControllerReference::Unverifiable,
             )
             .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths)
             .with_persisted_session_version(&runner.id, session.homeboy_version.clone()),
@@ -3729,87 +3711,6 @@ fn daemon_runtime_is_current(
         && identity_comparison == IdentityComparison::Match
         && stale_runtime_paths.is_empty()
         && changed_runtime_paths.is_empty()
-}
-
-/// Whether the controller's own build identity can serve as the reference a
-/// runner is compared against.
-///
-/// A controller built from a dirty working tree embeds the *last commit*, not
-/// the tree it was actually built from, so its commit names no reproducible
-/// build. Comparing any runner's commit against it can never match — not
-/// because the runner is behind, but because there is nothing well-defined to
-/// compare with. Rendering that as staleness marked every Lab runner
-/// permanently stale on any development controller (#11101).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ControllerReference {
-    /// The controller names a reproducible build. Commit comparison against it
-    /// is authoritative.
-    Comparable,
-    /// The controller cannot name the build it is running, so commit
-    /// comparison is *impossible* rather than *failed*.
-    Unverifiable,
-}
-
-impl ControllerReference {
-    fn for_identity(identity: &homeboy_product_identity::BuildIdentity) -> Self {
-        if identity.git_dirty == Some(true) {
-            Self::Unverifiable
-        } else {
-            Self::Comparable
-        }
-    }
-}
-
-/// The controller half of the stale-daemon verdict for one runner.
-struct ControllerCompatibility {
-    reference: ControllerReference,
-    version_matches: bool,
-    current: bool,
-}
-
-/// Judge a runner's configured job binary against `controller` — the identity
-/// from [`crate::controller_identity::compatibility_controller_identity`], which
-/// during `homeboy upgrade` is the installed controller rather than this
-/// pre-upgrade process (#15552).
-fn controller_compatibility(
-    configured_version: &str,
-    configured_build_identity: Option<&str>,
-    controller: &homeboy_product_identity::BuildIdentity,
-) -> ControllerCompatibility {
-    let reference = ControllerReference::for_identity(controller);
-    let version_matches = versions_match(configured_version, &controller.version);
-    let commit_comparison =
-        compare_build_commits(configured_build_identity, Some(&controller.display));
-    ControllerCompatibility {
-        reference,
-        version_matches,
-        current: controller_runtime_is_current(reference, version_matches, commit_comparison),
-    }
-}
-
-/// Controller↔runner convergence, the mirror of [`daemon_runtime_is_current`]
-/// for the other half of the comparison.
-///
-/// Version equality is enforced in **both** states: the crate version is
-/// compiled in and a dirty working tree does not make the controller misreport
-/// it. So a genuinely stale runner — one whose configured job command binary is
-/// a different Homeboy version — is still caught with a dirty controller, and
-/// the runner-internal daemon↔configured-binary check is untouched. Only the
-/// commit comparison is skipped when the controller cannot name its own build,
-/// because that comparison has no defined answer, not a negative one. Skipping
-/// it never widens the gate past version equality.
-fn controller_runtime_is_current(
-    controller_reference: ControllerReference,
-    controller_version_matches: bool,
-    controller_commit_comparison: IdentityComparison,
-) -> bool {
-    controller_version_matches
-        && match controller_reference {
-            ControllerReference::Comparable => {
-                controller_commit_comparison == IdentityComparison::Match
-            }
-            ControllerReference::Unverifiable => true,
-        }
 }
 
 fn unverifiable_configured_identity_message(homeboy: &str) -> String {

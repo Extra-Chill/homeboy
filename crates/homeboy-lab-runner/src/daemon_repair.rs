@@ -172,19 +172,6 @@ pub(crate) fn refresh_homeboy_action_for_ref(
     )
 }
 
-/// `homeboy runner refresh-homeboy <id> --ref <commit> --reconnect --allow-downgrade`.
-///
-/// Controller convergence can require moving the runner *back* to the
-/// controller's commit, which the ordinary refresh refuses.
-pub(crate) fn refresh_homeboy_downgrade_action(
-    runner_id: &str,
-    controller_commit: &str,
-) -> ExecutableAction {
-    let mut action = refresh_homeboy_action_for_ref(runner_id, Some(controller_commit));
-    action.args.push("--allow-downgrade".to_string());
-    action
-}
-
 /// `homeboy runner doctor <id> --scope lab-offload`.
 ///
 /// Read-only, and deliberately not a repair: it is what an operator (or an

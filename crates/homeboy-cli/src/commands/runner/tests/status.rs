@@ -1539,136 +1539,6 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
     assert_eq!(output.active_daemon_version.as_deref(), Some("0.262.0"));
 }
 
-/// A dirty controller alongside a genuinely version-skewed runner keeps the
-/// skew visible, but has no immutable target for a mutating refresh.
-#[test]
-fn compact_status_names_runner_version_skew_when_the_controller_is_dirty() {
-    let report = RunnerStatusReport {
-        runner_id: "homeboy-lab".to_string(),
-        connected: true,
-        state: runner::RunnerSessionState::Connected,
-        session: Some(RunnerSession {
-            runner_id: "homeboy-lab".to_string(),
-            mode: RunnerTunnelMode::DirectSsh,
-            role: runner::RunnerSessionRole::Controller,
-            server_id: Some("homeboy-lab".to_string()),
-            controller_id: None,
-            broker_url: None,
-            remote_daemon_address: Some("127.0.0.1:7357".to_string()),
-            local_port: Some(7357),
-            local_url: Some("http://127.0.0.1:7357".to_string()),
-            tunnel_pid: Some(123),
-            tunnel_process_start_identity: None,
-            proxy_forward: None,
-            remote_daemon_pid: Some(456),
-            remote_daemon_lease_id: Some("lease-456".to_string()),
-            homeboy_version: "0.321.0".to_string(),
-            homeboy_build_identity: Some("homeboy 0.321.0+daemon".to_string()),
-            connected_at: "2026-07-29T00:00:00Z".to_string(),
-            worker_identity: None,
-            worker_pid: None,
-            last_seen_at: None,
-            leaseless_recovery_evidence: None,
-            ..runner_session_fixture()
-        }),
-        stale_daemon: Some(
-            homeboy::runner::runners::RunnerStaleDaemonWarning::new(
-                "homeboy-lab",
-                "0.321.0".to_string(),
-                "0.321.1".to_string(),
-                Some("homeboy 0.321.0+daemon".to_string()),
-                Some("homeboy 0.321.1+configured".to_string()),
-            )
-            .with_controller_compatibility(
-                "homeboy-lab",
-                "0.321.1".to_string(),
-                "homeboy 0.321.1+configured-dirty".to_string(),
-                false,
-                true,
-                true,
-            ),
-        ),
-        configured_job_binary_build_identity: None,
-        daemon_freshness: Some(DaemonFreshnessReport {
-            fresh: true,
-            stale_reason_code: None,
-            restartable: true,
-            lease_id: Some("lease-456".to_string()),
-            pid: Some(456),
-            recovery_evidence: None,
-            ownership_evidence: None,
-            adoption_command: None,
-            binary_hash: None,
-            daemon_version: Some("0.321.0".to_string()),
-            daemon_build_identity: Some("homeboy 0.321.0+daemon".to_string()),
-            runtime_paths: None,
-            active_jobs: 0,
-            termination_evidence: None,
-            repair_plan: Vec::new(),
-        }),
-        active_jobs: Vec::new(),
-        active_runner_jobs: Vec::new(),
-        stale_runner_jobs: Vec::new(),
-        active_job_count: 0,
-        stale_runner_job_count: 0,
-        active_job_state: RunnerActiveJobState::Available,
-        active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
-        active_job_error: None,
-        active_job_recovery_evidence: None,
-        session_path: "/tmp/session.json".to_string(),
-    };
-
-    let summary = operator_summary(&report);
-    let admission = report.admission_summary(0);
-
-    assert!(summary
-        .risk
-        .iter()
-        .any(|risk| risk.contains("compatibility_skew")));
-    assert!(summary
-        .risk
-        .iter()
-        .any(|risk| risk.contains("controller_configured_version_skew")));
-    assert!(summary
-        .risk
-        .iter()
-        .any(|risk| risk.contains("homeboy 0.321.1+configured-dirty")));
-    // Exact ancestry is unavailable, so inspection preserves the skew evidence
-    // without recommending a potentially downgrading runner mutation.
-    assert!(summary
-        .next_action
-        .contains("homeboy runner status homeboy-lab"));
-    assert!(!summary.next_action.contains("refresh-homeboy"));
-    assert!(!summary.next_action.contains("upgrade --force"));
-    let warning = report.stale_daemon.as_ref().expect("stale daemon warning");
-    assert!(warning.safe_recovery_commands().is_empty());
-    assert_eq!(
-        warning.compatibility_reason,
-        Some("controller_configured_version_skew")
-    );
-    // The dirty tree is still reported — it is why the exact-commit proof is
-    // missing — but it is not the finding.
-    assert!(warning.message.contains("dirty"));
-    assert!(warning.message.contains("different Homeboy version"));
-    assert!(
-        report.connected,
-        "liveness remains independently observable"
-    );
-    assert!(report.daemon_freshness.expect("live daemon").fresh);
-    assert!(
-        admission.daemon_fresh,
-        "daemon lease evidence remains fresh"
-    );
-    assert!(
-        !admission.daemon_compatible,
-        "compatibility skew is reported separately"
-    );
-    assert!(
-        !admission.accepting_jobs,
-        "a live daemon is not necessarily compatible"
-    );
-}
-
 #[test]
 fn runner_status_actions_preserve_runner_ids_for_every_admission_state() {
     let cases = [
@@ -1676,7 +1546,6 @@ fn runner_status_actions_preserve_runner_ids_for_every_admission_state() {
         ("stale", stale_report(), None),
         ("active-job", active_job_report(), None),
         ("connected", connected_report(), None),
-        ("version-skew", version_skew_report(), None),
     ];
 
     for (state, report, pinned_ref) in cases {
@@ -2003,21 +1872,6 @@ fn stale_report() -> RunnerStatusReport {
         None,
         Some("homeboy 0.327.8+c8a6673b6abc-dirty".to_string()),
     ));
-    report
-}
-
-fn version_skew_report() -> RunnerStatusReport {
-    let mut report = stale_report();
-    report.stale_daemon = report.stale_daemon.map(|warning| {
-        warning.with_controller_compatibility(
-            "homeboy lab",
-            "0.327.9".to_string(),
-            "homeboy 0.327.9+abcdef123456".to_string(),
-            false,
-            true,
-            false,
-        )
-    });
     report
 }
 

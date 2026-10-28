@@ -2545,6 +2545,7 @@ where
             body: json!({
                 "version": VERSION,
                 "build_identity": build_identity::current(),
+                "lab_contract_version": homeboy_lab_contract::LAB_CONTRACT_VERSION,
                 "lab_handoff_capabilities": homeboy_lab_contract::required_lab_handoff_capabilities(),
                 "runtime_paths": daemon_runtime_paths_body(),
                 "lease": heartbeat_lease().ok(),
@@ -3722,6 +3723,7 @@ fn describe_runner(job_store: &JobStore) -> Result<serde_json::Value> {
         "schema": homeboy_runner_contract::RUNNER_SERVICE_OBSERVATION_SCHEMA,
         "lease_id": lease.lease_id,
         "build_identity": build_identity::current(),
+        "lab_contract_version": homeboy_lab_contract::LAB_CONTRACT_VERSION,
         "lab_handoff_capabilities": homeboy_lab_contract::required_lab_handoff_capabilities(),
         "freshness": freshness,
         "active_runner_job_count": active.len(),

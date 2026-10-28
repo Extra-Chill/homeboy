@@ -799,8 +799,6 @@ impl RunnerStatusReport {
     /// configured job binary for admission.
     pub fn daemon_compatible_for_admission(&self) -> bool {
         self.admission_blocking_stale_daemon().is_none()
-            && (self.stale_daemon.is_some()
-                || !crate::lab::offload::metadata::session_reported_version_blocks_admission(self))
     }
 
     /// The admission freshness fence shared by placement and dispatch.
@@ -1028,13 +1026,6 @@ impl RunnerStatusReport {
             if let Some(action) = warning.safe_recovery_actions().into_iter().next() {
                 return Some(action);
             }
-        }
-        if self.stale_daemon.is_none()
-            && crate::lab::offload::metadata::session_reported_version_blocks_admission(self)
-        {
-            return Some(crate::daemon_repair::refresh_homeboy_action(
-                &self.runner_id,
-            ));
         }
         if let Some(warning) = &self.stale_daemon {
             warning.safe_recovery_actions().into_iter().next()
@@ -1411,7 +1402,7 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn reported_runner_version_skew_blocks_cook_admission_with_refresh() {
+    fn reported_build_drift_does_not_block_cook_admission() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
         report.daemon_freshness = Some(fresh_daemon_freshness());
@@ -1419,19 +1410,9 @@ mod status_serialization_tests {
 
         let summary = report.admission_summary(0);
 
-        assert!(
-            !summary.daemon_compatible,
-            "controller/runner minor skew must fence admission"
-        );
-        assert!(
-            !summary.accepting_jobs,
-            "cooks must not dispatch onto a skewed runner"
-        );
-        let action = summary.next_action.expect("typed refresh blocker");
-        assert!(
-            action.contains("runner refresh-homeboy homeboy-lab"),
-            "{action}"
-        );
+        assert!(summary.daemon_compatible);
+        assert!(summary.accepting_jobs);
+        assert!(summary.next_action.is_none());
     }
 
     #[test]
@@ -1528,37 +1509,6 @@ mod status_serialization_tests {
             "missing proof offers inspection, not mutation"
         );
         assert!(!summary.safe_to_rotate, "missing daemon evidence is unsafe");
-    }
-
-    #[test]
-    fn admission_summary_separates_fresh_daemon_from_controller_configured_skew() {
-        let mut report = base_report();
-        report.active_job_state = RunnerActiveJobState::Available;
-        report.daemon_freshness = Some(fresh_daemon_freshness());
-        report.stale_daemon = Some(
-            RunnerStaleDaemonWarning::new(
-                "homeboy-lab",
-                "0.339.0".to_string(),
-                "0.339.0".to_string(),
-                Some("homeboy 0.339.0+daemon".to_string()),
-                Some("homeboy 0.339.0+configured".to_string()),
-            )
-            .with_controller_compatibility(
-                "homeboy-lab",
-                "0.338.0".to_string(),
-                "homeboy 0.338.0+controller".to_string(),
-                false,
-                true,
-                false,
-            ),
-        );
-
-        let summary = report.admission_summary(0);
-
-        assert!(summary.daemon_fresh);
-        assert!(!summary.daemon_compatible);
-        assert!(!summary.accepting_jobs);
-        assert_eq!(summary.next_action, None);
     }
 
     #[test]
@@ -2745,102 +2695,6 @@ impl RunnerStaleDaemonWarning {
         self.recovery_commands = rendered_commands(&actions);
         self.refresh_command = self.recovery_commands.join(" && ");
         self.recovery_actions = actions;
-    }
-
-    /// Fold the controller↔runner comparison into this warning.
-    ///
-    /// `controller_identity_unverifiable` means the controller cannot name the
-    /// build it is running — today, a dirty working tree. That is a *different
-    /// state* from a skewed runner and must never be rendered as one: it says
-    /// nothing about the runner, is true of every runner simultaneously, and
-    /// has no runner-side remediation (#11101).
-    pub fn with_controller_compatibility(
-        mut self,
-        runner_id: &str,
-        controller_version: String,
-        controller_build_identity: String,
-        controller_version_matches: bool,
-        daemon_matches_configured: bool,
-        controller_identity_unverifiable: bool,
-    ) -> Self {
-        self.controller_homeboy_version = Some(controller_version.clone());
-        self.controller_homeboy_build_identity = Some(controller_build_identity.clone());
-        if !daemon_matches_configured {
-            // The runner's live daemon disagrees with its own configured
-            // binary. That is a runner-side fact with a runner-side recovery,
-            // already established by `new`; controller-side advice must not
-            // overwrite it — least of all with a controller upgrade, which
-            // would not converge the daemon at all.
-            return self;
-        }
-        let configured_binary = self
-            .job_command_binary_build_identity
-            .clone()
-            .unwrap_or_else(|| self.job_command_binary_version.clone());
-        if controller_identity_unverifiable {
-            if controller_version_matches {
-                // Nothing about the runner is known to be wrong: the versions
-                // agree and only the exact-commit proof is unavailable.
-                //
-                // `stale_daemon_warning` does not construct a warning at all in
-                // this state — it is the case that used to fail every runner
-                // closed. This branch exists so that any other caller renders
-                // "cannot compare" honestly instead of inheriting a staleness
-                // message and a mutating recovery.
-                self.compatibility_reason = Some("controller_identity_unverifiable");
-                self.mismatch_predicate =
-                    "controller_build_commit == unverifiable(controller_git_dirty)";
-                self.message = format!(
-                    "controller `{controller_build_identity}` was built from a dirty working tree, so its recorded commit does not name the build that is running and cannot be compared against runner `{runner_id}`'s configured job command binary `{configured_binary}`; the comparison is unavailable, not failed — the versions agree and no runner drift is known. Commit or stash the controller working tree, then rerun `homeboy runner status {runner_id}` to restore the exact-commit proof."
-                );
-                // "Your working tree is dirty" has no safe automated fix: every
-                // candidate command either discards the operator's work or
-                // replaces the binary under test. Report no recovery command
-                // rather than a confidently wrong one.
-                self.set_recovery(Vec::new());
-            } else {
-                // The version difference is conclusive on its own, so a runner
-                // that really is behind is still caught here — the unavailable
-                // commit proof only removes the *stronger* check.
-                self.compatibility_reason = Some("controller_configured_version_skew");
-                self.mismatch_predicate = "controller_version != job_command_binary_version";
-                self.message = format!(
-                    "connected runner configured job command binary `{configured_binary}` is a different Homeboy version from controller `{controller_build_identity}`; the controller working tree is dirty so the exact-commit proof is unavailable, but the version difference is conclusive by itself and blocks admission until the runner converges"
-                );
-            }
-            return self;
-        }
-        self.compatibility_reason = Some(if controller_version_matches {
-            "controller_configured_identity_skew"
-        } else {
-            "controller_configured_version_skew"
-        });
-        self.mismatch_predicate = if controller_version_matches {
-            "controller_build_commit != job_command_binary_build_commit"
-        } else {
-            "controller_version != job_command_binary_version"
-        };
-        self.message = format!(
-            "connected runner configured job command binary `{configured_binary}` is incompatible with controller `{controller_build_identity}`; the daemon matches the configured binary, but controller compatibility requires convergence before admission"
-        );
-        if let Some(controller_commit) =
-            homeboy_upgrade::upgrade::parse_build_identity_display(&controller_build_identity)
-                .filter(|identity| identity.git_dirty != Some(true))
-                .and_then(|identity| identity.git_commit)
-        {
-            self.set_recovery(vec![if controller_version_matches {
-                crate::daemon_repair::refresh_homeboy_downgrade_action(
-                    runner_id,
-                    &controller_commit,
-                )
-            } else {
-                crate::daemon_repair::refresh_homeboy_action_for_ref(
-                    runner_id,
-                    Some(&controller_commit),
-                )
-            }]);
-        }
-        self
     }
 
     pub fn with_identity_unverifiable(

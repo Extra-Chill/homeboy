@@ -1060,8 +1060,7 @@ fn lab_runner_admission_candidate(
     // it unverified (not stale); `admission_fresh` still fences all work until
     // the lease is published and matched.
     let unverified_daemon = !lease_verdict.lease_published;
-    let version_blocked = status.stale_daemon.is_none()
-        && lab::offload::metadata::session_reported_version_blocks_admission(status);
+
     let admission_warning = status.admission_blocking_stale_daemon().filter(|_| {
         lab::offload::metadata::lab_runner_homeboy_has_blocking_status_drift(status, exact_version)
     });
@@ -1069,20 +1068,16 @@ fn lab_runner_admission_candidate(
         id: runner_id.to_string(),
         connected: status.connected,
         capacity,
-        stale_daemon: admission_warning.is_some() || version_blocked,
+        stale_daemon: admission_warning.is_some(),
         unverified_daemon,
         admission_fresh: lab::offload::metadata::lab_runner_daemon_fresh_for_admission(
             status,
             exact_version,
-        ) && !version_blocked,
+        ),
         admission_failure_reason: admission_warning
-            .map(|warning| warning.mismatch_predicate.to_string())
-            .or_else(|| {
-                version_blocked.then(|| "controller_version != runner_homeboy_version".to_string())
-            }),
+            .map(|warning| warning.mismatch_predicate.to_string()),
         admission_remediation: admission_warning
             .and_then(|_| status.admission_action())
-            .or_else(|| version_blocked.then(|| status.admission_action()).flatten())
             .map(|action| action.render_command()),
         active_jobs: status.active_job_count.max(status.active_jobs.len()),
         active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
@@ -2086,24 +2081,6 @@ mod tests {
     }
 
     fn skewed_runner_status(version: String) -> RunnerStatusReport {
-        let controller_version = homeboy_product_identity::product_version();
-        let controller_build_identity = format!("homeboy {controller_version}+0123456789ab");
-        let runner_build_identity = format!("homeboy {version}+0123456789ab");
-        let warning = RunnerStaleDaemonWarning::new(
-            "homeboy-lab",
-            version.clone(),
-            version.clone(),
-            Some(runner_build_identity.clone()),
-            Some(runner_build_identity),
-        )
-        .with_controller_compatibility(
-            "homeboy-lab",
-            controller_version.to_string(),
-            controller_build_identity,
-            false,
-            true,
-            false,
-        );
         RunnerStatusReport {
             runner_id: "homeboy-lab".to_string(),
             connected: true,
@@ -2131,14 +2108,12 @@ mod tests {
                 last_seen_at: Some("2026-08-24T00:00:01Z".to_string()),
                 leaseless_recovery_evidence: None,
             }),
-            stale_daemon: Some(warning),
+            stale_daemon: None,
             configured_job_binary_build_identity: None,
             daemon_freshness: Some(homeboy_core::daemon::DaemonFreshnessReport {
-                fresh: false,
-                stale_reason_code: Some(
-                    homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch,
-                ),
-                restartable: true,
+                fresh: true,
+                stale_reason_code: None,
+                restartable: false,
                 lease_id: Some("lease".to_string()),
                 pid: Some(42),
                 recovery_evidence: None,
@@ -2217,41 +2192,6 @@ mod tests {
 
         assert_eq!(readiness.state, LabRunnerReadinessState::Stale);
         assert!(readiness.selected_runner_id.is_none());
-        assert!(readiness
-            .reasons
-            .iter()
-            .any(|reason| reason == "controller_version != job_command_binary_version"));
-    }
-
-    #[test]
-    fn current_release_refresh_names_incompatible_skew_predicate_and_command() {
-        let controller = homeboy_product_identity::product_version();
-        let mut parts = controller.split('.');
-        let major = parts.next().expect("major");
-        let minor = parts
-            .next()
-            .and_then(|part| part.parse::<u64>().ok())
-            .expect("minor");
-        let mut status = skewed_runner_status(format!("{major}.{}.0", minor.wrapping_add(1)));
-        let freshness = status.daemon_freshness.as_mut().expect("fixture freshness");
-        freshness.fresh = true;
-        freshness.stale_reason_code = None;
-        let candidate =
-            lab_runner_admission_candidate("homeboy-lab", Some(1), &status, true, false);
-        let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
-
-        assert_eq!(readiness.state, LabRunnerReadinessState::Stale);
-        assert_eq!(
-            readiness.reasons,
-            [
-                "stale_daemon",
-                "controller_version != job_command_binary_version"
-            ]
-        );
-        assert_eq!(
-            readiness.remediation_commands,
-            ["homeboy runner refresh-homeboy homeboy-lab --ref 0123456789ab --reconnect"]
-        );
     }
 
     #[test]

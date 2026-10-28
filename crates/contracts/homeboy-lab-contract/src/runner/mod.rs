@@ -36,6 +36,9 @@ use homeboy_runner_contract::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Bump only on a breaking controller↔runner wire change.
+pub const LAB_CONTRACT_VERSION: u32 = 1;
+
 /// Options controlling how a runner workspace is synced before a job runs.
 #[derive(Debug, Clone, Default)]
 pub struct RunnerWorkspaceSyncOptions {
@@ -205,12 +208,13 @@ pub fn daemon_recovery_capability_advertised(
     })
 }
 
-/// Immutable runtime provenance supplied by a controller, runner command, or
-/// active daemon. Dirty or incomplete provenance is never eligible for a
-/// compatibility admission.
+/// Runtime provenance and wire contract advertised by a Lab participant.
+/// Build provenance is informational unless exact-build policy is requested.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LabRuntimeIdentity {
     pub build_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab_contract_version: Option<u32>,
     pub source_revision: String,
     pub clean: bool,
 }
@@ -256,49 +260,57 @@ pub struct LabCapabilityNegotiationProvenance {
     pub rejection_reason: Option<String>,
 }
 
+/// Typed reason for refusing a Lab handoff.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LabAdmissionRejection {
+    LabContractVersionMismatch,
+    CapabilityIncompatible,
+    ExactBuildMismatch,
+}
+
 /// Result of a fail-closed Lab capability admission decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LabCapabilityAdmission {
     pub compatible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection_code: Option<LabAdmissionRejection>,
     pub provenance: LabCapabilityNegotiationProvenance,
 }
 
-/// Evaluate a controller-to-Lab handoff using only explicit compatibility and
-/// provenance evidence. A newer source revision is accepted only when its
-/// ancestry has already been verified and both the executing command and active
-/// daemon advertise every required capability version.
+/// Evaluate a controller-to-Lab handoff using contract and capability evidence.
+/// Missing contract versions are accepted only when capabilities cover the workload.
 pub fn negotiate_lab_capability_handshake(
     handshake: &LabCapabilityHandshake,
 ) -> LabCapabilityAdmission {
-    let mut rejection_reason = runtime_identity_reason("controller", &handshake.controller)
-        .or_else(|| runtime_identity_reason("runner command", &handshake.runner_command))
-        .or_else(|| runtime_identity_reason("active daemon", &handshake.daemon));
+    admit_lab_runner(handshake, false)
+}
+
+/// Admit a runner by contract and capabilities, with optional exact-build fencing.
+pub fn admit_lab_runner(
+    handshake: &LabCapabilityHandshake,
+    require_exact: bool,
+) -> LabCapabilityAdmission {
+    let controller_version = handshake
+        .controller
+        .lab_contract_version
+        .unwrap_or(LAB_CONTRACT_VERSION);
+    let mut rejection_code = None;
+    let mut rejection_reason = [&handshake.runner_command, &handshake.daemon]
+        .into_iter()
+        .find_map(|runtime| {
+            let version = runtime.lab_contract_version.unwrap_or(LAB_CONTRACT_VERSION);
+            (version != controller_version).then(|| {
+                rejection_code = Some(LabAdmissionRejection::LabContractVersionMismatch);
+                format!("lab_contract_version_mismatch: controller Lab contract version {controller_version}, runner Lab contract version {version}; refresh the runner with `homeboy runner refresh-homeboy <runner-id> --reconnect`, then retry")
+            })
+        });
 
     if rejection_reason.is_none()
-        && handshake.runner_command.source_revision != handshake.daemon.source_revision
+        && handshake.runner_command.build_identity != handshake.daemon.build_identity
     {
         rejection_reason =
-            Some("runner command and active daemon source revisions differ".to_string());
-    }
-
-    if rejection_reason.is_none()
-        && !matches!(
-            handshake.ancestry,
-            LabRuntimeAncestry::ExactSource | LabRuntimeAncestry::VerifiedNewerDescendant
-        )
-    {
-        rejection_reason = Some(format!(
-            "runner provenance is not an exact source or verified newer descendant ({:?})",
-            handshake.ancestry
-        ));
-    }
-
-    if rejection_reason.is_none()
-        && handshake.ancestry == LabRuntimeAncestry::ExactSource
-        && handshake.controller.source_revision != handshake.runner_command.source_revision
-    {
-        rejection_reason =
-            Some("exact-source ancestry does not match the controller source revision".to_string());
+            Some("runner command and active daemon build identities differ".to_string());
     }
 
     let required = capability_versions(&handshake.required_capabilities);
@@ -353,9 +365,19 @@ pub fn negotiate_lab_capability_handshake(
         }
     }
 
+    if rejection_reason.is_none()
+        && require_exact
+        && handshake.controller.build_identity != handshake.runner_command.build_identity
+    {
+        rejection_code = Some(LabAdmissionRejection::ExactBuildMismatch);
+        rejection_reason =
+            Some("exact_build_mismatch: require_exact requires the controller build".to_string());
+    }
     let compatible = rejection_reason.is_none();
     LabCapabilityAdmission {
         compatible,
+        rejection_code: rejection_code
+            .or_else(|| (!compatible).then_some(LabAdmissionRejection::CapabilityIncompatible)),
         provenance: LabCapabilityNegotiationProvenance {
             schema: "homeboy/lab-capability-negotiation/v1".to_string(),
             controller_requirement: handshake.controller.clone(),
@@ -367,16 +389,6 @@ pub fn negotiate_lab_capability_handshake(
             rejection_reason,
         },
     }
-}
-
-fn runtime_identity_reason(role: &str, identity: &LabRuntimeIdentity) -> Option<String> {
-    if !identity.clean {
-        return Some(format!("{role} runtime provenance is dirty"));
-    }
-    if identity.build_identity.trim().is_empty() || identity.source_revision.trim().is_empty() {
-        return Some(format!("{role} runtime provenance is incomplete"));
-    }
-    None
 }
 
 fn capability_versions(capabilities: &[LabCapabilityVersion]) -> BTreeMap<String, u32> {
@@ -417,6 +429,7 @@ mod capability_handshake_tests {
     fn identity(build: &str, source: &str) -> LabRuntimeIdentity {
         LabRuntimeIdentity {
             build_identity: build.to_string(),
+            lab_contract_version: Some(LAB_CONTRACT_VERSION),
             source_revision: source.to_string(),
             clean: true,
         }
@@ -429,9 +442,97 @@ mod capability_handshake_tests {
             required_capabilities: capabilities.clone(),
             runner_command: identity("homeboy 1.0.1+runner", "b"),
             runner_command_capabilities: capabilities.clone(),
-            daemon: identity("homeboy 1.0.1+daemon", "b"),
+            daemon: identity("homeboy 1.0.1+runner", "b"),
             daemon_capabilities: capabilities,
             ancestry,
+        }
+    }
+
+    #[test]
+    fn admission_is_contract_based() {
+        for (name, same_build, version, missing_capability, require_exact, reason) in [
+            (
+                "same build",
+                true,
+                Some(LAB_CONTRACT_VERSION),
+                false,
+                false,
+                None,
+            ),
+            (
+                "different build",
+                false,
+                Some(LAB_CONTRACT_VERSION),
+                false,
+                false,
+                None,
+            ),
+            (
+                "different contract",
+                false,
+                Some(LAB_CONTRACT_VERSION + 1),
+                false,
+                false,
+                Some("lab_contract_version_mismatch:"),
+            ),
+            (
+                "missing capability",
+                false,
+                Some(LAB_CONTRACT_VERSION),
+                true,
+                false,
+                Some("required capability"),
+            ),
+            (
+                "exact opt-in",
+                false,
+                Some(LAB_CONTRACT_VERSION),
+                false,
+                true,
+                Some("exact_build_mismatch:"),
+            ),
+            ("legacy covered", false, None, false, false, None),
+            (
+                "legacy uncovered",
+                false,
+                None,
+                true,
+                false,
+                Some("required capability"),
+            ),
+        ] {
+            let mut handshake = handshake(LabRuntimeAncestry::Unknown);
+            if same_build {
+                handshake.runner_command = handshake.controller.clone();
+            }
+            handshake.runner_command.lab_contract_version = version;
+            handshake.daemon = handshake.runner_command.clone();
+            if missing_capability {
+                handshake.daemon_capabilities.pop();
+            }
+            let admission = admit_lab_runner(&handshake, require_exact);
+            assert_eq!(admission.compatible, reason.is_none(), "{name}");
+            if let Some(reason) = reason {
+                assert_eq!(
+                    admission.rejection_code,
+                    Some(match reason {
+                        "lab_contract_version_mismatch:" =>
+                            LabAdmissionRejection::LabContractVersionMismatch,
+                        "exact_build_mismatch:" => LabAdmissionRejection::ExactBuildMismatch,
+                        _ => LabAdmissionRejection::CapabilityIncompatible,
+                    }),
+                    "{name}"
+                );
+                assert!(
+                    admission
+                        .provenance
+                        .rejection_reason
+                        .as_deref()
+                        .unwrap()
+                        .starts_with(reason),
+                    "{name}"
+                );
+            }
         }
     }
 
@@ -449,30 +550,6 @@ mod capability_handshake_tests {
     }
 
     #[test]
-    fn rejects_controller_n_plus_one_with_older_runner() {
-        let admission = negotiate_lab_capability_handshake(&handshake(LabRuntimeAncestry::Older));
-        assert!(!admission.compatible);
-    }
-
-    #[test]
-    fn admits_cross_platform_same_source_builds() {
-        let mut handshake = handshake(LabRuntimeAncestry::ExactSource);
-        handshake.runner_command = identity("homeboy 1.0.0+linux", "a");
-        handshake.daemon = identity("homeboy 1.0.0+macos", "a");
-        assert!(negotiate_lab_capability_handshake(&handshake).compatible);
-    }
-
-    #[test]
-    fn rejects_diverged_unknown_and_dirty_provenance() {
-        for ancestry in [LabRuntimeAncestry::Diverged, LabRuntimeAncestry::Unknown] {
-            assert!(!negotiate_lab_capability_handshake(&handshake(ancestry)).compatible);
-        }
-        let mut dirty = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
-        dirty.daemon.clean = false;
-        assert!(!negotiate_lab_capability_handshake(&dirty).compatible);
-    }
-
-    #[test]
     fn rejects_capability_removal_schema_incompatibility_and_command_daemon_divergence() {
         let mut removed = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
         removed.daemon_capabilities.pop();
@@ -483,7 +560,7 @@ mod capability_handshake_tests {
         assert!(!negotiate_lab_capability_handshake(&incompatible).compatible);
 
         let mut divergent = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
-        divergent.daemon.source_revision = "c".to_string();
+        divergent.daemon.build_identity = "different".to_string();
         assert!(!negotiate_lab_capability_handshake(&divergent).compatible);
     }
 
