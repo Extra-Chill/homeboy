@@ -159,6 +159,64 @@ With `--from-run <baseline-run-id> --to-run <candidate-run-id>`, `runs compare` 
 - `--kind bench` compares the numeric metrics recorded in two benchmark runs. It refuses runs with a different shared benchmark context (settings, scenarios, workloads, iterations, runs, concurrency) and reports both run IDs, component state, the shared context, metric deltas (every metric either run recorded, or those selected with `--metric`), missing metrics, and a Markdown table under `reports.markdown`.
 - `--kind fuzz` compares the persisted fuzz result envelope artifacts of two runs. It resolves `fuzz_result_envelope` artifacts from the observation store, folds in related persisted fuzz hotspot/observation artifacts for hotspot analysis, and returns the same `homeboy/fuzz-compare/v1` payload as `homeboy fuzz compare` without requiring local file paths. `--hotspot-policy` sets whether hotspot regressions block.
 
+### Version regression checks
+
+```bash
+homeboy runs hotspots --kind agent-task --baseline-version previous --candidate-version current
+```
+
+Phase cohorts include `comparison.verdict` (`regressed`, `clean`, or
+`insufficient_samples`) and `regressions[]` with metric names, both values and
+sample counts. Only `regressed` gives a non-zero comparison exit. A phase p50
+or p95 must increase by both 25% and 5000 ms, with 10 samples per side.
+Reliability needs 20 missions per side and flags a Homeboy infrastructure
+or unclassified failure-rate increase of 5 percentage points. Any eligible metric can establish a clean comparison;
+undersampled metrics are not evidence of regression. No eligible metric means
+`insufficient_samples`.
+
+Override policy with `--phase-regression-relative` (fraction),
+`--phase-regression-floor-ms`, `--min-phase-samples`, `--failure-rate-increase`
+(fraction), and `--min-missions`.
+`current` is the running product version. `previous` chooses the highest semantic
+version below the candidate with enough phase samples or missions for the selected kind
+and component; non-semantic versions fall back to most recently observed.
+Selection and comparison share the recent `--last` window (default 100, maximum
+1000). If no baseline qualifies, the verdict is `insufficient_samples`.
+The query is read-only and skips malformed rows with a status log.
+
+For a quiet daily check, save this as `regression-check.json`, replace the
+transport and route with an installed transport's destination, then register
+it with `homeboy workflow run regression-check.json`:
+
+```json
+{
+  "schema": "homeboy/workflow/v1",
+  "id": "homeboy.regression-check",
+  "every": { "interval": "24h", "overlap": "skip" },
+  "steps": [
+    {
+      "id": "compare",
+      "homeboy": [
+        "runs", "hotspots", "--kind", "agent-task",
+        "--baseline-version", "previous", "--candidate-version", "current",
+        "--notify-regressions",
+        "--notification-transport", "installed.transport",
+        "--notification-route", "destination"
+      ]
+    }
+  ]
+}
+```
+
+A `homeboy` step's exit status settles its outcome; a regression fails the
+step and workflow. Generic workflow completion does not itself send a
+notification. `--notify-regressions` opts this command into the existing
+notification transport/outbox, only on `regressed`. A persistent atomic claim
+outside the observation store deduplicates resolved (baseline, candidate)
+pairs across cadence slots and restarts. Clean and undersampled checks stay
+silent. A queued delivery owns retries; dropped delivery releases the claim.
+Without this flag the comparison writes no notification state.
+
 `homeboy runs hotspots --coverage <run-id>...` reads durable `run.phase_spans`
 events and reports wall time (`wall_ms`), union-covered time (`covered_ms`),
 `covered_percentage`, and the largest unattributed `gaps`, with preceding and

@@ -1,9 +1,19 @@
+mod notification;
+#[cfg(test)]
+mod notification_tests;
 mod phase_spans;
 mod reliability;
+mod verdict;
+#[cfg(test)]
+mod verdict_tests;
+pub use notification::notify_regression;
 pub use phase_spans::{
     phase_hotspots, PhaseHotspot, PhaseHotspotQuery, PhaseHotspots, PhasePercentiles,
 };
 pub use reliability::{FailingPhase, Reliability, ReliabilityComparison, VersionReliability};
+pub use verdict::{
+    compare_phase_hotspots, Regression, RegressionComparison, RegressionThresholds, Verdict,
+};
 
 use std::collections::{BTreeMap, HashMap};
 

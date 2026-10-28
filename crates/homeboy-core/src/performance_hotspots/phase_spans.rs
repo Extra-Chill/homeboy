@@ -48,6 +48,8 @@ pub struct PhaseHotspots {
     pub runs_without_spans: usize,
     pub phases: Vec<PhaseHotspot>,
     pub reliability: super::Reliability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<super::RegressionComparison>,
 }
 
 #[derive(Default)]
@@ -77,6 +79,13 @@ fn percentiles(mut values: Vec<f64>) -> Option<PhasePercentiles> {
 /// `require_run` (which can hydrate remote evidence). Kind/component filtering
 /// is pushed into the store; version selection uses each span's recorder.
 pub fn phase_hotspots(
+    store: &ObservationStore,
+    query: &PhaseHotspotQuery,
+) -> Result<PhaseHotspots> {
+    super::compare_phase_hotspots(store, query, &super::RegressionThresholds::default())
+}
+
+pub(super) fn phase_hotspots_raw(
     store: &ObservationStore,
     query: &PhaseHotspotQuery,
 ) -> Result<PhaseHotspots> {
@@ -114,15 +123,29 @@ pub fn phase_hotspots(
                 continue;
             }
             if chrono::DateTime::parse_from_rfc3339(&span.started_at).is_err() {
+                crate::log_status!(
+                    "runs",
+                    "skipping malformed phase timestamp for {}: {}",
+                    run.id,
+                    span.id
+                );
                 continue;
             }
             has_spans = true;
-            let group = groups.entry(span.id).or_default();
+            let group = groups.entry(span.id.clone()).or_default();
             if span.status == PhaseStatus::Skipped {
                 group.skipped += 1;
                 continue;
             }
             let Some(ms) = span.duration_ms.filter(|ms| ms.is_finite() && *ms >= 0.0) else {
+                if span.duration_ms.is_some() {
+                    crate::log_status!(
+                        "runs",
+                        "skipping invalid phase duration for {}: {}",
+                        run.id,
+                        span.id
+                    );
+                }
                 continue;
             };
             group.all.push(ms);
@@ -178,6 +201,7 @@ pub fn phase_hotspots(
         runs_with_spans,
         phases,
         reliability,
+        comparison: None,
     })
 }
 
