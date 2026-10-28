@@ -1324,9 +1324,9 @@ trait GenerationEndpointOperations {
         None
     }
     /// The endpoint's own record for one job it owns, used to release ledger
-    /// ownership for work that already finished. Unlike [`Self::evidence`], this
-    /// is readable while the generation still reports active jobs, because a
-    /// stale owner is exactly why that count has not reached zero.
+    /// ownership for work that already finished. It is read while the
+    /// generation still reports active jobs, because a stale owner is exactly
+    /// why that count has not reached zero.
     fn job_record(&self, _session: &RunnerSession, _job_id: &str) -> Option<serde_json::Value> {
         None
     }
@@ -1461,9 +1461,6 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
     }
 
     fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
-        if self.active_jobs(session) != Some(0) {
-            return None;
-        }
         self.client
             .get(format!(
                 "{}{path}",
@@ -1667,9 +1664,6 @@ impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
     }
 
     fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
-        if self.active_jobs(session) != Some(0) {
-            return None;
-        }
         serde_json::from_str(&self.request("GET", session, path, None)?).ok()
     }
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
@@ -3605,6 +3599,41 @@ mod tests {
         assert!(
             queued_generation_jobs(&serde_json::json!({"data":{"body":{}}}), &endpoint).is_none()
         );
+    }
+
+    #[test]
+    fn evidence_is_read_from_an_endpoint_that_is_running_other_jobs() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let mut bytes = [0; 4096];
+            let count = stream.read(&mut bytes).expect("read request");
+            let request = String::from_utf8_lossy(&bytes[..count]);
+            assert!(
+                request.starts_with("GET /runs/terminal-run/artifacts "),
+                "{request}"
+            );
+            let body = serde_json::json!({"data":{"body":{"artifacts":[]}}}).to_string();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).expect("response");
+        });
+        // A busy admitting daemon still serves a terminal run's inventory.
+        let mut endpoint = session("lease-busy", "daemon-busy", Some(101));
+        endpoint.local_url = Some(format!("http://{address}"));
+        let operations = HttpGenerationEndpointOperations {
+            client: reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("client"),
+        };
+        assert_eq!(
+            operations.evidence(&endpoint, "/runs/terminal-run/artifacts"),
+            Some(serde_json::json!({"data":{"body":{"artifacts":[]}}}))
+        );
+        server.join().expect("fixture server");
     }
 
     #[test]
