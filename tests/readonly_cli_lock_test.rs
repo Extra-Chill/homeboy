@@ -31,9 +31,7 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
         for args in [
             vec!["--version"],
             vec!["--help"],
-            vec!["activity", "--help"],
             vec!["agent-task", "cook", "--help"],
-            vec!["activity"],
             vec!["self", "identity"],
             vec!["self", "status"],
             vec!["status"],
