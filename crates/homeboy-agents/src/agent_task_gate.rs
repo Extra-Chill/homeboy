@@ -559,6 +559,12 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
             candidates.push(path);
         }
     }
+    // Ignored children are generated output (a build's `dist/` with its own
+    // `package.json` but no lockfile, `node_modules`, `target`), not package
+    // roots the checkout declares. Installing in them fails the gate on an
+    // artifact of a previous build.
+    let ignored = git_ignored_children(checkout, &candidates[1..]);
+    candidates.retain(|candidate| !ignored.contains(candidate));
     candidates.sort();
     let mut evidence = Vec::new();
     for candidate in candidates {
@@ -589,6 +595,57 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
             .then_with(|| left.provider_id.cmp(&right.provider_id))
     });
     Ok(evidence)
+}
+
+/// The `children` git ignores in `checkout`. Outside a git checkout, or when
+/// git cannot answer, nothing counts as ignored.
+fn git_ignored_children(checkout: &Path, children: &[PathBuf]) -> Vec<PathBuf> {
+    use std::io::Write;
+    if children.is_empty() {
+        return Vec::new();
+    }
+    let Ok(mut child) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["check-ignore", "--stdin", "-z"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    let mut input = Vec::new();
+    for path in children {
+        if let Some(name) = path.file_name() {
+            input.extend_from_slice(name.as_encoded_bytes());
+            // A trailing slash makes directory-only patterns (`dist/`) match.
+            input.extend_from_slice(b"/\0");
+        }
+    }
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(&input).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Vec::new();
+        }
+    }
+    let Ok(output) = child.wait_with_output() else {
+        return Vec::new();
+    };
+    // 0: some paths ignored, 1: none, anything else: not a checkout or an error.
+    if output.status.code() != Some(0) {
+        return Vec::new();
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            let name = String::from_utf8_lossy(name);
+            checkout.join(name.trim_end_matches('/'))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -7802,6 +7859,46 @@ mod tests {
             assert_eq!(roots, vec!["package"], "{evidence:?}");
             assert!(root.join("package/hydration-count").is_file());
             assert!(!root.join("vendor/hydration-count").exists());
+        });
+    }
+
+    /// A build leaves `dist/package.json` behind (no lockfile). It is ignored
+    /// output, not a package root: installing there failed every promotion
+    /// with `npm ci` EUSAGE once the checkout had been built.
+    #[test]
+    fn git_ignored_children_are_not_hydrated() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("checkout");
+            let root = checkout.path();
+            let git = |args: &[&str]| {
+                let status = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(root)
+                    .args(args)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .expect("git");
+                assert!(status.success(), "git {args:?}");
+            };
+            git(&["init", "-q"]);
+            fs::write(root.join(".gitignore"), "dist/\nbuild\n").expect("gitignore");
+            let provider = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}}"#;
+            for directory in ["package", "dist", "build"] {
+                fs::create_dir(root.join(directory)).expect("child");
+                fs::write(root.join(directory).join("homeboy.json"), provider)
+                    .expect("child provider");
+            }
+
+            let evidence =
+                hydrate_gate_dependency_roots(root, true, "fixture").expect("dependency hydration");
+            let roots = evidence
+                .iter()
+                .map(|setup| setup.package_root.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(roots, vec!["package"], "{evidence:?}");
+            assert!(!root.join("dist/hydration-count").exists());
+            assert!(!root.join("build/hydration-count").exists());
         });
     }
 
