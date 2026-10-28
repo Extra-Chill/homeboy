@@ -1170,6 +1170,72 @@ mod tests {
         )
     }
 
+    #[test]
+    fn cook_component_is_recorded_on_mission_and_attempt_and_filters_hotspots() {
+        use homeboy_core::performance_hotspots::{phase_hotspots, PhaseHotspotQuery};
+
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = AgentTaskLifecycleStore::new(context.path_roots());
+        let cook_id = "component-cook";
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &store,
+            cook_id,
+            serde_json::json!({"source": {
+                "repository": "owning-repository",
+                "repository_identity": {"component_id": "x", "component_registered": true}
+            }}),
+            "queued",
+            "test",
+        )
+        .unwrap();
+        let mut attempt = plan("component-plan", "component attribution");
+        attempt.metadata["cook_repository_identity"] = serde_json::json!({
+            "component_id": "x", "component_registered": true
+        });
+        store
+            .submit_plan_with_runtime_admission(&attempt, "component-attempt", |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        agent_task_lifecycle::record_cook_attempt_in_store(&store, cook_id, 1, "component-attempt")
+            .unwrap();
+        let observation = store.open_observation_initialized().unwrap();
+        for id in [cook_id, "component-attempt"] {
+            assert_eq!(
+                observation
+                    .get_run(id)
+                    .unwrap()
+                    .unwrap()
+                    .component_id
+                    .as_deref(),
+                Some("x")
+            );
+            let _phase = observation.run_phase_guard(id, "admit");
+        }
+        let query = |component: &str| PhaseHotspotQuery {
+            kind: Some("agent-task".into()),
+            component: Some(component.into()),
+            last: 10,
+            ..Default::default()
+        };
+        let included = phase_hotspots(&observation, &query("x")).unwrap();
+        assert_eq!(included.run_ids.len(), 2);
+        assert_eq!(included.runs_with_spans, 2);
+        assert_eq!(
+            included
+                .reliability
+                .versions
+                .iter()
+                .map(|version| version.runs)
+                .sum::<usize>(),
+            2
+        );
+        let excluded = phase_hotspots(&observation, &query("y")).unwrap();
+        assert!(excluded.run_ids.is_empty());
+        assert!(excluded.phases.is_empty());
+        assert!(excluded.reliability.versions.is_empty());
+    }
+
     fn options_for(cook_id: &str, run_id: &str, initial_plan: AgentTaskPlan) -> CookRequest {
         CookRequest {
             identity: CookIdentity {

@@ -3219,18 +3219,38 @@ fn terminal_finished_at(record: &AgentTaskRunRecord) -> Option<String> {
 }
 
 fn plan_id_component(record: &AgentTaskRunRecord) -> Option<String> {
-    record
-        .metadata
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .or_else(|| {
-            record
-                .metadata
-                .get("kind")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
+    crate::agent_task_service::admitted_component_id(
+        record
+            .metadata
+            .pointer("/unmaterialized_cook_admission/binding/source/repository_identity"),
+    )
+    .or_else(|| {
+        crate::agent_task_service::admitted_component_id(
+            record.metadata.get("cook_repository_identity"),
+        )
+    })
+    .or_else(|| {
+        record
+            .metadata
+            .pointer("/unmaterialized_cook_admission/binding/source/repository")
+            .and_then(Value::as_str)
+            .filter(|component| !component.is_empty())
+            .map(ToString::to_string)
+    })
+    .or_else(|| {
+        record
+            .metadata
+            .get("repo")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+    })
+    .or_else(|| {
+        record
+            .metadata
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+    })
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {
