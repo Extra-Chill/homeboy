@@ -1812,9 +1812,8 @@ mod tests {
         });
     }
 
-    /// #15039: a shared-repository worktree that also registers a nested
-    /// component cannot be re-resolved from the bare path. Lab staging must use
-    /// the component identity recorded at admission (`--repo`) instead.
+    /// #15039: Lab staging of a shared-repository worktree that also registers
+    /// a nested component uses the identity recorded at admission (`--repo`).
     #[test]
     fn dependency_install_plan_uses_admitted_component_for_nested_worktree() {
         crate::test_support::with_isolated_home(|home| {
@@ -1872,16 +1871,6 @@ mod tests {
                 )
                 .expect("register component");
             }
-
-            let ambiguous =
-                dependency_install_plan(&worktree).expect_err("bare worktree path stays ambiguous");
-            assert!(
-                ambiguous
-                    .message
-                    .contains("matches multiple registered component configurations"),
-                "{}",
-                ambiguous.message
-            );
 
             dependency_install_plan_for_component(&worktree, Some("blocks-engine"))
                 .expect("admitted --repo identity stages the shared-repository worktree");

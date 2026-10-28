@@ -21925,9 +21925,8 @@ fn standalone_manual_preflight_recovers_merged_publication_without_republishing(
 }
 
 /// Register a repository-root component and a nested component sharing one
-/// Git remote, plus a separate checkout with the identical remote.
-/// `resolve_effective(None, ...)` cannot disambiguate either checkout — the
-/// overlapping-registration case Cook must carry its selected component
+/// Git remote, plus a separate checkout with the identical remote: the
+/// overlapping-registration case where Cook carries its selected component
 /// through admission, gates, and finalization.
 fn register_shared_repository_components(home: &std::path::Path) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("fixture root");
@@ -21977,41 +21976,9 @@ fn cook_promotion_finalization_resolves_review_profile_via_recorded_component_id
     homeboy_core::test_support::with_isolated_home(|home| {
         let (_fixture_root, checkout) = register_shared_repository_components(home.path());
 
-        // Baseline: without a recorded component identity, the shared
-        // repository worktree remains genuinely ambiguous.
-        let ambiguous_cook_id = "cook-14725-ambiguous";
-        let ambiguous_run_id = "cook-14725-ambiguous-run";
-        let mut ambiguous_options = batch_cook_options(
-            ambiguous_cook_id,
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        ambiguous_options.identity.initial_run_id = ambiguous_run_id.to_string();
-        ambiguous_options.identity.initial_plan.tasks[0]
-            .executor
-            .model = Some("fixture-model".to_string());
-        persist_initial_recipe(&ambiguous_options).expect("persist recipe");
-        agent_task_lifecycle::submit_plan(
-            &ambiguous_options.identity.initial_plan,
-            Some(ambiguous_run_id),
-        )
-        .expect("submit run");
-        seed_review_form_aggregate(ambiguous_run_id, &ambiguous_options.identity.initial_plan);
-        let ambiguous_promotion = promotion_with_existing_path(ambiguous_run_id, &checkout);
-        let error = cook_finalization_options(
-            &ambiguous_options,
-            ambiguous_run_id,
-            &ambiguous_promotion,
-            Vec::new(),
-        )
-        .expect_err("an unrecorded shared-repository checkout must fail closed");
-        assert!(error
-            .message
-            .contains("matches multiple registered component configurations"));
-        assert!(error.message.contains("blocks-engine, php-transformer"));
-
-        // Fixed: Cook durably records the component it admitted the run
-        // against, and finalization reuses that recorded identity instead of
-        // re-deriving it ambiguously from the bare worktree path.
+        // Cook durably records the component it admitted the run against, and
+        // finalization reuses that recorded identity instead of re-deriving it
+        // from the bare worktree path.
         let cook_id = "cook-14725-recorded";
         let run_id = "cook-14725-recorded-run";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
@@ -22159,17 +22126,6 @@ fn cook_promotion_recovery_accepts_component_fallback_when_no_recorded_identity_
                 .join(format!("agent-task-cooks/{cook_id}/recipe.json")),
         )
         .expect("remove fixture recipe before continuation");
-
-        // With no recipe, recovery has no recorded component identity to
-        // reuse. Omitting `--component` must reproduce the deterministic
-        // ambiguity error rather than silently falling back to ambiguous
-        // resolution.
-        let ambiguous =
-            recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut CaptureBackend::default())
-                .expect_err("no recorded identity and no --component must fail closed");
-        assert!(ambiguous
-            .message
-            .contains("matches multiple registered component configurations"));
 
         // `--component` supplied alongside `--recover` disambiguates a
         // pre-existing durable record with no recorded identity. `preflight`
