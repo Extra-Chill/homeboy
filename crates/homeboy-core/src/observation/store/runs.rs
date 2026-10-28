@@ -1764,6 +1764,48 @@ impl ObservationStore {
         Ok(run_page_from_probe(runs, limit, 0))
     }
 
+    /// Eligible runner-exec recovery sources, optionally restricted to one child
+    /// source given as `(run id, lease token)`. Eligibility applies before the
+    /// limit so unrelated running rows cannot starve recovery. A child also
+    /// accepts the unexpired lease the scheduler granted to its own token.
+    pub fn list_runner_exec_recovery_candidates(
+        &self,
+        source: Option<(&str, &str)>,
+        limit: i64,
+    ) -> Result<Vec<RunRecord>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, kind, component_id, started_at, finished_at, status, command, cwd,
+                   homeboy_version, git_sha, rig_id, metadata_json
+            FROM runs
+            WHERE kind = 'runner_execution' AND status = 'running'
+              AND (?1 IS NULL OR id = ?1)
+              AND json_extract(metadata_json, '$.kind') = 'runner_exec'
+              AND json_type(metadata_json, '$.runner_id') = 'text'
+              AND json_type(metadata_json, '$.runner_job_id') = 'text'
+              AND cwd IS NOT NULL
+              AND (json_type(metadata_json, '$.runner_exec_source_lease.expires_at_ms') IS NOT 'integer'
+                   OR json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') < ?2
+                   OR json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?4)
+              AND COALESCE(json_extract(metadata_json, '$.runner_exec_recovery.phase'), '') != 'blocked'
+            ORDER BY started_at DESC, id DESC
+            LIMIT ?3
+            "#,
+        ).map_err(sqlite_error("prepare runner-exec recovery candidates"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    source.map(|(id, _)| id),
+                    chrono::Utc::now().timestamp_millis(),
+                    limit,
+                    source.map(|(_, token)| token)
+                ],
+                row_to_run_record,
+            )
+            .map_err(sqlite_error("query runner-exec recovery candidates"))?;
+        collect_rows(rows, "collect runner-exec recovery candidates")
+    }
+
     /// List every currently running run so callers can retain active work when
     /// applying a separate display limit to recent history.
     pub fn list_active_runs(&self) -> Result<Vec<RunRecord>> {

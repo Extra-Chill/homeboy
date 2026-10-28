@@ -1892,6 +1892,7 @@ fn verify_retained_evidence(
             .metadata_json
             .pointer("/lab/runner/id")
             .or_else(|| run.metadata_json.pointer("/lab_offload/runner_id"))
+            .or_else(|| run.metadata_json.pointer("/runner_id"))
             .and_then(serde_json::Value::as_str);
         if owner != Some(runner_id) {
             return Err(invalid(
@@ -4825,6 +4826,59 @@ mod tests {
             );
             assert!(operations.stopped_leases.borrow().is_empty());
             assert!(operations.terminated_pids.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn retained_runner_exec_evidence_accepts_only_matching_top_level_runner_id() {
+        crate::test_support::with_isolated_home(|_| {
+            use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
+            let store = ObservationStore::open_initialized().expect("store");
+            let endpoint = session("lease-a", "daemon-a", Some(101));
+            let mut generations = RollingGenerations::new("lease-a", endpoint.clone());
+            let operations = FakeEndpointOperations::default();
+            for owner in ["runner-a", "different-runner"] {
+                let run = store
+                    .start_run(
+                        NewRunRecord::builder("runner_execution")
+                            .metadata(
+                                serde_json::json!({"kind": "runner_exec", "runner_id": owner}),
+                            )
+                            .build(),
+                    )
+                    .expect("run");
+                store
+                    .finish_run(&run.id, RunStatus::Pass, None)
+                    .expect("terminal run");
+                generations.run_owners.clear();
+                generations
+                    .run_owners
+                    .insert(run.id.clone(), "lease-a".to_string());
+                let encoded = homeboy_core::execution_contract::encode_uri_component(&run.id);
+                operations.evidence.borrow_mut().insert(
+                    format!("/runs/{encoded}/artifacts"),
+                    serde_json::json!({"data":{"body":{"artifacts":[]}}}),
+                );
+                operations.evidence.borrow_mut().insert(
+                    format!("/runs/{encoded}/findings"),
+                    serde_json::json!({"data":{"body":{"findings":[]}}}),
+                );
+                let result = verify_retained_evidence(
+                    "runner-a",
+                    &generations,
+                    "lease-a",
+                    &endpoint,
+                    &operations,
+                );
+                if owner == "runner-a" {
+                    result.expect("top-level runner identity accepted");
+                } else {
+                    assert!(result
+                        .expect_err("mismatched runner")
+                        .message
+                        .contains("runner identity is missing or inconsistent"));
+                }
+            }
         });
     }
 

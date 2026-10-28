@@ -178,11 +178,9 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
     let mut unavailable_endpoints = BTreeSet::new();
     let deadline = worker.deadline;
     let mut sessions = BTreeMap::new();
-    let candidates = recovery_candidates(&store)?;
+    let candidates =
+        store.list_runner_exec_recovery_candidates(Some((source_run_id, &worker.token)), 1)?;
     for (index, run) in candidates.iter().enumerate() {
-        if source_run_id != run.id {
-            continue;
-        }
         if Instant::now() >= deadline {
             deferred += candidates.len() - index;
             break;
@@ -862,41 +860,7 @@ pub fn record_scheduled_terminal_runner_exec_recovery_spawn_failure(
 fn recovery_candidates(
     store: &ObservationStore,
 ) -> Result<Vec<homeboy_core::observation::RunRecord>> {
-    Ok(store
-        .list_runs(RunListFilter {
-            kind: Some("runner_execution".to_string()),
-            status: Some(RunStatus::Running.as_str().to_string()),
-            limit: Some(STARTUP_RUNNER_EXEC_RECOVERY_LIMIT),
-            ..RunListFilter::default()
-        })?
-        .into_iter()
-        .filter(|run| {
-            run.metadata_json.get("kind").and_then(Value::as_str) == Some("runner_exec")
-                && run
-                    .metadata_json
-                    .get("runner_id")
-                    .and_then(Value::as_str)
-                    .is_some()
-                && run
-                    .metadata_json
-                    .get("runner_job_id")
-                    .and_then(Value::as_str)
-                    .is_some()
-                && run.cwd.is_some()
-                && run
-                    .metadata_json
-                    .pointer("/runner_exec_source_lease/expires_at_ms")
-                    .and_then(Value::as_i64)
-                    .is_none_or(|expires_at_ms| {
-                        expires_at_ms < chrono::Utc::now().timestamp_millis()
-                    })
-                && run
-                    .metadata_json
-                    .pointer("/runner_exec_recovery/phase")
-                    .and_then(Value::as_str)
-                    != Some("blocked")
-        })
-        .collect())
+    store.list_runner_exec_recovery_candidates(None, STARTUP_RUNNER_EXEC_RECOVERY_LIMIT)
 }
 
 fn recovered_output(
@@ -1036,6 +1000,37 @@ mod tests {
     }
 
     #[test]
+    fn recovery_candidates_are_not_starved_by_untyped_runs() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let candidate = store
+                .start_run(NewRunRecord::builder("runner_execution")
+                    .cwd_path(std::path::Path::new("/workspace"))
+                    .metadata(json!({"kind": "runner_exec", "runner_id": "runner", "runner_job_id": "job"}))
+                    .build())
+                .expect("candidate");
+            for _ in 0..=STARTUP_RUNNER_EXEC_RECOVERY_LIMIT {
+                store
+                    .start_run(NewRunRecord::builder("runner_execution").build())
+                    .expect("untyped run");
+            }
+            let candidates = recovery_candidates(&store).expect("candidates");
+            assert_eq!(
+                store
+                    .list_runner_exec_recovery_candidates(Some((&candidate.id, "child-token")), 1)
+                    .expect("source by id")
+                    .first()
+                    .map(|run| &run.id),
+                Some(&candidate.id)
+            );
+            assert_eq!(
+                candidates.iter().map(|run| &run.id).collect::<Vec<_>>(),
+                vec![&candidate.id]
+            );
+        });
+    }
+
+    #[test]
     fn startup_recovery_bounds_runner_exec_candidates() {
         with_isolated_home(|_| {
             let store = ObservationStore::open_initialized().expect("store");
@@ -1048,7 +1043,7 @@ mod tests {
             for index in 0..STARTUP_RUNNER_EXEC_RECOVERY_LIMIT {
                 connection
                     .execute(
-                        "INSERT INTO runs(id, kind, started_at, status, metadata_json) VALUES (?1, 'runner_execution', ?2, 'running', '{\"kind\":\"runner_exec\"}')",
+                        "INSERT INTO runs(id, kind, started_at, status, cwd, metadata_json) VALUES (?1, 'runner_execution', ?2, 'running', '/workspace', '{\"kind\":\"runner_exec\",\"runner_id\":\"runner\",\"runner_job_id\":\"job\"}')",
                         rusqlite::params![
                             format!("candidate-{index}"),
                             format!("2026-07-30T{:02}:{:02}:00Z", 18 + index / 60, index % 60)
@@ -1058,16 +1053,26 @@ mod tests {
             }
             connection
                 .execute(
-                    "INSERT INTO runs(id, kind, started_at, status, metadata_json) VALUES ('outside-budget', 'runner_execution', '2026-01-01T00:00:00Z', 'running', '{\"kind\":\"runner_exec\"}')",
+                    "INSERT INTO runs(id, kind, started_at, status, cwd, metadata_json) VALUES ('outside-budget', 'runner_execution', '2026-01-01T00:00:00Z', 'running', '/workspace', '{\"kind\":\"runner_exec\",\"runner_id\":\"runner\",\"runner_job_id\":\"job\"}')",
                     [],
                 )
                 .expect("insert outside-budget candidate");
             drop(connection);
 
             let reader = ObservationStore::open_scheduler_reader().expect("reader");
-            assert!(
-                recovery_candidates(&reader).expect("candidates").len()
-                    <= STARTUP_RUNNER_EXEC_RECOVERY_LIMIT as usize
+            assert_eq!(
+                recovery_candidates(&reader).expect("candidates").len(),
+                STARTUP_RUNNER_EXEC_RECOVERY_LIMIT as usize
+            );
+            assert_eq!(
+                reader
+                    .list_runner_exec_recovery_candidates(
+                        Some(("outside-budget", "child-token")),
+                        1
+                    )
+                    .expect("source outside page")[0]
+                    .id,
+                "outside-budget"
             );
         });
     }
@@ -1151,6 +1156,17 @@ mod tests {
                     "job",
                 )
                 .expect("expired takeover"));
+            // The survey skips the leased source; its own child still reaches it.
+            assert!(recovery_candidates(&store).expect("candidates").is_empty());
+            for (token, visible) in [("recovery-token", 1), ("other-token", 0)] {
+                assert_eq!(
+                    store
+                        .list_runner_exec_recovery_candidates(Some(("foreground", token)), 1)
+                        .expect("child source")
+                        .len(),
+                    visible
+                );
+            }
         });
     }
 
@@ -1238,9 +1254,9 @@ mod tests {
             let reader = ObservationStore::open_scheduler_reader().expect("reader");
             assert!(recovery_candidates(&reader).expect("candidates").is_empty());
             let children = store
-                .list_runs(RunListFilter {
+                .list_runs(homeboy_core::observation::RunListFilter {
                     kind: Some(RECOVERY_CHILD_KIND.to_string()),
-                    ..RunListFilter::default()
+                    ..homeboy_core::observation::RunListFilter::default()
                 })
                 .expect("list children");
             assert_eq!(child_ids.len(), 1, "retries reuse one child identity");
