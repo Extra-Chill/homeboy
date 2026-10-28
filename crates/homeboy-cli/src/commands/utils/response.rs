@@ -369,10 +369,7 @@ impl<T: Serialize> CommandResultEnvelope<T> {
 impl CommandResultEnvelope<()> {
     fn from_error(identity: &CommandIdentity, err: &Error, exit_code: i32) -> Self {
         let next_actions = actions_for_error(err);
-        let summary = failure_summary(
-            &err.message,
-            homeboy_upgrade::controller_staleness::current().failure_hint(),
-        );
+        let summary = err.message.clone();
         Self {
             schema: COMMAND_RESULT_SCHEMA,
             command: identity.command.clone(),
@@ -403,15 +400,6 @@ impl CommandResultEnvelope<()> {
             presentation: None,
             contract_warnings: Vec::new(),
         }
-    }
-}
-
-/// A failure summary leads with its cause; host release-gap guidance, when the
-/// controller is stale, follows it.
-fn failure_summary(cause: &str, release_hint: Option<String>) -> String {
-    match release_hint {
-        Some(hint) => format!("{cause} {hint}"),
-        None => cause.to_string(),
     }
 }
 
@@ -3397,37 +3385,8 @@ mod tests {
                 .unwrap_or_default()
                 .to_string();
             assert!(!message.trim().is_empty(), "{label} must name its cause");
-            // The summary may append the host's release-gap hint (#16276), so
-            // only its lead is the cause.
-            let summary = value["summary"].as_str().unwrap_or_default();
-            assert!(summary.starts_with(message.as_str()), "{label}: {summary}");
+            assert_eq!(value["summary"], message.as_str(), "{label}");
         }
-    }
-
-    /// #16276: a stale controller's release-gap hint follows the cause, so
-    /// the summary still leads with what failed.
-    #[test]
-    fn failure_summary_leads_with_the_cause_before_the_release_hint() {
-        let hint = homeboy_upgrade::controller_staleness::assess(
-            &homeboy_product_identity::BuildIdentity {
-                version: "0.431.14".to_string(),
-                git_commit: None,
-                git_dirty: None,
-                display: "homeboy 0.431.14".to_string(),
-            },
-            Some("v0.431.15"),
-            None,
-            0,
-        )
-        .failure_hint();
-        assert_eq!(
-            failure_summary("Invalid argument 'runner': stale daemon", hint),
-            "Invalid argument 'runner': stale daemon Controller v0.431.14 is 0 minor release(s) behind latest v0.431.15; run `homeboy upgrade`."
-        );
-        assert_eq!(
-            failure_summary("Invalid argument 'runner': stale daemon", None),
-            "Invalid argument 'runner': stale daemon"
-        );
     }
 
     #[test]
