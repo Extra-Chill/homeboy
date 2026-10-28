@@ -1313,7 +1313,10 @@ fn declared_failure_object(object: &Map<String, Value>) -> Option<DeclaredFailur
         // `refresh-homeboy` reports a failed postcondition as `verification`
         // text; without lifting it the summary falls back to "exited 1
         // without reporting a failure cause" (#15768).
-        .or_else(|| object.get("verification").and_then(Value::as_str))?
+        .or_else(|| object.get("verification").and_then(Value::as_str))
+        // Upgrade operations record a typed `predicate` and optional `cause`.
+        .or_else(|| object.get("cause").and_then(Value::as_str))
+        .or_else(|| object.get("predicate").and_then(Value::as_str))?
         .trim();
     if message.is_empty() {
         return None;
@@ -3210,6 +3213,31 @@ mod tests {
             let summary = value["summary"].as_str().expect("summary");
             assert!(summary.contains("did not converge"), "{summary}");
             assert!(!summary.contains("without reporting a failure cause"));
+        }
+    }
+
+    /// A failed upgrade names its cause, or at least its typed predicate.
+    #[test]
+    fn upgrade_failure_summarizes_cause_then_predicate() {
+        for (failure, expected) in [
+            (
+                json!({ "phase": "completed", "predicate": "runner_post_swap_verification",
+                        "cause": "runner homeboy-lab: extension a8c-review sync failed" }),
+                "runner homeboy-lab: extension a8c-review sync failed",
+            ),
+            (
+                json!({ "phase": "failed", "predicate": "upgrade_drain_timeout" }),
+                "upgrade_drain_timeout",
+            ),
+        ] {
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(json!({ "command": "upgrade.status", "status": "fail", "failure": failure })),
+                1,
+                &CommandIdentity::top_level("upgrade"),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+            assert_eq!(value["summary"], expected);
         }
     }
 
