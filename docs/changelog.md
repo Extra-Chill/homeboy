@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.18] - 2026-10-28
+
+### Changed
+- Stop appending 'run homeboy upgrade' to every failure summary
+
 ## [0.434.17] - 2026-10-28
 
 ### Changed
