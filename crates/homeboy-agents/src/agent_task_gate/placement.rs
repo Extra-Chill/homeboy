@@ -316,7 +316,7 @@ fn non_execution_report(request: &LabGateRequest, error: &Error) -> AgentTaskGat
     )
 }
 
-pub(crate) fn gate_non_execution_report(
+fn gate_non_execution_report(
     index: usize,
     argv: Vec<String>,
     visibility: AgentTaskGateVisibility,
