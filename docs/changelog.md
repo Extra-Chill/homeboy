@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.19] - 2026-10-28
+
+### Changed
+- Lab-runner test workloads end themselves once their temp dir is gone
+
+### Fixed
+- resolve shared-repository checkouts to their most specific registration
+- escape markup openers in review-form prose instead of refusing a verified candidate
+
 ## [0.434.18] - 2026-10-28
 
 ### Changed
