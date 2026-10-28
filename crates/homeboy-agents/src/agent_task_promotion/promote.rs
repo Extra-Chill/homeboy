@@ -2654,7 +2654,7 @@ mod lab_gate_binding_tests {
                     .iter()
                     .filter(|span| span.id == "admit.gate_toolchains")
                     .count();
-                assert_eq!(admission, 3, "round {round} admits every gate");
+                assert_eq!(admission, 0, "round {round} sends no readiness handoff");
                 assert_eq!(
                     spans
                         .iter()
@@ -3185,41 +3185,28 @@ fn run_promotion_gate(
     if gate_environment.lab_runner.is_none() {
         gate_environment.lab_runner = crate::agent_task_gate::placement::declared_runner(command)?;
     }
-    // Pre-dispatch validation protects provider budget. Recheck in this exact
-    // runtime because every gate receives its own isolated HOME/XDG directory.
-    let result = if let Err(error) = crate::agent_task_gate::preflight_gate_toolchains(
-        worktree_path,
-        &gate_environment,
-        &options.gates.required_toolchains(),
-        &options.gates.gate_package_artifacts,
-        Some(&runtime_tmpdir.context().tmp_dir),
-        options.gates.gate_timeout(),
-    ) {
-        // This runs before provider verification. A missing destination tool is
-        // setup evidence, not candidate blame or provider-budget consumption.
-        if gate_environment.lab_runner.is_some()
-            && error
-                .details
-                .get("gate_disposition")
-                .and_then(Value::as_str)
-                == Some("unavailable")
-        {
-            Ok(
-                crate::agent_task_gate::placement::gate_non_execution_report(
-                    index,
-                    crate::agent_task_gate::legacy_gate_argv(command),
-                    visibility,
-                    reveal_policy,
-                    &error,
-                ),
-            )
-        } else {
-            Err(gate_setup_failure(
-                "destination_gate_toolchain",
-                "destination_gate_workspace",
-                error,
-            ))
-        }
+    // Local gates recheck toolchains in their own isolated HOME/XDG. A Lab
+    // placement's toolchains were admitted once for the Cook
+    // (`preflight_verify_gate_options`); a per-gate readiness handoff would
+    // double every gate's Lab round trips (#16583).
+    let preflight = if gate_environment.lab_runner.is_some() {
+        Ok(())
+    } else {
+        crate::agent_task_gate::preflight_gate_toolchains(
+            worktree_path,
+            &gate_environment,
+            &options.gates.required_toolchains(),
+            &options.gates.gate_package_artifacts,
+            Some(&runtime_tmpdir.context().tmp_dir),
+            options.gates.gate_timeout(),
+        )
+    };
+    let result = if let Err(error) = preflight {
+        Err(gate_setup_failure(
+            "destination_gate_toolchain",
+            "destination_gate_workspace",
+            error,
+        ))
     } else if let Some(supervision) = supervision.as_deref() {
         crate::agent_task_gate::run_gate_command_with_supervision(
             worktree_path,
