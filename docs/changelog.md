@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.25] - 2026-10-28
+
+### Changed
+- Record the admitted component on Cook mission and attempt rows
+- Report a regressed runs hotspots verdict as the command's failure cause
+
 ## [0.434.24] - 2026-10-28
 
 ### Changed
