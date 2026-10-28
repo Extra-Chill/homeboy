@@ -301,7 +301,10 @@ fn started_payload_answers_what_did_i_just_start() {
     let body = payload.render_body();
     assert!(body.contains("Task: fix the notifier"), "{body}");
     assert!(body.contains("Attempt budget: 3"), "{body}");
-    assert!(body.contains("homeboy activity watch cook-abc"), "{body}");
+    assert!(
+        body.contains("homeboy agent-task status cook-abc --watch"),
+        "{body}"
+    );
 }
 
 #[test]

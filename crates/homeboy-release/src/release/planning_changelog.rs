@@ -512,7 +512,7 @@ mod tests {
             dir,
             "feature.txt",
             "feature",
-            "feat: bound homeboy activity latency with a reconcile-free runner view (#9522) (#9523)",
+            "feat: bound runner inspection latency with a reconcile-free view (#9522) (#9523)",
         );
         let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
         let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
@@ -527,7 +527,7 @@ mod tests {
 
         assert_eq!(
             entries["added"],
-            vec!["bound homeboy activity latency with a reconcile-free runner view"]
+            vec!["bound runner inspection latency with a reconcile-free view"]
         );
     }
 

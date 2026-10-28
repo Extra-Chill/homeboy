@@ -1,12 +1,7 @@
 //! One poll loop for every `homeboy ... watch` command.
 //!
-//! `activity watch` and `runs watch` each grew their own copy of the same
-//! bounded poll loop, the same `124` timeout exit code, and the same
-//! terminal/timeout conclusion shape (#10315). They are **not** the same
-//! command — see [`WatchPoller::Item`] — but the loop between them is
-//! identical, so it lives here once and each command supplies only what is
-//! genuinely its own: what it polls, when that is terminal, and how it renders
-//! the result.
+//! Bounded polling with a shared `124` timeout exit code and terminal/timeout
+//! conclusion shape. Each caller supplies what it polls and when it is terminal.
 //!
 //! The loop is generic over the poller, the sleep function, and the clock so a
 //! test can drive it deterministically without a store, a real clock, or real
@@ -26,12 +21,7 @@ pub const TIMEOUT_EXIT_CODE: i32 = 124;
 pub trait WatchPoller {
     /// The polled snapshot.
     ///
-    /// This is an associated type rather than one shared record because the
-    /// watch surfaces poll genuinely different domains: `runs watch` polls a
-    /// `RunRecord` out of the observation store, while `activity watch` polls
-    /// an `ActivityItem` — a projection across the observation store, the
-    /// agent-task store, runner sessions, and daemon jobs, which has no
-    /// `RunRecord` behind it at all.
+    /// For `runs watch`, this is a `RunRecord` from the observation store.
     type Item;
 
     /// Read the current snapshot for `id`.
@@ -41,8 +31,7 @@ pub trait WatchPoller {
     ///
     /// Owned by the poller because "terminal" is a per-domain judgement: a run
     /// status the caller cannot classify is treated as terminal so the watch
-    /// surfaces it rather than blocking forever, and an activity item is
-    /// terminal exactly when it is no longer queued or running.
+    /// surfaces it rather than blocking forever.
     fn is_terminal(&self, item: &Self::Item) -> bool;
 }
 
@@ -57,10 +46,7 @@ pub struct WatchConfig {
 
 /// Every duration unit any homeboy flag accepts, and what one of it is worth.
 ///
-/// Four commands had grown their own copy of this table with three different
-/// unit sets, so `triage --timeout 7d` errored while `runs watch --timeout 7d`
-/// worked, and `activity --duration 500ms` errored while `observe --duration
-/// 500ms` did not. This is the union of all four: every command now accepts
+/// Shared duration units keep timeout and duration flags consistent.
 pub use homeboy::core::duration::{
     parse_duration, parse_duration_parts, DURATION_UNITS, DURATION_UNITS_HINT,
 };
@@ -190,7 +176,7 @@ mod duration_tests {
     }
 
     /// The regressions this consolidation fixes. Before it, `triage` rejected
-    /// `d` and `ms`, and `activity`/`runs` rejected `ms`.
+    /// `d` and `ms`, and `runs` rejected `ms`.
     #[test]
     fn units_that_used_to_be_rejected_per_command_now_parse() {
         assert_eq!(
@@ -198,7 +184,7 @@ mod duration_tests {
             Duration::from_secs(7 * 24 * 60 * 60)
         );
         assert_eq!(
-            parse_duration("duration", "500ms").expect("activity now accepts millis"),
+            parse_duration("duration", "500ms").expect("duration accepts millis"),
             Duration::from_millis(500)
         );
     }

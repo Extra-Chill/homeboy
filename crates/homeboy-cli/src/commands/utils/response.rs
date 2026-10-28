@@ -162,7 +162,7 @@ pub(crate) fn actionable_metadata_for_run_ref(
             .with_kind(CommandNextActionKind::Show),
     )
     .with_next_action(
-        CommandNextAction::new("show activity", format!("homeboy activity show {run_id}"))
+        CommandNextAction::new("show run", format!("homeboy runs show {run_id}"))
             .with_kind(CommandNextActionKind::Show),
     )
 }
@@ -281,10 +281,8 @@ pub struct CommandAgentTaskRef {
 /// `artifacts` and `evidence` on [`CommandActionableMetadata`] both hold this
 /// shape. They used to hold two structurally identical types
 /// (`CommandArtifactRef` / `CommandEvidenceRef`); the distinction was never in
-/// the type, only in which field the value landed in — which is exactly how
-/// core already models it (`ActivityItem.artifacts` and `ActivityItem.evidence`
-/// are both `Vec<ActivityEvidenceRef>`). Collapsed in #10310; the serialized
-/// shape is unchanged.
+/// the type, only in which field the value landed in.
+/// Collapsed in #10310; the serialized shape is unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandArtifactRef {
     pub id: String,
@@ -1938,7 +1936,7 @@ fn failure_digest_for_run(
         next_actions: vec![
             CommandNextAction::new("show evidence", format!("homeboy runs evidence {run_id}"))
                 .with_kind(CommandNextActionKind::Show),
-            CommandNextAction::new("show activity", format!("homeboy activity show {run_id}"))
+            CommandNextAction::new("show run", format!("homeboy runs show {run_id}"))
                 .with_kind(CommandNextActionKind::Show),
         ],
         retryable: None,

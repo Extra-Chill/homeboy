@@ -3793,7 +3793,7 @@ pub fn persisted_statuses() -> Result<Vec<RunnerStatusReport>> {
 /// `status()` reconciles the full generation ledger, which issues one blocking
 /// HTTP call per *draining* generation (5s timeout each) and can take minutes
 /// with hundreds of generations. Callers that only need the current active-job
-/// view (e.g. `homeboy activity`) must not pay that cost or scan unbounded
+/// view must not pay that cost or scan unbounded
 /// history (#9522). This queries the connected session's `/jobs` endpoint once
 /// per runner — bounded work regardless of how much generation history has
 /// accumulated — and skips the per-generation reconcile entirely. Stale-job

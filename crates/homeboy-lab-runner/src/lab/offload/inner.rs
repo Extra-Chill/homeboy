@@ -2768,18 +2768,6 @@ fn workspace_resource_cleanup_policy_for_request(
     }
 }
 
-pub(crate) struct ControllerJobRetrievalCommands {
-    pub(crate) show: String,
-    pub(crate) watch: String,
-}
-
-pub(crate) fn controller_job_retrieval_commands(job_id: &str) -> ControllerJobRetrievalCommands {
-    ControllerJobRetrievalCommands {
-        show: format!("homeboy activity show {job_id}"),
-        watch: format!("homeboy activity watch {job_id}"),
-    }
-}
-
 pub(crate) fn detached_staging_submission_output(
     submission: crate::lab_staging_controller::DetachedStagingSubmission,
     run_id: &str,
@@ -2789,16 +2777,13 @@ pub(crate) fn detached_staging_submission_output(
         "retrieval_commands": {
             "status": format!("homeboy agent-task status {run_id}"),
             "logs": format!("homeboy agent-task logs {run_id}"),
+            "watch": format!("homeboy agent-task status {run_id} --watch"),
         },
     });
     match submission {
         crate::lab_staging_controller::DetachedStagingSubmission::Controller { job_id } => {
-            let commands = controller_job_retrieval_commands(&job_id);
             output["status"] = serde_json::json!("materializing");
             output["controller_job_id"] = serde_json::json!(job_id);
-            output["retrieval_commands"]["controller_job"] = serde_json::json!(commands.show);
-            output["retrieval_commands"]["controller_job_watch"] =
-                serde_json::json!(commands.watch);
         }
         crate::lab_staging_controller::DetachedStagingSubmission::Deferred(receipt) => {
             output["status"] = serde_json::json!("staged");

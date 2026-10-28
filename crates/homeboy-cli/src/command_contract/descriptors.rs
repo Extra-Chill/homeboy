@@ -9,7 +9,6 @@
 macro_rules! builtin_json_command_descriptors {
     ($consumer:ident) => {
         $consumer! {
-            (Activity, $crate::commands::activity::run, CommandSpec { output_notes: "unified active/recent activity read model in the standard JSON envelope", lab_supported: false, lab_notes: "read-only local activity query; never offloaded because it inspects operator-local stores", ..command_spec("activity", CommandJsonFamily::Workspace) }),
             (AgentTask, $crate::commands::agent_task::run, CommandSpec { subcommand_safety: AGENT_TASK_SUBCOMMAND_SAFETY, ..command_spec_with_representative_argv(&["homeboy", "agent-task", "providers"], lab_command_spec_with_summary("agent-task", CommandJsonFamily::Workspace, "Lab runner routing covers portable, explicit-runner, and runner-resident agent-task workflows", AGENT_TASK_LAB_SUPPORT)) }),
             (Project, $crate::commands::project::run, CommandSpec { subcommand_safety: PROJECT_SUBCOMMAND_SAFETY, ..command_spec("project", CommandJsonFamily::Workspace) }),
             (Ssh, $crate::commands::ssh::run, command_spec("ssh", CommandJsonFamily::Ops)),

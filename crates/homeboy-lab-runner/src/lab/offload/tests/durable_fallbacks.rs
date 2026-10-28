@@ -1,14 +1,6 @@
 use super::*;
 
 #[test]
-fn detached_staging_controller_job_commands_use_activity_surface() {
-    let commands = controller_job_retrieval_commands("controller-job-9678");
-
-    assert_eq!(commands.show, "homeboy activity show controller-job-9678");
-    assert_eq!(commands.watch, "homeboy activity watch controller-job-9678");
-}
-
-#[test]
 fn deferred_staging_emits_only_durable_run_commands() {
     const RUN: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
     let mission = homeboy_control_plane_contract::resolve(

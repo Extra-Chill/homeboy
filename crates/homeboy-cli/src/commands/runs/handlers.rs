@@ -9,7 +9,6 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use homeboy::core::activity::{self, ActivityFilter, ActivityOptions, ActivityScope};
 use homeboy::core::api_jobs;
 use homeboy::core::artifact_address::ArtifactAddress;
 use homeboy::core::observation::evidence_report::directory_publication_guidance;
@@ -52,9 +51,6 @@ pub fn list_runs(
     args: RunsListArgs,
     command: &'static str,
 ) -> CmdResult<RunsOutput> {
-    if args.active {
-        return list_active_runs(args);
-    }
     validate_list_search_args(&args)?;
     if let Some(runner_id) = args.runner.clone() {
         return remote::list_runner_runs(&runner_id, args, command);
@@ -158,22 +154,6 @@ fn group_cook_sub_runs(runs: Vec<RunRecord>) -> (Vec<RunRecord>, HashMap<String,
         }
     }
     (canonical, children)
-}
-
-fn list_active_runs(args: RunsListArgs) -> CmdResult<RunsOutput> {
-    let filter = ActivityFilter {
-        task_url: args.task_url,
-        repository: args.repo,
-        worktree: args.workspace,
-    };
-    let report = activity::activity_report_filtered(
-        ActivityScope::ActiveRecent,
-        args.limit.max(1) as usize,
-        ActivityOptions::default(),
-        &filter,
-        "runs.list_active",
-    )?;
-    Ok((RunsOutput::Active(Box::new(report)), 0))
 }
 
 pub fn cancel_run(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {

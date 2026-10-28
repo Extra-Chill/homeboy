@@ -59,10 +59,6 @@ pub enum HttpEndpoint {
         id: String,
     },
     BenchRuns,
-    Activity,
-    ActivityItem {
-        id: String,
-    },
     ControlPlaneCapabilities,
     ControlPlaneCapacity {
         query: Value,
@@ -219,8 +215,6 @@ impl HttpEndpoint {
             Self::RunArtifactContent { .. } => "runs.artifact.content",
             Self::RunFindings { .. } => "runs.findings",
             Self::BenchRuns => "bench.runs",
-            Self::Activity => "activity.list",
-            Self::ActivityItem { .. } => "activity.show",
             Self::ControlPlaneCapabilities => "control_plane.capabilities",
             Self::ControlPlaneCapacity { .. } => "control_plane.capacity",
             Self::ControlPlaneMissions { .. } => "control_plane.missions.list",

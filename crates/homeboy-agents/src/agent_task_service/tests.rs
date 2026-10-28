@@ -1316,7 +1316,7 @@ fn provider_execution_reservation_is_exactly_once_and_terminal() {
 #[test]
 fn local_reservation_advances_heartbeat_to_execution_start() {
     // A local (in-process) cook must advance its heartbeat when the provider
-    // execution is reserved, so `status`/`activity` can distinguish an active
+    // execution is reserved, so `status` can distinguish an active
     // provider from a hung preflight instead of showing the submission-time
     // heartbeat for the whole run (#8396).
     with_isolated_home(|_| {
@@ -2396,7 +2396,7 @@ fn discovery_lists_durable_runs_with_operator_commands() {
         // The prose apology this replaced told operators to go run a second,
         // runner-scoped command themselves. Discovery now points at the surface
         // that federates runner-resident records instead (#W3-15).
-        assert!(report.federated_command.contains("homeboy activity"));
+        assert_eq!(report.federated_command, "homeboy runner status");
         assert_eq!(run.run_id, "run-discovery-list");
         assert_eq!(run.state, AgentTaskRunState::Queued);
         assert_eq!(run.repo.as_deref(), Some("homeboy"));

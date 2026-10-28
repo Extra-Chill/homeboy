@@ -84,7 +84,7 @@ impl RunnerEvidenceProvider for RunnerEvidence {
                 connected: snapshot.connected,
                 // A connected runner whose typed-job probe timed out reports
                 // `Unavailable` with an empty `active_jobs`. Carrying that
-                // distinction is what lets `homeboy activity` return a partial
+                // distinction lets federating readers return a partial
                 // answer naming the runner instead of a silently-empty one.
                 active_jobs_available: snapshot.active_job_state
                     == crate::RunnerActiveJobState::Available,

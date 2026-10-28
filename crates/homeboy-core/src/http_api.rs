@@ -18,7 +18,7 @@ use crate::observation::{
     running_status_note, ArtifactListFilter, FindingListFilter, ObservationStore, RunListFilter,
     RunRecord, RunStatus, MAX_RUN_PAGE_LIMIT,
 };
-use crate::{activity, component, git};
+use crate::{component, git};
 
 mod analysis_job_runner;
 mod sandbox_tools;
@@ -77,10 +77,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
             id: (*id).to_string(),
         }),
         (HttpMethod::Get, ["bench", "runs"]) => Ok(HttpEndpoint::BenchRuns),
-        (HttpMethod::Get, ["activity"]) => Ok(HttpEndpoint::Activity),
-        (HttpMethod::Get, ["activity", id]) => Ok(HttpEndpoint::ActivityItem {
-            id: (*id).to_string(),
-        }),
         (HttpMethod::Get, ["v1", "control-plane", "capabilities"]) => {
             Ok(HttpEndpoint::ControlPlaneCapabilities)
         }
@@ -310,8 +306,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /runs/:id/artifacts/:artifact_id/content".to_string(),
                 "GET /runs/:id/findings".to_string(),
                 "GET /bench/runs".to_string(),
-                "GET /activity".to_string(),
-                "GET /activity/:id".to_string(),
                 "GET /v1/control-plane/capabilities".to_string(),
                 "GET /v1/control-plane/capacity".to_string(),
                 "GET /v1/control-plane/missions".to_string(),
@@ -506,7 +500,7 @@ where
     }
     // Boundary: only the run, artifact and finding readers below use the
     // observation store, and each opens it exactly once for the request.
-    // Component, rig, activity, job and sandbox endpoints never open it, so an
+    // Component, rig, job and sandbox endpoints never open it, so an
     // unavailable store cannot fail requests that do not depend on it.
     let open_store = ObservationStore::open_initialized;
     let body = match &endpoint {
@@ -614,37 +608,6 @@ where
         HttpEndpoint::BenchRuns => json!({
             "command": "api.bench.runs",
             "runs": list_runs(&open_store()?, &request.path, Some("bench"), job_store)?,
-        }),
-        // Deliberately does NOT federate runner-resident records. The daemon
-        // serves this on a single-threaded accept loop, so a bounded runner
-        // probe -- 15s per connected runner -- would stall `/health`, `daemon
-        // status`, and the job routes direct controllers depend on.
-        // The CLI federates by default because it can afford to wait; the
-        // daemon cannot. `homeboy activity` remains the federated surface.
-        HttpEndpoint::Activity => json!({
-            "command": "api.activity.list",
-            "activity": activity::activity_report_with(
-                activity_scope_for_path(&request.path),
-                activity_limit_for_path(&request.path),
-                activity::ActivityOptions {
-                    federate_runners: false,
-                    ..activity::ActivityOptions::default()
-                },
-            )?,
-        }),
-        // Same reasoning as `Activity` above: the fallback path in
-        // `resolve_activity_item` is *guaranteed* to reach federation for a
-        // runner-resident id, so leaving it on would let one lookup stall the
-        // whole daemon.
-        HttpEndpoint::ActivityItem { id } => json!({
-            "command": "api.activity.show",
-            "activity": activity::show_activity_with(
-                id,
-                activity::ActivityOptions {
-                    federate_runners: false,
-                    ..activity::ActivityOptions::default()
-                },
-            )?,
         }),
         HttpEndpoint::ControlPlaneMissions { .. }
         | HttpEndpoint::ControlPlaneMission { .. }
@@ -1569,21 +1532,6 @@ fn control_plane_err(
         endpoint: endpoint.name().to_string(),
         body,
     })
-}
-
-fn activity_scope_for_path(path: &str) -> activity::ActivityScope {
-    if query_value(path, "all").is_some_and(|value| value == "1" || value == "true") {
-        activity::ActivityScope::All
-    } else {
-        activity::ActivityScope::ActiveRecent
-    }
-}
-
-fn activity_limit_for_path(path: &str) -> usize {
-    query_value(path, "limit")
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|limit| limit.clamp(1, 1000))
-        .unwrap_or(20)
 }
 
 fn enqueue_sandbox_tool_job(

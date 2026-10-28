@@ -7766,8 +7766,8 @@ pub fn reconcile_scope_run_ids_in_store(
 ///
 /// This is a **pure read**: `store::read_cook_index` resolves the Cook alias
 /// through the read-only `control_plane_resources` projection and writes
-/// nothing. Read models that must not mutate persisted state (`activity`,
-/// #10308) may use it; reconciliation may not.
+/// nothing. Read models that must not mutate persisted state may use it;
+/// reconciliation may not.
 pub(crate) fn resolve_run_id(run_id: &str) -> Result<String> {
     let run_id = sanitize_run_id(run_id);
     match store::read_cook_index(&run_id) {

@@ -213,7 +213,6 @@ pub(crate) fn finalize_set_spec(
 //
 // `formatter_visibility::no_modules_are_declared_inside_macros` (below) fails
 // closed if a `mod` declaration is ever moved back inside a macro body.
-pub mod activity;
 pub mod agent_task;
 pub(crate) mod agent_task_dispatch;
 pub(crate) mod agent_task_summary;

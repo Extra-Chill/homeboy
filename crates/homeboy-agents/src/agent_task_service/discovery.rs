@@ -12,8 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 // `agent-task active` treats a `Running` record that has gone this long without
 // an `updated_at` heartbeat as suspect even when its owner process/runner-job
-// liveness cannot be disproven (#5682). Shared with `activity` so the two
-// surfaces cannot disagree about what "stale" means.
+// liveness cannot be disproven (#5682).
 use homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES;
 use homeboy_core::{Error, Result};
 use homeboy_upgrade::upgrade::{
@@ -22,10 +21,8 @@ use homeboy_upgrade::upgrade::{
 };
 use serde_json::Value;
 
-/// The cross-location surface that federates controller-local records with
-/// records resident on connected Lab runners.
-pub const FEDERATED_DISCOVERY_COMMAND: &str =
-    "homeboy activity list   # federates controller-local records with runner-resident ones";
+/// The owning command for work resident on connected runners.
+pub const FEDERATED_DISCOVERY_COMMAND: &str = "homeboy runner status";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTaskDiscoveryFilter {
@@ -208,15 +205,7 @@ pub struct AgentTaskDiscoveryReport {
     /// glance. Only populated for the `active` filter; `None` elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liveness_summary: Option<AgentTaskLivenessSummary>,
-    /// The federated surface that *does* see runner-resident runs.
-    ///
-    /// This field replaces the `lab_discovery` prose hint, which apologised for
-    /// a gap instead of closing it: it told operators that a freshly-offloaded
-    /// run's durable record lives on the runner and that they should go run a
-    /// second, runner-scoped command themselves. `homeboy activity` now
-    /// federates connected Lab runners directly, so the correct answer is a
-    /// command that already includes them rather than an explanation of why
-    /// this one does not (#W3-15, was #5681).
+    /// Inspect connected runners for runner-resident work.
     pub federated_command: &'static str,
 }
 

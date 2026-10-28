@@ -319,7 +319,10 @@ mod tests {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.starts_with("verifying")));
-        assert_eq!(verdict.next_action, "homeboy agent-task watch cook-16058");
+        assert_eq!(
+            verdict.next_action,
+            "homeboy agent-task status cook-16058 --watch"
+        );
         assert!(!verdict.next_action.contains("recover"));
     }
 
