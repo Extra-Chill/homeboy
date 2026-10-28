@@ -747,8 +747,9 @@ fn failure_diagnostics_for_data(
         return Some(diagnostics);
     }
 
-    let specialized_digest =
-        release_failure_digest(data).or_else(|| formatting_failure_digest(data));
+    let specialized_digest = release_failure_digest(data)
+        .or_else(|| formatting_failure_digest(data))
+        .or_else(|| hotspots_failure_digest(data));
     if let Some(failure_digest) = specialized_digest {
         return Some(command_failed_diagnostics(exit_code, failure_digest));
     }
@@ -1509,6 +1510,47 @@ fn actions_for_error(err: &Error) -> Vec<CommandNextAction> {
         .filter_map(|value| serde_json::from_value::<ExecutableAction>(value.clone()).ok())
         .map(CommandNextAction::from_action)
         .collect()
+}
+
+fn hotspots_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
+    if data.get("variant")?.as_str()? != "hotspots" {
+        return None;
+    }
+    let data = data.get("payload")?;
+    if data.get("command")?.as_str()? != "runs.hotspots" {
+        return None;
+    }
+    let comparison = data.pointer("/phase_hotspots/comparison")?;
+    if comparison.get("verdict")?.as_str()? != "regressed" {
+        return None;
+    }
+    let baseline = comparison.get("baseline_version")?.as_str()?;
+    let candidate = comparison.get("candidate_version")?.as_str()?;
+    let evidence = comparison
+        .get("regressions")?
+        .as_array()?
+        .iter()
+        .take(3)
+        .filter_map(|regression| {
+            let metric = regression.get("metric")?.as_str()?;
+            // Durations read as whole milliseconds; rates keep three decimals.
+            let precision = if metric.ends_with("_ms") { 0 } else { 3 };
+            Some(format!(
+                "{metric}: {:.precision$} -> {:.precision$}",
+                regression.get("baseline")?.as_f64()?,
+                regression.get("candidate")?.as_f64()?,
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(CommandFailureDigest {
+        summary: format!("regressed: baseline {baseline} -> candidate {candidate}; {evidence}"),
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs: Vec::new(),
+        next_actions: Vec::new(),
+        retryable: None,
+    })
 }
 
 fn failure_digest_for_data(data: &Value) -> Option<CommandFailureDigest> {
