@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.24] - 2026-10-28
+
+### Changed
+- Keep the run's Cargo artifacts when publishing them to the warm cache
+- Drop activity from the read-only CLI lock test
+
 ## [0.434.23] - 2026-10-28
 
 ### Changed
