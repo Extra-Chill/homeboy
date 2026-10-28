@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.26] - 2026-10-28
+
+### Changed
+- Name the cause when an upgrade fails
+- Settle workflow Cook items from terminal observations and name drain blockers
+
 ## [0.434.25] - 2026-10-28
 
 ### Changed
