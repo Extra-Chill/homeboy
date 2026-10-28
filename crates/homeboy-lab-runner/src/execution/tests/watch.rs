@@ -5,7 +5,7 @@
 use super::super::daemon::{
     fetch_daemon_events, fetch_daemon_watch_resilient_with_endpoint_reload, DaemonWatchFollow,
 };
-use super::handoff::wait_for_path;
+use super::handoff::{wait_for_path, ReleaseBlockedWorkload, BLOCKED_WORKLOAD_LOOP};
 use super::*;
 use reqwest::blocking::Client;
 use serde_json::Value;
@@ -115,15 +115,6 @@ fn event_sequences(events: &[homeboy_core::api_jobs::JobEvent]) -> Vec<u64> {
     events.iter().map(|event| event.sequence).collect()
 }
 
-/// Releases a blocked child workload when the test ends, even on failure.
-struct ReleaseBlockedWorkload(std::path::PathBuf);
-
-impl Drop for ReleaseBlockedWorkload {
-    fn drop(&mut self) {
-        let _ = std::fs::write(&self.0, "release");
-    }
-}
-
 #[test]
 fn watch_follow_reproduces_the_daemon_event_log_and_reports_promotion_once() {
     crate::test_support::with_isolated_home(|_| {
@@ -154,9 +145,10 @@ fn watch_follow_reproduces_the_daemon_event_log_and_reports_promotion_once() {
             "sh".to_string(),
             "-c".to_string(),
             format!(
-                "{}; echo stdout-one; {}; echo stdout-two; printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done",
+                "{}; echo stdout-one; {}; echo stdout-two; {}",
                 frame("promotion progress: applying patch"),
                 frame("promotion progress: gate running"),
+                BLOCKED_WORKLOAD_LOOP,
             ),
             "sh".to_string(),
             started.display().to_string(),
@@ -263,7 +255,7 @@ fn watch_follow_resumes_a_dropped_connection_without_losing_events() {
                 "sh".to_string(),
                 "-c".to_string(),
                 format!(
-                    "{}; while [ ! -e \"$1\" ]; do sleep 0.01; done; {}; {}; while [ ! -e \"$2\" ]; do sleep 0.01; done",
+                    "{}; while [ ! -e \"$1\" ] && [ -d \"${{1%/*}}\" ]; do sleep 0.01; done; {}; {}; while [ ! -e \"$2\" ] && [ -d \"${{2%/*}}\" ]; do sleep 0.01; done",
                     progress_frame("one"),
                     progress_frame("three"),
                     progress_frame("four"),
