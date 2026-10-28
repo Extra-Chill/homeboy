@@ -1865,13 +1865,21 @@ fn verify_retained_evidence(
     if runs.is_empty() && artifacts.is_empty() {
         return Ok(None);
     }
-    let proven_stopped = generations
-        .generations
-        .get(generation)
-        .is_some_and(|entry| {
-            entry.drain_state == crate::RollingDrainState::Draining
-                && operations.proven_stopped(endpoint)
-        });
+    // Asked only when a source inventory is unavailable: proof costs a remote
+    // probe, and a reachable inventory must still be compared.
+    let stopped = std::cell::OnceCell::new();
+    let proven_stopped = || {
+        *stopped.get_or_init(|| {
+            generations
+                .generations
+                .get(generation)
+                .is_some_and(|entry| {
+                    entry.drain_state == crate::RollingDrainState::Draining
+                        && operations.proven_stopped(endpoint)
+                })
+        })
+    };
+    let mut discharged = false;
     let store = ObservationStore::open_initialized()?;
     let invalid = |id: &str, reason: &str| {
         Error::internal_unexpected(format!("retained evidence {id}: {reason}"))
@@ -1913,19 +1921,21 @@ fn verify_retained_evidence(
             return Err(invalid(id, "controller run is not terminal"));
         }
         let local_artifacts = store.list_artifacts(id)?;
-        for artifact in &local_artifacts {
-            verify_controller_copy(artifact, &local_artifacts)?;
-        }
-        // A proven-stopped daemon can no longer supply inventories, but its
-        // controller evidence must still be terminal, correctly owned and valid.
-        if proven_stopped {
-            continue;
-        }
         // A valid local file does not prove the whole remote result was copied.
         // Compare exhaustive source inventories before releasing its daemon.
         let encoded = homeboy_core::execution_contract::encode_uri_component(id);
-        let remote = evidence(&format!("/runs/{encoded}/artifacts"))
-            .ok_or_else(|| invalid(id, "source artifact inventory unavailable"))?;
+        let Some(remote) = evidence(&format!("/runs/{encoded}/artifacts")) else {
+            if !proven_stopped() {
+                return Err(invalid(id, "source artifact inventory unavailable"));
+            }
+            // Only the stopped daemon held the inventory; every controller
+            // copy it left must still be valid.
+            for artifact in &local_artifacts {
+                verify_controller_copy(artifact, &local_artifacts)?;
+            }
+            discharged = true;
+            continue;
+        };
         let remote_artifacts = remote
             .pointer("/data/body/artifacts")
             .and_then(serde_json::Value::as_array)
@@ -1936,8 +1946,13 @@ fn verify_retained_evidence(
                     .map_err(|_| invalid(id, "source artifact metadata invalid"))?;
             verify_controller_copy(&source, &local_artifacts)?;
         }
-        let remote = evidence(&format!("/runs/{encoded}/findings"))
-            .ok_or_else(|| invalid(id, "source findings unavailable"))?;
+        let Some(remote) = evidence(&format!("/runs/{encoded}/findings")) else {
+            if !proven_stopped() {
+                return Err(invalid(id, "source findings unavailable"));
+            }
+            discharged = true;
+            continue;
+        };
         let remote_findings = remote
             .pointer("/data/body/findings")
             .ok_or_else(|| invalid(id, "source findings invalid"))?;
@@ -1969,7 +1984,7 @@ fn verify_retained_evidence(
         }
         verify_controller_copy(&artifact, &store.list_artifacts(&artifact.run_id)?)?;
     }
-    Ok(proven_stopped
+    Ok(discharged
         .then_some("daemon proven stopped; source inventory and findings checks discharged"))
 }
 
@@ -3975,6 +3990,63 @@ mod tests {
         });
     }
 
+    #[test]
+    fn stopped_generation_evidence_is_verified_through_the_admitting_endpoint() {
+        crate::test_support::with_isolated_home(|home| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+            let run = homeboy_core::observation::RunRecord {
+                id: "stopped-run".into(),
+                kind: "lint".into(),
+                status: "pass".into(),
+                started_at: "2026-10-23T00:00:00Z".into(),
+                finished_at: Some("2026-10-23T00:00:01Z".into()),
+                metadata_json: serde_json::json!({"lab":{"runner":{"id":"runner-a"}}}),
+                ..Default::default()
+            };
+            store.import_run(&run).unwrap();
+            let source = home.path().join("stopped-source");
+            std::fs::write(&source, b"verified evidence").unwrap();
+            let artifact = store.record_artifact(&run.id, "log", &source).unwrap();
+            let stopped = session("lease-stopped", "daemon-stopped", Some(101));
+            let current = session("lease-current", "daemon-current", Some(303));
+            let mut generations = RollingGenerations::new("lease-current".to_string(), current);
+            generations.begin("lease-stopped", stopped);
+            generations
+                .run_owners
+                .insert(run.id.clone(), "lease-stopped".into());
+            write("runner-a", &generations).unwrap();
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-current".to_string(), 0);
+            operations
+                .stopped_leases_proven
+                .borrow_mut()
+                .insert("lease-stopped".into());
+            operations
+                .evidence_unreachable_leases
+                .borrow_mut()
+                .insert("lease-stopped".into());
+            operations.evidence.borrow_mut().extend([
+                (
+                    "/runs/stopped-run/artifacts".into(),
+                    serde_json::json!({"data":{"body":{"artifacts":[artifact]}}}),
+                ),
+                (
+                    "/runs/stopped-run/findings".into(),
+                    serde_json::json!({"data":{"body":{"findings":[]}}}),
+                ),
+            ]);
+            let result = reconcile_with("runner-a", &operations).unwrap();
+            assert_eq!(result.retired_generation_ids, ["lease-stopped"]);
+            assert!(result.evidence_blocked_generation_ids.is_empty());
+            assert!(result.released_unverified_evidence.is_empty());
+        });
+    }
+
+    /// #15653: by default an idle generation whose retained evidence cannot be
+    /// verified stays registered and is reported as evidence-blocked.
     #[test]
     fn stopped_generation_releases_only_remote_evidence_checks() {
         for (proven_stopped, status, tampered, blocker) in [
