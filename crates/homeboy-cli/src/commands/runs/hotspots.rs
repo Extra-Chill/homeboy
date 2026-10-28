@@ -19,7 +19,7 @@ use homeboy::fuzz::{
 use super::common::SkippedArtifactRow;
 use super::{CmdResult, RunsOutput};
 
-#[derive(Args, Clone, Debug, Default)]
+#[derive(Args, Clone, Debug)]
 pub struct RunsHotspotsArgs {
     /// Report timeline coverage including mission-linked runs, and largest unattributed gaps.
     #[arg(long)]
@@ -38,6 +38,26 @@ pub struct RunsHotspotsArgs {
     pub baseline_version: Option<String>,
     #[arg(long, requires = "baseline_version")]
     pub candidate_version: Option<String>,
+    /// Relative phase regression fraction (0.25 means 25%).
+    #[arg(long, default_value_t = 0.25)]
+    pub phase_regression_relative: f64,
+    /// Minimum phase regression in milliseconds.
+    #[arg(long, default_value_t = 5000.0)]
+    pub phase_regression_floor_ms: f64,
+    #[arg(long, default_value_t = 10)]
+    pub min_phase_samples: usize,
+    /// Homeboy-failure and unclassified-failure rate increase, as a fraction (0.05 means 5 points).
+    #[arg(long, default_value_t = 0.05)]
+    pub failure_rate_increase: f64,
+    #[arg(long, default_value_t = 20)]
+    pub min_missions: usize,
+    /// Notify regressions once per resolved version pair via the existing outbox.
+    #[arg(long, requires = "baseline_version")]
+    pub notify_regressions: bool,
+    #[arg(long, requires = "notification_route")]
+    pub notification_transport: Option<String>,
+    #[arg(long, requires = "notification_transport")]
+    pub notification_route: Option<String>,
     /// Maximum recent matching runs to inspect (bounded at 1000).
     #[arg(long, default_value_t = 100)]
     pub last: usize,
@@ -56,6 +76,32 @@ pub struct RunsHotspotsArgs {
     /// Maximum ranked hotspots to return.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
+}
+
+impl Default for RunsHotspotsArgs {
+    fn default() -> Self {
+        Self {
+            coverage: false,
+            kind: None,
+            component: None,
+            homeboy_version: None,
+            baseline_version: None,
+            candidate_version: None,
+            phase_regression_relative: 0.25,
+            phase_regression_floor_ms: 5000.0,
+            min_phase_samples: 10,
+            failure_rate_increase: 0.05,
+            min_missions: 20,
+            notify_regressions: false,
+            notification_transport: None,
+            notification_route: None,
+            last: 100,
+            run_ids: vec![],
+            baseline_runs: vec![],
+            candidate_runs: vec![],
+            limit: 20,
+        }
+    }
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -181,7 +227,38 @@ pub(crate) fn runs_hotspots(
                 None,
             ));
         }
-        let mut phases = homeboy::core::performance_hotspots::phase_hotspots(
+        let thresholds = homeboy::core::performance_hotspots::RegressionThresholds {
+            phase_relative: args.phase_regression_relative,
+            phase_floor_ms: args.phase_regression_floor_ms,
+            phase_samples: args.min_phase_samples,
+            failure_rate: args.failure_rate_increase,
+            missions: args.min_missions,
+        };
+        if !thresholds.phase_relative.is_finite()
+            || thresholds.phase_relative < 0.0
+            || !thresholds.phase_floor_ms.is_finite()
+            || thresholds.phase_floor_ms < 0.0
+            || !thresholds.failure_rate.is_finite()
+            || !(0.0..=1.0).contains(&thresholds.failure_rate)
+            || thresholds.phase_samples == 0
+            || thresholds.missions == 0
+        {
+            return Err(Error::validation_invalid_argument(
+                "thresholds",
+                "thresholds must be finite, nonnegative; sample minima must be positive",
+                None,
+                None,
+            ));
+        }
+        let route = args
+            .notification_transport
+            .as_deref()
+            .zip(args.notification_route.as_deref())
+            .map(|(transport, route)| {
+                homeboy::core::notification_route::NotificationRoute::new(transport, route)
+            })
+            .transpose()?;
+        let mut phases = homeboy::core::performance_hotspots::compare_phase_hotspots(
             store,
             &homeboy::core::performance_hotspots::PhaseHotspotQuery {
                 kind: args.kind,
@@ -191,7 +268,18 @@ pub(crate) fn runs_hotspots(
                 candidate_version: args.candidate_version,
                 last: args.last,
             },
+            &thresholds,
         )?;
+        let regressed = phases
+            .comparison
+            .as_ref()
+            .is_some_and(|c| c.verdict == homeboy::core::performance_hotspots::Verdict::Regressed);
+        if args.notify_regressions && regressed {
+            if let Some(comparison) = &phases.comparison {
+                homeboy::core::performance_hotspots::notify_regression(comparison, route.as_ref());
+            }
+        }
+        let exit_code = if regressed { 1 } else { 0 };
         phases.phases.truncate(limit);
         return Ok((
             RunsOutput::Hotspots(RunsHotspotsOutput {
@@ -206,7 +294,7 @@ pub(crate) fn runs_hotspots(
                 phase_hotspots: Some(phases),
                 coverage: vec![],
             }),
-            0,
+            exit_code,
         ));
     }
     validate_hotspot_args(&args)?;
@@ -944,6 +1032,64 @@ mod tests {
         assert_eq!(output.coverage[1], expected_attempt);
         assert!(store.phase_spans(&mission.id).unwrap().spans.is_empty());
         assert_eq!(output.inspected_artifact_count, 0);
+    }
+
+    #[test]
+    fn phase_regression_exit_tracks_verdict_before_display_limit() {
+        use homeboy_engine_primitives::phase_timing::PhaseTimer;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(dir.path().join("runs.sqlite")).unwrap();
+        for (version, duration) in [("before", 20_000), ("after", 30_000)] {
+            for _ in 0..10 {
+                let run = store
+                    .start_run(
+                        NewRunRecord::builder("agent-task")
+                            .homeboy_version(version)
+                            .build(),
+                    )
+                    .unwrap();
+                let mut timer = PhaseTimer::with_version(version);
+                timer.record_ok("slow_unchanged", Duration::from_millis(100_000));
+                timer.record_ok("regressed", Duration::from_millis(duration));
+                store
+                    .record_phase_spans(&run.id, "attempt", &timer.into_report())
+                    .unwrap();
+            }
+        }
+        let args = RunsHotspotsArgs {
+            kind: Some("agent-task".into()),
+            baseline_version: Some("before".into()),
+            candidate_version: Some("after".into()),
+            limit: 1,
+            ..Default::default()
+        };
+        let (output, exit) = runs_hotspots(&store, args.clone()).unwrap();
+        assert_eq!(exit, 1);
+        let RunsOutput::Hotspots(output) = output else {
+            panic!("expected hotspots");
+        };
+        let phases = output.phase_hotspots.unwrap();
+        assert_eq!(phases.phases.len(), 1);
+        assert_eq!(phases.comparison.unwrap().regressions.len(), 2);
+        let (_, exit) = runs_hotspots(
+            &store,
+            RunsHotspotsArgs {
+                phase_regression_relative: 1.0,
+                ..args.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        let (_, exit) = runs_hotspots(
+            &store,
+            RunsHotspotsArgs {
+                min_phase_samples: 11,
+                ..args
+            },
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
     }
 
     fn sample_run(kind: &str, component_id: &str, rig_id: &str) -> NewRunRecord {
