@@ -2004,29 +2004,31 @@ pub enum ScheduledContinuationGate {
 }
 
 impl CookRecipeStore {
-    pub fn scheduled_continuation_gate(&self, run_id: &str) -> ScheduledContinuationGate {
+    pub fn scheduled_continuation_gate(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+    ) -> ScheduledContinuationGate {
         let lifecycle_store = self.lifecycle_store();
         let Ok(record) = lifecycle_store.read_record(run_id) else {
             return ScheduledContinuationGate::Ready;
         };
         let value = lifecycle_continuation(&record);
+        let foreign_driver = self
+            .foreign_cook_driver(cook_id)
+            .map_or(true, |driver| driver.is_some());
         match lifecycle_continuation_state(value) {
-            CookContinuationState::Pending => continuation_retry_wait(value).map_or(
-                ScheduledContinuationGate::Ready,
-                ScheduledContinuationGate::RetryAfter,
-            ),
-            CookContinuationState::Claimed
-                if value
-                    .and_then(|value| value.get("owner_pid"))
-                    .and_then(Value::as_u64)
-                    .is_some_and(|pid| homeboy_core::process::pid_is_running(pid as u32)) =>
-            {
-                ScheduledContinuationGate::HeldByLiveOwner
-            }
             state @ (CookContinuationState::Completed | CookContinuationState::Failed) => {
                 ScheduledContinuationGate::Settled(state)
             }
-            _ => ScheduledContinuationGate::Ready,
+            CookContinuationState::Absent => ScheduledContinuationGate::Ready,
+            _ if !lifecycle_continuation_claimable(value, foreign_driver) => {
+                ScheduledContinuationGate::HeldByLiveOwner
+            }
+            _ => continuation_retry_wait(value).map_or(
+                ScheduledContinuationGate::Ready,
+                ScheduledContinuationGate::RetryAfter,
+            ),
         }
     }
 }
@@ -2041,6 +2043,22 @@ enum LifecycleContinuationTransition<'a> {
 
 fn lifecycle_continuation(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<&Value> {
     record.metadata.get(LIFECYCLE_CONTINUATION_KEY)
+}
+
+/// The one claimability rule shared by the daemon gate and the claim, so a
+/// supervisor never spawns a worker that cannot claim. A Cook another live
+/// controller drives is not claimable: its driver owns every transition and
+/// the continuation stays pending until that driver exits (#15566).
+fn lifecycle_continuation_claimable(value: Option<&Value>, foreign_driver: bool) -> bool {
+    !foreign_driver
+        && match lifecycle_continuation_state(value) {
+            CookContinuationState::Pending => true,
+            CookContinuationState::Claimed => value
+                .and_then(|value| value.get("owner_pid"))
+                .and_then(Value::as_u64)
+                .is_some_and(|pid| !homeboy_core::process::pid_is_running(pid as u32)),
+            _ => false,
+        }
 }
 
 fn continuation_from_lifecycle(value: &Value) -> Result<AgentTaskCookContinuation> {
@@ -2369,16 +2387,9 @@ fn claim_lifecycle_record(
     cook_id: &str,
     run_id: &str,
 ) -> Result<Option<ClaimedCookContinuation>> {
-    // A Cook another live controller is driving is not claimable: its driver
-    // owns every transition, including the one this continuation would make.
-    // The continuation stays pending and becomes claimable once that driver
-    // exits (#15566).
-    if CookRecipeStore::from_data_root(data_root.to_path_buf())
+    let foreign_driver = CookRecipeStore::from_data_root(data_root.to_path_buf())
         .foreign_cook_driver(cook_id)?
-        .is_some()
-    {
-        return Ok(None);
-    }
+        .is_some();
     let claim_identity = format!("{}-{}", std::process::id(), Uuid::new_v4());
     let mut claimed = None;
     lifecycle_store.mutate_record(run_id, |record| {
@@ -2391,15 +2402,11 @@ fn claim_lifecycle_record(
         if continuation.cook_id != cook_id || continuation.run_id != run_id {
             return false;
         }
-        let state = lifecycle_continuation_state(Some(&value));
-        let dead_claim = state == CookContinuationState::Claimed
-            && value
-                .get("owner_pid")
-                .and_then(Value::as_u64)
-                .is_some_and(|pid| !homeboy_core::process::pid_is_running(pid as u32));
-        if state != CookContinuationState::Pending && !dead_claim {
+        if !lifecycle_continuation_claimable(Some(&value), foreign_driver) {
             return false;
         }
+        let dead_claim =
+            lifecycle_continuation_state(Some(&value)) == CookContinuationState::Claimed;
         let mut value = value;
         value["state"] = serde_json::json!("claimed");
         if let Some(value) = value.as_object_mut() {
@@ -4677,6 +4684,52 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_gate_and_claim_wait_for_foreign_driver() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        let other = store.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+        let driver = std::thread::spawn(move || {
+            let _guard = other.try_acquire_cook_driver("cook").unwrap().unwrap();
+            ready_tx.send(()).unwrap();
+            exit_rx.recv().unwrap();
+        });
+        ready_rx.recv().unwrap();
+        for state in ["pending", "claimed"] {
+            store
+                .lifecycle_store()
+                .mutate_record("run", |record| {
+                    let value = &mut record.metadata["cook_continuation"];
+                    value["state"] = state.into();
+                    value["owner_pid"] = serde_json::json!(u32::MAX);
+                    true
+                })
+                .unwrap();
+            assert_eq!(
+                store.scheduled_continuation_gate("cook", "run"),
+                ScheduledContinuationGate::HeldByLiveOwner
+            );
+            assert!(store
+                .claim_continuation_for("cook", "run")
+                .unwrap()
+                .is_none());
+        }
+        exit_tx.send(()).unwrap();
+        driver.join().unwrap();
+        assert_eq!(
+            store.scheduled_continuation_gate("cook", "run"),
+            ScheduledContinuationGate::Ready
+        );
+        assert!(store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
     fn dropped_continuation_claim_is_retried_even_while_owner_process_remains_alive() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = CookRecipeStore::new(context.path_roots());
@@ -6249,6 +6302,9 @@ mod cook_driver_tests {
             Some("4242")
         );
 
+        // Concurrent process-spawning tests can briefly inherit this open
+        // description across fork; release the fixture lock explicitly.
+        FileExt::unlock(&other).unwrap();
         drop(other);
         assert!(store.foreign_cook_driver("cook").unwrap().is_none());
         assert!(store.try_acquire_cook_driver("cook").unwrap().is_some());

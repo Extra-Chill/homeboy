@@ -2015,10 +2015,6 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
         store
             .enqueue_terminal_continuation(cook_id, run_id)
             .expect("enqueue continuation");
-        let claim = store
-            .claim_continuation_for(cook_id, run_id)
-            .expect("claim lookup")
-            .expect("other owner claims work");
         let checkpoint = serde_json::json!({
             "schema": "homeboy/terminal-cook-continuation-request/v1",
             "cook_id": cook_id,
@@ -2026,6 +2022,59 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
             "generation": 0,
         });
         let handler = TerminalCookWorkHandler;
+        // Model a foreign driver holding the same OS ownership lock. Repeated
+        // supervisor ticks must not create workers for this pending record.
+        use crate::agents::agent_task_service::ScheduledContinuationGate;
+        use fs4::fs_std::FileExt;
+        let lock_path = store
+            .data_root()
+            .join("agent-task-cooks")
+            .join(cook_id)
+            .join("driver.lock");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        assert!(lock.try_lock_exclusive().unwrap());
+        assert_eq!(
+            store.scheduled_continuation_gate(cook_id, run_id),
+            ScheduledContinuationGate::HeldByLiveOwner
+        );
+        for _ in 0..3 {
+            let waiting = handler
+                .advance(checkpoint.clone(), WorkJobInvocation::Resume)
+                .unwrap();
+            assert!(
+                matches!(waiting, WorkJobStep::Continue { checkpoint: next, wait, .. }
+                if next == checkpoint && wait == TERMINAL_COOK_WORKER_POLL)
+            );
+        }
+        drop(lock);
+        assert_eq!(
+            store.scheduled_continuation_gate(cook_id, run_id),
+            ScheduledContinuationGate::Ready
+        );
+        let spawned = handler
+            .advance(checkpoint.clone(), WorkJobInvocation::Resume)
+            .unwrap();
+        let WorkJobStep::Continue {
+            checkpoint: spawned,
+            ..
+        } = spawned
+        else {
+            panic!("released driver admits one worker");
+        };
+        let worker = parse_terminal_cook_job(&spawned).unwrap().worker.unwrap();
+        // The test executable is not the CLI; only admission/spawning is under test.
+        let _ = homeboy::core::process::terminate_process_tree(worker.pid);
+        let _ = fs::remove_dir_all(worker.outcome_path.parent().unwrap());
+        let claim = store
+            .claim_continuation_for(cook_id, run_id)
+            .unwrap()
+            .unwrap();
         let waiting = handler
             .advance(checkpoint.clone(), WorkJobInvocation::Resume)
             .expect("other owner remains active");
@@ -2077,6 +2126,7 @@ fn recorded_terminal_worker(
     let start_identity = homeboy::core::process::process_start_identity(child.id())
         .expect("identity")
         .expect("identity available");
+    fs::create_dir_all(dir).unwrap();
     let outcome_path = dir.join("outcome.json");
     if let Some(outcome) = outcome {
         fs::write(
@@ -2139,6 +2189,19 @@ fn terminal_continuation_runs_in_a_supervised_worker_process() {
             .advance(checkpoint, WorkJobInvocation::Resume)
             .expect("published outcome settles");
         assert!(matches!(settled, WorkJobStep::Complete(ref result) if result["exit_code"] == 0));
+        assert!(!dir.path().exists());
+
+        let (mut continuing, checkpoint) = recorded_terminal_worker(
+            dir.path(),
+            "0",
+            Some(serde_json::json!({ "outcome": "continue", "wait_ms": 250 })),
+        );
+        continuing.wait().unwrap();
+        assert!(
+            matches!(handler.advance(checkpoint, WorkJobInvocation::Resume).unwrap(),
+            WorkJobStep::Continue { wait, .. } if wait == Duration::from_millis(250))
+        );
+        assert!(!dir.path().exists());
 
         // A failed outcome re-raises the worker's error class.
         let (mut failed, checkpoint) = recorded_terminal_worker(
@@ -2152,14 +2215,22 @@ fn terminal_continuation_runs_in_a_supervised_worker_process() {
             })),
         );
         failed.wait().unwrap();
+        fs::write(
+            dir.path().join("worker.log"),
+            format!("{}\ndiagnostic survives\n", "x".repeat(100_000)),
+        )
+        .unwrap();
         let Err(error) = handler.advance(checkpoint, WorkJobInvocation::Resume) else {
             panic!("failed outcome fails the job");
         };
         assert_eq!(error.message, "bad continuation");
+        let tail = error.details["worker_log_tail"].as_str().unwrap();
+        assert!(tail.contains("diagnostic survives"));
+        assert!(tail.len() < 100_000);
+        assert!(!dir.path().exists());
 
         // A worker that keeps dying without an outcome is a fault: the job
         // fails instead of respawning without bound.
-        fs::remove_file(dir.path().join("outcome.json")).unwrap();
         let (mut crashed, mut checkpoint) = recorded_terminal_worker(dir.path(), "0", None);
         crashed.wait().unwrap();
         checkpoint["interrupted_workers"] =
@@ -2168,6 +2239,7 @@ fn terminal_continuation_runs_in_a_supervised_worker_process() {
             panic!("repeated crashes fail the job");
         };
         assert!(error.message.contains("without an outcome"));
+        assert!(dir.path().exists());
     });
 }
 
