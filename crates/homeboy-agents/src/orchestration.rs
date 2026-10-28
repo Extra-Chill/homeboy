@@ -2185,7 +2185,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         Some(retry_action_run_id(&record, request, &parameters));
                     match retry(&resolved, &parameters, request) {
                         Ok(retry) => {
-                            let outcome = if retry.created {
+                            let cook_retry = retry.record.metadata["cook_id"].is_string();
+                            let outcome = if cook_retry && retry.record.state().is_terminal() {
+                                ControlPlaneActionOutcome::Failed
+                            } else if cook_retry {
+                                ControlPlaneActionOutcome::AcceptedPending
+                            } else if retry.created {
                                 ControlPlaneActionOutcome::Succeeded
                             } else {
                                 ControlPlaneActionOutcome::AlreadySatisfied
@@ -2201,7 +2206,13 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                         "created": retry.created,
                                     }),
                                 },
-                                None,
+                                cook_retry.then(|| {
+                                    if retry.record.state().is_terminal() {
+                                        "Retry cannot run: its reservation is terminal.".to_string()
+                                    } else {
+                                        "Retry accepted; execution is pending.".to_string()
+                                    }
+                                }),
                             )
                         }
                         Err(error) => (
@@ -2898,6 +2909,7 @@ fn ensure_action_events_in_store(
         )?;
     }
     let kind = match acknowledgement.outcome {
+        ControlPlaneActionOutcome::AcceptedPending => "action.accepted",
         ControlPlaneActionOutcome::Succeeded => "action.succeeded",
         ControlPlaneActionOutcome::AlreadySatisfied => "action.already_satisfied",
         ControlPlaneActionOutcome::Failed => "action.failed",
