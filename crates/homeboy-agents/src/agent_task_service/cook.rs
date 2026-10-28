@@ -1846,7 +1846,26 @@ pub(crate) fn cook_observation_state(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> agent_task_lifecycle::AgentTaskRunState {
     use agent_task_lifecycle::AgentTaskRunState;
-    let stored = record.state();
+    let mut stored = record.state();
+    // Cook settlement can survive a failed lifecycle write. Once its driver
+    // has left, the settled run verdict owns terminality, not that stale write.
+    if !stored.is_terminal() {
+        if let Some(cook_id) = record.metadata["cook_id"].as_str() {
+            let recipes = CookRecipeStore::new(store.roots().clone());
+            if matches!(recipes.foreign_cook_driver(cook_id), Ok(None)) {
+                if let Ok(Some(run)) = store
+                    .open_observation_readonly()
+                    .and_then(|s| s.get_run(&record.run_id))
+                {
+                    stored = match run.status.as_str() {
+                        "pass" => AgentTaskRunState::Succeeded,
+                        "fail" | "error" => AgentTaskRunState::Failed,
+                        _ => stored,
+                    };
+                }
+            }
+        }
+    }
     // Publication is the end-to-end receipt, not a second verdict derived
     // from a possibly older promotion or terminal-progress snapshot.
     if super::CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published()) {

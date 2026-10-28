@@ -6534,6 +6534,86 @@ mod tests {
     }
 
     #[test]
+    fn settled_failed_run_ends_wait_despite_open_lifecycle() {
+        crate::test_support::with_isolated_home(|_| {
+            use homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore;
+            use homeboy::core::observation::RunStatus;
+
+            let run_id = "cook-settled-attempt-1";
+            let plan = AgentTaskPlan::new(run_id, Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+            let store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+            store
+                .mutate_record(run_id, |record| {
+                    record.metadata["cook_id"] = json!("cook-settled");
+                    true
+                })
+                .unwrap();
+            store
+                .open_observation_initialized()
+                .unwrap()
+                .settle_run(run_id, RunStatus::Fail)
+                .unwrap();
+            assert!(!store
+                .read_record_bounded(run_id)
+                .unwrap()
+                .state()
+                .is_terminal());
+
+            let args = StatusArgs {
+                run_id: run_id.to_string(),
+                exact: true,
+                ..Default::default()
+            };
+            // A settled dispatch/attempt row is not the verdict while its
+            // driver still owns the Cook.
+            use fs4::fs_std::FileExt;
+            let driver_dir = homeboy::core::paths::homeboy_data()
+                .unwrap()
+                .join("agent-task-cooks/cook-settled");
+            std::fs::create_dir_all(&driver_dir).unwrap();
+            let driver = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(driver_dir.join("driver.lock"))
+                .unwrap();
+            assert!(driver.try_lock_exclusive().unwrap());
+            assert!(!status_is_terminal(&status_once(args.clone()).unwrap().0));
+            drop(driver);
+
+            let status = status_once(args.clone()).unwrap();
+            assert_eq!(status.0["state"], "failed");
+            assert!(!cook_driver_still_owns(&status.0));
+            let poller = StatusPoller {
+                args,
+                await_materialization: true,
+            };
+            assert!(poller.is_terminal(&status));
+            let watched = watch_loop(
+                &poller,
+                run_id,
+                &WatchConfig {
+                    interval: Duration::from_secs(1),
+                    timeout: None,
+                },
+                |_| panic!("settled Cook must not keep polling"),
+                || Duration::ZERO,
+                |_, _| {},
+            )
+            .unwrap();
+            assert_eq!(watched.conclusion, WatchConclusion::Terminal);
+            assert_eq!(watched.item.0["state"], "failed");
+            assert!(!store
+                .read_record_bounded(run_id)
+                .unwrap()
+                .state()
+                .is_terminal());
+        });
+    }
+
+    #[test]
     fn a_recipe_only_attempt_ends_a_cook_wait_only_once_its_admission_is_terminal() {
         crate::test_support::with_isolated_home(|_| {
             let recipe_only = (
