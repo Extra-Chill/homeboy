@@ -42,7 +42,7 @@ current directory. The lease (`state.json`), job store, `owner.lock`, and
 `admission.lock` all live there.
 
 Every reader and writer resolves that same store: `daemon status`, `daemon
-plan`, `daemon recover`, `daemon jobs`, the Activity daemon-jobs provider,
+plan`, `daemon recover`, `daemon jobs`,
 `self`, discovery, and controller completion custody. A second
 `ensure-running` while a live daemon owns the store returns that daemon.
 

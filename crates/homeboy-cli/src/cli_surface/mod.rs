@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::commands::{
-    activity, agent_task, bench, cleanup, component, config, contract, control_plane, daemon,
-    deploy, extension, file, fuzz, git, harvest, project, refactor, release, review, rig, runner,
-    runs, runtime, self_cmd, server, source, ssh, status, trace, tunnel, upgrade, workflow,
-    workload, worktree,
+    agent_task, bench, cleanup, component, config, contract, control_plane, daemon, deploy,
+    extension, file, fuzz, git, harvest, project, refactor, release, review, rig, runner, runs,
+    runtime, self_cmd, server, source, ssh, status, trace, tunnel, upgrade, workflow, workload,
+    worktree,
 };
 
 mod argument_provenance;
@@ -167,8 +167,6 @@ impl Cli {
 // cascade through typed command dispatch without improving the CLI boundary.
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
-    /// Unified view of active and recently finished Homeboy work
-    Activity(activity::ActivityArgs),
     /// Run generic agent task plans
     #[command(name = "agent-task")]
     AgentTask(agent_task::AgentTaskArgs),

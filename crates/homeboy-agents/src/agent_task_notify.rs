@@ -250,8 +250,11 @@ fn cook_actions(payload: NotifyPayload, cook_id: &str) -> NotifyPayload {
                 .with_kind("show"),
         )
         .with_action(
-            NotifyAction::new("watch", format!("homeboy activity watch {cook_id}"))
-                .with_kind("watch"),
+            NotifyAction::new(
+                "watch",
+                format!("homeboy agent-task status {cook_id} --watch"),
+            )
+            .with_kind("watch"),
         )
 }
 

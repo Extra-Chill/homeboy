@@ -204,20 +204,6 @@ fn routes_job_inspection_endpoints() {
     );
 }
 
-#[test]
-fn routes_activity_endpoints() {
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/activity?limit=5").expect("route"),
-        HttpEndpoint::Activity
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/activity/run-123").expect("route"),
-        HttpEndpoint::ActivityItem {
-            id: "run-123".to_string()
-        }
-    );
-}
-
 const CONTROL_PLANE_FIXTURE_RUN: &str =
     "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
 const CONTROL_PLANE_FIXTURE_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
@@ -1585,50 +1571,6 @@ fn control_plane_run_id_is_bounded_before_the_record_lookup() {
         !error.message.contains(&oversized),
         "an oversized id must not be reflected into the error message",
     );
-}
-
-#[test]
-fn activity_endpoint_exposes_activity_report_and_show() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .start_run(sample_run("test", "homeboy", "studio"))
-            .expect("start run");
-        store
-            .finish_run(
-                &run.id,
-                RunStatus::Fail,
-                Some(serde_json::json!({ "exit_code": 1 })),
-            )
-            .expect("finish run");
-
-        let response = http_api::handle(HttpApiRequest {
-            method: HttpMethod::Get,
-            path: "/activity?all=1&limit=10".to_string(),
-            body: None,
-        })
-        .expect("activity list");
-        assert_eq!(response.endpoint, "activity.list");
-        assert_eq!(response.body["activity"]["command"], "activity");
-        assert!(response.body["activity"]["items"]
-            .as_array()
-            .expect("items")
-            .iter()
-            .any(|item| item["refs"]["run_id"] == run.id));
-
-        let response = http_api::handle(HttpApiRequest {
-            method: HttpMethod::Get,
-            path: format!("/activity/{}", run.id),
-            body: None,
-        })
-        .expect("activity show");
-        assert_eq!(response.endpoint, "activity.show");
-        assert_eq!(
-            response.body["activity"]["items"][0]["refs"]["run_id"],
-            run.id
-        );
-    });
 }
 
 #[test]

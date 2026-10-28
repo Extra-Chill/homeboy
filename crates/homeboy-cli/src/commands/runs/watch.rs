@@ -79,10 +79,8 @@ pub struct RunsWatchOutput {
 /// an explicit `runs reconcile` operation rather than a side effect of a focused
 /// watch.
 ///
-/// The reconciling read is what makes this poller distinct from
-/// `activity watch`'s: `runs watch` deliberately transitions an owner-dead run
-/// to `stale` so the watch can surface it instead of blocking, while activity
-/// reads are deliberately non-reconciling.
+/// Transitions an owner-dead run to `stale` so the watch can surface it
+/// instead of blocking.
 struct StorePoller<'a> {
     store: &'a ObservationStore,
 }

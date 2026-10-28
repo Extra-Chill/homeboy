@@ -84,7 +84,7 @@ impl NotifyEventKind {
 }
 
 /// What the event is about. `kind` is a generic subject class (`run`,
-/// `agent_task_cook`, `schedule`, `activity`), never a transport concept.
+/// `agent_task_cook`, `schedule`), never a transport concept.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotifySubject {
     pub kind: String,

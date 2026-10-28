@@ -124,7 +124,7 @@ impl Default for RunExecutionLifecycle {
 /// run stopped holding a promotable candidate a consumer can still act on,
 /// whereas `PartialFailure` is the terminal, unsuccessful, nothing-left-to-do
 /// case. Collapsing them meant a consumer reading only the serialized record
-/// (an `activity` listing, an HTTP response, a chat-plane message) could not
+/// (an HTTP response or a chat-plane message) could not
 /// tell "there is a candidate waiting to be promoted" from "this partially
 /// failed", because both arrived as the same string.
 ///

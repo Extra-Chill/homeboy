@@ -579,13 +579,19 @@ fn runner_exec_command_output(
                         id: job_id.clone(),
                         kind: "runner_job".to_string(),
                         source: "homeboy-runner-exec".to_string(),
-                        status_command: format!("homeboy activity show {job_id}"),
-                        watch_command: Some(format!("homeboy activity watch {job_id}")),
+                        status_command: format!(
+                            "homeboy runner job logs {} {job_id}",
+                            output.runner_id
+                        ),
+                        watch_command: Some(format!(
+                            "homeboy runner job logs {} {job_id} --follow",
+                            output.runner_id
+                        )),
                     });
                 metadata.next_actions.push(
                     crate::commands::utils::response::CommandNextAction::new(
-                        "show activity",
-                        format!("homeboy activity show {job_id}"),
+                        "show job logs",
+                        format!("homeboy runner job logs {} {job_id}", output.runner_id),
                     )
                     .with_kind(crate::commands::utils::response::CommandNextActionKind::Show),
                 );

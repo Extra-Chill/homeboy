@@ -103,9 +103,6 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Recover(_) => AgentTaskResourceBehavior::AdmittedWorkload,
         agent_task::AgentTaskCommand::Status(_)
         | agent_task::AgentTaskCommand::ValidatePlan(_)
-        // `watch` is an alias for `activity watch`: a bounded, non-reconciling
-        // poll over the activity read model, not an admitted workload.
-        | agent_task::AgentTaskCommand::Watch(_)
         | agent_task::AgentTaskCommand::List(_)
         | agent_task::AgentTaskCommand::ActiveScope(_)
         | agent_task::AgentTaskCommand::Logs(_)

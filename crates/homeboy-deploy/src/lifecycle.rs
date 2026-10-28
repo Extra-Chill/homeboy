@@ -943,25 +943,21 @@ mod tests {
                 "homeboy runs reconcile"
             );
             assert_eq!(run.metadata_json["targets"]["target-a"], "target-run");
-            let activity = homeboy_core::activity::show_activity("aggregate-run")
-                .expect("aggregate deploy run resolves through activity");
-            assert_eq!(activity.items[0].id, "aggregate-run");
+            assert_eq!(run.id, "aggregate-run");
         });
     }
 
     #[test]
-    fn active_deploy_observation_is_available_through_activity_show() {
+    fn active_deploy_observation_is_available_in_runs_store() {
         with_isolated_home(|_| {
             let observation = DeployObservation::start("site", "HEAD").expect("admit run");
-            let report = homeboy_core::activity::show_activity(observation.run_id())
-                .expect("activity show active deploy");
+            let store = ObservationStore::open_initialized().expect("runs store");
+            let run =
+                homeboy_core::observation::runs_service::require_run(&store, observation.run_id())
+                    .expect("show active deploy run");
 
-            assert_eq!(report.items.len(), 1);
-            assert_eq!(report.items[0].id, observation.run_id());
-            assert_eq!(
-                report.items[0].state,
-                homeboy_core::activity::ActivityState::Running
-            );
+            assert_eq!(run.id, observation.run_id());
+            assert_eq!(run.status, RunStatus::Running.as_str());
         });
     }
 }

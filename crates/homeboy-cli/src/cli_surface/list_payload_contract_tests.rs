@@ -30,10 +30,6 @@ const ENTITY_LIST_COMMANDS: &[&str] = &[
 /// `list` subcommands deliberately left on their own payload shape.
 const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
     (
-        "activity list",
-        "report-shaped: counts and zero_executing_work alongside items; type shared with show",
-    ),
-    (
         "agent-task list",
         "schema-versioned discovery report; `runs` shared with active and list --latest",
     ),

@@ -49,7 +49,7 @@ pub struct RunnerConnectionInfo {
     ///
     /// An empty `active_jobs` is ambiguous on its own: it means either "this
     /// runner has no active work" or "this runner did not answer". A federating
-    /// reader (`homeboy activity`) must be able to tell those apart so a runner
+    /// reader must be able to tell those apart so a runner
     /// outage becomes a *partial* result naming the runner rather than a
     /// silently-empty one.
     ///
@@ -114,7 +114,7 @@ pub trait RunnerEvidenceProvider: Send + Sync {
     /// `statuses()` reconciles the full generation ledger, which issues one
     /// blocking HTTP call per draining generation and can take minutes on a
     /// long-lived runner. Callers that only need the current/recent active-job
-    /// view (e.g. `homeboy activity`) use this instead so latency stays bounded
+    /// view use this instead so latency stays bounded
     /// as generation history grows (#9522). The default falls back to
     /// `statuses()` for providers that have no cheaper path (tests, no-ops).
     fn statuses_indexed(&self) -> Vec<RunnerConnectionInfo> {
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn statuses_indexed_defaults_to_statuses_and_honors_override() {
         // Default: a provider with no cheaper path serves statuses_indexed from
-        // statuses (so `homeboy activity` still works for every provider).
+        // statuses for every provider.
         struct DefaultProvider;
         impl RunnerEvidenceProvider for DefaultProvider {
             fn mirror_connected_runner_run(&self, _: &str) -> Result<Option<RunRecord>> {

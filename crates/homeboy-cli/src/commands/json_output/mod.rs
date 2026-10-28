@@ -259,10 +259,6 @@ pub(crate) fn run_command_output(
             super::runner::doctor::compact_command_run(result.0, result.1)
         }
         Commands::Runner(args) => runner::run_command_output(args),
-        Commands::Activity(args) => command_run_with_summary(
-            dispatch(Commands::Activity(args), spec, placement),
-            |payload, _| super::activity::render_activity_summary(payload),
-        ),
         Commands::Bench(args) => {
             let summarize = args.is_run_invocation() && !args.wants_full_json();
             command_run_with_summary(

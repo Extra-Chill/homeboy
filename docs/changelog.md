@@ -7799,7 +7799,7 @@ All notable changes to Homeboy CLI are documented in this file.
 ## [0.304.0] - 2026-07-22
 
 ### Added
-- bound homeboy activity latency with a reconcile-free runner view ([#9522](https://github.com/Extra-Chill/homeboy/pull/9522)) (by Chris Huber)
+- bound runner inspection latency with a reconcile-free view ([#9522](https://github.com/Extra-Chill/homeboy/pull/9522)) (by Chris Huber)
 
 ### Fixed
 - attribute runner_id on resource lifecycle records (by Chris Huber)

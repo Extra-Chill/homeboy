@@ -18154,7 +18154,6 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
         use homeboy_control_plane_contract::{ControlPlaneRunListRequest, MissionId};
         crate::orchestration::register();
 
-        crate::agent_task_lifecycle::activity_provider::register();
         let store = test_lifecycle_store();
         let recipes = CookRecipeStore::new(store.roots().clone());
         let mut launcher_ids = std::collections::BTreeSet::new();
@@ -18325,19 +18324,6 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                             "{name}: detail actions"
                         );
                         assert_eq!(listed, &detail, "{name}: list/detail");
-                        let activity =
-                            homeboy_core::activity::show_activity(listed.run.as_str()).unwrap();
-                        assert_eq!(
-                            listed.state
-                                == homeboy_control_plane_contract::ControlPlaneRunState::Succeeded,
-                            activity.items[0].state
-                                == homeboy_core::activity::ActivityState::Succeeded,
-                            "{name}: list/activity success"
-                        );
-                        assert_eq!(
-                            listed.state.is_terminal(),
-                            !homeboy_core::activity::is_active(activity.items[0].state)
-                        );
                     }
                     assert_eq!(page.has_more, page.next_cursor.is_some());
                     let Some(cursor) = page.next_cursor else {
@@ -18366,7 +18352,6 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
             for requested in [run_id.as_str(), options.identity.cook_id.as_str()] {
                 let observed = cook_observation_in_store(&store, requested).unwrap();
                 let canonical = crate::agent_task_service::control_plane_run(requested).unwrap();
-                let activity = homeboy_core::activity::show_activity(requested).unwrap();
                 assert_eq!(observed.run_id, *run_id);
                 assert_eq!(canonical.run.as_str(), run_id);
                 assert_eq!(
@@ -18380,23 +18365,10 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                     success,
                     "{name}"
                 );
-                assert_eq!(
-                    activity.items[0].state == homeboy_core::activity::ActivityState::Succeeded,
-                    success,
-                    "{name}"
-                );
-                assert_eq!(
-                    canonical.state.is_terminal(),
-                    !homeboy_core::activity::is_active(activity.items[0].state)
-                );
                 if live_owner {
                     assert_eq!(
                         canonical.state,
                         homeboy_control_plane_contract::ControlPlaneRunState::Running
-                    );
-                    assert_eq!(
-                        activity.items[0].state,
-                        homeboy_core::activity::ActivityState::Running
                     );
                 }
             }

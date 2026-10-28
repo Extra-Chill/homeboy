@@ -3441,7 +3441,7 @@ fn record_health_summary_stays_bounded_with_many_malformed_records() {
     // A state directory full of historical malformed agent-task records must
     // not produce unbounded per-record output. The health summary aggregates
     // every malformed record into a total count while capping the retained
-    // samples, so read-only activity/upgrade output stays bounded. (#8397)
+    // samples, so read-only upgrade output stays bounded. (#8397)
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());

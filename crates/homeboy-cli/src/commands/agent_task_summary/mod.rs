@@ -693,7 +693,7 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
     // `candidate_recoverable` is not its verdict, so watch it, never recover.
     if live_gate_verifying(payload) {
         let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
-        return format!("homeboy agent-task watch {cook_id}");
+        return format!("homeboy agent-task status {cook_id} --watch");
     }
     if string_value(payload, &["publication", "state"])
         .is_some_and(|state| matches!(state, "review_ready" | "draft_published"))

@@ -491,7 +491,7 @@ pub struct RunnerConnectReport {
 
 /// A read-only indexed snapshot of one runner's persisted active jobs, built
 /// without reconciling (polling) the generation ledger. Used by latency-bounded
-/// callers like `homeboy activity` (#9522).
+/// callers (#9522).
 #[derive(Debug, Clone)]
 pub struct RunnerActiveJobsSnapshot {
     pub runner_id: String,

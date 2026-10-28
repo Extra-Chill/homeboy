@@ -72,9 +72,6 @@ fn runs_list_rig_filter_surfaces_compact_artifact_index() {
         let (output, _) = list_runs(
             &test_store(),
             RunsListArgs {
-                active: false,
-                task_url: None,
-                repo: None,
                 runner: None,
                 kind: None,
                 component_id: None,

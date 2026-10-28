@@ -5,7 +5,6 @@ Inspect and maintain persisted observation-store runs and artifacts.
 ## Synopsis
 
 ```bash
-homeboy runs list [--active [--task-url <url>] [--repo <slug>] [--workspace <handle>] [--limit 20]]
 homeboy runs list [--runner <runner-id>] [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20] [--include-active-runner-jobs]
 homeboy runs distribution --field <metadata.path> [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20]
 homeboy runs latest-run [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>]
@@ -46,7 +45,7 @@ homeboy runs report failure-digest --output-dir <dir> --results <json>
 
 `homeboy runs list` reads only the local observation store by default. Pass `--include-active-runner-jobs` to also append active jobs from connected runner daemons, which may inspect runner sessions. `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine. For benchmark records, `--scenario <id>` filters to runs whose stored metadata includes that scenario.
 
-`homeboy runs list --active` is the bounded, unified activity projection for an acceptance lookup. It includes observation runs, durable agent-task records, daemon jobs, and active connected-runner jobs with the activity collector's existing deduplication and partial-federation accounting. Use `--task-url`, `--repo`, or `--workspace` to select one task identity. Its additive `active` envelope variant carries the existing `homeboy/activity-report/v1` payload; ordinary `runs list` output is unchanged.
+Use `homeboy runs list --running` for in-flight observation runs, `homeboy agent-task list` for durable cooks and attempts, and `homeboy runner status` for runner-resident work.
 
 The JSON output includes stable run fields: run id, kind, status, timestamps, component id, rig id, git SHA, command, cwd, metadata, and artifact records where relevant.
 

@@ -1998,9 +1998,7 @@ mod run_state_lifecycle_projection_tests {
         assert_eq!(seen.len(), ALL_RUN_STATES.len());
     }
 
-    /// The same property one hop further out, where the orchestrator actually
-    /// reads it — `ActivityState` is an alias of `RunLifecycleStatus`, so a
-    /// collapse here is a collapse in `activity` output.
+    /// The lifecycle status projection also preserves distinct states.
     #[test]
     fn the_lifecycle_status_projection_is_injective() {
         let mut seen: Vec<(RunLifecycleStatus, AgentTaskRunState)> = Vec::new();
@@ -2009,7 +2007,7 @@ mod run_state_lifecycle_projection_tests {
             if let Some((_, first)) = seen.iter().find(|(target, _)| *target == projected) {
                 panic!(
                     "{state:?} and {first:?} both project to {projected:?}; \
-                     activity could not distinguish them (#6761)"
+                     lifecycle status could not distinguish them (#6761)"
                 );
             }
             seen.push((projected, state));
