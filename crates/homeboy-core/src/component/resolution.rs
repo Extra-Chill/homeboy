@@ -1152,6 +1152,9 @@ fn registered_component_for_worktree_path(
     }
     candidates.sort_by(|left, right| left.id.cmp(&right.id));
     candidates.dedup_by(|left, right| left.id == right.id);
+    if candidates.len() > 1 {
+        candidates = most_specific_checkout_candidates(candidates, dir, &cwd_git_root);
+    }
     match candidates.len() {
         0 => Ok(None),
         1 => {
@@ -1179,6 +1182,38 @@ fn registered_component_for_worktree_path(
             Some(vec!["Use an explicit component ID or register one canonical component for this repository".to_string()]),
         )),
     }
+}
+
+/// A repository can register its root and packages below it (for example
+/// `repo` and `repo/package`). Every registration shares the checkout's git
+/// common dir, so the checkout matches all of them. Project each registration
+/// into this checkout and keep the deepest one that contains `dir`: the
+/// checkout root resolves to the root registration and `checkout/package`
+/// resolves to the package. Registrations that are siblings at the same depth
+/// stay ambiguous.
+fn most_specific_checkout_candidates(
+    candidates: Vec<Component>,
+    dir: &Path,
+    cwd_git_root: &Path,
+) -> Vec<Component> {
+    let containing: Vec<(usize, Component)> = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let registered_path =
+                PathBuf::from(shellexpand::tilde(&candidate.local_path).into_owned());
+            let checkout_path = rebase_registered_path_to_checkout(&registered_path, cwd_git_root);
+            path_is_at_or_inside(&checkout_path, dir)
+                .then(|| (checkout_path.components().count(), candidate.clone()))
+        })
+        .collect();
+    let Some(depth) = containing.iter().map(|(depth, _)| *depth).max() else {
+        return candidates;
+    };
+    containing
+        .into_iter()
+        .filter(|(candidate_depth, _)| *candidate_depth == depth)
+        .map(|(_, candidate)| candidate)
+        .collect()
 }
 
 fn path_has_portable_config(path: &Path) -> Result<bool> {
@@ -2873,7 +2908,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_id_disambiguates_root_and_nested_components_in_one_repository() {
+    fn root_and_nested_components_in_one_repository_resolve_by_checkout_path() {
         crate::test_support::with_isolated_home(|home| {
             let dir = tempfile::tempdir().expect("temp dir");
             let primary = dir.path().join("shared-repository");
@@ -2896,35 +2931,25 @@ mod tests {
             write_portable(&unrelated, "unrelated-component");
             write_standalone_registration(home.path(), "unrelated-component", &unrelated);
 
-            let ambiguity = resolve_effective(None, worktree.to_str(), None)
-                .expect_err("path-only resolution must remain ambiguous");
-            assert_eq!(ambiguity.code.as_str(), "validation.invalid_argument");
-            assert!(ambiguity
-                .message
-                .contains("nested-component, repository-root"));
-
-            let root = resolve_effective(Some("repository-root"), worktree.to_str(), None)
-                .expect("explicit root component resolves");
-            assert_eq!(root.id, "repository-root");
-            assert_eq!(
-                Path::new(&root.local_path),
-                worktree.canonicalize().expect("canonical worktree")
-            );
-
+            // #16559: the checkout root and the nested directory resolve to
+            // their own registration with or without an explicit ID.
             let nested_worktree = worktree.join("components/nested");
-            let nested = resolve_effective(
-                Some("nested-component"),
-                Some(nested_worktree.to_string_lossy().as_ref()),
-                None,
-            )
-            .expect("explicit nested component resolves");
-            assert_eq!(nested.id, "nested-component");
-            assert_eq!(
-                Path::new(&nested.local_path),
-                nested_worktree
-                    .canonicalize()
-                    .expect("canonical nested path")
-            );
+            for (path, id) in [
+                (&worktree, "repository-root"),
+                (&nested_worktree, "nested-component"),
+            ] {
+                for explicit in [None, Some(id)] {
+                    let component = resolve_effective(explicit, path.to_str(), None)
+                        .unwrap_or_else(|error| {
+                            panic!("{explicit:?} {}: {error:?}", path.display())
+                        });
+                    assert_eq!(component.id, id);
+                    assert_eq!(
+                        Path::new(&component.local_path),
+                        path.canonicalize().expect("canonical checkout path")
+                    );
+                }
+            }
 
             let mismatch = resolve_effective(Some("unrelated-component"), worktree.to_str(), None)
                 .expect_err("explicit component and portable path must agree");
