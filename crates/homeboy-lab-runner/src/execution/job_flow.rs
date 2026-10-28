@@ -133,27 +133,28 @@ where
         })?;
     }
     accepted(&job)?;
-    persist_runner_execution_transition(
-        &RunnerExecutionRecord::in_flight(
-            job.id.to_string(),
-            flow.runner.id.clone(),
-            flow.transport,
-        )
-        .with_job_id(job.id.to_string())
-        .with_path_materialization_plan(flow.path_materialization_plan.clone())
-        .with_orchestration_provenance(orchestration_target_provenance(
-            flow.runner,
-            None,
-            Some(&flow.source_snapshot),
-            &[],
-        ))
-        .with_next_actions(runner_execution_next_actions(
-            &flow.runner.id,
-            &job.id.to_string(),
-        )),
-        &flow.cwd,
-        &flow.command,
-    )?;
+    if flow.run_id_owns_generic_exec {
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_execution_record(
+            flow.run_id.as_deref().expect("accepted job has a run"),
+            &RunnerExecutionRecord::in_flight(
+                job.id.to_string(),
+                flow.runner.id.clone(),
+                flow.transport,
+            )
+            .with_job_id(job.id.to_string())
+            .with_path_materialization_plan(flow.path_materialization_plan.clone())
+            .with_orchestration_provenance(orchestration_target_provenance(
+                flow.runner,
+                None,
+                Some(&flow.source_snapshot),
+                &[],
+            ))
+            .with_next_actions(runner_execution_next_actions(
+                &flow.runner.id,
+                &job.id.to_string(),
+            )),
+        )?;
+    }
     let persisted_run_id = flow
         .mirror_evidence
         .then(|| {
@@ -467,7 +468,6 @@ where
         &artifacts,
         Some(&runner_result),
     );
-    persist_runner_execution_transition(&execution_record, &flow.cwd, &flow.command)?;
     let diagnostics = runner_exec_diagnostics(
         flow.runner,
         Some(&flow.source_snapshot),

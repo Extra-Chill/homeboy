@@ -56,6 +56,8 @@ pub(super) fn exec_via_daemon(
     print_handoff_output: bool,
     accepted_daemon_identity: Option<String>,
 ) -> Result<(RunnerExecOutput, i32)> {
+    let run_id_owns_generic_exec = run_id_owns_generic_exec || run_id.is_none();
+    let run_id = Some(run_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -68,22 +70,6 @@ pub(super) fn exec_via_daemon(
             runner.workspace_root.as_deref(),
         )
     });
-    persist_runner_execution_transition(
-        &RunnerExecutionRecord::planned(
-            format!("runner-exec:{}:daemon", runner.id),
-            runner.id.clone(),
-            "daemon",
-        )
-        .with_path_materialization_plan(path_materialization_plan.clone())
-        .with_orchestration_provenance(orchestration_target_provenance(
-            runner,
-            None,
-            Some(&source_snapshot),
-            &[],
-        )),
-        &cwd,
-        &command,
-    )?;
     let lifecycle = RunnerJobLifecycleMetadata {
         source: Some("runner-daemon".to_string()),
         kind: Some("runner.exec".to_string()),
@@ -2317,11 +2303,17 @@ pub(super) fn terminal_runner_poll_failure(
             &[],
         ))
         .with_next_actions(runner_execution_next_actions(&runner.id, &job_id));
-    if let Err(persistence_error) = persist_runner_execution_transition(&record, cwd, command) {
-        error = error.with_hint(format!(
-            "Could not persist the terminal runner execution record for job `{job_id}`: {}",
-            persistence_error.message
-        ));
+    if let Some(run_id) = mirror_run_id.as_deref() {
+        if let Err(persistence_error) = ObservationStore::open_initialized().and_then(|store| {
+            let mut run = store.get_run(run_id)?.ok_or_else(|| {
+                Error::internal_unexpected("terminal controller mirror disappeared")
+            })?;
+            run.metadata_json["runner_execution_record"] =
+                serde_json::to_value(&record).expect("runner execution record serializes");
+            store.update_run_metadata(run_id, run.metadata_json)
+        }) {
+            error = error.with_hint(persistence_error.message);
+        }
     }
     if let Some(run_id) = mirror_run_id {
         error.details["persisted_run_id"] = Value::String(run_id.clone());

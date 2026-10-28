@@ -857,6 +857,14 @@ fn generic_runner_exec_projection_failure_retains_terminal_evidence() {
         .expect("bound generic run");
         let snapshot = runner_snapshot("failed");
         let error = Error::internal_unexpected("artifact projection transport failed");
+        record_runner_exec_artifact_declarations_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            &["output.log".to_string()],
+            &[],
+            &[],
+        )
+        .expect("declare the artifact whose promotion fails");
 
         record_runner_exec_projection_failure(run_id, &snapshot, &error)
             .expect("terminal snapshot and projection error persist");
