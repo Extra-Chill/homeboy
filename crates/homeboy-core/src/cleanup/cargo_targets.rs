@@ -10,6 +10,7 @@ use homeboy_engine_primitives::shell::quote_path;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::observation::phase_timing;
 use crate::{Error, Result};
 
 pub const HOMEBOY_CARGO_TARGET_ROOT_ENV: &str = "HOMEBOY_CARGO_TARGET_ROOT";
@@ -156,27 +157,14 @@ impl ManagedCargoTarget {
         let Some(base_dir) = self.promote_to.take() else {
             return Ok(());
         };
-        let publication_owner = format!("warm-cache-publication:{}", self.owner);
-        with_base_store_publication_lock(&base_dir, &publication_owner, || {
-            publish_cargo_cache(&self.target_dir, &base_dir)
-        })
+        publish_cargo_cache(&self.target_dir, &base_dir)
     }
 }
 
 impl Drop for ManagedCargoTarget {
     fn drop(&mut self) {
-        // Best-effort warmth hand-off: promoting is never a build
-        // correctness requirement, only an optimization for the next run
-        // that seeds from this repository identity's base store.
-        if let Some(base_dir) = self.promote_to.take() {
-            // Readers take the same exclusive publication lock before seeding.
-            // This makes the complete cache projection visible as one operation,
-            // rather than exposing a concurrent seed to a partly copied store.
-            let publication_owner = format!("warm-cache-publication:{}", self.owner);
-            let _ = with_base_store_publication_lock(&base_dir, &publication_owner, || {
-                publish_cargo_cache(&self.target_dir, &base_dir)
-            });
-        }
+        // Warmth hand-off is best effort; explicit publication reports failures.
+        let _ = self.publish();
     }
 }
 
@@ -195,20 +183,14 @@ impl Drop for SharedCargoTargetLease {
         // A provider attempt, its retry, and controller gates can all hold a
         // shared lease. Only the final holder may clear liveness; otherwise a
         // cleaner can reclaim an actively compiling target between phases.
-        let _ = FileExt::unlock(&self.lock);
-        let final_holder = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(self.target_dir.join(LOCK_FILE))
-            .ok()
-            .and_then(|lock| match lock.try_lock_exclusive() {
-                Ok(true) => Some(lock),
-                Ok(false) | Err(_) => None,
-            });
-        if final_holder.is_some() {
+        // Upgrade the existing handle before unlocking: a concurrent fork may
+        // inherit it, so reopening after unlock can mistake that child for a
+        // live holder and leave a fresh lease behind.
+        if matches!(self.lock.try_lock_exclusive(), Ok(true)) {
             let _ = fs::remove_file(self.target_dir.join(LEASE_FILE));
             let _ = write_last_used(&self.target_dir, SystemTime::now());
         }
+        let _ = FileExt::unlock(&self.lock);
     }
 }
 
@@ -393,15 +375,18 @@ fn acquire_managed_cargo_target_for_compatibility_in(
 
 /// Seed a freshly created run-private Cargo target from the shared base store.
 fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<()> {
-    if base_dir.exists() {
-        let seed_owner = read_owner(private_dir)
-            .map(|owner| format!("warm-cache-seed:{owner}"))
-            .unwrap_or_else(|| "warm-cache-seed:unknown".to_string());
-        with_base_store_publication_lock(base_dir, &seed_owner, || {
-            copy_cargo_cache(&cache_projection(base_dir), private_dir, false)
-        })?;
-    }
-    Ok(())
+    phase_timing::time("cargo_target.seed", || {
+        if base_dir.exists() {
+            with_base_store_publication_lock(base_dir, "warm-cache-seed", false, None, || {
+                copy_cargo_cache(
+                    &cache_projection(base_dir),
+                    private_dir,
+                    CacheTransfer::Copy,
+                )
+            })?;
+        }
+        Ok(())
+    })
 }
 
 fn shared_store_dir(root: &Path, owner: &str) -> PathBuf {
@@ -426,11 +411,7 @@ fn is_lifecycle_sidecar(name: &std::ffi::OsStr) -> bool {
         || name == EXPLICIT_TARGET_FILE
 }
 
-/// Synchronize a Cargo cache projection without transferring Cargo's live lock.
-/// Callers hold the base store's exclusive publication lock, so a seed sees a
-/// complete projection and a promotion cannot race another promotion. Files are
-/// copied to a sibling temporary inode and renamed into place, so a cache file
-/// is never observed half-written even if a future reader misses that lock.
+/// Resolve the projection while holding a shared or exclusive publication lock.
 fn cache_projection(base_dir: &Path) -> PathBuf {
     let current = base_dir.join(CACHE_CURRENT);
     if current.exists() {
@@ -444,46 +425,94 @@ fn cache_projection(base_dir: &Path) -> PathBuf {
 /// reader. The base directory remains a lifecycle/lock container; its current
 /// cache is a separately published directory.
 fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
-    let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let staging = base_dir.join(format!(
-        "{CACHE_STAGING_PREFIX}{}-{sequence}",
-        std::process::id()
-    ));
-    fs::create_dir(&staging)
-        .map_err(|error| io_error(error, "create Cargo cache publication staging"))?;
-    let current = cache_projection(base_dir);
-    let result = (|| {
-        if current != base_dir {
-            copy_cargo_cache(&current, &staging, true)?;
-        } else {
-            copy_cargo_cache(base_dir, &staging, true)?;
-        }
-        copy_cargo_cache(from, &staging, true)?;
-        let published = base_dir.join(CACHE_CURRENT);
-        let previous = base_dir.join(format!("{CACHE_STAGING_PREFIX}previous-{sequence}"));
-        if published.exists() {
-            fs::rename(&published, &previous)
-                .map_err(|error| io_error(error, "stage previous Cargo cache publication"))?;
-        }
-        if let Err(error) = fs::rename(&staging, &published) {
-            if previous.exists() {
-                let _ = fs::rename(&previous, &published);
+    phase_timing::time("cargo_target.publish", || {
+        fs::create_dir_all(base_dir)
+            .map_err(|error| io_error(error, "create Cargo cache base store"))?;
+        let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let staging = base_dir.join(format!(
+            "{CACHE_STAGING_PREFIX}{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&staging)
+            .map_err(|error| io_error(error, "create Cargo cache publication staging"))?;
+        let result = (|| {
+            loop {
+                // Pin the snapshot while linking; retry outside the exclusive lock
+                // if another publisher swaps it before us, preserving both runs.
+                #[cfg(unix)]
+                use std::os::unix::fs::MetadataExt;
+                let snapshot = with_base_store_publication_lock(
+                    base_dir,
+                    "warm-cache-snapshot",
+                    false,
+                    None,
+                    || {
+                        copy_cargo_cache(
+                            &cache_projection(base_dir),
+                            &staging,
+                            CacheTransfer::Link,
+                        )?;
+                        Ok(fs::metadata(base_dir.join(CACHE_CURRENT)).ok())
+                    },
+                )?;
+                copy_cargo_cache(from, &staging, CacheTransfer::Move)?;
+                let swapped = with_base_store_publication_lock(
+                    base_dir,
+                    "warm-cache-publication",
+                    true,
+                    None,
+                    || {
+                        let current = fs::metadata(base_dir.join(CACHE_CURRENT)).ok();
+                        #[cfg(unix)]
+                        let unchanged = current.as_ref().map(|m| (m.dev(), m.ino()))
+                            == snapshot.as_ref().map(|m| (m.dev(), m.ino()));
+                        #[cfg(not(unix))]
+                        let unchanged = current.and_then(|m| m.created().ok())
+                            == snapshot.and_then(|m| m.created().ok());
+                        if !unchanged {
+                            return Ok(false);
+                        }
+                        let published = base_dir.join(CACHE_CURRENT);
+                        let previous = staging.with_extension("previous");
+                        if published.exists() {
+                            fs::rename(&published, &previous).map_err(|error| {
+                                io_error(error, "stage previous Cargo cache publication")
+                            })?;
+                        }
+                        if let Err(error) = fs::rename(&staging, &published) {
+                            if previous.exists() {
+                                let _ = fs::rename(&previous, &published);
+                            }
+                            return Err(io_error(error, "publish complete Cargo cache projection"));
+                        }
+                        if previous.exists() {
+                            fs::remove_dir_all(&previous).map_err(|error| {
+                                io_error(error, "remove superseded Cargo cache projection")
+                            })?;
+                        }
+                        Ok(true)
+                    },
+                )?;
+                if swapped {
+                    return Ok(());
+                }
             }
-            return Err(io_error(error, "publish complete Cargo cache projection"));
+        })();
+        if result.is_err() && staging.exists() {
+            let _ = fs::remove_dir_all(&staging);
         }
-        if previous.exists() {
-            fs::remove_dir_all(&previous)
-                .map_err(|error| io_error(error, "remove superseded Cargo cache projection"))?;
-        }
-        Ok(())
-    })();
-    if result.is_err() && staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
-    }
-    result
+        result
+    })
 }
 
-fn copy_cargo_cache(from: &Path, to: &Path, replace_existing: bool) -> Result<()> {
+#[derive(Clone, Copy)]
+enum CacheTransfer {
+    Copy,
+    Link,
+    Move,
+}
+
+fn copy_cargo_cache(from: &Path, to: &Path, transfer: CacheTransfer) -> Result<()> {
     for entry in
         fs::read_dir(from).map_err(|error| io_error(error, "read Cargo cache projection"))?
     {
@@ -499,20 +528,31 @@ fn copy_cargo_cache(from: &Path, to: &Path, replace_existing: bool) -> Result<()
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             fs::create_dir_all(&dest)
                 .map_err(|error| io_error(error, "create Cargo cache directory"))?;
-            copy_cargo_cache(&source, &dest, replace_existing)?;
+            copy_cargo_cache(&source, &dest, transfer)?;
             continue;
         }
-        if dest.exists() && !replace_existing {
+        if dest.exists() && !matches!(transfer, CacheTransfer::Move) {
             continue;
         }
-        let temporary = dest.with_extension(format!(
-            "homeboy-publish-{}",
-            ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::copy(&source, &temporary)
-            .map_err(|error| io_error(error, "copy Cargo cache artifact"))?;
-        fs::rename(&temporary, &dest)
-            .map_err(|error| io_error(error, "install Cargo cache artifact"))?;
+        if matches!(transfer, CacheTransfer::Move) {
+            match fs::rename(&source, &dest) {
+                Ok(()) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {}
+                Err(error) => return Err(io_error(error, "move Cargo cache artifact")),
+            }
+        }
+        if dest.exists() {
+            fs::remove_file(&dest)
+                .map_err(|error| io_error(error, "replace Cargo cache artifact"))?;
+        }
+        if matches!(transfer, CacheTransfer::Link) {
+            fs::hard_link(&source, &dest)
+                .map_err(|error| io_error(error, "link Cargo cache artifact"))?;
+        } else if matches!(transfer, CacheTransfer::Copy) || fs::hard_link(&source, &dest).is_err()
+        {
+            fs::copy(&source, &dest)
+                .map_err(|error| io_error(error, "copy Cargo cache artifact"))?;
+        }
     }
     Ok(())
 }
@@ -527,22 +567,11 @@ fn is_cargo_coordination_state(name: &std::ffi::OsStr) -> bool {
 fn with_base_store_publication_lock<T>(
     base_dir: &Path,
     owner: &str,
+    exclusive: bool,
+    deadline: Option<Instant>,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    with_base_store_publication_lock_until(
-        base_dir,
-        owner,
-        Instant::now() + CARGO_TARGET_LEASE_WAIT,
-        operation,
-    )
-}
-
-fn with_base_store_publication_lock_until<T>(
-    base_dir: &Path,
-    owner: &str,
-    deadline: Instant,
-    operation: impl FnOnce() -> Result<T>,
-) -> Result<T> {
+    let deadline = deadline.unwrap_or_else(|| Instant::now() + CARGO_TARGET_LEASE_WAIT);
     // Retention may reclaim the base store while a long run holds only its
     // private target. Re-create it so publication lands in a fresh store.
     fs::create_dir_all(base_dir)
@@ -557,7 +586,11 @@ fn with_base_store_publication_lock_until<T>(
     let started = Instant::now();
     let mut contention_polls = 0_u64;
     loop {
-        match lock.try_lock_exclusive() {
+        match if exclusive {
+            lock.try_lock_exclusive()
+        } else {
+            FileExt::try_lock_shared(&lock)
+        } {
             Ok(true) => break,
             Ok(false) => contention_polls = contention_polls.saturating_add(1),
             Err(error) => return Err(io_error(error, "lock Cargo cache publication")),
@@ -573,10 +606,14 @@ fn with_base_store_publication_lock_until<T>(
         }
         std::thread::sleep(CARGO_TARGET_LEASE_POLL);
     }
-    write_lifecycle(base_dir, Some(owner), SystemTime::now())?;
+    if exclusive {
+        write_lifecycle(base_dir, Some(owner), SystemTime::now())?;
+    }
     let result = operation();
     FileExt::unlock(&lock).map_err(|error| io_error(error, "unlock Cargo cache publication"))?;
-    let _ = fs::remove_file(base_dir.join(LEASE_FILE));
+    if exclusive {
+        let _ = fs::remove_file(base_dir.join(LEASE_FILE));
+    }
     let _ = write_last_used(base_dir, SystemTime::now());
     result
 }
@@ -1737,6 +1774,107 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn publication_preserves_artifacts_and_previous_projection_inodes() {
+        use std::os::unix::fs::MetadataExt;
+        let root = TempDir::new().unwrap();
+        let base = root.path().join("base");
+        let private = root.path().join("private");
+        fs::create_dir_all(base.join(CACHE_CURRENT)).unwrap();
+        fs::create_dir(&private).unwrap();
+        fs::write(base.join(CACHE_CURRENT).join("previous"), b"old").unwrap();
+        let previous = File::open(base.join(CACHE_CURRENT).join("previous")).unwrap();
+        fs::write(private.join("finished"), b"new").unwrap();
+        let finished = File::open(private.join("finished")).unwrap();
+        publish_cargo_cache(&private, &base).unwrap();
+        let projection = base.join(CACHE_CURRENT);
+        assert_eq!(fs::read(projection.join("finished")).unwrap(), b"new");
+        assert_eq!(
+            fs::metadata(projection.join("previous")).unwrap().ino(),
+            previous.metadata().unwrap().ino()
+        );
+        assert_eq!(
+            fs::metadata(projection.join("finished")).unwrap().ino(),
+            finished.metadata().unwrap().ino()
+        );
+        assert!(!private.join("finished").exists());
+    }
+
+    #[test]
+    fn two_seeds_complete_concurrently_under_a_shared_lock() {
+        let root = TempDir::new().unwrap();
+        let base = root.path().join("base");
+        fs::create_dir_all(base.join(CACHE_CURRENT)).unwrap();
+        fs::write(base.join(CACHE_CURRENT).join("artifact"), b"complete").unwrap();
+        with_base_store_publication_lock(&base, "test-reader", false, None, || {
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                let (send, recv) = std::sync::mpsc::channel();
+                for name in ["first", "second"] {
+                    let private = root.path().join(name);
+                    fs::create_dir(&private).unwrap();
+                    let (base, barrier, send) = (&base, &barrier, send.clone());
+                    scope.spawn(move || {
+                        barrier.wait();
+                        seed_worktree_cargo_target(base, &private).unwrap();
+                        assert_eq!(fs::read(private.join("artifact")).unwrap(), b"complete");
+                        send.send(()).unwrap();
+                    });
+                }
+                // Both seeds must finish while a reader still holds the lock.
+                for _ in 0..2 {
+                    recv.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            });
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn seed_and_publish_complete_without_a_partial_target() {
+        let root = TempDir::new().unwrap();
+        let base = root.path().join("base");
+        let private = root.path().join("private");
+        let seed = root.path().join("seed");
+        fs::create_dir_all(base.join(CACHE_CURRENT)).unwrap();
+        fs::create_dir(&private).unwrap();
+        fs::create_dir(&seed).unwrap();
+        for i in 0..128 {
+            fs::write(base.join(CACHE_CURRENT).join(i.to_string()), b"old").unwrap();
+            fs::write(private.join(i.to_string()), b"new").unwrap();
+        }
+        std::thread::scope(|scope| {
+            let (send, recv) = std::sync::mpsc::channel();
+            let lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(base.join(LOCK_FILE))
+                .unwrap();
+            FileExt::lock_shared(&lock).unwrap();
+            scope.spawn(|| publish_cargo_cache(&private, &base).unwrap());
+            let (base, seed) = (&base, &seed);
+            scope.spawn(move || {
+                seed_worktree_cargo_target(base, seed).unwrap();
+                send.send(()).unwrap();
+            });
+            recv.recv_timeout(Duration::from_secs(5)).unwrap();
+            for i in 0..128 {
+                assert_eq!(fs::read(seed.join(i.to_string())).unwrap(), b"old");
+            }
+            FileExt::unlock(&lock).unwrap();
+        });
+        for i in 0..128 {
+            assert_eq!(
+                fs::read(base.join(CACHE_CURRENT).join(i.to_string())).unwrap(),
+                b"new"
+            );
+        }
+    }
+
     #[test]
     fn admission_rejects_before_build_and_reports_capacity_and_reclaimable_stores() {
         let root = TempDir::new().unwrap();
@@ -2532,10 +2670,11 @@ mod tests {
             .unwrap();
         FileExt::lock_exclusive(&lock).unwrap();
 
-        let error = with_base_store_publication_lock_until(
+        let error = with_base_store_publication_lock(
             &base,
             "warm-cache-seed:runner-refresh:99",
-            Instant::now() + Duration::from_millis(10),
+            true,
+            Some(Instant::now() + Duration::from_millis(10)),
             || Ok(()),
         )
         .unwrap_err();
