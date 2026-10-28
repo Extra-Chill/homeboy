@@ -455,7 +455,7 @@ fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
                         Ok(fs::metadata(base_dir.join(CACHE_CURRENT)).ok())
                     },
                 )?;
-                copy_cargo_cache(from, &staging, CacheTransfer::Move)?;
+                copy_cargo_cache(from, &staging, CacheTransfer::Replace)?;
                 let swapped = with_base_store_publication_lock(
                     base_dir,
                     "warm-cache-publication",
@@ -509,7 +509,10 @@ fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
 enum CacheTransfer {
     Copy,
     Link,
-    Move,
+    /// Link the finished run's artifacts over the snapshot. The run keeps its
+    /// own files: callers such as runner refresh read their build output after
+    /// publishing it.
+    Replace,
 }
 
 fn copy_cargo_cache(from: &Path, to: &Path, transfer: CacheTransfer) -> Result<()> {
@@ -531,15 +534,8 @@ fn copy_cargo_cache(from: &Path, to: &Path, transfer: CacheTransfer) -> Result<(
             copy_cargo_cache(&source, &dest, transfer)?;
             continue;
         }
-        if dest.exists() && !matches!(transfer, CacheTransfer::Move) {
+        if dest.exists() && !matches!(transfer, CacheTransfer::Replace) {
             continue;
-        }
-        if matches!(transfer, CacheTransfer::Move) {
-            match fs::rename(&source, &dest) {
-                Ok(()) => continue,
-                Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {}
-                Err(error) => return Err(io_error(error, "move Cargo cache artifact")),
-            }
         }
         if dest.exists() {
             fs::remove_file(&dest)
@@ -1798,7 +1794,7 @@ mod tests {
             fs::metadata(projection.join("finished")).unwrap().ino(),
             finished.metadata().unwrap().ino()
         );
-        assert!(!private.join("finished").exists());
+        assert_eq!(fs::read(private.join("finished")).unwrap(), b"new");
     }
 
     #[test]
