@@ -982,7 +982,15 @@ pub(crate) fn upgrade_runners_with_executor_source_materializer_path_updater_and
             &mut update_homeboy_path,
             expected_controller_identity,
         );
-        if entry.success {
+        if entry.deferred {
+            homeboy_core::log_status!(
+                "upgrade",
+                "  {} deferred: {}",
+                entry.runner_id,
+                entry.detail
+            );
+            updated.push(entry);
+        } else if entry.success {
             homeboy_core::log_status!(
                 "upgrade",
                 "  {} {}",
@@ -1021,6 +1029,24 @@ pub fn upgrade_runner_with_executor(
         .homeboy_path
         .clone()
         .unwrap_or_else(|| "homeboy".to_string());
+    // Observe before any installation, source sync, reconnect, or extension work.
+    // The refresh handoff also rechecks idleness before replacing a daemon.
+    if let Ok(report) = status(&runner.id) {
+        let live_jobs = report.active_job_count.max(report.active_jobs.len());
+        if live_jobs > 0 {
+            let mut entry = runner_upgrade_failure_entry(
+                &runner.id,
+                original_homeboy_path,
+                None,
+                0,
+                format!("runner busy: {live_jobs} live job(s)"),
+            );
+            entry.success = true;
+            entry.deferred = true;
+            entry.recovery_commands.clear();
+            return entry;
+        }
+    }
     let previous_version = runner_homeboy_version(runner, &original_homeboy_path, exec)
         .ok()
         .flatten();
@@ -1429,6 +1455,7 @@ pub fn upgrade_runner_with_executor(
         homeboy_path,
         success,
         upgraded,
+        deferred: false,
         previous_version,
         new_version,
         bare_homeboy_version,
@@ -1510,6 +1537,7 @@ fn refresh_managed_immutable_runner(
             homeboy_path: refreshed.selected_binary_path,
             success: false,
             upgraded: false,
+            deferred: false,
             previous_version,
             new_version: None,
             bare_homeboy_version: None,
@@ -1569,6 +1597,7 @@ fn refresh_managed_immutable_runner(
         homeboy_path: homeboy_path.clone(),
         success,
         upgraded: homeboy_path != previous_homeboy_path,
+        deferred: false,
         previous_version,
         new_version,
         bare_homeboy_version: None,
@@ -1645,6 +1674,7 @@ fn managed_immutable_runner_failure_entry(
         homeboy_path,
         success: false,
         upgraded: false,
+        deferred: false,
         previous_version,
         new_version: None,
         bare_homeboy_version: None,

@@ -331,7 +331,7 @@ pub fn submit_plan(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    homeboy_core::runtime_promotion::ensure_upgrade_drain_admission(requested_run_id, None)?;
+    homeboy_core::runtime_promotion::ensure_upgrade_drain_admission(requested_run_id)?;
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     submit_plan_in_store(&lifecycle_store, plan, requested_run_id)
 }
@@ -642,7 +642,7 @@ pub fn prepare_unmaterialized_cook_admission(
     requested_state: &str,
     reason: &str,
 ) -> Result<AgentTaskRunRecord> {
-    homeboy_core::runtime_promotion::ensure_upgrade_drain_admission(Some(cook_id), None)?;
+    homeboy_core::runtime_promotion::ensure_upgrade_drain_admission(Some(cook_id))?;
     validate_unmaterialized_admission_input(&binding, requested_state)?;
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     let cook_id = sanitize_run_id(cook_id);

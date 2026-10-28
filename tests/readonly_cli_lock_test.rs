@@ -18,7 +18,7 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
         // both before the snapshot: lazy lock-file creation is not a change to
         // the held lease, and removing lock files would split lock ownership.
         drop(
-            homeboy::core::runtime_promotion::begin_upgrade_drain("fixture-init", vec![], vec![])
+            homeboy::core::runtime_promotion::begin_upgrade_drain("fixture-init", vec![])
                 .expect("initialize upgrade drain lock"),
         );
         let git_before = git_metadata_snapshot(&repository);

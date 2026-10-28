@@ -781,9 +781,6 @@ pub(crate) fn reserve_daemon_admission(
         "idempotency_key": idempotency_key,
         "admission_lease_protocol": 1,
     });
-    if let Some(operation) = homeboy_core::runtime_promotion::upgrade_drain_operation()? {
-        payload["upgrade_operation_id"] = json!(operation);
-    }
     if let Some((workspace, owner_id)) = workspace_owner_registration.as_ref() {
         payload["workspace_owner_request"] = json!({
             "workspace": workspace,

@@ -133,7 +133,7 @@ pub fn drain_work_intents_with(
     let mut scheduled = Vec::new();
     let mut deferred = Vec::new();
     while let Some(intent) = store.next_pending_work_intent(now_ms)? {
-        match crate::runtime_promotion::ensure_upgrade_drain_admission(Some(&intent.run_id), None)
+        match crate::runtime_promotion::ensure_upgrade_drain_admission(Some(&intent.run_id))
             .and_then(|()| schedule(&intent))
             .and_then(durable_job_receipt)
         {
@@ -202,7 +202,6 @@ mod tests {
             let guard = crate::runtime_promotion::begin_upgrade_drain(
                 "upgrade-dispatch-test",
                 vec!["drain-run".into()],
-                vec![],
             )
             .unwrap();
             // Continuations of an existing Cook must still drain.
@@ -215,12 +214,9 @@ mod tests {
             // No cached daemon state or daemon PID is involved: a subsequent
             // dispatch pass (including one after restart) reads the same fence.
             drop(guard);
-            let guard = crate::runtime_promotion::begin_upgrade_drain(
-                "upgrade-dispatch-test",
-                vec![],
-                vec![],
-            )
-            .unwrap();
+            let guard =
+                crate::runtime_promotion::begin_upgrade_drain("upgrade-dispatch-test", vec![])
+                    .unwrap();
             commit_intents(&["intent-after-drain"]);
             let pass = drain_work_intents_with(|_| {
                 panic!("new work must not reach the daemon scheduler during upgrade")

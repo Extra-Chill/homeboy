@@ -7,10 +7,7 @@ struct DrainRecord {
     operation_id: String,
     pid: u32,
     identity: Option<crate::process::ProcessStartIdentity>,
-    #[serde(default)]
-    expires_at_ms: Option<u64>,
     runs: Vec<String>,
-    runners: Vec<String>,
 }
 
 pub struct UpgradeDrainGuard {
@@ -27,11 +24,7 @@ impl Drop for UpgradeDrainGuard {
 /// Reserve admission before inspecting live work. The independent lock is not
 /// the promotion lock: existing executions must still acquire promotion pins
 /// and publish their completions while the upgrade waits for them.
-pub fn begin_upgrade_drain(
-    operation_id: &str,
-    runs: Vec<String>,
-    runners: Vec<String>,
-) -> Result<UpgradeDrainGuard> {
+pub fn begin_upgrade_drain(operation_id: &str, runs: Vec<String>) -> Result<UpgradeDrainGuard> {
     let root = paths::runtime_promotion_dir()?;
     fs::create_dir_all(&root).map_err(io("create upgrade drain directory"))?;
     let lock = fs::OpenOptions::new()
@@ -61,85 +54,10 @@ pub fn begin_upgrade_drain(
                     Error::internal_unexpected("upgrade process identity unavailable")
                 })?,
         ),
-        expires_at_ms: None,
         runs,
-        runners,
     };
     crate::engine::local_files::write_json_file(&path, &record)?;
     Ok(UpgradeDrainGuard { path, _lock: lock })
-}
-
-/// Authenticated daemon control endpoint: the operation token owns release.
-/// A deadline bounds a lost controller's remote admission reservation.
-pub fn remote_upgrade_drain(request: &serde_json::Value) -> Result<()> {
-    let root = paths::runtime_promotion_dir()?;
-    fs::create_dir_all(&root).map_err(io("create remote drain directory"))?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(root.join("remote-drain.lock"))
-        .map_err(io("open remote drain lock"))?;
-    FileExt::lock_exclusive(&lock).map_err(io("lock remote drain"))?;
-    let token = request["operation_id"]
-        .as_str()
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| Error::internal_unexpected("drain operation identity missing"))?;
-    if let Some(current) = active_drain()? {
-        // Releasing an obsolete token is idempotent: never disturb its successor.
-        if request["resume"] == true && current.operation_id != token {
-            return Ok(());
-        }
-        if current.operation_id != token
-            && (request["previous_operation_id"].as_str() != Some(current.operation_id.as_str())
-                || current.expires_at_ms.is_none())
-        {
-            let mut error = Error::validation_invalid_argument(
-                "upgrade_drain",
-                "another operation owns runner drain",
-                None,
-                Some(vec![format!(
-                    "homeboy upgrade status {}",
-                    current.operation_id
-                )]),
-            );
-            error.details["drain_owner"] = serde_json::json!(current.operation_id);
-            return Err(error);
-        }
-        // A shared runner can live on the controller host. Its remote control
-        // must not replace the process-owned fence with an expiring record.
-        if current.expires_at_ms.is_none() {
-            return Ok(());
-        }
-    }
-    let path = root.join("upgrade-drain.json");
-    if request["resume"] == true {
-        match fs::remove_file(path) {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(io("resume runner drain")(error)),
-        }
-    }
-    let timeout_ms = request["timeout_ms"]
-        .as_u64()
-        .unwrap_or(1_800_000)
-        .min(86_400_000);
-    let record = DrainRecord {
-        operation_id: token.to_string(),
-        pid: 0,
-        identity: None,
-        expires_at_ms: Some(crate::api_jobs::timestamp_ms().saturating_add(timeout_ms)),
-        runs: serde_json::from_value(request["runs"].clone())
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
-        runners: Vec::new(),
-    };
-    crate::engine::local_files::write_json_file(&path, &record)
-}
-
-/// Read-only remote ownership inventory for controller recovery of older runs.
-pub fn remote_upgrade_drain_owner() -> Result<Option<String>> {
-    Ok(active_drain()?.map(|record| record.operation_id))
 }
 
 fn active_drain() -> Result<Option<DrainRecord>> {
@@ -151,35 +69,18 @@ fn active_drain() -> Result<Option<DrainRecord>> {
     };
     let record: DrainRecord = serde_json::from_slice(&bytes)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    if record
-        .expires_at_ms
-        .is_some_and(|deadline| crate::api_jobs::timestamp_ms() >= deadline)
-    {
-        return Ok(None);
-    }
-    if record.expires_at_ms.is_none()
-        && matches!(
-            crate::process::process_identity_state_with_start_identity(
-                record.pid,
-                None,
-                record.identity.as_ref()
-            ),
-            crate::process::ProcessIdentityState::Dead
-                | crate::process::ProcessIdentityState::IdentityMismatch
-        )
-    {
+    if matches!(
+        crate::process::process_identity_state_with_start_identity(
+            record.pid,
+            None,
+            record.identity.as_ref()
+        ),
+        crate::process::ProcessIdentityState::Dead
+            | crate::process::ProcessIdentityState::IdentityMismatch
+    ) {
         return Ok(None);
     }
     Ok(Some(record))
-}
-
-/// The upgrade worker itself may execute its bounded runner installation
-/// commands; unrelated clients never inherit this permission.
-pub fn ensure_runner_upgrade_drain_admission(run_id: Option<&str>, runner: &str) -> Result<()> {
-    if active_drain()?.is_some_and(|record| record.pid == std::process::id()) {
-        return Ok(());
-    }
-    ensure_upgrade_drain_admission(run_id, Some(runner))
 }
 
 pub fn upgrade_drain_operation() -> Result<Option<String>> {
@@ -188,33 +89,14 @@ pub fn upgrade_drain_operation() -> Result<Option<String>> {
         .map(|record| record.operation_id))
 }
 
-pub fn ensure_upgrade_drain_request(request: &serde_json::Value) -> Result<()> {
-    if let Some(record) = active_drain()? {
-        if request["upgrade_operation_id"].as_str() == Some(record.operation_id.as_str()) {
-            return Ok(());
-        }
-    }
-    ensure_upgrade_drain_admission(request["durable_run_id"].as_str(), None)
-}
-
-pub fn runner_is_draining(runner: &str) -> Result<bool> {
-    Ok(active_drain()?.is_some_and(|record| record.runners.iter().any(|id| id == runner)))
-}
-
-pub fn ensure_upgrade_drain_admission(run_id: Option<&str>, runner: Option<&str>) -> Result<()> {
+pub fn ensure_upgrade_drain_admission(run_id: Option<&str>) -> Result<()> {
     let Some(record) = active_drain()? else {
         return Ok(());
     };
-    if runner.is_some_and(|runner| !record.runners.iter().any(|id| id == runner))
-        || run_id.is_some_and(|run| record.runs.iter().any(|id| id == run))
-    {
+    if run_id.is_some_and(|run| record.runs.iter().any(|id| id == run)) {
         return Ok(());
     }
-    let kind = if runner.is_some() {
-        "runner_draining"
-    } else {
-        "controller_draining"
-    };
+    let kind = "controller_draining";
     let mut error = Error::validation_invalid_argument(
         "admission",
         kind,
@@ -235,34 +117,10 @@ pub fn ensure_upgrade_drain_admission(run_id: Option<&str>, runner: Option<&str>
 mod tests {
     use super::*;
     #[test]
-    fn runtime_promotion_remote_drain_takeover_compares_owner_and_release_is_token_scoped() {
-        crate::test_support::with_isolated_home(|_| {
-            remote_upgrade_drain(&serde_json::json!({"operation_id": "old", "runs": []})).unwrap();
-            let error =
-                remote_upgrade_drain(&serde_json::json!({"operation_id": "new", "runs": []}))
-                    .unwrap_err();
-            assert_eq!(error.details["drain_owner"], "old");
-            assert!(remote_upgrade_drain(&serde_json::json!({"operation_id": "new", "previous_operation_id": "wrong", "runs": []})).is_err());
-            remote_upgrade_drain(&serde_json::json!({"operation_id": "new", "previous_operation_id": "old", "runs": []})).unwrap();
-            remote_upgrade_drain(&serde_json::json!({"operation_id": "old", "resume": true}))
-                .unwrap();
-            assert_eq!(
-                remote_upgrade_drain_owner().unwrap().as_deref(),
-                Some("new")
-            );
-            remote_upgrade_drain(&serde_json::json!({"operation_id": "new", "resume": true}))
-                .unwrap();
-            assert!(remote_upgrade_drain_owner().unwrap().is_none());
-            let _local = begin_upgrade_drain("local", vec![], vec![]).unwrap();
-            assert!(remote_upgrade_drain(&serde_json::json!({"operation_id": "new", "previous_operation_id": "local", "runs": []})).is_err());
-        });
-    }
-
-    #[test]
     fn runtime_promotion_competing_upgrade_hint_is_read_only_and_executable() {
         crate::test_support::with_isolated_home(|_| {
-            let guard = begin_upgrade_drain("upgrade-owner", vec![], vec![]).unwrap();
-            let error = match begin_upgrade_drain("upgrade-contender", vec![], vec![]) {
+            let guard = begin_upgrade_drain("upgrade-owner", vec![]).unwrap();
+            let error = match begin_upgrade_drain("upgrade-contender", vec![]) {
                 Ok(_) => panic!("a second upgrade must not own admission"),
                 Err(error) => error,
             };
@@ -279,35 +137,22 @@ mod tests {
                 Some("upgrade-owner")
             );
             drop(guard);
-            assert!(begin_upgrade_drain("upgrade-contender", vec![], vec![]).is_ok());
+            assert!(begin_upgrade_drain("upgrade-contender", vec![]).is_ok());
         });
     }
 
     #[test]
     fn runtime_promotion_upgrade_drain_survives_clients_and_preserves_existing_cooks() {
         crate::test_support::with_isolated_home(|_| {
-            let guard =
-                begin_upgrade_drain("upgrade-1", vec!["live-cook".into()], vec!["lab".into()])
-                    .unwrap();
-            assert!(runner_is_draining("lab").unwrap());
-            assert!(ensure_upgrade_drain_admission(Some("live-cook"), None).is_ok());
-            let error = ensure_upgrade_drain_admission(Some("new-cook"), None).unwrap_err();
+            let guard = begin_upgrade_drain("upgrade-1", vec!["live-cook".into()]).unwrap();
+            assert!(ensure_upgrade_drain_admission(Some("live-cook")).is_ok());
+            let error = ensure_upgrade_drain_admission(Some("new-cook")).unwrap_err();
             assert_eq!(error.details["kind"], "controller_draining");
             let hints = serde_json::to_string(&error.hints).unwrap();
             assert!(hints.contains("homeboy upgrade status upgrade-1"));
             assert!(!hints.contains("--force"));
-            remote_upgrade_drain(
-                &serde_json::json!({"operation_id":"upgrade-1", "runs":[], "resume":false}),
-            )
-            .unwrap();
-            assert_eq!(
-                upgrade_drain_operation().unwrap().as_deref(),
-                Some("upgrade-1")
-            );
-            assert!(ensure_upgrade_drain_admission(None, Some("lab")).is_err());
-            assert!(ensure_upgrade_drain_admission(None, Some("other")).is_ok());
             drop(guard);
-            assert!(ensure_upgrade_drain_admission(None, None).is_ok());
+            assert!(ensure_upgrade_drain_admission(None).is_ok());
         });
     }
 }

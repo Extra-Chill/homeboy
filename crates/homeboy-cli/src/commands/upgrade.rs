@@ -72,8 +72,6 @@ pub enum UpgradeCommand {
         /// Operation id from a previous `homeboy upgrade`. Defaults to the latest upgrade run.
         id: Option<String>,
     },
-    /// Release remote drains retained by a terminal upgrade.
-    ReleaseDrains { id: String },
     /// Resume an admitted upgrade from its detached worker process.
     #[command(hide = true)]
     Continue { id: String },
@@ -85,22 +83,6 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         let json = serde_json::to_value(result)
             .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
         return Ok((json, 0));
-    }
-
-    if let Some(UpgradeCommand::ReleaseDrains { id }) = args.command.as_ref() {
-        let status = upgrade::load_upgrade_operation_status(Some(id))?;
-        if status.status == "running" {
-            return Err(homeboy::core::Error::internal_unexpected(
-                "cannot release a live upgrade's drains",
-            )
-            .into());
-        }
-        upgrade::release_upgrade_drains(id)?;
-        return Ok((
-            serde_json::to_value(upgrade::load_upgrade_operation_status(Some(id))?)
-                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
-            0,
-        ));
     }
 
     if let Some(UpgradeCommand::Continue { id }) = args.command.as_ref() {
@@ -397,6 +379,7 @@ mod tests {
             homeboy_path: "/home/user/.cargo/bin/homeboy".to_string(),
             success: false,
             upgraded: true,
+            deferred: false,
             previous_version: Some("0.228.6".to_string()),
             new_version: Some("0.228.7".to_string()),
             bare_homeboy_version: Some("0.222.17".to_string()),
@@ -457,6 +440,7 @@ mod tests {
             homeboy_path: "homeboy".to_string(),
             success: false,
             upgraded: false,
+            deferred: false,
             previous_version: None,
             new_version: None,
             bare_homeboy_version: None,
@@ -487,6 +471,7 @@ mod tests {
             homeboy_path: "/home/user/homeboy-main/target/release/homeboy".to_string(),
             success: false,
             upgraded: false,
+            deferred: false,
             previous_version: Some("0.265.2".to_string()),
             new_version: Some("0.265.2".to_string()),
             bare_homeboy_version: Some("0.255.8".to_string()),
@@ -525,6 +510,7 @@ mod tests {
             homeboy_path: "homeboy".to_string(),
             success: true,
             upgraded: true,
+            deferred: false,
             previous_version: Some("0.265.1".to_string()),
             new_version: Some("0.265.2".to_string()),
             bare_homeboy_version: Some("0.265.2".to_string()),
@@ -588,6 +574,7 @@ mod tests {
             extension_skips: Vec::new(),
             runners_updated: Vec::new(),
             runners_skipped: Vec::new(),
+            runners_deferred: Vec::new(),
             extensions_unrefreshed: Vec::new(),
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),

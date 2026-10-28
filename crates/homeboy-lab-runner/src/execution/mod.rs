@@ -827,10 +827,6 @@ pub(crate) fn exec_with_status_snapshot(
     options: RunnerExecOptions,
     status_snapshot: Option<RunnerStatusReport>,
 ) -> Result<(RunnerExecOutput, i32)> {
-    homeboy_core::runtime_promotion::ensure_runner_upgrade_drain_admission(
-        options.run_id.as_deref(),
-        runner_id,
-    )?;
     let explicit_generic_run_id = options
         .run_id_owns_generic_exec
         .then(|| options.run_id.clone())
@@ -1449,9 +1445,6 @@ fn runner_exec_request_metadata(run_id: Option<&str>, transport: &str, runner_id
         "controller_attempt_id": controller_attempt_id,
         "accepted_handoff_id": accepted_handoff_id,
     });
-    if let Ok(Some(operation)) = homeboy_core::runtime_promotion::upgrade_drain_operation() {
-        metadata["upgrade_operation_id"] = serde_json::json!(operation);
-    }
     if let Some(run_id) = run_id.filter(|id| !id.trim().is_empty()) {
         metadata["durable_run_id"] = serde_json::json!(run_id);
         metadata["run_id"] = serde_json::json!(run_id);
