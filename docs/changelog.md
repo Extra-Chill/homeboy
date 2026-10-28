@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.22] - 2026-10-28
+
+### Changed
+- Skip the per-gate Lab readiness handoff during promotion
+- Stop respawning terminal-continuation workers while a Cook driver is alive
+
 ## [0.434.21] - 2026-10-28
 
 ### Fixed
