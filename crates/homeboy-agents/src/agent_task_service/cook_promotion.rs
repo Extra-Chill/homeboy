@@ -2261,14 +2261,11 @@ pub(crate) enum BaseCatchUp {
     /// The destination is not exactly this Cook's promoted candidate, so Cook
     /// does not own it and never rewrites it.
     NotOwned(String),
-    /// The candidate was replayed onto the moved base and recorded as the
-    /// latest promotion. `regate` is set when the rebased tree differs from
-    /// the verified tree: the recorded promotion is then a verification-pending
-    /// checkpoint for promotion to re-gate. Otherwise it keeps its gate proof.
-    Rebased {
-        promotion: AgentTaskPromotionReport,
-        regate: bool,
-    },
+    /// The candidate was replayed onto the moved base without conflicts and
+    /// recorded as the latest promotion. It keeps its gate proof; the forge's
+    /// CI verifies the merged result (#16603). `provenance.base_catch_up`
+    /// names the base its gates actually ran on.
+    Rebased { promotion: AgentTaskPromotionReport },
     /// The candidate does not apply to the moved base. `paths` are the
     /// candidate files the base also changed; the destination is untouched.
     Conflict { base: String, paths: Vec<String> },
@@ -2372,7 +2369,6 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
             })
         }
     };
-    let regate = tree != verified.tree;
     let json_error = |error: serde_json::Error| Error::internal_json(error.to_string(), None);
     let mut caught_up = serde_json::to_value(promotion).map_err(json_error)?;
     let candidate_sha = git_output(
@@ -2403,31 +2399,20 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
     caught_up["verified_base"] = json!({ "base": options.finalization.base, "sha": fresh_base });
     caught_up["provenance"]["candidate"] =
         serde_json::to_value(candidate_fingerprint(path)?).map_err(json_error)?;
+    let gates_verified_base = promotion
+        .provenance
+        .pointer("/base_catch_up/gates_verified_base")
+        .cloned()
+        .unwrap_or_else(|| json!(prior_base));
     caught_up["provenance"]["base_catch_up"] = json!({
         "source_candidate": expected,
         "source_verified_base": prior_base,
+        "gates_verified_base": gates_verified_base,
         "resolved_base": fresh_base,
-        "regated": regate,
     });
-    if regate {
-        caught_up["status"] = json!("verification_pending");
-        caught_up["provenance"]["resume_inputs"] = json!({
-            "base_ref": options.finalization.base,
-            "task_base_sha": cook_candidate_base_sha(options),
-            "candidate_ref": null,
-        });
-        caught_up["provenance"]["resume_contract"] = json!({
-            "kind": "base_catch_up",
-            "source_candidate": expected,
-            "source_verified_base": prior_base,
-            "resolved_base": fresh_base,
-            "previous": promotion.provenance.get("resume_contract"),
-        });
-    }
     lifecycle_store.record_promotion(run_id, caught_up.clone())?;
     Ok(BaseCatchUp::Rebased {
         promotion: serde_json::from_value(caught_up).map_err(json_error)?,
-        regate,
     })
 }
 

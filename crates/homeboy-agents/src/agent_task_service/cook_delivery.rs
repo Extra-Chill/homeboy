@@ -1113,14 +1113,13 @@ fn compare_failed_gates_to_verified_base(
 
 /// Bring a Cook-owned candidate onto its current resolved base (#16049).
 ///
-/// A candidate whose base moved is replayed onto the new base. An identical
-/// tree keeps its gate proof; a changed tree is re-gated through the same
-/// promotion path [`ensure_verified`] uses. `moving_base_error` carries
+/// A candidate whose base moved is replayed onto the new base and keeps its
+/// gate proof; the forge's CI verifies the merged result (#16603). `moving_base_error` carries
 /// finalization's refusal when the base moved under it, and makes a candidate
 /// that cannot be caught up a blocker instead of a finalization attempt.
 fn ensure_base_current(
     ctx: &mut CookDeliveryContext<'_, '_>,
-    mut promotion: AgentTaskPromotionReport,
+    promotion: AgentTaskPromotionReport,
     base_movements: &mut u32,
     moving_base_error: Option<&Error>,
 ) -> Result<CookDeliveryStep<AgentTaskPromotionReport>> {
@@ -1163,48 +1162,9 @@ fn ensure_base_current(
             let code = CookDeliveryBlockerCode::BaseConflict;
             ctx.blocked(code, message, Vec::new(), *base_movements)
         }
-        BaseCatchUp::Rebased {
-            promotion: rebased,
-            regate,
-        } => {
+        BaseCatchUp::Rebased { promotion } => {
             *base_movements += 1;
-            promotion = rebased;
-            if regate {
-                ctx.progress(
-                    "promotion",
-                    Some("re-verifying the candidate on its moved base"),
-                )?;
-                promotion = promote_with_gate_setup_retries(
-                    ctx.side_effects,
-                    lifecycle_store,
-                    options,
-                    run_id,
-                    |_, _, _| {},
-                )?;
-                compare_failed_gates_to_verified_base(
-                    lifecycle_store,
-                    options,
-                    run_id,
-                    &mut promotion,
-                )?;
-            }
             ctx.update_attempt_promotion(&promotion);
-            if promotion.status != AgentTaskPromotionStatus::Applied {
-                let status = match promotion.status {
-                    AgentTaskPromotionStatus::GateDeferred => CookStatus::GatesDeferred,
-                    _ => CookStatus::GateFailed,
-                };
-                let stop_reason = format!(
-                    "the candidate rebased onto moved base `{}` did not pass the declared deterministic gates; finalization was not attempted",
-                    options.finalization.base
-                );
-                return Ok(ControlFlow::Break(ctx.report(
-                    status.as_str(),
-                    None,
-                    Some(&stop_reason),
-                    1,
-                )));
-            }
             Ok(ControlFlow::Continue(promotion))
         }
     }
