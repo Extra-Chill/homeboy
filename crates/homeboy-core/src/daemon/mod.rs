@@ -1444,19 +1444,33 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
     let state_dir = path.parent().unwrap_or(&path).to_path_buf();
     let state_identity = daemon_state_identity(&path, &jobs_path)?;
     let validation = validate_lease_file(&path)?;
+    // Every daemon of one Unix user shares this ledger, whatever its state
+    // dir (#16089). Scope it to the lease this state dir recorded, live or
+    // dead, so another controller's stamped work on a shared Lab host neither
+    // protects this daemon nor blocks its replacement. Unstamped records have
+    // no proven owner and stay counted; a state dir with no lease projects the
+    // whole ledger, as before.
     let job_store = JobStore::open_without_reconciliation(&jobs_path)?;
-    let active_job_recovery_evidence = job_store.active_daemon_job_recovery_evidence(
-        validation
-            .running
-            .then(|| {
-                validation
-                    .state
-                    .as_ref()
-                    .map(|state| state.lease_id.as_str())
-            })
-            .flatten(),
-        pid_is_running,
-    );
+    let job_store = match validation.state.as_ref() {
+        Some(state) => job_store.with_daemon_lease(state.lease_id.clone()),
+        None => job_store,
+    };
+    let active_job_recovery_evidence = job_store
+        .active_daemon_job_recovery_evidence(
+            validation
+                .running
+                .then(|| {
+                    validation
+                        .state
+                        .as_ref()
+                        .map(|state| state.lease_id.as_str())
+                })
+                .flatten(),
+            pid_is_running,
+        )
+        .into_iter()
+        .filter(|evidence| job_store.executes_lease(evidence.daemon_lease_id.as_deref()))
+        .collect::<Vec<_>>();
     // Durable terminal evidence proves no workload remains, so those jobs are
     // reported as evidence but do not protect the daemon from replacement.
     let blocking_active_jobs = active_job_recovery_evidence
