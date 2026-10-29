@@ -8,10 +8,12 @@
 //! replaying the same events against a committed state is a no-op.
 //!
 //! Step submissions carry deterministic keys,
-//! `<instance>/<step>/<iteration>/<attempt>` for runs,
-//! `<instance>/<step>/<iteration>/item-<n>/<attempt>` for `foreach` items, and
-//! `<instance>/<step>/<iteration>/when-<n>` or `<instance>/~until/<iteration>/<n>`
-//! for command gates, so a replayed submission converges on the same job.
+//! `<instance>/<step>/<iteration>/<attempt>` for runs and
+//! `<instance>/<step>/<iteration>/item-<n>/<attempt>` for `foreach` items, so
+//! a replayed submission converges on the same job. A step's outcome and
+//! output are the result of its run in this instance; a definition that wants
+//! another pass makes its final step re-admit the definition (see the
+//! `workflow` command docs).
 //!
 //! A `foreach` step expands its items once its `needs` and `when` pass, runs
 //! at most `max_parallel` of them at a time, and settles when every item has
@@ -25,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::definition::{Join, StepDefinition, StepKind, WorkflowDefinition};
-use super::gate::{GateFacts, GateValue};
+use super::gate::GateFacts;
 use super::template::{self, TemplateValues};
 
 pub const WORKFLOW_STATE_SCHEMA: &str = "homeboy/workflow-state/v1";
@@ -68,18 +70,10 @@ pub enum StepPhase {
     Done,
 }
 
-/// One command gate launched as a step job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GateCommand {
-    pub key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub passed: Option<bool>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepState {
     pub phase: StepPhase,
-    /// Attempts submitted in the current iteration.
+    /// Attempts submitted for the step.
     #[serde(default)]
     pub attempt: u32,
     /// The current (or last) submitted step key.
@@ -90,24 +84,18 @@ pub struct StepState {
     pub started_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
-    /// The latest terminal outcome. Before the step settles in this
-    /// iteration it is the previous iteration's result (`carried`).
+    /// The outcome of the step's run in this instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub carried: bool,
-    /// `when` command gates for this iteration, by pre-order index.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub gates: BTreeMap<u32, GateCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// A `foreach` step's items for this iteration, once expanded.
+    /// A `foreach` step's items, once expanded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<ItemState>,
 }
@@ -163,8 +151,6 @@ impl StepState {
             outcome: None,
             output: None,
             run_id: None,
-            carried: false,
-            gates: BTreeMap::new(),
             prompt: None,
             error: None,
             items: Vec::new(),
@@ -186,23 +172,20 @@ pub struct InstanceState {
     pub instance: String,
     pub inputs: BTreeMap<String, Value>,
     pub status: InstanceStatus,
+    /// The pass of the step graph this instance runs. One instance runs one
+    /// pass; a definition that wants another pass re-admits itself, which
+    /// chains a new instance.
     pub iteration: u32,
-    /// Step jobs submitted so far, including command gates.
+    /// Step jobs submitted so far.
     pub step_runs: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
     pub steps: BTreeMap<String, StepState>,
-    /// `iterate.until` command gates for this iteration.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub until: BTreeMap<u32, GateCommand>,
     /// A step failed: no new step starts unless it is `always`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub failing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Step outcomes of every finished iteration.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub history: Vec<BTreeMap<String, String>>,
 }
 
 impl InstanceState {
@@ -224,10 +207,8 @@ impl InstanceState {
                 .iter()
                 .map(|step| (step.id.clone(), StepState::pending()))
                 .collect(),
-            until: BTreeMap::new(),
             failing: false,
             reason: None,
-            history: Vec::new(),
         }
     }
 
@@ -244,19 +225,7 @@ impl InstanceState {
                     .filter(|item| item.phase == StepPhase::Running)
                     .filter_map(|item| item.key.clone()),
             );
-            keys.extend(
-                step.gates
-                    .values()
-                    .filter(|gate| gate.passed.is_none())
-                    .map(|gate| gate.key.clone()),
-            );
         }
-        keys.extend(
-            self.until
-                .values()
-                .filter(|gate| gate.passed.is_none())
-                .map(|gate| gate.key.clone()),
-        );
         keys
     }
 
@@ -343,9 +312,6 @@ pub enum SubmissionKind {
         args: Vec<String>,
         cook_id: String,
     },
-    Gate {
-        argv: Vec<String>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -417,22 +383,13 @@ struct Machine<'a> {
     now_ms: u64,
 }
 
-struct Facts<'a> {
-    state: &'a InstanceState,
-    commands: &'a BTreeMap<u32, GateCommand>,
-}
-
-impl GateFacts for Facts<'_> {
+impl GateFacts for InstanceState {
     fn outcome(&self, step: &str) -> Option<&str> {
-        self.state.steps.get(step)?.outcome.as_deref()
+        self.steps.get(step)?.outcome.as_deref()
     }
 
     fn output(&self, step: &str) -> Option<&Value> {
-        self.state.steps.get(step)?.output.as_ref()
-    }
-
-    fn command(&self, index: u32) -> Option<bool> {
-        self.commands.get(&index)?.passed
+        self.steps.get(step)?.output.as_ref()
     }
 }
 
@@ -447,10 +404,6 @@ impl TemplateValues for InstanceState {
 
     fn step_run_id(&self, step: &str) -> Option<&str> {
         self.steps.get(step)?.run_id.as_deref()
-    }
-
-    fn iteration(&self) -> u32 {
-        self.iteration
     }
 
     fn instance(&self) -> &str {
@@ -475,21 +428,6 @@ impl Machine<'_> {
     }
 
     fn finish(&mut self, result: &StepResult) {
-        let passed = result.status == FinishedStatus::Succeeded;
-        for gate in self
-            .state
-            .steps
-            .values_mut()
-            .flat_map(|step| step.gates.values_mut())
-            .chain(self.state.until.values_mut())
-        {
-            if gate.key == result.key {
-                if gate.passed.is_none() {
-                    gate.passed = Some(passed);
-                }
-                return;
-            }
-        }
         if let Some((id, index)) = self.state.steps.iter().find_map(|(id, step)| {
             step.items
                 .iter()
@@ -751,7 +689,6 @@ impl Machine<'_> {
         let failure = FAILURE_OUTCOMES.contains(&outcome.as_str());
         let step = self.step(id);
         step.phase = StepPhase::Done;
-        step.carried = false;
         step.outcome = Some(outcome);
         if failure {
             let error = step.error.clone().or_else(|| {
@@ -775,7 +712,6 @@ impl Machine<'_> {
     fn skip(&mut self, id: &str) {
         let step = self.step(id);
         step.phase = StepPhase::Done;
-        step.carried = false;
         step.outcome = Some("skipped".to_string());
         step.output = None;
         step.run_id = None;
@@ -924,137 +860,25 @@ impl Machine<'_> {
         }));
     }
 
-    /// Submit the command gates a pending evaluation is blocked on.
-    fn submit_gates(&mut self, owner: Option<&str>, indices: &[u32], argvs: &[Vec<String>]) {
-        let iteration = self.state.iteration;
-        let instance = self.state.instance.clone();
-        for index in indices {
-            let launched = match owner {
-                Some(id) => self.state.steps[id].gates.contains_key(index),
-                None => self.state.until.contains_key(index),
-            };
-            if launched {
-                continue;
-            }
-            let key = match owner {
-                Some(id) => format!("{instance}/{id}/{iteration}/when-{index}"),
-                None => format!("{instance}/~until/{iteration}/{index}"),
-            };
-            let argv = argvs[*index as usize]
-                .iter()
-                .map(|arg| template::render(arg, &self.state))
-                .collect::<Result<Vec<_>, _>>();
-            let gate = match argv {
-                // A gate whose argv cannot render cannot pass.
-                Err(_) => GateCommand {
-                    key: key.clone(),
-                    passed: Some(false),
-                },
-                Ok(argv) => {
-                    if !self.reserve_run() {
-                        return;
-                    }
-                    self.commands.push(Command::SubmitStep(StepSubmission {
-                        key: key.clone(),
-                        step: owner.unwrap_or("~until").to_string(),
-                        iteration,
-                        attempt: 0,
-                        kind: SubmissionKind::Gate { argv },
-                        not_before_ms: None,
-                    }));
-                    GateCommand { key, passed: None }
-                }
-            };
-            match owner {
-                Some(id) => {
-                    self.step(id).gates.insert(*index, gate);
-                }
-                None => {
-                    self.state.until.insert(*index, gate);
-                }
-            }
-        }
-    }
-
     fn progress(&mut self) {
-        loop {
-            let fanning_out = self
-                .state
-                .steps
-                .iter()
-                .filter(|(_, step)| step.phase == StepPhase::Running && !step.items.is_empty())
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>();
-            for id in fanning_out {
-                self.pump(&id);
-            }
-            self.schedule_ready_steps();
-            if self.state.status.is_terminal() || !self.state.steps.values().all(StepState::settled)
-            {
-                return;
-            }
-            if self.state.failing {
-                self.complete(InstanceStatus::Failed, None);
-                return;
-            }
-            let Some(iterate) = &self.definition.iterate else {
-                self.complete(InstanceStatus::Succeeded, None);
-                return;
-            };
-            let value = iterate.until.evaluate(&Facts {
-                state: &self.state,
-                commands: &self.state.until,
-            });
-            match value {
-                GateValue::True => {
-                    self.complete(InstanceStatus::Succeeded, None);
-                    return;
-                }
-                GateValue::Pending(indices) => {
-                    let argvs = owned_commands(&iterate.until);
-                    self.submit_gates(None, &indices, &argvs);
-                    // A gate that could not render is decided now.
-                    if self.state.until.values().all(|gate| gate.passed.is_some()) {
-                        continue;
-                    }
-                    return;
-                }
-                GateValue::False if self.state.iteration >= iterate.max_iterations => {
-                    self.complete(
-                        InstanceStatus::BudgetExhausted,
-                        Some(format!(
-                            "the until gate did not pass within {} iterations",
-                            iterate.max_iterations
-                        )),
-                    );
-                    return;
-                }
-                GateValue::False => self.next_iteration(),
-            }
+        let fanning_out = self
+            .state
+            .steps
+            .iter()
+            .filter(|(_, step)| step.phase == StepPhase::Running && !step.items.is_empty())
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in fanning_out {
+            self.pump(&id);
         }
-    }
-
-    fn next_iteration(&mut self) {
-        self.state.history.push(
-            self.state
-                .steps
-                .iter()
-                .map(|(id, step)| (id.clone(), step.outcome.clone().unwrap_or_default()))
-                .collect(),
-        );
-        self.state.iteration += 1;
-        self.state.until.clear();
-        for step in self.state.steps.values_mut() {
-            step.phase = StepPhase::Pending;
-            step.attempt = 0;
-            step.key = None;
-            step.started_at_ms = None;
-            step.timed_out = false;
-            step.gates.clear();
-            step.prompt = None;
-            step.error = None;
-            step.items.clear();
-            step.carried = step.outcome.is_some();
+        self.schedule_ready_steps();
+        if self.state.status.is_terminal() || !self.state.steps.values().all(StepState::settled) {
+            return;
+        }
+        if self.state.failing {
+            self.complete(InstanceStatus::Failed, None);
+        } else {
+            self.complete(InstanceStatus::Succeeded, None);
         }
     }
 
@@ -1086,34 +910,10 @@ impl Machine<'_> {
                     continue;
                 }
                 if let Some(when) = &definition.when {
-                    let value = when.evaluate(&Facts {
-                        state: &self.state,
-                        commands: &self.state.steps[id].gates,
-                    });
-                    match value {
-                        GateValue::True => {}
-                        GateValue::False => {
-                            let step = self.step(id);
-                            if step.carried && step.outcome.is_some() {
-                                // Keep the earlier iteration's result.
-                                step.phase = StepPhase::Done;
-                            } else {
-                                self.skip(id);
-                            }
-                            changed = true;
-                            continue;
-                        }
-                        GateValue::Pending(indices) => {
-                            let before = self.commands.len();
-                            let argvs = owned_commands(when);
-                            self.submit_gates(Some(id), &indices, &argvs);
-                            let decided = self.state.steps[id]
-                                .gates
-                                .values()
-                                .all(|gate| gate.passed.is_some());
-                            changed |= self.commands.len() != before || decided;
-                            continue;
-                        }
+                    if !when.evaluate(&self.state) {
+                        self.skip(id);
+                        changed = true;
+                        continue;
                     }
                 }
                 if let StepKind::Approval(approval) = definition.kind() {
@@ -1134,13 +934,6 @@ impl Machine<'_> {
     }
 }
 
-fn owned_commands(gate: &super::gate::Gate) -> Vec<Vec<String>> {
-    gate.command_gates()
-        .into_iter()
-        .map(<[String]>::to_vec)
-        .collect()
-}
-
 /// Template values inside one `foreach` item: the instance plus `{{item}}`.
 struct ItemScope<'a> {
     state: &'a InstanceState,
@@ -1158,10 +951,6 @@ impl TemplateValues for ItemScope<'_> {
 
     fn step_run_id(&self, step: &str) -> Option<&str> {
         self.state.step_run_id(step)
-    }
-
-    fn iteration(&self) -> u32 {
-        self.state.iteration
     }
 
     fn instance(&self) -> &str {

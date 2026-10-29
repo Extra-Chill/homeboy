@@ -1,0 +1,200 @@
+{
+  "definition": {
+    "id": "cook-outcome",
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "cook": {
+          "placement": "lab",
+          "prompt": "Try the fix",
+          "repo": "scratch",
+          "verify": [
+            "composer test"
+          ]
+        },
+        "id": "fix"
+      },
+      {
+        "always": true,
+        "exec": {
+          "args": [
+            "recover",
+            "--run",
+            "{{steps.fix.run_id}}"
+          ],
+          "program": "node"
+        },
+        "id": "recover",
+        "needs": [
+          "fix"
+        ],
+        "when": {
+          "outcome": [
+            "candidate_recoverable"
+          ],
+          "step": "fix"
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/fix/1/1",
+        "outcome": "candidate_recoverable",
+        "run_id": "wf-golden-fix-i1-a1",
+        "status": "succeeded"
+      },
+      "now_ms": 1000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/recover/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 2000
+    }
+  ],
+  "expect_status": "succeeded",
+  "inputs": {},
+  "transcript": [
+    {
+      "commands": [
+        {
+          "args": [
+            "--placement",
+            "lab",
+            "--prompt",
+            "Try the fix",
+            "--repo",
+            "scratch",
+            "--verify",
+            "composer test"
+          ],
+          "attempt": 1,
+          "command": "submit_step",
+          "cook_id": "wf-golden-fix-i1-a1",
+          "iteration": 1,
+          "key": "wf-golden/fix/1/1",
+          "kind": "cook",
+          "step": "fix"
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "fix": {
+            "attempt": 1,
+            "key": "wf-golden/fix/1/1",
+            "outcome": null,
+            "phase": "running"
+          },
+          "recover": {
+            "attempt": 0,
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        }
+      }
+    },
+    {
+      "commands": [
+        {
+          "args": [
+            "recover",
+            "--run",
+            "wf-golden-fix-i1-a1"
+          ],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/recover/1/1",
+          "kind": "exec",
+          "program": "node",
+          "step": "recover"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/fix/1/1",
+        "outcome": "candidate_recoverable",
+        "run_id": "wf-golden-fix-i1-a1",
+        "status": "succeeded"
+      },
+      "now_ms": 1000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 2,
+        "steps": {
+          "fix": {
+            "attempt": 1,
+            "key": "wf-golden/fix/1/1",
+            "outcome": "candidate_recoverable",
+            "phase": "done"
+          },
+          "recover": {
+            "attempt": 1,
+            "key": "wf-golden/recover/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        }
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "complete",
+          "status": "succeeded"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/recover/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 2000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "succeeded",
+        "step_runs": 2,
+        "steps": {
+          "fix": {
+            "attempt": 1,
+            "key": "wf-golden/fix/1/1",
+            "outcome": "candidate_recoverable",
+            "phase": "done"
+          },
+          "recover": {
+            "attempt": 1,
+            "key": "wf-golden/recover/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          }
+        }
+      }
+    }
+  ]
+}

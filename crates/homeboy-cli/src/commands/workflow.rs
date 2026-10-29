@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Args, CommandFactory, Subcommand};
-use homeboy::core::daemon::workflow_job::{WorkflowJobRequest, WORKFLOW_JOB_REQUEST_SCHEMA};
+use homeboy::core::daemon::workflow_job::{
+    chain_successor, WorkflowJobRequest, WORKFLOW_INSTANCE_ENV, WORKFLOW_JOB_REQUEST_SCHEMA,
+};
 use homeboy::core::daemon::LocalControllerJobClient;
 use homeboy::core::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef};
 use homeboy::core::workflow::definition::StepKind;
@@ -79,7 +81,8 @@ pub struct RunArgs {
     /// Admit the workflow on this runner's daemon instead of the local one
     #[arg(long = "on", value_name = "RUNNER")]
     on: Option<String>,
-    /// Set from the global `--wait`: observe the instance until it is terminal.
+    /// Set from the global `--wait`: observe the instance until it is
+    /// terminal, then follow its child instances to the last one.
     #[arg(skip)]
     pub(crate) wait: bool,
 }
@@ -210,8 +213,14 @@ pub(crate) fn admit(
     let disposition = match client.workflow(&instance) {
         Ok(_) => "reused",
         Err(_) => {
-            let request =
-                admission_request(definition, inputs, &instance, instance_name, current_dir()?)?;
+            let request = admission_request(
+                definition,
+                inputs,
+                &instance,
+                instance_name,
+                parent_from_env(),
+                current_dir()?,
+            )?;
             client.submit(request.submission()?)?;
             "created"
         }
@@ -242,7 +251,7 @@ fn register_cadence(
         .collect::<BTreeMap<_, _>>();
     let inputs = definition.resolve_inputs(&provided)?;
     let instance = definition.instance_id(&inputs, None);
-    let request = admission_request(definition, inputs, &instance, None, current_dir()?)?;
+    let request = admission_request(definition, inputs, &instance, None, None, current_dir()?)?;
     let client = LocalControllerJobClient::connect_current_build()?;
     let mut view = json!({ "cadence": client.register_workflow_cadence(&request)? });
     view["submission"] = json!({ "disposition": view["cadence"]["disposition"], "source": source });
@@ -262,7 +271,7 @@ pub fn register_builtin_cadence_factory() {
                 .filter(|home| home.is_dir())
                 .map(Ok)
                 .unwrap_or_else(current_dir)?;
-            admission_request(definition, inputs, &instance, None, cwd)
+            admission_request(definition, inputs, &instance, None, None, cwd)
         },
     ));
 }
@@ -277,11 +286,14 @@ fn current_dir() -> Result<PathBuf> {
 }
 
 /// Capture the admitted environment and pin every program the steps run.
+/// `parent` is the instance whose step is admitting this one, read from the
+/// step environment `workflow run` runs in.
 fn admission_request(
     definition: &WorkflowDefinition,
     inputs: BTreeMap<String, Value>,
     instance: &str,
     instance_name: Option<&str>,
+    parent: Option<String>,
     cwd: PathBuf,
 ) -> Result<WorkflowJobRequest> {
     let mut env = EnvMaterializationPlan::default();
@@ -309,7 +321,6 @@ fn admission_request(
 
     let mut programs = BTreeMap::new();
     let mut runs_homeboy = false;
-    let mut gate_programs = Vec::new();
     for step in &definition.steps {
         match step.kind() {
             StepKind::Exec(exec) => {
@@ -317,32 +328,6 @@ fn admission_request(
             }
             StepKind::Cook(_) | StepKind::Homeboy(_) => runs_homeboy = true,
             StepKind::Approval(_) => {}
-        }
-        if let Some(gate) = &step.when {
-            gate_programs.extend(gate.command_gates().into_iter().map(|argv| argv[0].clone()));
-        }
-    }
-    if let Some(iterate) = &definition.iterate {
-        gate_programs.extend(
-            iterate
-                .until
-                .command_gates()
-                .into_iter()
-                .map(|argv| argv[0].clone()),
-        );
-    }
-    for program in gate_programs {
-        if program == "homeboy" {
-            runs_homeboy = true;
-        } else if program.contains("{{") {
-            return Err(Error::validation_invalid_argument(
-                "command",
-                "a command gate's program cannot be templated",
-                Some(program),
-                None,
-            ));
-        } else {
-            programs.insert(program.clone(), resolve_program(&program)?);
         }
     }
     // `homeboy` and `cook` steps run Homeboy itself, with the same admitted
@@ -369,6 +354,7 @@ fn admission_request(
         inputs,
         homeboy_program: current_exe.display().to_string(),
         cwd: cwd.display().to_string(),
+        parent,
         env,
         homeboy_env,
         programs,
@@ -506,14 +492,31 @@ fn envelope_exit_code(data: &Value, process: Option<i32>) -> i32 {
         .unwrap_or(1)
 }
 
+/// The instance whose step runs this command, if any. A step's environment
+/// names its instance, so `workflow run` inside a step records that instance
+/// as the admitted one's parent and the chain stays visible in `status`.
+fn parent_from_env() -> Option<String> {
+    std::env::var(WORKFLOW_INSTANCE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn watch_instance(client: &LocalControllerJobClient, instance: &str) -> Result<Value> {
     let mut last = String::new();
+    let mut watched = instance.to_string();
     loop {
-        let view = client.workflow(instance)?;
+        let view = client.workflow(&watched)?;
         let line = progress_line(&view);
         if line != last {
             eprintln!("{line}");
             last = line;
+        }
+        if let Some(child) = chain_successor(&view) {
+            // The chain re-admitted itself: follow it to the last instance.
+            watched = child;
+            last.clear();
+            continue;
         }
         if is_terminal(&view) {
             return Ok(view);
@@ -559,10 +562,9 @@ fn progress_line(view: &Value) -> String {
         })
         .unwrap_or_default();
     format!(
-        "{} {} iteration {} runs {}: {steps}",
+        "{} {} ({} step runs): {steps}",
         view["instance"].as_str().unwrap_or_default(),
         view["status"].as_str().unwrap_or_default(),
-        view["iteration"],
         view["step_runs"],
     )
 }
@@ -722,12 +724,6 @@ mod tests {
                 continue;
             }
             let parsed = WorkflowDefinition::from_value(value.clone());
-            // Example B (`notify`) uses a field a later release implements;
-            // this one refuses it.
-            if value["id"] == "homeboy-nightly-red-main" {
-                assert!(parsed.is_err());
-                continue;
-            }
             validate(&parsed.unwrap()).unwrap_or_else(|error| {
                 panic!(
                     "docs example `{}` is invalid: {}",

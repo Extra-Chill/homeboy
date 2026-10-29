@@ -29,6 +29,7 @@ fn request(definition: Value, cwd: &Path) -> WorkflowJobRequest {
         inputs,
         homeboy_program: "/bin/sh".to_string(),
         cwd: cwd.display().to_string(),
+        parent: None,
         env,
         homeboy_env: EnvMaterializationPlan::default(),
         programs: BTreeMap::from([("sh".to_string(), "/bin/sh".to_string())]),
@@ -36,21 +37,34 @@ fn request(definition: Value, cwd: &Path) -> WorkflowJobRequest {
 }
 
 fn admit(store: &JobStore, request: &WorkflowJobRequest) -> Uuid {
+    match admit_with_outcome(store, request).0 {
+        crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(id) => id,
+        crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => job.id,
+    }
+}
+
+/// Admit the request and report the durable admission outcome, so a test can
+/// tell a created instance from an existing one.
+fn admit_with_outcome(
+    store: &JobStore,
+    request: &WorkflowJobRequest,
+) -> (
+    crate::api_jobs::ControllerJobSubmissionOutcome,
+    String,
+) {
     register_workflow_job_driver();
     let envelope: crate::daemon::ControllerJobRequest =
         serde_json::from_value(request.submission().unwrap()).unwrap();
+    let key = envelope.idempotency_key.clone();
     let state = crate::daemon::controller_job_state(&envelope).unwrap();
-    match store
+    let outcome = store
         .admit_controller_job(
             "controller.workflow".to_string(),
             envelope.idempotency_key,
             state,
         )
-        .unwrap()
-    {
-        crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(id) => id,
-        crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => job.id,
-    }
+        .unwrap();
+    (outcome, key)
 }
 
 fn wait_terminal(store: &JobStore, job_id: Uuid, seconds: u64) -> crate::api_jobs::Job {
@@ -129,28 +143,27 @@ fn failed_step_cause_reaches_the_workflow_status() {
     });
 }
 
-/// `evaluate` reports findings on its first run and acceptance on its
-/// second; the gate launches `fix` only on findings, and the `until` gate
-/// passes on iteration 2. Every step job runs exactly once.
+/// An output gate on an upstream step decides whether the next step runs:
+/// `evaluate` reports findings, `fix` runs because of it, and a step whose
+/// gate is false is skipped. Every step job runs exactly once.
 #[test]
-fn gates_launch_the_next_step_and_until_passes_on_iteration_two() {
+fn when_gates_launch_the_next_step_and_skip_the_rest() {
     with_isolated_home(|home| {
         let runs = home.path().join("runs.log");
-        let counter = home.path().join("evaluations");
         let definition = json!({
             "schema": "homeboy/workflow/v1",
             "id": "proof",
-            "budget": {"max_step_runs": 10},
-            "iterate": {"until": {"step": "evaluate", "output": "/verdict", "equals": "accepted"}, "max_iterations": 3},
             "steps": [
                 {"id": "evaluate", "exec": sh(&format!(
-                    "echo evaluate >> {runs}; echo x >> {counter}; \
-                     if [ $(wc -l < {counter}) -ge 2 ]; then v=accepted; else v=findings; fi; \
-                     printf '{{\"verdict\":\"%s\"}}' $v > \"$HOMEBOY_STEP_OUTPUT\"",
-                    runs = runs.display(), counter = counter.display()))},
+                    "echo evaluate >> {runs}; \
+                     printf '{{\"verdict\":\"findings\"}}' > \"$HOMEBOY_STEP_OUTPUT\"",
+                    runs = runs.display()))},
                 {"id": "fix", "needs": ["evaluate"],
                  "when": {"step": "evaluate", "output": "/verdict", "equals": "findings"},
-                 "exec": sh(&format!("echo fix-{{{{iteration}}}} >> {}", runs.display()))}
+                 "exec": sh(&format!("echo fix >> {}", runs.display()))},
+                {"id": "release", "needs": ["evaluate"],
+                 "when": {"step": "evaluate", "output": "/verdict", "equals": "accepted"},
+                 "exec": sh(&format!("echo release >> {}", runs.display()))}
             ]
         });
         let store = JobStore::open_without_reconciliation(
@@ -165,14 +178,13 @@ fn gates_launch_the_next_step_and_until_passes_on_iteration_two() {
         assert_eq!(job.status, JobStatus::Succeeded);
         let status = workflow_status(&store, &request.instance).unwrap();
         assert_eq!(status["status"], "succeeded");
-        assert_eq!(status["iteration"], 2);
         assert_eq!(status["steps"]["fix"]["outcome"], "succeeded");
-        assert_eq!(status["steps"]["fix"]["carried"], true);
+        assert_eq!(status["steps"]["release"]["outcome"], "skipped");
         assert_eq!(
             std::fs::read_to_string(&runs).unwrap(),
-            "evaluate\nfix-1\nevaluate\n"
+            "evaluate\nfix\n"
         );
-        for key in ["evaluate/1/1", "fix/1/1", "evaluate/2/1"] {
+        for key in ["evaluate/1/1", "fix/1/1"] {
             let child = store
                 .controller_job_for_key(&format!("{}/{key}", request.instance))
                 .unwrap_or_else(|| panic!("{key} was submitted"));
@@ -183,7 +195,7 @@ fn gates_launch_the_next_step_and_until_passes_on_iteration_two() {
             );
         }
         assert!(store
-            .controller_job_for_key(&format!("{}/fix/2/1", request.instance))
+            .controller_job_for_key(&format!("{}/release/1/1", request.instance))
             .is_none());
     });
 }
@@ -670,4 +682,140 @@ fn a_cook_step_that_exits_without_recording_its_run_fails() {
         ),
         Some(Some("succeeded".to_string()))
     );
+}
+
+/// A self-admitting chain: the `again` step runs `workflow run <same
+/// definition> --input iteration=N+1`, gated on the evaluate output. The step
+/// process sees `HOMEBOY_WORKFLOW_INSTANCE`, so `workflow run` records the
+/// admitting instance as the child's `parent`; a replayed admission converges
+/// on the existing child; and a watcher follows the chain to its last
+/// instance and reports that instance's terminal status.
+#[test]
+fn a_step_that_readmits_the_definition_chains_child_instances() {
+    with_isolated_home(|home| {
+        let definition = json!({
+            "schema": "homeboy/workflow/v1",
+            "id": "chain",
+            "inputs": {"iteration": {"default": 1}},
+            "steps": [
+                {"id": "evaluate",
+                 "exec": sh("printf '{\"iteration\":{{inputs.iteration}}}' > \"$HOMEBOY_STEP_OUTPUT\"")},
+                {"id": "again", "needs": ["evaluate"],
+                 "when": {"step": "evaluate", "output": "/iteration", "lt": 3},
+                 "homeboy": ["workflow", "run", "-", "--input", "iteration=2"]}
+            ]
+        });
+        // Stands in for the `homeboy` binary: records the instance environment
+        // its step ran with, which is what `workflow run` reads at admission.
+        let parent_env = home.path().join("step-instance.txt");
+        homeboy_test_support::write_executable(
+            home.path().join("fake-homeboy"),
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$HOMEBOY_WORKFLOW_INSTANCE\" > {}\n",
+                parent_env.display()
+            ),
+            0o755,
+        )
+        .unwrap();
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-chain-test".to_string());
+
+        // Pass 1: the parent instance runs its `again` step.
+        let mut parent = request(definition.clone(), home.path());
+        parent.homeboy_program = home.path().join("fake-homeboy").display().to_string();
+        let parent_id = parent.instance.clone();
+        let parent_job = admit(&store, &parent);
+        crate::daemon::start_controller_job(parent_job, &store).unwrap();
+        assert_eq!(
+            wait_terminal(&store, parent_job, 30).status,
+            JobStatus::Succeeded
+        );
+        assert_eq!(
+            std::fs::read_to_string(&parent_env).unwrap(),
+            parent_id,
+            "the re-admitting step ran with HOMEBOY_WORKFLOW_INSTANCE set"
+        );
+
+        // `workflow run` inside that step admits pass 2 with the parent env.
+        let chain_definition = WorkflowDefinition::from_value(definition.clone()).unwrap();
+        chain_definition.validate(&|_| true).unwrap();
+        let step_program = parent.homeboy_program.clone();
+        let child_request = |iteration: i64, parent: &str| {
+            let provided = BTreeMap::from([("iteration".to_string(), json!(iteration))]);
+            let mut child = request(definition.clone(), home.path());
+            child.homeboy_program = step_program.clone();
+            child.inputs = chain_definition.resolve_inputs(&provided).expect("declared input");
+            child.instance = chain_definition.instance_id(&child.inputs, None);
+            child.definition_digest = chain_definition.digest();
+            child.parent = Some(parent.to_string());
+            child
+        };
+        let child = child_request(2, &parent_id);
+        let (outcome, _) = admit_with_outcome(&store, &child);
+        assert!(
+            matches!(
+                outcome,
+                crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(_)
+            ),
+            "the first admission creates the child"
+        );
+        // A replayed admission of the same definition and inputs converges on
+        // the existing child instance.
+        let child_job = store.controller_job_for_key(&child.instance).unwrap().id;
+        let (replay, _) = admit_with_outcome(&store, &child);
+        match replay {
+            crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => {
+                assert_eq!(job.id, child_job, "the replay returned the existing child")
+            }
+            crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(_) => {
+                panic!("the replayed admission created a second child")
+            }
+        }
+        crate::daemon::start_controller_job(child_job, &store).unwrap();
+        assert_eq!(
+            wait_terminal(&store, child_job, 30).status,
+            JobStatus::Succeeded
+        );
+        assert_eq!(
+            std::fs::read_to_string(&parent_env).unwrap(),
+            child.instance,
+            "the child's own step env named the child"
+        );
+
+        // Pass 3, admitted by pass 2's step. Its gate is false, so the chain
+        // ends here.
+        let grandchild = child_request(3, &child.instance);
+        let grandchild_job = admit(&store, &grandchild);
+        crate::daemon::start_controller_job(grandchild_job, &store).unwrap();
+        assert_eq!(
+            wait_terminal(&store, grandchild_job, 30).status,
+            JobStatus::Succeeded
+        );
+
+        // The chain is visible from both ends.
+        let parent_view = workflow_status(&store, &parent_id).unwrap();
+        assert_eq!(parent_view["parent"], Value::Null);
+        assert_eq!(
+            parent_view["children"],
+            json!([child.instance]),
+            "the parent lists exactly its child"
+        );
+        let child_view = workflow_status(&store, &child.instance).unwrap();
+        assert_eq!(child_view["parent"], json!(parent_id));
+        assert_eq!(child_view["children"], json!([grandchild.instance]));
+        let grandchild_view = workflow_status(&store, &grandchild.instance).unwrap();
+        assert_eq!(grandchild_view["parent"], json!(child.instance));
+        assert_eq!(grandchild_view["children"], json!([]));
+
+        // `--wait` follows the chain from its head to the last instance.
+        let mut watched = parent_view;
+        while let Some(next) = chain_successor(&watched) {
+            watched = workflow_status(&store, &next).unwrap();
+        }
+        assert_eq!(watched["instance"], json!(grandchild.instance));
+        assert_eq!(watched["status"], "succeeded");
+    });
 }

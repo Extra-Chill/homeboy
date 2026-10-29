@@ -68,14 +68,11 @@
         "steps": {
           "a": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/1",
             "outcome": null,
             "phase": "running"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -93,14 +90,11 @@
         "steps": {
           "a": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/1",
             "outcome": null,
             "phase": "running"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -129,14 +123,11 @@
         "steps": {
           "a": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/1",
             "outcome": null,
             "phase": "running"
           }
-        },
-        "until": {}
+        }
       }
     }
   ]

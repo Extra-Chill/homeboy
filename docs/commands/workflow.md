@@ -15,8 +15,9 @@ A workflow pre-defines multi-step and repeating agent work and runs it mechanica
 
 - **One instance is one daemon job.** `workflow run` admits a `workflow` job in the daemon job store. The daemon is its only writer.
 - **The instance never runs work itself.** It submits `step` jobs and evaluates gates. Every step job is a supervised child with an admitted environment (see `homeboy daemon` and the `step` job kind).
+- **One instance is one pass.** A step's outcome and output are the result of its run in this instance. A definition that wants another pass makes its final step re-admit the definition with the next pass's inputs, which chains a new instance (see [Self-admitting chains](#self-admitting-chains)).
 - **Every decision is a pure function.** `advance(definition, state, event)` returns the next state and its commands: submit a step, cancel a step, complete the instance. The daemon commits the new checkpoint, the new step jobs, and their submission keys in **one store transaction**, and only then starts the steps. A crash at any point either loses a whole decision or replays it against the same keys.
-- **Keys are deterministic.** A step job's key is `<instance>/<step>/<iteration>/<attempt>`; a `foreach` item's is `<instance>/<step>/<iteration>/item-<n>/<attempt>`; a command gate's key is `<instance>/<step>/<iteration>/when-<n>` or `<instance>/~until/<iteration>/<n>`. A replayed submission converges on the existing job, so no step runs twice.
+- **Keys are deterministic.** A step job's key is `<instance>/<step>/<iteration>/<attempt>`; a `foreach` item's is `<instance>/<step>/<iteration>/item-<n>/<attempt>`. An instance runs iteration 1. A replayed submission converges on the existing job, so no step runs twice.
 - **The instance id is deterministic too.** It is `wf-<definition-id>-<sha256(definition digest, inputs, --instance)[..12]>`. Re-running the same definition with the same inputs returns the existing instance; new inputs (or a new `--instance` name) start a new one.
 - **The definition is pinned.** Its digest and body are stored in the instance at admission, so editing the file never changes a running instance.
 
@@ -36,7 +37,6 @@ Statuses:
   "inputs":  { "<name>": { "required": true, "default": null } },
   "env":     { "public": ["NAME"], "secrets": ["SECRET_REF"] },   // the admitted environment; nothing else is inherited
   "budget":  { "max_step_runs": 20, "deadline": "12h" },          // hard stop → budget_exhausted
-  "iterate": { "until": <gate>, "max_iterations": 4 },            // re-run the step graph until the gate passes
   "every":   { "interval": "24h", "at": "03:00Z", "overlap": "skip" },  // optional cadence (see below)
   "steps": [
     {
@@ -59,7 +59,7 @@ Statuses:
 }
 ```
 
-`notify` belongs to a later release. A definition that uses it is refused with a message that names the field.
+`iterate` and `command` gates are not part of this version. Admission refuses them with a message that names the replacement: an `iterate` is replaced by a final `homeboy` step that runs `workflow run <this definition>` with the next pass's inputs, gated by `when`; a `{"command": [...]}` gate is replaced by an `exec` step plus an `outcome` gate. Unknown top-level fields are refused like any unknown field.
 
 ### Fan-out and join
 
@@ -82,20 +82,19 @@ A step with `foreach` expands, once its `needs` and `when` pass, into one step j
 
 ### Gates
 
-A gate is a closed, deterministic predicate. There is no expression language.
+A gate is a closed, deterministic predicate: a pure read of the outcomes and outputs of the steps in the same instance. There is no expression language and no side effect.
 
 | Gate | Passes when |
 |---|---|
-| `{"step":"id","outcome":["succeeded","candidate_recoverable"]}` | the step's latest outcome is in the set |
-| `{"step":"id","output":"/json/pointer","equals":X}` (or `in`, `exists`, `lt`, `gt`) | the test holds on the step's latest output |
-| `{"command":["homeboy","review","lint"]}` | the command exits 0. It runs as a step job, so it is logged and auditable |
-| `{"all":[…]}`, `{"any":[…]}`, `{"not":…}` | the combination holds, evaluated left to right; a command gate runs only once the gates before it are decided |
+| `{"step":"id","outcome":["succeeded","candidate_recoverable"]}` | the step's outcome is in the set |
+| `{"step":"id","output":"/json/pointer","equals":X}` (or `in`, `exists`, `lt`, `gt`) | the test holds on the step's output |
+| `{"all":[…]}`, `{"any":[…]}`, `{"not":…}` | the combination holds |
 
-A step's *latest* outcome and output carry into the next iteration until the step settles again. That is what lets a step gate on its own earlier result: with `"when": {"not": {"step": "capture", "outcome": ["succeeded"]}}`, `capture` runs once and later iterations keep its output. A step whose `when` is false keeps its carried result; without one it is `skipped`.
+A gate is decided when the step it belongs to is scheduled, so it reads steps that have already settled — its `needs`, or the output of an upstream step.
 
 ### Templating
 
-String substitution only: `{{inputs.x}}`, `{{steps.<id>.output<pointer>}}`, `{{steps.<id>.run_id}}`, `{{iteration}}`, `{{instance}}`, and in a `foreach` step's work `{{item}}` / `{{item.<field>}}`. A string substitutes as itself; any other JSON value substitutes as its compact JSON.
+String substitution only: `{{inputs.x}}`, `{{steps.<id>.output<pointer>}}`, `{{steps.<id>.run_id}}`, `{{instance}}`, and in a `foreach` step's work `{{item}}` / `{{item.<field>}}`. A string substitutes as itself; any other JSON value substitutes as its compact JSON.
 
 ### Validation
 
@@ -107,13 +106,14 @@ String substitution only: `{{inputs.x}}`, `{{steps.<id>.output<pointer>}}`, `{{s
 - Every `cook` key is a real `agent-task cook` flag.
 - Every environment name is declared once; a credential-named variable is a secret, never a public value.
 - Durations (`timeout`, `retry.backoff`, `budget.deadline`) parse.
+- No `iterate` and no `command` gates (see the format above).
 
 ### Failure, retry, budgets
 
 - **A failed step fails the instance.** `failed`, `timed_out`, `cancelled`, and `partial_failure` are failures. No new step starts after one unless it is `always`; when everything in flight has settled the instance is `failed`. It never parks.
 - **`retry`** re-submits the step as attempt `n+1` when its outcome is in `on` (default `failed` and `timed_out`), up to `max` retries. `backoff` delays the retry through the step job's `not_before` wait.
 - **`timeout`** cancels the step's job when it has run that long; the outcome is `timed_out`.
-- **`budget.max_step_runs`** counts every step job, including command gates. Reaching it cancels whatever is running and ends the instance `budget_exhausted`. So does passing `budget.deadline`, and so does an `until` gate that has not passed after `max_iterations`.
+- **`budget.max_step_runs`** counts every step job. Reaching it cancels whatever is running and ends the instance `budget_exhausted`. So does passing `budget.deadline`.
 
 ### Environment
 
@@ -122,6 +122,16 @@ A step runs with `env_clear()` plus its admitted environment:
 - `env.public` names are captured from the environment that runs `workflow run`. A declared name that is unset there is refused.
 - `env.secrets` are agent-task secret references, resolved when each step spawns. The daemon's own environment is never a source.
 - `homeboy` and `cook` steps also get the runtime environment a detached Cook gets (provider process variables and Homeboy's `HOMEBOY_*` configuration).
+- Every step also gets `HOMEBOY_WORKFLOW_INSTANCE`, the id of the instance whose step is running. `workflow run` reads it and records the admitting instance as the new instance's `parent`.
+
+### Self-admitting chains
+
+The replacement for `iterate` is a chain of instances: the definition's final step is a `homeboy` step that runs `workflow run <this definition>` with the next pass's inputs, gated by `when`. Each pass is one instance, so every pass has its own status, step jobs, and budget.
+
+- **The parent link.** An instance admitted by a step of another instance records that instance as its `parent`. `workflow status <instance>` shows `parent` and `children`, so the chain is readable from either end.
+- **Replays converge.** The instance id hashes the definition and inputs, so a step re-running `workflow run` with the same inputs (a crash, a replayed decision) returns the existing child instead of admitting a second one.
+- **Watching follows the chain.** `workflow run --wait` and `workflow status --watch` observe their instance to its terminal status, then follow `children` to the last instance of the chain and report that instance's terminal status.
+- **Termination is the author's job.** The re-admitting step's `when` gate decides whether the chain continues; with a false gate the chain ends and the last instance is the report. `workflow cancel` stops a chain by cancelling the instance that would re-admit.
 
 ### Cadence (`every`)
 
@@ -146,77 +156,66 @@ When the daemon that owns an instance dies or is stopped, the instance resumes o
 ## Commands
 
 - **`workflow validate`** parses and validates a definition and prints its digest and step graph.
-- **`workflow run`** admits an instance in the local daemon and prints its status; a definition with `every` is registered as a cadence instead. With `--wait` it follows the instance until it is terminal and exits non-zero unless it succeeded. `--on RUNNER` admits the same definition on that runner's daemon through `homeboy runner exec`, so the environment is admitted on the runner and an always-on runner can own the instance.
-- **`workflow status`** is a pure projection of the job ledger: the instance status, each step's phase, outcome, attempt, key, and step job, each `foreach` item with its step job, Cook run id, and the live state of a running Cook, the gates, and every finished iteration. `--watch` polls until the instance is terminal.
+- **`workflow run`** admits an instance in the local daemon and prints its status; a definition with `every` is registered as a cadence instead. With `--wait` it follows the instance — and any chain of children it admits — until the last instance is terminal, and exits non-zero unless that instance succeeded. `--on RUNNER` admits the same definition on that runner's daemon through `homeboy runner exec`, so the environment is admitted on the runner and an always-on runner can own the instance.
+- **`workflow status`** is a pure projection of the job ledger: the instance status, its `parent` and `children`, each step's phase, outcome, attempt, key, and step job, each `foreach` item with its step job, Cook run id, and the live state of a running Cook. `--watch` polls until the instance — and any chain it admits — is terminal.
 - **`workflow cancel`** cancels the instance; the daemon cancels every step job it is running. Once the cancellation is durable the instance admits no more steps. Given a workflow id that is not an instance, it stops that cadence.
-- **`workflow approve`** records an approval for a step that is awaiting one in the current iteration.
+- **`workflow approve`** records an approval for a step that is awaiting one.
 - **`workflow list`** lists instances in the daemon; `--registered` lists the definitions in `~/.config/homeboy/workflows/`, the built-ins, and every registered cadence.
 
 ## Examples
 
-### A command gate that launches a Cook, then re-checks
+### Example A: a self-admitting proof loop
 
-`evaluate` writes `{"verdict": …}` to `$HOMEBOY_STEP_OUTPUT`. On `findings` the gate launches a Cook with its own `--verify` gate; the `until` gate re-runs the graph until the verdict is `accepted`.
-
-```json
-{
-  "schema": "homeboy/workflow/v1",
-  "id": "evaluate-and-fix",
-  "inputs": { "repo": { "required": true } },
-  "budget": { "max_step_runs": 8, "deadline": "4h" },
-  "iterate": {
-    "until": { "step": "evaluate", "output": "/verdict", "equals": "accepted" },
-    "max_iterations": 3
-  },
-  "steps": [
-    { "id": "evaluate", "exec": { "program": "./evaluate.sh", "args": ["{{iteration}}"] } },
-    { "id": "fix", "needs": ["evaluate"],
-      "when": { "step": "evaluate", "output": "/verdict", "equals": "findings" },
-      "cook": { "repo": "{{inputs.repo}}", "prompt": "Address the evaluation findings (iteration {{iteration}}).",
-                "verify": ["test -f FIXED"] } }
-  ]
-}
-```
-
-### Example A: proof loop (command → gate → Cook → re-check)
+One definition, one instance per pass. `capture` and `evaluate` decide, `fix` is a Cook that only runs on findings, and `again` re-admits the same definition with the next iteration number when `evaluate` says to continue. Three iterations are three instances; each pass has its own status and budget.
 
 ```json
 {
   "schema": "homeboy/workflow/v1",
   "id": "ssi-url-proof",
-  "inputs": { "url": {"required": true}, "candidate_sha": {"required": true}, "workspace": {"required": true} },
-  "env": { "public": ["SSI_BLOCKS_ENGINE_PATH", "HOMEBOY_WP_CODEBOX_BIN"] },
-  "budget": { "max_step_runs": 12, "deadline": "10h" },
-  "iterate": {
-    "until": { "step": "evaluate", "output": "/verdict", "equals": "accepted" },
-    "max_iterations": 3
+  "inputs": {
+    "url": {"required": true},
+    "candidate_sha": {"required": true},
+    "workspace": {"required": true},
+    "iteration": {"default": 1}
   },
+  "env": { "public": ["SSI_BLOCKS_ENGINE_PATH", "HOMEBOY_WP_CODEBOX_BIN"] },
+  "budget": { "max_step_runs": 6, "deadline": "4h" },
   "steps": [
     { "id": "capture", "timeout": "15m",
-      "when": { "not": { "step": "capture", "outcome": ["succeeded"] } },
       "homeboy": ["runner", "exec", "lab", "--cwd", "{{inputs.workspace}}", "--",
                   "node", "tools/url-loop-controller.mjs", "capture", "--url", "{{inputs.url}}"] },
     { "id": "evaluate", "needs": ["capture"], "timeout": "90m",
       "homeboy": ["runner", "exec", "lab", "--", "node", "tools/url-loop-controller.mjs", "evaluate",
-                  "--fixture", "{{steps.capture.output/fixture_root}}", "--candidate-sha", "{{inputs.candidate_sha}}"] },
+                  "--fixture", "{{steps.capture.output/fixture_root}}", "--candidate-sha", "{{inputs.candidate_sha}}",
+                  "--iteration", "{{inputs.iteration}}"] },
     { "id": "fix", "needs": ["evaluate"],
       "when": { "step": "evaluate", "output": "/verdict", "equals": "findings" },
       "retry": { "max": 1, "on": ["failed"] },
       "cook": { "repo": "static-site-importer", "placement": "lab",
                 "prompt": "Fix the import findings in {{steps.evaluate.output/report_path}} for {{inputs.url}}.",
-                "verify": ["composer test", "node tools/url-loop-controller.mjs evaluate --fixture {{steps.capture.output/fixture_root}}"] } }
+                "verify": ["composer test", "node tools/url-loop-controller.mjs evaluate --fixture {{steps.capture.output/fixture_root}}"] } },
+    { "id": "again", "needs": ["evaluate"],
+      "when": { "step": "evaluate", "output": "/continue", "exists": true },
+      "homeboy": ["workflow", "run", "ssi-url-proof",
+                  "--input", "url={{inputs.url}}",
+                  "--input", "candidate_sha={{inputs.candidate_sha}}",
+                  "--input", "workspace={{inputs.workspace}}",
+                  "--input", "iteration={{steps.evaluate.output/next_iteration}}"] }
   ]
 }
 ```
 
-- **Iteration 1:** `capture` → `evaluate`. On `findings` the gate launches `fix`, a Cook with its own `--verify` gates.
-- **The `until` gate** then decides whether to stop. Iteration 2 re-runs `evaluate` (`capture` keeps its carried output because its `when` is now false) and `fix`, up to 3 iterations or 12 step runs.
-- **A `capture` failure** (for example missing Chromium) fails the instance with its output in the step job's log under `artifacts/jobs/<job_id>/`. It cannot park.
-- **A new candidate SHA** runs `homeboy workflow run ssi-url-proof --input url=… --input candidate_sha=<new> --input workspace=…`. New inputs are a new instance; the same inputs are a no-op.
+The contract between passes is in the inputs and the evaluate output:
 
-### Example B: nightly repeating task (cadence + gate → Cook → gate)
+- **`evaluate` emits `{"verdict": …, "continue": …, "next_iteration": …}`** — a `continue` member means another pass is needed, and `next_iteration` is the number the next pass runs with. The `again` step re-admits the definition with it; the admission happens inside this pass's step, so this pass's status view lists the next pass under `children`.
+- **Each pass is one instance** with its own `wf-…` id (the definition and inputs decide it). `capture` runs in every pass; the controller reuses the fixture it already captured for the URL, so a later pass returns quickly and passes its `fixture_root` on to `evaluate`.
+- **A new candidate SHA is just new inputs:** `homeboy workflow run ssi-url-proof --input url=… --input candidate_sha=<new> --input workspace=…`. The same inputs are a no-op that returns the existing instance.
+- **`--wait` follows the chain:** `homeboy workflow run ssi-url-proof … --wait` exits when the last pass of the chain is terminal, non-zero unless it succeeded.
+- **A `capture` failure** (for example missing Chromium) fails that pass's instance with its output in the step job's log under `artifacts/jobs/<job_id>/`. It cannot park; the chain stops with it.
 
-Requires `notify`, which a later release implements; this release refuses the definition. Without `notify` it registers as a daily cadence at 07:00 UTC.
+### Example B: nightly repeating task (cadence + gate → Cook → review)
+
+A daily cadence at 07:00 UTC. The `ci` step reads the latest `main` run; the `fix` Cook runs only on a red build, and `review` reviews the Cook it produced.
 
 ```json
 {
@@ -225,7 +224,6 @@ Requires `notify`, which a later release implements; this release refuses the de
   "every": { "interval": "24h", "at": "07:00Z", "overlap": "skip" },
   "env": { "secrets": ["github-token"] },
   "budget": { "max_step_runs": 6, "deadline": "4h" },
-  "notify": { "on": ["failed", "budget_exhausted", "succeeded"] },
   "steps": [
     { "id": "ci", "exec": { "program": "gh", "args": ["run", "list", "-R", "Extra-Chill/homeboy", "-b", "main", "-L", "1", "--json", "conclusion,url"] } },
     { "id": "fix", "needs": ["ci"],

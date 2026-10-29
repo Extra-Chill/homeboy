@@ -181,30 +181,23 @@
         "steps": {
           "cook": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           },
           "prepare": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/prepare/1/1",
             "outcome": null,
             "phase": "running"
           },
           "report": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -299,8 +292,6 @@
         "steps": {
           "cook": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "items": [
               {
                 "attempt": 1,
@@ -327,22 +318,17 @@
           },
           "prepare": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/prepare/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "report": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -384,8 +370,6 @@
         "steps": {
           "cook": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "items": [
               {
                 "attempt": 2,
@@ -412,22 +396,17 @@
           },
           "prepare": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/prepare/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "report": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -469,8 +448,6 @@
         "steps": {
           "cook": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "items": [
               {
                 "attempt": 2,
@@ -497,22 +474,17 @@
           },
           "prepare": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/prepare/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "report": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -534,8 +506,6 @@
         "steps": {
           "cook": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "items": [
               {
                 "attempt": 2,
@@ -562,22 +532,17 @@
           },
           "prepare": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/prepare/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "report": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -606,8 +571,6 @@
         "steps": {
           "cook": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "items": [
               {
                 "attempt": 2,
@@ -634,22 +597,17 @@
           },
           "prepare": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/prepare/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "report": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -669,8 +627,6 @@
         "steps": {
           "cook": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "items": [
               {
                 "attempt": 2,
@@ -697,22 +653,17 @@
           },
           "prepare": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/prepare/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "report": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -743,8 +694,6 @@
         "steps": {
           "cook": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "items": [
               {
                 "attempt": 2,
@@ -771,22 +720,17 @@
           },
           "prepare": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/prepare/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "report": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/report/1/1",
             "outcome": null,
             "phase": "running"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -811,8 +755,6 @@
         "steps": {
           "cook": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "items": [
               {
                 "attempt": 2,
@@ -839,22 +781,17 @@
           },
           "prepare": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/prepare/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "report": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/report/1/1",
             "outcome": "succeeded",
             "phase": "done"
           }
-        },
-        "until": {}
+        }
       }
     }
   ]

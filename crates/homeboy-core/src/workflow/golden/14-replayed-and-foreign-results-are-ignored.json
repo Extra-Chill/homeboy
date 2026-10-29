@@ -108,22 +108,17 @@
         "steps": {
           "a": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/1",
             "outcome": null,
             "phase": "running"
           },
           "b": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -143,22 +138,17 @@
         "steps": {
           "a": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/1",
             "outcome": null,
             "phase": "running"
           },
           "b": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -189,22 +179,17 @@
         "steps": {
           "a": {
             "attempt": 2,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/2",
             "outcome": "failed",
             "phase": "running"
           },
           "b": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -224,22 +209,17 @@
         "steps": {
           "a": {
             "attempt": 2,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/2",
             "outcome": "failed",
             "phase": "running"
           },
           "b": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -270,22 +250,17 @@
         "steps": {
           "a": {
             "attempt": 2,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/2",
             "outcome": "succeeded",
             "phase": "done"
           },
           "b": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/b/1/1",
             "outcome": null,
             "phase": "running"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -305,22 +280,17 @@
         "steps": {
           "a": {
             "attempt": 2,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/2",
             "outcome": "succeeded",
             "phase": "done"
           },
           "b": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/b/1/1",
             "outcome": null,
             "phase": "running"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -345,22 +315,17 @@
         "steps": {
           "a": {
             "attempt": 2,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/2",
             "outcome": "succeeded",
             "phase": "done"
           },
           "b": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/b/1/1",
             "outcome": "succeeded",
             "phase": "done"
           }
-        },
-        "until": {}
+        }
       }
     }
   ]

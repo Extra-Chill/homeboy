@@ -2,16 +2,14 @@
 //!
 //! A gate is one of:
 //!
-//! - `{"step": id, "outcome": [..]}`: the step's latest outcome is in the set.
+//! - `{"step": id, "outcome": [..]}`: the step's outcome is in the set.
 //! - `{"step": id, "output": "/pointer", <test>}`: a JSON-pointer test on the
-//!   step's latest output, where `<test>` is exactly one of `equals`, `in`,
-//!   `exists`, `lt`, `gt`.
-//! - `{"command": [argv..]}`: the command exits 0. It runs as a step job, so
-//!   it is logged and auditable like any other step.
+//!   step's output, where `<test>` is exactly one of `equals`, `in`, `exists`,
+//!   `lt`, `gt`.
 //! - `{"all": [..]}`, `{"any": [..]}`, `{"not": gate}`.
 //!
-//! There is no expression language. Evaluation is pure: command gates report
-//! `Pending` until their step job's result is supplied by the caller.
+//! There is no expression language. Evaluation is pure: a gate only reads the
+//! outcomes and outputs of steps in the same instance.
 
 use std::collections::BTreeSet;
 
@@ -30,9 +28,6 @@ pub enum Gate {
         pointer: String,
         test: OutputTest,
     },
-    Command {
-        argv: Vec<String>,
-    },
     All(Vec<Gate>),
     Any(Vec<Gate>),
     Not(Box<Gate>),
@@ -47,41 +42,21 @@ pub enum OutputTest {
     Gt(f64),
 }
 
-/// The value of a gate at one point in time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GateValue {
-    True,
-    False,
-    /// The gate cannot be decided until these command gates (by pre-order
-    /// index) have run.
-    Pending(Vec<u32>),
-}
-
 /// Facts a gate reads. Implementations come from the instance state.
 pub trait GateFacts {
-    /// The latest terminal outcome of `step`, if it has one.
+    /// The outcome of `step`, if it has one.
     fn outcome(&self, step: &str) -> Option<&str>;
-    /// The latest output of `step`, if it produced one.
+    /// The output of `step`, if it produced one.
     fn output(&self, step: &str) -> Option<&Value>;
-    /// The result of command gate `index`, once its step job finished.
-    fn command(&self, index: u32) -> Option<bool>;
 }
 
 impl Gate {
-    /// Evaluate left to right with short-circuiting, so a command gate is only
-    /// launched once every gate before it in its combinator is decided.
-    pub fn evaluate(&self, facts: &dyn GateFacts) -> GateValue {
-        let mut index = 0;
-        self.evaluate_at(facts, &mut index)
-    }
-
-    fn evaluate_at(&self, facts: &dyn GateFacts, index: &mut u32) -> GateValue {
+    /// Whether the gate passes. A pure read of the supplied facts.
+    pub fn evaluate(&self, facts: &dyn GateFacts) -> bool {
         match self {
-            Gate::Outcome { step, outcome } => bool_value(
-                facts
-                    .outcome(step)
-                    .is_some_and(|actual| outcome.iter().any(|expected| expected == actual)),
-            ),
+            Gate::Outcome { step, outcome } => facts
+                .outcome(step)
+                .is_some_and(|actual| outcome.iter().any(|expected| expected == actual)),
             Gate::Output {
                 step,
                 pointer,
@@ -90,68 +65,11 @@ impl Gate {
                 let value = facts
                     .output(step)
                     .and_then(|output| output.pointer(pointer));
-                bool_value(test.holds(value))
+                test.holds(value)
             }
-            Gate::Command { .. } => {
-                let own = *index;
-                *index += 1;
-                match facts.command(own) {
-                    Some(passed) => bool_value(passed),
-                    None => GateValue::Pending(vec![own]),
-                }
-            }
-            Gate::All(gates) => {
-                let mut result = GateValue::True;
-                for gate in gates {
-                    if result != GateValue::True {
-                        // Decided or blocked: later children only consume indices.
-                        gate.skip(index);
-                        continue;
-                    }
-                    result = gate.evaluate_at(facts, index);
-                }
-                result
-            }
-            Gate::Any(gates) => {
-                let mut result = GateValue::False;
-                for gate in gates {
-                    if result != GateValue::False {
-                        gate.skip(index);
-                        continue;
-                    }
-                    result = gate.evaluate_at(facts, index);
-                }
-                result
-            }
-            Gate::Not(gate) => match gate.evaluate_at(facts, index) {
-                GateValue::True => GateValue::False,
-                GateValue::False => GateValue::True,
-                pending => pending,
-            },
-        }
-    }
-
-    fn skip(&self, index: &mut u32) {
-        *index += self.command_gates().len() as u32;
-    }
-
-    /// Every command gate in pre-order. Its position is its stable index.
-    pub fn command_gates(&self) -> Vec<&[String]> {
-        let mut commands = Vec::new();
-        self.collect_commands(&mut commands);
-        commands
-    }
-
-    fn collect_commands<'a>(&'a self, commands: &mut Vec<&'a [String]>) {
-        match self {
-            Gate::Command { argv } => commands.push(argv),
-            Gate::All(gates) | Gate::Any(gates) => {
-                for gate in gates {
-                    gate.collect_commands(commands);
-                }
-            }
-            Gate::Not(gate) => gate.collect_commands(commands),
-            Gate::Outcome { .. } | Gate::Output { .. } => {}
+            Gate::All(gates) => gates.iter().all(|gate| gate.evaluate(facts)),
+            Gate::Any(gates) => gates.iter().any(|gate| gate.evaluate(facts)),
+            Gate::Not(gate) => !gate.evaluate(facts),
         }
     }
 
@@ -173,16 +91,7 @@ impl Gate {
                 }
             }
             Gate::Not(gate) => gate.collect_steps(steps),
-            Gate::Command { .. } => {}
         }
-    }
-}
-
-fn bool_value(value: bool) -> GateValue {
-    if value {
-        GateValue::True
-    } else {
-        GateValue::False
     }
 }
 
@@ -247,27 +156,16 @@ impl TryFrom<Value> for Gate {
             only(&["not"])?;
             return Ok(Gate::Not(Box::new(Gate::try_from(gate.clone())?)));
         }
-        if let Some(argv) = object.get("command") {
-            only(&["command"])?;
-            let argv = argv
-                .as_array()
-                .ok_or("`command` takes an argv array")?
-                .iter()
-                .map(|arg| {
-                    arg.as_str()
-                        .map(str::to_string)
-                        .ok_or("`command` arguments must be strings")
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if argv.is_empty() || argv[0].trim().is_empty() {
-                return Err("`command` needs a program".to_string());
-            }
-            return Ok(Gate::Command { argv });
+        if object.contains_key("command") {
+            return Err(
+                "command gates are not supported: run the command as an `exec` step and gate on its `outcome`"
+                    .to_string(),
+            );
         }
         let step = object
             .get("step")
             .and_then(Value::as_str)
-            .ok_or("a gate needs one of `step`, `command`, `all`, `any`, or `not`")?
+            .ok_or("a gate needs one of `step`, `all`, `any`, or `not`")?
             .to_string();
         if let Some(outcome) = object.get("outcome") {
             only(&["step", "outcome"])?;
@@ -347,7 +245,6 @@ impl From<Gate> for Value {
                 };
                 json!({ "step": step, "output": pointer, name: operand })
             }
-            Gate::Command { argv } => json!({ "command": argv }),
             Gate::All(gates) => {
                 json!({ "all": gates.into_iter().map(Value::from).collect::<Vec<_>>() })
             }
@@ -368,7 +265,6 @@ mod tests {
     struct Facts {
         outcomes: BTreeMap<String, String>,
         outputs: BTreeMap<String, Value>,
-        commands: BTreeMap<u32, bool>,
     }
 
     impl GateFacts for Facts {
@@ -378,9 +274,6 @@ mod tests {
         fn output(&self, step: &str) -> Option<&Value> {
             self.outputs.get(step)
         }
-        fn command(&self, index: u32) -> Option<bool> {
-            self.commands.get(&index).copied()
-        }
     }
 
     fn gate(value: Value) -> Gate {
@@ -388,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn outcome_and_output_gates_read_latest_facts() {
+    fn outcome_and_output_gates_read_step_facts() {
         let mut facts = Facts::default();
         facts
             .outcomes
@@ -400,67 +293,39 @@ mod tests {
         let cases = [
             (
                 json!({"step":"a","outcome":["succeeded","candidate_recoverable"]}),
-                GateValue::True,
+                true,
             ),
-            (
-                json!({"step":"a","outcome":["succeeded"]}),
-                GateValue::False,
-            ),
-            (
-                json!({"step":"b","outcome":["succeeded"]}),
-                GateValue::False,
-            ),
-            (
-                json!({"step":"a","output":"/verdict","equals":"findings"}),
-                GateValue::True,
-            ),
+            (json!({"step":"a","outcome":["succeeded"]}), false),
+            (json!({"step":"b","outcome":["succeeded"]}), false),
+            (json!({"step":"a","output":"/verdict","equals":"findings"}), true),
             (
                 json!({"step":"a","output":"/verdict","in":["accepted","findings"]}),
-                GateValue::True,
+                true,
             ),
-            (
-                json!({"step":"a","output":"/missing","exists":false}),
-                GateValue::True,
-            ),
-            (
-                json!({"step":"a","output":"/list/0","exists":true}),
-                GateValue::True,
-            ),
-            (
-                json!({"step":"a","output":"/count","lt":4}),
-                GateValue::True,
-            ),
-            (
-                json!({"step":"a","output":"/count","gt":3}),
-                GateValue::False,
-            ),
+            (json!({"step":"a","output":"/missing","exists":false}), true),
+            (json!({"step":"a","output":"/list/0","exists":true}), true),
+            (json!({"step":"a","output":"/count","lt":4}), true),
+            (json!({"step":"a","output":"/count","gt":3}), false),
             (
                 json!({"not":{"step":"a","outcome":["succeeded"]}}),
-                GateValue::True,
+                true,
+            ),
+            (
+                json!({"all":[{"step":"a","outcome":["candidate_recoverable"]},{"step":"a","output":"/count","lt":4}]}),
+                true,
+            ),
+            (
+                json!({"any":[{"step":"a","outcome":["succeeded"]},{"step":"a","output":"/count","lt":4}]}),
+                true,
+            ),
+            (
+                json!({"any":[{"step":"a","outcome":["succeeded"]},{"step":"a","output":"/count","gt":4}]}),
+                false,
             ),
         ];
         for (value, expected) in cases {
             assert_eq!(gate(value.clone()).evaluate(&facts), expected, "{value}");
         }
-    }
-
-    #[test]
-    fn command_gates_short_circuit_in_pre_order() {
-        let any = gate(json!({"any": [
-            {"command": ["true"]},
-            {"all": [{"command": ["a"]}, {"command": ["b"]}]}
-        ]}));
-        let mut facts = Facts::default();
-        assert_eq!(any.evaluate(&facts), GateValue::Pending(vec![0]));
-        facts.commands.insert(0, false);
-        assert_eq!(any.evaluate(&facts), GateValue::Pending(vec![1]));
-        facts.commands.insert(1, true);
-        assert_eq!(any.evaluate(&facts), GateValue::Pending(vec![2]));
-        facts.commands.insert(2, false);
-        assert_eq!(any.evaluate(&facts), GateValue::False);
-        facts.commands.insert(0, true);
-        assert_eq!(any.evaluate(&facts), GateValue::True);
-        assert_eq!(any.command_gates().len(), 3);
     }
 
     #[test]
@@ -472,15 +337,19 @@ mod tests {
             json!({"step":"a","output":"/x","equals":1,"gt":2}),
             json!({"step":"a","output":"x","equals":1}),
             json!({"all":[]}),
-            json!({"command":[]}),
+            json!({"command":["true"]}),
             json!({"step":"a","outcome":["succeeded"],"extra":true}),
             json!({"expr":"a == b"}),
         ] {
             assert!(Gate::try_from(bad.clone()).is_err(), "{bad}");
         }
+        assert_eq!(
+            Gate::try_from(json!({"command":["true"]})).unwrap_err(),
+            "command gates are not supported: run the command as an `exec` step and gate on its `outcome`"
+        );
         for good in [
             json!({"step":"a","output":"/x","equals":{"k":1}}),
-            json!({"any":[{"command":["homeboy","review","lint"]},{"not":{"step":"b","outcome":["failed"]}}]}),
+            json!({"any":[{"step":"b","output":"/ok","exists":true},{"not":{"step":"b","outcome":["failed"]}}]}),
         ] {
             assert_eq!(Value::from(gate(good.clone())), good);
         }

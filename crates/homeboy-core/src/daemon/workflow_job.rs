@@ -36,6 +36,10 @@ pub const WORKFLOW_JOB_VERSION: u32 = 1;
 pub const WORKFLOW_JOB_REQUEST_SCHEMA: &str = "homeboy/workflow-job-request/v1";
 /// The file an `exec` step writes its JSON output to.
 pub const STEP_OUTPUT_ENV: &str = "HOMEBOY_STEP_OUTPUT";
+/// The step environment variable that names the instance whose step is
+/// running. `workflow run` reads it and records the admitting instance as the
+/// admitted instance's `parent`, so a self-admitting chain stays visible.
+pub const WORKFLOW_INSTANCE_ENV: &str = "HOMEBOY_WORKFLOW_INSTANCE";
 const OUTPUT_FILE: &str = "output.json";
 /// Outputs larger than this are not carried into the instance state.
 const MAX_OUTPUT_BYTES: u64 = 256 * 1024;
@@ -70,6 +74,10 @@ pub struct WorkflowJobRequest {
     pub homeboy_program: String,
     /// Absolute working directory of every step without its own `cwd`.
     pub cwd: String,
+    /// The instance whose step admitted this one, when `workflow run` ran
+    /// inside a step that carried `HOMEBOY_WORKFLOW_INSTANCE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     /// The workflow's declared environment: public values and secret refs.
     #[serde(default)]
     pub env: EnvMaterializationPlan,
@@ -118,6 +126,9 @@ impl WorkflowJobRequest {
             if !Path::new(path).is_absolute() {
                 return Err(invalid(format!("`{path}` must be an absolute path")));
             }
+        }
+        if self.parent.as_ref().is_some_and(|parent| parent.trim().is_empty()) {
+            return Err(invalid("workflow `parent` must be a non-empty instance id"));
         }
         Ok(())
     }
@@ -220,6 +231,7 @@ impl ControllerJobDriver for WorkflowJobDriver {
         Ok(json!({
             "schema": request.schema,
             "instance": request.instance,
+            "parent": request.parent,
             "workflow": request.definition.id,
             "definition_digest": request.definition_digest,
             "inputs": request.inputs.keys().collect::<Vec<_>>(),
@@ -626,6 +638,8 @@ pub fn step_request(
         let mut env = request.homeboy_env.clone();
         env.public_env.extend(request.env.public_env.clone());
         env.secret_refs.extend(request.env.secret_refs.clone());
+        env.public_env
+            .insert(WORKFLOW_INSTANCE_ENV.to_string(), request.instance.clone());
         env.normalize();
         env
     };
@@ -633,6 +647,8 @@ pub fn step_request(
         let mut env = request.env.clone();
         env.public_env
             .insert(STEP_OUTPUT_ENV.to_string(), output.clone());
+        env.public_env
+            .insert(WORKFLOW_INSTANCE_ENV.to_string(), request.instance.clone());
         env.normalize();
         env
     };
@@ -689,26 +705,6 @@ pub fn step_request(
                 homeboy_env(),
             )
         }
-        SubmissionKind::Gate { argv } => {
-            let (first, rest) = argv
-                .split_first()
-                .ok_or_else(|| invalid("a command gate needs a program"))?;
-            if first == "homeboy" {
-                (
-                    request.homeboy_program.clone(),
-                    rest.to_vec(),
-                    request.cwd.clone(),
-                    homeboy_env(),
-                )
-            } else {
-                (
-                    program(first)?,
-                    rest.to_vec(),
-                    request.cwd.clone(),
-                    exec_env(),
-                )
-            }
-        }
     };
     let consumer = if linked_run.is_some() {
         step_terminal_consumer()
@@ -753,7 +749,6 @@ pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
                 "phase": step.phase,
                 "attempt": step.attempt,
                 "outcome": step.outcome,
-                "carried": step.carried,
                 "key": step.key,
                 "job": step.key.as_deref().map(job_of).unwrap_or(Value::Null),
                 "run_id": step.run_id,
@@ -772,19 +767,8 @@ pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
                 })).collect::<Vec<_>>(),
                 "prompt": step.prompt,
                 "error": step.error,
-                "gates": step.gates.values().map(|gate| json!({
-                    "key": gate.key,
-                    "passed": gate.passed,
-                    "job": job_of(&gate.key),
-                })).collect::<Vec<_>>(),
             }))
         }).collect::<serde_json::Map<_, _>>(),
-        "until": state.until.values().map(|gate| json!({
-            "key": gate.key,
-            "passed": gate.passed,
-            "job": job_of(&gate.key),
-        })).collect::<Vec<_>>(),
-        "history": state.history,
     })
 }
 
@@ -852,14 +836,51 @@ fn instance_view(
         view["workflow"] = json!(request.definition.id);
         view["definition_digest"] = json!(request.definition_digest);
         view["inputs"] = json!(request.inputs);
+        view["parent"] = json!(request.parent);
+        view["children"] = json!(child_instances(store, &request.instance));
     }
     view
+}
+
+/// The instances `instance` admitted, oldest first: the child links of a
+/// self-admitting chain.
+fn child_instances(store: &JobStore, instance: &str) -> Vec<String> {
+    let mut children = store
+        .controller_jobs_of_type(WORKFLOW_JOB_TYPE)
+        .iter()
+        .filter_map(|(job, controller)| {
+            let request = WorkflowJobRequest::parse(&controller.request).ok()?;
+            (request.parent.as_deref() == Some(instance)).then(|| {
+                (job.created_at_ms, job.id, request.instance)
+            })
+        })
+        .collect::<Vec<_>>();
+    children.sort();
+    children.into_iter().map(|(_, _, instance)| instance).collect()
 }
 
 /// `GET /workflows/<instance>`.
 pub(crate) fn workflow_status(store: &JobStore, instance: &str) -> Result<Value> {
     let (job, controller) = instance_job(store, instance)?;
     Ok(instance_view(&job, &controller, store))
+}
+
+/// The instance a watcher moves to next: the last child of a terminal
+/// instance. `workflow run --wait` and `workflow status --watch` follow these
+/// links, so watching a self-admitting chain reports its last instance's
+/// terminal status.
+pub fn chain_successor(view: &Value) -> Option<String> {
+    if !matches!(
+        view["status"].as_str(),
+        Some("succeeded" | "failed" | "cancelled" | "budget_exhausted")
+    ) {
+        return None;
+    }
+    view["children"]
+        .as_array()?
+        .last()?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// `GET /workflows`.
@@ -875,6 +896,7 @@ pub(crate) fn workflow_list(store: &JobStore) -> Value {
                 "status": view["status"],
                 "iteration": view["iteration"],
                 "step_runs": view["step_runs"],
+                "parent": view["parent"],
                 "job_id": job.id,
                 "created_at_ms": job.created_at_ms,
             })
