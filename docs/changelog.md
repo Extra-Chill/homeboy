@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.30] - 2026-10-29
+
+### Changed
+- Clone ref-pinned sources without history blobs
+
 ## [0.434.29] - 2026-10-29
 
 ### Changed
