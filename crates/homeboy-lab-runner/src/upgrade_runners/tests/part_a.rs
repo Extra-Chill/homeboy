@@ -163,7 +163,7 @@ fn syncs_extension_revisions_after_runner_upgrade() {
                 1 => "homeboy 0.228.4\n",
                 2 => "{\"success\":true}\n",
                 3 => "homeboy 0.228.5\n",
-                4 => "{\"success\":true}\n",
+                4 => "{\"success\":true,\"data\":{\"entities\":[{\"id\":\"wordpress\",\"source_revision\":\"outdated\"}]}}\n",
                 5 => "{\"success\":true}\n",
                 6 => "homeboy 0.228.5\n",
                 _ => "",
@@ -218,7 +218,7 @@ fn skips_runner_extensions_outside_supported_extension_policy() {
                 1 => "homeboy 0.228.4\n",
                 2 => "{\"success\":true}\n",
                 3 => "homeboy 0.228.5\n",
-                4 => "{\"success\":true}\n",
+                4 => "{\"success\":true,\"data\":{\"entities\":[]}}\n",
                 5 => "{\"success\":true}\n",
                 6 => "homeboy 0.228.5\n",
                 _ => "",
@@ -309,7 +309,7 @@ fn updates_versioned_runner_homeboy_path_to_bare_homeboy_when_newer() {
                 2 => "{\"success\":true}\n",
                 3 => "homeboy 0.229.1\n",
                 4 => "homeboy 0.229.3\n",
-                5 => "{\"success\":true}\n",
+                5 => "{\"success\":true,\"data\":{\"entities\":[]}}\n",
                 6 => "{\"success\":true}\n",
                 _ => "",
             };
@@ -332,10 +332,7 @@ fn updates_versioned_runner_homeboy_path_to_bare_homeboy_when_newer() {
         path_updates,
         vec![("lab".to_string(), "homeboy".to_string())]
     );
-    assert_eq!(
-        commands[4],
-        vec!["homeboy", "extension", "show", "required-extension"]
-    );
+    assert_eq!(commands[4], vec!["homeboy", "extension", "list"]);
     assert!(updated[0].detail.contains(
         "runner homeboy_path updated from `/home/user/.cargo/bin/homeboy-0.229.1` to `homeboy`"
     ));

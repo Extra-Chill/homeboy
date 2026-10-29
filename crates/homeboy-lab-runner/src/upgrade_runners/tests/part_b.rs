@@ -202,7 +202,7 @@ fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
 }
 
 #[test]
-fn installs_missing_runner_extension_without_replace_flag() {
+fn installs_missing_runner_extension_from_inventory() {
     let _local_version = pin_local_version_for_fixtures();
     let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
     let extension_updates = vec![ExtensionUpgradeEntry {
@@ -230,10 +230,7 @@ fn installs_missing_runner_extension_without_replace_flag() {
                 1 => ("homeboy 0.228.4\n", 0),
                 2 => ("{\"success\":true}\n", 0),
                 3 => ("homeboy 0.228.5\n", 0),
-                4 => (
-                    "{\"success\":false,\"error\":{\"code\":\"extension.not_found\"}}\n",
-                    4,
-                ),
+                4 => ("{\"success\":true,\"data\":{\"entities\":[]}}\n", 0),
                 5 => ("{\"success\":true}\n", 0),
                 6 => ("homeboy 0.228.5\n", 0),
                 _ => ("", 0),
@@ -259,6 +256,7 @@ fn installs_missing_runner_extension_without_replace_flag() {
             "swift",
             "--ref",
             "98a61eda",
+            "--replace",
         ]
     );
 }
@@ -288,11 +286,10 @@ fn defers_extension_failures_when_runner_refresh_leaves_path_drift() {
                     0,
                 ),
                 3 => ("homeboy 0.228.18\n", "", 0),
-                4 => ("{\"success\":true}\n", "", 0),
+                4 => ("{\"success\":true,\"data\":{\"entities\":[]}}\n", "", 0),
                 5 => ("", "extension setup failed", 1),
                 6 => ("{\"success\":true}\n", "", 0),
-                7 => ("{\"success\":true}\n", "", 0),
-                8 => ("homeboy 0.228.13\n", "", 0),
+                7 => ("homeboy 0.228.13\n", "", 0),
                 _ => ("", "unexpected runner command", 1),
             };
             Ok((
