@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.29] - 2026-10-29
+
+### Changed
+- Reuse durable verified-base gate results across Cook promotions
+
 ## [0.434.28] - 2026-10-29
 
 ### Changed
