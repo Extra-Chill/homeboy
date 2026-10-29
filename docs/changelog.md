@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.28] - 2026-10-29
+
+### Changed
+- Keep a clean moved-base rebase's gate proof instead of re-running every gate
+
 ## [0.434.27] - 2026-10-28
 
 ### Fixed
