@@ -522,7 +522,7 @@ fn extension_snapshot_extract_command(destination: &str, archive: &str) -> Strin
     )
 }
 
-fn run_materialization_command(
+pub(crate) fn run_materialization_command(
     runner: &Runner,
     env: Option<&HashMap<String, String>>,
     command: Vec<String>,

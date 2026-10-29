@@ -1,9 +1,7 @@
 use super::*;
 use crate as runner;
-use crate::materialize_runner_extension_with_exec;
 use crate::Runner;
 use crate::RunnerExecOptions;
-use crate::{RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource};
 use homeboy_core::Result;
 use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
 use homeboy_upgrade::upgrade::RunnerExtensionSyncEntry;
@@ -21,6 +19,41 @@ pub fn sync_runner_extensions(
     let mut synced = Vec::new();
     let mut skipped = Vec::new();
     let mut failed = Vec::new();
+    let installed = extension_updates
+        .iter()
+        .any(|extension| {
+            extension.source_url.is_some()
+                && extension.source_revision.is_some()
+                && runner_supports_extension_sync(runner, &extension.extension_id)
+        })
+        .then(|| {
+            let (output, code) = exec(
+                &runner.id,
+                RunnerExecOptions::raw_command(vec![
+                    homeboy_path.to_string(),
+                    "extension".to_string(),
+                    "list".to_string(),
+                ])
+                .with_env(runner.env.clone()),
+            )
+            .map_err(|err| err.message)?;
+            if code != 0 {
+                return Err(format!(
+                    "runner extension inventory failed ({code}): {}",
+                    output.stderr
+                ));
+            }
+            let value: serde_json::Value = serde_json::from_str(&output.stdout)
+                .map_err(|err| format!("invalid runner extension inventory: {err}"))?;
+            if value["success"] != true {
+                return Err("runner extension inventory did not report success".to_string());
+            }
+            value
+                .pointer("/data/entities")
+                .and_then(|rows| rows.as_array())
+                .cloned()
+                .ok_or_else(|| "runner extension inventory omitted data.entities".to_string())
+        });
     for extension in extension_updates {
         let (Some(source_url), Some(source_revision)) = (
             extension.source_url.as_deref(),
@@ -49,18 +82,36 @@ pub fn sync_runner_extensions(
             continue;
         }
 
-        let request = RunnerExtensionMaterializationRequest {
-            id: extension.extension_id.clone(),
-            revision: source_revision.to_string(),
-            source: RunnerExtensionMaterializationSource::RemoteGit {
-                url: source_url.to_string(),
-                git_ref: source_revision.to_string(),
-            },
+        let result = match installed.as_ref().expect("sync candidate has inventory") {
+            Ok(rows) => {
+                let already_current = rows.iter().any(|row| {
+                    row["id"].as_str() == Some(&extension.extension_id)
+                        && row["source_revision"].as_str().is_some_and(|revision| {
+                            !revision.is_empty() && source_revision.starts_with(revision)
+                        })
+                });
+                if already_current {
+                    Ok(true)
+                } else {
+                    crate::extension_materialization::run_materialization_command(
+                        runner,
+                        None,
+                        runner_extension_install_recovery_command(
+                            homeboy_path,
+                            source_url,
+                            &extension.extension_id,
+                            source_revision,
+                        ),
+                        exec,
+                    )
+                    .map(|()| false)
+                    .map_err(|err| err.message)
+                }
+            }
+            Err(detail) => Err(detail.clone()),
         };
-        let result =
-            materialize_runner_extension_with_exec(runner, homeboy_path, None, &request, exec);
         match result {
-            Ok(_provenance) => {
+            Ok(already_current) => {
                 homeboy_core::log_status!(
                     "upgrade",
                     "  {} extension {} synced at {}",
@@ -72,7 +123,7 @@ pub fn sync_runner_extensions(
                     extension_id: extension.extension_id.clone(),
                     source_revision: source_revision.to_string(),
                     synced: true,
-                    detail: None,
+                    detail: already_current.then(|| "already at revision".to_string()),
                     recovery_commands: Vec::new(),
                 });
             }
@@ -81,7 +132,7 @@ pub fn sync_runner_extensions(
                     extension_id: extension.extension_id.clone(),
                     source_revision: source_revision.to_string(),
                     synced: false,
-                    detail: Some(format!("sync failed: {}", err.message)),
+                    detail: Some(format!("sync failed: {err}")),
                     recovery_commands: runner_exec_recovery_commands(
                         runner,
                         &runner_extension_install_recovery_command(

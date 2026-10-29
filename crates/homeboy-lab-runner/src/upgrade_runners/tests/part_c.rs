@@ -62,6 +62,78 @@ fn reports_runner_upgrade_failure_without_stopping_other_runners() {
 }
 
 #[test]
+fn matching_runner_extension_revisions_need_only_one_exec() {
+    let runner = ssh_runner("lab", Some("homeboy"));
+    let updates = vec![
+        extension_update("swift", "98a61eda12345678"),
+        extension_update("wordpress", "48517ac3"),
+    ];
+    let mut commands = Vec::new();
+    let (synced, skipped, failed) = sync_runner_extensions(
+        &runner,
+        "homeboy",
+        &updates,
+        &mut |runner_id, options| {
+            commands.push(options.command.clone());
+            Ok((
+                exec_output(
+                    runner_id,
+                    options.command,
+                    r#"{"success":true,"data":{"entities":[{"id":"swift","source_revision":"98a61eda"},{"id":"wordpress","source_revision":"48517ac3"}]}}"#,
+                    "",
+                    0,
+                ),
+                0,
+            ))
+        },
+    );
+    assert!(failed.is_empty());
+    assert!(skipped.is_empty());
+    assert_eq!(synced.len(), 2);
+    assert!(synced.iter().all(|entry| entry.synced
+        && entry
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("already at revision"))));
+    assert_eq!(commands, vec![vec!["homeboy", "extension", "list"]]);
+}
+
+#[test]
+fn runner_extension_sync_installs_only_changed_or_unknown_revisions() {
+    let runner = ssh_runner("lab", Some("homeboy"));
+    let updates = vec![
+        extension_update("current", "abcdef123456"),
+        extension_update("changed", "123456abcdef"),
+        extension_update("unknown", "123456abcdef"),
+        extension_update("missing", "123456abcdef"),
+    ];
+    let mut commands = Vec::new();
+    let (synced, skipped, failed) = sync_runner_extensions(
+        &runner,
+        "homeboy",
+        &updates,
+        &mut |runner_id, options| {
+            commands.push(options.command.clone());
+            let stdout = if commands.len() == 1 {
+                r#"{"success":true,"data":{"entities":[{"id":"current","source_revision":"abcdef1"},{"id":"changed","source_revision":"abcdef1"},{"id":"unknown","source_revision":""}]}}"#
+            } else {
+                ""
+            };
+            Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+        },
+    );
+    assert_eq!(synced.len(), 4);
+    assert!(skipped.is_empty());
+    assert!(failed.is_empty());
+    assert_eq!(commands.len(), 4);
+    for (command, id) in commands[1..].iter().zip(["changed", "unknown", "missing"]) {
+        assert_eq!(command[2], "install");
+        assert_eq!(command[5], id);
+        assert_eq!(command.last().unwrap(), "--replace");
+    }
+}
+
+#[test]
 fn isolates_runner_extension_sync_failures_and_continues_later_extensions() {
     let _local_version = pin_local_version_for_fixtures();
     let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
@@ -83,11 +155,10 @@ fn isolates_runner_extension_sync_failures_and_continues_later_extensions() {
                 1 => ("homeboy 0.228.4\n", "", 0),
                 2 => ("{\"success\":true}\n", "", 0),
                 3 => ("homeboy 0.228.5\n", "", 0),
-                4 => ("{\"success\":true}\n", "", 0),
+                4 => ("{\"success\":true,\"data\":{\"entities\":[]}}\n", "", 0),
                 5 => ("", "swift failed", 1),
                 6 => ("{\"success\":true}\n", "", 0),
-                7 => ("{\"success\":true}\n", "", 0),
-                8 => ("homeboy 0.228.5\n", "", 0),
+                7 => ("homeboy 0.228.5\n", "", 0),
                 _ => ("", "", 0),
             };
             Ok((
@@ -146,7 +217,7 @@ fn upgrades_runner_binary_before_controller_scoped_extension_sync() {
                     ("{\"success\":true}\n", "", 0)
                 }
                 3 => ("homeboy 0.228.21\n", "", 0),
-                4 => ("{\"success\":true}\n", "", 0),
+                4 => ("{\"success\":true,\"data\":{\"entities\":[]}}\n", "", 0),
                 5 => ("{\"success\":true}\n", "", 0),
                 6 => ("homeboy 0.228.21\n", "", 0),
                 _ => ("", "unexpected runner command", 1),
