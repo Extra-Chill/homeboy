@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.7] - 2026-10-29
+
+### Changed
+- Reuse a built WP Codebox release before cloning its source
+
 ## [3.53.6] - 2026-10-26
 
 ### Fixed
