@@ -130,29 +130,24 @@ if [ -e "$CACHE_DIR" ] && [ ! -d "$CACHE_DIR/.git" ]; then
     fail "cache dir exists but is not a git checkout: $CACHE_DIR"
 fi
 
-# Build and verify a sibling checkout. The active source remains fully usable
-# until this candidate has its checkout, artifacts, identity, and readiness.
-CANDIDATE_DIR="$(mktemp -d "${PARENT_DIR}/.wp-codebox-candidate.XXXXXX")" || fail "failed to create staged WP Codebox cache checkout"
-echo "Staging WP Codebox cache update: $SOURCE -> $CANDIDATE_DIR"
-git clone --quiet --no-checkout -- "$SOURCE" "$CANDIDATE_DIR" || fail "git clone failed for $SOURCE"
-
 if [ -z "$REQUESTED_REF" ]; then
     REQUESTED_REF="$(git ls-remote --symref "$SOURCE" HEAD 2>/dev/null | sed -n 's#^ref: refs/heads/##; s#[[:space:]]HEAD$##p' | head -n 1)"
     [ -n "$REQUESTED_REF" ] || REQUESTED_REF=main
 fi
 
-echo "Fetching WP Codebox ref: $REQUESTED_REF"
-git -C "$CANDIDATE_DIR" fetch --quiet --tags origin "$REQUESTED_REF" || fail "failed to fetch ref '$REQUESTED_REF' from $SOURCE"
-git -C "$CANDIDATE_DIR" reset --hard --quiet FETCH_HEAD || fail "failed to reset staged cache checkout to FETCH_HEAD"
-SHA="$(git -C "$CANDIDATE_DIR" rev-parse HEAD)" || fail "failed to read staged WP Codebox SHA"
-export WP_CODEBOX_SOURCE_REF="$REQUESTED_REF" WP_CODEBOX_SOURCE_SHA="$SHA"
-git -C "$CANDIDATE_DIR" clean -ffdx --quiet || fail "failed to clean untracked build residue from staged WP Codebox cache checkout"
-
-[ -f "$CANDIDATE_DIR/package-lock.json" ] || [ -f "$CANDIDATE_DIR/npm-shrinkwrap.json" ] || fail "WP Codebox source cache requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci: $SOURCE"
+# Resolve the ref without cloning so an already-built release is reused for
+# the cost of one ls-remote. Peeled tags win over the tag object.
+SHA=""
+if printf '%s' "$REQUESTED_REF" | grep -Eq '^[0-9a-f]{40}$'; then
+    SHA="$REQUESTED_REF"
+else
+    SHA="$(git ls-remote "$SOURCE" "refs/heads/$REQUESTED_REF" "refs/tags/$REQUESTED_REF" "refs/tags/$REQUESTED_REF^{}" 2>/dev/null | sort -k2 -r | awk 'NR==1{print $1}')"
+fi
 
 # Reuse only releases whose recorded source and CLI bytes still match.
 for EXISTING_RELEASE in "${CACHE_DIR}.releases/"*; do
     [ -d "$EXISTING_RELEASE" ] && [ ! -L "$EXISTING_RELEASE" ] || continue
+    [ -n "$SHA" ] || break
     if node - "$EXISTING_RELEASE" "$SHA" <<'NODE'
 const fs = require('node:fs');
 const crypto = require('node:crypto');
@@ -167,14 +162,27 @@ try {
 NODE
     then
         RELEASE_DIR="$EXISTING_RELEASE"
-        rm -rf "$CANDIDATE_DIR"
-        CANDIDATE_DIR=""
         echo "Reusing verified WP Codebox release: $RELEASE_DIR"
         break
     fi
 done
 
 if [ -z "$RELEASE_DIR" ]; then
+# Build and verify a sibling checkout. The active source remains fully usable
+# until this candidate has its checkout, artifacts, identity, and readiness.
+CANDIDATE_DIR="$(mktemp -d "${PARENT_DIR}/.wp-codebox-candidate.XXXXXX")" || fail "failed to create staged WP Codebox cache checkout"
+echo "Staging WP Codebox cache update: $SOURCE -> $CANDIDATE_DIR"
+git clone --quiet --no-checkout --filter=blob:none -- "$SOURCE" "$CANDIDATE_DIR" || fail "git clone failed for $SOURCE"
+
+echo "Fetching WP Codebox ref: $REQUESTED_REF"
+git -C "$CANDIDATE_DIR" fetch --quiet --tags origin "$REQUESTED_REF" || fail "failed to fetch ref '$REQUESTED_REF' from $SOURCE"
+git -C "$CANDIDATE_DIR" reset --hard --quiet FETCH_HEAD || fail "failed to reset staged cache checkout to FETCH_HEAD"
+SHA="$(git -C "$CANDIDATE_DIR" rev-parse HEAD)" || fail "failed to read staged WP Codebox SHA"
+export WP_CODEBOX_SOURCE_REF="$REQUESTED_REF" WP_CODEBOX_SOURCE_SHA="$SHA"
+git -C "$CANDIDATE_DIR" clean -ffdx --quiet || fail "failed to clean untracked build residue from staged WP Codebox cache checkout"
+
+[ -f "$CANDIDATE_DIR/package-lock.json" ] || [ -f "$CANDIDATE_DIR/npm-shrinkwrap.json" ] || fail "WP Codebox source cache requires an npm lockfile (package-lock.json or npm-shrinkwrap.json) for deterministic npm ci: $SOURCE"
+
 echo "Installing WP Codebox dependencies..."
 "$NPM_BIN" --prefix "$CANDIDATE_DIR" ci --include=optional --no-fund --no-audit || fail "npm ci failed in $CANDIDATE_DIR"
 

@@ -178,7 +178,8 @@ INITIAL_CLI_SHA="$(shasum -a 256 "${CACHE_DIR}/packages/cli/dist/index.js" | awk
 "${FAKE_BIN}/node" "${CACHE_DIR}/packages/cli/dist/index.js" --version | grep -q '0.23.4' || { echo "Current WP Codebox fixture was not admitted" >&2; exit 1; }
 
 CALLS_BEFORE="$(wc -l < "$NPM_CALLS")"
-PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm" >/dev/null
+REUSE_OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
+case "$REUSE_OUTPUT" in *"Staging WP Codebox cache update"*) echo "Same SHA cloned the source again" >&2; exit 1 ;; esac
 [ "$(readlink "$CACHE_DIR")" = "$INITIAL_RELEASE" ] || { echo "Same SHA created a duplicate release" >&2; exit 1; }
 [ "$(wc -l < "$NPM_CALLS")" = "$CALLS_BEFORE" ] || { echo "Same SHA ran npm again" >&2; exit 1; }
 
@@ -302,7 +303,7 @@ else
     echo "Expected portable sha256 helper to support shasum and sha256sum" >&2
     exit 1
 fi
-if ! grep -q 'git clone --quiet --no-checkout -- "$SOURCE" "$CANDIDATE_DIR"' "${SCRIPT}"; then
+if ! grep -q 'git clone --quiet --no-checkout --filter=blob:none -- "$SOURCE" "$CANDIDATE_DIR"' "${SCRIPT}"; then
     echo "Expected cache updater clone to delimit source options" >&2
     exit 1
 fi
