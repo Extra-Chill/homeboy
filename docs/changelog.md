@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.32] - 2026-10-29
+
+### Changed
+- Skip runner extension installs already at the requested revision
+
+### Fixed
+- reattach the daemon when observation starts after a tunnel drop
+
 ## [0.434.31] - 2026-10-29
 
 ### Changed
