@@ -375,7 +375,6 @@ mod tests {
     fn targeted_runner_failures_return_non_zero_status() {
         let mut result = base_upgrade_result();
         result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
-            phases: serde_json::json!({}),
             runner_id: "homeboy-lab".to_string(),
             homeboy_path: "/home/user/.cargo/bin/homeboy".to_string(),
             success: false,
@@ -437,7 +436,6 @@ mod tests {
     fn non_targeted_runner_failures_return_nonzero_upgrade_status() {
         let mut result = base_upgrade_result();
         result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
-            phases: serde_json::json!({}),
             runner_id: "homeboy-lab".to_string(),
             homeboy_path: "homeboy".to_string(),
             success: false,
@@ -469,7 +467,6 @@ mod tests {
         let mut result = base_upgrade_result();
         result.new_version = Some("0.265.2".to_string());
         result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
-            phases: serde_json::json!({}),
             runner_id: "homeboy-lab".to_string(),
             homeboy_path: "/home/user/homeboy-main/target/release/homeboy".to_string(),
             success: false,
@@ -509,7 +506,6 @@ mod tests {
     fn aligned_runners_emit_no_degraded_warning() {
         let mut result = base_upgrade_result();
         result.runners_updated.push(upgrade::RunnerUpgradeEntry {
-            phases: serde_json::json!({}),
             runner_id: "homeboy-lab".to_string(),
             homeboy_path: "homeboy".to_string(),
             success: true,
@@ -583,7 +579,6 @@ mod tests {
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),
             operation_id: None,
-            phases: serde_json::json!({}),
         }
     }
 }

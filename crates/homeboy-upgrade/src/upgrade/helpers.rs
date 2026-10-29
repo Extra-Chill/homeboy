@@ -441,24 +441,12 @@ fn run_controller_upgrade_with_operation(
     } else {
         None
     };
-    std::thread::scope(|scope| {
-        let acquisition = selected_release
-            .as_ref()
-            .filter(|_| !skip_runners)
-            .map(|release| {
-                scope.spawn(move || {
-                    super::with_runner_upgrade(|provider| {
-                        provider.acquire_runner_release(&release.tag, runner_targets)
-                    })
-                })
-            });
-
-        let candidate_version = if source_noop {
-            target_version.clone()
-        } else if let Some(release) = selected_release.as_ref() {
-            release.version.clone()
-        } else if install_method == InstallMethod::Source {
-            source_upgrade_path
+    let candidate_version = if source_noop {
+        target_version.clone()
+    } else if let Some(release) = selected_release.as_ref() {
+        release.version.clone()
+    } else if install_method == InstallMethod::Source {
+        source_upgrade_path
             .as_deref()
             .and_then(source_build_identity)
             .map(|identity| identity.version)
@@ -472,705 +460,708 @@ fn run_controller_upgrade_with_operation(
                     None,
                 )
             })?
-        } else {
-            current_version().to_string()
-        };
-        let (convergence_runner_method, convergence_source_path) = convergence_inputs(
-            source_noop,
-            runner_method_override,
-            source_upgrade_path.as_deref(),
-        );
-        let extension_preflight = if skip_extensions {
-            Vec::new()
-        } else {
-            preflight_extensions_for_upgrade(&candidate_version)
-        };
-        if !extension_preflight.is_empty() {
-            return Ok(extension_preflight_failure_result(
-                install_method,
-                previous_version,
-                previous_build_identity,
+    } else {
+        current_version().to_string()
+    };
+    let (convergence_runner_method, convergence_source_path) = convergence_inputs(
+        source_noop,
+        runner_method_override,
+        source_upgrade_path.as_deref(),
+    );
+    let extension_preflight = if skip_extensions {
+        Vec::new()
+    } else {
+        preflight_extensions_for_upgrade(&candidate_version)
+    };
+    if !extension_preflight.is_empty() {
+        return Ok(extension_preflight_failure_result(
+            install_method,
+            previous_version,
+            previous_build_identity,
+            &candidate_version,
+            extension_preflight,
+        ));
+    }
+    let runner_preflight = if skip_runners {
+        Vec::new()
+    } else {
+        super::with_runner_upgrade(|provider| {
+            provider.preflight_configured_runners_for_upgrade(
+                convergence_runner_method,
+                convergence_source_path,
+                // A resolved source workspace is the controller-selected build
+                // input, even when it was inferred from the source install.
+                convergence_source_path.is_some(),
+                runner_targets,
                 &candidate_version,
-                extension_preflight,
-            ));
-        }
-        let runner_preflight = if skip_runners {
-            Vec::new()
-        } else {
-            super::with_runner_upgrade(|provider| {
-                provider.preflight_configured_runners_for_upgrade(
-                    convergence_runner_method,
-                    convergence_source_path,
-                    // A resolved source workspace is the controller-selected build
-                    // input, even when it was inferred from the source install.
-                    convergence_source_path.is_some(),
-                    runner_targets,
-                    &candidate_version,
-                )
-            })?
-        };
-        if !runner_preflight.is_empty() {
-            return Ok(runner_preflight_failure_result(
-                install_method,
-                previous_version,
-                previous_build_identity,
-                runner_preflight,
-            ));
-        }
+            )
+        })?
+    };
+    if !runner_preflight.is_empty() {
+        return Ok(runner_preflight_failure_result(
+            install_method,
+            previous_version,
+            previous_build_identity,
+            runner_preflight,
+        ));
+    }
 
-        // Check if a release update is available unless an explicit source target
-        // has already been approved for controller replacement.
-        if source_noop || !replacement_approved {
-            let replacement_now_required = if source_noop {
-                controller_replacement_required_after_discovery(
-                    true,
-                    deliberate,
-                    source_upgrade_decision,
-                    false,
-                )
-            } else {
-                let check = check_for_updates()?;
-                controller_replacement_required_after_discovery(
-                    false,
-                    deliberate,
-                    source_upgrade_decision,
-                    check.update_available,
-                )
-            };
-            if !replacement_now_required {
-                // Even when no binary update is needed, still run extension updates.
-                let selection_guard = acquire_controller_selection_guard_fast(
-                    operation,
-                    "controller extension refresh",
-                )?;
-                // Acquiring shared admission proves every prior installer mutation
-                // fence has drained. Freeze its pending byte evidence before this
-                // operation can return the same-version/no-update result.
-                super::operation::freeze_prior_pending_replacements(
-                    operation
-                        .id()
-                        .expect("controller upgrades require a durable operation"),
-                )?;
-                let initial_completion = reconcile_controller_identity(
-                    observed_installed_controller_identity()?,
-                    previous_build_identity.as_deref(),
-                    Some(previous_version.as_str()),
-                )?;
-                let (mut extensions_updated, mut extension_skips) =
-                    if !controller_allows_extension_refresh(false, &initial_completion) {
-                        operation.mark_extensions_durable(
-                            "not_run",
-                            "controller changed before extension refresh admission",
-                        )?;
-                        (vec![], vec![])
-                    } else if skip_extensions {
-                        operation
-                            .mark_extensions_durable("skipped", "extension refresh skipped")?;
-                        (vec![], vec![])
-                    } else {
-                        operation.set_phase_durable("refreshing installed extensions")?;
-                        let (updated, skipped) = update_all_extensions(operation.id())?;
-                        let status = extension_component_status(true, false, &updated, &skipped);
-                        operation.mark_extensions_durable(&status.status, &status.summary)?;
-                        (updated, skipped)
-                    };
-                let mut completion;
-                drop(selection_guard);
-                let acquired = acquisition
-                    .map(|job| job.join().expect("runner acquisition panicked"))
-                    .transpose()?
-                    .unwrap_or_default();
-                let (mut runners_updated, mut runners_skipped) = if skip_runners {
+    // Check if a release update is available unless an explicit source target
+    // has already been approved for controller replacement.
+    if source_noop || !replacement_approved {
+        let replacement_now_required = if source_noop {
+            controller_replacement_required_after_discovery(
+                true,
+                deliberate,
+                source_upgrade_decision,
+                false,
+            )
+        } else {
+            let check = check_for_updates()?;
+            controller_replacement_required_after_discovery(
+                false,
+                deliberate,
+                source_upgrade_decision,
+                check.update_available,
+            )
+        };
+        if !replacement_now_required {
+            // Even when no binary update is needed, still run extension updates.
+            let selection_guard =
+                acquire_controller_selection_guard_fast(operation, "controller extension refresh")?;
+            // Acquiring shared admission proves every prior installer mutation
+            // fence has drained. Freeze its pending byte evidence before this
+            // operation can return the same-version/no-update result.
+            super::operation::freeze_prior_pending_replacements(
+                operation
+                    .id()
+                    .expect("controller upgrades require a durable operation"),
+            )?;
+            let initial_completion = reconcile_controller_identity(
+                observed_installed_controller_identity()?,
+                previous_build_identity.as_deref(),
+                Some(previous_version.as_str()),
+            )?;
+            let (mut extensions_updated, mut extension_skips) =
+                if !controller_allows_extension_refresh(false, &initial_completion) {
+                    operation.mark_extensions_durable(
+                        "not_run",
+                        "controller changed before extension refresh admission",
+                    )?;
+                    (vec![], vec![])
+                } else if skip_extensions {
+                    operation.mark_extensions_durable("skipped", "extension refresh skipped")?;
                     (vec![], vec![])
                 } else {
-                    completion = reconcile_controller_identity(
-                        observed_installed_controller_identity()?,
-                        previous_build_identity.as_deref(),
-                        Some(previous_version.as_str()),
-                    )?;
-                    if completion.superseded {
-                        (vec![], vec![])
-                    } else {
-                        operation.set_phase_durable("refreshing configured runners")?;
-                        // Runner refresh already acquires its own generation-checked
-                        // publication lease after materialization. Delegating a
-                        // controller lease here would hold Cook admission during Git
-                        // acquisition and builds as well as publication.
-                        refresh_configured_runners_with_progress(operation, || {
-                            super::with_runner_upgrade(|p| {
-                                p.upgrade_configured_runners_with_explicit_source_path(
-                                    force,
-                                    convergence_runner_method,
-                                    convergence_source_path,
-                                    convergence_source_path.is_some(),
-                                    completion.build_identity.as_deref(),
-                                    runner_targets,
-                                    &extensions_updated,
-                                    None,
-                                    &acquired,
-                                )
-                            })
-                        })?
-                    }
+                    operation.set_phase_durable("refreshing installed extensions")?;
+                    let (updated, skipped) = update_all_extensions(operation.id())?;
+                    let status = extension_component_status(true, false, &updated, &skipped);
+                    operation.mark_extensions_durable(&status.status, &status.summary)?;
+                    (updated, skipped)
                 };
-                let final_selection_guard =
-                    acquire_controller_selection_guard(operation, "controller upgrade result")?;
+            let mut completion;
+            drop(selection_guard);
+            let (mut runners_updated, mut runners_skipped) = if skip_runners {
+                (vec![], vec![])
+            } else {
                 completion = reconcile_controller_identity(
                     observed_installed_controller_identity()?,
                     previous_build_identity.as_deref(),
                     Some(previous_version.as_str()),
                 )?;
                 if completion.superseded {
-                    extensions_updated.clear();
-                    extension_skips.clear();
-                    runners_updated.clear();
-                    runners_skipped.clear();
-                }
-                let partial = runner_convergence_failed(
-                    &runners_updated,
-                    &runners_skipped,
-                    completion.version.as_deref(),
-                );
-                let runner_disposition = runner_convergence_disposition(
-                    runner_completion_is_skipped(skip_runners, true, completion.superseded),
-                    &runners_updated,
-                    &runners_skipped,
-                    completion.version.as_deref(),
-                );
-                let extensions_status = if completion.superseded {
-                    superseded_extension_status()
+                    (vec![], vec![])
                 } else {
-                    extension_component_status(
-                        !skip_extensions,
-                        skip_extensions,
-                        &extensions_updated,
-                        &extension_skips,
-                    )
-                };
-                let mut result = UpgradeResult {
-                    command: "upgrade".to_string(),
-                    install_method,
-                    previous_version: previous_version.clone(),
-                    new_version: completion.version.clone(),
-                    previous_build_identity,
-                    new_build_identity: completion.build_identity.clone(),
-                    source_revision: None,
-                    upgraded: false,
-                    outcome: Some(
-                        if completion.superseded {
-                            "controller_superseded"
-                        } else {
-                            "controller_unchanged"
-                        }
-                        .to_string(),
-                    ),
-                    preflight: None,
-                    controller: Some(component_status(
-                        if completion.superseded {
-                            "superseded"
-                        } else {
-                            "unchanged"
-                        },
-                        if completion.superseded {
-                            "controller changed while optional extension refresh was running"
-                        } else {
-                            "controller already current"
-                        },
-                    )),
-                    extensions: Some(extensions_status.clone()),
-                    runners: Some(if completion.superseded {
-                        superseded_runner_status()
-                    } else {
-                        runner_component_status(
-                            runner_disposition,
-                            &runners_updated,
-                            &runners_skipped,
-                            false,
-                        )
-                    }),
-                    partial,
-                    runner_convergence: Some(runner_disposition),
-                    message: if completion.superseded {
-                        superseded_completion_message(completion.build_identity.as_deref())
-                    } else {
-                        format!(
-                            "{}{}",
-                            match runner_disposition {
-                                RunnerConvergenceDisposition::Partial => {
-                                    "PARTIAL: controller is already current, but configured runners did not converge"
-                                .to_string()
-                                }
-                                RunnerConvergenceDisposition::Skipped => {
-                                    "Already at latest version; runner convergence skipped"
-                                        .to_string()
-                                }
-                                RunnerConvergenceDisposition::NoRunnersConfigured => {
-                                    "Already at latest version; no configured runners".to_string()
-                                }
-                                RunnerConvergenceDisposition::Deferred => {
-                                    "Already at latest version; busy runners deferred".to_string()
-                                }
-                                RunnerConvergenceDisposition::Converged => {
-                                    "Already at latest version; configured runners converged"
-                                        .to_string()
-                                }
-                            },
-                            extension_partial_clause(Some(&extensions_status)),
-                        )
-                    },
-                    restart_required: false,
-                    extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(
-                        &extensions_updated,
-                    ),
-                    extensions_updated,
-                    extensions_skipped: extension_skips
-                        .iter()
-                        .map(|skip| skip.extension_id.clone())
-                        .collect(),
-                    extension_skips,
-                    runners_updated,
-                    runners_skipped,
-                    runners_deferred: Vec::new(),
-                    // No binary swap happened, so resident services already run the
-                    // current binary and need no restart.
-                    services_restarted: Vec::new(),
-                    services_pending_restart: Vec::new(),
-                    operation_id: None,
-                    phases: serde_json::json!({}),
-                };
-                if !completion.superseded {
-                    result
-                        .extension_skips
-                        .extend(target_missing_extension_warnings());
+                    operation.set_phase_durable("refreshing configured runners")?;
+                    // Runner refresh already acquires its own generation-checked
+                    // publication lease after materialization. Delegating a
+                    // controller lease here would hold Cook admission during Git
+                    // acquisition and builds as well as publication.
+                    refresh_configured_runners_with_progress(operation, || {
+                        super::with_runner_upgrade(|p| {
+                            p.upgrade_configured_runners_with_explicit_source_path(
+                                force,
+                                convergence_runner_method,
+                                convergence_source_path,
+                                convergence_source_path.is_some(),
+                                completion.build_identity.as_deref(),
+                                runner_targets,
+                                &extensions_updated,
+                                None,
+                            )
+                        })
+                    })?
                 }
-                converge_resident_daemon_after_controller_reconciliation(&completion)?;
-                if completion.superseded {
-                    invalidate_superseded_evidence(&mut result);
-                }
-                finish_completed_under_selection(operation, &result, final_selection_guard)?;
-                return Ok(result);
+            };
+            let final_selection_guard =
+                acquire_controller_selection_guard(operation, "controller upgrade result")?;
+            completion = reconcile_controller_identity(
+                observed_installed_controller_identity()?,
+                previous_build_identity.as_deref(),
+                Some(previous_version.as_str()),
+            )?;
+            if completion.superseded {
+                extensions_updated.clear();
+                extension_skips.clear();
+                runners_updated.clear();
+                runners_skipped.clear();
             }
-        }
-
-        // Keep the same promotion authority from compatibility revalidation through
-        // the controller swap. Source builds retain their isolated build target, but
-        // their final install shares this lease rather than opening a TOCTOU window.
-        let controller_mutation_lease =
-            acquire_controller_upgrade_lease(operation, "controller upgrade")?;
-        super::operation::freeze_prior_pending_replacements(
-            operation
-                .id()
-                .expect("controller upgrades require a durable operation"),
-        )?;
-        controller_mutation_lease.assert_generation()?;
-        let extension_revalidation = if skip_extensions {
-            Vec::new()
-        } else {
-            preflight_extensions_for_upgrade(&candidate_version)
-        };
-        if !extension_revalidation.is_empty() {
-            let result = extension_preflight_failure_result(
-                install_method,
-                previous_version,
-                previous_build_identity,
-                &candidate_version,
-                extension_revalidation,
+            let partial = runner_convergence_failed(
+                &runners_updated,
+                &runners_skipped,
+                completion.version.as_deref(),
             );
+            let runner_disposition = runner_convergence_disposition(
+                runner_completion_is_skipped(skip_runners, true, completion.superseded),
+                &runners_updated,
+                &runners_skipped,
+                completion.version.as_deref(),
+            );
+            let extensions_status = if completion.superseded {
+                superseded_extension_status()
+            } else {
+                extension_component_status(
+                    !skip_extensions,
+                    skip_extensions,
+                    &extensions_updated,
+                    &extension_skips,
+                )
+            };
+            let mut result = UpgradeResult {
+                command: "upgrade".to_string(),
+                install_method,
+                previous_version: previous_version.clone(),
+                new_version: completion.version.clone(),
+                previous_build_identity,
+                new_build_identity: completion.build_identity.clone(),
+                source_revision: None,
+                upgraded: false,
+                outcome: Some(
+                    if completion.superseded {
+                        "controller_superseded"
+                    } else {
+                        "controller_unchanged"
+                    }
+                    .to_string(),
+                ),
+                preflight: None,
+                controller: Some(component_status(
+                    if completion.superseded {
+                        "superseded"
+                    } else {
+                        "unchanged"
+                    },
+                    if completion.superseded {
+                        "controller changed while optional extension refresh was running"
+                    } else {
+                        "controller already current"
+                    },
+                )),
+                extensions: Some(extensions_status.clone()),
+                runners: Some(if completion.superseded {
+                    superseded_runner_status()
+                } else {
+                    runner_component_status(
+                        runner_disposition,
+                        &runners_updated,
+                        &runners_skipped,
+                        false,
+                    )
+                }),
+                partial,
+                runner_convergence: Some(runner_disposition),
+                message: if completion.superseded {
+                    superseded_completion_message(completion.build_identity.as_deref())
+                } else {
+                    format!(
+                        "{}{}",
+                        match runner_disposition {
+                            RunnerConvergenceDisposition::Partial => {
+                                "PARTIAL: controller is already current, but configured runners did not converge"
+                                .to_string()
+                            }
+                            RunnerConvergenceDisposition::Skipped => {
+                                "Already at latest version; runner convergence skipped".to_string()
+                            }
+                            RunnerConvergenceDisposition::NoRunnersConfigured => {
+                                "Already at latest version; no configured runners".to_string()
+                            }
+                            RunnerConvergenceDisposition::Deferred => {
+                                "Already at latest version; busy runners deferred".to_string()
+                            }
+                            RunnerConvergenceDisposition::Converged => {
+                                "Already at latest version; configured runners converged"
+                                    .to_string()
+                            }
+                        },
+                        extension_partial_clause(Some(&extensions_status)),
+                    )
+                },
+                restart_required: false,
+                extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
+                extensions_updated,
+                extensions_skipped: extension_skips
+                    .iter()
+                    .map(|skip| skip.extension_id.clone())
+                    .collect(),
+                extension_skips,
+                runners_updated,
+                runners_skipped,
+                runners_deferred: Vec::new(),
+                // No binary swap happened, so resident services already run the
+                // current binary and need no restart.
+                services_restarted: Vec::new(),
+                services_pending_restart: Vec::new(),
+                operation_id: None,
+            };
+            if !completion.superseded {
+                result
+                    .extension_skips
+                    .extend(target_missing_extension_warnings());
+            }
+            converge_resident_daemon_after_controller_reconciliation(&completion)?;
+            if completion.superseded {
+                invalidate_superseded_evidence(&mut result);
+            }
+            finish_completed_under_selection(operation, &result, final_selection_guard)?;
             return Ok(result);
         }
-        operation.set_phase_durable("mutating controller")?;
-        let controller_upgrade = run_controller_mutation_after_runner_preflight(
-            runner_preflight,
-            || {
-                controller_mutation_lease.assert_generation()?;
-                if skip_runners {
-                    Ok(Vec::new())
-                } else {
-                    super::with_runner_upgrade(|provider| {
-                        provider.preflight_configured_runners_for_upgrade(
-                            runner_method_override,
-                            source_upgrade_path.as_deref(),
-                            source_upgrade_path.is_some(),
-                            runner_targets,
-                            &candidate_version,
-                        )
-                    })
-                }
-            },
-            || {
-                if matches!(install_method, InstallMethod::Homebrew) && !deliberate {
-                    let completion = reconcile_controller_identity(
-                        observed_installed_controller_identity()?,
-                        previous_build_identity.as_deref(),
-                        Some(previous_version.as_str()),
-                    )?;
-                    if completion.superseded {
-                        return Ok((
-                            false,
-                            completion.version,
-                            completion.build_identity,
-                            None,
-                            true,
-                        ));
+    }
+
+    // Keep the same promotion authority from compatibility revalidation through
+    // the controller swap. Source builds retain their isolated build target, but
+    // their final install shares this lease rather than opening a TOCTOU window.
+    let controller_mutation_lease =
+        acquire_controller_upgrade_lease(operation, "controller upgrade")?;
+    super::operation::freeze_prior_pending_replacements(
+        operation
+            .id()
+            .expect("controller upgrades require a durable operation"),
+    )?;
+    controller_mutation_lease.assert_generation()?;
+    let extension_revalidation = if skip_extensions {
+        Vec::new()
+    } else {
+        preflight_extensions_for_upgrade(&candidate_version)
+    };
+    if !extension_revalidation.is_empty() {
+        let result = extension_preflight_failure_result(
+            install_method,
+            previous_version,
+            previous_build_identity,
+            &candidate_version,
+            extension_revalidation,
+        );
+        return Ok(result);
+    }
+    operation.set_phase_durable("mutating controller")?;
+    let runner_release = selected_release
+        .as_ref()
+        .filter(|_| !skip_runners)
+        .map(|release| release.tag.as_str());
+    let (controller_upgrade, runner_acquisition) = overlap_runner_release_acquisition(
+        runner_release,
+        |tag| {
+            super::with_runner_upgrade(|provider| {
+                provider.acquire_runner_release(tag, runner_targets)
+            })
+        },
+        || {
+            run_controller_mutation_after_runner_preflight(
+                runner_preflight,
+                || {
+                    controller_mutation_lease.assert_generation()?;
+                    if skip_runners {
+                        Ok(Vec::new())
+                    } else {
+                        super::with_runner_upgrade(|provider| {
+                            provider.preflight_configured_runners_for_upgrade(
+                                runner_method_override,
+                                source_upgrade_path.as_deref(),
+                                source_upgrade_path.is_some(),
+                                runner_targets,
+                                &candidate_version,
+                            )
+                        })
                     }
-                }
-                let operation_id = operation
-                    .id()
-                    .expect("controller upgrades require a durable operation")
-                    .to_string();
-                let lease_heartbeat_failure = std::sync::Mutex::new(None);
-                let progress_heartbeat_failure = std::sync::Mutex::new(None);
-                let phase_sync = std::sync::Mutex::new(());
-                let execution_started = std::time::Instant::now();
-                let result = run_with_upgrade_heartbeats(
-                    UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
-                    |elapsed| {
-                        let _phase = phase_sync.lock().expect("serialize upgrade progress");
-                        if let Err(error) = controller_mutation_lease.heartbeat() {
-                            let mut failure = lease_heartbeat_failure
-                                .lock()
-                                .expect("record lease heartbeat failure");
-                            if failure.is_none() {
-                                *failure = Some(error);
-                            }
+                },
+                || {
+                    if matches!(install_method, InstallMethod::Homebrew) && !deliberate {
+                        let completion = reconcile_controller_identity(
+                            observed_installed_controller_identity()?,
+                            previous_build_identity.as_deref(),
+                            Some(previous_version.as_str()),
+                        )?;
+                        if completion.superseded {
+                            return Ok((
+                                false,
+                                completion.version,
+                                completion.build_identity,
+                                None,
+                                true,
+                            ));
                         }
-                        if let Err(error) = persist_upgrade_heartbeat(&operation_id, elapsed) {
-                            let mut failure = progress_heartbeat_failure
-                                .lock()
-                                .expect("record progress heartbeat failure");
-                            if failure.is_none() {
-                                *failure = Some(error);
-                            }
-                        }
-                    },
-                    || {
-                        let operation = std::cell::RefCell::new(&mut *operation);
-                        let mut report_phase = |phase: &str| {
+                    }
+                    let operation_id = operation
+                        .id()
+                        .expect("controller upgrades require a durable operation")
+                        .to_string();
+                    let lease_heartbeat_failure = std::sync::Mutex::new(None);
+                    let progress_heartbeat_failure = std::sync::Mutex::new(None);
+                    let phase_sync = std::sync::Mutex::new(());
+                    let execution_started = std::time::Instant::now();
+                    let result = run_with_upgrade_heartbeats(
+                        UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
+                        |elapsed| {
                             let _phase = phase_sync.lock().expect("serialize upgrade progress");
-                            let result = operation.borrow_mut().set_phase_durable(phase);
-                            if result.is_ok() {
-                                *progress_heartbeat_failure
+                            if let Err(error) = controller_mutation_lease.heartbeat() {
+                                let mut failure = lease_heartbeat_failure
                                     .lock()
-                                    .expect("clear recovered progress heartbeat failure") = None;
+                                    .expect("record lease heartbeat failure");
+                                if failure.is_none() {
+                                    *failure = Some(error);
+                                }
                             }
-                            result
-                        };
-                        let mut replacement_checkpoint =
-                            |checkpoint: &super::execution::ReplacementCheckpoint| {
+                            if let Err(error) = persist_upgrade_heartbeat(&operation_id, elapsed) {
+                                let mut failure = progress_heartbeat_failure
+                                    .lock()
+                                    .expect("record progress heartbeat failure");
+                                if failure.is_none() {
+                                    *failure = Some(error);
+                                }
+                            }
+                        },
+                        || {
+                            let operation = std::cell::RefCell::new(&mut *operation);
+                            let mut report_phase = |phase: &str| {
                                 let _phase = phase_sync.lock().expect("serialize upgrade progress");
-                                operation
-                                    .borrow_mut()
-                                    .record_replacement_checkpoint_durable(checkpoint)
+                                let result = operation.borrow_mut().set_phase_durable(phase);
+                                if result.is_ok() {
+                                    *progress_heartbeat_failure
+                                        .lock()
+                                        .expect("clear recovered progress heartbeat failure") =
+                                        None;
+                                }
+                                result
                             };
-                        if install_method == InstallMethod::Source {
-                            operation.borrow_mut().mark_controller_durable(
+                            let mut replacement_checkpoint =
+                                |checkpoint: &super::execution::ReplacementCheckpoint| {
+                                    let _phase =
+                                        phase_sync.lock().expect("serialize upgrade progress");
+                                    operation
+                                        .borrow_mut()
+                                        .record_replacement_checkpoint_durable(checkpoint)
+                                };
+                            if install_method == InstallMethod::Source {
+                                operation.borrow_mut().mark_controller_durable(
                             "candidate_building",
                             "source candidate build started; controller promotion not attempted",
                         )?;
-                        }
-                        execute_upgrade(
-                            install_method,
-                            source_upgrade_path.as_deref(),
-                            source_path.is_some(),
-                            force,
-                            deliberate,
-                            previous_build_identity.as_deref(),
-                            selected_release.as_ref(),
-                            Some(&controller_mutation_lease),
-                            &mut report_phase,
-                            &mut replacement_checkpoint,
-                        )
-                    },
-                );
-                controller_mutation_lease.assert_generation()?;
-                *lease_heartbeat_failure
-                    .lock()
-                    .expect("clear recovered lease heartbeat failure") = None;
-                persist_upgrade_heartbeat(&operation_id, execution_started.elapsed())?;
-                *progress_heartbeat_failure
-                    .lock()
-                    .expect("clear recovered progress heartbeat failure") = None;
-                if let Some(error) = lease_heartbeat_failure
-                    .into_inner()
-                    .expect("lease heartbeat failures are not poisoned")
-                {
-                    return Err(error);
-                }
-                if let Some(error) = progress_heartbeat_failure
-                    .into_inner()
-                    .expect("progress heartbeat failures are not poisoned")
-                {
-                    return Err(error);
-                }
-                result
-            },
-        );
-        let controller_upgrade = match controller_upgrade {
-            Ok(result) => result,
-            Err(error) => {
-                operation.mark_controller_durable(
-                    "failed",
-                    if error
-                        .details
-                        .get("kind")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("source_build_deadline_exceeded")
+                            }
+                            execute_upgrade(
+                                install_method,
+                                source_upgrade_path.as_deref(),
+                                source_path.is_some(),
+                                force,
+                                deliberate,
+                                previous_build_identity.as_deref(),
+                                selected_release.as_ref(),
+                                Some(&controller_mutation_lease),
+                                &mut report_phase,
+                                &mut replacement_checkpoint,
+                            )
+                        },
+                    );
+                    controller_mutation_lease.assert_generation()?;
+                    *lease_heartbeat_failure
+                        .lock()
+                        .expect("clear recovered lease heartbeat failure") = None;
+                    persist_upgrade_heartbeat(&operation_id, execution_started.elapsed())?;
+                    *progress_heartbeat_failure
+                        .lock()
+                        .expect("clear recovered progress heartbeat failure") = None;
+                    if let Some(error) = lease_heartbeat_failure
+                        .into_inner()
+                        .expect("lease heartbeat failures are not poisoned")
                     {
-                        "source candidate build timed out; controller promotion was not attempted"
-                    } else {
-                        "controller candidate execution failed before promotion"
-                    },
-                )?;
-                return Err(error);
+                        return Err(error);
+                    }
+                    if let Some(error) = progress_heartbeat_failure
+                        .into_inner()
+                        .expect("progress heartbeat failures are not poisoned")
+                    {
+                        return Err(error);
+                    }
+                    result
+                },
+            )
+        },
+    );
+    if let Some((started_at, duration_ms, error)) = runner_acquisition {
+        operation.record_concurrent_phase(
+            "acquiring runner release",
+            started_at,
+            duration_ms,
+            error,
+        );
+    }
+    let controller_upgrade = match controller_upgrade {
+        Ok(result) => result,
+        Err(error) => {
+            operation.mark_controller_durable(
+                "failed",
+                if error
+                    .details
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("source_build_deadline_exceeded")
+                {
+                    "source candidate build timed out; controller promotion was not attempted"
+                } else {
+                    "controller candidate execution failed before promotion"
+                },
+            )?;
+            return Err(error);
+        }
+    };
+    let (success, new_version, new_build_identity, source_revision, superseded) =
+        match controller_upgrade {
+            Ok(result) => result,
+            Err(runners_skipped) => {
+                let result = runner_preflight_failure_result(
+                    install_method,
+                    previous_version,
+                    previous_build_identity,
+                    runners_skipped,
+                );
+                return Ok(result);
             }
         };
-        let (success, new_version, new_build_identity, source_revision, superseded) =
-            match controller_upgrade {
-                Ok(result) => result,
-                Err(runners_skipped) => {
-                    let result = runner_preflight_failure_result(
-                        install_method,
-                        previous_version,
-                        previous_build_identity,
-                        runners_skipped,
-                    );
-                    return Ok(result);
-                }
-            };
-        controller_mutation_lease.assert_generation()?;
-        let upgrade_completed = !superseded && should_sync_after_upgrade(new_version.as_deref());
-        if upgrade_completed {
-            // This is deliberately a short switch, not a drain: records admitted
-            // before it retain their immutable runtime pin and remain executable.
-            operation.set_phase_durable("rotating_controller_generation")?;
-            let installed_executable = super::execution::active_binary_path()?;
-            homeboy_core::controller_runtime::activate_installed_generation(&installed_executable)?;
-            if success {
-                operation.mark_controller_promoted_durable("controller installation completed")?;
-            }
-        } else if superseded {
-            operation.mark_controller_durable(
-                "superseded",
-                "controller promotion was superseded by the active build",
-            )?;
-        } else {
-            operation
-                .mark_controller_durable("failed", "controller installation did not complete")?;
+    controller_mutation_lease.assert_generation()?;
+    let upgrade_completed = !superseded && should_sync_after_upgrade(new_version.as_deref());
+    if upgrade_completed {
+        // This is deliberately a short switch, not a drain: records admitted
+        // before it retain their immutable runtime pin and remain executable.
+        operation.set_phase_durable("rotating_controller_generation")?;
+        let installed_executable = super::execution::active_binary_path()?;
+        homeboy_core::controller_runtime::activate_installed_generation(&installed_executable)?;
+        if success {
+            operation.mark_controller_promoted_durable("controller installation completed")?;
         }
-        drop(controller_mutation_lease);
-
-        let selection_guard =
-            acquire_controller_selection_guard(operation, "controller extension refresh")?;
-        let initial_completion = reconcile_controller_identity(
-            observed_installed_controller_identity()?,
-            new_build_identity.as_deref(),
-            new_version.as_deref(),
+    } else if superseded {
+        operation.mark_controller_durable(
+            "superseded",
+            "controller promotion was superseded by the active build",
         )?;
+    } else {
+        operation.mark_controller_durable("failed", "controller installation did not complete")?;
+    }
+    drop(controller_mutation_lease);
 
-        // Auto-update all installed extensions after the upgrade command completes.
-        // This prevents CI/local extension version drift that causes baseline
-        // mismatches and inconsistent audit findings.
-        let (mut extensions_updated, mut extension_skips) =
-            if !controller_allows_extension_refresh(superseded, &initial_completion) {
-                operation.mark_extensions_durable(
-                    "not_run",
-                    "controller changed before extension refresh admission",
-                )?;
-                (vec![], vec![])
-            } else if upgrade_completed && !skip_extensions {
-                operation.set_phase_durable("refreshing installed extensions")?;
-                let (updated, skipped) = update_all_extensions(operation.id())?;
-                let status = extension_component_status(true, false, &updated, &skipped);
-                operation.mark_extensions_durable(&status.status, &status.summary)?;
-                (updated, skipped)
-            } else if skip_extensions {
-                operation.mark_extensions_durable("skipped", "extension refresh skipped")?;
-                (vec![], vec![])
-            } else {
-                operation
-                    .mark_extensions_durable("not_run", "extension refresh was not attempted")?;
-                (vec![], vec![])
-            };
+    let selection_guard =
+        acquire_controller_selection_guard(operation, "controller extension refresh")?;
+    let initial_completion = reconcile_controller_identity(
+        observed_installed_controller_identity()?,
+        new_build_identity.as_deref(),
+        new_version.as_deref(),
+    )?;
 
-        drop(selection_guard);
-
-        let acquired = acquisition
-            .map(|job| job.join().expect("runner acquisition panicked"))
-            .transpose()?
-            .unwrap_or_default();
-        let (mut runners_updated, mut runners_skipped) = if upgrade_completed && !skip_runners {
-            let completion = reconcile_controller_identity(
-                observed_installed_controller_identity()?,
-                new_build_identity.as_deref(),
-                new_version.as_deref(),
+    // Auto-update all installed extensions after the upgrade command completes.
+    // This prevents CI/local extension version drift that causes baseline
+    // mismatches and inconsistent audit findings.
+    let (mut extensions_updated, mut extension_skips) =
+        if !controller_allows_extension_refresh(superseded, &initial_completion) {
+            operation.mark_extensions_durable(
+                "not_run",
+                "controller changed before extension refresh admission",
             )?;
-            let runner_completion_superseded = superseded || completion.superseded;
-            if runner_completion_superseded {
-                operation.mark_controller_durable(
-                    "superseded",
-                    "controller changed before configured runner convergence",
-                )?;
-                (vec![], vec![])
-            } else {
-                operation.set_phase_durable("refreshing configured runners")?;
-                refresh_configured_runners_with_progress(operation, || {
-                    super::with_runner_upgrade(|p| {
-                        p.upgrade_configured_runners_with_explicit_source_path(
-                            force,
-                            runner_method_override,
-                            source_upgrade_path.as_deref(),
-                            source_upgrade_path.is_some(),
-                            new_build_identity.as_deref(),
-                            runner_targets,
-                            &extensions_updated,
-                            None,
-                            &acquired,
-                        )
-                    })
-                })?
-            }
+            (vec![], vec![])
+        } else if upgrade_completed && !skip_extensions {
+            operation.set_phase_durable("refreshing installed extensions")?;
+            let (updated, skipped) = update_all_extensions(operation.id())?;
+            let status = extension_component_status(true, false, &updated, &skipped);
+            operation.mark_extensions_durable(&status.status, &status.summary)?;
+            (updated, skipped)
+        } else if skip_extensions {
+            operation.mark_extensions_durable("skipped", "extension refresh skipped")?;
+            (vec![], vec![])
         } else {
+            operation.mark_extensions_durable("not_run", "extension refresh was not attempted")?;
             (vec![], vec![])
         };
 
-        let final_selection_guard =
-            acquire_controller_selection_guard(operation, "controller upgrade result")?;
+    drop(selection_guard);
+
+    let (mut runners_updated, mut runners_skipped) = if upgrade_completed && !skip_runners {
         let completion = reconcile_controller_identity(
             observed_installed_controller_identity()?,
             new_build_identity.as_deref(),
             new_version.as_deref(),
         )?;
-        let completion_superseded = superseded || completion.superseded;
-        if completion_superseded {
+        let runner_completion_superseded = superseded || completion.superseded;
+        if runner_completion_superseded {
             operation.mark_controller_durable(
                 "superseded",
-                "controller changed before upgrade completion was recorded",
+                "controller changed before configured runner convergence",
             )?;
-            extensions_updated.clear();
-            extension_skips.clear();
-            runners_updated.clear();
-            runners_skipped.clear();
+            (vec![], vec![])
+        } else {
+            operation.set_phase_durable("refreshing configured runners")?;
+            refresh_configured_runners_with_progress(operation, || {
+                super::with_runner_upgrade(|p| {
+                    p.upgrade_configured_runners_with_explicit_source_path(
+                        force,
+                        runner_method_override,
+                        source_upgrade_path.as_deref(),
+                        source_upgrade_path.is_some(),
+                        new_build_identity.as_deref(),
+                        runner_targets,
+                        &extensions_updated,
+                        None,
+                    )
+                })
+            })?
         }
+    } else {
+        (vec![], vec![])
+    };
 
-        // Protect the reconciled controller identity while resident services are
-        // restarted so their evidence cannot describe a later contender's binary.
-        let (services_restarted, services_pending_restart) =
-            restart_resident_services_after_reconciliation(
-                completion_superseded,
-                &final_selection_guard,
-                || restart_resident_services_after_swap(success, skip_services),
-            );
-        converge_resident_daemon_after_controller_reconciliation(&completion)?;
+    let final_selection_guard =
+        acquire_controller_selection_guard(operation, "controller upgrade result")?;
+    let completion = reconcile_controller_identity(
+        observed_installed_controller_identity()?,
+        new_build_identity.as_deref(),
+        new_version.as_deref(),
+    )?;
+    let completion_superseded = superseded || completion.superseded;
+    if completion_superseded {
+        operation.mark_controller_durable(
+            "superseded",
+            "controller changed before upgrade completion was recorded",
+        )?;
+        extensions_updated.clear();
+        extension_skips.clear();
+        runners_updated.clear();
+        runners_skipped.clear();
+    }
 
-        let runner_disposition = runner_convergence_disposition(
-            runner_completion_is_skipped(skip_runners, upgrade_completed, completion_superseded),
+    // Protect the reconciled controller identity while resident services are
+    // restarted so their evidence cannot describe a later contender's binary.
+    let (services_restarted, services_pending_restart) =
+        restart_resident_services_after_reconciliation(
+            completion_superseded,
+            &final_selection_guard,
+            || restart_resident_services_after_swap(success, skip_services),
+        );
+    converge_resident_daemon_after_controller_reconciliation(&completion)?;
+
+    let runner_disposition = runner_convergence_disposition(
+        runner_completion_is_skipped(skip_runners, upgrade_completed, completion_superseded),
+        &runners_updated,
+        &runners_skipped,
+        completion.version.as_deref(),
+    );
+
+    let extensions_status = if completion_superseded {
+        superseded_extension_status()
+    } else {
+        extension_component_status(
+            upgrade_completed,
+            skip_extensions,
+            &extensions_updated,
+            &extension_skips,
+        )
+    };
+
+    let mut result = UpgradeResult {
+        command: "upgrade".to_string(),
+        install_method,
+        previous_version,
+        new_version: completion.version.clone(),
+        previous_build_identity,
+        new_build_identity: completion.build_identity.clone(),
+        source_revision,
+        upgraded: success,
+        outcome: Some(if completion_superseded {
+            "controller_superseded".to_string()
+        } else {
+            upgrade_outcome(success, runner_disposition).to_string()
+        }),
+        preflight: None,
+        controller: Some(component_status(
+            if completion_superseded {
+                "superseded"
+            } else if success {
+                "updated"
+            } else {
+                "failed"
+            },
+            if completion_superseded {
+                "controller promotion was superseded by the active build"
+            } else if success {
+                "controller installation completed"
+            } else {
+                "controller installation did not complete"
+            },
+        )),
+        extensions: Some(extensions_status.clone()),
+        runners: Some(if completion_superseded {
+            superseded_runner_status()
+        } else {
+            runner_component_status(
+                runner_disposition,
+                &runners_updated,
+                &runners_skipped,
+                !upgrade_completed && !skip_runners,
+            )
+        }),
+        partial: runner_convergence_failed(
             &runners_updated,
             &runners_skipped,
             completion.version.as_deref(),
-        );
-
-        let extensions_status = if completion_superseded {
-            superseded_extension_status()
+        ),
+        runner_convergence: Some(runner_disposition),
+        message: if completion_superseded {
+            superseded_completion_message(completion.build_identity.as_deref())
         } else {
-            extension_component_status(
-                upgrade_completed,
-                skip_extensions,
-                &extensions_updated,
-                &extension_skips,
-            )
-        };
-
-        let mut result = UpgradeResult {
-            command: "upgrade".to_string(),
-            install_method,
-            previous_version,
-            new_version: completion.version.clone(),
-            previous_build_identity,
-            new_build_identity: completion.build_identity.clone(),
-            source_revision,
-            upgraded: success,
-            outcome: Some(if completion_superseded {
-                "controller_superseded".to_string()
-            } else {
-                upgrade_outcome(success, runner_disposition).to_string()
-            }),
-            preflight: None,
-            controller: Some(component_status(
-                if completion_superseded {
-                    "superseded"
-                } else if success {
-                    "updated"
-                } else {
-                    "failed"
-                },
-                if completion_superseded {
-                    "controller promotion was superseded by the active build"
-                } else if success {
-                    "controller installation completed"
-                } else {
-                    "controller installation did not complete"
-                },
-            )),
-            extensions: Some(extensions_status.clone()),
-            runners: Some(if completion_superseded {
-                superseded_runner_status()
-            } else {
-                runner_component_status(
-                    runner_disposition,
-                    &runners_updated,
-                    &runners_skipped,
-                    !upgrade_completed && !skip_runners,
-                )
-            }),
-            partial: runner_convergence_failed(
+            upgrade_message(
+                success,
+                completion.version.as_deref(),
+                completion.build_identity.as_deref(),
+                runner_disposition,
                 &runners_updated,
                 &runners_skipped,
-                completion.version.as_deref(),
-            ),
-            runner_convergence: Some(runner_disposition),
-            message: if completion_superseded {
-                superseded_completion_message(completion.build_identity.as_deref())
-            } else {
-                upgrade_message(
-                    success,
-                    completion.version.as_deref(),
-                    completion.build_identity.as_deref(),
-                    runner_disposition,
-                    &runners_updated,
-                    &runners_skipped,
-                    Some(&extensions_status),
-                )
-            },
-            // Source replacement updates the on-disk executable, but this command
-            // exits immediately afterwards. Re-execing only `--version` skips the
-            // normal completion path and provides no lifecycle benefit.
-            restart_required: false,
-            extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
-            extensions_updated,
-            extensions_skipped: extension_skips
-                .iter()
-                .map(|skip| skip.extension_id.clone())
-                .collect(),
-            extension_skips,
-            runners_updated,
-            runners_skipped,
-            runners_deferred: Vec::new(),
-            services_restarted,
-            services_pending_restart,
-            operation_id: None,
-            phases: serde_json::json!({}),
-        };
-        if !completion_superseded {
-            result
-                .extension_skips
-                .extend(target_missing_extension_warnings());
-        }
-        if completion_superseded {
-            invalidate_superseded_evidence(&mut result);
-        }
-        finish_completed_under_selection(operation, &result, final_selection_guard)?;
-        Ok(result)
-    })
+                Some(&extensions_status),
+            )
+        },
+        // Source replacement updates the on-disk executable, but this command
+        // exits immediately afterwards. Re-execing only `--version` skips the
+        // normal completion path and provides no lifecycle benefit.
+        restart_required: false,
+        extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
+        extensions_updated,
+        extensions_skipped: extension_skips
+            .iter()
+            .map(|skip| skip.extension_id.clone())
+            .collect(),
+        extension_skips,
+        runners_updated,
+        runners_skipped,
+        runners_deferred: Vec::new(),
+        services_restarted,
+        services_pending_restart,
+        operation_id: None,
+    };
+    if !completion_superseded {
+        result
+            .extension_skips
+            .extend(target_missing_extension_warnings());
+    }
+    if completion_superseded {
+        invalidate_superseded_evidence(&mut result);
+    }
+    finish_completed_under_selection(operation, &result, final_selection_guard)?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1212,8 +1203,33 @@ fn source_upgrade_noop_result(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
         operation_id: None,
-        phases: serde_json::json!({}),
     }
+}
+
+/// Run `controller` while `acquire` fills runner release slots for `tag`.
+/// Acquisition only stages immutable runner slots, so it can download during
+/// the controller install; the later runner refresh reuses an acquired slot and
+/// downloads itself when acquisition failed. Returns the acquisition's
+/// `(started_at, duration_ms, error)` when one ran.
+fn overlap_runner_release_acquisition<T>(
+    tag: Option<&str>,
+    acquire: impl FnOnce(&str) -> Result<()> + Send,
+    controller: impl FnOnce() -> T,
+) -> (T, Option<(u64, u64, Option<String>)>) {
+    std::thread::scope(|scope| {
+        let acquisition = tag.map(|tag| {
+            scope.spawn(move || {
+                let started_at = homeboy_core::daemon::workflow_cadence::now_ms();
+                let clock = std::time::Instant::now();
+                let error = acquire(tag).err().map(|error| error.message);
+                (started_at, clock.elapsed().as_millis() as u64, error)
+            })
+        });
+        let result = controller();
+        let acquisition =
+            acquisition.map(|job| job.join().expect("runner release acquisition panicked"));
+        (result, acquisition)
+    })
 }
 
 fn run_controller_mutation_after_runner_preflight<T>(
@@ -1274,7 +1290,6 @@ fn runner_preflight_failure_result(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
         operation_id: None,
-        phases: serde_json::json!({}),
     }
 }
 
@@ -1325,7 +1340,6 @@ fn extension_preflight_failure_result(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
         operation_id: None,
-        phases: serde_json::json!({}),
     }
 }
 
@@ -1718,7 +1732,6 @@ fn run_targeted_runner_upgrade(
             runner_targets,
             &installed_extension_catalog(),
             None,
-            &[],
         )
     })?;
 
@@ -1782,7 +1795,6 @@ fn run_targeted_runner_upgrade(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
         operation_id: None,
-        phases: serde_json::json!({}),
     })
 }
 
@@ -2614,8 +2626,6 @@ fn complete_upgrade_operation(
     mut result: UpgradeResult,
 ) -> Result<UpgradeResult> {
     split_deferred_runners(&mut result);
-    operation.record_runner_phases(&result.runners_updated);
-    operation.record_runner_phases(&result.runners_skipped);
     let operation_id = operation.id().map(str::to_string);
     result.operation_id = operation_id.clone();
     if let Err(mut error) = operation.finish_completed_durable(&result) {
@@ -2624,7 +2634,6 @@ fn complete_upgrade_operation(
         }
         return Err(error);
     }
-    result.phases = operation.phases();
     Ok(result)
 }
 
@@ -2635,8 +2644,6 @@ fn finish_completed_under_selection(
 ) -> Result<()> {
     let mut result = result.clone();
     split_deferred_runners(&mut result);
-    operation.record_runner_phases(&result.runners_updated);
-    operation.record_runner_phases(&result.runners_skipped);
     let result = &result;
     let terminal = match operation.finish_completed_durable(result) {
         Ok(()) => Ok(()),
@@ -3810,37 +3817,6 @@ mod runner_source_upgrade_tests {
     }
 
     #[test]
-    fn runner_acquisition_precedes_install_but_promotion_follows_controller_verification() {
-        // Guard the orchestration boundaries, not thread scheduling: the scoped
-        // acquisition job must exist before execute_upgrade can block on install.
-        let source = include_str!("helpers.rs");
-        let controller = source
-            .split("fn run_controller_upgrade_with_operation(")
-            .nth(1)
-            .unwrap()
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
-        let acquire = controller.find("provider.acquire_runner_release(").unwrap();
-        let install = controller.find("execute_upgrade(").unwrap();
-        let verified = controller
-            .find("operation.mark_controller_promoted_durable(")
-            .unwrap();
-        let runner_refresh = controller
-            .rfind("p.upgrade_configured_runners_with_explicit_source_path(")
-            .unwrap();
-        let join = controller.rfind("job.join()").unwrap();
-        assert!(
-            acquire < install,
-            "acquisition must launch before controller install"
-        );
-        assert!(
-            install < verified && verified < join && join < runner_refresh,
-            "runner promotion must consume acquisition only after controller verification"
-        );
-    }
-
-    #[test]
     fn changed_runner_compatibility_revalidation_precedes_controller_mutation() {
         let events = RefCell::new(Vec::new());
         let changed_manifest_requires_homeboy = ">=3.0.0";
@@ -3858,7 +3834,6 @@ mod runner_source_upgrade_tests {
                         != "incompatible";
                 Ok((!compatible)
                     .then(|| RunnerUpgradeEntry {
-                        phases: serde_json::json!({}),
                         runner_id: "lab-a".to_string(),
                         homeboy_path: "homeboy".to_string(),
                         success: false,
@@ -4845,7 +4820,6 @@ mod convergence_tests {
 
     fn runner(previous: &str, current: &str, upgraded: bool) -> RunnerUpgradeEntry {
         RunnerUpgradeEntry {
-            phases: serde_json::json!({}),
             runner_id: "lab".to_string(),
             homeboy_path: "/opt/homeboy/homeboy".to_string(),
             success: true,
@@ -4924,7 +4898,6 @@ mod convergence_tests {
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),
             operation_id: None,
-            phases: serde_json::json!({}),
         };
 
         invalidate_superseded_evidence(&mut result);
@@ -5005,6 +4978,36 @@ mod convergence_tests {
             None
         )
         .starts_with("PARTIAL: controller upgraded to 0.304.0"));
+    }
+
+    #[test]
+    fn runner_release_acquisition_overlaps_the_controller_install() {
+        // Each side waits for the other to start, so either serial order times out.
+        let wait = std::time::Duration::from_secs(10);
+        let (acquiring, acquisition_started) = std::sync::mpsc::channel();
+        let (installing, install_started) = std::sync::mpsc::channel();
+        let (result, acquisition) = overlap_runner_release_acquisition(
+            Some("v1.2.3"),
+            move |tag| {
+                acquiring.send(tag.to_string()).unwrap();
+                install_started
+                    .recv_timeout(wait)
+                    .expect("install runs alongside");
+                Err(homeboy_core::Error::internal_unexpected("download failed"))
+            },
+            || {
+                installing.send(()).unwrap();
+                acquisition_started.recv_timeout(wait)
+            },
+        );
+        assert_eq!(result.expect("acquisition runs alongside"), "v1.2.3");
+        let (started_at, _, error) = acquisition.expect("acquisition ran");
+        assert!(started_at > 0);
+        assert!(error.unwrap().contains("download failed"));
+
+        let (_, skipped) =
+            overlap_runner_release_acquisition(None, |_| unreachable!("no release"), || ());
+        assert!(skipped.is_none());
     }
 
     #[test]

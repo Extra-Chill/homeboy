@@ -497,7 +497,6 @@ mod tests {
 
     fn converged_entry(runner_id: &str, version: &str) -> RunnerUpgradeEntry {
         RunnerUpgradeEntry {
-            phases: serde_json::json!({}),
             runner_id: runner_id.to_string(),
             homeboy_path: "/home/u/Developer/_homeboy_binaries/homeboy-new/homeboy".to_string(),
             success: true,

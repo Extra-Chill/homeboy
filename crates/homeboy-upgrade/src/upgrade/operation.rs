@@ -190,14 +190,19 @@ impl UpgradeOperation {
         Ok(operation)
     }
 
-    pub fn record_runner_phases(&mut self, entries: &[super::types::RunnerUpgradeEntry]) {
-        for entry in entries {
-            self.metadata["phases"][format!("runner:{}", entry.runner_id)] = entry.phases.clone();
+    /// Record a phase that ran concurrently with the sequential phases.
+    pub fn record_concurrent_phase(
+        &mut self,
+        phase: &str,
+        started_at: u64,
+        duration_ms: u64,
+        error: Option<String>,
+    ) {
+        self.metadata["phases"][phase] =
+            json!({"started_at": started_at, "duration_ms": duration_ms});
+        if let Some(error) = error {
+            self.metadata["phases"][phase]["error"] = json!(error);
         }
-    }
-
-    pub fn phases(&self) -> Value {
-        self.metadata["phases"].clone()
     }
 
     pub fn id(&self) -> Option<&str> {
@@ -310,7 +315,7 @@ impl UpgradeOperation {
     }
 
     fn transition_phase(&mut self, phase: &str) {
-        let now = phase_timestamp_ms();
+        let now = homeboy_core::daemon::workflow_cadence::now_ms();
         if self.timed_phase == phase {
             return;
         }
@@ -433,9 +438,6 @@ impl UpgradeOperation {
     }
 
     pub fn finish_completed_durable(&mut self, result: &UpgradeResult) -> Result<()> {
-        if self.finished {
-            return Ok(());
-        }
         if let Some(metadata) = self.metadata.as_object_mut() {
             metadata.remove("promotion_wait");
         }
@@ -456,7 +458,6 @@ impl UpgradeOperation {
         // a post-swap runner verification failure after the caller has exited.
         self.transition_phase("completed");
         self.metadata["result"] = json!(result);
-        self.metadata["result"]["phases"] = self.metadata["phases"].clone();
         if let Some(failure) = failure_from_result(result, self.started.elapsed().as_secs()) {
             self.metadata["failure"] = json!(failure);
         }
@@ -671,18 +672,11 @@ impl UpgradeOperation {
     }
 }
 
-fn phase_timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_millis() as u64
-}
-
 fn initial_metadata() -> Value {
     json!({
         "schema": UPGRADE_OPERATION_SCHEMA,
         "phase": "admitted",
-        "phases": {"admitted": {"started_at": phase_timestamp_ms()}},
+        "phases": {"admitted": {"started_at": homeboy_core::daemon::workflow_cadence::now_ms()}},
         "elapsed_seconds": 0,
         "controller": component("pending", "controller mutation has not started"),
         "extensions": component("pending", "extension refresh has not started"),
@@ -1471,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_timings_survive_completion_in_metadata_status_and_result() {
+    fn phase_timings_survive_completion_in_metadata_and_status() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut operation = UpgradeOperation::start("homeboy upgrade");
             let id = operation.id().unwrap().to_string();
@@ -1503,7 +1497,6 @@ mod tests {
             ] {
                 assert!(phases[phase]["started_at"].as_u64().unwrap() > 0);
                 assert!(phases[phase]["duration_ms"].is_u64());
-                assert_eq!(run.metadata_json["result"]["phases"][phase], phases[phase]);
             }
             assert_eq!(
                 load_upgrade_operation_status(Some(&id)).unwrap().phases,
@@ -1921,7 +1914,6 @@ mod tests {
                     summary: "0 converged, 1 require repair".to_string(),
                 });
                 result.runners_skipped.push(super::super::types::RunnerUpgradeEntry {
-                    phases: serde_json::json!({}),
                     runner_id: "lab".to_string(),
                     homeboy_path: "/opt/homeboy".to_string(),
                     success: false,
@@ -2665,7 +2657,6 @@ mod tests {
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),
             operation_id: None,
-            phases: json!({}),
         }
     }
 }

@@ -242,9 +242,6 @@ pub struct UpgradeResult {
     /// `homeboy upgrade status <id>` after a client timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
-    /// Phase names mapped to Unix-epoch `started_at` milliseconds and
-    /// monotonic `duration_ms`; runner sub-phases are nested under `runner:<id>`.
-    pub phases: serde_json::Value,
 }
 
 impl UpgradeResult {
@@ -383,8 +380,6 @@ pub struct ExtensionUpgradeEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerUpgradeEntry {
-    /// Binary acquisition, extension sync, and verification phase timings.
-    pub phases: serde_json::Value,
     pub runner_id: String,
     pub homeboy_path: String,
     pub success: bool,
@@ -444,7 +439,7 @@ mod tests {
 
     #[test]
     fn exit_code_rejects_every_reported_failure() {
-        let baseline: UpgradeResult = serde_json::from_str(r#"{"command":"upgrade","install_method":"binary","previous_version":"1","new_version":"2","upgraded":true,"message":"ok","restart_required":false,"phases":{}}"#).unwrap();
+        let baseline: UpgradeResult = serde_json::from_str(r#"{"command":"upgrade","install_method":"binary","previous_version":"1","new_version":"2","upgraded":true,"message":"ok","restart_required":false}"#).unwrap();
         assert_eq!(baseline.exit_code(), 0);
         for status in [
             "failed",
@@ -476,11 +471,11 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_response_exposes_phase_timings() {
+    fn upgrade_response_without_new_fields_remains_deserializable() {
         let result: UpgradeResult = serde_json::from_str(
-            r#"{"command":"upgrade","install_method":"binary","previous_version":"0.301.2","new_version":"0.304.0","upgraded":true,"message":"ok","restart_required":false,"phases":{}}"#,
+            r#"{"command":"upgrade","install_method":"binary","previous_version":"0.301.2","new_version":"0.304.0","upgraded":true,"message":"ok","restart_required":false}"#,
         )
-        .expect("current upgrade response remains readable");
+        .expect("pre-convergence response remains readable");
 
         assert!(!result.partial);
         assert!(result.runners_updated.is_empty());
@@ -528,7 +523,6 @@ mod tests {
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),
             operation_id: None,
-            phases: serde_json::json!({}),
         };
 
         let json = serde_json::to_value(&result).expect("upgrade result serializes");

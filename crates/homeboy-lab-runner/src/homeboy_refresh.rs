@@ -3369,11 +3369,21 @@ if [ -n "$release_tag" ]; then
   fi
   echo "HOMEBOY_REFRESH_SOURCE_SHA=$target"
   printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"build"}'
-  release_stage=$(mktemp -d "$(dirname "$dir")/.stage-XXXXXX")
-  trap cleanup_release_stage EXIT HUP INT TERM
-  HOMEBOY_INSTALL_STAGE_ONLY=1 HOMEBOY_INSTALL_PATH="$release_stage/homeboy" HOMEBOY_UPGRADE_RELEASE_TAG="$release_tag" HOMEBOY_UPGRADE_RELEASE_VERSION="${release_tag#v}" sh -c "$homeboy_installer"
-  binary="$release_stage/homeboy"
-  echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release:$release_tag"
+  # A tag already acquired here (e.g. by the upgrade's early acquisition)
+  # resolves to its content-addressed slot once the slot's hash re-verifies.
+  release_marker="$(dirname "$dir")/.release-$release_tag.sha256"
+  cached_sha=$(cat "$release_marker" 2>/dev/null || true)
+  cached_binary="$(dirname "$dir")/homeboy-$cached_sha/homeboy"
+  if [ -n "$cached_sha" ] && [ -x "$cached_binary" ] && [ "$(hash_binary "$cached_binary")" = "$cached_sha" ]; then
+    binary="$cached_binary"
+    echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release-cache:$release_tag"
+  else
+    release_stage=$(mktemp -d "$(dirname "$dir")/.stage-XXXXXX")
+    trap cleanup_release_stage EXIT HUP INT TERM
+    HOMEBOY_INSTALL_STAGE_ONLY=1 HOMEBOY_INSTALL_PATH="$release_stage/homeboy" HOMEBOY_UPGRADE_RELEASE_TAG="$release_tag" HOMEBOY_UPGRADE_RELEASE_VERSION="${release_tag#v}" sh -c "$homeboy_installer"
+    binary="$release_stage/homeboy"
+    echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release:$release_tag"
+  fi
 else
   checkout_existed=false
   if [ -d "$dir/.git" ]; then
@@ -3448,6 +3458,11 @@ else
   trap - EXIT HUP INT TERM
 fi
 cleanup_release_stage
+if [ -n "$release_tag" ]; then
+  staged_marker=$(mktemp "$(dirname "$dir")/.release-marker.XXXXXX")
+  printf '%s' "$binary_sha" > "$staged_marker"
+  mv -f "$staged_marker" "$release_marker"
+fi
 echo "HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha"
 echo "HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary"
 echo "HOMEBOY_REFRESH_HISTORY_REPOSITORY=$cache"
@@ -3468,12 +3483,13 @@ trap - EXIT HUP INT TERM
 printf '%s\n' "$identity"
 "#;
 
-pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<String> {
+/// Acquire `tag` into the runner's content-addressed binary slot without
+/// selecting it. A later refresh of the same release reuses the slot.
+pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<()> {
     let runner = load(runner_id)?;
-    let root = runner
-        .workspace_root
-        .as_deref()
-        .ok_or_else(|| Error::internal_unexpected("runner acquisition requires workspace_root"))?;
+    let root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::internal_unexpected(format!("runner {runner_id} has no workspace_root"))
+    })?;
     let dir = default_target_dir(root, tag);
     let script = materialize_script(
         DEFAULT_HOMEBOY_REMOTE,
@@ -3486,15 +3502,11 @@ pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<String>
     let (output, code) = super::exec(runner_id, RunnerExecOptions::diagnostic_raw_shell(script))?;
     if code != 0 {
         return Err(Error::internal_unexpected(format!(
-            "runner release acquisition failed: {runner_id}"
+            "runner {runner_id} release acquisition exited {code}: {}",
+            output.stderr.trim()
         )));
     }
-    output
-        .stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("HOMEBOY_REFRESH_BINARY_PATH="))
-        .map(str::to_string)
-        .ok_or_else(|| Error::internal_unexpected("runner acquisition returned no immutable path"))
+    Ok(())
 }
 
 fn materialize_script(

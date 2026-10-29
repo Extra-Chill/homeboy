@@ -43,9 +43,7 @@ pub use runner_admission_provider::{
     RunnerDirectActiveJobsProvider,
 };
 pub(crate) use runner_upgrade_provider::with_runner_upgrade;
-pub use runner_upgrade_provider::{
-    register_runner_upgrade_provider, AcquiredRunnerRelease, RunnerUpgradeProvider,
-};
+pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgradeProvider};
 pub use services::restart_extension_services;
 pub use types::{
     ExtensionPreflightBlocker, ExtensionUpgradeEntry, ExtensionUpgradeSkip, InstallMethod,

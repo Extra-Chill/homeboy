@@ -13,14 +13,6 @@ use std::path::Path;
 use crate::upgrade::{ExtensionUpgradeEntry, InstallMethod, RunnerCheckEntry, RunnerUpgradeEntry};
 use homeboy_core::error::Result;
 
-#[derive(Debug)]
-pub struct AcquiredRunnerRelease {
-    pub runner_id: String,
-    pub binary_path: String,
-    pub started_at: u64,
-    pub duration_ms: u64,
-}
-
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
 /// the runner layer and registered at startup.
 pub trait RunnerUpgradeProvider: Send + Sync {
@@ -38,13 +30,10 @@ pub trait RunnerUpgradeProvider: Send + Sync {
         candidate_version: &str,
     ) -> Result<Vec<RunnerUpgradeEntry>>;
 
-    /// Acquire immutable release slots without changing any active runner binary.
-    fn acquire_runner_release(
-        &self,
-        _tag: &str,
-        _targets: &[String],
-    ) -> Result<Vec<AcquiredRunnerRelease>> {
-        Ok(Vec::new())
+    /// Acquire `tag` into each managed runner's immutable binary slot without
+    /// selecting it, so the later runner refresh reuses the acquired slot.
+    fn acquire_runner_release(&self, _tag: &str, _runner_targets: &[String]) -> Result<()> {
+        Ok(())
     }
 
     /// Upgrade the configured runners from an explicit source checkout,
@@ -60,7 +49,6 @@ pub trait RunnerUpgradeProvider: Send + Sync {
         runner_targets: &[String],
         extension_updates: &[ExtensionUpgradeEntry],
         promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
-        acquired: &[AcquiredRunnerRelease],
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)>;
 
     /// A short build-identity string for a source checkout (commit + dirty
@@ -105,7 +93,6 @@ impl RunnerUpgradeProvider for NoopRunnerUpgradeProvider {
         _runner_targets: &[String],
         _extension_updates: &[ExtensionUpgradeEntry],
         _promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
-        _acquired: &[AcquiredRunnerRelease],
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
         Ok((Vec::new(), Vec::new()))
     }

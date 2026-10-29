@@ -1060,7 +1060,6 @@ pub fn upgrade_runner_with_executor(
             expected_controller_identity,
             extension_updates,
             exec,
-            None,
         );
     }
     let expected_build_identity = expected_controller_identity
@@ -1102,11 +1101,6 @@ pub fn upgrade_runner_with_executor(
             err,
         );
     }
-    let binary_started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_millis() as u64;
-    let binary_started = std::time::Instant::now();
     let mut upgrade_homeboy_path = original_homeboy_path.clone();
     let mut path_update_detail = None;
     let upgrade = exec(
@@ -1178,12 +1172,6 @@ pub fn upgrade_runner_with_executor(
         }
     };
 
-    let binary_duration = binary_started.elapsed().as_millis() as u64;
-    let verify_started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_millis() as u64;
-    let verify_started = std::time::Instant::now();
     let mut homeboy_path = upgrade_homeboy_path.clone();
     let mut new_version = runner_homeboy_version(runner, &upgrade_homeboy_path, exec)
         .ok()
@@ -1280,11 +1268,6 @@ pub fn upgrade_runner_with_executor(
     if path_drift.is_none() {
         path_drift = source_identity_drift.clone();
     }
-    let extension_started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_millis() as u64;
-    let extension_started = std::time::Instant::now();
     let (extensions_synced, mut extensions_skipped, mut extensions_failed) =
         if let Some(drift) = path_drift.as_deref() {
             (
@@ -1295,7 +1278,6 @@ pub fn upgrade_runner_with_executor(
         } else {
             sync_runner_extensions(runner, &homeboy_path, extension_updates, exec)
         };
-    let extension_duration = extension_started.elapsed().as_millis() as u64;
     if path_drift.is_some() && is_auto_realignable_homeboy_path(&homeboy_path) {
         let refreshed_bare_homeboy_version =
             runner_bare_homeboy_version(runner, &homeboy_path, exec);
@@ -1469,11 +1451,6 @@ pub fn upgrade_runner_with_executor(
     );
 
     RunnerUpgradeEntry {
-        phases: serde_json::json!({
-            "binary": {"started_at": binary_started_at, "duration_ms": binary_duration},
-            "extensions": {"started_at": extension_started_at, "duration_ms": extension_duration},
-            "verify": {"started_at": verify_started_at, "duration_ms": (verify_started.elapsed().as_millis() as u64).saturating_sub(extension_duration)},
-        }),
         runner_id: runner.id.clone(),
         homeboy_path,
         success,
@@ -1496,7 +1473,7 @@ pub fn upgrade_runner_with_executor(
     }
 }
 
-pub(super) fn refresh_managed_immutable_runner(
+fn refresh_managed_immutable_runner(
     runner: &Runner,
     previous_homeboy_path: String,
     previous_version: Option<String>,
@@ -1504,7 +1481,6 @@ pub(super) fn refresh_managed_immutable_runner(
     expected_controller_identity: Option<&str>,
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-    acquired: Option<&str>,
 ) -> RunnerUpgradeEntry {
     let Some(controller_commit) = managed_immutable_runner_target_revision(
         selected_source_revision,
@@ -1523,27 +1499,9 @@ pub(super) fn refresh_managed_immutable_runner(
         &runner.id,
         Some(&controller_commit),
     );
-    if let Some(path) = acquired {
-        if let Some(drift) =
-            runner_build_identity_drift(runner, path, expected_controller_identity, exec)
-        {
-            return managed_immutable_runner_failure_entry(
-                &runner.id,
-                previous_homeboy_path,
-                previous_version,
-                Some(&controller_commit),
-                1,
-                drift,
-            );
-        }
-    }
     let options = crate::HomeboyBinaryRefreshOptions {
         runner_id: runner.id.clone(),
-        mode: acquired.map_or(crate::HomeboyBinaryRefreshMode::Materialize, |path| {
-            crate::HomeboyBinaryRefreshMode::Select {
-                binary_path: path.to_string(),
-            }
-        }),
+        mode: crate::HomeboyBinaryRefreshMode::Materialize,
         source: None,
         git_ref: Some(controller_commit.clone()),
         target_dir: None,
@@ -1552,11 +1510,6 @@ pub(super) fn refresh_managed_immutable_runner(
         allow_downgrade: false,
         dry_run: false,
     };
-    let verify_started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_millis() as u64;
-    let verify_started = std::time::Instant::now();
     let (refreshed, exit_code) = match crate::refresh_homeboy_binary(options) {
         Ok(result) => result,
         Err(error) => {
@@ -1580,7 +1533,6 @@ pub(super) fn refresh_managed_immutable_runner(
         refreshed.failure.is_some(),
     ) {
         return RunnerUpgradeEntry {
-            phases: serde_json::json!({}),
             runner_id: runner.id.clone(),
             homeboy_path: refreshed.selected_binary_path,
             success: false,
@@ -1632,12 +1584,6 @@ pub(super) fn refresh_managed_immutable_runner(
                 .ok()
                 .flatten()
         });
-    let verify_duration = verify_started.elapsed().as_millis() as u64;
-    let extension_started_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_millis() as u64;
-    let extension_started = std::time::Instant::now();
     let (extensions_synced, extensions_skipped, extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
     let admission_ready = managed_immutable_admission_ready(&reconciled);
@@ -1647,10 +1593,6 @@ pub(super) fn refresh_managed_immutable_runner(
         && stale_daemon.is_none()
         && extensions_failed.is_empty();
     RunnerUpgradeEntry {
-        phases: serde_json::json!({
-            "verify": {"started_at": verify_started_at, "duration_ms": verify_duration},
-            "extensions": {"started_at": extension_started_at, "duration_ms": extension_started.elapsed().as_millis() as u64},
-        }),
         runner_id: runner.id.clone(),
         homeboy_path: homeboy_path.clone(),
         success,
@@ -1728,7 +1670,6 @@ fn managed_immutable_runner_failure_entry(
     detail: String,
 ) -> RunnerUpgradeEntry {
     RunnerUpgradeEntry {
-        phases: serde_json::json!({}),
         runner_id: runner_id.to_string(),
         homeboy_path,
         success: false,
