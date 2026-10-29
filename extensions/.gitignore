@@ -3,3 +3,4 @@
 .claude/CLAUDE.local.md
 rust/dist-manifest.json
 wordpress/vendor/
+rust/tests/fixtures/*/target/
