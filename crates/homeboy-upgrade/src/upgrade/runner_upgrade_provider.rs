@@ -30,6 +30,12 @@ pub trait RunnerUpgradeProvider: Send + Sync {
         candidate_version: &str,
     ) -> Result<Vec<RunnerUpgradeEntry>>;
 
+    /// Acquire `tag` into each managed runner's immutable binary slot without
+    /// selecting it, so the later runner refresh reuses the acquired slot.
+    fn acquire_runner_release(&self, _tag: &str, _runner_targets: &[String]) -> Result<()> {
+        Ok(())
+    }
+
     /// Upgrade the configured runners from an explicit source checkout,
     /// returning `(upgraded, skipped)` entries.
     #[allow(clippy::too_many_arguments)]

@@ -33,6 +33,7 @@ pub struct UpgradeOperationStatus {
     pub status: String,
     pub phase: String,
     pub elapsed_seconds: u64,
+    pub phases: Value,
     /// True when the durable terminal operation did not satisfy every required
     /// upgrade postcondition. This is independent from the controller swap.
     pub failed: bool,
@@ -97,6 +98,8 @@ pub struct UpgradeOperation {
     observation: Option<ActiveObservation>,
     metadata: Value,
     started: Instant,
+    timed_phase: String,
+    phase_started: Instant,
     finished: bool,
     pending_terminal: Option<TerminalIntent>,
     controller_promoted: bool,
@@ -134,6 +137,8 @@ impl UpgradeOperation {
             observation,
             metadata,
             started: Instant::now(),
+            timed_phase: "admitted".to_string(),
+            phase_started: Instant::now(),
             finished: false,
             pending_terminal: None,
             controller_promoted: false,
@@ -163,6 +168,8 @@ impl UpgradeOperation {
             observation: Some(observation),
             metadata,
             started: Instant::now(),
+            timed_phase: "admitted".to_string(),
+            phase_started: Instant::now(),
             finished: false,
             pending_terminal: None,
             controller_promoted: false,
@@ -181,6 +188,21 @@ impl UpgradeOperation {
             operation.id().expect("durable operation has an id")
         ));
         Ok(operation)
+    }
+
+    /// Record a phase that ran concurrently with the sequential phases.
+    pub fn record_concurrent_phase(
+        &mut self,
+        phase: &str,
+        started_at: u64,
+        duration_ms: u64,
+        error: Option<String>,
+    ) {
+        self.metadata["phases"][phase] =
+            json!({"started_at": started_at, "duration_ms": duration_ms});
+        if let Some(error) = error {
+            self.metadata["phases"][phase]["error"] = json!(error);
+        }
     }
 
     pub fn id(&self) -> Option<&str> {
@@ -241,8 +263,10 @@ impl UpgradeOperation {
         }
         Ok(Some(Self {
             observation: Some(observation),
+            timed_phase: metadata["phase"].as_str().unwrap_or("admitted").to_string(),
             metadata,
             started: Instant::now(),
+            phase_started: Instant::now(),
             finished: false,
             pending_terminal: None,
             controller_promoted: false,
@@ -276,7 +300,7 @@ impl UpgradeOperation {
 
     pub fn set_phase_durable(&mut self, phase: &str) -> Result<()> {
         emit_upgrade_phase(phase);
-        self.metadata["phase"] = json!(phase);
+        self.transition_phase(phase);
         match phase {
             "refreshing installed extensions" => {
                 self.metadata["extensions"] = component("running", "extension refresh in progress");
@@ -288,6 +312,24 @@ impl UpgradeOperation {
         }
         self.metadata["elapsed_seconds"] = json!(self.started.elapsed().as_secs());
         self.persist_durable()
+    }
+
+    fn transition_phase(&mut self, phase: &str) {
+        let now = homeboy_core::daemon::workflow_cadence::now_ms();
+        if self.timed_phase == phase {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.timed_phase, phase.to_string());
+        let elapsed = self.phase_started.elapsed().as_millis() as u64;
+        self.phase_started = Instant::now();
+        let duration = self.metadata["phases"][&previous]["duration_ms"]
+            .as_u64()
+            .unwrap_or(0);
+        self.metadata["phases"][&previous]["duration_ms"] = json!(duration + elapsed);
+        if self.metadata["phases"][phase].is_null() {
+            self.metadata["phases"][phase] = json!({"started_at": now});
+        }
+        self.metadata["phase"] = json!(phase);
     }
 
     pub fn record_promotion_wait(
@@ -383,6 +425,9 @@ impl UpgradeOperation {
     }
 
     pub fn mark_extensions_durable(&mut self, status: &str, summary: &str) -> Result<()> {
+        if self.metadata["phase"] == "refreshing installed extensions" {
+            self.transition_phase("extensions_refreshed");
+        }
         self.metadata["extensions"] = component(status, summary);
         self.persist_durable()
     }
@@ -411,6 +456,7 @@ impl UpgradeOperation {
         // The component summaries are intentionally compact. Keep the complete
         // result with the operation so a later status lookup can still explain
         // a post-swap runner verification failure after the caller has exited.
+        self.transition_phase("completed");
         self.metadata["result"] = json!(result);
         if let Some(failure) = failure_from_result(result, self.started.elapsed().as_secs()) {
             self.metadata["failure"] = json!(failure);
@@ -429,7 +475,7 @@ impl UpgradeOperation {
         if let Some(metadata) = self.metadata.as_object_mut() {
             metadata.remove("promotion_wait");
         }
-        self.metadata["phase"] = json!("failed");
+        self.transition_phase("failed");
         self.metadata["error"] = json!({
             "code": format!("{:?}", error.code),
             "message": error.message,
@@ -630,6 +676,7 @@ fn initial_metadata() -> Value {
     json!({
         "schema": UPGRADE_OPERATION_SCHEMA,
         "phase": "admitted",
+        "phases": {"admitted": {"started_at": homeboy_core::daemon::workflow_cadence::now_ms()}},
         "elapsed_seconds": 0,
         "controller": component("pending", "controller mutation has not started"),
         "extensions": component("pending", "extension refresh has not started"),
@@ -1045,6 +1092,7 @@ fn status_from_run(run: &RunRecord) -> Result<UpgradeOperationStatus> {
             .get("elapsed_seconds")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        phases: metadata["phases"].clone(),
         failed: matches!(run.status.as_str(), "fail" | "error"),
         controller: component_from_metadata(&metadata, "controller"),
         extensions: component_from_metadata(&metadata, "extensions"),
@@ -1414,6 +1462,47 @@ mod tests {
         );
 
         assert!(heartbeat_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn phase_timings_survive_completion_in_metadata_and_status() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().unwrap().to_string();
+            operation.set_phase_durable("draining_controller").unwrap();
+            operation
+                .set_phase_durable("installing_controller")
+                .unwrap();
+            operation.set_phase_durable("verifying_install").unwrap();
+            operation
+                .set_phase_durable("refreshing installed extensions")
+                .unwrap();
+            operation
+                .mark_extensions_durable("updated", "done")
+                .unwrap();
+            operation
+                .finish_completed_durable(&completed_upgrade_result())
+                .unwrap();
+            let run = ObservationStore::open_initialized()
+                .unwrap()
+                .get_run(&id)
+                .unwrap()
+                .unwrap();
+            let phases = &run.metadata_json["phases"];
+            for phase in [
+                "draining_controller",
+                "installing_controller",
+                "verifying_install",
+                "refreshing installed extensions",
+            ] {
+                assert!(phases[phase]["started_at"].as_u64().unwrap() > 0);
+                assert!(phases[phase]["duration_ms"].is_u64());
+            }
+            assert_eq!(
+                load_upgrade_operation_status(Some(&id)).unwrap().phases,
+                *phases
+            );
+        });
     }
 
     #[test]

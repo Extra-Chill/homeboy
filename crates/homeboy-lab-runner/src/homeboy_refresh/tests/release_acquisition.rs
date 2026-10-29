@@ -369,6 +369,57 @@ fn release_acquisition_publishes_a_verified_slot_without_a_git_checkout() {
     );
 }
 
+#[test]
+fn acquired_release_tag_reuses_its_verified_slot_without_downloading() {
+    let Some(triple) = host_release_triple() else {
+        return;
+    };
+    let fixture = release_fixture();
+    publish_release_archive(&fixture, triple, ReleaseArchive::Valid);
+    let root = binaries_root(&fixture);
+    let dir = root.join(format!("homeboy-{RELEASE_TAG}"));
+    // A marker naming a slot that does not verify is ignored.
+    fs::write(
+        root.join(format!(".release-{RELEASE_TAG}.sha256")),
+        "0".repeat(64),
+    )
+    .unwrap();
+
+    let first = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first = String::from_utf8(first.stdout).unwrap();
+    assert!(
+        first.contains(&format!(
+            "HOMEBOY_REFRESH_BINARY_ORIGIN=release:{RELEASE_TAG}\n"
+        )),
+        "{first}"
+    );
+
+    // The release asset is gone: only the recorded, re-verified slot can satisfy this.
+    fs::remove_dir_all(fixture.releases.join(RELEASE_TAG)).unwrap();
+    let second = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second = String::from_utf8(second.stdout).unwrap();
+    assert!(
+        second.contains(&format!(
+            "HOMEBOY_REFRESH_BINARY_ORIGIN=release-cache:{RELEASE_TAG}\n"
+        )),
+        "{second}"
+    );
+    assert_eq!(
+        refreshed_binary_path(&ssh_bootstrap_plan(), &first).expect("first slot"),
+        refreshed_binary_path(&ssh_bootstrap_plan(), &second).expect("reused slot")
+    );
+}
+
 fn assert_release_archive_rejected(kind: ReleaseArchive, expected: &str) {
     let Some(triple) = host_release_triple() else {
         return;

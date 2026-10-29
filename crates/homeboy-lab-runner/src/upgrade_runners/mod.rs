@@ -70,6 +70,29 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
         )
     }
 
+    fn acquire_runner_release(&self, tag: &str, runner_targets: &[String]) -> Result<()> {
+        let runners: Vec<_> = runner_upgrade_targets(runner_targets)?
+            .into_iter()
+            .filter(|runner| {
+                runner
+                    .settings
+                    .homeboy_path
+                    .as_deref()
+                    .is_some_and(|path| is_managed_immutable_homeboy_path(runner, path))
+            })
+            .collect();
+        std::thread::scope(|scope| {
+            runners
+                .iter()
+                .map(|runner| {
+                    scope.spawn(|| crate::homeboy_refresh::acquire_release_slot(&runner.id, tag))
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .try_for_each(|job| job.join().expect("runner release acquisition panicked"))
+        })
+    }
+
     fn upgrade_configured_runners_with_explicit_source_path(
         &self,
         force: bool,

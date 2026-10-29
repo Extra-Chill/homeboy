@@ -755,132 +755,156 @@ fn run_controller_upgrade_with_operation(
         return Ok(result);
     }
     operation.set_phase_durable("mutating controller")?;
-    let controller_upgrade = run_controller_mutation_after_runner_preflight(
-        runner_preflight,
-        || {
-            controller_mutation_lease.assert_generation()?;
-            if skip_runners {
-                Ok(Vec::new())
-            } else {
-                super::with_runner_upgrade(|provider| {
-                    provider.preflight_configured_runners_for_upgrade(
-                        runner_method_override,
-                        source_upgrade_path.as_deref(),
-                        source_upgrade_path.is_some(),
-                        runner_targets,
-                        &candidate_version,
-                    )
-                })
-            }
+    let runner_release = selected_release
+        .as_ref()
+        .filter(|_| !skip_runners)
+        .map(|release| release.tag.as_str());
+    let (controller_upgrade, runner_acquisition) = overlap_runner_release_acquisition(
+        runner_release,
+        |tag| {
+            super::with_runner_upgrade(|provider| {
+                provider.acquire_runner_release(tag, runner_targets)
+            })
         },
         || {
-            if matches!(install_method, InstallMethod::Homebrew) && !deliberate {
-                let completion = reconcile_controller_identity(
-                    observed_installed_controller_identity()?,
-                    previous_build_identity.as_deref(),
-                    Some(previous_version.as_str()),
-                )?;
-                if completion.superseded {
-                    return Ok((
-                        false,
-                        completion.version,
-                        completion.build_identity,
-                        None,
-                        true,
-                    ));
-                }
-            }
-            let operation_id = operation
-                .id()
-                .expect("controller upgrades require a durable operation")
-                .to_string();
-            let lease_heartbeat_failure = std::sync::Mutex::new(None);
-            let progress_heartbeat_failure = std::sync::Mutex::new(None);
-            let phase_sync = std::sync::Mutex::new(());
-            let execution_started = std::time::Instant::now();
-            let result = run_with_upgrade_heartbeats(
-                UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
-                |elapsed| {
-                    let _phase = phase_sync.lock().expect("serialize upgrade progress");
-                    if let Err(error) = controller_mutation_lease.heartbeat() {
-                        let mut failure = lease_heartbeat_failure
-                            .lock()
-                            .expect("record lease heartbeat failure");
-                        if failure.is_none() {
-                            *failure = Some(error);
-                        }
-                    }
-                    if let Err(error) = persist_upgrade_heartbeat(&operation_id, elapsed) {
-                        let mut failure = progress_heartbeat_failure
-                            .lock()
-                            .expect("record progress heartbeat failure");
-                        if failure.is_none() {
-                            *failure = Some(error);
-                        }
+            run_controller_mutation_after_runner_preflight(
+                runner_preflight,
+                || {
+                    controller_mutation_lease.assert_generation()?;
+                    if skip_runners {
+                        Ok(Vec::new())
+                    } else {
+                        super::with_runner_upgrade(|provider| {
+                            provider.preflight_configured_runners_for_upgrade(
+                                runner_method_override,
+                                source_upgrade_path.as_deref(),
+                                source_upgrade_path.is_some(),
+                                runner_targets,
+                                &candidate_version,
+                            )
+                        })
                     }
                 },
                 || {
-                    let operation = std::cell::RefCell::new(&mut *operation);
-                    let mut report_phase = |phase: &str| {
-                        let _phase = phase_sync.lock().expect("serialize upgrade progress");
-                        let result = operation.borrow_mut().set_phase_durable(phase);
-                        if result.is_ok() {
-                            *progress_heartbeat_failure
-                                .lock()
-                                .expect("clear recovered progress heartbeat failure") = None;
+                    if matches!(install_method, InstallMethod::Homebrew) && !deliberate {
+                        let completion = reconcile_controller_identity(
+                            observed_installed_controller_identity()?,
+                            previous_build_identity.as_deref(),
+                            Some(previous_version.as_str()),
+                        )?;
+                        if completion.superseded {
+                            return Ok((
+                                false,
+                                completion.version,
+                                completion.build_identity,
+                                None,
+                                true,
+                            ));
                         }
-                        result
-                    };
-                    let mut replacement_checkpoint =
-                        |checkpoint: &super::execution::ReplacementCheckpoint| {
+                    }
+                    let operation_id = operation
+                        .id()
+                        .expect("controller upgrades require a durable operation")
+                        .to_string();
+                    let lease_heartbeat_failure = std::sync::Mutex::new(None);
+                    let progress_heartbeat_failure = std::sync::Mutex::new(None);
+                    let phase_sync = std::sync::Mutex::new(());
+                    let execution_started = std::time::Instant::now();
+                    let result = run_with_upgrade_heartbeats(
+                        UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
+                        |elapsed| {
                             let _phase = phase_sync.lock().expect("serialize upgrade progress");
-                            operation
-                                .borrow_mut()
-                                .record_replacement_checkpoint_durable(checkpoint)
-                        };
-                    if install_method == InstallMethod::Source {
-                        operation.borrow_mut().mark_controller_durable(
+                            if let Err(error) = controller_mutation_lease.heartbeat() {
+                                let mut failure = lease_heartbeat_failure
+                                    .lock()
+                                    .expect("record lease heartbeat failure");
+                                if failure.is_none() {
+                                    *failure = Some(error);
+                                }
+                            }
+                            if let Err(error) = persist_upgrade_heartbeat(&operation_id, elapsed) {
+                                let mut failure = progress_heartbeat_failure
+                                    .lock()
+                                    .expect("record progress heartbeat failure");
+                                if failure.is_none() {
+                                    *failure = Some(error);
+                                }
+                            }
+                        },
+                        || {
+                            let operation = std::cell::RefCell::new(&mut *operation);
+                            let mut report_phase = |phase: &str| {
+                                let _phase = phase_sync.lock().expect("serialize upgrade progress");
+                                let result = operation.borrow_mut().set_phase_durable(phase);
+                                if result.is_ok() {
+                                    *progress_heartbeat_failure
+                                        .lock()
+                                        .expect("clear recovered progress heartbeat failure") =
+                                        None;
+                                }
+                                result
+                            };
+                            let mut replacement_checkpoint =
+                                |checkpoint: &super::execution::ReplacementCheckpoint| {
+                                    let _phase =
+                                        phase_sync.lock().expect("serialize upgrade progress");
+                                    operation
+                                        .borrow_mut()
+                                        .record_replacement_checkpoint_durable(checkpoint)
+                                };
+                            if install_method == InstallMethod::Source {
+                                operation.borrow_mut().mark_controller_durable(
                             "candidate_building",
                             "source candidate build started; controller promotion not attempted",
                         )?;
+                            }
+                            execute_upgrade(
+                                install_method,
+                                source_upgrade_path.as_deref(),
+                                source_path.is_some(),
+                                force,
+                                deliberate,
+                                previous_build_identity.as_deref(),
+                                selected_release.as_ref(),
+                                Some(&controller_mutation_lease),
+                                &mut report_phase,
+                                &mut replacement_checkpoint,
+                            )
+                        },
+                    );
+                    controller_mutation_lease.assert_generation()?;
+                    *lease_heartbeat_failure
+                        .lock()
+                        .expect("clear recovered lease heartbeat failure") = None;
+                    persist_upgrade_heartbeat(&operation_id, execution_started.elapsed())?;
+                    *progress_heartbeat_failure
+                        .lock()
+                        .expect("clear recovered progress heartbeat failure") = None;
+                    if let Some(error) = lease_heartbeat_failure
+                        .into_inner()
+                        .expect("lease heartbeat failures are not poisoned")
+                    {
+                        return Err(error);
                     }
-                    execute_upgrade(
-                        install_method,
-                        source_upgrade_path.as_deref(),
-                        source_path.is_some(),
-                        force,
-                        deliberate,
-                        previous_build_identity.as_deref(),
-                        selected_release.as_ref(),
-                        Some(&controller_mutation_lease),
-                        &mut report_phase,
-                        &mut replacement_checkpoint,
-                    )
+                    if let Some(error) = progress_heartbeat_failure
+                        .into_inner()
+                        .expect("progress heartbeat failures are not poisoned")
+                    {
+                        return Err(error);
+                    }
+                    result
                 },
-            );
-            controller_mutation_lease.assert_generation()?;
-            *lease_heartbeat_failure
-                .lock()
-                .expect("clear recovered lease heartbeat failure") = None;
-            persist_upgrade_heartbeat(&operation_id, execution_started.elapsed())?;
-            *progress_heartbeat_failure
-                .lock()
-                .expect("clear recovered progress heartbeat failure") = None;
-            if let Some(error) = lease_heartbeat_failure
-                .into_inner()
-                .expect("lease heartbeat failures are not poisoned")
-            {
-                return Err(error);
-            }
-            if let Some(error) = progress_heartbeat_failure
-                .into_inner()
-                .expect("progress heartbeat failures are not poisoned")
-            {
-                return Err(error);
-            }
-            result
+            )
         },
     );
+    if let Some((started_at, duration_ms, error)) = runner_acquisition {
+        operation.record_concurrent_phase(
+            "acquiring runner release",
+            started_at,
+            duration_ms,
+            error,
+        );
+    }
     let controller_upgrade = match controller_upgrade {
         Ok(result) => result,
         Err(error) => {
@@ -1180,6 +1204,32 @@ fn source_upgrade_noop_result(
         services_pending_restart: Vec::new(),
         operation_id: None,
     }
+}
+
+/// Run `controller` while `acquire` fills runner release slots for `tag`.
+/// Acquisition only stages immutable runner slots, so it can download during
+/// the controller install; the later runner refresh reuses an acquired slot and
+/// downloads itself when acquisition failed. Returns the acquisition's
+/// `(started_at, duration_ms, error)` when one ran.
+fn overlap_runner_release_acquisition<T>(
+    tag: Option<&str>,
+    acquire: impl FnOnce(&str) -> Result<()> + Send,
+    controller: impl FnOnce() -> T,
+) -> (T, Option<(u64, u64, Option<String>)>) {
+    std::thread::scope(|scope| {
+        let acquisition = tag.map(|tag| {
+            scope.spawn(move || {
+                let started_at = homeboy_core::daemon::workflow_cadence::now_ms();
+                let clock = std::time::Instant::now();
+                let error = acquire(tag).err().map(|error| error.message);
+                (started_at, clock.elapsed().as_millis() as u64, error)
+            })
+        });
+        let result = controller();
+        let acquisition =
+            acquisition.map(|job| job.join().expect("runner release acquisition panicked"));
+        (result, acquisition)
+    })
 }
 
 fn run_controller_mutation_after_runner_preflight<T>(
@@ -4935,6 +4985,36 @@ mod convergence_tests {
             None
         )
         .starts_with("PARTIAL: controller upgraded to 0.304.0"));
+    }
+
+    #[test]
+    fn runner_release_acquisition_overlaps_the_controller_install() {
+        // Each side waits for the other to start, so either serial order times out.
+        let wait = std::time::Duration::from_secs(10);
+        let (acquiring, acquisition_started) = std::sync::mpsc::channel();
+        let (installing, install_started) = std::sync::mpsc::channel();
+        let (result, acquisition) = overlap_runner_release_acquisition(
+            Some("v1.2.3"),
+            move |tag| {
+                acquiring.send(tag.to_string()).unwrap();
+                install_started
+                    .recv_timeout(wait)
+                    .expect("install runs alongside");
+                Err(homeboy_core::Error::internal_unexpected("download failed"))
+            },
+            || {
+                installing.send(()).unwrap();
+                acquisition_started.recv_timeout(wait)
+            },
+        );
+        assert_eq!(result.expect("acquisition runs alongside"), "v1.2.3");
+        let (started_at, _, error) = acquisition.expect("acquisition ran");
+        assert!(started_at > 0);
+        assert!(error.unwrap().contains("download failed"));
+
+        let (_, skipped) =
+            overlap_runner_release_acquisition(None, |_| unreachable!("no release"), || ());
+        assert!(skipped.is_none());
     }
 
     #[test]
