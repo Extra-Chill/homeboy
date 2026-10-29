@@ -2224,3 +2224,52 @@ fn running_job() -> Job {
         runner_job_projection: None,
     }
 }
+
+#[test]
+fn observation_reattaches_when_the_tunnel_dropped_before_it_started() {
+    let transient = || {
+        let mut error = Error::internal_io("tunnel reconnecting", None);
+        error.retryable = Some(true);
+        error
+    };
+    let refused = || Error::validation_invalid_argument("runner", "identity mismatch", None, None);
+    // (connected endpoint, reattach results in order, expected endpoint or error code)
+    let cases: Vec<(
+        Option<&str>,
+        Vec<Result<Option<String>>>,
+        std::result::Result<&str, ErrorCode>,
+    )> = vec![
+        (Some("http://connected"), vec![], Ok("http://connected")),
+        (
+            None,
+            vec![Err(transient()), Ok(Some("http://reattached".to_string()))],
+            Ok("http://reattached"),
+        ),
+        (
+            None,
+            vec![Err(refused())],
+            Err(ErrorCode::ValidationInvalidArgument),
+        ),
+        (None, vec![Ok(None)], Err(ErrorCode::InternalUnexpected)),
+    ];
+    for (connected, reloads, expected) in cases {
+        let reloads = std::sync::Mutex::new(reloads.into_iter());
+        let result = initial_observation_endpoint(
+            "lab",
+            "job",
+            &|| false,
+            || Ok(connected.map(str::to_string)),
+            || {
+                reloads
+                    .lock()
+                    .unwrap()
+                    .next()
+                    .expect("unexpected extra reattach")
+            },
+        );
+        match expected {
+            Ok(endpoint) => assert_eq!(result.expect("endpoint"), endpoint),
+            Err(code) => assert_eq!(result.expect_err("refusal").code, code),
+        }
+    }
+}

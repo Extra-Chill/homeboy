@@ -1766,17 +1766,19 @@ pub(crate) fn observe_daemon_job_until_terminal(
         .map_err(|error| {
             Error::internal_unexpected(format!("build daemon observer client: {error}"))
         })?;
-    let status = super::super::status(runner_id)?;
-    let session = status.session.filter(|_| status.connected).ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "runner `{runner_id}` has no connected daemon session for observation"
-        ))
-    })?;
-    let mut endpoint = session.local_url.clone().ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "runner `{runner_id}` has no direct daemon endpoint for observation"
-        ))
-    })?;
+    let mut endpoint = initial_observation_endpoint(
+        runner_id,
+        runner_job_id,
+        cancelled,
+        || {
+            let status = super::super::status(runner_id)?;
+            Ok(status
+                .session
+                .filter(|_| status.connected)
+                .and_then(|session| session.local_url))
+        },
+        || refreshed_daemon_endpoint(runner_id, runner_job_id, accepted_daemon_identity),
+    )?;
     let started = Instant::now();
     let deadline = started + budget;
     let mut backoff = DAEMON_TERMINAL_WAIT_INITIAL_BACKOFF;
@@ -1821,6 +1823,54 @@ pub(crate) fn observe_daemon_job_until_terminal(
     )?;
     super::super::generation_store::reconcile(runner_id)?;
     Ok(DaemonTerminalObservation { job, events })
+}
+
+/// Resolve the daemon endpoint an observation starts from.
+///
+/// Staging observes many short daemon jobs in sequence, so a tunnel that drops
+/// between two of them must not end the Cook: the remote job keeps running.
+/// Start from the connected session when there is one; otherwise reattach the
+/// job's owning daemon through the same reconnect path polling uses, retrying
+/// inside the transient grace window (#16614).
+pub(super) fn initial_observation_endpoint<Connected, Reload>(
+    runner_id: &str,
+    runner_job_id: &str,
+    cancelled: &dyn Fn() -> bool,
+    connected_endpoint: Connected,
+    reload_endpoint: Reload,
+) -> Result<String>
+where
+    Connected: Fn() -> Result<Option<String>>,
+    Reload: Fn() -> Result<Option<String>>,
+{
+    if let Some(endpoint) = connected_endpoint()? {
+        return Ok(endpoint);
+    }
+    let deadline = Instant::now() + DAEMON_POLL_TRANSIENT_GRACE;
+    loop {
+        match reload_endpoint() {
+            Ok(Some(endpoint)) => return Ok(endpoint),
+            Ok(None) => {
+                return Err(Error::internal_unexpected(format!(
+                    "runner `{runner_id}` has no direct daemon endpoint for observation"
+                )))
+            }
+            Err(error) if reattach_failure_is_transient(&error) => {
+                if Instant::now() >= deadline {
+                    let mut surfaced = error;
+                    surfaced.retryable = Some(true);
+                    return Err(surfaced.with_hint(format!(
+                        "Could not reattach to runner `{runner_id}` within {}s; the remote job may still be in flight. Reconnect with `homeboy runner connect {runner_id}`.",
+                        DAEMON_POLL_TRANSIENT_GRACE.as_secs()
+                    )));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        if sleep_daemon_wait_unless_cancelled(DAEMON_POLL_RETRY_BACKOFF, cancelled) {
+            return Err(daemon_terminal_wait_cancelled_error(runner_job_id));
+        }
+    }
 }
 
 pub(super) fn fetch_daemon_job_resilient_with_endpoint_reload<Reload>(
