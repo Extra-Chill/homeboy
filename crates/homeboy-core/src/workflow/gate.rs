@@ -297,7 +297,10 @@ mod tests {
             ),
             (json!({"step":"a","outcome":["succeeded"]}), false),
             (json!({"step":"b","outcome":["succeeded"]}), false),
-            (json!({"step":"a","output":"/verdict","equals":"findings"}), true),
+            (
+                json!({"step":"a","output":"/verdict","equals":"findings"}),
+                true,
+            ),
             (
                 json!({"step":"a","output":"/verdict","in":["accepted","findings"]}),
                 true,
@@ -306,10 +309,7 @@ mod tests {
             (json!({"step":"a","output":"/list/0","exists":true}), true),
             (json!({"step":"a","output":"/count","lt":4}), true),
             (json!({"step":"a","output":"/count","gt":3}), false),
-            (
-                json!({"not":{"step":"a","outcome":["succeeded"]}}),
-                true,
-            ),
+            (json!({"not":{"step":"a","outcome":["succeeded"]}}), true),
             (
                 json!({"all":[{"step":"a","outcome":["candidate_recoverable"]},{"step":"a","output":"/count","lt":4}]}),
                 true,

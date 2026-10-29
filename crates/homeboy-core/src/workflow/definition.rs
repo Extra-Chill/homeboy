@@ -817,12 +817,13 @@ mod tests {
             ),
             (|v| v["steps"][0]["timeout"] = json!("90"), "unit required"),
             (
-                |v| {
-                    v["iterate"] = json!({"until": {"step": "evaluate", "output": "/verdict", "equals": "accepted"}, "max_iterations": 3})
-                },
+                |v| v["iterate"] = json!({"until": {"step": "evaluate", "output": "/verdict", "equals": "accepted"}, "max_iterations": 3}),
                 "`workflow run <this definition>`",
             ),
-            (|v| v["notify"] = json!({"on": ["failed"]}), "unknown field `notify`"),
+            (
+                |v| v["notify"] = json!({"on": ["failed"]}),
+                "unknown field `notify`",
+            ),
             (
                 |v| v["steps"][1]["when"] = json!({"command": ["true"]}),
                 "exec` step and gate on its `outcome`",

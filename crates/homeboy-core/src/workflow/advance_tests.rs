@@ -256,9 +256,8 @@ struct Row {
 
 /// Scripted step work: what each submitted step job produces.
 fn world(submission: &StepSubmission) -> StepResult {
-    let output = (submission.step == "evaluate").then(|| {
-        json!({"verdict": "findings", "report": "r1.json"})
-    });
+    let output = (submission.step == "evaluate")
+        .then(|| json!({"verdict": "findings", "report": "r1.json"}));
     let (status, outcome) = match (submission.step.as_str(), submission.attempt) {
         // The fix Cook fails its first attempt and is retried.
         ("fix", 1) => (FinishedStatus::Failed, Some("failed".to_string())),

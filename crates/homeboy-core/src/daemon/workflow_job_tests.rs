@@ -48,10 +48,7 @@ fn admit(store: &JobStore, request: &WorkflowJobRequest) -> Uuid {
 fn admit_with_outcome(
     store: &JobStore,
     request: &WorkflowJobRequest,
-) -> (
-    crate::api_jobs::ControllerJobSubmissionOutcome,
-    String,
-) {
+) -> (crate::api_jobs::ControllerJobSubmissionOutcome, String) {
     register_workflow_job_driver();
     let envelope: crate::daemon::ControllerJobRequest =
         serde_json::from_value(request.submission().unwrap()).unwrap();
@@ -180,10 +177,7 @@ fn when_gates_launch_the_next_step_and_skip_the_rest() {
         assert_eq!(status["status"], "succeeded");
         assert_eq!(status["steps"]["fix"]["outcome"], "succeeded");
         assert_eq!(status["steps"]["release"]["outcome"], "skipped");
-        assert_eq!(
-            std::fs::read_to_string(&runs).unwrap(),
-            "evaluate\nfix\n"
-        );
+        assert_eq!(std::fs::read_to_string(&runs).unwrap(), "evaluate\nfix\n");
         for key in ["evaluate/1/1", "fix/1/1"] {
             let child = store
                 .controller_job_for_key(&format!("{}/{key}", request.instance))
@@ -747,7 +741,9 @@ fn a_step_that_readmits_the_definition_chains_child_instances() {
             let provided = BTreeMap::from([("iteration".to_string(), json!(iteration))]);
             let mut child = request(definition.clone(), home.path());
             child.homeboy_program = step_program.clone();
-            child.inputs = chain_definition.resolve_inputs(&provided).expect("declared input");
+            child.inputs = chain_definition
+                .resolve_inputs(&provided)
+                .expect("declared input");
             child.instance = chain_definition.instance_id(&child.inputs, None);
             child.definition_digest = chain_definition.digest();
             child.parent = Some(parent.to_string());

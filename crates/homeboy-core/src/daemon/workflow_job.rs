@@ -127,7 +127,11 @@ impl WorkflowJobRequest {
                 return Err(invalid(format!("`{path}` must be an absolute path")));
             }
         }
-        if self.parent.as_ref().is_some_and(|parent| parent.trim().is_empty()) {
+        if self
+            .parent
+            .as_ref()
+            .is_some_and(|parent| parent.trim().is_empty())
+        {
             return Err(invalid("workflow `parent` must be a non-empty instance id"));
         }
         Ok(())
@@ -850,13 +854,15 @@ fn child_instances(store: &JobStore, instance: &str) -> Vec<String> {
         .iter()
         .filter_map(|(job, controller)| {
             let request = WorkflowJobRequest::parse(&controller.request).ok()?;
-            (request.parent.as_deref() == Some(instance)).then(|| {
-                (job.created_at_ms, job.id, request.instance)
-            })
+            (request.parent.as_deref() == Some(instance))
+                .then(|| (job.created_at_ms, job.id, request.instance))
         })
         .collect::<Vec<_>>();
     children.sort();
-    children.into_iter().map(|(_, _, instance)| instance).collect()
+    children
+        .into_iter()
+        .map(|(_, _, instance)| instance)
+        .collect()
 }
 
 /// `GET /workflows/<instance>`.
