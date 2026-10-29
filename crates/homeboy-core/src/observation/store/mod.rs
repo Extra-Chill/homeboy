@@ -11,6 +11,7 @@ mod control_plane_events;
 pub mod coordination;
 mod findings;
 mod helpers;
+pub mod metadata_payloads;
 mod runs;
 mod schema;
 mod work_intents;

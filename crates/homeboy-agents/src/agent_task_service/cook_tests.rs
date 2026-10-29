@@ -20307,13 +20307,17 @@ fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
             &patch_root.path().join("candidate.patch"),
             "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
         );
-        // Seed an already-applied promotion so the promote path loads it rather
-        // than performing a real git/worktree promotion.
-        agent_task_lifecycle::record_promotion(
-            run_id,
-            serde_json::to_value(promotion(run_id)).unwrap(),
-        )
-        .unwrap();
+        // A large candidate diff must survive canonical storage and replay.
+        let large_diff = format!(
+            "diff --git a/src/lib.rs b/src/lib.rs\n{}",
+            "+candidate line\n".repeat(90_000)
+        );
+        assert!(large_diff.len() > 1_000_000);
+        let mut report = promotion(run_id);
+        report.provenance["gate_feedback_baseline"] =
+            serde_json::json!({"current_diff": large_diff});
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(report).unwrap())
+            .unwrap();
 
         let options = promotion_claim_options(cook_id, run_id);
         let operation_key = format!("promote:{run_id}");
@@ -20344,6 +20348,33 @@ fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
                 .unwrap();
         assert_eq!(replayed.source.run_id, first.source.run_id);
         assert_eq!(replayed.patch_artifact.id, first.patch_artifact.id);
+        assert_eq!(gate_feedback_current_diff(&replayed), large_diff);
+        assert_eq!(gate_feedback_current_diff(&first), large_diff);
+        let review = crate::orchestration::review_from_current_environment(
+            run_id,
+            &homeboy_control_plane_contract::ControlPlaneRunReviewRequest {
+                to_worktree: None,
+                provider_argv: Vec::new(),
+            },
+        )
+        .unwrap();
+        // Review resolves the report before applying its public evidence byte budget.
+        assert_eq!(
+            review.evidence["record"]["reason"],
+            "review_evidence_byte_limit"
+        );
+        assert!(
+            review.evidence["record"]["size_bytes"].as_u64().unwrap() > large_diff.len() as u64
+        );
+        let stored = homeboy_core::observation::ObservationStore::open_initialized()
+            .unwrap()
+            .get_run(run_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            serde_json::to_vec(&stored.metadata_json).unwrap().len()
+                < homeboy_core::observation::store::metadata_payloads::RUN_METADATA_CAP
+        );
     });
 }
 
@@ -20984,53 +21015,6 @@ fn concurrent_retry_dispatch_claims_admit_exactly_one_dispatcher() {
         left_store.run_dir(next_run_id),
         right_store.run_dir(next_run_id)
     );
-}
-
-#[test]
-fn historical_applied_promotion_restores_only_its_exact_checkpoint_baseline() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let plan = AgentTaskPlan::new("cook-historical-baseline", Vec::new());
-        let run_id = "cook-historical-baseline-attempt-1";
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
-        agent_task_lifecycle::record_cook_attempt_in_store(
-            &test_lifecycle_store(),
-            "cook-historical-baseline",
-            1,
-            run_id,
-        )
-        .unwrap();
-        let candidate = serde_json::json!({"kind":"git","fingerprint":{"head":"abc"}});
-        let checkpoint = serde_json::json!({
-            "schema":"homeboy/agent-task-promotion-report/v1",
-            "status":"verification_pending",
-            "source":{"kind":"aggregate","task_id":"task","run_id":run_id},
-            "to_worktree":"fixture@target",
-            "target":{"worktree":"fixture@target","path":"/fixture/target"},
-            "patch_artifact":{"id":"patch","kind":"patch","path":"/fixture/patch","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-            "provenance":{"post_apply":true,"candidate":candidate,"gate_feedback_baseline":{"schema":"homeboy/agent-task-gate-feedback-baseline/v1","current_diff":"diff --git a/a b/a\n"}},
-            "operator_notification":{"status":"blocked","message":"pending"}
-        });
-        let applied = serde_json::json!({
-            "schema":"homeboy/agent-task-promotion-report/v1",
-            "status":"applied",
-            "source":{"kind":"aggregate","task_id":"task","run_id":run_id},
-            "to_worktree":"fixture@target",
-            "target":{"worktree":"fixture@target","path":"/fixture/target"},
-            "patch_artifact":{"id":"patch","kind":"patch","path":"/fixture/patch","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-            "provenance":{"candidate":candidate},
-            "operator_notification":{"status":"completed","message":"applied"}
-        });
-        agent_task_lifecycle::record_promotion(run_id, checkpoint).unwrap();
-        agent_task_lifecycle::record_promotion(run_id, applied).unwrap();
-
-        let restored = persisted_promotion_for_attempt("cook-historical-baseline")
-            .unwrap()
-            .expect("alias resolves historical attempt");
-        assert_eq!(
-            restored.provenance["gate_feedback_baseline"]["current_diff"],
-            "diff --git a/a b/a\n"
-        );
-    });
 }
 
 #[test]

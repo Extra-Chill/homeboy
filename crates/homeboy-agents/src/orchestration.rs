@@ -1565,11 +1565,29 @@ impl OrchestrationService<LifecycleStoreLookup> {
             requested_id.as_str(),
         )
         .map_err(map_lifecycle_error)?;
-        let durable_read = crate::agent_task_lifecycle::exact_durable_local_read_in_store(
+        let mut durable_read = crate::agent_task_lifecycle::exact_durable_local_read_in_store(
             &self.lookup.store,
             &target.run_id,
         )
         .map_err(map_lifecycle_error)?;
+        // Review consumes promotion content; status and ordinary inspection do not.
+        let root = self
+            .lookup
+            .store
+            .open_observation_initialized()
+            .and_then(|store| store.artifact_root())
+            .map_err(map_lifecycle_error)?;
+        if let Some(promotion) = durable_read
+            .record
+            .metadata
+            .pointer_mut("/cook_delivery/artifacts/promotion")
+        {
+            *promotion =
+                homeboy_core::observation::store::metadata_payloads::resolve_metadata_payload(
+                    promotion, &root,
+                )
+                .map_err(map_lifecycle_error)?;
+        }
         let snapshot = self
             .lookup
             .snapshot_from_pair(durable_read.record.clone(), durable_read.aggregate.clone())?;

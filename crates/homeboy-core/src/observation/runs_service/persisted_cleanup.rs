@@ -75,6 +75,21 @@ pub fn cleanup_persisted_artifacts_with_store(
         rows.push(row);
     }
 
+    if options.run_id.is_none()
+        && options.kind.is_none()
+        && options.artifact_type.is_none()
+        && options.run_kind.is_none()
+        && options.component_id.is_none()
+    {
+        let (files, bytes) = store.sweep_metadata_payloads(options.apply)?;
+        planned_file_count += files;
+        planned_size_bytes += bytes;
+        if options.apply {
+            removed_file_count += files;
+            removed_size_bytes += bytes;
+        }
+    }
+
     Ok(PersistedArtifactCleanupOutcome {
         dry_run: !options.apply,
         artifact_root: artifact_root.to_path_buf(),

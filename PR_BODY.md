@@ -1,17 +1,17 @@
 ## Summary
-Cook previously stopped before provider execution when its managed destination needed repair, leaving operators to reconcile it manually. Admission now converges the recorded destination against the pinned base, preserves attributable earlier work, and gives specific recovery routes for work it cannot safely replace.
+#16617 traced recurring SQLite writer contention to oversized run metadata, not an insufficient retry budget: multi-megabyte gate-feedback diffs were copied into the same promotion report several times and rewritten together. Run metadata now externalizes the known large Cook payloads and keeps content-addressed references, while replay, review and gate-feedback consumers resolve content on demand.
 
 ## What changed
-- Clean destinations without unique history converge to the pinned base; open PRs route to the exact PR-URL Cook command, and unique commits route through PR creation and rework.
-- Missing recorded branches are restored from a surviving remote head or the recorded base, without substituting a new caller-provided base.
-- Earlier Cook changes are preserved before reset; unattributed changes are refused with named files and a stash recovery action.
-- An unlocked driver lock allows takeover of an interrupted Cook's destination, including preservation of a nonterminal attempt's candidate.
-- Transient fetch and SSL failures receive bounded backoff retries and infrastructure classification; real-worktree regressions cover admission and preservation behavior.
+- Values larger than 16 KiB at `gate_feedback_baseline.current_diff` and the promotion-record locations move to `metadata-payloads/<sha256>`; small values remain inline without payload writes or fsync. References contain only SHA-256 and byte length, resolved under the artifact root.
+- `promotion`, `promotions[]` and promotion operation results share canonical content-addressed reports. Run writes enforce a 256 KiB metadata cap with a typed error identifying the largest remaining JSON path; metadata parsing and ordinary inspection do not hydrate payloads.
+- Artifact cleanup marks references from surviving run rows and sweeps unreferenced payload files, including those orphaned by run deletion. Publication/write guards prevent cleanup from sweeping payloads between publication and row commit.
+- `runs reconcile --compact-metadata` explicitly externalizes existing metadata and then VACUUMs the store; routine run deletion and artifact cleanup never compact or VACUUM. Slow transaction diagnostics use the existing logging surface with structured operation, duration, changed-row and SQLite page-write byte fields.
+- The >1 MB promotion replay regression checks bounded stored metadata, exact gate-feedback content and review resolution. A cleanup regression checks that deleted-run payloads are swept while referenced payloads survive; the obsolete inline checkpoint-baseline reconstruction reader and its test are removed.
 
 ## Compatibility
-Additive recovery behavior replaces generic destination-state refusals. Caller-owned checkouts retain snapshot semantics, authenticated promoted candidates retain their verified HEAD, and promotion code is unchanged.
+Additive inline/reference storage contract for small/large known payloads. Oversized unknown run metadata is now rejected instead of silently growing SQLite rows; use explicit compaction on an idle store for existing rows.
 
 ## Used for
-AI inspected the linked issues, implemented destination convergence and recovery, and exercised the regression gates.
+AI read the issue, implemented payload storage and lifecycle changes, updated consumers, and exercised the regression gates.
 
-Closes #16323
+Closes #16617

@@ -554,6 +554,7 @@ impl ObservationStore {
         owner_token: &str,
         lease_expires_at_ms: i64,
     ) -> Result<Option<RunRecord>> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("kind", &run.kind)?;
         validate_required("id", &id)?;
         validate_required("owner_token", owner_token)?;
@@ -564,7 +565,7 @@ impl ObservationStore {
             .clone()
             .with_missing_from(RunContext::subprocess_compatibility_from_env());
         let metadata_json =
-            serialize_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
+            self.serialize_run_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
         let started_at = chrono::Utc::now().to_rfc3339();
         let now = chrono::Utc::now().timestamp_millis();
         let rows = execute_with_retry("claim expiring singleton run", || {
@@ -620,7 +621,8 @@ impl ObservationStore {
         status: RunStatus,
         metadata_json: serde_json::Value,
     ) -> Result<bool> {
-        let metadata_json = serialize_metadata(&metadata_json)?;
+        let _payload_guard = self.metadata_payload_lock(false)?;
+        let metadata_json = self.serialize_run_metadata(&metadata_json)?;
         let finished_at = chrono::Utc::now().to_rfc3339();
         let rows = execute_with_retry("finish leased running run", || {
             self.connection.execute(
@@ -647,9 +649,10 @@ impl ObservationStore {
         terminal_projection: serde_json::Value,
         execution_record: serde_json::Value,
     ) -> Result<bool> {
-        let failure = serialize_metadata(&failure)?;
-        let terminal_projection = serialize_metadata(&terminal_projection)?;
-        let execution_record = serialize_metadata(&execution_record)?;
+        let _payload_guard = self.metadata_payload_lock(false)?;
+        let failure = self.serialize_run_metadata(&failure)?;
+        let terminal_projection = self.serialize_run_metadata(&terminal_projection)?;
+        let execution_record = self.serialize_run_metadata(&execution_record)?;
         let finished_at = chrono::Utc::now().to_rfc3339();
         let rows = execute_with_retry("finish pre-handoff runner exec", || {
             self.connection.execute(
@@ -737,7 +740,8 @@ impl ObservationStore {
         runner_job_id: &str,
         metadata_json: serde_json::Value,
     ) -> Result<bool> {
-        let metadata_json = serialize_metadata(&metadata_json)?;
+        let _payload_guard = self.metadata_payload_lock(false)?;
+        let metadata_json = self.serialize_run_metadata(&metadata_json)?;
         let finished_at = chrono::Utc::now().to_rfc3339();
         let rows = execute_with_retry("fail claimed runner recovery source", || {
             self.connection.execute(
@@ -785,7 +789,8 @@ impl ObservationStore {
         child_token: &str,
         metadata_json: serde_json::Value,
     ) -> Result<bool> {
-        let metadata_json = serialize_metadata(&metadata_json)?;
+        let _payload_guard = self.metadata_payload_lock(false)?;
+        let metadata_json = self.serialize_run_metadata(&metadata_json)?;
         let rows = execute_with_retry("defer claimed runner recovery source", || {
             self.connection.execute(
                 "UPDATE runs SET metadata_json = ?1 WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?3",
@@ -824,6 +829,7 @@ impl ObservationStore {
         mission_id: Option<&str>,
         restart: bool,
     ) -> Result<RunRecord> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         if let Some(route) = crate::notification_route::current() {
             route.insert_into_metadata(&mut run.metadata_json);
         }
@@ -835,7 +841,7 @@ impl ObservationStore {
         }
         let started_at = chrono::Utc::now().to_rfc3339();
         let metadata_json =
-            serialize_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
+            self.serialize_run_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
 
         let on_conflict = if restart {
             r#"
@@ -856,7 +862,11 @@ impl ObservationStore {
             ""
         };
         let applied = execute_with_retry("insert run record", || {
-            let transaction = self.connection.unchecked_transaction()?;
+            let transaction = TimedWrite::observe(
+                self.connection.unchecked_transaction()?,
+                &self.connection,
+                "upsert run with canonical events",
+            );
             let rows = transaction.execute(
                 &format!(
                     r#"
@@ -927,6 +937,7 @@ impl ObservationStore {
         status: RunStatus,
         metadata_json: Option<serde_json::Value>,
     ) -> Result<RunRecord> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
         let finished_at = chrono::Utc::now().to_rfc3339();
         let rows = match metadata_json {
@@ -947,7 +958,7 @@ impl ObservationStore {
                         }
                     }
                 }
-                let serialized = serialize_metadata(&metadata_json)?;
+                let serialized = self.serialize_run_metadata(&metadata_json)?;
                 execute_with_retry("finish run record with metadata", || {
                     self.connection.execute(
                         r#"
@@ -996,9 +1007,10 @@ impl ObservationStore {
         expected_kind: &str,
         metadata_json: serde_json::Value,
     ) -> Result<RunRecord> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
         validate_required("expected_kind", expected_kind)?;
-        let metadata_json = serialize_metadata(&metadata_json)?;
+        let metadata_json = self.serialize_run_metadata(&metadata_json)?;
         let rows = execute_with_retry("resume run record", || {
             self.connection.execute(
                 "UPDATE runs SET finished_at = NULL, status = 'running', metadata_json = ?1 \
@@ -1027,6 +1039,7 @@ impl ObservationStore {
         status: RunStatus,
         metadata_json: Option<serde_json::Value>,
     ) -> Result<Option<RunRecord>> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
         let finished_at = chrono::Utc::now().to_rfc3339();
         let rows = match metadata_json {
@@ -1044,7 +1057,7 @@ impl ObservationStore {
                         }
                     }
                 }
-                let serialized = serialize_metadata(&metadata_json)?;
+                let serialized = self.serialize_run_metadata(&metadata_json)?;
                 execute_with_retry("finish running run record with metadata", || {
                     self.connection.execute(
                         r#"
@@ -1096,6 +1109,7 @@ impl ObservationStore {
         mut metadata_json: serde_json::Value,
         expected_metadata_json: &serde_json::Value,
     ) -> Result<Option<RunRecord>> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
         if crate::notification_route::NotificationRoute::from_metadata(&metadata_json).is_none() {
             if let Some(route) =
@@ -1105,8 +1119,8 @@ impl ObservationStore {
             }
         }
         let finished_at = chrono::Utc::now().to_rfc3339();
-        let serialized = serialize_metadata(&metadata_json)?;
-        let expected = serialize_metadata(expected_metadata_json)?;
+        let serialized = self.serialize_run_metadata(&metadata_json)?;
+        let expected = self.serialize_run_metadata(expected_metadata_json)?;
         let rows = execute_with_retry("finish running run record with metadata CAS", || {
             self.connection.execute(
                 r#"
@@ -1135,8 +1149,9 @@ impl ObservationStore {
         run_id: &str,
         metadata_json: serde_json::Value,
     ) -> Result<RunRecord> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
-        let serialized = serialize_metadata(&metadata_json)?;
+        let serialized = self.serialize_run_metadata(&metadata_json)?;
         let rows = execute_with_retry("update run metadata", || {
             self.connection.execute(
                 r#"
@@ -1194,8 +1209,9 @@ impl ObservationStore {
         run_id: &str,
         metadata_json: serde_json::Value,
     ) -> Result<Option<RunRecord>> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
-        let serialized = serialize_metadata(&metadata_json)?;
+        let serialized = self.serialize_run_metadata(&metadata_json)?;
         let rows = execute_with_retry("update running run metadata", || {
             self.connection.execute(
                 r#"
@@ -1220,6 +1236,7 @@ impl ObservationStore {
         run_id: &str,
         patch: serde_json::Value,
     ) -> Result<Option<RunRecord>> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
         if !patch.is_object() {
             return Err(Error::validation_invalid_argument(
@@ -1229,13 +1246,37 @@ impl ObservationStore {
                 None,
             ));
         }
-        let serialized = serialize_metadata(&patch)?;
-        let rows = execute_with_retry("patch running run metadata", || {
-            self.connection.execute(
-                "UPDATE runs SET metadata_json = json_patch(metadata_json, ?1) WHERE id = ?2 AND status = ?3",
+        let serialized = self.serialize_run_metadata(&patch)?;
+        let transaction =
+            begin_control_plane_write(&self.connection, "patch running run metadata")?;
+        let merged: Option<String> = transaction
+            .query_row(
+                "SELECT json_patch(metadata_json, ?1) FROM runs WHERE id = ?2 AND status = ?3",
                 params![serialized, run_id, RunStatus::Running.as_str()],
+                |row| row.get(0),
             )
-        })?;
+            .optional()
+            .map_err(sqlite_error("merge running run metadata"))?;
+        let Some(merged) = merged else {
+            return Ok(None);
+        };
+        if merged.len() > super::metadata_payloads::RUN_METADATA_CAP {
+            return Err(Error::validation_invalid_argument(
+                "runs.metadata_json",
+                "merged metadata exceeds run metadata cap",
+                None,
+                None,
+            ));
+        }
+        let rows = transaction
+            .execute(
+                "UPDATE runs SET metadata_json = ?1 WHERE id = ?2 AND status = ?3",
+                params![merged, run_id, RunStatus::Running.as_str()],
+            )
+            .map_err(sqlite_error("patch running run metadata"))?;
+        transaction
+            .commit()
+            .map_err(sqlite_error("commit metadata patch"))?;
         if rows == 0 {
             return Ok(None);
         }
@@ -1251,12 +1292,13 @@ impl ObservationStore {
         worker_pid: u32,
         deadline_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<RunRecord>> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
-        let owner = serialize_metadata(&serde_json::json!({
+        let owner = self.serialize_run_metadata(&serde_json::json!({
             "pid": worker_pid,
             "recorded_at": chrono::Utc::now().to_rfc3339(),
         }))?;
-        let handoff = serialize_metadata(&serde_json::json!({
+        let handoff = self.serialize_run_metadata(&serde_json::json!({
             "state": "transferring",
             "launcher_pid": std::process::id(),
             "worker_pid": worker_pid,
@@ -1304,6 +1346,7 @@ impl ObservationStore {
         worker_pid: u32,
         reason: &str,
     ) -> Result<Option<RunRecord>> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
         let Some(run) = self.get_run(run_id)? else {
             return Ok(None);
@@ -1337,7 +1380,7 @@ impl ObservationStore {
             object.insert("error".to_string(), serde_json::json!(reason));
         }
         let finished_at = chrono::Utc::now().to_rfc3339();
-        let metadata = serialize_metadata(&metadata)?;
+        let metadata = self.serialize_run_metadata(&metadata)?;
         let rows = execute_with_retry("fail running run handoff", || {
             self.connection.execute(
                 "UPDATE runs SET finished_at = ?1, status = ?2, metadata_json = ?3 WHERE id = ?4 AND status = ?5 AND json_extract(metadata_json, '$.homeboy_ownership_handoff.state') = 'transferring' AND json_extract(metadata_json, '$.homeboy_ownership_handoff.worker_pid') = ?6",
@@ -1394,6 +1437,7 @@ impl ObservationStore {
         worker_pid: u32,
         deadline_unix_ms: i64,
     ) -> Result<Option<RunRecord>> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         let Some(run) = self.get_run(run_id)? else {
             return Ok(None);
         };
@@ -1413,7 +1457,7 @@ impl ObservationStore {
             object.insert("error".to_string(), serde_json::json!(reason));
         }
         let finished_at = chrono::Utc::now().to_rfc3339();
-        let metadata = serialize_metadata(&metadata)?;
+        let metadata = self.serialize_run_metadata(&metadata)?;
         let now_unix_ms = chrono::Utc::now().timestamp_millis();
         let rows = execute_with_retry("expire running run handoff", || {
             self.connection.execute(
@@ -2040,8 +2084,9 @@ impl ObservationStore {
     }
 
     pub fn import_run(&self, run: &RunRecord) -> Result<()> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run.id", &run.id)?;
-        let metadata_json = serialize_metadata(&run.metadata_json)?;
+        let metadata_json = self.serialize_run_metadata(&run.metadata_json)?;
         let inserted = execute_with_retry("import run record", || {
             self.connection.execute(
                 r#"
@@ -2091,6 +2136,7 @@ impl ObservationStore {
     /// Insert a synthetic controller run exactly once. The caller that wins the
     /// insert owns `publication_token`; concurrent readers must not inherit it.
     pub fn import_synthetic_run(&self, run: &RunRecord, publication_token: &str) -> Result<bool> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run.id", &run.id)?;
         let token = run
             .metadata_json
@@ -2101,7 +2147,7 @@ impl ObservationStore {
                 "synthetic run publication token does not match its metadata",
             ));
         }
-        let metadata_json = serialize_metadata(&run.metadata_json)?;
+        let metadata_json = self.serialize_run_metadata(&run.metadata_json)?;
         execute_with_retry("import synthetic run record", || {
             self.connection.execute(
                 r#"
@@ -2255,6 +2301,7 @@ impl ObservationStore {
         intents: &[WorkIntent],
         revision: Option<RunMetadataRevision<'_>>,
     ) -> Result<bool> {
+        let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run.id", &run.id)?;
         for intent in intents {
             intent.validate(&run.id)?;
@@ -2270,7 +2317,7 @@ impl ObservationStore {
                 }
             }
         }
-        let metadata_json = serialize_metadata(&run.metadata_json)?;
+        let metadata_json = self.serialize_run_metadata(&run.metadata_json)?;
         let bound_run = if events.is_empty() {
             None
         } else {
@@ -2288,7 +2335,11 @@ impl ObservationStore {
         execute_with_retry("upsert imported run with canonical events", || {
             captured = None;
             applied = false;
-            let transaction = self.connection.unchecked_transaction()?;
+            let transaction = TimedWrite::observe(
+                self.connection.unchecked_transaction()?,
+                &self.connection,
+                "upsert run with canonical events",
+            );
             let run_applied = apply_imported_run_in_tx(
                 &transaction,
                 &run,
