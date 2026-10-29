@@ -3480,7 +3480,7 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
 }
 
 #[test]
-fn moved_base_with_identical_tree_publishes_without_regating() {
+fn moved_base_rebase_publishes_without_regating() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-16049-identical-attempt-1";
         let (options, _) = seed_moving_base_attempt("cook-16049-identical", run_id);
@@ -3497,7 +3497,6 @@ fn moved_base_with_identical_tree_publishes_without_regating() {
                     Ok(match catch_ups_seen.fetch_add(1, Ordering::SeqCst) {
                         0 => BaseCatchUp::Rebased {
                             promotion: rebased_onto(promotion, "moved-base"),
-                            regate: false,
                         },
                         _ => BaseCatchUp::Current,
                     })
@@ -3518,22 +3517,22 @@ fn moved_base_with_identical_tree_publishes_without_regating() {
     });
 }
 
-/// #16049: a rebase that changes the tree re-gates through promotion before
-/// it publishes; finalization's moving-base refusal catches up again.
+/// #16603: finalization's moving-base refusal catches up again and publishes
+/// the rebased candidate on its existing gate proof.
 #[test]
-fn moved_base_with_changed_tree_regates_then_publishes() {
+fn moved_base_under_finalization_catches_up_then_publishes_without_regating() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-16049-changed-attempt-1";
-        let (options, applied) = seed_moving_base_attempt("cook-16049-changed", run_id);
+        let (options, _) = seed_moving_base_attempt("cook-16049-changed", run_id);
         let promotions = Arc::new(AtomicUsize::new(0));
         let finalizations = Arc::new(AtomicUsize::new(0));
         let (promotions_seen, finalizations_seen) =
             (Arc::clone(&promotions), Arc::clone(&finalizations));
         let report = run_cook(CookContext {
             side_effects: Some(CookSideEffects::for_test(
-                move |store, options, run_id| match promotions_seen.fetch_add(1, Ordering::SeqCst) {
-                    0 => promote_or_load_attempt_in_store(store, options, run_id),
-                    _ => Ok(rebased_onto(&applied, "moved-base")),
+                move |store, options, run_id| {
+                    promotions_seen.fetch_add(1, Ordering::SeqCst);
+                    promote_or_load_attempt_in_store(store, options, run_id)
                 },
                 move |_, _: &CookRequest, promotion: &AgentTaskPromotionReport| {
                     // The base is current until finalization finds it moved.
@@ -3541,11 +3540,8 @@ fn moved_base_with_changed_tree_regates_then_publishes() {
                     if finalizations_seen.load(Ordering::SeqCst) == 0 || base == "moved-base" {
                         return Ok(BaseCatchUp::Current);
                     }
-                    let mut pending = rebased_onto(promotion, "moved-base");
-                    pending.status = AgentTaskPromotionStatus::VerificationPending;
                     Ok(BaseCatchUp::Rebased {
-                        promotion: pending,
-                        regate: true,
+                        promotion: rebased_onto(promotion, "moved-base"),
                     })
                 },
                 {
@@ -3567,11 +3563,7 @@ fn moved_base_with_changed_tree_regates_then_publishes() {
         .unwrap();
 
         assert_eq!(report.value.status, "review_ready");
-        assert_eq!(
-            promotions.load(Ordering::SeqCst),
-            2,
-            "the rebased tree re-gated"
-        );
+        assert_eq!(promotions.load(Ordering::SeqCst), 1, "gates ran once");
         assert_eq!(finalizations.load(Ordering::SeqCst), 2);
         assert_no_moving_base_continuation(run_id);
     });
@@ -3632,7 +3624,6 @@ fn moved_base_budget_exhaustion_blocks_with_base_conflict() {
                 |_, _: &CookRequest, promotion: &AgentTaskPromotionReport| {
                     Ok(BaseCatchUp::Rebased {
                         promotion: rebased_onto(promotion, "moved-base"),
-                        regate: false,
                     })
                 },
                 move |_, _: &_, _: &_, _: &_| {
@@ -4033,10 +4024,12 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
         assert_eq!(report.value.status, "review_ready", "{:#?}", report.value);
         assert_eq!(finalization_calls.load(Ordering::SeqCst), 1);
         let caught_up = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
+        assert_eq!(caught_up.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(
-            caught_up.provenance["resume_contract"]["kind"], "base_catch_up",
-            "the rebased tree carries the base's files, so its gates ran again"
+            caught_up.provenance["base_catch_up"]["gates_verified_base"], verified_base,
+            "the rebased candidate keeps the gate proof from the base its gates ran on"
         );
+        assert!(caught_up.provenance.get("resume_contract").is_none());
         assert_eq!(
             git_output(&destination, &["diff", "--name-only", &advanced_base]).unwrap(),
             "src/lib.rs",
