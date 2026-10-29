@@ -140,6 +140,7 @@ mod tests {
                 inputs,
                 homeboy_program: "/bin/true".into(),
                 cwd: home.path().display().to_string(),
+                parent: None,
                 env: Default::default(),
                 homeboy_env: Default::default(),
                 programs: Default::default(),

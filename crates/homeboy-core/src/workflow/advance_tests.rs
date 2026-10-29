@@ -93,9 +93,7 @@ fn projection(state: &InstanceState) -> Value {
                 "phase": step.phase,
                 "attempt": step.attempt,
                 "outcome": step.outcome,
-                "carried": step.carried,
                 "key": step.key,
-                "gates": step.gates,
             });
             if !step.items.is_empty() {
                 projected["items"] = step.items.iter().map(|item| json!({
@@ -110,7 +108,6 @@ fn projection(state: &InstanceState) -> Value {
             }
             (id.clone(), projected)
         }).collect::<BTreeMap<_, _>>(),
-        "until": state.until,
     })
 }
 
@@ -153,7 +150,7 @@ fn golden_transcripts_match() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
         .collect::<Vec<_>>();
     files.sort();
-    assert!(files.len() >= 21, "golden fixtures are missing");
+    assert!(files.len() >= 18, "golden fixtures are missing");
     let mut covered = BTreeSet::new();
     for path in files {
         let mut fixture: Value =
@@ -219,7 +216,6 @@ fn golden_transcripts_match() {
         "submit:exec",
         "submit:homeboy",
         "submit:cook",
-        "submit:gate",
         "phase:pending",
         "phase:awaiting_approval",
         "phase:running",
@@ -260,11 +256,8 @@ struct Row {
 
 /// Scripted step work: what each submitted step job produces.
 fn world(submission: &StepSubmission) -> StepResult {
-    let output = match (submission.step.as_str(), submission.iteration) {
-        ("evaluate", 1) => Some(json!({"verdict": "findings", "report": "r1.json"})),
-        ("evaluate", _) => Some(json!({"verdict": "accepted"})),
-        _ => None,
-    };
+    let output = (submission.step == "evaluate")
+        .then(|| json!({"verdict": "findings", "report": "r1.json"}));
     let (status, outcome) = match (submission.step.as_str(), submission.attempt) {
         // The fix Cook fails its first attempt and is retried.
         ("fix", 1) => (FinishedStatus::Failed, Some("failed".to_string())),
@@ -291,17 +284,12 @@ fn proof_definition() -> WorkflowDefinition {
         "id": "proof",
         "inputs": {"url": {"required": true}},
         "budget": {"max_step_runs": 12},
-        "iterate": {"until": {"step": "evaluate", "output": "/verdict", "equals": "accepted"}, "max_iterations": 3},
         "steps": [
-            {"id": "capture", "when": {"not": {"step": "capture", "outcome": ["succeeded"]}},
-             "exec": {"program": "true"}},
+            {"id": "capture", "exec": {"program": "true"}},
             {"id": "evaluate", "needs": ["capture"],
              "exec": {"program": "node", "args": ["evaluate", "{{inputs.url}}"]}},
             {"id": "fix", "needs": ["evaluate"],
-             "when": {"all": [
-                {"step": "evaluate", "output": "/verdict", "equals": "findings"},
-                {"command": ["homeboy", "review", "lint", "{{inputs.url}}"]}
-             ]},
+             "when": {"step": "evaluate", "output": "/verdict", "equals": "findings"},
              "retry": {"max": 1, "on": ["failed"]},
              "cook": {"repo": "scratch", "prompt": "fix {{steps.evaluate.output/report}}", "verify": ["true"]}},
             {"id": "approve", "needs": ["fix"], "always": true,
@@ -512,14 +500,10 @@ fn crash_at_every_command_boundary_converges_without_running_a_step_twice() {
     let baseline = drive(&scenario, None);
     let final_state = baseline.checkpoint.clone().unwrap();
     assert_eq!(final_state.status, InstanceStatus::Succeeded);
-    assert_eq!(final_state.iteration, 2);
+    assert_eq!(final_state.iteration, 1);
     assert_eq!(
         final_state.steps["capture"].outcome.as_deref(),
         Some("succeeded")
-    );
-    assert!(
-        final_state.steps["capture"].carried,
-        "capture is carried into iteration 2"
     );
     let keys = baseline.inserts.keys().cloned().collect::<Vec<_>>();
     assert_eq!(
@@ -527,10 +511,8 @@ fn crash_at_every_command_boundary_converges_without_running_a_step_twice() {
         vec![
             "wf-golden/capture/1/1",
             "wf-golden/evaluate/1/1",
-            "wf-golden/evaluate/2/1",
             "wf-golden/fix/1/1",
             "wf-golden/fix/1/2",
-            "wf-golden/fix/1/when-0",
         ]
     );
     assert_crash_recovery_converges(&scenario, &baseline);
@@ -590,7 +572,6 @@ fn assert_crash_recovery_converges(scenario: &Scenario, baseline: &Ledger) {
                 projection(&final_state),
                 "crash {kind:?} at transaction {at} diverged"
             );
-            assert_eq!(state.history, final_state.history);
             for (key, inserts) in &ledger.inserts {
                 assert_eq!(
                     *inserts, 1,
@@ -673,7 +654,7 @@ fn terminal_instances_ignore_every_event() {
         Event::Tick,
         Event::Approved {
             step: "approve".into(),
-            iteration: 2,
+            iteration: 1,
         },
         Event::StepFinished(StepResult {
             error: None,

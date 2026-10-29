@@ -1,7 +1,7 @@
 //! Workflow templating: string substitution only.
 //!
 //! `{{inputs.x}}`, `{{steps.<id>.output<pointer>}}`, `{{steps.<id>.run_id}}`,
-//! `{{iteration}}`, `{{instance}}`, and inside a `foreach` step `{{item}}` or
+//! `{{instance}}`, and inside a `foreach` step `{{item}}` or
 //! `{{item.<field>[.<field>...]}}`. A string value substitutes as itself; any
 //! other JSON value substitutes as its compact JSON text.
 
@@ -19,7 +19,6 @@ pub enum Reference {
         pointer: String,
     },
     StepRunId(String),
-    Iteration,
     Instance,
     /// The current `foreach` item, at a JSON pointer (`""` for the item).
     Item(String),
@@ -30,7 +29,6 @@ pub trait TemplateValues {
     fn input(&self, name: &str) -> Option<&Value>;
     fn step_output(&self, step: &str) -> Option<&Value>;
     fn step_run_id(&self, step: &str) -> Option<&str>;
-    fn iteration(&self) -> u32;
     fn instance(&self) -> &str;
     /// The current `foreach` item, inside a fan-out step only.
     fn item(&self) -> Option<&Value> {
@@ -53,7 +51,6 @@ pub fn references(text: &str) -> Result<Vec<Reference>, String> {
 
 fn parse_reference(raw: &str) -> Result<Reference, String> {
     match raw {
-        "iteration" => return Ok(Reference::Iteration),
         "instance" => return Ok(Reference::Instance),
         "item" => return Ok(Reference::Item(String::new())),
         _ => {}
@@ -107,7 +104,7 @@ pub fn resolve_value(text: &str, values: &dyn TemplateValues) -> Result<Value, S
         if capture.get(0).expect("whole match").as_str() == trimmed {
             let reference = parse_reference(&capture[1])?;
             return match &reference {
-                Reference::Iteration | Reference::Instance | Reference::StepRunId(_) => {
+                Reference::Instance | Reference::StepRunId(_) => {
                     resolve(&reference, values).map(Value::String)
                 }
                 Reference::Input(name) => values
@@ -146,7 +143,6 @@ pub fn render(text: &str, values: &dyn TemplateValues) -> Result<String, String>
 
 fn resolve(reference: &Reference, values: &dyn TemplateValues) -> Result<String, String> {
     let value = match reference {
-        Reference::Iteration => return Ok(values.iteration().to_string()),
         Reference::Instance => return Ok(values.instance().to_string()),
         Reference::Input(name) => values
             .input(name)
@@ -192,9 +188,6 @@ mod tests {
         fn step_run_id(&self, step: &str) -> Option<&str> {
             (step == "fix").then_some("cook-1")
         }
-        fn iteration(&self) -> u32 {
-            2
-        }
         fn instance(&self) -> &str {
             "wf-x-abc"
         }
@@ -236,11 +229,11 @@ mod tests {
         };
         assert_eq!(
             render(
-                "fix {{steps.evaluate.output/report_path}} for {{ inputs.url }} n={{inputs.n}} it={{iteration}} in {{instance}} run={{steps.fix.run_id}} all={{steps.evaluate.output/list}}",
+                "fix {{steps.evaluate.output/report_path}} for {{ inputs.url }} n={{inputs.n}} in {{instance}} run={{steps.fix.run_id}} all={{steps.evaluate.output/list}}",
                 &values
             )
             .unwrap(),
-            "fix /tmp/r.json for https://example.test n=3 it=2 in wf-x-abc run=cook-1 all=[1,2]"
+            "fix /tmp/r.json for https://example.test n=3 in wf-x-abc run=cook-1 all=[1,2]"
         );
         assert!(render("{{steps.evaluate.output/missing}}", &values).is_err());
         assert!(render("{{inputs.absent}}", &values).is_err());
@@ -270,6 +263,7 @@ mod tests {
             "{{item.}}",
             "{{item.a..b}}",
             "{{env.HOME}}",
+            "{{iteration}}",
             "{{steps.a.status}}",
             "{{steps.a.outputx}}",
             "{{inputs.}}",

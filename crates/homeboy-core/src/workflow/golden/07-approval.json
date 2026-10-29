@@ -113,30 +113,23 @@
         "steps": {
           "after": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           },
           "build": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/build/1/1",
             "outcome": null,
             "phase": "running"
           },
           "ship": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -156,30 +149,23 @@
         "steps": {
           "after": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           },
           "build": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/build/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "ship": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "awaiting_approval"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -199,30 +185,23 @@
         "steps": {
           "after": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           },
           "build": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/build/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "ship": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "awaiting_approval"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -242,30 +221,23 @@
         "steps": {
           "after": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           },
           "build": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/build/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "ship": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "awaiting_approval"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -297,30 +269,23 @@
         "steps": {
           "after": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/after/1/1",
             "outcome": null,
             "phase": "running"
           },
           "build": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/build/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "ship": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": "succeeded",
             "phase": "done"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -345,30 +310,23 @@
         "steps": {
           "after": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/after/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "build": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/build/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "ship": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": "succeeded",
             "phase": "done"
           }
-        },
-        "until": {}
+        }
       }
     }
   ]

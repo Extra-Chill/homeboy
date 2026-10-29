@@ -30,8 +30,6 @@ pub struct WorkflowDefinition {
     pub env: EnvSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<Budget>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub iterate: Option<Iterate>,
     /// Optional cadence: `workflow run` registers the definition with the
     /// daemon, which admits one instance per due slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,13 +125,6 @@ pub struct Budget {
     pub max_step_runs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Iterate {
-    pub until: Gate,
-    pub max_iterations: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -310,15 +301,6 @@ impl StepDefinition {
         }
         strings
     }
-
-    /// The templated argv strings of the step's `when` command gates.
-    fn when_strings(&self) -> Vec<&str> {
-        self.when
-            .iter()
-            .flat_map(Gate::command_gates)
-            .flat_map(|argv| argv.iter().map(String::as_str))
-            .collect()
-    }
 }
 
 fn collect_strings<'a>(value: &'a Value, strings: &mut Vec<&'a str>) {
@@ -333,9 +315,6 @@ fn collect_strings<'a>(value: &'a Value, strings: &mut Vec<&'a str>) {
     }
 }
 
-/// Features of the workflow format that a later Homeboy release implements.
-const LATER_TOP_LEVEL: &[(&str, &str)] = &[("notify", "`notify`")];
-
 impl WorkflowDefinition {
     /// Parse a definition without validating it.
     pub fn parse(text: &str) -> Result<Self> {
@@ -346,10 +325,11 @@ impl WorkflowDefinition {
     }
 
     pub fn from_value(raw: Value) -> Result<Self> {
-        for (field, label) in LATER_TOP_LEVEL {
-            if raw.get(field).is_some() {
-                return Err(not_yet(label));
-            }
+        if raw.get("iterate").is_some() {
+            return Err(invalid(
+                "iterate",
+                "`iterate` is not supported: make the final step a `homeboy` step that runs `workflow run <this definition>` with the next pass's inputs, gated by `when`",
+            ));
         }
         serde_path_to_error::deserialize(raw)
             .map_err(|error| invalid("definition", format!("invalid workflow: {error}")))
@@ -550,12 +530,6 @@ impl WorkflowDefinition {
                     self.check_reference(&reference, &upstream, &field)?;
                 }
             }
-            for text in step.when_strings() {
-                let field = format!("{field}.when");
-                for reference in template::references(text).map_err(|e| invalid(&field, e))? {
-                    self.check_reference(&reference, &upstream, &field)?;
-                }
-            }
             if let Some(Value::String(foreach)) = &step.foreach {
                 let field = format!("{field}.foreach");
                 for reference in template::references(foreach).map_err(|e| invalid(&field, e))? {
@@ -576,29 +550,6 @@ impl WorkflowDefinition {
                 }
             }
         }
-        if let Some(iterate) = &self.iterate {
-            if iterate.max_iterations == 0 {
-                return Err(invalid("iterate.max_iterations", "must be at least 1"));
-            }
-            for referenced in iterate.until.referenced_steps() {
-                if !ids.contains(referenced) {
-                    return Err(invalid(
-                        "iterate.until",
-                        format!("gate reads unknown step `{referenced}`"),
-                    ));
-                }
-            }
-            let all = ids.iter().map(|id| id.to_string()).collect::<BTreeSet<_>>();
-            for argv in iterate.until.command_gates() {
-                for text in argv {
-                    for reference in
-                        template::references(text).map_err(|e| invalid("iterate.until", e))?
-                    {
-                        self.check_reference(&reference, &all, "iterate.until")?;
-                    }
-                }
-            }
-        }
         Ok(())
     }
 
@@ -613,11 +564,7 @@ impl WorkflowDefinition {
                 field,
                 format!("template reads undeclared input `{name}`"),
             )),
-            Reference::Item(_)
-                if field.ends_with(".foreach")
-                    || field.ends_with(".when")
-                    || field == "iterate.until" =>
-            {
+            Reference::Item(_) if field.ends_with(".foreach") || field.ends_with(".when") => {
                 Err(invalid(
                     field,
                     "`{{item}}` is only available in the work a `foreach` step runs",
@@ -784,15 +731,6 @@ fn invalid(field: &str, message: impl Into<String>) -> Error {
     Error::validation_invalid_argument(field, message, None, None)
 }
 
-fn not_yet(label: &str) -> Error {
-    Error::validation_invalid_argument(
-        "definition",
-        format!("{label} is not supported by this workflow version yet"),
-        None,
-        None,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,7 +759,6 @@ mod tests {
             "schema": WORKFLOW_SCHEMA,
             "id": "proof",
             "inputs": {"url": {"required": true}},
-            "iterate": {"until": {"step": "evaluate", "output": "/verdict", "equals": "accepted"}, "max_iterations": 3},
             "steps": [
                 {"id": "evaluate", "exec": {"program": "node", "args": ["eval.mjs", "{{inputs.url}}"]}},
                 {"id": "fix", "needs": ["evaluate"],
@@ -879,7 +816,18 @@ mod tests {
                 "cannot be retried",
             ),
             (|v| v["steps"][0]["timeout"] = json!("90"), "unit required"),
-            (|v| v["notify"] = json!({"on": ["failed"]}), "not supported"),
+            (
+                |v| v["iterate"] = json!({"until": {"step": "evaluate", "output": "/verdict", "equals": "accepted"}, "max_iterations": 3}),
+                "`workflow run <this definition>`",
+            ),
+            (
+                |v| v["notify"] = json!({"on": ["failed"]}),
+                "unknown field `notify`",
+            ),
+            (
+                |v| v["steps"][1]["when"] = json!({"command": ["true"]}),
+                "exec` step and gate on its `outcome`",
+            ),
             (|v| v["every"] = json!({"interval": "30s"}), "at least 1m"),
             (
                 |v| v["every"] = json!({"interval": "1h", "at": "25:00Z"}),
@@ -935,7 +883,6 @@ mod tests {
                 |v| v["env"] = json!({"public": ["GITHUB_TOKEN"]}),
                 "credential",
             ),
-            (|v| v["iterate"]["max_iterations"] = json!(0), "at least 1"),
             (
                 |v| v["steps"][1]["when"] = json!({"step": "other", "outcome": ["succeeded"]}),
                 "not upstream",

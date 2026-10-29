@@ -107,38 +107,29 @@
         "steps": {
           "a": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/1",
             "outcome": null,
             "phase": "running"
           },
           "b": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           },
           "c": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           },
           "d": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": null,
             "phase": "pending"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -172,38 +163,29 @@
         "steps": {
           "a": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "b": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": "skipped",
             "phase": "done"
           },
           "c": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": "skipped",
             "phase": "done"
           },
           "d": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/d/1/1",
             "outcome": null,
             "phase": "running"
           }
-        },
-        "until": {}
+        }
       }
     },
     {
@@ -228,38 +210,29 @@
         "steps": {
           "a": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/a/1/1",
             "outcome": "succeeded",
             "phase": "done"
           },
           "b": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": "skipped",
             "phase": "done"
           },
           "c": {
             "attempt": 0,
-            "carried": false,
-            "gates": {},
             "key": null,
             "outcome": "skipped",
             "phase": "done"
           },
           "d": {
             "attempt": 1,
-            "carried": false,
-            "gates": {},
             "key": "wf-golden/d/1/1",
             "outcome": "succeeded",
             "phase": "done"
           }
-        },
-        "until": {}
+        }
       }
     }
   ]
