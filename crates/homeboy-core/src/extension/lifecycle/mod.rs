@@ -393,7 +393,9 @@ mod update;
 use update::is_extension_update_workdir_clean;
 pub(crate) use update::write_requested_source_ref;
 pub(crate) use update::write_source_metadata;
-pub use update::{extension_update_dirty_paths, update, update_linked_group};
+pub use update::{
+    extension_update_dirty_paths, resolve_update_revisions, update, update_linked_group,
+};
 
 /// Uninstall a extension. Automatically detects symlinks vs cloned directories.
 /// - Symlinked extensions: removes symlink only (source preserved)
@@ -1225,7 +1227,7 @@ exec '{}' "$@"
             let before = read_source_revision("wordpress").expect("linked git revision");
             assert!(!extension_source.join(".source-revision").exists());
 
-            update("wordpress", false).expect("update linked extension");
+            update("wordpress", false, None).expect("update linked extension");
 
             assert!(
                 !extension_source.join(".source-revision").exists(),
@@ -1672,7 +1674,7 @@ exec '{}' "$@"
             assert!(commit_all(&source, "add runtime package"));
             assert!(run_git(&source, &["push", "origin", "HEAD"]));
 
-            update("wordpress", false).expect("update cloned extension");
+            update("wordpress", false, None).expect("update cloned extension");
 
             assert!(home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
@@ -2066,7 +2068,7 @@ exec '{}' "$@"
                 ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install pinned extracted extension");
-            update("wordpress", false).expect("update pinned extracted extension");
+            update("wordpress", false, None).expect("update pinned extracted extension");
 
             assert_eq!(load_extension("wordpress").unwrap().version, "1.0.0");
             assert_eq!(
@@ -2125,7 +2127,7 @@ exec '{}' "$@"
             )
             .expect("install linked extension");
 
-            let error = update("wordpress", false)
+            let error = update("wordpress", false, None)
                 .expect_err("non-git linked source should fail with repair guidance");
 
             assert!(
@@ -2265,7 +2267,7 @@ exec '{}' "$@"
             .expect("install linked extension");
 
             let result =
-                update("wordpress", false).expect("linked update should use default branch");
+                update("wordpress", false, None).expect("linked update should use default branch");
             assert!(result.linked);
             assert_eq!(
                 result.source_update.old_branch.as_deref(),
@@ -2288,6 +2290,68 @@ exec '{}' "$@"
             assert!(
                 current_branch == default_branch || current_branch.is_empty(),
                 "linked update should use the default branch, or detached origin/default when the branch is checked out in another worktree"
+            );
+        });
+    }
+
+    #[test]
+    fn unchanged_extracted_source_skips_clone_restage_and_setup() {
+        with_isolated_home(|home| {
+            let source = home.path().join("source-repo");
+            fs::create_dir_all(&source).unwrap();
+            let remote = prepare_git_extension_repo(&source, "wordpress").expect("git fixture");
+            write_extension_fixture_with_setup(&source, "wordpress");
+            assert!(commit_all(&source, "configure setup"));
+            assert!(run_git(&source, &["push", "origin", "HEAD"]));
+            let remote_url = remote.path().join("extension.git");
+            let installed = install(
+                &remote_url.to_string_lossy(),
+                Some("wordpress"),
+                ExtensionLifecycleValidation::declaration_only(),
+            )
+            .unwrap();
+            fs::write(installed.path.join("setup-count.txt"), "unchanged").unwrap();
+            fs::write(installed.path.join("local-marker"), "keep").unwrap();
+            // Any attempt to enter the clone/staging path fails on this file.
+            let obstruction = installed
+                .path
+                .parent()
+                .unwrap()
+                .join(".update-clone-tmp-wordpress");
+            fs::write(&obstruction, "must not touch").unwrap();
+            let result = update("wordpress", false, None).expect("unchanged source skips clone");
+            assert_eq!(
+                result.source_update.old_source_revision,
+                result.source_update.new_source_revision
+            );
+            assert!(result
+                .source_update
+                .update_note
+                .unwrap()
+                .contains("up to date"));
+            assert_eq!(
+                fs::read_to_string(installed.path.join("setup-count.txt")).unwrap(),
+                "unchanged"
+            );
+            assert!(installed.path.join("local-marker").exists());
+            assert!(
+                update("wordpress", true, None).is_err(),
+                "force enters refresh path"
+            );
+            fs::remove_file(obstruction).unwrap();
+            update("wordpress", true, None).expect("forced refresh");
+            assert_eq!(
+                fs::read_to_string(installed.path.join("setup-count.txt")).unwrap(),
+                "setup"
+            );
+            fs::write(source.join("wordpress/changed"), "new revision").unwrap();
+            assert!(commit_all(&source, "changed source"));
+            assert!(run_git(&source, &["push", "origin", "HEAD"]));
+            update("wordpress", false, None).expect("changed source refreshes");
+            assert!(installed.path.join("changed").exists());
+            assert_eq!(
+                fs::read_to_string(installed.path.join("setup-count.txt")).unwrap(),
+                "setup"
             );
         });
     }
@@ -2316,7 +2380,7 @@ exec '{}' "$@"
             assert!(commit_all(&source, "update extension"));
             assert!(run_git(&source, &["push", "origin", "HEAD"]));
 
-            update("wordpress", false).expect("update extracted extension");
+            update("wordpress", false, None).expect("update extracted extension");
 
             let updated = load_extension("wordpress").expect("updated extension");
             assert_eq!(updated.version, "2.0.0");
@@ -2353,7 +2417,7 @@ exec '{}' "$@"
             assert!(commit_all(&source, "break extension manifest"));
             assert!(run_git(&source, &["push", "origin", "HEAD"]));
 
-            assert!(update("wordpress", false).is_err());
+            assert!(update("wordpress", false, None).is_err());
 
             let current = load_extension("wordpress").expect("previous extension remains loadable");
             assert_eq!(current.version, "1.0.0");

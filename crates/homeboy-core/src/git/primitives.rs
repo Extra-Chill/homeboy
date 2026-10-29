@@ -52,6 +52,56 @@ fn ensure_git_success(
     ))
 }
 
+/// Resolve a remote ref to its commit without cloning. Unknown refs and remote
+/// failures deliberately leave callers free to attempt their normal refresh.
+pub fn remote_revision(url: &str, requested_ref: Option<&str>) -> Option<String> {
+    let requested = requested_ref.unwrap_or("HEAD");
+    // A pinned commit is its own revision; ls-remote cannot list it.
+    if requested.len() == 40 && requested.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Some(requested.to_ascii_lowercase());
+    }
+    let head = format!("refs/heads/{requested}");
+    let tag = format!("refs/tags/{requested}");
+    let peeled = format!("{tag}^{{}}");
+    let explicit_peeled = format!("{requested}^{{}}");
+    let output = Command::new("git")
+        .args([
+            "ls-remote",
+            "--",
+            url,
+            requested,
+            &head,
+            &tag,
+            &peeled,
+            &explicit_peeled,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let refs: Vec<_> = stdout
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .collect();
+    // Match checkout's branch-before-tag preference, peeling annotated tags.
+    let revision = [
+        head.as_str(),
+        explicit_peeled.as_str(),
+        requested,
+        peeled.as_str(),
+        tag.as_str(),
+    ]
+    .into_iter()
+    .find_map(|name| {
+        refs.iter()
+            .find(|(_, reference)| *reference == name)
+            .map(|(sha, _)| sha.to_string())
+    });
+    revision
+}
+
 /// Clone a git repository to a target directory.
 pub fn clone_repo(url: &str, target_dir: &Path) -> Result<()> {
     run_git(
