@@ -1444,19 +1444,33 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
     let state_dir = path.parent().unwrap_or(&path).to_path_buf();
     let state_identity = daemon_state_identity(&path, &jobs_path)?;
     let validation = validate_lease_file(&path)?;
+    // Every daemon of one Unix user shares this ledger, whatever its state
+    // dir (#16089). Scope it to the lease this state dir recorded, live or
+    // dead, so another controller's stamped work on a shared Lab host neither
+    // protects this daemon nor blocks its replacement. Unstamped records have
+    // no proven owner and stay counted; a state dir with no lease projects the
+    // whole ledger, as before.
     let job_store = JobStore::open_without_reconciliation(&jobs_path)?;
-    let active_job_recovery_evidence = job_store.active_daemon_job_recovery_evidence(
-        validation
-            .running
-            .then(|| {
-                validation
-                    .state
-                    .as_ref()
-                    .map(|state| state.lease_id.as_str())
-            })
-            .flatten(),
-        pid_is_running,
-    );
+    let job_store = match validation.state.as_ref() {
+        Some(state) => job_store.with_daemon_lease(state.lease_id.clone()),
+        None => job_store,
+    };
+    let active_job_recovery_evidence = job_store
+        .active_daemon_job_recovery_evidence(
+            validation
+                .running
+                .then(|| {
+                    validation
+                        .state
+                        .as_ref()
+                        .map(|state| state.lease_id.as_str())
+                })
+                .flatten(),
+            pid_is_running,
+        )
+        .into_iter()
+        .filter(|evidence| job_store.executes_lease(evidence.daemon_lease_id.as_deref()))
+        .collect::<Vec<_>>();
     // Durable terminal evidence proves no workload remains, so those jobs are
     // reported as evidence but do not protect the daemon from replacement.
     let blocking_active_jobs = active_job_recovery_evidence
@@ -6010,6 +6024,66 @@ mod tests {
                     .active_jobs,
                 1
             );
+        });
+    }
+
+    /// Offline `daemon status` (the CLI path `runner connect` reads when this
+    /// controller's daemon is dead) must scope the shared ledger the same way
+    /// as the live daemon (#16089). Another controller's stamped live work on a
+    /// shared Lab host otherwise blocks replacing a dead daemon it never ran on.
+    #[test]
+    fn offline_status_ignores_another_daemons_stamped_jobs_in_a_shared_ledger() {
+        with_isolated_home(|_| {
+            let own_lease = "lease-dead-controller-a";
+            write_test_lease(own_lease);
+            // Point the recorded lease at a reaped child so the daemon is dead.
+            let path = state_path().expect("state path");
+            let mut child = std::process::Command::new("true").spawn().expect("spawn");
+            let dead_pid = child.id();
+            child.wait().expect("reap");
+            let mut state: DaemonState =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read lease"))
+                    .expect("parse lease");
+            state.pid = dead_pid;
+            write_lease(&path, &state).expect("write dead lease");
+
+            let ledger = paths::observation_db().expect("shared ledger path");
+            let other_scope = JobStore::open_without_reconciliation(&ledger)
+                .expect("open other scope's store")
+                .with_daemon_lease("lease-live-controller-b".to_string());
+            let foreign = other_scope.create("runner.exec");
+            other_scope.start(foreign.id).expect("start foreign job");
+
+            let status = read_status_for_state_path(path.clone()).expect("status");
+            assert!(!status.running, "the recorded daemon is dead");
+            assert!(
+                status.active_job_recovery_evidence.is_empty(),
+                "another daemon's stamped job does not protect this one: {:?}",
+                status.active_job_recovery_evidence
+            );
+            assert_eq!(status.freshness.active_jobs, 0);
+
+            // Work this daemon accepted still protects it.
+            let own_scope = JobStore::open_without_reconciliation(&ledger)
+                .expect("open own store")
+                .with_daemon_lease(own_lease.to_string());
+            let own = own_scope.create("runner.exec");
+            own_scope.start(own.id).expect("start own job");
+            // So does a record with no proven owner.
+            let unscoped = JobStore::open_without_reconciliation(&ledger).expect("open");
+            let unstamped = unscoped.create("runner.exec");
+            unscoped.start(unstamped.id).expect("start unstamped job");
+
+            let status = read_status_for_state_path(path).expect("status");
+            let mut ids = status
+                .active_job_recovery_evidence
+                .iter()
+                .map(|evidence| evidence.job_id)
+                .collect::<Vec<_>>();
+            ids.sort();
+            let mut expected = vec![own.id, unstamped.id];
+            expected.sort();
+            assert_eq!(ids, expected);
         });
     }
 
