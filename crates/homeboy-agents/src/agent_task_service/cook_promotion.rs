@@ -1931,6 +1931,7 @@ fn verify_replacement_gates_owned(
             },
         )?;
         super::cook_baseline::compare_gate_failures_to_verified_base(
+            &observation_store,
             &mut replacement,
             &target_path,
             replacement_gate_workspace

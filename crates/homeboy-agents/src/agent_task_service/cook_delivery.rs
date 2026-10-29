@@ -1093,6 +1093,7 @@ fn compare_failed_gates_to_verified_base(
         options.gates.declared_supervision(),
         || {
             compare_gate_failures_to_verified_base(
+                &lifecycle_store.open_observation_initialized()?,
                 promotion,
                 std::path::Path::new(&repository_root),
                 std::path::Path::new(&repository_root),

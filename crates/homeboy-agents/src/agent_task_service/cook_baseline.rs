@@ -8,7 +8,14 @@
 //! build them from a source root or a prior promotion. The private `git_output`
 //! helpers live here because this cluster is their only user.
 
+use crate::agent_task_gate::{AgentTaskGatePackageArtifactProvenance, AgentTaskGateReport};
+use homeboy_core::observation::store::{
+    coordination::{ExpectedRevision, RecordWrite},
+    ObservationStore,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -283,7 +290,88 @@ fn replay_gate_policy(
     policy
 }
 
+const BASELINE_RECORDS: &str = "cook-gate-baseline-v1";
+
+#[derive(Serialize, Deserialize)]
+struct BaselineFacts {
+    exit_code: i32,
+    status: AgentTaskGateStatus,
+    failure_fingerprint: String,
+    package_artifacts: Vec<AgentTaskGatePackageArtifactProvenance>,
+}
+
+impl BaselineFacts {
+    fn from_gate(gate: &AgentTaskGateReport) -> Self {
+        Self {
+            exit_code: gate.exit_code,
+            status: gate.status,
+            failure_fingerprint: failure_fingerprint(
+                gate.exit_code,
+                &gate.stdout,
+                &gate.stderr,
+                gate.failure_evidence
+                    .as_ref()
+                    .map(|e| e.diagnostics.as_slice())
+                    .unwrap_or_default(),
+            ),
+            package_artifacts: gate.environment.package_artifacts.clone(),
+        }
+    }
+
+    fn comparable(&self) -> bool {
+        self.exit_code != 124
+            && matches!(
+                self.status,
+                AgentTaskGateStatus::Succeeded | AgentTaskGateStatus::Failed
+            )
+    }
+
+    fn apply(&self, gate: &mut AgentTaskGateReport, base_sha: &str, diagnostic: Option<String>) {
+        let matches = self.status == AgentTaskGateStatus::Failed
+            && self.failure_fingerprint == Self::from_gate(gate).failure_fingerprint;
+        gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+            base_ref: base_sha.to_string(),
+            exit_code: self.exit_code,
+            failure_fingerprint: self.failure_fingerprint.clone(),
+            matches_candidate_failure: matches,
+            result: if matches {
+                AgentTaskGateDifferentialResult::BaselineRed
+            } else {
+                AgentTaskGateDifferentialResult::CandidateRegression
+            },
+            diagnostic,
+        });
+        if matches {
+            gate.accept_inherited_failure();
+        }
+    }
+}
+
+fn baseline_record_key(
+    gate: &AgentTaskGateReport,
+    base_sha: &str,
+    component_id: Option<&str>,
+) -> Result<String> {
+    // Lab offload metadata is unique per gate run and is observation context,
+    // not a gate input; keying on it would make every record unreachable.
+    let mut policy = replay_gate_policy(&gate.environment, component_id);
+    policy
+        .variables
+        .remove(homeboy_core::observation::context::LAB_OFFLOAD_METADATA_ENV);
+    let inputs = serde_json::json!([
+        base_sha,
+        gate.invocation()?.identity_digest()?,
+        policy,
+        gate.environment.package_artifacts,
+    ]);
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(inputs.to_string().as_bytes())
+    ))
+}
+
 pub(crate) fn compare_gate_failures_to_verified_base(
+    store: &ObservationStore,
     promotion: &mut AgentTaskPromotionReport,
     repository_root: &std::path::Path,
     gate_workspace: &std::path::Path,
@@ -303,6 +391,38 @@ pub(crate) fn compare_gate_failures_to_verified_base(
         })
         .count();
     if unresolved == 0 {
+        return Ok(());
+    }
+    let mut compared = 0;
+    for gate in &mut promotion.deterministic_gates {
+        if gate.status != AgentTaskGateStatus::Failed
+            || gate.baseline_comparison.is_some()
+            || gate
+                .environment
+                .package_artifact_replay_requirements()
+                .is_none()
+        {
+            continue;
+        }
+        let key = baseline_record_key(gate, base_sha, component_id)?;
+        if let Some(record) = store.coordination_record(BASELINE_RECORDS, &key)? {
+            if let Ok(facts) = serde_json::from_value::<BaselineFacts>(record.payload) {
+                if facts.comparable()
+                    && facts.package_artifacts == gate.environment.package_artifacts
+                {
+                    facts.apply(
+                        gate,
+                        base_sha,
+                        Some(format!("reused recorded baseline {key}")),
+                    );
+                    compared += 1;
+                    checkpoint(compared, unresolved)?;
+                }
+            }
+        }
+    }
+    if compared == unresolved {
+        promotion.normalize_gate_outcome();
         return Ok(());
     }
     let repository_root = repository_root.canonicalize().map_err(|error| {
@@ -384,7 +504,6 @@ pub(crate) fn compare_gate_failures_to_verified_base(
             &baseline_gate_workspace,
             component_id,
         )?;
-        let mut compared = 0;
         for (index, gate) in promotion.deterministic_gates.iter_mut().enumerate() {
             if gate.status != AgentTaskGateStatus::Failed || gate.baseline_comparison.is_some() {
                 continue;
@@ -497,69 +616,28 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                     });
                     Ok(())
                 }
-                Ok(baseline) if baseline.status == AgentTaskGateStatus::Failed => {
-                    let matches = failure_fingerprint(
-                        gate.exit_code,
-                        &gate.stdout,
-                        &gate.stderr,
-                        gate.failure_evidence
-                            .as_ref()
-                            .map(|evidence| evidence.diagnostics.as_slice())
-                            .unwrap_or_default(),
-                    ) == failure_fingerprint(
-                        baseline.exit_code,
-                        &baseline.stdout,
-                        &baseline.stderr,
-                        baseline
-                            .failure_evidence
-                            .as_ref()
-                            .map(|evidence| evidence.diagnostics.as_slice())
-                            .unwrap_or_default(),
-                    );
-                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
-                        base_ref: base_sha.to_string(),
-                        exit_code: baseline.exit_code,
-                        failure_fingerprint: failure_fingerprint(
-                            baseline.exit_code,
-                            &baseline.stdout,
-                            &baseline.stderr,
-                            baseline
-                                .failure_evidence
-                                .as_ref()
-                                .map(|evidence| evidence.diagnostics.as_slice())
-                                .unwrap_or_default(),
-                        ),
-                        matches_candidate_failure: matches,
-                        result: if matches {
-                            AgentTaskGateDifferentialResult::BaselineRed
-                        } else {
-                            AgentTaskGateDifferentialResult::CandidateRegression
-                        },
-                        diagnostic: None,
-                    });
-                    if matches {
-                        gate.accept_inherited_failure();
-                    }
-                    Ok(())
-                }
                 Ok(baseline) => {
-                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
-                        base_ref: base_sha.to_string(),
-                        exit_code: baseline.exit_code,
-                        failure_fingerprint: failure_fingerprint(
-                            baseline.exit_code,
-                            &baseline.stdout,
-                            &baseline.stderr,
-                            baseline
-                                .failure_evidence
-                                .as_ref()
-                                .map(|evidence| evidence.diagnostics.as_slice())
-                                .unwrap_or_default(),
-                        ),
-                        matches_candidate_failure: false,
-                        result: AgentTaskGateDifferentialResult::CandidateRegression,
-                        diagnostic: None,
-                    });
+                    let facts = BaselineFacts::from_gate(&baseline);
+                    facts.apply(gate, base_sha, None);
+                    let key = baseline_record_key(gate, base_sha, component_id)?;
+                    let payload = serde_json::to_value(&facts).map_err(|error| {
+                        Error::internal_io(
+                            error.to_string(),
+                            Some("serialize baseline facts".to_string()),
+                        )
+                    })?;
+                    if facts.comparable() {
+                        store.put_coordination_record(
+                            BASELINE_RECORDS,
+                            &key,
+                            ExpectedRevision::Absent,
+                            RecordWrite {
+                                state: "comparable",
+                                payload: &payload,
+                                expires_at_ms: None,
+                            },
+                        )?;
+                    }
                     Ok(())
                 }
                 Err(error) => {
@@ -916,41 +994,448 @@ mod tests {
 
     #[test]
     fn differential_gate_comparison_classifies_inherited_regression_and_inconclusive() {
-        for (name, command, candidate_output, timeout, expected, accepted) in [
-            (
-                "inherited",
-                "printf 'same\\n' >&2; exit 1",
-                "same\n",
-                std::time::Duration::from_secs(1),
-                AgentTaskGateDifferentialResult::BaselineRed,
-                true,
-            ),
-            (
-                "regression",
-                "cat state >&2; exit 1",
-                "candidate\n",
-                std::time::Duration::from_secs(1),
-                AgentTaskGateDifferentialResult::CandidateRegression,
-                false,
-            ),
-            (
-                "inconclusive",
-                "sleep 1; exit 1",
-                "candidate\n",
-                std::time::Duration::from_millis(10),
-                AgentTaskGateDifferentialResult::Inconclusive,
-                false,
-            ),
-        ] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            for (name, command, candidate_output, timeout, expected, accepted) in [
+                (
+                    "inherited",
+                    "printf 'same\\n' >&2; exit 1",
+                    "same\n",
+                    std::time::Duration::from_secs(1),
+                    AgentTaskGateDifferentialResult::BaselineRed,
+                    true,
+                ),
+                (
+                    "regression",
+                    "cat state >&2; exit 1",
+                    "candidate\n",
+                    std::time::Duration::from_secs(1),
+                    AgentTaskGateDifferentialResult::CandidateRegression,
+                    false,
+                ),
+                (
+                    "inconclusive",
+                    "sleep 1; exit 1",
+                    "candidate\n",
+                    std::time::Duration::from_millis(10),
+                    AgentTaskGateDifferentialResult::Inconclusive,
+                    false,
+                ),
+            ] {
+                let temp = tempfile::tempdir().expect("repository");
+                git_output(temp.path(), &["init", "-b", "main"]).expect("init");
+                git_output(temp.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
+                git_output(temp.path(), &["config", "user.email", "test@example.test"])
+                    .expect("email");
+                std::fs::write(temp.path().join("state"), "base\n").expect("base state");
+                git_output(temp.path(), &["add", "state"]).expect("add");
+                git_output(temp.path(), &["commit", "-m", "base"]).expect("commit");
+                let base = git_output(temp.path(), &["rev-parse", "HEAD"]).expect("base sha");
+                std::fs::write(temp.path().join("state"), "candidate\n").expect("candidate state");
+                let mut promotion: AgentTaskPromotionReport =
+                    serde_json::from_value(serde_json::json!({
+                        "schema": "homeboy/agent-task-promotion-report/v1",
+                        "status": "gate_failed",
+                        "source": {"kind": "aggregate", "task_id": "task"},
+                        "to_worktree": "fixture",
+                        "target": {"worktree": "fixture", "path": temp.path()},
+                        "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+                        "deterministic_gates": [],
+                        "operator_notification": {"status": "blocked", "message": "red"}
+                    }))
+                    .expect("promotion");
+                let counter = temp.path().join("baseline-count");
+                let command = format!("echo run >> '{}'; {command}", counter.display());
+                let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
+                    name,
+                    crate::agent_task_gate::legacy_gate_argv(&command),
+                    1,
+                    "",
+                    candidate_output,
+                    None,
+                    HomeboyGateVisibility::Visible,
+                    AgentTaskGateRevealPolicy::FullEvidence,
+                    AgentTaskGateEnvironment::default(),
+                );
+                gate.status = AgentTaskGateStatus::Failed;
+                gate.failure_evidence = Some(AgentTaskGateFailureEvidence {
+                    classification: AgentTaskGateFailureClassification::CandidateCode,
+                    summary: "candidate gate failed".to_string(),
+                    command: command.to_string(),
+                    exit_code: 1,
+                    stdout_tail: String::new(),
+                    stderr_tail: candidate_output.to_string(),
+                    agent_feedback: "Repair the candidate gate failure.".to_string(),
+                    diagnostics: Vec::new(),
+                });
+                promotion.deterministic_gates.push(gate);
+
+                let store =
+                    ObservationStore::open_initialized_at(temp.path().join("observations.sqlite"))
+                        .expect("store");
+                let original = promotion.clone();
+                let result = compare_gate_failures_to_verified_base(
+                    &store,
+                    &mut promotion,
+                    temp.path(),
+                    temp.path(),
+                    &base,
+                    timeout,
+                    None,
+                    |_compared, _total| Ok(()),
+                );
+
+                result.expect("baseline comparison");
+                drop(store);
+                let store =
+                    ObservationStore::open_initialized_at(temp.path().join("observations.sqlite"))
+                        .expect("reopen durable store");
+                let mut second = original.clone();
+                // A hit needs neither a valid repository nor a workspace: lookup
+                // precedes worktree creation and dependency materialization.
+                let replay_root = if accepted {
+                    temp.path().join("absent")
+                } else {
+                    temp.path().to_path_buf()
+                };
+                compare_gate_failures_to_verified_base(
+                    &store,
+                    &mut second,
+                    &replay_root,
+                    &replay_root,
+                    &base,
+                    timeout,
+                    None,
+                    |_, _| Ok(()),
+                )
+                .expect("second comparison");
+                assert_eq!(
+                    second.deterministic_gates[0].status,
+                    promotion.deterministic_gates[0].status
+                );
+                assert_eq!(
+                    second.deterministic_gates[0]
+                        .baseline_comparison
+                        .as_ref()
+                        .unwrap()
+                        .result,
+                    expected
+                );
+                let runs = || {
+                    std::fs::read_to_string(&counter)
+                        .expect("counter")
+                        .lines()
+                        .count()
+                };
+                assert_eq!(
+                    runs(),
+                    if accepted || name == "regression" {
+                        1
+                    } else {
+                        2
+                    }
+                );
+                if accepted {
+                    assert!(second.deterministic_gates[0]
+                        .baseline_comparison
+                        .as_ref()
+                        .unwrap()
+                        .diagnostic
+                        .as_ref()
+                        .unwrap()
+                        .contains("reused"));
+                    let mut different_failure = original.clone();
+                    different_failure.deterministic_gates[0].stderr =
+                        "different candidate failure\n".to_string();
+                    compare_gate_failures_to_verified_base(
+                        &store,
+                        &mut different_failure,
+                        &replay_root,
+                        &replay_root,
+                        &base,
+                        timeout,
+                        None,
+                        |_, _| Ok(()),
+                    )
+                    .expect("reuse with different candidate failure");
+                    assert_eq!(
+                        different_failure.deterministic_gates[0]
+                            .baseline_comparison
+                            .as_ref()
+                            .unwrap()
+                            .result,
+                        AgentTaskGateDifferentialResult::CandidateRegression
+                    );
+                    assert_eq!(runs(), 1);
+                    let mut changed = original.clone();
+                    changed.deterministic_gates[0].command =
+                        crate::agent_task_gate::legacy_gate_argv(&format!("{command}; # changed"));
+                    changed.deterministic_gates[0].invocation = None;
+                    compare_gate_failures_to_verified_base(
+                        &store,
+                        &mut changed,
+                        temp.path(),
+                        temp.path(),
+                        &base,
+                        timeout,
+                        None,
+                        |_, _| Ok(()),
+                    )
+                    .expect("changed command");
+                    assert_eq!(runs(), 2);
+                    git_output(temp.path(), &["add", "state"]).expect("add changed state");
+                    git_output(temp.path(), &["commit", "-m", "new base"]).expect("new base");
+                    let new_base =
+                        git_output(temp.path(), &["rev-parse", "HEAD"]).expect("new sha");
+                    let mut changed = original.clone();
+                    compare_gate_failures_to_verified_base(
+                        &store,
+                        &mut changed,
+                        temp.path(),
+                        temp.path(),
+                        &new_base,
+                        timeout,
+                        None,
+                        |_, _| Ok(()),
+                    )
+                    .expect("changed base");
+                    assert_eq!(runs(), 3);
+
+                    // The same invocation/base with new package bytes must not
+                    // borrow the earlier result. Both paths are committed files.
+                    let mut packaged = original.clone();
+                    packaged.deterministic_gates[0]
+                        .environment
+                        .package_artifacts = vec![AgentTaskGatePackageArtifactProvenance {
+                        id: "fixture".to_string(),
+                        environment: "FIXTURE_PACKAGE".to_string(),
+                        value: "fixture".to_string(),
+                        source: None,
+                        artifacts: vec![
+                            crate::agent_task_gate::AgentTaskGateArtifactPathProvenance {
+                                path: "state".to_string(),
+                                sha256: Some(format!("sha256:{:x}", Sha256::digest(b"base\n"))),
+                            },
+                        ],
+                        remediation: serde_json::json!({"action": "restore fixture"}),
+                    }];
+                    compare_gate_failures_to_verified_base(
+                        &store,
+                        &mut packaged,
+                        temp.path(),
+                        temp.path(),
+                        &base,
+                        timeout,
+                        None,
+                        |_, _| Ok(()),
+                    )
+                    .expect("package comparison");
+                    assert_eq!(runs(), 4);
+                    let mut changed = original.clone();
+                    changed.deterministic_gates[0].environment.package_artifacts = packaged
+                        .deterministic_gates[0]
+                        .environment
+                        .package_artifacts
+                        .clone();
+                    changed.deterministic_gates[0].environment.package_artifacts[0].artifacts[0]
+                        .sha256 = Some("sha256:changed".to_string());
+                    compare_gate_failures_to_verified_base(
+                        &store,
+                        &mut changed,
+                        temp.path(),
+                        temp.path(),
+                        &base,
+                        timeout,
+                        None,
+                        |_, _| Ok(()),
+                    )
+                    .expect("changed package digest");
+                    let comparison = changed.deterministic_gates[0]
+                        .baseline_comparison
+                        .as_ref()
+                        .unwrap();
+                    assert_eq!(
+                        comparison.result,
+                        AgentTaskGateDifferentialResult::Inconclusive
+                    );
+                    assert!(!comparison.diagnostic.as_ref().unwrap().contains("reused"));
+                }
+                assert_eq!(
+                    promotion.deterministic_gates[0]
+                        .baseline_comparison
+                        .as_ref()
+                        .expect("comparison")
+                        .result,
+                    expected
+                );
+                assert_eq!(
+                    promotion.deterministic_gates[0].status
+                        == AgentTaskGateStatus::AcceptedInheritedFailure,
+                    accepted
+                );
+                assert_eq!(
+                    promotion.status,
+                    crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+                );
+            }
+        });
+    }
+
+    /// Production gates each carry a unique Lab offload context; the record key
+    /// must ignore it, or no baseline record is ever reused (#16604).
+    #[test]
+    fn baseline_record_key_ignores_lab_offload_context_but_not_gate_inputs() {
+        let gate = |offload: &str, path: &str| {
+            let environment = AgentTaskGateEnvironment {
+                inherited: vec![
+                    crate::agent_task_gate::AgentTaskGateEnvironmentVariable {
+                        name: homeboy_core::observation::context::LAB_OFFLOAD_METADATA_ENV
+                            .to_string(),
+                        value: offload.to_string(),
+                    },
+                    crate::agent_task_gate::AgentTaskGateEnvironmentVariable {
+                        name: "PATH".to_string(),
+                        value: path.to_string(),
+                    },
+                ],
+                ..AgentTaskGateEnvironment::default()
+            };
+            crate::agent_task_gate::AgentTaskGateReport::new(
+                "gate",
+                crate::agent_task_gate::legacy_gate_argv("exit 1"),
+                1,
+                "",
+                "",
+                None,
+                HomeboyGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                environment,
+            )
+        };
+        let key = |gate: &crate::agent_task_gate::AgentTaskGateReport, base: &str| {
+            baseline_record_key(gate, base, Some("component")).expect("key")
+        };
+        let first = gate("{\"run\":1}", "/usr/bin");
+        assert_eq!(
+            key(&first, "base"),
+            key(&gate("{\"run\":2}", "/usr/bin"), "base")
+        );
+        assert_ne!(
+            key(&first, "base"),
+            key(&gate("{\"run\":1}", "/opt/bin"), "base")
+        );
+        assert_ne!(key(&first, "base"), key(&first, "moved"));
+    }
+
+    #[test]
+    fn differential_gate_comparison_accepts_an_identical_missing_monorepo_path() {
+        homeboy_core::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("repository");
             git_output(temp.path(), &["init", "-b", "main"]).expect("init");
             git_output(temp.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
             git_output(temp.path(), &["config", "user.email", "test@example.test"]).expect("email");
-            std::fs::write(temp.path().join("state"), "base\n").expect("base state");
-            git_output(temp.path(), &["add", "state"]).expect("add");
+            std::fs::write(temp.path().join("README"), "base\n").expect("base file");
+            git_output(temp.path(), &["add", "README"]).expect("add");
             git_output(temp.path(), &["commit", "-m", "base"]).expect("commit");
             let base = git_output(temp.path(), &["rev-parse", "HEAD"]).expect("base sha");
-            std::fs::write(temp.path().join("state"), "candidate\n").expect("candidate state");
+
+            let command = "cd packages/missing-component && cargo test";
+            let candidate = std::process::Command::new("sh")
+                .args(&crate::agent_task_gate::legacy_gate_argv(command)[1..])
+                .current_dir(temp.path())
+                .output()
+                .expect("run candidate gate");
+            assert!(!candidate.status.success());
+            let mut promotion: AgentTaskPromotionReport =
+                serde_json::from_value(serde_json::json!({
+                    "schema": "homeboy/agent-task-promotion-report/v1",
+                    "status": "gate_failed",
+                    "source": {"kind": "aggregate", "task_id": "task"},
+                    "to_worktree": "fixture",
+                    "target": {"worktree": "fixture", "path": temp.path()},
+                    "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+                    "deterministic_gates": [],
+                    "operator_notification": {"status": "blocked", "message": "red"}
+                }))
+                .expect("promotion");
+            let stdout = String::from_utf8_lossy(&candidate.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&candidate.stderr).to_string();
+            let exit_code = candidate.status.code().unwrap_or(1);
+            let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
+                "monorepo-gate",
+                crate::agent_task_gate::legacy_gate_argv(command),
+                exit_code,
+                &stdout,
+                &stderr,
+                None,
+                HomeboyGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                AgentTaskGateEnvironment::default(),
+            );
+            gate.failure_evidence = Some(AgentTaskGateFailureEvidence {
+                classification: AgentTaskGateFailureClassification::CandidateCode,
+                summary: "monorepo gate failed from its requested path".to_string(),
+                command: command.to_string(),
+                exit_code,
+                stdout_tail: stdout,
+                stderr_tail: stderr,
+                agent_feedback: "Repair the candidate gate failure.".to_string(),
+                diagnostics: Vec::new(),
+            });
+            promotion.deterministic_gates.push(gate);
+
+            compare_gate_failures_to_verified_base(
+                &ObservationStore::open_initialized_at(temp.path().join("observations.sqlite"))
+                    .expect("store"),
+                &mut promotion,
+                temp.path(),
+                temp.path(),
+                &base,
+                std::time::Duration::from_secs(1),
+                None,
+                |_compared, _total| Ok(()),
+            )
+            .expect("baseline comparison");
+
+            let gate = &promotion.deterministic_gates[0];
+            assert_eq!(
+                gate.status,
+                AgentTaskGateStatus::AcceptedInheritedFailure,
+                "{gate:#?}"
+            );
+            assert_eq!(
+                gate.baseline_comparison
+                    .as_ref()
+                    .expect("comparison")
+                    .result,
+                AgentTaskGateDifferentialResult::BaselineRed
+            );
+        });
+    }
+
+    #[test]
+    fn differential_gate_comparison_replays_a_declared_plan_without_shell_projection() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("repository");
+            git_output(temp.path(), &["init", "-b", "main"]).expect("init");
+            git_output(temp.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
+            git_output(temp.path(), &["config", "user.email", "test@example.test"]).expect("email");
+            std::fs::write(temp.path().join("marker"), "base\n").expect("base marker");
+            git_output(temp.path(), &["add", "marker"]).expect("add");
+            git_output(temp.path(), &["commit", "-m", "base"]).expect("commit");
+            let base = git_output(temp.path(), &["rev-parse", "HEAD"]).expect("base sha");
+            std::fs::write(temp.path().join("marker"), "candidate\n").expect("candidate marker");
+
+            let bin = temp.path().join("bin");
+            std::fs::create_dir(&bin).expect("bin");
+            let homeboy = bin.join("homeboy");
+            homeboy_test_support::write_executable(&homeboy, "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\n/bin/cat marker >&2\nexit 1\n", 0o755)
+        .expect("homeboy adapter");
+
+            let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
+            vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
+            1,
+        )
+        .expect("plan");
             let mut promotion: AgentTaskPromotionReport =
                 serde_json::from_value(serde_json::json!({
                     "schema": "homeboy/agent-task-promotion-report/v1",
@@ -964,216 +1449,53 @@ mod tests {
                 }))
                 .expect("promotion");
             let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
-                name,
-                crate::agent_task_gate::legacy_gate_argv(command),
+                "declared",
+                vec![
+                    "homeboy".to_string(),
+                    "review".to_string(),
+                    "test".to_string(),
+                ],
                 1,
                 "",
-                candidate_output,
+                "candidate\n",
                 None,
                 HomeboyGateVisibility::Visible,
                 AgentTaskGateRevealPolicy::FullEvidence,
-                AgentTaskGateEnvironment::default(),
+                crate::agent_task_gate::AgentTaskGateEnvironment {
+                    inherited: vec![crate::agent_task_gate::AgentTaskGateEnvironmentVariable {
+                        name: "PATH".to_string(),
+                        value: bin.display().to_string(),
+                    }],
+                    ..Default::default()
+                },
             );
-            gate.status = AgentTaskGateStatus::Failed;
-            gate.failure_evidence = Some(AgentTaskGateFailureEvidence {
-                classification: AgentTaskGateFailureClassification::CandidateCode,
-                summary: "candidate gate failed".to_string(),
-                command: command.to_string(),
-                exit_code: 1,
-                stdout_tail: String::new(),
-                stderr_tail: candidate_output.to_string(),
-                agent_feedback: "Repair the candidate gate failure.".to_string(),
-                diagnostics: Vec::new(),
-            });
+            gate.invocation = Some(AgentTaskGateInvocation::DeclaredTest { plan: plan.clone() });
+            gate.test_execution_outcome =
+                Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Failed);
             promotion.deterministic_gates.push(gate);
 
-            let result = compare_gate_failures_to_verified_base(
+            compare_gate_failures_to_verified_base(
+                &ObservationStore::open_initialized_at(temp.path().join("observations.sqlite"))
+                    .expect("store"),
                 &mut promotion,
                 temp.path(),
                 temp.path(),
                 &base,
-                timeout,
+                std::time::Duration::from_secs(5),
                 None,
                 |_compared, _total| Ok(()),
-            );
+            )
+            .expect("typed baseline replay");
 
-            result.expect("baseline comparison");
+            let gate = &promotion.deterministic_gates[0];
             assert_eq!(
-                promotion.deterministic_gates[0]
-                    .baseline_comparison
-                    .as_ref()
-                    .expect("comparison")
-                    .result,
-                expected
+                gate.invocation().expect("typed invocation"),
+                AgentTaskGateInvocation::DeclaredTest { plan }
             );
             assert_eq!(
-                promotion.deterministic_gates[0].status
-                    == AgentTaskGateStatus::AcceptedInheritedFailure,
-                accepted
+                gate.baseline_comparison.as_ref().unwrap().result,
+                AgentTaskGateDifferentialResult::CandidateRegression
             );
-            assert_eq!(
-                promotion.status,
-                crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
-            );
-        }
-    }
-
-    #[test]
-    fn differential_gate_comparison_accepts_an_identical_missing_monorepo_path() {
-        let temp = tempfile::tempdir().expect("repository");
-        git_output(temp.path(), &["init", "-b", "main"]).expect("init");
-        git_output(temp.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
-        git_output(temp.path(), &["config", "user.email", "test@example.test"]).expect("email");
-        std::fs::write(temp.path().join("README"), "base\n").expect("base file");
-        git_output(temp.path(), &["add", "README"]).expect("add");
-        git_output(temp.path(), &["commit", "-m", "base"]).expect("commit");
-        let base = git_output(temp.path(), &["rev-parse", "HEAD"]).expect("base sha");
-
-        let command = "cd packages/missing-component && cargo test";
-        let candidate = std::process::Command::new("sh")
-            .args(&crate::agent_task_gate::legacy_gate_argv(command)[1..])
-            .current_dir(temp.path())
-            .output()
-            .expect("run candidate gate");
-        assert!(!candidate.status.success());
-        let mut promotion: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
-            "schema": "homeboy/agent-task-promotion-report/v1",
-            "status": "gate_failed",
-            "source": {"kind": "aggregate", "task_id": "task"},
-            "to_worktree": "fixture",
-            "target": {"worktree": "fixture", "path": temp.path()},
-            "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
-            "deterministic_gates": [],
-            "operator_notification": {"status": "blocked", "message": "red"}
-        }))
-        .expect("promotion");
-        let stdout = String::from_utf8_lossy(&candidate.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&candidate.stderr).to_string();
-        let exit_code = candidate.status.code().unwrap_or(1);
-        let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
-            "monorepo-gate",
-            crate::agent_task_gate::legacy_gate_argv(command),
-            exit_code,
-            &stdout,
-            &stderr,
-            None,
-            HomeboyGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-            AgentTaskGateEnvironment::default(),
-        );
-        gate.failure_evidence = Some(AgentTaskGateFailureEvidence {
-            classification: AgentTaskGateFailureClassification::CandidateCode,
-            summary: "monorepo gate failed from its requested path".to_string(),
-            command: command.to_string(),
-            exit_code,
-            stdout_tail: stdout,
-            stderr_tail: stderr,
-            agent_feedback: "Repair the candidate gate failure.".to_string(),
-            diagnostics: Vec::new(),
         });
-        promotion.deterministic_gates.push(gate);
-
-        compare_gate_failures_to_verified_base(
-            &mut promotion,
-            temp.path(),
-            temp.path(),
-            &base,
-            std::time::Duration::from_secs(1),
-            None,
-            |_compared, _total| Ok(()),
-        )
-        .expect("baseline comparison");
-
-        let gate = &promotion.deterministic_gates[0];
-        assert_eq!(gate.status, AgentTaskGateStatus::AcceptedInheritedFailure);
-        assert_eq!(
-            gate.baseline_comparison
-                .as_ref()
-                .expect("comparison")
-                .result,
-            AgentTaskGateDifferentialResult::BaselineRed
-        );
-    }
-
-    #[test]
-    fn differential_gate_comparison_replays_a_declared_plan_without_shell_projection() {
-        let temp = tempfile::tempdir().expect("repository");
-        git_output(temp.path(), &["init", "-b", "main"]).expect("init");
-        git_output(temp.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
-        git_output(temp.path(), &["config", "user.email", "test@example.test"]).expect("email");
-        std::fs::write(temp.path().join("marker"), "base\n").expect("base marker");
-        git_output(temp.path(), &["add", "marker"]).expect("add");
-        git_output(temp.path(), &["commit", "-m", "base"]).expect("commit");
-        let base = git_output(temp.path(), &["rev-parse", "HEAD"]).expect("base sha");
-        std::fs::write(temp.path().join("marker"), "candidate\n").expect("candidate marker");
-
-        let bin = temp.path().join("bin");
-        std::fs::create_dir(&bin).expect("bin");
-        let homeboy = bin.join("homeboy");
-        homeboy_test_support::write_executable(&homeboy, "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\n/bin/cat marker >&2\nexit 1\n", 0o755)
-        .expect("homeboy adapter");
-
-        let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
-            vec!["homeboy".to_string(), "review".to_string(), "test".to_string()],
-            1,
-        )
-        .expect("plan");
-        let mut promotion: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
-            "schema": "homeboy/agent-task-promotion-report/v1",
-            "status": "gate_failed",
-            "source": {"kind": "aggregate", "task_id": "task"},
-            "to_worktree": "fixture",
-            "target": {"worktree": "fixture", "path": temp.path()},
-            "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
-            "deterministic_gates": [],
-            "operator_notification": {"status": "blocked", "message": "red"}
-        }))
-        .expect("promotion");
-        let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
-            "declared",
-            vec![
-                "homeboy".to_string(),
-                "review".to_string(),
-                "test".to_string(),
-            ],
-            1,
-            "",
-            "candidate\n",
-            None,
-            HomeboyGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-            crate::agent_task_gate::AgentTaskGateEnvironment {
-                inherited: vec![crate::agent_task_gate::AgentTaskGateEnvironmentVariable {
-                    name: "PATH".to_string(),
-                    value: bin.display().to_string(),
-                }],
-                ..Default::default()
-            },
-        );
-        gate.invocation = Some(AgentTaskGateInvocation::DeclaredTest { plan: plan.clone() });
-        gate.test_execution_outcome =
-            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Failed);
-        promotion.deterministic_gates.push(gate);
-
-        compare_gate_failures_to_verified_base(
-            &mut promotion,
-            temp.path(),
-            temp.path(),
-            &base,
-            std::time::Duration::from_secs(5),
-            None,
-            |_compared, _total| Ok(()),
-        )
-        .expect("typed baseline replay");
-
-        let gate = &promotion.deterministic_gates[0];
-        assert_eq!(
-            gate.invocation().expect("typed invocation"),
-            AgentTaskGateInvocation::DeclaredTest { plan }
-        );
-        assert_eq!(
-            gate.baseline_comparison.as_ref().unwrap().result,
-            AgentTaskGateDifferentialResult::CandidateRegression
-        );
     }
 }
