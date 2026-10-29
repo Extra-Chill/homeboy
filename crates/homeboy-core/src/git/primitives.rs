@@ -56,6 +56,10 @@ fn ensure_git_success(
 /// failures deliberately leave callers free to attempt their normal refresh.
 pub fn remote_revision(url: &str, requested_ref: Option<&str>) -> Option<String> {
     let requested = requested_ref.unwrap_or("HEAD");
+    // A pinned commit is its own revision; ls-remote cannot list it.
+    if requested.len() == 40 && requested.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Some(requested.to_ascii_lowercase());
+    }
     let head = format!("refs/heads/{requested}");
     let tag = format!("refs/tags/{requested}");
     let peeled = format!("{tag}^{{}}");

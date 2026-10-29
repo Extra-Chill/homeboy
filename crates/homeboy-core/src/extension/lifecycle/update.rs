@@ -711,7 +711,11 @@ mod transaction_tests {
         );
         assert_eq!(
             git::remote_revision(url, Some("refs/tags/release")),
-            Some(revision)
+            Some(revision.clone())
+        );
+        assert_eq!(
+            git::remote_revision(url, Some(&revision)),
+            Some(revision.clone())
         );
         assert_eq!(git::remote_revision(url, Some("missing-ref")), None);
         assert_eq!(
