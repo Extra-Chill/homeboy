@@ -62,9 +62,17 @@ pub fn clone_repo(url: &str, target_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Ref-pinned clones fetch blobs only for the checked-out tree; history blobs
+/// arrive lazily if something asks for them.
+const BLOBLESS: &str = "--filter=blob:none";
+
 /// Clone a git repository to a target directory and check out a requested ref.
 pub fn clone_repo_at_ref(url: &str, target_dir: &Path, revision: Option<&str>) -> Result<()> {
-    clone_repo(url, target_dir)?;
+    run_git(
+        Path::new("."),
+        &["clone", BLOBLESS, url, &target_dir.to_string_lossy()],
+        "git clone",
+    )?;
 
     if let Some(revision) = revision {
         run_git(
@@ -87,7 +95,7 @@ pub fn clone_repo_at_ref_with_timeout(
 ) -> Result<()> {
     run_git_with_env_timeout(
         Path::new("."),
-        &["clone", url, &target_dir.to_string_lossy()],
+        &["clone", BLOBLESS, url, &target_dir.to_string_lossy()],
         "git clone",
         &[],
         timeout,
