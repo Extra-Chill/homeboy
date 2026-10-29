@@ -352,10 +352,16 @@ fn baseline_record_key(
     base_sha: &str,
     component_id: Option<&str>,
 ) -> Result<String> {
+    // Lab offload metadata is unique per gate run and is observation context,
+    // not a gate input; keying on it would make every record unreachable.
+    let mut policy = replay_gate_policy(&gate.environment, component_id);
+    policy
+        .variables
+        .remove(homeboy_core::observation::context::LAB_OFFLOAD_METADATA_ENV);
     let inputs = serde_json::json!([
         base_sha,
         gate.invocation()?.identity_digest()?,
-        replay_gate_policy(&gate.environment, component_id),
+        policy,
         gate.environment.package_artifacts,
     ]);
     Ok(format!(
@@ -1272,6 +1278,52 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// Production gates each carry a unique Lab offload context; the record key
+    /// must ignore it, or no baseline record is ever reused (#16604).
+    #[test]
+    fn baseline_record_key_ignores_lab_offload_context_but_not_gate_inputs() {
+        let gate = |offload: &str, path: &str| {
+            let environment = AgentTaskGateEnvironment {
+                inherited: vec![
+                    crate::agent_task_gate::AgentTaskGateEnvironmentVariable {
+                        name: homeboy_core::observation::context::LAB_OFFLOAD_METADATA_ENV
+                            .to_string(),
+                        value: offload.to_string(),
+                    },
+                    crate::agent_task_gate::AgentTaskGateEnvironmentVariable {
+                        name: "PATH".to_string(),
+                        value: path.to_string(),
+                    },
+                ],
+                ..AgentTaskGateEnvironment::default()
+            };
+            crate::agent_task_gate::AgentTaskGateReport::new(
+                "gate",
+                crate::agent_task_gate::legacy_gate_argv("exit 1"),
+                1,
+                "",
+                "",
+                None,
+                HomeboyGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                environment,
+            )
+        };
+        let key = |gate: &crate::agent_task_gate::AgentTaskGateReport, base: &str| {
+            baseline_record_key(gate, base, Some("component")).expect("key")
+        };
+        let first = gate("{\"run\":1}", "/usr/bin");
+        assert_eq!(
+            key(&first, "base"),
+            key(&gate("{\"run\":2}", "/usr/bin"), "base")
+        );
+        assert_ne!(
+            key(&first, "base"),
+            key(&gate("{\"run\":1}", "/opt/bin"), "base")
+        );
+        assert_ne!(key(&first, "base"), key(&first, "moved"));
     }
 
     #[test]
