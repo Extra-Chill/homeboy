@@ -26,6 +26,7 @@ pub fn runner_upgrade_failure_entry(
 ) -> RunnerUpgradeEntry {
     let recovery_commands = runner_upgrade_recovery_commands(runner_id, &homeboy_path);
     RunnerUpgradeEntry {
+        phases: serde_json::json!({}),
         runner_id: runner_id.to_string(),
         homeboy_path,
         success: false,

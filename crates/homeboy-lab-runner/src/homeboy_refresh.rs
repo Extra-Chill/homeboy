@@ -3468,6 +3468,35 @@ trap - EXIT HUP INT TERM
 printf '%s\n' "$identity"
 "#;
 
+pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<String> {
+    let runner = load(runner_id)?;
+    let root = runner
+        .workspace_root
+        .as_deref()
+        .ok_or_else(|| Error::internal_unexpected("runner acquisition requires workspace_root"))?;
+    let dir = default_target_dir(root, tag);
+    let script = materialize_script(
+        DEFAULT_HOMEBOY_REMOTE,
+        tag,
+        &dir,
+        &format!("{dir}/target/release/homeboy"),
+        false,
+        &[],
+    );
+    let (output, code) = super::exec(runner_id, RunnerExecOptions::diagnostic_raw_shell(script))?;
+    if code != 0 {
+        return Err(Error::internal_unexpected(format!(
+            "runner release acquisition failed: {runner_id}"
+        )));
+    }
+    output
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("HOMEBOY_REFRESH_BINARY_PATH="))
+        .map(str::to_string)
+        .ok_or_else(|| Error::internal_unexpected("runner acquisition returned no immutable path"))
+}
+
 fn materialize_script(
     source: &str,
     git_ref: &str,

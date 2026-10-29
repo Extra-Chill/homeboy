@@ -286,6 +286,58 @@ fn materialized_slot_provenance_round_trips_a_multi_line_identity() {
 }
 
 #[test]
+fn release_slot_acquisition_can_finish_while_controller_install_is_blocked() {
+    let Some(triple) = host_release_triple() else {
+        return;
+    };
+    let fixture = release_fixture();
+    publish_release_archive(&fixture, triple, ReleaseArchive::Valid);
+    let root = binaries_root(&fixture);
+    let active = root.join("active-homeboy");
+    fs::write(&active, "old controller-verified selection").unwrap();
+    let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+    let (verified_tx, verified_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let fixture = &fixture;
+        let active = &active;
+        let root = &root;
+        let acquisition = scope.spawn(move || {
+            let output = materialize(
+                fixture,
+                CANONICAL_SOURCE,
+                RELEASE_TAG,
+                &root.join(format!("homeboy-{RELEASE_TAG}")),
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let path = refreshed_binary_path(&ssh_bootstrap_plan(), &stdout).unwrap();
+            acquired_tx.send(path.clone()).unwrap();
+            verified_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            // Selection consumes the immutable slot only after verification.
+            select_probe(fixture, &path);
+            fs::write(active, path).unwrap();
+        });
+        let path = acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("acquisition finishes before controller install is released");
+        assert!(Path::new(&path).is_file());
+        assert_eq!(
+            fs::read_to_string(active).unwrap(),
+            "old controller-verified selection"
+        );
+        verified_tx.send(()).unwrap();
+        acquisition.join().unwrap();
+        assert_eq!(fs::read_to_string(active).unwrap(), path);
+    });
+}
+
+#[test]
 fn release_acquisition_publishes_a_verified_slot_without_a_git_checkout() {
     let Some(triple) = host_release_triple() else {
         return;

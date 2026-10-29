@@ -70,6 +70,39 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
         )
     }
 
+    fn acquire_runner_release(
+        &self,
+        tag: &str,
+        targets: &[String],
+    ) -> Result<Vec<homeboy_upgrade::upgrade::AcquiredRunnerRelease>> {
+        let runners = orchestration::runner_upgrade_targets(targets)?;
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = runners
+                .iter()
+                .map(|runner| {
+                    scope.spawn(move || {
+                        let started_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .expect("clock after epoch")
+                            .as_millis() as u64;
+                        let started = std::time::Instant::now();
+                        crate::homeboy_refresh::acquire_release_slot(&runner.id, tag).map(
+                            |binary_path| homeboy_upgrade::upgrade::AcquiredRunnerRelease {
+                                runner_id: runner.id.clone(),
+                                binary_path,
+                                started_at,
+                                duration_ms: started.elapsed().as_millis() as u64,
+                            },
+                        )
+                    })
+                })
+                .collect();
+            jobs.into_iter()
+                .map(|job| job.join().expect("runner acquisition panicked"))
+                .collect()
+        })
+    }
+
     fn upgrade_configured_runners_with_explicit_source_path(
         &self,
         force: bool,
@@ -80,7 +113,61 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
         runner_targets: &[String],
         extension_updates: &[ExtensionUpgradeEntry],
         promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
+        acquired: &[homeboy_upgrade::upgrade::AcquiredRunnerRelease],
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
+        if !acquired.is_empty() {
+            let mut updated = Vec::new();
+            let mut skipped = Vec::new();
+            for release in acquired {
+                let runner = crate::load(&release.runner_id)?;
+                if let Ok(report) = crate::status(&runner.id) {
+                    let live_jobs = report.active_job_count.max(report.active_jobs.len());
+                    if live_jobs > 0 {
+                        let mut entry = failure::runner_upgrade_failure_entry(
+                            &runner.id,
+                            runner.settings.homeboy_path.clone().unwrap_or_default(),
+                            None,
+                            0,
+                            format!("runner busy: {live_jobs} live job(s)"),
+                        );
+                        entry.success = true;
+                        entry.deferred = true;
+                        entry.recovery_commands.clear();
+                        updated.push(entry);
+                        continue;
+                    }
+                }
+                let mut entry = orchestration::refresh_managed_immutable_runner(
+                    &runner,
+                    runner.settings.homeboy_path.clone().unwrap_or_default(),
+                    version::runner_homeboy_version(
+                        &runner,
+                        runner.settings.homeboy_path.as_deref().unwrap_or("homeboy"),
+                        &mut crate::exec,
+                    )
+                    .ok()
+                    .flatten(),
+                    None,
+                    expected_controller_identity,
+                    extension_updates,
+                    &mut crate::exec,
+                    Some(&release.binary_path),
+                );
+                entry.phases["binary"] = serde_json::json!({
+                    "started_at": release.started_at, "duration_ms": release.duration_ms,
+                });
+                if entry.success {
+                    updated.push(entry);
+                } else {
+                    skipped.push(entry);
+                }
+            }
+            return Ok(service_binaries::converge_service_binaries_for_entries(
+                &orchestration::runner_upgrade_targets(runner_targets)?,
+                updated,
+                skipped,
+            ));
+        }
         upgrade_configured_runners_with_explicit_source_path(
             force,
             method_override,
