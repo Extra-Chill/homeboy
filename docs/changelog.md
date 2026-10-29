@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.31] - 2026-10-29
+
+### Changed
+- replace iterate and command gates with self-admitting instances
+
+### Fixed
+- scope offline daemon status to its own lease in a shared ledger
+
 ## [0.434.30] - 2026-10-29
 
 ### Changed
