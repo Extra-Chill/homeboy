@@ -29,21 +29,7 @@ pub(super) fn write_source_workspace_files(path: &Path, package_name: &str) {
     .expect("package manifest");
 }
 
-pub(super) fn git(path: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {} failed: {}{}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr),
-        String::from_utf8_lossy(&output.stdout)
-    );
-}
+pub(super) use homeboy_test_support::git::run as git;
 
 #[test]
 fn queued_binary_revalidates_target_before_install() {

@@ -790,16 +790,8 @@ pub(crate) fn canonical_workspace_path(path: &str) -> homeboy_core::error::Resul
 #[cfg(test)]
 mod default_excludes_tests {
     use super::default_excludes_for;
-    use std::process::Command;
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {args:?}");
-    }
+    use homeboy_test_support::git::run as git;
 
     /// Regression for #15303 cause 1: data-machine tracks
     /// `tests/fixtures/service-account/test-key.pem`, and the `*.pem` secret

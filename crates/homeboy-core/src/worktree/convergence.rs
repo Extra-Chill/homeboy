@@ -336,12 +336,7 @@ mod tests {
         base: String,
     }
 
-    fn git(path: &Path, args: &[&str]) -> String {
-        crate::git::run_git(path, args, "convergence fixture")
-            .unwrap()
-            .trim()
-            .to_string()
-    }
+    use homeboy_test_support::git::output as git;
 
     fn fixture() -> Fixture {
         let root = tempfile::tempdir().unwrap();

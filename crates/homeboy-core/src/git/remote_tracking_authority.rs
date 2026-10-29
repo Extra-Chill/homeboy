@@ -23,15 +23,7 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
-    fn git(path: &Path, args: &[&str]) {
-        assert!(Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git")
-            .status
-            .success());
-    }
+    use homeboy_test_support::git::run as git;
 
     fn repository(path: &Path) {
         git(path, &["init", "-q"]);

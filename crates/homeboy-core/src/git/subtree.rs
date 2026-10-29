@@ -419,21 +419,8 @@ fn run_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
-    fn git(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {:?}: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    use homeboy_test_support::git::run as git;
 
     #[test]
     fn publishes_nested_subtree_and_retries_identically() {

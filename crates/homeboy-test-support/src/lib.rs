@@ -1,5 +1,7 @@
 //! Small, dependency-light helpers shared by workspace tests.
 
+pub mod git;
+
 /// Publish a fixture only after its writer has closed, preserving the requested mode.
 ///
 /// A sibling temporary file keeps the final rename on the same filesystem. Never

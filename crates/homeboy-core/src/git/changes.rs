@@ -906,17 +906,7 @@ mod tests {
         }
     }
 
-    fn git(path: &str, args: &[&str]) {
-        assert!(
-            Command::new("git")
-                .args(args)
-                .current_dir(path)
-                .status()
-                .unwrap()
-                .success(),
-            "git {args:?} failed"
-        );
-    }
+    use homeboy_test_support::git::run as git;
 
     /// Regression for the "moving base branch" bug: a long-running worktree
     /// diverges from `main`, then `main` advances with unrelated commits

@@ -5469,14 +5469,7 @@ esac
         crate::commands::agent_task::run(args).expect_err("CLI command fails")
     }
 
-    fn run_git(path: &std::path::Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {args:?} failed");
-    }
+    use homeboy_test_support::git::run as run_git;
 
     fn git_output(path: &std::path::Path, args: &[&str]) -> String {
         let output = Command::new("git")

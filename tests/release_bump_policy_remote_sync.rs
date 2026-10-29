@@ -286,16 +286,7 @@ fn ref_exists(repo: &Path, reference: &str) -> bool {
         .success()
 }
 
-fn git(repo: &Path, args: &[&str]) -> String {
-    let mut command = vec!["git"];
-    command.extend_from_slice(args);
-    let output = run_output(repo, &command);
-    assert_success(&output);
-    String::from_utf8(output.stdout)
-        .expect("git output")
-        .trim()
-        .to_string()
-}
+use homeboy_test_support::git::output as git;
 
 fn run(repo: &Path, command: &[&str]) {
     let output = run_output(repo, command);

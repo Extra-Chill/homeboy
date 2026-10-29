@@ -381,7 +381,6 @@ mod tests {
     use homeboy_core::component::{Component, VersionTarget};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_dir(name: &str) -> PathBuf {
@@ -401,19 +400,7 @@ mod tests {
         }
     }
 
-    fn run_git(root: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git command should run");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_test_support::git::run as run_git;
 
     #[test]
     fn release_owned_file_paths_include_changelog_and_version_targets() {
