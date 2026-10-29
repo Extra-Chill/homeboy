@@ -2745,6 +2745,7 @@ fn update_all_extensions(
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
 
+    let revisions = lifecycle::resolve_update_revisions(&extension_ids);
     for (index, id) in extension_ids.iter().enumerate() {
         let old_version = homeboy_core::extension::catalog::load_extension(id)
             .ok()
@@ -2769,7 +2770,13 @@ fn update_all_extensions(
                     }
                 }
             },
-            || lifecycle::update(id, false),
+            || {
+                lifecycle::update(
+                    id,
+                    false,
+                    revisions.get(id).map(|revision| revision.as_deref()),
+                )
+            },
         );
         if let Some(error) = progress_failure
             .into_inner()

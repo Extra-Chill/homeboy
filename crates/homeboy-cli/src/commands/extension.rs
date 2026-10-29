@@ -1595,7 +1595,7 @@ fn update_extension(
     // Capture version before update
     let old_version = load_extension(extension_id).ok().map(|m| m.version.clone());
 
-    let result = extension::lifecycle::update(extension_id, force)?;
+    let result = extension::lifecycle::update(extension_id, force, None)?;
 
     // Capture version after update
     let new_version = load_extension(&result.extension_id)

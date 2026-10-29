@@ -17,8 +17,42 @@ use super::{source_metadata, UpdateResult};
 use crate::extension::catalog::{is_extension_linked, load_extension};
 use homeboy_extension_contract::update_output::ExtensionSourceUpdate;
 
-/// Update an installed extension by pulling latest changes.
-pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
+/// Resolve each extracted source URL/ref once for a sweep. Failed lookups are
+/// retained too, so every member falls through to refresh without retrying.
+pub fn resolve_update_revisions(
+    extension_ids: &[String],
+) -> std::collections::HashMap<String, Option<String>> {
+    let mut groups = std::collections::HashMap::<_, Vec<String>>::new();
+    for id in extension_ids {
+        let Ok(dir) = paths::extension(id) else {
+            continue;
+        };
+        if is_extension_linked(id) || dir.join(".git").exists() {
+            continue;
+        }
+        if let Ok(source) = source_metadata::resolve_source_url_read_only(id) {
+            groups
+                .entry((source, read_source_requested_ref(&dir)))
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    groups
+        .into_iter()
+        .flat_map(|((url, requested_ref), ids)| {
+            let revision = git::remote_revision(&url, requested_ref.as_deref());
+            ids.into_iter().map(move |id| (id, revision.clone()))
+        })
+        .collect()
+}
+
+/// Update an installed extension by pulling latest changes. `remote_revision`
+/// supplies a sweep's lookup result (including failure); `None` resolves here.
+pub fn update(
+    extension_id: &str,
+    force: bool,
+    remote_revision: Option<Option<&str>>,
+) -> Result<UpdateResult> {
     let extension_dir = paths::extension(extension_id)?;
     if !extension_dir.exists() {
         return Err(Error::extension_not_found(extension_id.to_string(), vec![]));
@@ -110,7 +144,27 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
         });
     }
 
-    update_extracted_extension(extension_id, &extension_dir, &source_url)?;
+    let old_revision = super::read_source_metadata_value(&extension_dir, "revision");
+    let resolved;
+    let remote_revision = if force {
+        None
+    } else if let Some(revision) = remote_revision {
+        revision
+    } else {
+        resolved = git::remote_revision(
+            &source_url,
+            read_source_requested_ref(&extension_dir).as_deref(),
+        );
+        resolved.as_deref()
+    };
+    let unchanged = old_revision
+        .as_deref()
+        .zip(remote_revision)
+        .is_some_and(|(old, remote)| !old.is_empty() && remote.starts_with(old));
+    if !unchanged {
+        update_extracted_extension(extension_id, &extension_dir, &source_url)?;
+    }
+    let new_revision = super::read_source_metadata_value(&extension_dir, "revision");
 
     Ok(UpdateResult {
         extension_id: extension_id.to_string(),
@@ -119,7 +173,12 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
         linked: false,
         source_path: None,
         git_root: None,
-        source_update: ExtensionSourceUpdate::default(),
+        source_update: ExtensionSourceUpdate {
+            old_source_revision: old_revision,
+            new_source_revision: new_revision,
+            update_note: unchanged.then(|| "Extension source is up to date.".to_string()),
+            ..Default::default()
+        },
         repaired_source_metadata: source_repair,
     })
 }
@@ -621,6 +680,45 @@ fn preserve_dirty_error(error: Error, initially_clean: bool, worktree: &Path) ->
 mod transaction_tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn remote_revision_resolves_head_branches_and_peeled_tags() {
+        let repo = committed_repo();
+        let url = repo.path().to_str().unwrap();
+        let revision = git::remote_revision(url, None).expect("remote HEAD");
+        let branch = git::current_branch(repo.path()).unwrap();
+        assert_eq!(
+            git::remote_revision(url, Some(&branch)),
+            Some(revision.clone())
+        );
+        assert!(git_succeeds(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "tag",
+                "-a",
+                "release",
+                "-m",
+                "annotated release",
+            ]
+        ));
+        assert_eq!(
+            git::remote_revision(url, Some("release")),
+            Some(revision.clone())
+        );
+        assert_eq!(
+            git::remote_revision(url, Some("refs/tags/release")),
+            Some(revision)
+        );
+        assert_eq!(git::remote_revision(url, Some("missing-ref")), None);
+        assert_eq!(
+            git::remote_revision("/nonexistent/homeboy-remote", None),
+            None
+        );
+    }
 
     #[test]
     fn rollback_restores_the_prior_clean_revision() {
