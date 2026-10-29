@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.10] - 2026-10-29
+
+### Changed
+- Drop the committed Criterion fixture build output
+
 ## [1.37.9] - 2026-10-25
 
 ### Changed
