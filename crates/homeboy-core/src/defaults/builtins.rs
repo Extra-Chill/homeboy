@@ -180,7 +180,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_upgrade_installs_active_binary() {
+    fn source_upgrade_only_builds_the_release_binary() {
         // The bundled asset, not the process-wide defaults: an operator's
         // EXTENSION_DEFAULTS_PATH override must not decide this assertion.
         let config = parse_extension_provided_defaults(include_str!(concat!(
@@ -190,10 +190,13 @@ mod tests {
         .install_methods
         .source;
 
-        assert!(config.upgrade_command.contains("cargo build --release"));
-        assert!(config.upgrade_command.contains("target/release/homeboy"));
-        assert!(config.upgrade_command.contains("--version"));
-        assert!(!config.upgrade_command.contains("cargo install --path"));
+        // Homeboy proves and installs the built artifact itself; the command
+        // only builds it.
+        assert!(config
+            .upgrade_command
+            .trim_end()
+            .ends_with("cargo build --release"));
+        assert!(!config.upgrade_command.contains("cargo install"));
     }
 
     #[test]
