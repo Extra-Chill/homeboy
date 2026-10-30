@@ -228,16 +228,20 @@ fn resolve_checkout_less_release_component(
         return Ok(None);
     };
 
-    let Some(tag) =
-        crate::git::release_download::latest_release_tag_for_repo(&github, &standalone.github)?
+    let Some(tag) = crate::git::release_download::latest_release_tag_for_component(
+        &github,
+        &standalone.github,
+        component_id,
+    )?
     else {
         return Ok(None);
     };
 
-    let mut component = crate::git::release_download::fetch_portable_config_at_tag(
+    let mut component = crate::git::release_download::fetch_component_config_at_tag(
         &github,
         &standalone.github,
         &tag,
+        component_id,
     )?;
     component.id = component_id.to_string();
     Ok(Some(component))

@@ -354,9 +354,10 @@ pub(super) fn latest_default_deploy_tag(component: &Component) -> Result<Option<
         let Some(github) = homeboy_core::git::release_download::parse_github_url(remote_url) else {
             return Ok(None);
         };
-        return homeboy_core::git::release_download::latest_release_tag_for_repo(
+        return homeboy_core::git::release_download::latest_release_tag_for_component(
             &github,
             &component.github,
+            &component.id,
         );
     }
 

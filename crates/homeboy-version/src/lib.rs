@@ -61,6 +61,11 @@ pub fn component_release_tag_version(
     component: &Component,
     git_ref: &str,
 ) -> homeboy_core::Result<Option<String>> {
+    if !component.has_local_checkout() {
+        if let Some(version) = release_tag_version_for_prefix(git_ref, Some(&component.id)) {
+            return Ok(Some(version));
+        }
+    }
     let scope = scope::ReleaseScope::resolve(component, &component.id)?;
     Ok(release_tag_version_for_prefix(git_ref, scope.tag_prefix()))
 }
@@ -88,9 +93,10 @@ pub fn checkout_less_release_version(
     let Some(github) = homeboy_core::git::release_download::parse_github_url(remote_url) else {
         return Ok(None);
     };
-    let Some(tag) = homeboy_core::git::release_download::latest_release_tag_for_repo(
+    let Some(tag) = homeboy_core::git::release_download::latest_release_tag_for_component(
         &github,
         &component.github,
+        &component.id,
     )?
     else {
         return Ok(None);
@@ -118,6 +124,24 @@ fn release_tag_version_for_prefix(git_ref: &str, tag_prefix: Option<&str>) -> Op
 #[cfg(test)]
 mod release_tag_version_tests {
     use super::release_tag_version_for_prefix;
+
+    #[test]
+    fn checkout_less_component_recognizes_its_prefixed_release() {
+        let component = homeboy_core::component::Component::new(
+            "wp-native-auth".into(),
+            String::new(),
+            String::new(),
+            None,
+        );
+        assert_eq!(
+            super::component_release_tag_version(&component, "wp-native-auth-v0.4.3").unwrap(),
+            Some("0.4.3".into())
+        );
+        assert_eq!(
+            super::component_release_tag_version(&component, "sibling-v0.4.3").unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn a_root_component_release_tag_resolves_its_version() {
