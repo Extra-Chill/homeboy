@@ -181,7 +181,14 @@ mod tests {
 
     #[test]
     fn source_upgrade_installs_active_binary() {
-        let config = default_source_config();
+        // The bundled asset, not the process-wide defaults: an operator's
+        // EXTENSION_DEFAULTS_PATH override must not decide this assertion.
+        let config = parse_extension_provided_defaults(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/defaults/extension-provided-defaults.json"
+        )))
+        .install_methods
+        .source;
 
         assert!(config.upgrade_command.contains("cargo build --release"));
         assert!(config.upgrade_command.contains("target/release/homeboy"));
