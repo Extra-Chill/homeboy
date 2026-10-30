@@ -965,7 +965,7 @@ impl JobStore {
 
     /// Act for one daemon scope: jobs this store creates are stamped with it,
     /// and its scoped sweeps see only jobs stamped with it.
-    pub(crate) fn with_daemon_scope(mut self, daemon_scope: DaemonScope) -> Self {
+    pub fn with_daemon_scope(mut self, daemon_scope: DaemonScope) -> Self {
         self.daemon_scope = Some(daemon_scope);
         self
     }
