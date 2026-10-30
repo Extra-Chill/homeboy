@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.23.2] - 2026-10-30
+
+### Fixed
+- Fix differential gating for full-scope pull requests
+
 ## [2.23.1] - 2026-10-30
 
 ### Changed
