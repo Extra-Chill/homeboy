@@ -1171,11 +1171,17 @@ fn canonical_status_omits_unrelated_high_cardinality_cleanup_inventory() {
         assert!(!value.to_string().contains("/workspace/unrelated-9999"));
         assert!(value.to_string().len() < 16 * 1024);
 
+        // The inventory exceeds the run-metadata cap, so the row keeps a
+        // content-addressed reference and the full list stays resolvable.
         let persisted = agent_task_lifecycle::reconcile_status(run_id).expect("persisted record");
+        let retention =
+            homeboy::core::observation::store::metadata_payloads::resolve_metadata_payload(
+                &persisted.metadata["automatic_artifact_retention"],
+                &homeboy::core::paths::artifact_root().expect("artifact root"),
+            )
+            .expect("resolve retention inventory");
         assert_eq!(
-            persisted.metadata["automatic_artifact_retention"]["worktrees"]
-                .as_array()
-                .map(Vec::len),
+            retention["worktrees"].as_array().map(Vec::len),
             Some(10_000)
         );
     });

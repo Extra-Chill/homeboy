@@ -1,4 +1,5 @@
-//! Content-addressed payloads for the two large Cook metadata contracts.
+//! Content-addressed payloads for large run metadata: known Cook payloads
+//! above the threshold, and any other value needed to stay under the row cap.
 use super::*;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
@@ -102,6 +103,48 @@ fn prepare(value: &mut Value, root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The deepest value on the largest-child path that is still above the
+/// externalization threshold and not already a payload reference.
+fn largest_inline_payload(value: &mut Value) -> Option<&mut Value> {
+    fn size(value: &Value) -> usize {
+        serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+    }
+    if value.get(REFERENCE).is_some() || size(value) <= METADATA_PAYLOAD_THRESHOLD {
+        return None;
+    }
+    let largest_child = match value {
+        Value::Object(object) => object
+            .iter()
+            .max_by_key(|(_, child)| size(child))
+            .map(|(key, _)| key.clone()),
+        Value::Array(array) => array
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, child)| size(child))
+            .map(|(index, _)| index.to_string()),
+        _ => None,
+    };
+    let descends = largest_child.as_ref().is_some_and(|key| {
+        let child = match &*value {
+            Value::Object(object) => object.get(key),
+            Value::Array(array) => key.parse::<usize>().ok().and_then(|i| array.get(i)),
+            _ => None,
+        };
+        child.is_some_and(|child| {
+            child.get(REFERENCE).is_none() && size(child) > METADATA_PAYLOAD_THRESHOLD
+        })
+    });
+    if !descends {
+        return Some(value);
+    }
+    let key = largest_child.expect("descends implies a child");
+    match value {
+        Value::Object(object) => largest_inline_payload(object.get_mut(&key)?),
+        Value::Array(array) => largest_inline_payload(array.get_mut(key.parse::<usize>().ok()?)?),
+        _ => None,
+    }
+}
+
 /// Resolve only at a content-consuming boundary, using the caller's roots.
 pub fn resolve_metadata_payload(value: &Value, root: &Path) -> Result<Value> {
     if let Some(reference) = value.get(REFERENCE) {
@@ -164,31 +207,19 @@ impl ObservationStore {
     }
     pub(crate) fn serialize_run_metadata(&self, value: &Value) -> Result<String> {
         let mut value = value.clone();
-        prepare(&mut value, &self.artifact_root()?)?;
-        let serialized = serialize_metadata(&value)?;
-        if serialized.len() > RUN_METADATA_CAP {
-            let mut path = String::from("runs.metadata_json");
-            let mut largest = &value;
-            loop {
-                let child = match largest {
-                    Value::Object(object) => object
-                        .iter()
-                        .max_by_key(|(_, child)| child.to_string().len())
-                        .map(|(key, child)| (format!(".{key}"), child)),
-                    Value::Array(array) => array
-                        .iter()
-                        .enumerate()
-                        .max_by_key(|(_, child)| child.to_string().len())
-                        .map(|(index, child)| (format!("[{index}]"), child)),
-                    _ => None,
-                };
-                let Some((segment, child)) = child else {
-                    break;
-                };
-                path.push_str(&segment);
-                largest = child;
-            }
-            return Err(Error::validation_invalid_argument(path, format!("run metadata exceeds {RUN_METADATA_CAP} byte cap after externalizing known payload paths"), None, None));
+        let root = self.artifact_root()?;
+        prepare(&mut value, &root)?;
+        let mut serialized = serialize_metadata(&value)?;
+        // Any other oversized value moves to the same content-addressed store,
+        // largest first, so the row stays bounded without losing evidence.
+        while serialized.len() > RUN_METADATA_CAP {
+            let Some(oversized) = largest_inline_payload(&mut value) else {
+                return Err(Error::internal_unexpected(format!(
+                    "run metadata exceeds {RUN_METADATA_CAP} byte cap with no value above {METADATA_PAYLOAD_THRESHOLD} bytes left to externalize"
+                )));
+            };
+            externalize(oversized, &root)?;
+            serialized = serialize_metadata(&value)?;
         }
         Ok(serialized)
     }
