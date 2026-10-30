@@ -86,6 +86,110 @@ fn fixture(locked: &str, newest: &str) -> (tempfile::TempDir, ReleaseOptions) {
     (temp, options)
 }
 
+// Exercises the real release commit boundary with two independently registered
+// subdirectory components. No registry packages or network access are needed.
+#[test]
+fn subdirectory_release_commits_workspace_lockfile_without_staging_siblings() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let mut components = Vec::new();
+    for name in ["a", "b"] {
+        let path = root.join(format!("packages/{name}"));
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("package.json"),
+            format!(r#"{{"name":"fixture-{name}","version":"0.0.2"}}"#),
+        )
+        .unwrap();
+        std::fs::write(path.join("homeboy.json"), serde_json::to_vec(&serde_json::json!({
+            "id": name,
+            "version_targets": [{"file": "package.json", "pattern": "\"version\"\\s*:\\s*\"([0-9.]+)\""}]
+        })).unwrap()).unwrap();
+        components.push(
+            load_component(
+                name,
+                &ReleaseOptions {
+                    path_override: Some(path.display().to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+    }
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"fixture-root","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+    let npm = |cwd: &Path| {
+        let output = std::process::Command::new("npm")
+            .args([
+                "install",
+                "--package-lock-only",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+                "--offline",
+            ])
+            .current_dir(cwd)
+            .output()
+            .expect("npm required for workspace regression");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    npm(root);
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "Fixture"]);
+    git(root, &["config", "user.email", "fixture@example.test"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "fix: workspace fixture"]);
+
+    // Model the provider-owned post-version-bump hook: update the manifest,
+    // then let npm refresh the authoritative root lockfile from component A.
+    std::fs::write(
+        root.join("packages/a/package.json"),
+        r#"{"name":"fixture-a","version":"0.1.0"}"#,
+    )
+    .unwrap();
+    npm(Path::new(&components[0].local_path));
+    let state = ReleaseState {
+        version: Some("0.1.0".into()),
+        ..Default::default()
+    };
+    let result = super::executor::run_git_commit(&components[0], "a", &state).unwrap();
+    assert_eq!(result.status, ReleaseStepStatus::Success, "{result:?}");
+    let committed = git(root, &["show", "--format=", "--name-only", "HEAD"]);
+    assert!(
+        committed.lines().any(|line| line == "package-lock.json"),
+        "{committed}"
+    );
+    assert!(
+        committed
+            .lines()
+            .any(|line| line == "packages/a/package.json"),
+        "{committed}"
+    );
+    assert!(git(root, &["status", "--porcelain"]).is_empty());
+    npm(Path::new(&components[1].local_path));
+    assert!(
+        git(root, &["status", "--porcelain"]).is_empty(),
+        "B hydration must not repair A's lockfile"
+    );
+
+    std::fs::write(root.join("packages/b/unrelated.txt"), "do not stage").unwrap();
+    std::fs::write(root.join("packages/a/release.txt"), "release output").unwrap();
+    let result = super::executor::run_git_commit(&components[0], "a", &state).unwrap();
+    assert_eq!(result.status, ReleaseStepStatus::Success);
+    let committed = git(root, &["show", "--format=", "--name-only", "HEAD"]);
+    assert!(!committed.contains("packages/b/"), "{committed}");
+    assert!(git(root, &["status", "--porcelain"]).contains("packages/b/unrelated.txt"));
+}
+
 #[test]
 fn dependency_refresh_only_release_commits_manifest_lockfile_and_changelog() {
     let (temp, options) = fixture("1.0.0", "1.0.1");

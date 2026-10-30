@@ -318,6 +318,7 @@ pub(crate) fn run_git_commit(
         ));
     }
 
+    stage_workspace_npm_lockfile(component)?;
     let should_amend = should_amend_release_commit(&component.local_path)?;
     let message = state
         .version
@@ -364,6 +365,68 @@ pub(crate) fn run_git_commit(
             Vec::new(),
         ))
     }
+}
+
+/// `git add .` below the repository root cannot stage the workspace lockfile.
+/// Only accept a tracked ancestor lockfile that explicitly owns this package;
+/// never widen staging to the entire monorepo.
+fn stage_workspace_npm_lockfile(component: &Component) -> Result<()> {
+    use std::path::Path;
+
+    if !component
+        .version_targets
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|target| target.file == "package.json")
+    {
+        return Ok(());
+    }
+    let component_path = Path::new(&component.local_path)
+        .canonicalize()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let root = homeboy_core::git::run_git(
+        &component_path,
+        &["rev-parse", "--show-toplevel"],
+        "resolve workspace release root",
+    )?;
+    let root = Path::new(root.trim())
+        .canonicalize()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    for ancestor in component_path.ancestors().skip(1) {
+        if !ancestor.starts_with(&root) {
+            break;
+        }
+        let lockfile = ancestor.join("package-lock.json");
+        let Ok(contents) = std::fs::read_to_string(&lockfile) else {
+            continue;
+        };
+        let Ok(lock) = serde_json::from_str::<serde_json::Value>(&contents) else {
+            continue;
+        };
+        let package = component_path
+            .strip_prefix(ancestor)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if lock
+            .get("packages")
+            .and_then(|packages| packages.get(&package))
+            .is_none()
+        {
+            continue;
+        }
+        let relative = lockfile.strip_prefix(&root).unwrap().to_string_lossy();
+        if homeboy_core::git::is_tracked_path(&root, &relative) {
+            homeboy_core::git::run_git(
+                &root,
+                &["add", "--", &relative],
+                "stage workspace release lockfile",
+            )?;
+        }
+        break;
+    }
+    Ok(())
 }
 
 /// Delete release-generated artifact directories. Skipped when the caller chose
