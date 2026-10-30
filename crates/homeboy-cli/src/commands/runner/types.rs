@@ -49,7 +49,7 @@ pub struct RunnerExtra {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub generation_inventory: Vec<RunnerDaemonGenerationStatus>,
     /// Idle drained generations, with the blocker or null when ready to stop.
-    pub retirement_readiness: BTreeMap<String, Option<String>>,
+    pub retirement_readiness: BTreeMap<String, homeboy::runner::GenerationRetirementVerdict>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub operator_hints: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

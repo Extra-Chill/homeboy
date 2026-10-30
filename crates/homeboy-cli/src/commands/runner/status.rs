@@ -45,7 +45,7 @@ pub(super) fn status(
         let capabilities =
             global_execution_capabilities(&runners, Some(&report), Some(&lab_readiness))?;
         let generation_inventory = admission_snapshot.generation_inventory;
-        let retirement_readiness = runner::generation_retirement_readiness(id)?;
+        let retirement_readiness = homeboy::runner::persisted_retirement_verdicts(id)?;
         // Lead with the compact authoritative admission answer, summarizing the
         // draining generations by count rather than expanding the full ledger
         // (#9478/#9522). The full inventory stays available as detail below.
@@ -132,7 +132,9 @@ pub(super) fn status(
     let capabilities = execution_capabilities(&runners, &sessions, Some(&lab_readiness));
     let mut retirement_readiness = std::collections::BTreeMap::new();
     for report in &sessions {
-        for (generation, reason) in runner::generation_retirement_readiness(&report.runner_id)? {
+        for (generation, reason) in
+            homeboy::runner::persisted_retirement_verdicts(&report.runner_id)?
+        {
             retirement_readiness.insert(format!("{}/{}", report.runner_id, generation), reason);
         }
     }

@@ -1781,6 +1781,106 @@ fn controller_local_status_query_never_probes_a_configured_remote_runner() {
 }
 
 #[test]
+fn status_reports_persisted_retirement_verdict_without_evidence_calls() {
+    homeboy::test_support::with_isolated_home(|_| {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = done.clone();
+        let server = std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                        .unwrap();
+                    let mut bytes = [0; 8192];
+                    let n = stream.read(&mut bytes).unwrap_or(0);
+                    seen.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&bytes[..n]).to_string());
+                    let body = r#"{"data":{"body":{"artifacts":[],"findings":[]}}}"#;
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        });
+        homeboy::core::server::create(r#"{"id":"lab","host":"127.0.0.1","user":"user"}"#, false)
+            .unwrap();
+        runner::create(
+            r#"{"id":"lab","kind":"ssh","server_id":"lab","workspace_root":"/tmp/lab"}"#,
+            false,
+        )
+        .unwrap();
+        let endpoint = serde_json::json!({
+            "runner_id":"lab", "mode":"direct_ssh", "role":"controller",
+            "local_url":format!("http://{address}"), "local_port":address.port(),
+            "homeboy_version":"test", "connected_at":"2026-10-30T00:00:00Z"
+        });
+        let directory = homeboy::core::paths::runner_sessions_dir()
+            .unwrap()
+            .join("lab");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("generations.json"), serde_json::to_vec(&serde_json::json!({
+            "runner_id":"lab", "admission_owner":"current",
+            "generations": {
+                "current": {"endpoint":endpoint,"drain_state":"admitting","observed_active_jobs":0},
+                "old": {"endpoint":endpoint,"drain_state":"draining","observed_active_jobs":0}
+            },
+            "job_owners":{}, "run_owners":{"retained-run":"old"}, "artifact_owners":{}, "retired_evidence":{}
+        })).unwrap()).unwrap();
+        let store = homeboy::core::observation::ObservationStore::open_initialized().unwrap();
+        store
+            .import_run(&homeboy::core::observation::RunRecord {
+                id: "retained-run".into(),
+                kind: "runner-exec".into(),
+                status: "pass".into(),
+                metadata_json: serde_json::json!({"runner_id":"lab"}),
+                ..Default::default()
+            })
+            .unwrap();
+        let verdict = serde_json::json!({
+            "checked_at":"2026-10-30T00:00:00Z", "state":"blocked",
+            "kind":"retained_evidence", "run_id":"retained-run", "reason":"previous evidence blocker"
+        });
+        std::fs::write(
+            directory.join("retirement-verdicts.state"),
+            serde_json::to_vec(&serde_json::json!({"old":verdict})).unwrap(),
+        )
+        .unwrap();
+        let result = super::super::status::status(None, false, false);
+        let selected_result = super::super::status::status(Some("lab"), false, false);
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        server.join().unwrap();
+        let (output, _) = result.unwrap();
+        let (selected_output, _) = selected_result.unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(
+            !requests.iter().any(|request| request.contains("/runs/")),
+            "status read retained evidence: {requests:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&output.extra.retirement_readiness["lab/old"]).unwrap(),
+            verdict
+        );
+        assert_eq!(
+            serde_json::to_value(&selected_output.extra.retirement_readiness["old"]).unwrap(),
+            verdict
+        );
+    });
+}
+
+#[test]
 fn peer_session_preview_action_satisfies_the_cli_contract() {
     let action = homeboy::runner::readonly_probe::ReadOnlyProbeDegradation {
         probe: "runner_peer_session".to_string(),
