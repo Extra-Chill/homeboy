@@ -1456,9 +1456,13 @@ fn review_promotion_candidates(
                     "--artifact-id".to_string(),
                     artifact_id.clone(),
                 ];
+                // A promotion that cannot be read is no continuation; the
+                // promote command reports why.
                 let continuation = crate::agent_task_service::recorded_promotion_report(
                     &record.metadata,
                 )
+                .ok()
+                .flatten()
                 .filter(|promotion| {
                     crate::agent_task_service::promotion_is_resumable(promotion, false)
                         && promotion.pointer("/source/task_id").and_then(Value::as_str)
@@ -1469,12 +1473,14 @@ fn review_promotion_candidates(
                             == Some(artifact_id.as_str())
                 });
                 let destination = continuation
+                    .as_ref()
                     .and_then(|promotion| promotion.pointer("/target/worktree"))
                     .and_then(Value::as_str)
                     .or(request.to_worktree.as_deref());
                 let command = destination.and_then(|destination| {
                     command.extend(["--to-worktree".to_string(), destination.to_string()]);
                     let resume_contract = continuation
+                        .as_ref()
                         .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
                         .filter(|_| cook_contract.is_none());
                     let resume_gate_error = resume_contract.and_then(|contract| {
@@ -1491,6 +1497,7 @@ fn review_promotion_candidates(
                             .err()
                     });
                     if let Some(contract) = continuation
+                        .as_ref()
                         .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
                     {
                         append_resume_base(&mut command, contract);
@@ -1664,7 +1671,8 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 evidence["contributing_attempt"] = serde_json::json!({
                     "run_id": latest.record.run_id,
                     "review_form": review_form,
-                    "verification": crate::agent_task_service::recorded_promotion_report(&latest.record.metadata),
+                    "verification": crate::agent_task_service::recorded_promotion_report(&latest.record.metadata)
+                        .map_err(map_lifecycle_error)?,
                 });
             }
             evidence["candidate_selection"] = serde_json::json!(selection);
@@ -2830,6 +2838,7 @@ fn recover_interrupted_action_acknowledgement(
             let report = crate::agent_task_service::recorded_promotion_report_typed(
                 &current.metadata,
             )
+            .map_err(map_lifecycle_error)?
             .filter(
                     |report: &crate::agent_task_promotion::AgentTaskPromotionReport| {
                         report.source.run_id.as_deref() == Some(original.run_id.as_str())

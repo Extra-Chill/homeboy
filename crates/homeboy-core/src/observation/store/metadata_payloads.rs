@@ -10,7 +10,7 @@ use std::path::Path;
 
 pub const METADATA_PAYLOAD_THRESHOLD: usize = 16 * 1024;
 pub const RUN_METADATA_CAP: usize = 256 * 1024;
-const REFERENCE: &str = "metadata_payload";
+pub const REFERENCE: &str = "metadata_payload";
 
 fn io(error: std::io::Error) -> Error {
     Error::internal_io(error.to_string(), Some("run metadata payload".into()))

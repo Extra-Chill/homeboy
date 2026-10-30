@@ -348,7 +348,8 @@ fn replay_promotion_command(
         "--dry-run".to_string(),
     ];
     // The dry-run replays the exact persisted promotion's selectors.
-    let promotion = recorded_promotion_report(&record.metadata);
+    let promotion = recorded_promotion_report(&record.metadata).ok().flatten();
+    let promotion = promotion.as_ref();
     if let Some(task_id) = promotion
         .and_then(|promotion| promotion.pointer("/source/task_id"))
         .and_then(Value::as_str)
@@ -459,7 +460,8 @@ fn aggregate_transport_report(
 }
 
 fn preserved_candidate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
-    let promotion = recorded_promotion_report(&record.metadata);
+    let promotion = recorded_promotion_report(&record.metadata).ok().flatten();
+    let promotion = promotion.as_ref();
     json!({
         "status": promotion.and_then(|promotion| promotion.get("status")),
         "task_id": promotion.and_then(|promotion| {
@@ -475,8 +477,9 @@ fn preserved_candidate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecor
 
 fn preserved_gate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
     recorded_promotion_report(&record.metadata)
-        .and_then(|promotion| promotion.get("deterministic_gates"))
-        .cloned()
+        .ok()
+        .flatten()
+        .and_then(|mut promotion| promotion.get_mut("deterministic_gates").map(Value::take))
         .unwrap_or(Value::Null)
 }
 
@@ -1115,23 +1118,18 @@ pub(crate) fn persisted_promotion_from_record(
     requested_run_id: &str,
     record: agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<AgentTaskPromotionReport>> {
-    let Some(value) = recorded_promotion_report(&record.metadata) else {
+    let Some(value) = recorded_promotion_report(&record.metadata)? else {
         return Ok(None);
     };
-    let mut promotion: AgentTaskPromotionReport = serde_json::from_value(
-        homeboy_core::observation::store::metadata_payloads::resolve_metadata_payload(
-            value,
-            &homeboy_core::paths::artifact_root()?,
-        )?,
-    )
-    .map_err(|error| {
-        Error::validation_invalid_argument(
-            "cook_delivery.artifacts.promotion",
-            format!("persisted cook promotion is invalid: {error}"),
-            Some(requested_run_id.to_string()),
-            None,
-        )
-    })?;
+    let mut promotion: AgentTaskPromotionReport =
+        serde_json::from_value(value).map_err(|error| {
+            Error::validation_invalid_argument(
+                "cook_delivery.artifacts.promotion",
+                format!("persisted cook promotion is invalid: {error}"),
+                Some(requested_run_id.to_string()),
+                None,
+            )
+        })?;
     // `status` resolves a Cook alias to its immutable latest attempt. Validate
     // against that concrete owner so aliases and exact durable IDs share the
     // same persisted-promotion contract.
@@ -1319,9 +1317,12 @@ pub fn record_replacement_gate_proof(
         return Err(error);
     }
     let record = agent_task_lifecycle::reconcile_status(run_id)?;
-    let (original_history_index, original_history) = recorded_promotion_history(&record.metadata)
-        .and_then(|promotions| {
-            let latest = recorded_promotion_report(&record.metadata)?;
+    let latest = recorded_promotion_report(&record.metadata)?;
+    let history = recorded_promotion_history(&record.metadata)?;
+    let (original_history_index, original_history) = history
+        .as_ref()
+        .zip(latest.as_ref())
+        .and_then(|(promotions, latest)| {
             let index = promotions
                 .iter()
                 .rposition(|promotion| promotion == latest)?;
@@ -1398,9 +1399,10 @@ pub(super) fn validate_replacement_promotion_in_store(
     let record = store.read_record(run_id)?;
     let proof = &promotion.provenance["replacement_gate_proof"];
     let reference = &proof["original_history"];
+    let history = recorded_promotion_history(&record.metadata)?;
     let original = reference["index"]
         .as_u64()
-        .and_then(|index| recorded_promotion_history(&record.metadata)?.get(index as usize));
+        .and_then(|index| history.as_ref()?.get(index as usize));
     let valid_history = original.is_some_and(|original| {
         reference["run_id"] == run_id
             && reference["metadata_key"] == "cook_delivery.artifacts.promotions"
@@ -5031,13 +5033,16 @@ fn cook_review_dossier_with_stores_and_review_form(
         .read_record(successful_run_id)
         .ok()
         .and_then(|record| {
-            recorded_promotion_history(&record.metadata).and_then(|promotions| {
-                promotions.iter().rev().find_map(|promotion| {
-                    promotion
-                        .pointer("/provenance/replacement_gate_proof")
-                        .cloned()
+            recorded_promotion_history(&record.metadata)
+                .ok()
+                .flatten()
+                .and_then(|promotions| {
+                    promotions.iter().rev().find_map(|promotion| {
+                        promotion
+                            .pointer("/provenance/replacement_gate_proof")
+                            .cloned()
+                    })
                 })
-            })
         })
     {
         let original_gates = replacement["original_history"]["deterministic_gate_count"]
@@ -5537,7 +5542,7 @@ fn exact_promotion_for_contribution(
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
     let record = lifecycle_store.read_record(run_id)?;
-    let value = recorded_promotion_report(&record.metadata).ok_or_else(|| {
+    let value = recorded_promotion_report(&record.metadata)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "cook_delivery.artifacts.promotion",
             "Cook contribution source has no persisted promotion",
@@ -5545,15 +5550,14 @@ fn exact_promotion_for_contribution(
             None,
         )
     })?;
-    let promotion: AgentTaskPromotionReport =
-        serde_json::from_value(value.clone()).map_err(|error| {
-            Error::validation_invalid_argument(
-                "cook_delivery.artifacts.promotion",
-                format!("persisted Cook contribution promotion is invalid: {error}"),
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
+    let promotion: AgentTaskPromotionReport = serde_json::from_value(value).map_err(|error| {
+        Error::validation_invalid_argument(
+            "cook_delivery.artifacts.promotion",
+            format!("persisted Cook contribution promotion is invalid: {error}"),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
     if promotion.source.run_id.as_deref() != Some(run_id) {
         return Err(Error::validation_invalid_argument(
             "cook_delivery.artifacts.promotion.source.run_id",
@@ -6348,7 +6352,7 @@ fn cook_selected_candidate_provenance(
         .map(|store| store.read_record(&selection.run_id))
         .unwrap_or_else(|| agent_task_lifecycle::exact_record(&selection.run_id))
         .ok()?;
-    if let Some(promotion) = recorded_promotion_report(&record.metadata) {
+    if let Ok(Some(promotion)) = recorded_promotion_report(&record.metadata) {
         value["applied_promotion"] = serde_json::json!({
             "identity": promotion.pointer("/patch_artifact/sha256"),
             "destination": promotion.get("to_worktree"),
@@ -6479,9 +6483,10 @@ pub(crate) fn cook_failure_context_with_stores(
         .as_ref()
         .filter(|claim| claim.state == agent_task_lifecycle::ClaimState::Failed)
         .and_then(|claim| claim.result.clone());
+    // Display only: an unreadable report is named by the controller diagnostic.
     let promotion = record
         .as_ref()
-        .and_then(|record| recorded_promotion_report(&record.metadata));
+        .and_then(|record| recorded_promotion_report(&record.metadata).ok().flatten());
     let delivery = record
         .as_ref()
         .and_then(|record| super::CookDelivery::from_run_metadata(&record.metadata));
@@ -6610,6 +6615,7 @@ pub(crate) fn cook_failure_context_with_stores(
         || status == "deterministic_gate_failure"
     {
         let diagnostic = promotion
+            .as_ref()
             .and_then(|promotion| gate_failure_diagnostic(promotion, record_run_id))
             .or_else(|| {
                 Some(json!({
@@ -6775,7 +6781,7 @@ pub(crate) fn cook_failure_context_with_stores(
                     .map(super::cook_recovery_command_prefix_for_record),
             )
         });
-    let promotion_provenance = promotion.cloned();
+    let promotion_provenance = promotion;
     Some(super::AgentTaskCookFailureContext {
         cook_id: cook_id.to_string(),
         latest_run_id: chronological_latest_run_id,

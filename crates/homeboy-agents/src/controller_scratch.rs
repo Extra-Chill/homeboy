@@ -1998,12 +1998,9 @@ fn promoted_attempt_workspace_matches(
     let Ok(record) = crate::agent_task_lifecycle::exact_record(&resource.run_id) else {
         return false;
     };
-    let Some(promotion) = crate::agent_task_service::recorded_promotion_report(&record.metadata)
-        .cloned()
-        .and_then(|value| {
-            serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionReport>(value)
-                .ok()
-        })
+    // An unreadable promotion authenticates nothing: keep the workspace.
+    let Ok(Some(promotion)) =
+        crate::agent_task_service::recorded_promotion_report_typed(&record.metadata)
     else {
         return false;
     };

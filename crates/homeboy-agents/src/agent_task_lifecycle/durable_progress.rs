@@ -360,15 +360,14 @@ fn gate_lifecycle_requests(
     record: &AgentTaskRunRecord,
 ) -> Result<Vec<ControlPlaneEventAppendRequest>> {
     let promotions: Vec<Value> =
-        crate::agent_task_service::recorded_promotion_history(&record.metadata)
+        match crate::agent_task_service::recorded_promotion_history(&record.metadata)?
             .filter(|promotions| !promotions.is_empty())
-            .cloned()
-            .unwrap_or_else(|| {
-                crate::agent_task_service::recorded_promotion_report(&record.metadata)
-                    .cloned()
-                    .into_iter()
-                    .collect()
-            });
+        {
+            Some(promotions) => promotions,
+            None => crate::agent_task_service::recorded_promotion_report(&record.metadata)?
+                .into_iter()
+                .collect(),
+        };
     let task_id = record
         .tasks
         .first()

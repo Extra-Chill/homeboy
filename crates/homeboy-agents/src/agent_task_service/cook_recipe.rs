@@ -1155,13 +1155,12 @@ fn reached_freeze_boundary_in_store(
             // correctable until an applied promotion exists.
             reached = Some(RecipeFreezeBoundary::Candidate);
         }
-        let promotion =
-            serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionReport>(
-                super::recorded_promotion_report(&record.metadata)
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            )
-            .ok();
+        // A payload that cannot be resolved must not make a promoted recipe
+        // look unfrozen, so that error propagates.
+        let promotion = super::recorded_promotion_report(&record.metadata)?.and_then(|value| {
+            serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionReport>(value)
+                .ok()
+        });
         if promotion
             .as_ref()
             .is_some_and(|promotion| promotion.status.patch_promoted())
@@ -3108,7 +3107,9 @@ pub(crate) fn complete_absorbed_review_form_follow_ups(
         let Ok(record) = lifecycle_store.read_record(&attempt.run_id) else {
             continue;
         };
-        let follow_up = super::recorded_promotion_report(&record.metadata)
+        let promotion = super::recorded_promotion_report(&record.metadata)?;
+        let follow_up = promotion
+            .as_ref()
             .and_then(|promotion| promotion.pointer("/provenance/cook_follow_up"));
         if !record.state().is_terminal()
             || follow_up

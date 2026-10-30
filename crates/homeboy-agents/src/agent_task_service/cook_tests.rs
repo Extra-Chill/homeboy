@@ -3352,8 +3352,9 @@ fn agent_task_cook_rows_wait_for_verification_and_terminal_disposition() {
                     );
                     assert_eq!(store.read_aggregate(id).unwrap().totals.succeeded, 1);
                     assert_eq!(
-                        super::super::recorded_promotion_report(&record.metadata).unwrap()
-                            ["status"],
+                        super::super::recorded_promotion_report(&record.metadata)
+                            .unwrap()
+                            .unwrap()["status"],
                         "verification_pending"
                     );
                     let observation = store.open_observation_initialized().unwrap();
@@ -21615,7 +21616,11 @@ fn cook_promotion_finalizes_into_the_injected_stores_across_split_recipe_and_lif
         .read_record(run_id)
         .expect("read the run record in the lifecycle root");
     assert!(crate::agent_task_service::recorded_finalization_receipt(&record.metadata).is_some());
-    assert!(crate::agent_task_service::recorded_promotion_history(&record.metadata).is_some());
+    assert!(
+        crate::agent_task_service::recorded_promotion_history(&record.metadata)
+            .unwrap()
+            .is_some()
+    );
     assert!(lifecycle_store
         .run_dir(run_id)
         .starts_with(lifecycle_context.data_dir()));

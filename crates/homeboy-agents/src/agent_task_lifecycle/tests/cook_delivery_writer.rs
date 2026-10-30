@@ -144,7 +144,9 @@ fn concurrent_delivery_writers_do_not_lose_an_update() {
         Some(&published())
     );
     assert_eq!(
-        recorded_promotion_report(&record.metadata).expect("promotion")["status"],
+        recorded_promotion_report(&record.metadata)
+            .unwrap()
+            .expect("promotion")["status"],
         "applied"
     );
     assert_eq!(
