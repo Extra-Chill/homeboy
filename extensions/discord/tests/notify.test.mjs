@@ -35,6 +35,7 @@ await testDeprecatedBotTokenAlias();
 await testOwningSessionThreadDeliversThroughCommandSender();
 await testOwningSessionThreadDeliversThroughHttpSender();
 await testSessionWithoutSenderUsesRest();
+await testProgressOnlyWithoutPostDestinationSkips();
 await testSessionSenderMisconfigurationFailsClosed();
 await testDeprecatedSessionAliases();
 console.log('discord notification tests passed');
@@ -238,6 +239,21 @@ async function testSessionWithoutSenderUsesRest() {
     assert.equal(result.delivery.mode, 'bot');
     assert.equal(requests[0].url, `/api/v10/channels/${threadOneId}/messages`);
   });
+}
+
+async function testProgressOnlyWithoutPostDestinationSkips() {
+  const { stub, cleanup } = argvStub();
+  const run = await notifyRaw(
+    { HOMEBOY_SESSION_SEND_COMMAND: stub },
+    { route: threadRoute(threadOneId), status: 'started' },
+  );
+  assert.equal(run.code, 0);
+  const result = JSON.parse(run.stdout);
+  assert.equal(result.status, 'skipped');
+  assert.equal(result.delivery.mode, 'skipped');
+  assert.equal(result.delivery.reason, 'progress_only_without_post_destination');
+  assert.equal(result.attempts, 0);
+  cleanup();
 }
 
 async function testSessionSenderMisconfigurationFailsClosed() {

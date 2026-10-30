@@ -36,6 +36,16 @@ async function main() {
     });
   }
 
+  if (validation.mode === 'skipped') {
+    return finish({
+      schema: 'homeboy/discord-notification-result/v1',
+      status: 'skipped',
+      delivery: { ...proof, reason: validation.reason },
+      attempts: 0,
+      ...notes,
+    });
+  }
+
   if (validation.mode === 'session') {
     const delivered = await sendToSession(validation, rendered.content);
     return finish(
@@ -118,6 +128,7 @@ function validate(args, env) {
   if (parsedRoute?.error) return invalid('invalid_route', 'route', parsedRoute.error);
 
   const deprecations = [];
+  let sessionOnlyProgress = false;
 
   // A chat bridge typically drops messages its own bot authored, so a REST post
   // to the thread that owns this run never reaches that session. When the host
@@ -132,12 +143,14 @@ function validate(args, env) {
   //
   // Only a state the session might act on is worth a turn. A run that merely
   // started reports no outcome and no decision, so it is posted for the human
-  // to read without interrupting the agent.
-  if (parsedRoute?.kind === 'thread' && !isProgressOnlyStatus(args.status)) {
+  // to read without interrupting the agent. With no bot or webhook to post it,
+  // there is nowhere for it to go, and that is a deliberate skip, not a failure.
+  if (parsedRoute?.kind === 'thread') {
     const configured = sessionSender(env);
     if (configured.error) return invalid('invalid_configuration', 'session_sender', configured.error);
     deprecations.push(...configured.deprecations);
-    if (configured.sender) {
+    sessionOnlyProgress = Boolean(configured.sender) && isProgressOnlyStatus(args.status);
+    if (configured.sender && !sessionOnlyProgress) {
       return {
         ok: true,
         mode: 'session',
@@ -156,6 +169,9 @@ function validate(args, env) {
     deprecations.push(deprecation('botToken'));
   }
   const webhookUrl = value(env.DISCORD_WEBHOOK_URL);
+  if (sessionOnlyProgress && !botToken && !webhookUrl) {
+    return { ok: true, mode: 'skipped', reason: 'progress_only_without_post_destination', deprecations };
+  }
   if (Boolean(botToken) === Boolean(webhookUrl)) {
     return invalid('not_configured', 'auth', 'Configure exactly one auth mode: DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL.');
   }
