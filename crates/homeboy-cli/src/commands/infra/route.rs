@@ -853,6 +853,125 @@ pub(crate) fn auto_cook_unavailable_lab_state(
     matches!(state, "stale" | "disconnected").then_some(state)
 }
 
+/// Admission facts shared by Cook routing and its read-only projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CookAdmissionDecision {
+    Admitted,
+    Blocked {
+        reason: String,
+        next_action: Option<String>,
+    },
+    Indeterminate {
+        reason: String,
+        next_action: String,
+    },
+}
+
+impl CookAdmissionDecision {
+    pub(crate) fn unchecked() -> Self {
+        Self::Indeterminate {
+            reason: "static inputs only; admission not checked".into(),
+            next_action: "run with --placement local to authorize controller execution".into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CookAdmissionPhase {
+    Submission,
+    Execution,
+}
+
+pub(crate) fn cook_admission_decision(
+    phase: CookAdmissionPhase,
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+    local_replay: impl FnOnce() -> String,
+) -> CookAdmissionDecision {
+    use homeboy::core::parsed_command_preflight::{
+        ResourceAdmissionDecision, ResourceAdmissionEvidence,
+    };
+    use homeboy_lab_contract::{EffectiveExecutionPlacement, Placement};
+    let requested = preflight.placement.requested;
+    if requested == Placement::Local {
+        return CookAdmissionDecision::Admitted;
+    }
+    if preflight.placement.selected == EffectiveExecutionPlacement::Local {
+        if let (
+            CookAdmissionPhase::Execution,
+            ResourceAdmissionDecision::Rejected {
+                label, evidence, ..
+            },
+        ) = (phase, &preflight.resource_admission)
+        {
+            let state = if *evidence == ResourceAdmissionEvidence::Unavailable {
+                "unavailable"
+            } else {
+                "rejected"
+            };
+            return CookAdmissionDecision::Indeterminate {
+                reason: format!("resource admission {state} for {label}"),
+                next_action: "homeboy self doctor".into(),
+            };
+        }
+        let unmaterialized =
+            cook_requires_unmaterialized_admission_for_placement(requested, preflight);
+        if unmaterialized && requested == Placement::Auto {
+            if let Some(state) = auto_cook_unavailable_lab_state(preflight) {
+                return CookAdmissionDecision::Blocked {
+                    reason: cook_unavailable_lab_reason(preflight, state),
+                    next_action: Some(local_replay()),
+                };
+            }
+        }
+        return if requested == Placement::LabOrLocal || !unmaterialized {
+            CookAdmissionDecision::Admitted
+        } else {
+            CookAdmissionDecision::Indeterminate {
+                reason: "detached Cook admission will be revalidated before execution".into(),
+                next_action: "homeboy self doctor".into(),
+            }
+        };
+    }
+    let Some(runner) = preflight.placement.runner.as_ref() else {
+        return CookAdmissionDecision::unchecked();
+    };
+    let runner_id = &runner.runner_id;
+    let snapshot = homeboy::runner::runners::persisted_status(runner_id)
+        .and_then(homeboy::runner::runners::runner_admission_snapshot_for_status)
+        .ok();
+    let unresolved = snapshot.as_ref().is_some_and(|s| {
+        s.summary.unresolved_retained_projection_count > 0
+            || !s.summary.unresolved_generation_ids.is_empty()
+    });
+    let ready = preflight.lab_readiness.as_ref().is_some_and(|r| {
+        r.state == "connected_ready"
+            && r.selected_runner_id.as_ref() == Some(runner_id)
+            && r.available_runner_ids.contains(runner_id)
+    });
+    if !unresolved && ready {
+        return CookAdmissionDecision::Admitted;
+    }
+    if let Some(snapshot) = snapshot {
+        let outcome = crate::commands::runner::reconciliation_outcome(
+            runner_id,
+            Vec::new(),
+            &snapshot.status,
+            &snapshot.summary,
+        );
+        if let Some(reason) = outcome
+            .remaining_blocker
+            .or_else(|| unresolved.then(|| "unresolved_generation_projection".into()))
+        {
+            return CookAdmissionDecision::Blocked {
+                reason,
+                next_action: outcome.next_action,
+            };
+        }
+        return CookAdmissionDecision::Admitted;
+    }
+    CookAdmissionDecision::unchecked()
+}
+
 fn admission_digest(value: impl AsRef<[u8]>) -> String {
     format!(
         "sha256:{}",
@@ -2505,6 +2624,18 @@ fn unmaterialized_admission_state(
     }
 }
 
+fn cook_unavailable_lab_reason(
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+    state: &str,
+) -> String {
+    preflight
+        .lab_readiness
+        .as_ref()
+        .and_then(|r| r.reasons.first())
+        .cloned()
+        .unwrap_or_else(|| format!("Lab runner readiness is {state}"))
+}
+
 fn auto_cook_unavailable_lab_replay_error(
     cli: &Cli,
     preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
@@ -2521,12 +2652,13 @@ fn auto_cook_unavailable_lab_replay_error(
     let lab_or_local_args = cook_placement_replay_args(normalized_args, "lab-or-local");
     let local_command = homeboy::core::engine::shell::quote_args(&local_args);
     let lab_or_local_command = homeboy::core::engine::shell::quote_args(&lab_or_local_args);
-    let reason = preflight
-        .lab_readiness
-        .as_ref()
-        .and_then(|readiness| readiness.reasons.first())
-        .cloned()
-        .unwrap_or_else(|| format!("Lab runner readiness is {state}"));
+    let CookAdmissionDecision::Blocked { reason, .. } =
+        cook_admission_decision(CookAdmissionPhase::Submission, preflight, || {
+            local_command.clone()
+        })
+    else {
+        return None;
+    };
     let mut error = Error::validation_invalid_argument(
         "placement",
         format!(
@@ -2557,7 +2689,7 @@ fn auto_cook_unavailable_lab_replay_error(
     )
 }
 
-fn cook_placement_replay_args(args: &[String], placement: &str) -> Vec<String> {
+pub(crate) fn cook_placement_replay_args(args: &[String], placement: &str) -> Vec<String> {
     let mut replay = portable_route_args(args);
     if replay.is_empty() {
         replay.push("homeboy".to_string());

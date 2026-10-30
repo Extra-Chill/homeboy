@@ -44,7 +44,6 @@ const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(5);
-const PREVIEW_ADMISSION_UNCHECKED: &str = "static inputs only; admission not checked";
 
 fn run_cook_explicit(
     request: agent_task_service::CookRequest,
@@ -1049,8 +1048,12 @@ fn apply_preview_worktree_capacity(
                 inspection_path.as_deref().or(source.as_deref()),
             );
             let capacity = resolved["workspace"]["capacity"].clone();
-            resolved["placement"]["admission"] =
-                blocked_preview_admission(blocker, Some(next_action));
+            resolved["placement"]["admission"] = render_cook_admission(
+                crate::commands::infra::route::CookAdmissionDecision::Blocked {
+                    reason: blocker,
+                    next_action: Some(next_action),
+                },
+            );
             resolved["placement"]["admission"]["capacity"] = capacity;
             return;
         }
@@ -1063,9 +1066,11 @@ fn apply_preview_worktree_capacity(
     // The reserve shortfall only words a hint; the operator's cleanup command
     // measures the merged worktrees that actually hold reclaimable space on
     // demand (#16396).
-    resolved["placement"]["admission"] = blocked_preview_admission(
-        blocker,
-        Some("homeboy worktree cleanup --dry-run".to_string()),
+    resolved["placement"]["admission"] = render_cook_admission(
+        crate::commands::infra::route::CookAdmissionDecision::Blocked {
+            reason: blocker,
+            next_action: Some("homeboy worktree cleanup --dry-run".to_string()),
+        },
     );
     resolved["placement"]["admission"]["capacity"] = capacity.clone();
 }
@@ -1400,7 +1405,9 @@ fn finalize_cook_preview_replay(
             "replay requires the original non-empty prompt on stdin for `--prompt -`".to_string(),
         );
     }
-    if preview_placement_policy_from_argv(&replay.argv)["requested"] != "local" {
+    if homeboy::core::parsed_command_preflight::captured_result()
+        .is_none_or(|result| result.placement.requested != homeboy_lab_contract::Placement::Local)
+    {
         replay.requires.push(
             "runner placement admission is deferred; replay revalidates connected runner readiness before execution"
                 .to_string(),
@@ -1704,208 +1711,62 @@ fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
 }
 
 fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
-    let mut policy = preview_placement_policy_from_argv(replay_args);
+    let mut policy = preview_placement_policy(replay_args);
     apply_resolved_placement(&mut policy);
     if policy["requested"] == "local" {
         return policy;
     }
-    policy["admission"] = if policy["selected"] == "local" {
-        preview_local_placement_admission(replay_args)
-    } else {
-        preview_placement_admission(&policy)
-    };
+    let decision = homeboy::core::parsed_command_preflight::captured_result()
+        .map(|result| {
+            crate::commands::infra::route::cook_admission_decision(
+                crate::commands::infra::route::CookAdmissionPhase::Execution,
+                &result,
+                || {
+                    homeboy::core::engine::shell::quote_args(
+                        &crate::commands::infra::route::cook_placement_replay_args(
+                            replay_args,
+                            "local",
+                        ),
+                    )
+                },
+            )
+        })
+        .unwrap_or_else(crate::commands::infra::route::CookAdmissionDecision::unchecked);
+    policy["admission"] = render_cook_admission(decision);
     policy
 }
 
-fn preview_local_placement_admission(replay_args: &[String]) -> Value {
-    use homeboy::core::parsed_command_preflight::ResourceAdmissionDecision;
-
-    let Some(result) = homeboy::core::parsed_command_preflight::captured_result() else {
-        return indeterminate_preview_admission();
-    };
-    // Only flags before the bare separator are Homeboy's own. Reading a
-    // forwarded `--placement` as Homeboy's own would misclassify placement
-    // admission for the forwarded command instead of the cook invocation
-    // (#11577).
-    let owned_replay_args = crate::command_capability::homeboy_owned_args(replay_args);
-    let requested = match owned_replay_args
-        .iter()
-        .enumerate()
-        .find_map(|(index, arg)| {
-            arg.strip_prefix("--placement=").or_else(|| {
-                (arg == "--placement")
-                    .then(|| owned_replay_args.get(index + 1).map(String::as_str))
-                    .flatten()
-            })
-        }) {
-        Some("local") => homeboy_lab_contract::Placement::Local,
-        Some("lab") => homeboy_lab_contract::Placement::Lab,
-        Some("lab-or-local") => homeboy_lab_contract::Placement::LabOrLocal,
-        _ => homeboy_lab_contract::Placement::Auto,
-    };
-    if let ResourceAdmissionDecision::Rejected {
-        label, evidence, ..
-    } = result.resource_admission
-    {
-        let reason = match evidence {
-            homeboy::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable => {
-                format!("resource admission unavailable for {label}")
-            }
-            _ => format!("resource admission rejected for {label}"),
-        };
-        return indeterminate_preview_admission_with_next_action(&reason, "homeboy self doctor");
-    }
-    if crate::commands::infra::route::cook_requires_unmaterialized_admission_for_placement(
-        requested, &result,
-    ) && requested == homeboy_lab_contract::Placement::Auto
-        && crate::commands::infra::route::auto_cook_unavailable_lab_state(&result).is_some()
-    {
-        let readiness = result.lab_readiness.as_ref().expect("checked above");
-        let reason = readiness
-            .reasons
-            .first()
-            .cloned()
-            .unwrap_or_else(|| format!("Lab runner readiness is {}", readiness.state));
-        return blocked_preview_admission(reason, Some(local_preview_replay(replay_args)));
-    }
-    match result.resource_admission {
-        ResourceAdmissionDecision::NotRequired | ResourceAdmissionDecision::Admitted
-            if requested == homeboy_lab_contract::Placement::LabOrLocal
-                || !crate::commands::infra::route::cook_requires_unmaterialized_admission_for_placement(
-                    requested,
-                    &result,
-                ) =>
-        {
-            admissible_preview_admission()
-        }
-        ResourceAdmissionDecision::NotRequired | ResourceAdmissionDecision::Admitted => {
-            indeterminate_preview_admission_with_next_action(
-                "detached Cook admission will be revalidated before execution",
-                "homeboy self doctor",
-            )
-        }
-        ResourceAdmissionDecision::Rejected { .. } => unreachable!("handled above"),
-    }
-}
-
-fn local_preview_replay(replay_args: &[String]) -> String {
-    let mut args = replay_args.to_vec();
-    // Only flags before the bare separator are Homeboy's own. Rewriting a
-    // forwarded `--placement` would corrupt the argument the forwarded
-    // command was asked to receive (#11577).
-    let owned = crate::command_capability::homeboy_owned_args(&args).len();
-    if let Some(index) = args[..owned].iter().position(|arg| arg == "--placement") {
-        if index + 1 < owned {
-            args[index + 1] = "local".to_string();
-        }
-    } else if let Some(index) = args[..owned]
-        .iter()
-        .position(|arg| arg.starts_with("--placement="))
-    {
-        args[index] = "--placement=local".to_string();
-    } else {
-        args.insert(1, "--placement".to_string());
-        args.insert(2, "local".to_string());
-    }
-    homeboy::core::engine::shell::quote_args(&args)
-}
-
-fn preview_placement_admission(policy: &Value) -> Value {
-    let Some(runner_id) = policy.get("selected_runner").and_then(Value::as_str) else {
-        return indeterminate_preview_admission();
-    };
-    let snapshot = homeboy::runner::runners::persisted_status(runner_id)
-        .and_then(homeboy::runner::runners::runner_admission_snapshot_for_status)
-        .ok();
-    if let Some(snapshot) = snapshot.as_ref() {
-        let unresolved = snapshot.summary.unresolved_retained_projection_count > 0
-            || !snapshot.summary.unresolved_generation_ids.is_empty();
-        if unresolved {
-            let outcome = crate::commands::runner::reconciliation_outcome(
-                runner_id,
-                Vec::new(),
-                &snapshot.status,
-                &snapshot.summary,
-            );
-            return blocked_preview_admission(
-                outcome
-                    .remaining_blocker
-                    .unwrap_or_else(|| "unresolved_generation_projection".to_string()),
-                outcome.next_action,
-            );
-        }
-    }
-    if captured_selected_runner_is_connected_ready(runner_id) {
-        return admissible_preview_admission();
-    }
-    if let Some(snapshot) = snapshot {
-        let outcome = crate::commands::runner::reconciliation_outcome(
-            runner_id,
-            Vec::new(),
-            &snapshot.status,
-            &snapshot.summary,
-        );
-        if let Some(blocker) = outcome.remaining_blocker {
-            return blocked_preview_admission(blocker, outcome.next_action);
-        }
-        return admissible_preview_admission();
-    }
-    indeterminate_preview_admission()
-}
-
-fn captured_selected_runner_is_connected_ready(runner_id: &str) -> bool {
-    homeboy::core::parsed_command_preflight::captured_result().is_some_and(|result| {
-        result.lab_readiness.as_ref().is_some_and(|readiness| {
-            readiness.state == "connected_ready"
-                && readiness.selected_runner_id.as_deref() == Some(runner_id)
-                && readiness
-                    .available_runner_ids
-                    .iter()
-                    .any(|available| available == runner_id)
-        })
-    })
-}
-
-fn indeterminate_preview_admission() -> Value {
-    indeterminate_preview_admission_with_next_action(
-        PREVIEW_ADMISSION_UNCHECKED,
-        "run with --placement local to authorize controller execution",
-    )
-}
-
-fn indeterminate_preview_admission_with_next_action(reason: &str, next_action: &str) -> Value {
-    serde_json::json!({
-        "schema": "homeboy/cook-preview-placement-admission/v1",
-        "state": "indeterminate",
-        "revalidate_before_execution": true,
-        "blockers": [],
-        "deferred_to": "execution_placement_admission",
-        "reason": reason,
-        "replay_prerequisite": reason,
-        "next_action": next_action,
-    })
-}
-
-fn admissible_preview_admission() -> Value {
-    serde_json::json!({
-        "schema": "homeboy/cook-preview-placement-admission/v1",
-        "state": "admissible",
-        "revalidate_before_execution": true,
-        "blockers": [],
-    })
-}
-
-fn blocked_preview_admission(blocker: String, next_action: Option<String>) -> Value {
+fn render_cook_admission(decision: crate::commands::infra::route::CookAdmissionDecision) -> Value {
+    use crate::commands::infra::route::CookAdmissionDecision;
     let mut admission = serde_json::json!({
         "schema": "homeboy/cook-preview-placement-admission/v1",
-        "state": "blocked",
         "revalidate_before_execution": true,
-        "blockers": [blocker],
-        "remaining_blocker": blocker,
-        "replay_prerequisite": blocker,
+        "blockers": [],
     });
-    if let Some(next_action) = next_action {
-        admission["next_action"] = serde_json::json!(next_action);
+    match decision {
+        CookAdmissionDecision::Admitted => admission["state"] = serde_json::json!("admissible"),
+        CookAdmissionDecision::Blocked {
+            reason,
+            next_action,
+        } => {
+            admission["state"] = serde_json::json!("blocked");
+            admission["blockers"] = serde_json::json!([reason]);
+            admission["remaining_blocker"] = serde_json::json!(reason);
+            admission["replay_prerequisite"] = serde_json::json!(reason);
+            if let Some(action) = next_action {
+                admission["next_action"] = serde_json::json!(action);
+            }
+        }
+        CookAdmissionDecision::Indeterminate {
+            reason,
+            next_action,
+        } => {
+            admission["state"] = serde_json::json!("indeterminate");
+            admission["deferred_to"] = serde_json::json!("execution_placement_admission");
+            admission["reason"] = serde_json::json!(reason);
+            admission["replay_prerequisite"] = serde_json::json!(reason);
+            admission["next_action"] = serde_json::json!(next_action);
+        }
     }
     admission
 }
@@ -1937,32 +1798,19 @@ fn apply_resolved_placement(policy: &mut Value) {
     }
 }
 
-fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
+fn preview_placement_policy(argv: &[String]) -> Value {
     let argv = crate::command_capability::homeboy_owned_args(argv);
-    let placement = argv
-        .iter()
-        .enumerate()
-        .find_map(|(index, value)| {
-            value
-                .strip_prefix("--placement=")
-                .map(str::to_string)
-                .or_else(|| {
-                    (value == "--placement")
-                        .then(|| argv.get(index + 1).cloned())
-                        .flatten()
-                })
-        })
-        .unwrap_or_else(|| "auto".to_string());
-    let runner = argv.iter().enumerate().find_map(|(index, value)| {
-        value
-            .strip_prefix("--runner=")
-            .map(str::to_string)
-            .or_else(|| {
-                (value == "--runner")
-                    .then(|| argv.get(index + 1).cloned())
-                    .flatten()
-            })
-    });
+    let placement = homeboy::core::parsed_command_preflight::captured_result()
+        .map(|result| cli_placement_str(result.placement.requested))
+        .unwrap_or("auto");
+    let runner =
+        homeboy::core::parsed_command_preflight::captured_result().and_then(|result| match result
+            .input
+            .runner
+        {
+            homeboy::core::parsed_command_preflight::RunnerIntent::Explicit(id) => Some(id),
+            _ => None,
+        });
     serde_json::json!({
         "requested": placement,
         "runner": runner,
@@ -2951,23 +2799,6 @@ mod preview_tests {
     }
 
     #[test]
-    fn preview_reports_requested_placement_without_executing_a_route() {
-        let policy = preview_placement_policy_from_argv(&[
-            "homeboy".to_string(),
-            "--placement=lab-or-local".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--".to_string(),
-            "--placement=local".to_string(),
-            "--runner=forwarded".to_string(),
-        ]);
-        assert_eq!(policy["requested"], "lab-or-local");
-        assert_eq!(policy["runner"], Value::Null);
-        assert_eq!(policy["detach_after_handoff"], true);
-        assert_eq!(policy["route_executed"], false);
-    }
-
-    #[test]
     fn compiled_plan_preview_emits_placement_admission_schema() {
         crate::test_support::with_isolated_home(|_| {
             let (repository, workspace) = linked_preview_workspace();
@@ -3809,28 +3640,6 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
         });
     }
 
-    #[test]
-    fn preview_defers_lab_placement_admission_with_a_structured_phase() {
-        let _preflight = ResetCapturedPreflight::new();
-        let policy = preview_placement_policy_with_admission(&[
-            "homeboy".to_string(),
-            "--placement".to_string(),
-            "lab".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-        ]);
-        assert_eq!(policy["requested"], "lab");
-        assert_eq!(policy["route_executed"], false);
-        assert_eq!(
-            policy["admission"]["deferred_to"],
-            "execution_placement_admission"
-        );
-        assert_eq!(
-            policy["admission"]["reason"],
-            "static inputs only; admission not checked"
-        );
-    }
-
     /// Scopes the captured controller preflight to this test thread so a
     /// concurrently running preview test cannot observe or overwrite it.
     struct ResetCapturedPreflight(
@@ -4135,6 +3944,17 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
 
     #[test]
     fn local_preview_omits_runner_admission_and_replay_prerequisites() {
+        let _reset = ResetCapturedPreflight::new();
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "cook",
+            "--preview",
+        ])
+        .unwrap();
+        crate::cli_runtime::capture_preflight_result_for_test(&cli, None);
         let args = cook(&[
             "homeboy",
             "--placement",
@@ -4176,104 +3996,107 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
     }
 
     #[test]
-    /// #15614: a read-only Auto preview never authorizes a silent local
-    /// fallback from a disconnected Lab. It blocks on the Lab state and offers
-    /// the explicit local replay instead.
-    fn auto_preview_with_a_disconnected_lab_blocks_and_offers_local_replay() {
-        let _reset = ResetCapturedPreflight::new();
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--preview",
-            "--prompt",
-            "implement the issue",
-            "--verify",
-            "true",
-        ])
-        .expect("parse Auto Cook preview");
-        crate::cli_runtime::capture_preflight_result_for_test(
-            &cli,
-            Some(
-                homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
-                    state: "disconnected".to_string(),
-                    selected_runner_id: Some("homeboy-lab".to_string()),
-                    available_runner_ids: Vec::new(),
-                    reasons: vec!["not_connected".to_string()],
-                    remediation_commands: vec!["homeboy runner connect homeboy-lab".to_string()],
-                    repair_admitted_runner_ids: Vec::new(),
-                },
-            ),
-        );
-
-        let policy = preview_placement_policy_with_admission(&[
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--preview".to_string(),
-        ]);
-
-        assert_eq!(policy["selected"], "local");
-        assert_eq!(policy["admission"]["state"], "blocked");
-        assert_eq!(policy["admission"]["remaining_blocker"], "not_connected");
-        assert_eq!(
-            policy["admission"]["next_action"],
-            "homeboy --placement local agent-task cook --preview"
-        );
-    }
-
-    #[test]
-    fn preview_placement_admission_matches_attached_and_detached_policy_matrix() {
-        let _reset = ResetCapturedPreflight::new();
-        for placement in ["auto", "local", "lab-or-local"] {
-            for detached in [false, true] {
-                let mut argv = vec![
-                    "homeboy".to_string(),
-                    "--placement".to_string(),
-                    placement.to_string(),
-                    "agent-task".to_string(),
-                    "cook".to_string(),
-                    "--preview".to_string(),
-                ];
-                if !detached {
-                    argv.push("--wait".to_string());
+    fn shared_cook_admission_matrix() {
+        use crate::commands::infra::route::{cook_admission_decision, CookAdmissionDecision};
+        use homeboy::core::parsed_command_preflight::*;
+        crate::test_support::with_isolated_home(|_| {
+            let _reset = ResetCapturedPreflight::new();
+            persist_unresolved_generation_runner("unresolved");
+            for (placement, runner, unavailable, rejected, expected) in [
+                ("auto", None, false, false, CookAdmissionDecision::Admitted),
+                ("local", None, false, false, CookAdmissionDecision::Admitted),
+                (
+                    "lab-or-local",
+                    None,
+                    true,
+                    false,
+                    CookAdmissionDecision::Admitted,
+                ),
+                (
+                    "lab",
+                    Some("ready"),
+                    false,
+                    false,
+                    CookAdmissionDecision::Admitted,
+                ),
+                (
+                    "auto",
+                    Some("ready"),
+                    false,
+                    false,
+                    CookAdmissionDecision::Admitted,
+                ),
+                (
+                    "lab",
+                    Some("unresolved"),
+                    false,
+                    false,
+                    CookAdmissionDecision::Blocked {
+                        reason: "unresolved_generation_projection".into(),
+                        next_action: Some("homeboy runner disconnect unresolved && homeboy runner connect unresolved".into()),
+                    },
+                ),
+                (
+                    "auto",
+                    None,
+                    true,
+                    false,
+                    CookAdmissionDecision::Blocked {
+                        reason: "not_connected".into(),
+                        next_action: Some("local replay".into()),
+                    },
+                ),
+                (
+                    "auto",
+                    None,
+                    false,
+                    true,
+                    CookAdmissionDecision::Indeterminate {
+                        reason: "resource admission rejected for Cook".into(),
+                        next_action: "homeboy self doctor".into(),
+                    },
+                ),
+            ] {
+                let cli = Cli::try_parse_from([
+                    "homeboy",
+                    "--placement",
+                    placement,
+                    "agent-task",
+                    "cook",
+                    "--preview",
+                ])
+                .unwrap();
+                if let Some(runner) = runner {
+                    crate::cli_runtime::capture_admitted_runner_preflight_for_test(&cli, runner);
+                } else {
+                    crate::cli_runtime::capture_preflight_result_for_test(
+                        &cli,
+                        unavailable.then(|| LabReadinessSnapshot {
+                            state: "disconnected".into(),
+                            selected_runner_id: Some("lab".into()),
+                            available_runner_ids: vec![],
+                            reasons: vec!["not_connected".into()],
+                            remediation_commands: vec![],
+                            repair_admitted_runner_ids: vec![],
+                        }),
+                    );
                 }
-                let cli = Cli::try_parse_from(argv.clone()).expect("parse placement preview");
-                crate::cli_runtime::capture_preflight_result_for_test(
-                    &cli,
-                    Some(
-                        homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
-                            state: "disconnected".to_string(),
-                            selected_runner_id: Some("homeboy-lab".to_string()),
-                            available_runner_ids: Vec::new(),
-                            reasons: vec!["not_connected".to_string()],
-                            remediation_commands: vec![
-                                "homeboy runner connect homeboy-lab".to_string()
-                            ],
-                            repair_admitted_runner_ids: Vec::new(),
+                let mut result = captured_result().unwrap();
+                result.resource_admission = if rejected {
+                    ResourceAdmissionDecision::Rejected {
+                        label: "Cook".into(),
+                        engages_at: ResourceHeat::Hot,
+                        evidence: ResourceAdmissionEvidence::Observed {
+                            pressure: ResourceHeat::Hot,
                         },
-                    ),
-                );
-                let policy = preview_placement_policy_with_admission(&argv);
-                let state = policy.pointer("/admission/state").and_then(Value::as_str);
-                match (placement, detached) {
-                    // #15614: Auto never silently falls back from a
-                    // disconnected Lab; it names the explicit local replay.
-                    ("auto", _) => {
-                        assert_eq!(state, Some("blocked"), "{placement}, detached={detached}")
                     }
-                    ("lab-or-local", _) => {
-                        assert_eq!(
-                            state,
-                            Some("admissible"),
-                            "{placement}, detached={detached}"
-                        )
-                    }
-                    ("local", _) => assert!(state.is_none()),
-                    _ => unreachable!(),
-                }
+                } else {
+                    ResourceAdmissionDecision::Admitted
+                };
+                assert_eq!(cook_admission_decision(crate::commands::infra::route::CookAdmissionPhase::Execution, &result, || "local replay".into()), expected,
+                    "{placement}, runner={runner:?}, unavailable={unavailable}, rejected={rejected}");
             }
-        }
+        });
     }
 
     #[test]
@@ -12126,7 +11949,7 @@ mod tests {
             assert_eq!(capacity["state"], "shortfall");
             let mut resolved = serde_json::json!({
                 "workspace": {"action": "planned_create", "kind": "native", "path": destination},
-                "placement": {"requested": "lab", "selected": "lab", "admission": super::admissible_preview_admission()}
+                "placement": {"requested": "lab", "selected": "lab", "admission": super::render_cook_admission(crate::commands::infra::route::CookAdmissionDecision::Admitted)}
             });
             apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None);
             let preview = super::cook_preview_result(
