@@ -535,7 +535,7 @@ fn wall_clock_busy_wait(attempt: i32, budget: std::time::Duration) -> bool {
 pub(crate) fn begin_control_plane_write<'conn>(
     connection: &'conn rusqlite::Connection,
     operation: &str,
-) -> Result<rusqlite::Transaction<'conn>> {
+) -> Result<TimedWrite<'conn>> {
     use std::time::Instant;
 
     let started = Instant::now();
@@ -551,6 +551,103 @@ pub(crate) fn begin_control_plane_write<'conn>(
                 sqlite_error(operation)(error)
             }
         })
+        .map(|transaction| TimedWrite {
+            transaction: Some(transaction),
+            connection,
+            operation: operation.to_string(),
+            started: Instant::now(),
+            initial_changes: connection.total_changes(),
+            initial_bytes: cache_write_bytes(connection),
+        })
+}
+
+/// Writer-slot timing starts after admission and ends after commit or rollback.
+#[derive(Debug)]
+pub(crate) struct TimedWrite<'a> {
+    transaction: Option<rusqlite::Transaction<'a>>,
+    connection: &'a rusqlite::Connection,
+    operation: String,
+    started: std::time::Instant,
+    initial_changes: u64,
+    initial_bytes: u64,
+}
+
+impl<'a> std::ops::Deref for TimedWrite<'a> {
+    type Target = rusqlite::Transaction<'a>;
+    fn deref(&self) -> &Self::Target {
+        self.transaction.as_ref().expect("active transaction")
+    }
+}
+
+impl<'a> TimedWrite<'a> {
+    pub(crate) fn observe(
+        transaction: rusqlite::Transaction<'a>,
+        connection: &'a rusqlite::Connection,
+        operation: &str,
+    ) -> Self {
+        Self {
+            transaction: Some(transaction),
+            connection,
+            operation: operation.into(),
+            started: std::time::Instant::now(),
+            initial_changes: connection.total_changes(),
+            initial_bytes: cache_write_bytes(connection),
+        }
+    }
+    pub fn rollback(mut self) -> rusqlite::Result<()> {
+        self.transaction
+            .take()
+            .expect("active transaction")
+            .rollback()
+    }
+    pub fn commit(mut self) -> rusqlite::Result<()> {
+        self.transaction
+            .take()
+            .expect("active transaction")
+            .commit()
+    }
+}
+
+// SQLite reports pages flushed by this connection, including WAL writes.
+fn cache_write_bytes(connection: &rusqlite::Connection) -> u64 {
+    let mut current = 0;
+    let mut highwater = 0;
+    // SAFETY: the connection owns this handle and this call does not retain it.
+    let status = unsafe {
+        rusqlite::ffi::sqlite3_db_status(
+            connection.handle(),
+            rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE,
+            &mut current,
+            &mut highwater,
+            0,
+        )
+    };
+    let page_size: u64 = connection
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .unwrap_or(0);
+    if status == rusqlite::ffi::SQLITE_OK {
+        (current.max(0) as u64) * page_size
+    } else {
+        0
+    }
+}
+
+impl Drop for TimedWrite<'_> {
+    fn drop(&mut self) {
+        drop(self.transaction.take());
+        if self.started.elapsed() >= std::time::Duration::from_secs(1) {
+            crate::log_status!(
+                "observation.slow_write",
+                "{}",
+                serde_json::json!({
+                    "operation": self.operation,
+                    "duration_ms": self.started.elapsed().as_millis(),
+                    "changed_rows": self.connection.total_changes().saturating_sub(self.initial_changes),
+                    "bytes": cache_write_bytes(self.connection).saturating_sub(self.initial_bytes),
+                })
+            );
+        }
+    }
 }
 
 /// Returns true when the SQLite error is a transient busy/locked condition that

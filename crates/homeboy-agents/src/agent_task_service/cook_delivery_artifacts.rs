@@ -38,7 +38,12 @@ pub fn recorded_promotion_report(metadata: &Value) -> Option<&Value> {
 /// [`recorded_promotion_report`] parsed as the exact report a replay
 /// executes. `None` when absent or not a valid report.
 pub fn recorded_promotion_report_typed(metadata: &Value) -> Option<AgentTaskPromotionReport> {
-    serde_json::from_value(recorded_promotion_report(metadata)?.clone()).ok()
+    let value = homeboy_core::observation::store::metadata_payloads::resolve_metadata_payload(
+        recorded_promotion_report(metadata)?,
+        &homeboy_core::paths::artifact_root().ok()?,
+    )
+    .ok()?;
+    serde_json::from_value(value).ok()
 }
 
 /// The append-only history of promotion reports.

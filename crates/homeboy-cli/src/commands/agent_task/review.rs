@@ -500,6 +500,11 @@ pub(crate) fn resolve_promotion_gates(
                 None,
             )
         })?;
+        let promotion =
+            homeboy::core::observation::store::metadata_payloads::resolve_metadata_payload(
+                promotion,
+                &homeboy::core::paths::artifact_root()?,
+            )?;
         let matches_task =
             promotion.pointer("/source/task_id").and_then(Value::as_str) == Some(task_id);
         let matches_artifact = promotion
@@ -1743,6 +1748,10 @@ fn deserialize_maybe_enveloped<T: serde::de::DeserializeOwned>(
             value
         };
 
+    let payload = homeboy::core::observation::store::metadata_payloads::resolve_metadata_payload(
+        &payload,
+        &homeboy::core::paths::artifact_root()?,
+    )?;
     serde_json::from_value(payload).map_err(|error| {
         homeboy::core::Error::validation_invalid_json(
             error,
