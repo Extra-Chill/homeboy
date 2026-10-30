@@ -381,7 +381,11 @@ fn execute_promotion_inner(request: AgentTaskPromotionRequest) -> Result<AgentTa
     let previous = request.source_run_id.as_ref().and_then(|run_id| {
         agent_task_lifecycle::reconcile_status(run_id)
             .ok()
-            .and_then(|record| super::recorded_promotion_report(&record.metadata).cloned())
+            .and_then(|record| {
+                super::recorded_promotion_report(&record.metadata)
+                    .ok()
+                    .flatten()
+            })
     });
     // Promotion consumes the request, so capture the fields the finalization
     // path needs before handing it over.

@@ -4813,8 +4813,8 @@ where
         } else {
             let claim = recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?;
             if claim.is_none()
-                && agent_task_service_direct::recorded_promotion_report(&record.metadata)
-                    .is_some_and(Value::is_object)
+                && agent_task_service_direct::recorded_promotion_report(&record.metadata)?
+                    .is_some_and(|promotion| promotion.is_object())
             {
                 // A direct operator continuation must remain admissible even
                 // when status reconciliation has not materialized the queue
@@ -5008,8 +5008,13 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 let record = &observation.0;
                 candidate_fingerprint =
                     agent_task_service_direct::recorded_promotion_report(&record.metadata)
-                        .and_then(|promotion| promotion.pointer("/provenance/candidate"))
-                        .cloned()
+                        .ok()
+                        .flatten()
+                        .and_then(|mut promotion| {
+                            promotion
+                                .pointer_mut("/provenance/candidate")
+                                .map(Value::take)
+                        })
                         .unwrap_or(Value::Null);
                 phases.push(serde_json::json!({ "phase": "lifecycle", "status": "passed", "reason": "ok", "state": format!("{:?}", record.state()) }));
                 observation
