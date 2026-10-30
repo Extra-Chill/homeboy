@@ -771,6 +771,25 @@ fn to_details(details: impl Serialize) -> Value {
 }
 
 impl Error {
+    /// A generic message ("IO error") names a class, not a failure. Internal
+    /// I/O errors keep the failing operation in `details.context` and the OS
+    /// error in `details.error`; fold both into the message so compact
+    /// projections (status, notifications, bounded output) say what failed.
+    pub fn attributed_message(&self) -> String {
+        let field = |key: &str| {
+            self.details
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        };
+        match (field("context"), field("error")) {
+            (Some(context), Some(error)) => format!("{}: {context}: {error}", self.message),
+            (Some(context), None) => format!("{}: {context}", self.message),
+            (None, Some(error)) => format!("{}: {error}", self.message),
+            (None, None) => self.message.clone(),
+        }
+    }
+
     pub fn new(code: ErrorCode, message: impl Into<String>, details: Value) -> Self {
         Self {
             code,
