@@ -1092,6 +1092,8 @@ current platform's optional native packages before checking both the CLI and the
 | `HOMEBOY_PHPSTAN_LEVEL=N` | One-off PHPStan level override |
 | `HOMEBOY_FIX_ONLY=1` | Lint runner fix-only mode (set automatically by `homeboy review lint --fix`) |
 | `HOMEBOY_SUMMARY_MODE=1` | Compact summary output |
+| `HOMEBOY_EXCLUDE_SNIFFS` | Comma-separated PHPCS sniff names to exclude. |
+| `HOMEBOY_SCOPE_EXCLUDE` | Newline- or comma-separated repo-relative paths excluded by PHPCS, PHPStan and ESLint (appended to existing ignores). When unset, subdirectories containing their own `homeboy.json` are excluded as nested components. An explicitly empty value disables this fallback. |
 | `HOMEBOY_STEP=phpcs` / `HOMEBOY_SKIP=eslint` | Filter lint steps |
 | `HOMEBOY_LINT_FAIL_ON=errors\|warnings` | PHPCS gate severity (default `errors`: warnings reported but non-blocking; `warnings` restores legacy block-on-warning). ESLint already gates on errors only. |
 

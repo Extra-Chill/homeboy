@@ -60,10 +60,23 @@ write_eslint_findings_sidecar() {
     HOMEBOY_LINT_FINDINGS_FILE="$previous_target"
 }
 
+source "${SCRIPT_DIR}/scope-excludes.sh"
+SCOPE_EXCLUDES=()
+while IFS= read -r scope_path; do
+    [ -n "$scope_path" ] && SCOPE_EXCLUDES+=("$scope_path")
+done < <(homeboy_scope_excludes "$PLUGIN_PATH")
+
 # Return false for dependency trees and generated assets. Repository-specific
 # ignores remain ESLint configuration policy; this prevents generated output
 # from becoming an explicit CLI target that can bypass that policy.
 is_lint_source_file() {
+    local candidate="$1" excluded
+    [[ "$candidate" = /* ]] || candidate="$PLUGIN_PATH/$candidate"
+    for excluded in "${SCOPE_EXCLUDES[@]}"; do
+        case "$candidate" in
+            "$excluded"|"$excluded"/*) return 1 ;;
+        esac
+    done
     case "$1" in
         */node_modules/*|*/vendor/*|*/vendor_prefixed/*|*/vendor-prefixed/*|*/vendor_scoped/*|*/vendor-scoped/*|*/dist/*|*/build/*|*.min.js)
             return 1
@@ -185,6 +198,14 @@ fi
 # config only from this resolved component path, never from a primary checkout.
 export HOMEBOY_ESLINT_COMPONENT_PATH="$PLUGIN_PATH"
 eslint_base_args=(--config "$ESLINT_CONFIG")
+for scope_path in "${SCOPE_EXCLUDES[@]}"; do
+    # Ignore patterns are relative to the component working directory.
+    case "$scope_path" in
+        "$PLUGIN_PATH"/*)
+            eslint_base_args+=(--ignore-pattern "${scope_path#"$PLUGIN_PATH"/}/**")
+            ;;
+    esac
+done
 
 if [ -n "$TEXT_DOMAIN" ]; then
     eslint_base_args+=(--rule "@wordpress/i18n-text-domain: [error, { allowedTextDomain: \"$TEXT_DOMAIN\" }]")

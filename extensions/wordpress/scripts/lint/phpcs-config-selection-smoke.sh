@@ -217,4 +217,22 @@ assert_exact_arg "$PHPCS_ARGS_FILE" "--config-set" "extension phpcs self-healing
 assert_exact_arg "$PHPCS_ARGS_FILE" "--standard=${expected_config}" "phpcs fallback"
 assert_fix_consumers "$expected_config" "$expected_phpcs_bin" extension
 
+# Root plugin plus nested component and an explicitly excluded directory.
+git -C "$COMPONENT_DIR" init -q
+mkdir -p "$COMPONENT_DIR/nested" "$COMPONENT_DIR/excluded"
+touch "$COMPONENT_DIR/homeboy.json" "$COMPONENT_DIR/nested/homeboy.json"
+printf '<?php\n' > "$COMPONENT_DIR/nested/plugin.php"
+printf '<?php\n' > "$COMPONENT_DIR/excluded/skip.php"
+unset HOMEBOY_SCOPE_EXCLUDE
+run_lint 0
+grep -F -- ",${COMPONENT_DIR}/nested/*" "$PHPCS_ARGS_FILE" >/dev/null
+HOMEBOY_SCOPE_EXCLUDE=$'excluded/,\nnested/' run_lint 0
+grep -F -- ",${COMPONENT_DIR}/excluded/*" "$PHPCS_ARGS_FILE" >/dev/null
+grep -F -- ",${COMPONENT_DIR}/nested/*" "$PHPCS_ARGS_FILE" >/dev/null
+HOMEBOY_SCOPE_EXCLUDE='' run_lint 0
+if grep -F -- ",${COMPONENT_DIR}/nested" "$PHPCS_ARGS_FILE"; then
+    echo 'FAIL: explicitly empty scope must disable nested discovery' >&2
+    exit 1
+fi
+
 echo "PHPCS config selection smoke passed"

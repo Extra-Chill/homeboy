@@ -727,7 +727,14 @@ fixable_count=0
 
 # Build base phpcs arguments
 phpcs_base_args=(--standard="$PHPCS_CONFIG")
-phpcs_base_args+=(--ignore='*/vendor/*,*/vendor_prefixed/*,*/vendor-prefixed/*,*/vendor_scoped/*,*/vendor-scoped/*,*/node_modules/*,*/dist/*,*/build/*,*/tools/*,*/scoper.inc.php')
+# Use absolute scope paths so exclusions do not match unrelated basenames.
+source "${SCRIPT_DIR}/scope-excludes.sh"
+phpcs_ignore='*/vendor/*,*/vendor_prefixed/*,*/vendor-prefixed/*,*/vendor_scoped/*,*/vendor-scoped/*,*/node_modules/*,*/dist/*,*/build/*,*/tools/*,*/scoper.inc.php'
+while IFS= read -r scope_path; do
+    [ -n "$scope_path" ] || continue
+    phpcs_ignore+=",${scope_path},${scope_path}/*"
+done < <(homeboy_scope_excludes "$PLUGIN_PATH")
+phpcs_base_args+=(--ignore="$phpcs_ignore")
 
 if [ "$WORDPRESS_LINT_ROLE" = "scoper_config" ]; then
     phpcs_base_args+=(--sniffs=Generic.PHP.Syntax)

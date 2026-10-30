@@ -298,6 +298,8 @@ homeboy_run_phpstan() {
     (cd "$PLUGIN_PATH" && "$PHPSTAN_BIN" "$@")
 }
 
+source "${SCRIPT_DIR}/scope-excludes.sh"
+
 generate_dependency_config() {
     local tmpfile
     local has_dependencies=0
@@ -348,6 +350,18 @@ generate_dependency_config() {
         if [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
             printf '%s\n' '    customRulesetUsed: false'
         fi
+        local scope_path escaped_scope has_scope_excludes=0
+        while IFS= read -r scope_path; do
+            [ -n "$scope_path" ] || continue
+            if [ "$has_scope_excludes" -eq 0 ]; then
+                printf '%s\n' '    excludePaths:' '        analyseAndScan:'
+                has_scope_excludes=1
+                has_component_context=1
+            fi
+            escaped_scope="${scope_path//\'/\'\'}"
+            printf "            - '%s'\n" "$escaped_scope"
+            printf "            - '%s/*'\n" "$escaped_scope"
+        done < <(homeboy_scope_excludes "$PLUGIN_PATH")
         printf '%s\n' '    scanDirectories:'
 
         local dependency_paths=""

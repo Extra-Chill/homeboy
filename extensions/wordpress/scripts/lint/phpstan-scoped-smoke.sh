@@ -378,4 +378,15 @@ assert "Failed opening required core/abstraction.php" in finding["message"], fin
 assert finding.get("fingerprint"), finding
 PY
 
+git -C "$COMPONENT_DIR" init -q
+mkdir -p "$COMPONENT_DIR/nested" "$COMPONENT_DIR/excluded"
+touch "$COMPONENT_DIR/homeboy.json" "$COMPONENT_DIR/nested/homeboy.json"
+unset HOMEBOY_SCOPE_EXCLUDE
+run_phpstan
+assert_file_contains "$CONFIG_CAPTURE" "excludePaths:" "scope excludes missing"
+assert_file_contains "$CONFIG_CAPTURE" "'$COMPONENT_DIR/nested/*'" "nested component not excluded"
+HOMEBOY_SCOPE_EXCLUDE=$'excluded/,\nnested/' run_phpstan
+assert_file_contains "$CONFIG_CAPTURE" "'$COMPONENT_DIR/excluded/*'" "explicit directory not excluded"
+assert_file_contains "$CONFIG_CAPTURE" "'$COMPONENT_DIR/nested/*'" "mixed separators not parsed"
+
 echo "PHPStan scoped lint smoke passed"

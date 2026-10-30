@@ -84,4 +84,21 @@ if ! grep -Fq "nested/src/app.js" "${TMPDIR}/invalid-source.out"; then
     exit 1
 fi
 
+# Nested components are skipped without core scope input; explicit scope can
+# additionally exclude arbitrary directories while retaining root findings.
+git -C "$component_dir" init -q
+touch "$component_dir/homeboy.json" "$component_dir/nested/homeboy.json"
+printf '%s\n' 'export {};' > "$component_dir/root.js"
+unset HOMEBOY_SCOPE_EXCLUDE
+run_eslint > "${TMPDIR}/nested-scope.out"
+mkdir -p "$component_dir/excluded"
+printf '%s\n' 'const = excluded;' > "$component_dir/excluded/app.js"
+HOMEBOY_SCOPE_EXCLUDE=$'nested/,\nexcluded/' run_eslint > "${TMPDIR}/explicit-scope.out"
+printf '%s\n' 'const = root;' > "$component_dir/root.js"
+if HOMEBOY_SCOPE_EXCLUDE=$'nested/,\nexcluded/' run_eslint > "${TMPDIR}/root-invalid.out" 2>&1; then
+    echo 'Expected root source violation to remain linted' >&2
+    exit 1
+fi
+grep -F 'root.js' "${TMPDIR}/root-invalid.out" >/dev/null
+
 echo "ESLint nested build ignore smoke passed"
