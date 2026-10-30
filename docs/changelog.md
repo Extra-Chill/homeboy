@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.436.6] - 2026-10-30
+
+### Fixed
+- retire generations whose retained run has no runner identity metadata
+- leave Cook terminal announcements to Cook in the completion backstop
+
 ## [0.436.5] - 2026-10-30
 
 ### Changed
