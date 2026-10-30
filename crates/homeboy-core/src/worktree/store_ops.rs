@@ -999,12 +999,32 @@ fn branch_worktree_registrations(
 /// any of it ran.
 ///
 /// When the declared base is a local branch tracking a remote, the
-/// remote-tracking ref is the shared base and is used instead. Anything else —
-/// a commit, a tag, an explicit `origin/...` ref, or an untracked local branch —
-/// is already an exact start point and is preserved.
+/// remote-tracking ref is the shared base and is used instead. A branch that
+/// exists only as `origin/<branch>` resolves to that ref explicitly rather than
+/// through git's version-dependent remote guessing. Anything else — a commit, a
+/// tag, an explicit `origin/...` ref, or an untracked local branch — is already
+/// an exact start point and is preserved.
 fn shared_start_point(source: &Path, declared: &str) -> Result<String> {
     if !branch_exists(source, declared)? {
-        return Ok(declared.to_string());
+        let resolves = |reference: &str| {
+            git::run_git(
+                source,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{reference}^{{commit}}"),
+                ],
+                "git resolve task worktree base",
+            )
+            .is_ok()
+        };
+        let remote = format!("refs/remotes/origin/{declared}");
+        return Ok(if !resolves(declared) && resolves(&remote) {
+            format!("origin/{declared}")
+        } else {
+            declared.to_string()
+        });
     }
     let upstream = git::run_git(
         source,

@@ -1260,14 +1260,14 @@ impl ObservationStore {
         let Some(merged) = merged else {
             return Ok(None);
         };
-        if merged.len() > super::metadata_payloads::RUN_METADATA_CAP {
-            return Err(Error::validation_invalid_argument(
-                "runs.metadata_json",
-                "merged metadata exceeds run metadata cap",
-                None,
-                None,
-            ));
-        }
+        let merged = if merged.len() > super::metadata_payloads::RUN_METADATA_CAP {
+            let merged = serde_json::from_str(&merged).map_err(|error| {
+                Error::internal_json(error.to_string(), Some("parse merged run metadata".into()))
+            })?;
+            self.serialize_run_metadata(&merged)?
+        } else {
+            merged
+        };
         let rows = transaction
             .execute(
                 "UPDATE runs SET metadata_json = ?1 WHERE id = ?2 AND status = ?3",

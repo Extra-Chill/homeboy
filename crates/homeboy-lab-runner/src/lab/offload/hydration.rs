@@ -999,17 +999,17 @@ mod tests {
                 .expect("register component");
             }
 
-            let ambiguous = hydrate_lab_workspace_dependencies_for_component(
+            // A checkout resolves to its most specific registration (#16570):
+            // the worktree root is the root component, not the nested package.
+            let bare = hydrate_lab_workspace_dependencies_for_component(
                 "unused-runner",
                 &worktree.display().to_string(),
                 "/remote/blocks-engine",
                 None,
                 None,
             )
-            .expect_err("bare worktree path stays ambiguous");
-            assert!(ambiguous
-                .message
-                .contains("matches multiple registered component configurations"));
+            .expect("bare worktree path resolves to the root component");
+            assert_eq!(bare.status, "skipped_no_provider");
 
             let staged = hydrate_lab_workspace_dependencies_for_component(
                 "unused-runner",
