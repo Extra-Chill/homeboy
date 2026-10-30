@@ -146,12 +146,14 @@ pub fn resolve_metadata_payload(value: &Value, root: &Path) -> Result<Value> {
 impl ObservationStore {
     pub(crate) fn metadata_payload_lock(&self, exclusive: bool) -> Result<fs::File> {
         use fs4::fs_std::FileExt;
-        // Advisory flock is separate from SQLite's byte-range locks. Reuse the
-        // existing database inode: small inline values create no payload files.
+        // Lock a sidecar, never the database inode: closing any descriptor for
+        // the database would drop the POSIX locks SQLite holds on it.
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&self.path)
+            .create(true)
+            .truncate(false)
+            .open(self.path.with_extension("sqlite.metadata-payloads.lock"))
             .map_err(io)?;
         if exclusive {
             file.lock_exclusive().map_err(io)?;
@@ -300,6 +302,19 @@ impl ObservationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_lock_never_opens_the_database_inode() {
+        use std::os::unix::fs::MetadataExt;
+        crate::test_support::with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().unwrap();
+            let guard = store.metadata_payload_lock(false).unwrap();
+            assert_ne!(
+                guard.metadata().unwrap().ino(),
+                fs::metadata(&store.path).unwrap().ino()
+            );
+        });
+    }
 
     #[test]
     fn artifact_cleanup_sweeps_unreferenced_metadata_payloads() {
