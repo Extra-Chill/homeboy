@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.435.8] - 2026-10-30
+
+### Changed
+- restart the controller daemon in place instead of draining live work
+
+### Fixed
+- release dropped resource collectors' RSS registration and sampler
+- name the I/O cause in bounded refresh-homeboy errors
+
 ## [0.435.7] - 2026-10-30
 
 ### Fixed
