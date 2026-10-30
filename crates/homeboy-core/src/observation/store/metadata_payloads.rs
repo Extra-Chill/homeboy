@@ -146,12 +146,16 @@ pub fn resolve_metadata_payload(value: &Value, root: &Path) -> Result<Value> {
 impl ObservationStore {
     pub(crate) fn metadata_payload_lock(&self, exclusive: bool) -> Result<fs::File> {
         use fs4::fs_std::FileExt;
-        // Advisory flock is separate from SQLite's byte-range locks. Reuse the
-        // existing database inode: small inline values create no payload files.
+        // Lock a sidecar, never the database inode: closing any descriptor
+        // for a file releases every POSIX lock the process holds on it, so a
+        // guard opened on the database would drop SQLite's own locks when it
+        // closes and let other processes checkpoint under a live connection.
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&self.path)
+            .create(true)
+            .truncate(false)
+            .open(Path::new(&self.path).with_extension("sqlite.metadata-payloads.lock"))
             .map_err(io)?;
         if exclusive {
             file.lock_exclusive().map_err(io)?;
@@ -300,6 +304,75 @@ impl ObservationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Child-process probe for SQLite's SHARED byte range on a database file.
+    /// POSIX record locks are invisible to the process that holds them, so the
+    /// check must run in another process.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "invoked as a child process by metadata_payload_guard_keeps_sqlite_locks"]
+    fn sqlite_shared_lock_probe() {
+        use std::os::unix::io::AsRawFd;
+        let Ok(path) = std::env::var("HOMEBOY_SQLITE_LOCK_PROBE") else {
+            return;
+        };
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_WRLCK as _;
+        lock.l_whence = libc::SEEK_SET as _;
+        lock.l_start = 0x4000_0002;
+        lock.l_len = 510;
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) },
+            0
+        );
+        println!(
+            "sqlite-shared-lock-held={}",
+            lock.l_type as i32 != libc::F_UNLCK as i32
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_payload_guard_keeps_sqlite_locks() {
+        crate::test_support::with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().unwrap();
+            let held = || {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "observation::store::metadata_payloads::tests::sqlite_shared_lock_probe",
+                        "--ignored",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env("HOMEBOY_SQLITE_LOCK_PROBE", &store.path)
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&output.stdout).contains("sqlite-shared-lock-held=true")
+            };
+            store.connection.execute_batch("BEGIN").unwrap();
+            let _: i64 = store
+                .connection
+                .query_row("SELECT count(*) FROM runs", [], |row| row.get(0))
+                .unwrap();
+            assert!(
+                held(),
+                "an open read transaction holds SQLite's SHARED lock"
+            );
+            drop(store.metadata_payload_lock(false).unwrap());
+            drop(store.metadata_payload_lock(true).unwrap());
+            assert!(
+                held(),
+                "releasing the payload guard must not release SQLite's locks"
+            );
+            store.connection.execute_batch("COMMIT").unwrap();
+        });
+    }
 
     #[test]
     fn artifact_cleanup_sweeps_unreferenced_metadata_payloads() {
