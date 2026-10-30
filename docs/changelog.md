@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.435.6] - 2026-10-30
+
+### Changed
+- share git fixture helpers through homeboy-test-support
+- render Cook preview admission from the shared admission decision
+
 ## [0.435.5] - 2026-10-30
 
 ### Fixed
