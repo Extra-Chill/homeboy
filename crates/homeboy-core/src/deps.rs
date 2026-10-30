@@ -226,6 +226,14 @@ pub fn hydrate_declared_dependencies_for_component(
     )
 }
 
+/// The directories where the dependency providers resolved at `path` would run
+/// their install commands. Adapter selections that search upward report the
+/// matched selection root, so callers can hydrate each selection root once at
+/// that root instead of once per directory that resolves to it.
+pub fn dependency_selection_roots(path: &Path) -> Result<Vec<PathBuf>> {
+    provider::dependency_selection_roots(path)
+}
+
 fn hydrate_declared_dependencies_unlocked(
     path: &Path,
     workspace: &str,
