@@ -2325,6 +2325,11 @@ fn promotion_ancestry_decision(
     }
 }
 
+/// The runner's Git ancestry comparison could not run, so GitHub PR provenance
+/// is the only remaining proof. When that proof also fails, the comparison
+/// failure is the actionable cause: a release commit pushed without a PR can
+/// never satisfy the GitHub lookup, so reporting only the lookup hides why
+/// ordinary Git ancestry was not consulted.
 fn promotion_ancestry_unavailable(
     comparison_error: Error,
     prove_integration: impl FnOnce() -> Result<bool>,
@@ -2332,7 +2337,13 @@ fn promotion_ancestry_unavailable(
     match prove_integration() {
         Ok(true) => Ok(false),
         Ok(false) => Err(comparison_error),
-        Err(error) => Err(error),
+        Err(mut error) => {
+            error.message = format!(
+                "runner Git ancestry check could not run ({}); {}",
+                comparison_error.message, error.message
+            );
+            Err(error)
+        }
     }
 }
 

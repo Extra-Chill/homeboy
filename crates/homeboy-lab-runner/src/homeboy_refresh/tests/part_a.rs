@@ -2602,6 +2602,12 @@ fn promotion_validation_keeps_probe_failure_blocked_when_github_provenance_is_un
     )
     .expect_err("unknown integration provenance remains blocked");
     assert_eq!(error.details["field"], "history_diverged");
+    assert!(error
+        .message
+        .starts_with("runner Git ancestry check could not run ("));
+    assert!(error
+        .message
+        .contains("authoritative source repository cannot compare"));
     assert!(error.message.contains("HTTP 503"));
     assert!(error.message.contains("cannot prove"));
     assert!(error.details["tried"][0]
