@@ -2423,6 +2423,17 @@ fn completion_notifications(
             stale_runs.extend(run.as_ref());
             continue;
         }
+        // Cook announces its own outcome once, through the Cook lifecycle, so
+        // an agent-task row (the Cook, an attempt, a transport retry) gets no
+        // second generic event. Its marker was consumed by the claim. A stale
+        // row still notifies: its controller died before Cook could announce.
+        if run.as_ref().is_some_and(|run| {
+            run.kind == "agent-task"
+                && crate::observation::RunStatus::from_label(&run.status)
+                    != Some(crate::observation::RunStatus::Stale)
+        }) {
+            continue;
+        }
         let status = run
             .as_ref()
             .map(|run| run.status.as_str())
