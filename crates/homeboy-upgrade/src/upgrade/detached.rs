@@ -27,7 +27,7 @@ struct DetachedUpgradeRequest {
 
 /// Queue the exact release before the caller can reach a pin-wait timeout.
 /// The worker is independent of the daemon job ledger so that its own upgrade
-/// can pass the daemon's active-work restart fence once foreign jobs drain.
+/// can restart the daemon in place without waiting for foreign jobs.
 pub fn start_detached_upgrade(
     force: bool,
     method: InstallMethod,
@@ -122,7 +122,6 @@ pub fn continue_detached_upgrade(id: &str) -> Result<UpgradeResult> {
         None,
         Some(&request.release_tag),
         operation,
-        super::UpgradeDrainOptions::default(),
     )
 }
 

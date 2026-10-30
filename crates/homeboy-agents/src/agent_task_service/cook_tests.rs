@@ -9191,8 +9191,8 @@ fn admission_refused_lifecycle_retry_dispatches_through_its_cook() {
             &options.identity.initial_plan,
             "lab_admission",
             &Error::validation_invalid_argument(
-                "controller_draining",
-                "controller_draining: upgrade drain refuses admission before dispatch",
+                "runner_unavailable",
+                "runner_unavailable: runner transport refuses admission before dispatch",
                 None,
                 None,
             )
@@ -9203,7 +9203,7 @@ fn admission_refused_lifecycle_retry_dispatches_through_its_cook() {
         let before = crate::orchestration::run_from_current_environment(cook_id).unwrap();
         assert!(serde_json::to_string(&before.blocker)
             .unwrap()
-            .contains("controller_draining"));
+            .contains("runner_unavailable"));
         let retry = agent_task_lifecycle::retry(first_run_id, None).unwrap();
         assert_ne!(retry.run_id, *first_run_id);
         assert_eq!(retry.metadata["cook_id"], cook_id);
@@ -9236,7 +9236,7 @@ fn admission_refused_lifecycle_retry_dispatches_through_its_cook() {
         assert_eq!(projected.run.as_str(), retry.run_id);
         assert!(!serde_json::to_string(&projected.blocker)
             .unwrap()
-            .contains("controller_draining"));
+            .contains("runner_unavailable"));
         assert_eq!(
             super::super::load_recipe(cook_id).unwrap().attempts.len(),
             2
@@ -9249,7 +9249,7 @@ fn admission_refused_lifecycle_retry_dispatches_through_its_cook() {
         assert!(
             serde_json::to_string(&original.metadata["pre_execution_failure"])
                 .unwrap()
-                .contains("controller_draining")
+                .contains("runner_unavailable")
         );
     });
 }

@@ -387,16 +387,8 @@ pub(crate) fn execute_upgrade(
         // not stand in for the candidate it is about to be replaced by.
         // The controller is the single admission point for the staged
         // candidate; the installer runs in stage-only mode and skips its own.
-        let admitted = verify_staged_release_candidate(selected_version, staged).and_then(|()| {
-            run_verified_target_admission(
-                staged,
-                selected_version,
-                &candidate_legacy_identity(destination)?,
-                &selected_release
-                    .expect("release upgrades select a release")
-                    .tag,
-            )
-        });
+        let admitted = verify_staged_release_candidate(selected_version, staged)
+            .and_then(|()| run_verified_target_admission(staged));
         if let Err(error) = admitted {
             replacement_checkpoint(
                 &checkpoint.with_state(replacement_observed_state(checkpoint)?),
@@ -826,15 +818,7 @@ fn verify_source_candidate_target_admission(
         }
     }
 
-    let legacy_identity = installed_binary
-        .and_then(|path| candidate_legacy_identity(path).ok())
-        .unwrap_or_else(|| "unavailable".to_string());
-    run_verified_target_admission(
-        built_binary,
-        &candidate_version,
-        &legacy_identity,
-        &format!("source candidate {}", built_binary.display()),
-    )?;
+    run_verified_target_admission(built_binary)?;
     Ok(candidate)
 }
 
@@ -859,96 +843,59 @@ fn source_workspace_package_version(workspace_root: &Path) -> Result<String> {
         .ok_or_else(|| Error::internal_unexpected("source workspace has no package version"))
 }
 
-fn candidate_legacy_identity(installed_binary: &Path) -> Result<String> {
-    let identity = Command::new(installed_binary)
-        .args(["self", "identity"])
-        .output();
-    match identity {
-        Ok(output) if output.status.success() => {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        }
-        _ => Ok(active_binary_info_at(installed_binary)?
-            .and_then(|info| info.build_identity)
-            .unwrap_or_else(|| "unavailable".to_string())),
-    }
+/// The candidate's observation schema, or `None` when it cannot say (a
+/// release older than the query). An unknown schema is treated as a change.
+fn run_verified_target_admission(candidate: &Path) -> Result<()> {
+    let schema = command_output_with_timeout(
+        Command::new(candidate).arg("--observation-schema-version"),
+        Duration::from_secs(5),
+        "query candidate observation schema",
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .and_then(|output| String::from_utf8(output.stdout).ok())
+    .and_then(|value| value.trim().parse::<i64>().ok());
+    ensure_candidate_schema(schema)
 }
 
-fn run_verified_target_admission(
-    candidate: &Path,
-    target_version: &str,
-    legacy_identity: &str,
-    selected_tag_or_artifact: &str,
-) -> Result<()> {
-    upgrade_phase("running verified source candidate admission");
-    let output = Command::new(candidate)
-        .args([
-            "self",
-            "upgrade-admission",
-            "--legacy-identity",
-            legacy_identity,
-            "--target-version",
-            target_version,
-            "--selected-tag-or-artifact",
-            selected_tag_or_artifact,
-        ])
-        .output()
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("run source candidate admission".to_string()),
-            )
-        })?;
-    if output.status.success() {
+fn ensure_candidate_schema(schema: Option<i64>) -> Result<()> {
+    if schema == Some(homeboy_core::observation::store::CURRENT_SCHEMA_VERSION) {
         return Ok(());
     }
-    let detail = upgrade_failure_detail(&output.stderr, &output.stdout).unwrap_or_default();
-    let mut error = Error::validation_invalid_argument(
-        "controller_upgrade",
-        format!(
-            "verified source candidate refused controller replacement{}",
-            if detail.is_empty() {
-                String::new()
-            } else {
-                format!(": {}", bounded_upgrade_cause(&detail))
-            }
-        ),
-        None,
-        None,
-    );
-    error.details["kind"] = serde_json::json!("candidate_admission_refused");
-    error.details["phase"] = serde_json::json!("running_candidate_admission");
-    error.details["error"] = serde_json::json!(detail);
-    error.details["cause"] = serde_json::json!(bounded_upgrade_cause(&detail));
-    if let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-        if envelope["schema"] == "homeboy/command-result/v3" && envelope["success"] == false {
-            if let Some(message) = envelope["diagnostics"]["message"].as_str() {
-                // Candidate admission names the durable blocker and its owning
-                // recovery action. Preserve that typed summary intact across
-                // the process boundary instead of applying the generic prose
-                // truncation limit.
-                error.message = message.to_string();
-                error.details["cause"] = serde_json::json!(error.message);
-            }
-            error.details["candidate_diagnostics"] = envelope["diagnostics"].clone();
-            if envelope["diagnostics"]["code"] == "validation.invalid_argument" {
-                error.code = homeboy_core::error::ErrorCode::ValidationInvalidArgument;
-            }
-            if let Some(details) = envelope["diagnostics"]["details"].as_object() {
-                for (key, value) in details {
-                    error.details[key] = value.clone();
-                }
-            }
-            let recovery = envelope["diagnostics"]["details"]["tried"]
-                .as_array()
+    let mut live = super::admission::with_controller_upgrade_admission(|provider| {
+        provider.non_terminal_work()
+    })?;
+    let path = homeboy_core::paths::observation_db()?;
+    if homeboy_core::api_jobs::JobStore::exists_at_path(&path) {
+        let store = homeboy_core::api_jobs::JobStore::open_without_reconciliation(path)?;
+        live.extend(
+            store
+                .list()
                 .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_str)
-                .take(8)
-                .map(bounded_upgrade_cause)
-                .collect::<Vec<_>>();
-            error.details["diagnostic_references"] = serde_json::json!(recovery);
-        }
+                .filter(|job| !job.status.is_terminal())
+                .map(|job| format!("{} ({})", job.id, job.operation)),
+        );
     }
+    schema_change_admission(schema, live)
+}
+
+fn schema_change_admission(schema: Option<i64>, live: Vec<String>) -> Result<()> {
+    if live.is_empty() {
+        return Ok(());
+    }
+    let mut error =
+        Error::validation_invalid_argument(
+            "controller_upgrade",
+            format!(
+            "observation schema change to {} would hide live work: {}; no binaries were replaced",
+            schema.map_or_else(|| "an unknown version".to_string(), |schema| schema.to_string()),
+            live.join(", ")
+        ),
+            None,
+            None,
+        );
+    error.details["kind"] = serde_json::json!("schema_change");
+    error.details["live_work"] = serde_json::json!(live);
     Err(error)
 }
 
@@ -1084,10 +1031,6 @@ fn complete_source_upgrade(
             &owned_promotion_lease
         }
     };
-    promotion_lease.drain_for_binary_replacement(
-        super::helpers::CONTROLLER_UPGRADE_PROMOTION_WAIT_TIMEOUT,
-        |_| {},
-    )?;
     let active_identity = installed_target_build_identity()?;
     if source_promotion_is_superseded(force, active_identity.as_ref(), &workspace_root)? {
         let active = active_identity.expect("identity checked above");

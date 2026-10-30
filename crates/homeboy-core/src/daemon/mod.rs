@@ -4595,9 +4595,6 @@ pub(crate) fn admit_controller_job(
     job_store: &JobStore,
 ) -> Result<ControllerJobAdmission> {
     let controller_job = controller_job_state(&request)?;
-    crate::runtime_promotion::ensure_upgrade_drain_admission(
-        controller_job.linked_durable_run_id.as_deref(),
-    )?;
     let outcome = job_store.admit_controller_job(
         format!("controller.{}", request.job_type),
         request.idempotency_key.clone(),

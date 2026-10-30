@@ -20,20 +20,18 @@ Runner sync uses this contract:
 - Report configured `homeboy_path` versus bare `homeboy` version drift when both can be observed.
 - Report a stale connected runner daemon when the daemon session version no longer matches the configured runner executable version.
 
-Before a controller version upgrade, stale runner-backed ownership does not
-block replacement when a fresh direct daemon observation reports zero active
-jobs. A nonzero or unavailable active-job observation remains a blocker. A
-linked extension with a missing target is instead reported as a warning with
-`extension relink` and `extension uninstall` actions; it does not prevent the
-controller upgrade.
+Controller upgrades install the verified binary, stop the resident daemon by
+its exact lease, and start the installed binary in the same state directory.
+Startup recovery resumes in-flight work; upgrades do not drain, cancel, or
+block new Cook admission. A candidate with a different observation-store schema
+is refused while non-terminal work exists, naming that work and leaving all
+binaries unchanged.
 
 ## Options
 
 - `status [ID]`: Inspect a persisted upgrade operation. Reports whether binary promotion and optional extension/runner refresh completed. Omit `ID` to read the latest upgrade run. Also available as `homeboy runs show <id>`.
 - `--check`: Check for updates without installing. Returns version information without making changes.
 - `--force`: Force upgrade even if already at the latest version; does not cancel active work.
-- `--drain-timeout <SECONDS>`: Bound the controller drain (default 1800). Progress identifies outstanding jobs and Cooks.
-- `--cancel-active`: Explicitly cancel outstanding jobs and durable Cooks instead of waiting for natural completion. Exact cancelled identities are printed and retained on the upgrade operation.
 - `--skip-extensions`: Skip automatic extension updates.
 - `--skip-runners`: Upgrade the controller only; cannot be combined with `--upgrade-runner`.
 - `--upgrade-runner`: Select configured runners to converge with the controller upgrade. Repeat to target multiple runners.
@@ -51,7 +49,7 @@ Binary installs download a release asset named `homeboy-<target triple>.tar.xz`,
 - **The target triple is detected honestly.** An OS/architecture pair Homeboy publishes no assets for is reported as undetermined; asset availability is then explicitly *not verified* rather than guessed.
 - **A 404 names the resolved asset URL and the target triple** it looked for, so diagnosing a missing asset does not require listing release assets by hand.
 
-Binary upgrades run the same `homeboy-installer.sh` that is published as a release asset, with `HOMEBOY_INSTALL_STAGE_ONLY=1` and `HOMEBOY_INSTALL_PATH` pointing into an isolated stage. In that mode the installer only downloads, checksum- and version-verifies, and places the candidate in the stage; Homeboy then verifies the staged candidate, runs its upgrade admission against the installed controller's identity, and atomically promotes it over the active binary. The installer honors `HOMEBOY_UPGRADE_RELEASE_TAG` to download from a specific tag instead of `releases/latest/download`; `upgrade` sets it from the release it selected.
+Binary upgrades run the same `homeboy-installer.sh` that is published as a release asset, with `HOMEBOY_INSTALL_STAGE_ONLY=1` and `HOMEBOY_INSTALL_PATH` pointing into an isolated stage. In that mode the installer only downloads, checksum- and version-verifies, and places the candidate in the stage; Homeboy then verifies the staged candidate, queries its observation-store schema before replacement, and atomically promotes it over the active binary. The installer honors `HOMEBOY_UPGRADE_RELEASE_TAG` to download from a specific tag instead of `releases/latest/download`; `upgrade` sets it from the release it selected.
 
 Controllers released before the bootstrap admission contract can recover without
 running their legacy `upgrade` command by invoking the pinned release installer:
@@ -148,8 +146,8 @@ Status reads reconcile an upgrade record whose owner has exited to
 a non-success interrupted terminal state, projecting any pending binary
 replacement from its durable checkpoint. A proven controller replacement
 remains visible independently from incomplete extension or runner refresh.
-Controller replacement admission still waits for live runtime-generation pins.
-Upgrades run in the foreground through controller drain, promotion and admission
+Controller replacement does not wait for live runtime-generation pins.
+Upgrades run in the foreground through binary promotion and daemon restart
 resumption. A queued worker is not reported as successful completion. Only the
 controller admission window is fenced while existing Cooks finish. Runner jobs
 keep running and later complete through the upgraded controller. After the
@@ -180,7 +178,7 @@ Runner upgrade entries include the configured `homeboy_path`, observed configure
 ## Exit code
 
 - `0`: Completed upgrade with selected targets converged and runner admission restored.
-- Non-zero: Drain timeout, cancellation failure, preflight refusal, partial upgrade, failed component, interrupted operation, pending service restart, or admission-readiness failure.
+- Non-zero: Schema-change refusal, preflight failure, partial upgrade, failed component, interrupted operation, pending service restart, or admission-readiness failure.
 
 ## Notes
 

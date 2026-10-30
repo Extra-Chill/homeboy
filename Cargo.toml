@@ -71,6 +71,7 @@ tempfile = "3.14"
 clap = { version = "4.5", features = ["derive", "env", "string"] }
 
 [dev-dependencies]
+homeboy-upgrade = { path = "crates/homeboy-upgrade" }
 homeboy-test-support = { path = "crates/homeboy-test-support" }
 
 homeboy-runner-contract = { version = "0.1.0", path = "crates/contracts/homeboy-runner-contract" }

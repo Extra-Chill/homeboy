@@ -133,10 +133,7 @@ pub fn drain_work_intents_with(
     let mut scheduled = Vec::new();
     let mut deferred = Vec::new();
     while let Some(intent) = store.next_pending_work_intent(now_ms)? {
-        match crate::runtime_promotion::ensure_upgrade_drain_admission(Some(&intent.run_id))
-            .and_then(|()| schedule(&intent))
-            .and_then(durable_job_receipt)
-        {
+        match schedule(&intent).and_then(durable_job_receipt) {
             Ok(receipt) => {
                 store.acknowledge_work_intent(&intent.id, &receipt)?;
                 scheduled.push(receipt);
@@ -196,48 +193,27 @@ mod tests {
     }
 
     #[test]
-    fn runtime_promotion_drain_fences_daemon_dispatch_using_durable_intents() {
+    fn runtime_promotion_upgrade_in_progress_does_not_refuse_controller_admission() {
         with_isolated_home(|_| {
-            commit_intents(&["intent-before-drain"]);
-            let guard = crate::runtime_promotion::begin_upgrade_drain(
-                "upgrade-dispatch-test",
-                vec!["drain-run".into()],
+            let root = crate::paths::runtime_promotion_dir().unwrap();
+            std::fs::create_dir_all(&root).unwrap();
+            // Even an old upgrader's reservation must not fence new admission.
+            std::fs::write(
+                root.join("upgrade-drain.json"),
+                serde_json::json!({
+                    "operation_id": "upgrade-in-progress", "pid": std::process::id(),
+                    "runs": []
+                })
+                .to_string(),
             )
             .unwrap();
-            // Continuations of an existing Cook must still drain.
+            commit_intents(&["new-cook-during-upgrade"]);
             let pass = drain_work_intents_with(|intent| {
                 Ok(serde_json::json!({"scheduled": true, "job_id": intent.id}))
             })
             .unwrap();
-            assert_eq!(pass["scheduled"].as_array().unwrap().len(), 1);
-
-            // No cached daemon state or daemon PID is involved: a subsequent
-            // dispatch pass (including one after restart) reads the same fence.
-            drop(guard);
-            let guard =
-                crate::runtime_promotion::begin_upgrade_drain("upgrade-dispatch-test", vec![])
-                    .unwrap();
-            commit_intents(&["intent-after-drain"]);
-            let pass = drain_work_intents_with(|_| {
-                panic!("new work must not reach the daemon scheduler during upgrade")
-            })
-            .unwrap();
-            assert!(pass["scheduled"].as_array().unwrap().is_empty());
-            assert_eq!(pass["deferred"][0]["id"], "intent-after-drain");
-            assert!(pass["deferred"][0]["last_error"]
-                .as_str()
-                .unwrap()
-                .contains("controller_draining"));
-            drop(guard);
-            let deadline = pass["deferred"][0]["next_attempt_ms"].as_u64().unwrap();
-            while crate::api_jobs::timestamp_ms() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            let pass = drain_work_intents_with(|intent| {
-                Ok(serde_json::json!({"scheduled": true, "job_id": intent.id}))
-            })
-            .unwrap();
-            assert_eq!(pass["scheduled"][0]["job_id"], "intent-after-drain");
+            assert_eq!(pass["scheduled"][0]["job_id"], "new-cook-during-upgrade");
+            assert!(pass["deferred"].as_array().unwrap().is_empty());
         });
     }
 

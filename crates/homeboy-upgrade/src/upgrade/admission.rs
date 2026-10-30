@@ -116,10 +116,14 @@ impl ControllerUpgradeAdmission {
 pub trait ControllerUpgradeAdmissionProvider: Send + Sync {
     fn controller_upgrade_admission(&self) -> Result<ControllerUpgradeAdmission>;
 
-    fn cancel_for_upgrade(&self, run_id: &str) -> Result<()> {
-        Err(Error::internal_unexpected(format!(
-            "cannot cancel durable Cook {run_id}: lifecycle provider unavailable"
-        )))
+    /// Schema switches must preserve all non-terminal work, not just live owners.
+    fn non_terminal_work(&self) -> Result<Vec<String>> {
+        Ok(self
+            .controller_upgrade_admission()?
+            .blockers
+            .into_iter()
+            .map(|blocker| blocker.run_id)
+            .collect())
     }
 
     /// Repair only ownership that the target controller can prove is stale

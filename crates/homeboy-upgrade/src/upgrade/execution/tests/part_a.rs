@@ -85,56 +85,48 @@ fn parses_homeboy_version_output() {
 
 #[cfg(unix)]
 #[test]
-fn candidate_admission_cause_survives_process_exit_and_durable_status() {
-    use crate::upgrade::operation::{load_upgrade_operation_status, UpgradeOperation};
-
+fn candidate_schema_query_admits_live_job_only_for_unchanged_schema() {
     homeboy_core::test_support::with_isolated_home(|home| {
+        let store = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+            homeboy_core::paths::observation_db().unwrap(),
+        )
+        .unwrap();
+        let job = store.create("controller.workflow");
         let candidate = home.path().join("candidate");
-        homeboy_test_support::write_executable(&candidate, concat!(
-            "#!/bin/sh\n",
-            "printf 'candidate diagnostic notice\\n' >&2\n",
-            "printf '%s\\n' '{\"schema\":\"homeboy/command-result/v3\",\"success\":false,",
-            "\"diagnostics\":{\"code\":\"validation.invalid_argument\",\"message\":\"replacement blocked by unresolved runner ownership\",",
-            "\"details\":{\"tried\":[\"homeboy runner reconcile fixture\"]}}}'\n",
-            "exit 2\n"
-        ), 0o700)
-        .expect("write candidate executable");
-
-        let error = run_verified_target_admission(&candidate, "1.0.0", "old", "fixture")
-            .expect_err("candidate must refuse replacement");
-        assert_eq!(
-            error.message,
-            "replacement blocked by unresolved runner ownership"
-        );
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(error.details["error"]
-            .as_str()
-            .unwrap()
-            .contains("candidate diagnostic notice"));
-        assert!(error.details["error"]
-            .as_str()
-            .unwrap()
-            .contains("homeboy runner reconcile fixture"));
-
-        let mut operation = UpgradeOperation::start("homeboy upgrade");
-        let id = operation.id().expect("durable operation").to_string();
-        operation
-            .finish_failed_durable(&error)
-            .expect("terminalize refusal");
-        drop(operation);
-        let status = load_upgrade_operation_status(Some(&id)).expect("read after exit");
-        let failure = status.failure.expect("actionable failure");
-        assert_eq!(failure.predicate, "candidate_admission_refused");
-        assert_eq!(failure.phase, "running_candidate_admission");
-        assert_eq!(
-            failure.cause.as_deref(),
-            Some("replacement blocked by unresolved runner ownership")
-        );
-        assert_eq!(
-            failure.diagnostic_references,
-            vec!["homeboy runner reconcile fixture"]
-        );
+        let current = homeboy_core::observation::store::CURRENT_SCHEMA_VERSION;
+        // An older release cannot answer the query; its schema is unknown.
+        for schema in [Some(current), Some(current + 1), None] {
+            let script = match schema {
+                Some(schema) => format!(
+                    "#!/bin/sh\n[ \"$1\" = --observation-schema-version ] || exit 2\nprintf '{schema}\\n'\n"
+                ),
+                None => "#!/bin/sh\necho 'unexpected argument' >&2\nexit 2\n".to_string(),
+            };
+            homeboy_test_support::write_executable(&candidate, script, 0o700).unwrap();
+            let admission = run_verified_target_admission(&candidate);
+            if schema == Some(current) {
+                admission.expect("live work must not block same-schema replacement");
+            } else {
+                let error = admission.unwrap_err();
+                assert_eq!(error.details["kind"], "schema_change");
+                assert!(error.message.contains(&job.id.to_string()));
+                assert!(error.message.contains("no binaries were replaced"));
+            }
+        }
     });
+}
+
+#[test]
+fn schema_change_refuses_live_work_without_replacing_binaries() {
+    let error = schema_change_admission(
+        Some(homeboy_core::observation::store::CURRENT_SCHEMA_VERSION + 1),
+        vec!["controller-job-live".into(), "cook-live".into()],
+    )
+    .unwrap_err();
+    assert_eq!(error.details["kind"], "schema_change");
+    assert!(error.message.contains("controller-job-live"));
+    assert!(error.message.contains("cook-live"));
+    assert!(error.message.contains("no binaries were replaced"));
 }
 
 #[test]
@@ -204,7 +196,6 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
     .expect("manifest");
     let installed = workspace.path().join("installed-homeboy");
     let candidate = workspace.path().join("staged-homeboy");
-    let evidence = workspace.path().join("admission-evidence");
     homeboy_test_support::write_executable(
         &installed,
         "#!/bin/sh\nif [ \"$1\" = self ]; then exit 64; fi\nprintf 'homeboy 0.351.0+old\\n'\n",
@@ -212,10 +203,9 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
     )
     .expect("installed controller");
     homeboy_test_support::write_executable(&candidate, format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nprintf '%s|%s|%s|%s\\n' \"$1\" \"$4\" \"$6\" \"$8\" > {}\nexit 0\n",
-            quote_path(&evidence.display().to_string())
-        ), 0o755)
-    .expect("staged candidate");
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nprintf '{}\\n'\n",
+        homeboy_core::observation::store::CURRENT_SCHEMA_VERSION
+    ), 0o755).expect("candidate");
 
     let candidate_identity = verify_source_candidate_target_admission(
         workspace.path(),
@@ -229,14 +219,6 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
         candidate_identity.build_identity.as_deref(),
         Some("homeboy 0.352.0+new")
     );
-    assert_eq!(
-        std::fs::read_to_string(&evidence).expect("admission evidence"),
-        format!(
-            "self|homeboy 0.351.0+old|0.352.0|source candidate {}\n",
-            candidate.display()
-        )
-    );
-
     homeboy_test_support::write_executable(&candidate, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nexit 1\n", 0o755)
     .expect("failing staged candidate");
 
@@ -248,7 +230,9 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
     )
     .expect_err("candidate admission failure blocks promotion");
 
-    assert!(error.message.contains("verified source candidate refused"));
+    assert!(error
+        .message
+        .contains("did not report its observation schema"));
     assert_eq!(
         std::fs::read_to_string(&installed).expect("installed bytes"),
         "#!/bin/sh\nif [ \"$1\" = self ]; then exit 64; fi\nprintf 'homeboy 0.351.0+old\\n'\n"

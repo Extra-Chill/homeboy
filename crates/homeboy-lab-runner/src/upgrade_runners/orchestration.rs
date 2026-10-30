@@ -32,10 +32,8 @@ pub fn preflight_configured_runners_for_upgrade(
             .unwrap_or_else(|| "homeboy".to_string());
         if let Some(detail) = runner_live_jobs_preflight(&runner.id, candidate_version) {
             let mut entry = runner_upgrade_failure_entry(&runner.id, homeboy_path, None, 1, detail);
-            entry.recovery_commands = vec![format!(
-                "homeboy upgrade --cancel-active --upgrade-runner {}",
-                runner.id
-            )];
+            entry.recovery_commands =
+                vec![format!("homeboy upgrade --upgrade-runner {}", runner.id)];
             failures.push(entry);
             continue;
         }

@@ -378,12 +378,17 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
     // resumes in the same store.
     for pause in [Duration::from_millis(1500), Duration::from_secs(4)] {
         std::thread::sleep(pause);
-        let stopped = json_output(&bin, home.path(), &["daemon", "stop"]);
+        // Upgrade uses this exact requested-stop primitive, even while busy.
+        let resident = status(&bin, home.path());
+        let lease = resident["data"]["daemon"]["lease_id"]
+            .as_str()
+            .expect("resident exact lease");
+        let stopped = json_output(&bin, home.path(), &["daemon", "stop", "--lease-id", lease]);
         assert_eq!(
             stopped["success"], true,
             "stop with work in flight: {stopped}"
         );
-        let restarted = json_output(&bin, home.path(), &["daemon", "ensure-running"]);
+        let restarted = json_output(&bin, home.path(), &["daemon", "start"]);
         assert_eq!(restarted["success"], true, "restart in place: {restarted}");
         reaper.track(restarted["data"]["pid"].as_i64().unwrap_or_default());
     }

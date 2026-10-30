@@ -737,6 +737,7 @@ dependencies = [
  "homeboy-product-identity",
  "homeboy-runner-contract",
  "homeboy-test-support",
+ "homeboy-upgrade",
  "libc",
  "reqwest",
  "rusqlite",

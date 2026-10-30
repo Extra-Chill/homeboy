@@ -1469,7 +1469,9 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut operation = UpgradeOperation::start("homeboy upgrade");
             let id = operation.id().unwrap().to_string();
-            operation.set_phase_durable("draining_controller").unwrap();
+            operation
+                .set_phase_durable("running_candidate_admission")
+                .unwrap();
             operation
                 .set_phase_durable("installing_controller")
                 .unwrap();
@@ -1490,7 +1492,7 @@ mod tests {
                 .unwrap();
             let phases = &run.metadata_json["phases"];
             for phase in [
-                "draining_controller",
+                "running_candidate_admission",
                 "installing_controller",
                 "verifying_install",
                 "refreshing installed extensions",
