@@ -188,55 +188,62 @@ fn source_build_command_receives_build_only_contract() {
 #[cfg(unix)]
 #[test]
 fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failure() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    std::fs::write(
-        workspace.path().join("Cargo.toml"),
-        "[package]\nname = \"homeboy\"\nversion = \"0.352.0\"\n",
-    )
-    .expect("manifest");
-    let installed = workspace.path().join("installed-homeboy");
-    let candidate = workspace.path().join("staged-homeboy");
-    homeboy_test_support::write_executable(
-        &installed,
-        "#!/bin/sh\nif [ \"$1\" = self ]; then exit 64; fi\nprintf 'homeboy 0.351.0+old\\n'\n",
-        0o755,
-    )
-    .expect("installed controller");
-    homeboy_test_support::write_executable(&candidate, format!(
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+            homeboy_core::paths::observation_db().unwrap(),
+        )
+        .unwrap();
+        let _job = store.create("controller.workflow");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            workspace.path().join("Cargo.toml"),
+            "[package]\nname = \"homeboy\"\nversion = \"0.352.0\"\n",
+        )
+        .expect("manifest");
+        let installed = workspace.path().join("installed-homeboy");
+        let candidate = workspace.path().join("staged-homeboy");
+        homeboy_test_support::write_executable(
+            &installed,
+            "#!/bin/sh\nif [ \"$1\" = self ]; then exit 64; fi\nprintf 'homeboy 0.351.0+old\\n'\n",
+            0o755,
+        )
+        .expect("installed controller");
+        homeboy_test_support::write_executable(&candidate, format!(
         "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nprintf '{}\\n'\n",
         homeboy_core::observation::store::CURRENT_SCHEMA_VERSION
     ), 0o755).expect("candidate");
 
-    let candidate_identity = verify_source_candidate_target_admission(
-        workspace.path(),
-        &candidate,
-        None,
-        Some(&installed),
-    )
-    .expect("new candidate, not the old controller, admits replacement");
-    assert_eq!(candidate_identity.version.as_deref(), Some("0.352.0"));
-    assert_eq!(
-        candidate_identity.build_identity.as_deref(),
-        Some("homeboy 0.352.0+new")
-    );
-    homeboy_test_support::write_executable(&candidate, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nexit 1\n", 0o755)
+        let candidate_identity = verify_source_candidate_target_admission(
+            workspace.path(),
+            &candidate,
+            None,
+            Some(&installed),
+        )
+        .expect("new candidate, not the old controller, admits replacement");
+        assert_eq!(candidate_identity.version.as_deref(), Some("0.352.0"));
+        assert_eq!(
+            candidate_identity.build_identity.as_deref(),
+            Some("homeboy 0.352.0+new")
+        );
+        homeboy_test_support::write_executable(&candidate, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nexit 1\n", 0o755)
     .expect("failing staged candidate");
 
-    let error = verify_source_candidate_target_admission(
-        workspace.path(),
-        &candidate,
-        None,
-        Some(&installed),
-    )
-    .expect_err("candidate admission failure blocks promotion");
+        let error = verify_source_candidate_target_admission(
+            workspace.path(),
+            &candidate,
+            None,
+            Some(&installed),
+        )
+        .expect_err("candidate admission failure blocks promotion");
 
-    assert!(error
-        .message
-        .contains("did not report its observation schema"));
-    assert_eq!(
-        std::fs::read_to_string(&installed).expect("installed bytes"),
-        "#!/bin/sh\nif [ \"$1\" = self ]; then exit 64; fi\nprintf 'homeboy 0.351.0+old\\n'\n"
-    );
+        assert!(error
+            .message
+            .contains("observation schema change to an unknown version"));
+        assert_eq!(
+            std::fs::read_to_string(&installed).expect("installed bytes"),
+            "#!/bin/sh\nif [ \"$1\" = self ]; then exit 64; fi\nprintf 'homeboy 0.351.0+old\\n'\n"
+        );
+    });
 }
 
 #[test]
@@ -487,40 +494,6 @@ fn installer_timeout_terminates_and_reaps_the_process_tree() {
     assert!(
         !homeboy_core::process::pid_is_running(child_pid),
         "timed-out installer left a runnable descendant"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn installer_timeout_classifies_bytes_mutated_before_the_hang() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let target = workspace.path().join("homeboy");
-    homeboy_test_support::write_executable(
-        &target,
-        "#!/bin/sh\necho 'homeboy 0.2.0'\n# old\n",
-        0o755,
-    )
-    .expect("write installed fixture");
-
-    let checkpoint = ReplacementCheckpoint::pending(&target, Some("0.2.0"), None, None)
-        .expect("capture immutable pre-install evidence");
-    let shell = format!(
-        "printf changed > {}; sleep 30",
-        quote_path(&target.display().to_string())
-    );
-
-    supervise_installer_shell_command(
-        &shell,
-        Duration::from_millis(50),
-        "test binary installer",
-        |_| Ok(()),
-        |_| {},
-    )
-    .expect_err("installer mutates and then times out");
-
-    assert_eq!(
-        replacement_observed_state(&checkpoint).expect("classify post-timeout bytes"),
-        "changed_unverified"
     );
 }
 

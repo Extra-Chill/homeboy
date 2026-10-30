@@ -184,7 +184,7 @@ Runner upgrade entries include the configured `homeboy_path`, observed configure
 
 - Version checking queries the GitHub Releases API. Network failures are handled gracefully.
 - On Unix platforms, successful source installs automatically restart into the new binary. Binary and package-manager installs do not require a restart.
-- Upgrade persists a durable operation before controller mutation. Long extension refresh emits bounded `[upgrade] phase=... elapsed=Ns` heartbeats. `homeboy upgrade status` reconciles dead foreground owners and reports whether a binary replacement checkpoint proves promotion; optional refresh is marked interrupted when its owner exits.
+- Upgrade persists a durable operation before controller mutation. Long extension refresh emits bounded `[upgrade] phase=... elapsed=Ns` heartbeats. `homeboy upgrade status` reconciles dead foreground owners and reports whether the destination hash matches the selected release's durably recorded sha256; optional refresh is marked interrupted when its owner exits.
 
 ## Related
 

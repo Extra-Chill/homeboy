@@ -304,43 +304,16 @@ impl UpgradeOperation {
         self.persist_durable()
     }
 
-    pub fn record_replacement_checkpoint_durable(
+    pub fn record_replacement_evidence_durable(
         &mut self,
-        checkpoint: &super::execution::ReplacementCheckpoint,
+        checkpoint: &super::execution::ReplacementEvidence,
     ) -> Result<()> {
         let previous_metadata = self.metadata.clone();
         let previous_controller_promoted = self.controller_promoted;
         self.metadata["replacement"] = json!(checkpoint);
-        if checkpoint.state == "applied" {
-            self.controller_promoted = true;
-            self.metadata["controller"] = component(
-                "replacement_applied",
-                "controller replacement applied; verification pending",
-            );
-            self.metadata["phase"] = json!("controller_replacement_applied");
-        } else if checkpoint.state == "pending" {
-            self.metadata["phase"] = json!("controller_replacement_pending");
-        } else if checkpoint.state == "not_applied" {
-            self.metadata["controller"] = component(
-                "replacement_not_applied",
-                "controller replacement did not change the installed target",
-            );
-            self.metadata["phase"] = json!("controller_replacement_not_applied");
-        } else if checkpoint.state == "changed_unverified" {
-            self.metadata["controller"] = component(
-                "replacement_changed_unverified",
-                "controller target changed, but the selected identity could not be verified",
-            );
-            self.metadata["phase"] = json!("controller_replacement_changed_unverified");
-        } else if checkpoint.state == "evidence_unavailable" {
-            self.metadata["controller"] = component(
-                "replacement_evidence_unavailable",
-                "controller replacement evidence could not be read",
-            );
-            self.metadata["phase"] = json!("controller_replacement_evidence_unavailable");
-        }
+        self.metadata["phase"] = json!("installing_controller");
         let persisted = self.persist_durable();
-        if persisted.is_err() && checkpoint.state == "pending" {
+        if persisted.is_err() {
             self.metadata = previous_metadata;
             self.controller_promoted = previous_controller_promoted;
         }
@@ -615,7 +588,7 @@ impl Drop for UpgradeOperation {
         }
         // Panic unwinding and a hard process crash must leave the same
         // lease-recoverable checkpoint for the next mutation owner to freeze.
-        if self.metadata["replacement"]["state"].as_str() == Some("pending") {
+        if self.metadata.get("replacement").is_some() {
             return;
         }
         if self.pending_terminal.is_some() {
@@ -940,11 +913,7 @@ fn merge_latest_monotonic_progress(target: &mut Value, source: &Value) {
     let Some(source_replacement) = source.get("replacement") else {
         return;
     };
-    let target_state = target["replacement"]["state"].as_str();
-    let source_state = source_replacement["state"].as_str();
-    if target.get("replacement").is_none()
-        || (target_state == Some("pending") && source_state.is_some_and(|state| state != "pending"))
-    {
+    if target.get("replacement").is_none() {
         target["replacement"] = source_replacement.clone();
     }
 }
@@ -974,8 +943,7 @@ fn status_from_run(run: &RunRecord) -> Result<UpgradeOperationStatus> {
             None,
         ));
     }
-    let mut metadata = run.metadata_json.clone();
-    reconcile_replacement_projection(&mut metadata);
+    let metadata = run.metadata_json.clone();
     Ok(UpgradeOperationStatus {
         command: "upgrade.status".to_string(),
         operation_id: run.id.clone(),
@@ -1169,40 +1137,49 @@ fn failure_from_result(
     })
 }
 
+#[cfg(test)]
+#[test]
+fn crash_between_rename_and_record_is_decided_by_destination_hash() {
+    use sha2::Digest;
+    let directory = tempfile::tempdir().unwrap();
+    let staged = directory.path().join("candidate");
+    let destination = directory.path().join("installed");
+    std::fs::write(&staged, b"release bytes").unwrap();
+    std::fs::write(&destination, b"old bytes").unwrap();
+    let expected_sha256 = format!("{:x}", sha2::Sha256::digest(b"release bytes"));
+    let durable = json!({ "replacement": {
+        "target": destination, "expected_version": "0.376.1",
+        "expected_build_identity": null, "expected_sha256": expected_sha256,
+    }});
+    let mut before = durable.clone();
+    reconcile_replacement_projection(&mut before);
+    assert_eq!(before["controller"]["status"], "replacement_not_observed");
+    std::fs::rename(staged, &destination).unwrap();
+    // Reload only the fact persisted before rename, without a completion record.
+    let mut recovered = durable;
+    reconcile_replacement_projection(&mut recovered);
+    assert_eq!(recovered["controller"]["status"], "replacement_applied");
+}
+
 fn reconcile_replacement_projection(metadata: &mut Value) {
     let Some(replacement) = metadata.get("replacement") else {
         return;
     };
-    // Only a pending checkpoint represents the crash window where disk state is
-    // authoritative. Applied and terminal history must not change when a later
-    // operation installs another controller.
-    if replacement.get("state").and_then(Value::as_str) != Some("pending") {
-        return;
-    }
     let Ok(checkpoint) =
-        serde_json::from_value::<super::execution::ReplacementCheckpoint>(replacement.clone())
+        serde_json::from_value::<super::execution::ReplacementEvidence>(replacement.clone())
     else {
         metadata["controller"] = component(
             "replacement_evidence_missing",
-            "pending replacement has no pre-mutation byte evidence",
+            "replacement has no selected artifact digest",
         );
         return;
     };
     match super::execution::replacement_was_applied(&checkpoint) {
         Ok(true) => {
-            let identity = super::execution::replacement_applied_identity(&checkpoint)
-                .ok()
-                .flatten();
             metadata["controller"] = component(
                 "replacement_applied",
-                identity.map_or_else(
-                    || "installed controller bytes match the selected replacement".to_string(),
-                    |identity| format!("installed controller is {}", identity.display),
-                ),
+                "installed controller bytes match the selected replacement",
             );
-            if metadata["phase"] == "controller_replacement_pending" {
-                metadata["phase"] = json!("controller_replacement_applied");
-            }
         }
         Ok(false) => {
             metadata["controller"] = component(
@@ -1219,7 +1196,7 @@ fn reconcile_replacement_projection(metadata: &mut Value) {
     }
 }
 
-pub(crate) fn freeze_prior_pending_replacements(current_operation_id: &str) -> Result<()> {
+pub(crate) fn freeze_prior_replacements(current_operation_id: &str) -> Result<()> {
     let store = ObservationStore::open_initialized()?;
     let runs = store.list_runs_all(RunListFilter {
         kind: Some(UPGRADE_OPERATION_KIND.to_string()),
@@ -1227,50 +1204,12 @@ pub(crate) fn freeze_prior_pending_replacements(current_operation_id: &str) -> R
         ..RunListFilter::default()
     })?;
     for run in runs {
-        if run.id == current_operation_id
-            || run.metadata_json["replacement"]["state"].as_str() != Some("pending")
-        {
+        if run.id == current_operation_id || run.metadata_json.get("replacement").is_none() {
             continue;
         }
         let expected_metadata = run.metadata_json;
         let mut metadata = expected_metadata.clone();
-        let checkpoint = serde_json::from_value::<super::execution::ReplacementCheckpoint>(
-            metadata["replacement"].clone(),
-        )
-        .map_err(|error| {
-            Error::internal_unexpected(format!(
-                "prior upgrade operation has invalid replacement evidence: {}: {error}",
-                run.id
-            ))
-        })?;
-        let state = super::execution::replacement_observed_state(&checkpoint)?;
-        metadata["replacement"]["state"] = json!(state);
-        match state {
-            "applied" => {
-                metadata["controller"] = component(
-                    "replacement_applied",
-                    "installed controller bytes prove the selected replacement was applied",
-                );
-            }
-            "changed_unverified" => {
-                metadata["controller"] = component(
-                    "replacement_changed_unverified",
-                    "controller target changed, but the selected identity could not be verified",
-                );
-            }
-            "not_applied" => {
-                metadata["controller"] = component(
-                    "replacement_not_applied",
-                    "controller replacement did not change the installed target",
-                );
-            }
-            _ => {
-                metadata["controller"] = component(
-                    "replacement_evidence_unavailable",
-                    "controller replacement evidence could not be read",
-                );
-            }
-        }
+        reconcile_replacement_projection(&mut metadata);
         metadata["phase"] = json!("controller_replacement_superseded");
         metadata["terminal_intent_id"] = json!(format!("upgrade-superseded:{}", run.id));
         let frozen = store.finish_running_run_if_metadata(
@@ -1911,134 +1850,6 @@ mod tests {
     }
 
     #[test]
-    fn replacement_applied_checkpoint_precedes_verification() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut operation = UpgradeOperation::start("homeboy upgrade");
-            let id = operation.id().expect("persisted operation").to_string();
-            let checkpoint = replacement_checkpoint("pending", "/tmp/homeboy-target");
-            operation
-                .record_replacement_checkpoint_durable(&checkpoint)
-                .expect("persist replacement intent");
-            operation
-                .record_replacement_checkpoint_durable(&checkpoint.with_state("applied"))
-                .expect("persist replacement application");
-
-            let run = operation
-                .observation
-                .as_ref()
-                .expect("observation")
-                .store()
-                .get_run(&id)
-                .expect("read operation")
-                .expect("operation exists");
-            assert_eq!(run.metadata_json["replacement"]["state"], "applied");
-            assert_eq!(run.metadata_json["phase"], "controller_replacement_applied");
-            assert_eq!(
-                run.metadata_json["controller"]["status"],
-                "replacement_applied"
-            );
-        });
-    }
-
-    #[test]
-    fn failed_pending_checkpoint_is_not_replayed_into_terminal_metadata() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut operation = UpgradeOperation::start("homeboy upgrade");
-            let id = operation.id().expect("persisted operation").to_string();
-            let checkpoint = replacement_checkpoint("pending", "/tmp/homeboy-target");
-            operation.fail_next_progress_write();
-            let checkpoint_error = operation
-                .record_replacement_checkpoint_durable(&checkpoint)
-                .expect_err("inject pending-checkpoint persistence failure");
-            operation
-                .finish_failed_durable(&checkpoint_error)
-                .expect("terminalize the pre-mutation failure");
-
-            let run = operation
-                .observation
-                .as_ref()
-                .expect("observation")
-                .store()
-                .get_run(&id)
-                .expect("read operation")
-                .expect("operation exists");
-            assert!(run.metadata_json.get("replacement").is_none());
-            assert_eq!(run.status, RunStatus::Error.as_str());
-        });
-    }
-
-    #[test]
-    fn successful_noop_installer_is_terminal_error_with_not_applied_evidence() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut operation = UpgradeOperation::start("homeboy upgrade");
-            let id = operation.id().expect("persisted operation").to_string();
-            let checkpoint = replacement_checkpoint("pending", "/tmp/homeboy-target");
-            operation
-                .record_replacement_checkpoint_durable(&checkpoint)
-                .expect("persist replacement intent");
-            operation
-                .record_replacement_checkpoint_durable(&checkpoint.with_state("not_applied"))
-                .expect("persist successful installer no-op");
-
-            operation
-                .finish_failed_durable(&Error::internal_unexpected(
-                    "binary installer exited successfully without replacing the controller",
-                ))
-                .expect("terminalize successful installer no-op");
-
-            let run = operation
-                .observation
-                .as_ref()
-                .expect("observation")
-                .store()
-                .get_run(&id)
-                .expect("read operation")
-                .expect("operation exists");
-            assert_eq!(run.status, RunStatus::Error.as_str());
-            assert_eq!(run.metadata_json["phase"], "failed");
-            assert_eq!(run.metadata_json["replacement"]["state"], "not_applied");
-            assert_eq!(
-                run.metadata_json["controller"]["status"],
-                "replacement_not_applied"
-            );
-        });
-    }
-
-    #[test]
-    fn applied_checkpoint_survives_the_following_persistence_failure() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut operation = UpgradeOperation::start("homeboy upgrade");
-            let id = operation.id().expect("persisted operation").to_string();
-            let checkpoint = replacement_checkpoint("pending", "/tmp/homeboy-target");
-            operation
-                .record_replacement_checkpoint_durable(&checkpoint)
-                .expect("persist replacement intent");
-            operation.fail_next_progress_write();
-            let checkpoint_error = operation
-                .record_replacement_checkpoint_durable(&checkpoint.with_state("applied"))
-                .expect_err("inject applied-checkpoint persistence failure");
-            operation
-                .finish_failed_durable(&checkpoint_error)
-                .expect("terminal retry carries in-memory applied state");
-
-            let run = operation
-                .observation
-                .as_ref()
-                .expect("observation")
-                .store()
-                .get_run(&id)
-                .expect("read operation")
-                .expect("operation exists");
-            assert_eq!(run.status, RunStatus::Error.as_str());
-            assert_eq!(run.metadata_json["replacement"]["state"], "applied");
-            assert_eq!(
-                run.metadata_json["controller"]["status"],
-                "replacement_applied"
-            );
-        });
-    }
-
-    #[test]
     fn failed_terminalization_preserves_concurrent_component_progress() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut operation = UpgradeOperation::start("homeboy upgrade");
@@ -2185,24 +1996,6 @@ mod tests {
     }
 
     #[test]
-    fn applied_replacement_history_is_not_reconciled_against_current_disk() {
-        let mut metadata = json!({
-            "phase": "completed",
-            "controller": component("updated", "controller installation completed"),
-            "replacement": {
-                "state": "applied",
-                "target": "/definitely/not/the/current/controller",
-                "expected_version": "0.2.0"
-            }
-        });
-
-        reconcile_replacement_projection(&mut metadata);
-
-        assert_eq!(metadata["phase"], "completed");
-        assert_eq!(metadata["controller"]["status"], "updated");
-    }
-
-    #[test]
     fn freeze_cas_loss_accepts_a_concurrently_terminal_predecessor() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let operation = UpgradeOperation::start("homeboy upgrade");
@@ -2233,240 +2026,6 @@ mod tests {
                 RunStatus::Pass.as_str()
             );
         });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn crash_before_byte_swap_does_not_reconcile_same_version_replacement() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let target_dir = tempfile::tempdir().expect("target directory");
-            let target = target_dir.path().join("homeboy");
-            write_executable(&target, "#!/bin/sh\necho 'homeboy 0.2.0'\n# old\n");
-            let checkpoint = super::super::execution::ReplacementCheckpoint::pending(
-                &target,
-                Some("0.2.0"),
-                None,
-                None,
-            )
-            .expect("capture pre-mutation evidence");
-
-            let mut operation = UpgradeOperation::start("homeboy upgrade");
-            let id = operation.id().expect("persisted operation").to_string();
-            operation
-                .record_replacement_checkpoint_durable(&checkpoint)
-                .expect("persist replacement intent");
-
-            let status = load_upgrade_operation_status(Some(&id)).expect("reconcile status");
-            assert_eq!(
-                status
-                    .controller
-                    .as_ref()
-                    .map(|component| component.status.as_str()),
-                Some("replacement_not_observed")
-            );
-            assert_eq!(status.phase, "controller_replacement_pending");
-
-            freeze_prior_pending_replacements("next-controller-operation")
-                .expect("freeze crash evidence before admitting the next mutation");
-            write_executable(&target, "#!/bin/sh\necho 'homeboy 0.2.0'\n# later retry\n");
-            let frozen = load_upgrade_operation_status(Some(&id)).expect("reload frozen status");
-            assert_eq!(frozen.status, RunStatus::Error.as_str());
-            assert_eq!(frozen.phase, "controller_replacement_superseded");
-            assert_eq!(
-                frozen
-                    .controller
-                    .as_ref()
-                    .map(|component| component.status.as_str()),
-                Some("replacement_not_applied")
-            );
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn crash_after_same_version_byte_swap_reconciles_deliberate_replacement() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let target_dir = tempfile::tempdir().expect("target directory");
-            let target = target_dir.path().join("homeboy");
-            write_executable(&target, "#!/bin/sh\necho 'homeboy 0.2.0'\n# old\n");
-            let checkpoint = super::super::execution::ReplacementCheckpoint::pending(
-                &target,
-                Some("0.2.0"),
-                None,
-                None,
-            )
-            .expect("capture pre-mutation evidence");
-
-            let mut operation = UpgradeOperation::start("homeboy upgrade");
-            let id = operation.id().expect("persisted operation").to_string();
-            operation
-                .record_replacement_checkpoint_durable(&checkpoint)
-                .expect("persist replacement intent");
-            write_executable(&target, "#!/bin/sh\necho 'homeboy 0.2.0'\n# replacement\n");
-
-            let status = load_upgrade_operation_status(Some(&id)).expect("reconcile status");
-            assert_eq!(
-                status
-                    .controller
-                    .as_ref()
-                    .map(|component| component.status.as_str()),
-                Some("replacement_applied")
-            );
-            assert_eq!(status.phase, "controller_replacement_applied");
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn panic_after_pending_remains_recoverable_by_the_next_mutation_owner() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let target_dir = tempfile::tempdir().expect("target directory");
-            let target = target_dir.path().join("homeboy");
-            write_executable(&target, "#!/bin/sh\necho 'homeboy 0.2.0'\n# old\n");
-            let checkpoint = super::super::execution::ReplacementCheckpoint::pending(
-                &target,
-                Some("0.2.0"),
-                None,
-                None,
-            )
-            .expect("capture pre-mutation evidence");
-            let operation_id = std::panic::catch_unwind(|| {
-                let mut operation = UpgradeOperation::start("homeboy upgrade");
-                let id = operation.id().expect("persisted operation").to_string();
-                operation
-                    .record_replacement_checkpoint_durable(&checkpoint)
-                    .expect("persist replacement intent");
-                std::panic::panic_any(id);
-            })
-            .expect_err("inject panic after pending")
-            .downcast::<String>()
-            .expect("panic carries operation id");
-
-            let pending = load_upgrade_operation_status(Some(&operation_id))
-                .expect("panic leaves pending operation inspectable");
-            assert_eq!(pending.status, RunStatus::Running.as_str());
-            freeze_prior_pending_replacements("next-controller-operation")
-                .expect("next owner freezes panic evidence");
-            let frozen =
-                load_upgrade_operation_status(Some(&operation_id)).expect("load frozen operation");
-            assert_eq!(frozen.status, RunStatus::Error.as_str());
-            assert_eq!(frozen.phase, "controller_replacement_superseded");
-            assert_eq!(
-                frozen
-                    .controller
-                    .as_ref()
-                    .map(|component| component.status.as_str()),
-                Some("replacement_not_applied")
-            );
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn crash_with_changed_unverifiable_bytes_freezes_distinct_evidence() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let target_dir = tempfile::tempdir().expect("target directory");
-            let target = target_dir.path().join("homeboy");
-            write_executable(&target, "#!/bin/sh\necho 'homeboy 0.2.0'\n# old\n");
-            let checkpoint = super::super::execution::ReplacementCheckpoint::pending(
-                &target,
-                Some("0.2.0"),
-                None,
-                None,
-            )
-            .expect("capture pre-mutation evidence");
-            let operation_id = {
-                let mut operation = UpgradeOperation::start("homeboy upgrade");
-                let id = operation.id().expect("persisted operation").to_string();
-                operation
-                    .record_replacement_checkpoint_durable(&checkpoint)
-                    .expect("persist replacement intent");
-                std::fs::write(&target, b"changed bytes that cannot execute")
-                    .expect("simulate crash after byte transition");
-                id
-            };
-
-            freeze_prior_pending_replacements("next-controller-operation")
-                .expect("next owner freezes changed evidence");
-            let frozen =
-                load_upgrade_operation_status(Some(&operation_id)).expect("load frozen operation");
-            assert_eq!(frozen.status, RunStatus::Error.as_str());
-            assert_eq!(
-                frozen
-                    .controller
-                    .as_ref()
-                    .map(|component| component.status.as_str()),
-                Some("replacement_changed_unverified")
-            );
-            assert_eq!(frozen.phase, "controller_replacement_superseded");
-            let run = ObservationStore::open_initialized()
-                .expect("open store")
-                .get_run(&operation_id)
-                .expect("read run")
-                .expect("run exists");
-            assert_eq!(
-                run.metadata_json["replacement"],
-                json!(checkpoint.with_state("changed_unverified"))
-            );
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn spawning_failure_checkpoint_cannot_be_reclassified_by_later_swap() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let target_dir = tempfile::tempdir().expect("target directory");
-            let target = target_dir.path().join("homeboy");
-            write_executable(&target, "#!/bin/sh\necho 'homeboy 0.2.0'\n# old\n");
-            let checkpoint = super::super::execution::ReplacementCheckpoint::pending(
-                &target,
-                Some("0.2.0"),
-                None,
-                None,
-            )
-            .expect("capture pre-mutation evidence")
-            .with_state("not_applied");
-            let mut operation = UpgradeOperation::start("homeboy upgrade");
-            let id = operation.id().expect("persisted operation").to_string();
-            operation
-                .record_replacement_checkpoint_durable(&checkpoint)
-                .expect("persist spawn failure");
-            write_executable(
-                &target,
-                "#!/bin/sh\necho 'homeboy 0.2.0'\n# later operation\n",
-            );
-
-            let status = load_upgrade_operation_status(Some(&id)).expect("load status");
-            assert_ne!(
-                status
-                    .controller
-                    .as_ref()
-                    .map(|component| component.status.as_str()),
-                Some("replacement_applied")
-            );
-            assert_eq!(
-                status
-                    .controller
-                    .as_ref()
-                    .map(|component| component.status.as_str()),
-                Some("replacement_not_applied")
-            );
-        });
-    }
-
-    fn replacement_checkpoint(
-        state: &str,
-        target: &str,
-    ) -> super::super::execution::ReplacementCheckpoint {
-        super::super::execution::ReplacementCheckpoint {
-            state: state.to_string(),
-            target: target.into(),
-            expected_version: Some("0.2.0".to_string()),
-            expected_build_identity: Some("0.2.0+candidate".to_string()),
-            expected_sha256: None,
-            previous_build_identity: Some("0.1.0+old".to_string()),
-            previous_sha256: "old-digest".to_string(),
-        }
     }
 
     #[cfg(unix)]
