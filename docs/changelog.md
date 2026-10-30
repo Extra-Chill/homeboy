@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.434.35] - 2026-10-30
+
+### Changed
+- skip reinstall and setup for unchanged linked sources
+- read runner extension compatibility from the inventory
+- Anchor fetched commits in the runner history cache
+
 ## [0.434.34] - 2026-10-30
 
 ### Changed
