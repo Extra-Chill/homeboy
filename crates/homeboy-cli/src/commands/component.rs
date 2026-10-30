@@ -35,6 +35,9 @@ enum ComponentCommand {
         /// Repository-relative shared path/glob selecting all components (repeatable)
         #[arg(long = "shared-path")]
         shared_paths: Vec<String>,
+        /// Select directly changed components only (shared paths still select all)
+        #[arg(long)]
+        direct_only: bool,
     },
     /// Initialize portable component config for a repo
     Create {
@@ -259,15 +262,24 @@ pub fn run_changed(args: ComponentArgs) -> CmdResult<String> {
         path,
         format,
         shared_paths,
+        direct_only,
     } = args.command
     else {
         return Err(homeboy::core::Error::internal_unexpected(
             "Expected component changed",
         ));
     };
-    let output = component::changed::changed(Path::new(&path), &base, &head, &shared_paths)?;
+    let output =
+        component::changed::changed(Path::new(&path), &base, &head, &shared_paths, direct_only)?;
     let text = match format {
-        ChangedFormat::Matrix => serde_json::to_string(&output),
+        ChangedFormat::Matrix => {
+            let include: Vec<_> = output
+                .include
+                .iter()
+                .map(|c| serde_json::json!({"component": c.component, "path": c.path}))
+                .collect();
+            serde_json::to_string(&serde_json::json!({"include": include}))
+        }
         ChangedFormat::Json => serde_json::to_string(&output.include),
         ChangedFormat::Ids => {
             return Ok((
@@ -1195,7 +1207,10 @@ mod tests {
                 "matrix",
                 r#"{"include":[{"component":"network","path":"."}]}"#,
             ),
-            ("json", r#"[{"component":"network","path":"."}]"#),
+            (
+                "json",
+                r#"[{"component":"network","path":".","reason":"changed"}]"#,
+            ),
             ("ids", "network"),
         ] {
             let cli = TestCli::try_parse_from([
