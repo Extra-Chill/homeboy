@@ -22,9 +22,10 @@ paths under it to `--output`:
 - `$RUNNER_TEMP/homeboy-ci-results` on GitHub Actions.
 
 There is no repo-relative `homeboy-ci-results/` directory and no fallback that
-reads one. After `homeboy ci`, `homeboy ci gate`, or `homeboy review` on a clean
-checkout, `git status --porcelain --ignored` stays empty, and every evidence path
-reported in command output points outside the tree.
+reads one. After `homeboy review ci run`, `homeboy review ci differential-gate`,
+or `homeboy review` on a clean checkout, `git status --porcelain --ignored`
+stays empty, and every evidence path reported in command output points outside
+the tree.
 
 ## Envelope
 

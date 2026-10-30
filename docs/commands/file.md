@@ -47,7 +47,7 @@ homeboy file find <project_id> <path> [options]
 Options:
 
 - `--name <pattern>`: Filename pattern (glob, e.g., `*.php`)
-- `--type <f|d|l>`: File type: `f` (file), `d` (directory), `l` (symlink)
+- `--file-type <f|d|l>`: File type: `f` (file), `d` (directory), `l` (symlink)
 - `--max-depth <n>`: Maximum directory depth
 
 Examples:
@@ -57,7 +57,7 @@ Examples:
 homeboy file find mysite /var/www --name "*.php"
 
 # Find directories named "cache"
-homeboy file find mysite /var/www --name "cache" --type d
+homeboy file find mysite /var/www --name "cache" --file-type d
 
 # Find files in top 2 levels only
 homeboy file find mysite /var/www --name "*.log" --max-depth 2
