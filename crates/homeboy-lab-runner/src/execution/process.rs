@@ -536,10 +536,18 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     require_child_identity_acknowledgement: bool,
     child_started: Option<homeboy_core::daemon::runner_exec_driver::ExecChildStarted>,
     #[cfg(unix)] verified_cwd_fd: Option<std::os::fd::RawFd>,
+    output_dir: Option<&Path>,
 ) -> Result<ProcessOutput> {
     let temp_owner = runner_temp_owner(&plan.env)?;
-    let mut command = std::process::Command::new(&plan.command[0]);
-    command.args(&plan.command[1..]).current_dir(&plan.cwd);
+    let mut command = match output_dir {
+        Some(dir) => homeboy_core::daemon::runner_exec_job::command(dir, &plan.command)?,
+        None => {
+            let mut command = std::process::Command::new(&plan.command[0]);
+            command.args(&plan.command[1..]);
+            command
+        }
+    };
+    command.current_dir(&plan.cwd);
     #[cfg(unix)]
     if let Some(fd) = verified_cwd_fd {
         bind_verified_cwd(&mut command, fd);
@@ -557,6 +565,7 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
         &plan.env,
         &plan.secret_env_names,
         plan.runner.settings.concurrency_limit,
+        output_dir,
     )
 }
 
@@ -662,6 +671,7 @@ mod tests {
             false,
             None,
             Some(directory.as_raw_fd()),
+            None,
         )
         .expect("execute from verified fd");
         assert_eq!(output.exit_code, 0);
@@ -1835,6 +1845,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
     env: &HashMap<String, String>,
     secret_env_names: &[String],
     concurrency_limit: Option<usize>,
+    output_dir: Option<&Path>,
 ) -> Result<ProcessOutput> {
     let stdout_line_observer = progress_sink.as_ref().map(|sink| {
         let sink = Arc::clone(sink);
@@ -1856,6 +1867,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
         stdout_line_observer,
         child_started,
         concurrency_limit,
+        output_dir,
     )?;
     let output = measured.output;
     Ok(ProcessOutput {

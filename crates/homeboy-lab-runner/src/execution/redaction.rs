@@ -29,7 +29,7 @@ pub(crate) fn redact_runner_exec_streams(
     )
 }
 
-pub(super) fn runner_exec_secret_values(
+pub(crate) fn runner_exec_secret_values(
     env: &HashMap<String, String>,
     secret_env_names: &[String],
     policy: &RedactionPolicy,
