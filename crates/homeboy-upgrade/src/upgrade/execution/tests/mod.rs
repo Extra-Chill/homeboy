@@ -2,13 +2,13 @@
 
 #[cfg(unix)]
 #[test]
-fn release_candidate_is_spawned_once_and_never_after_rename() {
+fn release_candidate_is_queried_before_rename_and_never_after() {
     let directory = tempfile::tempdir().unwrap();
     let staged = directory.path().join("candidate");
     let destination = directory.path().join("installed");
     let calls = directory.path().join("calls");
     write_executable_fixture(&staged, &format!(
-        "#!/bin/sh\necho call >> '{}'\necho '{{\"identity\":\"0.376.1\",\"observation_schema_version\":{}}}'\n",
+        "#!/bin/sh\necho \"$1\" >> '{}'\ncase \"$1\" in\n  --version) echo 'homeboy 0.376.1' ;;\n  --observation-schema-version) echo {} ;;\nesac\n",
         calls.display(), homeboy_core::observation::store::CURRENT_SCHEMA_VERSION,
     ));
     let identity = verify_staged_release_candidate("0.376.1", &staged).unwrap();
@@ -21,7 +21,12 @@ fn release_candidate_is_spawned_once_and_never_after_rename() {
     .unwrap();
     std::fs::rename(&staged, &destination).unwrap();
     assert!(replacement_was_applied(&evidence).unwrap());
-    assert_eq!(std::fs::read_to_string(calls).unwrap(), "call\n");
+    // Identity and schema are queried once each before the rename; the
+    // installed binary is proven by hash, never by spawning it again.
+    assert_eq!(
+        std::fs::read_to_string(calls).unwrap(),
+        "--version\n--observation-schema-version\n"
+    );
 }
 
 #[test]
