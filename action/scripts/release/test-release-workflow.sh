@@ -210,6 +210,18 @@ python3 - "${REUSABLE_RELEASE}" <<'PY'
 import sys
 
 workflow = open(sys.argv[1]).read()
+monorepo, workflow = workflow.split('  # ── Step 1:', 1)
+assert "if: inputs.components != ''" in monorepo
+assert "inputs.components == ''" in workflow
+assert '      components:' in monorepo
+assert 'value: ${{ jobs.monorepo.outputs.results }}' in monorepo
+assert monorepo.count('resolve-prepared-ref.sh') == 1
+assert 'PREPARED_REF: ${{ inputs.prepared-ref || github.sha }}' in monorepo
+assert 'uses: ./.homeboy-monorepo' in monorepo
+assert 'run-monorepo-releases.py generate' in monorepo
+assert 'homeboy-monorepo-releases.json' in monorepo
+assert 'needs: check' not in monorepo
+print('PASS: monorepo mode is isolated, serial, aggregated, and validates source once')
 action_checkout = workflow.index("path: .homeboy-action")
 resolver = workflow.index("run: bash .homeboy-action/scripts/release/resolve-prepared-ref.sh")
 source_checkout = workflow.index("ref: ${{ steps.source-sha.outputs.source-sha }}")

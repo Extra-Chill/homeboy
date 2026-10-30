@@ -131,6 +131,37 @@ Omit `components` to retain the existing root/`component` workflow. Monorepo
 mode runs unsharded per-component CI (`test-shards` is not used); it does not
 run PR merge policies. Keep PR merging in a separate job gated on Components.
 
+### Monorepo releases
+
+Call `release.yml` once per merge instead of using a component matrix:
+
+```yaml
+jobs:
+  release:
+    uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
+    with:
+      components: all
+    secrets: inherit
+```
+
+Grant the release workflow's existing write permissions. Every tracked
+`homeboy.json` (including the root) is discovered in sorted path order. Each
+component resolves its own toolchain and runs the existing package/publish and
+GitHub Release pipeline serially in one checkout of the release branch (default
+`main`). Nested components use Homeboy's `<id>-vX.Y.Z` tags and their own artifacts.
+The starting source SHA is checked for staleness once; subsequent releases build
+on earlier bump commits. No releasable commits is a successful skip. Failures do
+not stop later components, but fail the job at the end. Release-commit pushes
+are not filtered in this mode, allowing a later run to catch up missed releases.
+
+`release-results` is a JSON list of
+`{component, released, version, tag, skipped_reason}`. The same JSON is uploaded
+as `homeboy-monorepo-releases`, including on component failure. Single-component
+outputs and post-release dispatch remain specific to single-component mode.
+`dry-run` and publish opt-outs apply to every component. Do not combine
+`components: all` with `component`. Omit `components` to keep the existing
+single-component workflow unchanged.
+
 ### Reusable Workflow Permissions
 
 The reusable workflow requests `contents: write`, `pull-requests: write`, and

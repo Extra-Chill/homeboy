@@ -73,6 +73,10 @@ on:
         description: 'Component name or path override passed to the composite action.'
         type: string
         default: ''
+      components:
+        description: 'Set to all for serial monorepo releases; empty preserves single-component mode.'
+        type: string
+        default: ''
       prepared-ref:
         description: 'Optional prepared consumer source ref. It must resolve to the current release-branch tip.'
         type: string
@@ -134,6 +138,9 @@ on:
         description: 'Optional npm registry token fallback for release.publish. Omit when npm trusted publishing/OIDC is configured.'
         required: false
     outputs:
+      release-results:
+        description: 'Monorepo JSON list of component release results.'
+        value: ${{ jobs.monorepo.outputs.results }}
       released:
         description: 'Whether a release was created (true/false).'
         value: ${{ jobs.release.outputs.released }}
@@ -191,12 +198,74 @@ permissions:
   # publish an npm package.
 
 jobs:
+  monorepo:
+    name: Serial monorepo releases
+    if: inputs.components != ''
+    runs-on: ubuntu-latest
+    outputs:
+      results: ${{ steps.releases.outputs.results }}
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token || github.token }}
+      - name: Check out action revision
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ inputs.action-ref }}
+          path: .homeboy-action
+      # Validate once, never between components.
+      - name: Validate starting source
+        id: source
+        shell: bash
+        env:
+          PREPARED_REF: ${{ inputs.prepared-ref || github.sha }}
+          RELEASE_BRANCH: ${{ inputs.release-branch || 'main' }}
+          SOURCE_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: bash .homeboy-action/scripts/release/resolve-prepared-ref.sh
+      - name: Prepare serial release checkout
+        if: steps.source.outputs.stale != 'true'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source-sha }}
+          RELEASE_BRANCH: ${{ inputs.release-branch || 'main' }}
+          RELEASE_INPUTS: ${{ toJSON(inputs) }}
+        run: |
+          set -euo pipefail
+          git checkout -B "${RELEASE_BRANCH#refs/heads/}" "$SOURCE_SHA"
+          printf '%s\n' '.homeboy-action/' '.homeboy-monorepo/' >> .git/info/exclude
+          python3 .homeboy-action/scripts/release/run-monorepo-releases.py generate
+      - name: Release components serially
+        id: releases
+        if: steps.source.outputs.stale != 'true'
+        uses: ./.homeboy-monorepo
+        env:
+          MONOREPO_APP_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          MONOREPO_SSH_KEY: ${{ secrets.PUBLISH_SSH_KEY }}
+          MONOREPO_NPM_TOKEN: ${{ inputs.dry-run != true && secrets.NPM_TOKEN || '' }}
+      - name: Preserve aggregate release results
+        if: always() && steps.source.outputs.stale != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-monorepo-releases
+          path: ${{ runner.temp }}/homeboy-monorepo-releases.json
+          if-no-files-found: ignore
+
   # ── Step 1: Check for releasable commits ──
   check:
     name: Check for releasable commits
     # A push whose head commit is itself a release commit has nothing left to
     # release — the tag already moved. Manual dispatch is never filtered.
-    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'release:') }}
+    if: ${{ inputs.components == '' && (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'release:')) }}
     runs-on: ubuntu-latest
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
