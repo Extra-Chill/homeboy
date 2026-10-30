@@ -1811,11 +1811,15 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
     assert!(scoped.record.is_none());
     assert!(scoped.skipped.is_empty());
 
-    // The one coordinating write. The preflight closure is never reached: the
-    // pinless record fails controller-runtime validation first, which is the
-    // branch that quarantines and skips.
+    // The one coordinating write: a failing preflight is the branch that
+    // quarantines and skips.
     let claim = claim_next_eligible_queued_run_with_preflight_in_store(&seeded, |_, _| {
-        unreachable!("preflight runs only after the durable plan and runtime validate")
+        Err(homeboy_core::Error::validation_invalid_argument(
+            "preflight",
+            "fixture preflight refuses admission",
+            None,
+            None,
+        ))
     })
     .expect("scan the injected store's queue");
     assert!(claim.record.is_none());
