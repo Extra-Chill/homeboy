@@ -76,7 +76,9 @@ pub(super) enum RunsCommand {
     /// Compare selected metrics across persisted run history, or two exact
     /// runs of one kind with `--from-run` / `--to-run`
     Compare(RunsCompareArgs),
-    /// Aggregate hotspot rankings across persisted fuzz run artifacts
+    /// Rank where run time goes: `--kind` aggregates durable phase spans by
+    /// exclusive self time (with inclusive p50/p95 and version comparison),
+    /// `--coverage` reports unattributed gaps; otherwise ranks fuzz artifacts
     Hotspots(RunsHotspotsArgs),
     /// Reconcile running observation records. `--dry-run` previews the bounded
     /// observation-record scope; without it, only reported orphaned records are
