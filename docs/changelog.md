@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.436.8] - 2026-10-30
+
+### Changed
+- build Apple Silicon on macos-15 ahead of the macos-14 retirement
+- update fixtures that relied on patch artifacts after S5
+- lab-runner: every runner upgrades through the managed slot
+
+### Fixed
+- hydrate each dependency selection root once
+- verify retained evidence outside the generation registry lock
+
 ## [0.436.7] - 2026-10-30
 
 ### Changed
