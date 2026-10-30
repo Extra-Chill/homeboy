@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.436.0] - 2026-10-30
+
+### Added
+- defer full verification to required PR CI checks
+
+### Fixed
+- runner exec jobs survive a runner daemon restart
+- converge immutable runner slots and bound failure diagnostics
+
 ## [0.435.8] - 2026-10-30
 
 ### Changed
