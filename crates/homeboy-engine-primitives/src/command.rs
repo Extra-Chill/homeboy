@@ -4155,6 +4155,22 @@ fn capture_tail(mut stream: impl Read, byte_limit: usize) -> io::Result<BoundedS
     Ok(capture.finish())
 }
 
+/// The bounded tail of an output file, with the same capture metadata a piped
+/// stream records. A missing file is empty output.
+pub fn capture_file_tail(
+    path: &std::path::Path,
+    byte_limit: usize,
+) -> io::Result<(Vec<u8>, CaptureMetadata)> {
+    let capture = match std::fs::File::open(path) {
+        Ok(file) => capture_tail(file, byte_limit)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            TailCapture::new(byte_limit).finish()
+        }
+        Err(error) => return Err(error),
+    };
+    Ok((capture.bytes, capture.metadata))
+}
+
 fn capture_tail_with_stdout_observer(
     mut stream: impl Read,
     byte_limit: usize,

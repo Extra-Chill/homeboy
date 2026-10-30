@@ -2413,6 +2413,47 @@ impl JobStore {
         })
     }
 
+    /// Running local children recorded under another daemon
+    /// lease, with their Linux kernel start identity (#16681).
+    pub(crate) fn foreign_runner_exec_children(&self) -> Vec<(Uuid, u32, u64)> {
+        self.inner
+            .lock()
+            .expect("job store mutex poisoned")
+            .jobs
+            .values()
+            .filter(|stored| {
+                stored.job.status == JobStatus::Running
+                    && stored.job.daemon_lease_id != self.daemon_lease_id
+            })
+            .filter_map(|stored| {
+                let process = stored.local_child.as_ref()?.process.as_ref()?;
+                match process.discriminator {
+                    LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks } => {
+                        Some((stored.job.id, process.pid, ticks))
+                    }
+                    LocalChildStartDiscriminator::Unsupported { .. } => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Bind a re-adopted runner exec job to this daemon's lease, so dead-lease
+    /// recovery of its former daemon leaves it to its new supervisor.
+    pub(crate) fn adopt_runner_exec_job(&self, job_id: Uuid) -> Result<()> {
+        let lease_id = self.daemon_lease_id.clone().ok_or_else(|| {
+            Error::internal_unexpected("re-adopting a runner exec job requires a daemon lease")
+        })?;
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .filter(|stored| stored.job.status == JobStatus::Running)
+                .ok_or_else(|| job_not_found(job_id))?;
+            stored.job.daemon_lease_id = Some(lease_id);
+            Ok(())
+        })
+    }
+
     pub(crate) fn active_controller_jobs(&self) -> Vec<(Uuid, ControllerJobState)> {
         self.inner
             .lock()

@@ -271,6 +271,18 @@ fn execute_daemon_exec(
         )
     })?;
 
+    if let Some(dir) = &prepared.output_dir {
+        // A daemon that re-adopts this child after a restart redacts with these.
+        let policy = homeboy_core::redaction::RedactionPolicy::default();
+        homeboy_core::daemon::runner_exec_job::write_redaction_values(
+            dir,
+            &super::execution::redaction::runner_exec_secret_values(
+                &plan.env,
+                &plan.secret_env_names,
+                &policy,
+            ),
+        )?;
+    }
     let output = execute_runner_process_until_cancelled_with_progress(
         &plan,
         is_cancelled,
@@ -282,6 +294,7 @@ fn execute_daemon_exec(
             .as_ref()
             .and_then(|staged| staged.workspace.as_ref())
             .map(super::staged_workspace::StagedWorkspaceDirectory::fd),
+        prepared.output_dir.as_deref(),
     )?;
     let (stdout, stderr) = super::execution::redaction::redact_runner_exec_streams(
         output.stdout,

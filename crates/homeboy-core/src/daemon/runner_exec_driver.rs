@@ -71,6 +71,10 @@ pub struct PreparedDaemonExec {
     pub heartbeat_only_stall: HeartbeatOnlyStallPolicy,
     /// Non-secret provider identity and emitted key provenance for durable output.
     pub extension_env_provenance: Value,
+    /// The job artifact directory the child's output and exit record go to,
+    /// set by the daemon once it holds the job's custody (#16681). A driver
+    /// spawns the child there so it survives a daemon restart.
+    pub output_dir: Option<std::path::PathBuf>,
     /// Opaque driver-owned plan handle carried back into `execute`. The daemon
     /// never inspects it; it exists so the driver can reconstruct the full
     /// runner process without re-preparing.
@@ -120,6 +124,7 @@ impl PreparedDaemonExec {
             concurrency_limit,
             heartbeat_only_stall,
             extension_env_provenance,
+            output_dir: None,
             plan_token,
         }
     }

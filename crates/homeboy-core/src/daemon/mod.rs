@@ -48,6 +48,7 @@ mod patch_capture;
 pub mod recovery_actions;
 mod remote_runner;
 pub mod runner_exec_driver;
+pub mod runner_exec_job;
 mod runner_files;
 pub mod runner_staging;
 pub(crate) mod runner_watch;
@@ -1808,6 +1809,7 @@ where
     {
         let _ = job_store.rearm_recovery_after_requested_stop(&stopped_lease);
     }
+    runner_exec_job::recover_runner_exec_jobs(&job_store);
     recover_controller_jobs(&job_store);
     // Built-in cadences (`homeboy.retention`) are registered unless the
     // operator opted out; a failure here must not keep the daemon down.
@@ -4411,6 +4413,10 @@ fn enqueue_exec_request(
                         }
                     }
                 });
+                // Held until the outcome is captured; a restarted daemon re-adopts
+                // a child whose custody was released by its daemon's death.
+                let custody = runner_exec_job::RunnerExecCustody::acquire(job.job_id())?;
+                plan.output_dir = Some(custody.dir().to_path_buf());
                 job.progress(json!({ "phase": "local_child_driver_execution_started" }))?;
                 job.progress(json!({ "phase": "local_child_command_spawn_attempted" }))?;
                 let driver_cancellation = Arc::clone(&cancellation_requested);

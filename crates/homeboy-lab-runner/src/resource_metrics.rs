@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -10,8 +11,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use homeboy_core::daemon::runner_exec_job;
 use homeboy_core::engine::command::{
-    supports_process_tree_isolation, wait_with_bounded_output,
+    supports_process_tree_isolation, terminate_process_tree_and_reap,
+    terminate_remaining_process_group, wait_with_bounded_output,
     wait_with_bounded_output_until_cancelled_with_stdout_observer_owned, CommandCaptureMetadata,
     ExecutionOwner, StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
@@ -106,6 +109,10 @@ pub(crate) fn measured_command_output(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Cancellation, progress, child identity, and output custody are independently security-relevant."
+)]
 pub(crate) fn measured_command_output_until_cancelled_with_progress(
     command: &mut Command,
     mut is_cancelled: impl FnMut() -> bool,
@@ -114,9 +121,30 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     stdout_line_observer: Option<StdoutLineObserver>,
     child_started: Option<homeboy_core::daemon::runner_exec_driver::ExecChildStarted>,
     concurrency_limit: Option<usize>,
+    output_dir: Option<&Path>,
 ) -> Result<MeasuredOutput> {
     if require_child_identity_acknowledgement {
         require_process_tree_isolation()?;
+        if progress_sink.is_none() {
+            return Err(Error::validation_invalid_argument(
+                "child-identity-acknowledgement",
+                "durable runner execution requires a child identity acknowledgement sink",
+                None,
+                None,
+            ));
+        }
+    }
+    if let Some(dir) = output_dir {
+        return durable_command_output_until_cancelled(
+            command,
+            dir,
+            is_cancelled,
+            progress_sink,
+            require_child_identity_acknowledgement,
+            stdout_line_observer,
+            child_started,
+            concurrency_limit,
+        );
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let started = Instant::now();
@@ -124,55 +152,18 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         .map_err(|error| runner_command_spawn_error(command, &error))?;
     let identity = owner.identity();
     let pid = identity.root_pid;
-    if let Some(child_started) = child_started {
-        if let Err(error) = child_started(identity.into()) {
-            let cleanup = owner
-                .drain_and_reap()
-                .and_then(homeboy_core::engine::command::ExecutionOutcome::into_root_status)
-                .map(|_| ());
-            let cleanup_context = cleanup
-                .err()
-                .map(|cleanup_error| format!("; child cleanup also failed: {cleanup_error}"))
-                .unwrap_or_default();
-            return Err(Error::internal_io(
-                format!(
-                    "failed to persist spawned runner child identity: {error}{cleanup_context}"
-                ),
-                Some("persist runner child identity".to_string()),
-            ));
-        }
-    }
-    // The first PID event is an acknowledgement boundary: without durable
-    // identity evidence, terminate and reap rather than leaving work running.
-    if require_child_identity_acknowledgement {
-        let progress = progress_sink.as_ref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "child-identity-acknowledgement",
-                "durable runner execution requires a child identity acknowledgement sink",
-                None,
-                None,
-            )
-        })?;
-        if let Err(error) = progress(runner_command_heartbeat_data(
-            started.elapsed(),
-            pid,
-            process_tree_resource_summary(pid),
-        )) {
-            let cleanup = owner
-                .drain_and_reap()
-                .and_then(homeboy_core::engine::command::ExecutionOutcome::into_root_status)
-                .map(|_| ());
-            let cleanup_context = cleanup
-                .err()
-                .map(|error| format!("; child cleanup also failed: {error}"))
-                .unwrap_or_default();
-            return Err(Error::internal_io(
-                format!(
-                    "failed to persist spawned runner child identity: {error}{cleanup_context}"
-                ),
-                Some("persist runner child identity".to_string()),
-            ));
-        }
+    if let Err(error) = acknowledge_child(
+        identity.into(),
+        started,
+        progress_sink.as_ref(),
+        require_child_identity_acknowledgement,
+        child_started,
+    ) {
+        let cleanup = owner
+            .drain_and_reap()
+            .and_then(homeboy_core::engine::command::ExecutionOutcome::into_root_status)
+            .map(|_| ());
+        return Err(child_identity_error(error, cleanup));
     }
     let guard_violation = Arc::new(Mutex::new(None));
     let collector = ResourceMetricsCollector::start(
@@ -205,6 +196,161 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         capture,
         metrics,
     })
+}
+
+/// Run a child that writes its output and exit record to its job's artifact
+/// directory and leads its own session, so it survives the daemon (#16681).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Mirrors the piped execution path's independently security-relevant inputs."
+)]
+fn durable_command_output_until_cancelled(
+    command: &mut Command,
+    dir: &Path,
+    mut is_cancelled: impl FnMut() -> bool,
+    progress_sink: Option<RunnerCommandProgressSink>,
+    require_child_identity_acknowledgement: bool,
+    stdout_line_observer: Option<StdoutLineObserver>,
+    child_started: Option<homeboy_core::daemon::runner_exec_driver::ExecChildStarted>,
+    concurrency_limit: Option<usize>,
+) -> Result<MeasuredOutput> {
+    let wait_error = |error: std::io::Error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("wait for runner command".to_string()),
+        )
+    };
+    let started = Instant::now();
+    let (mut child, identity) = runner_exec_job::spawn(command)
+        .map_err(|error| runner_command_spawn_error(command, &error))?;
+    let pid = identity.pid;
+    if let Err(error) = acknowledge_child(
+        identity,
+        started,
+        progress_sink.as_ref(),
+        require_child_identity_acknowledgement,
+        child_started,
+    ) {
+        let cleanup = terminate_process_tree_and_reap(&mut child).map(|_| ());
+        return Err(child_identity_error(error, cleanup));
+    }
+    let guard_violation = Arc::new(Mutex::new(None));
+    let collector = ResourceMetricsCollector::start(
+        pid,
+        started,
+        progress_sink,
+        Some(Arc::clone(&guard_violation)),
+        concurrency_limit,
+    );
+    let mut follower = LineFollower::new(runner_exec_job::stdout_path(dir));
+    let status = loop {
+        if let Some(observer) = &stdout_line_observer {
+            follower.poll(observer.as_ref());
+        }
+        if let Some(status) = child.try_wait().map_err(wait_error)? {
+            break status;
+        }
+        let violated = guard_violation
+            .lock()
+            .expect("resource guard mutex poisoned")
+            .is_some();
+        if is_cancelled() || violated {
+            break terminate_process_tree_and_reap(&mut child).map_err(wait_error)?;
+        }
+        thread::sleep(DURABLE_POLL_INTERVAL);
+    };
+    let _ = terminate_remaining_process_group(pid);
+    if let Some(observer) = &stdout_line_observer {
+        follower.poll(observer.as_ref());
+    }
+    let (stdout, stderr, capture) = runner_exec_job::read_output(dir)?;
+    let metrics = collector.finish(started.elapsed());
+    Ok(MeasuredOutput {
+        output: Output {
+            status,
+            stdout,
+            stderr,
+        },
+        capture,
+        metrics,
+    })
+}
+
+const DURABLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_FOLLOWED_LINE_BYTES: usize = 1024 * 1024;
+
+/// Observes complete lines as they are appended to an output file.
+struct LineFollower {
+    path: PathBuf,
+    offset: u64,
+    pending: Vec<u8>,
+}
+
+impl LineFollower {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            offset: 0,
+            pending: Vec::new(),
+        }
+    }
+
+    fn poll(&mut self, observer: &(dyn Fn(&str) + Send + Sync)) {
+        use std::io::{Read as _, Seek as _};
+        let Ok(mut file) = std::fs::File::open(&self.path) else {
+            return;
+        };
+        let mut appended = Vec::new();
+        if file.seek(std::io::SeekFrom::Start(self.offset)).is_err()
+            || file.read_to_end(&mut appended).is_err()
+        {
+            return;
+        }
+        self.offset += appended.len() as u64;
+        self.pending.extend_from_slice(&appended);
+        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=end).collect();
+            let line = String::from_utf8_lossy(&line[..end]);
+            observer(line.trim_end_matches('\r'));
+        }
+        if self.pending.len() > MAX_FOLLOWED_LINE_BYTES {
+            self.pending.clear();
+        }
+    }
+}
+
+/// Persist a spawned child's identity before it runs unacknowledged. The
+/// first PID event is an acknowledgement boundary: on error the caller stops
+/// and reaps the child rather than leaving work running.
+fn acknowledge_child(
+    identity: homeboy_core::daemon::runner_exec_driver::RunnerChildIdentity,
+    started: Instant,
+    progress_sink: Option<&RunnerCommandProgressSink>,
+    require_child_identity_acknowledgement: bool,
+    child_started: Option<homeboy_core::daemon::runner_exec_driver::ExecChildStarted>,
+) -> Result<()> {
+    if let Some(child_started) = child_started {
+        child_started(identity)?;
+    }
+    if let Some(progress) = progress_sink.filter(|_| require_child_identity_acknowledgement) {
+        progress(runner_command_heartbeat_data(
+            started.elapsed(),
+            identity.pid,
+            process_tree_resource_summary(identity.pid),
+        ))?;
+    }
+    Ok(())
+}
+
+fn child_identity_error(error: Error, cleanup: std::io::Result<()>) -> Error {
+    let cleanup_context = cleanup
+        .err()
+        .map(|cleanup_error| format!("; child cleanup also failed: {cleanup_error}"))
+        .unwrap_or_default();
+    Error::internal_io(
+        format!("failed to persist spawned runner child identity: {error}{cleanup_context}"),
+        Some("persist runner child identity".to_string()),
+    )
 }
 
 /// Build durable, secret-safe evidence for a failed pre-spawn command handoff.
@@ -1191,6 +1337,7 @@ mod tests {
                 Err(Error::internal_unexpected("persist child identity"))
             })),
             None,
+            None,
         )
         .expect_err("callback failure returns");
 
@@ -1265,6 +1412,7 @@ mod tests {
                 Ok(())
             })),
             None,
+            None,
         )
         .expect("runner cancel completes");
         assert!(!output.output.status.success());
@@ -1325,6 +1473,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("command completes");
 
@@ -1346,6 +1495,7 @@ mod tests {
             || false,
             None,
             true,
+            None,
             None,
             None,
             None,
@@ -1389,6 +1539,7 @@ mod tests {
             || false,
             Some(progress_sink),
             true,
+            None,
             None,
             None,
             None,
