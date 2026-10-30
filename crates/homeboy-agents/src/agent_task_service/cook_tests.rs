@@ -18787,6 +18787,18 @@ fn terminal_persisted_promotion_loads_without_source_aggregate() {
         assert_eq!(loaded.source.run_id.as_deref(), Some(run_id));
         assert_eq!(loaded.patch_artifact.id, expected.patch_artifact.id);
 
+        // An infrastructure result is not a terminal verdict to replay. With
+        // missing source evidence both preflight and execution must refuse,
+        // rather than return the stale deferred result as successful recovery.
+        let mut deferred = expected.clone();
+        deferred.status = AgentTaskPromotionStatus::GateDeferred;
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(deferred).unwrap())
+            .unwrap();
+        assert!(
+            preflight_cook_promotion_in_store(&lifecycle_store, &options, run_id, None).is_err()
+        );
+        assert!(promote_or_load_attempt_in_store(&lifecycle_store, &options, run_id).is_err());
+
         let mut pending = promotion(run_id);
         pending.status = AgentTaskPromotionStatus::VerificationPending;
         let pending = serde_json::to_value(pending).expect("serialize pending fixture");

@@ -553,7 +553,7 @@ fn validate_resume_provenance(
     let previous_status = previous.get("status").and_then(Value::as_str);
     if !(matches!(
         previous_status,
-        Some("gate_failed" | "verification_pending")
+        Some("gate_failed" | "verification_pending" | "gates_deferred" | "gate_deferred")
     ) || options.gates.rerun_completed_gates && previous_status == Some("applied"))
     {
         return Err(Error::validation_invalid_argument(

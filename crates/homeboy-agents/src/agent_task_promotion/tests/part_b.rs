@@ -948,6 +948,38 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
     });
 
     let options = super::resume_candidate::bind_candidate(options, &target);
+    // Infrastructure deferral (including the legacy spelling) must resume the
+    // same candidate, just like an interrupted post-apply checkpoint. This API
+    // has no provider execution path and authenticates the candidate before gates.
+    let candidate_before =
+        super::super::promote::git_output(&target, &["rev-parse", "HEAD"]).unwrap();
+    let mut options = options;
+    let gate_log = temp.path().join("gate-executions");
+    options.gates.verify = vec![format!("printf ran >> '{}'", gate_log.display())];
+    let mut previous = previous;
+    previous["provenance"]["resume_contract"]["gates"] =
+        serde_json::to_value(&options.gates).unwrap();
+    for (index, status) in ["gates_deferred", "gate_deferred"].into_iter().enumerate() {
+        let mut deferred = previous.clone();
+        deferred["status"] = serde_json::json!(status);
+        let resumed = resume_promoted_patch(options.clone(), &target, &deferred)
+            .expect("deferred candidate re-executes gates");
+        assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(resumed.gate_results.len(), 2);
+        assert!(resumed
+            .gate_results
+            .iter()
+            .all(|gate| gate.status == homeboy_core::gate::HomeboyGateStatus::Passed));
+        assert_eq!(
+            super::super::promote::git_output(&target, &["rev-parse", "HEAD"]).unwrap(),
+            candidate_before
+        );
+        assert!(resumed.command_evidence.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&gate_log).unwrap(),
+            "ran".repeat(index + 1)
+        );
+    }
     let report = resume_promoted_patch(options, &target, &previous).expect("resume proof");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);

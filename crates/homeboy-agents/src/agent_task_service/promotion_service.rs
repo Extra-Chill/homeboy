@@ -460,8 +460,10 @@ fn bind_promotion_request_fingerprint(
 
 pub fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> bool {
     let status = previous.get("status").and_then(Value::as_str);
-    matches!(status, Some("gate_failed") | Some("verification_pending"))
-        || (rerun_completed_gates && status == Some("applied"))
+    matches!(
+        status,
+        Some("gate_failed" | "verification_pending" | "gates_deferred" | "gate_deferred")
+    ) || (rerun_completed_gates && status == Some("applied"))
 }
 
 #[cfg(test)]
