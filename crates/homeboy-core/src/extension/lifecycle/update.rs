@@ -227,7 +227,8 @@ pub fn update_linked_group(extension_ids: &[String], force: bool) -> Result<Vec<
         ));
     }
     let new_revision = git::short_head_revision(&git_root);
-    for (id, extension_dir, source_dir, _) in &entries {
+    let unchanged = !force && new_revision.is_some() && new_revision == old_revision;
+    for (id, extension_dir, source_dir, _) in entries.iter().filter(|_| !unchanged) {
         if let Err(error) = refresh_linked_extension_install(id, source_dir, extension_dir) {
             if initially_clean {
                 restore_linked_checkout(&git_root, old_branch.as_deref(), old_revision.as_deref());
@@ -530,7 +531,17 @@ fn update_linked_extension(
             old_source_revision.as_deref(),
         ));
     }
-    if let Err(error) = refresh_linked_extension_install(extension_id, &source_dir, extension_dir) {
+    let new_source_revision = git::short_head_revision(&git_root);
+    // An unchanged source was installed and set up by the refresh that
+    // produced this revision, exactly as for extracted installs (#16624).
+    let unchanged =
+        !force && new_source_revision.is_some() && new_source_revision == old_source_revision;
+    let refreshed = if unchanged {
+        Ok(())
+    } else {
+        refresh_linked_extension_install(extension_id, &source_dir, extension_dir)
+    };
+    if let Err(error) = refreshed {
         // The clean-worktree gate above proves this transaction owns every
         // changed path. Restore the prior checkout before returning so a failed
         // setup or incompatible refreshed manifest never strands a user on a
@@ -547,7 +558,6 @@ fn update_linked_extension(
     }
     let url = format!("linked:{}", source_dir.display());
     let new_branch = git::current_branch(&git_root);
-    let new_source_revision = git::short_head_revision(&git_root);
     Ok(UpdateResult {
         extension_id: extension_id.to_string(),
         url,

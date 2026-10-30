@@ -673,6 +673,23 @@ mod tests {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Push one new commit to `remote` from a scratch clone.
+    fn advance_remote(home: &Path, remote: &Path) {
+        let clone = home.join("advance-clone");
+        assert!(run_git(
+            home,
+            &[
+                "clone",
+                "--quiet",
+                remote.to_str().unwrap(),
+                clone.to_str().unwrap()
+            ]
+        ));
+        fs::write(clone.join("CHANGELOG"), "next").unwrap();
+        assert!(commit_all(&clone, "advance"));
+        assert!(run_git(&clone, &["push", "--quiet", "origin", "HEAD"]));
+    }
+
     fn prepare_git_extension_repo(repo: &Path, extension_id: &str) -> Option<TempDir> {
         write_extension_fixture(repo, extension_id);
         prepare_git_repo(repo)
@@ -2152,7 +2169,7 @@ exec '{}' "$@"
             let home = home.path();
             let source = home.join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
-            let _remote = match prepare_git_extension_monorepo(&source, &["fixture-a", "fixture-b"])
+            let remote = match prepare_git_extension_monorepo(&source, &["fixture-a", "fixture-b"])
             {
                 Some(remote) => remote,
                 None => return,
@@ -2174,6 +2191,7 @@ exec '{}' "$@"
             // clean state required by this update-path test.
             fs::remove_file(source.join("fixture-a/setup-count.txt")).expect("clear setup output");
             fs::remove_file(source.join("fixture-b/setup-count.txt")).expect("clear setup output");
+            advance_remote(home, &remote.path().join("extension.git"));
 
             let bin_dir = home.join("bin");
             let pull_count_file = home.join("pull-count");
@@ -2214,6 +2232,45 @@ exec '{}' "$@"
                     .count(),
                 1,
                 "fixture-b setup should still run after the shared root update"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_linked_source_skips_setup() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            let _remote = match prepare_git_extension_monorepo(&source, &["fixture-a", "fixture-b"])
+            {
+                Some(remote) => remote,
+                None => return,
+            };
+            for id in ["fixture-a", "fixture-b"] {
+                install(
+                    &source.join(id).to_string_lossy(),
+                    Some(id),
+                    ExtensionLifecycleValidation::declaration_only(),
+                )
+                .expect("install linked extension");
+                fs::remove_file(source.join(id).join("setup-count.txt")).expect("clear setup");
+            }
+
+            update("fixture-a", false, None).expect("single linked update");
+            let result = update_all(false);
+            assert_eq!(result.updated.len(), 2, "{:?}", result.skipped_details);
+            for id in ["fixture-a", "fixture-b"] {
+                assert!(
+                    !source.join(id).join("setup-count.txt").exists(),
+                    "{id}: an unchanged linked source must not rerun setup"
+                );
+            }
+            update("fixture-a", true, None).expect("forced linked update");
+            assert!(
+                source.join("fixture-a/setup-count.txt").exists(),
+                "--force still reruns setup"
             );
         });
     }
