@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.436.4] - 2026-10-30
+
+### Changed
+- lab-runner: refresh installs released binaries only
+- delete detached upgrade and other dead upgrade code
+- Add monorepo changed-component detection for deploy matrices
+
+### Fixed
+- apply lint and test scope excludes and nested boundaries
+
 ## [0.436.3] - 2026-10-30
 
 ### Fixed
