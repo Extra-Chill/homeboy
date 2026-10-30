@@ -9275,6 +9275,26 @@ fn resolve_cook_component_workspace(
             Some(repository_root.display().to_string()),
         )
     })?;
+    // A component ID is not its owning repository name. Validate the owner by
+    // remote, then project the component's relative path into that checkout.
+    if let Some(expected_url) = component.remote_url.as_deref() {
+        let remote = homeboy_core::git::resolve_default_remote(&canonical_root);
+        let actual_url = homeboy_core::git::remote_url(&canonical_root, &remote);
+        let expected = cook_remote_identity(expected_url);
+        let actual = actual_url.as_deref().and_then(cook_remote_identity);
+        if actual_url.as_deref() != Some(expected_url) && (expected.is_none() || actual != expected)
+        {
+            return Err(Error::validation_invalid_argument(
+                "component workspace",
+                format!(
+                    "Cook component `{component_id}` owning repository `{expected_url}` does not match destination repository `{}`",
+                    actual_url.as_deref().unwrap_or("<missing remote>")
+                ),
+                Some(repository_root.display().to_string()),
+                None,
+            ));
+        }
+    }
     let effective = match component_cwd {
         Some(component_cwd) => homeboy_core::resolve_contained_local_path(
             &canonical_root,
@@ -9290,7 +9310,8 @@ fn resolve_cook_component_workspace(
         return Err(Error::validation_invalid_argument(
             "component workspace",
             format!(
-                "resolved component `{component_id}` is not present in materialized Cook workspace"
+                "resolved component `{component_id}` of owning repository `{}` is not present in materialized Cook workspace",
+                component.remote_url.as_deref().unwrap_or(&component.local_path)
             ),
             Some(effective.display().to_string()),
             None,
@@ -9308,6 +9329,25 @@ fn resolve_cook_component_workspace(
         )
     })?;
     Ok(repository_root.join(component_cwd))
+}
+
+fn cook_remote_identity(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (host, path) = if let Some((_, rest)) = url.split_once("://") {
+        let (authority, path) = rest.split_once('/')?;
+        (authority.rsplit('@').next()?, path)
+    } else {
+        let (authority, path) = url.split_once(':')?;
+        (authority.rsplit('@').next()?, path)
+    };
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    (!host.is_empty() && !path.is_empty()).then(|| {
+        format!(
+            "{}/{}",
+            host.to_ascii_lowercase(),
+            path.to_ascii_lowercase()
+        )
+    })
 }
 
 /// Bind component-relative execution and gate evidence through the same resolver

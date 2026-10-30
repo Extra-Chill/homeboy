@@ -84,6 +84,15 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
     homeboy_core::test_support::with_isolated_home(|home| {
         let repository = tempfile::tempdir().expect("materialized repository");
         homeboy_core::test_support::run_git_fixture_command(repository.path(), &["init", "-q"]);
+        homeboy_core::test_support::run_git_fixture_command(
+            repository.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/blocks-engine.git",
+            ],
+        );
         let component_path = repository.path().join("packages/php-transformer");
         std::fs::create_dir_all(&component_path).expect("nested component");
         let registrations = home.path().join(".config/homeboy/components");
@@ -8088,6 +8097,108 @@ fn adoption_replays_candidate_and_baseline_gates_from_the_persisted_component_wo
             crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
             "candidate and baseline both execute in the component workspace"
         );
+    });
+}
+
+#[test]
+fn native_subdirectory_component_reaches_workspace_admission() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        use homeboy_core::test_support::{
+            run_git_fixture_command as git, write_component_registration,
+        };
+        use homeboy_core::worktree_provider::*;
+        let (_root, source) =
+            homeboy_core::test_support::shared_committed_git_repo_fixture("blocks-engine");
+        let nested = source.join("php-transformer");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("composer.json"), "{}").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-qm", "nested component"]);
+        git(
+            &source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Automattic/blocks-engine.git",
+            ],
+        );
+        write_component_registration(home.path(), "php-transformer", &nested);
+        let registration = home
+            .path()
+            .join(".config/homeboy/components/php-transformer.json");
+        let mut component: Value =
+            serde_json::from_slice(&std::fs::read(&registration).unwrap()).unwrap();
+        component["remote_url"] = serde_json::json!("git@github.com:Automattic/blocks-engine.git");
+        std::fs::write(&registration, serde_json::to_vec(&component).unwrap()).unwrap();
+        let provision = ensure_worktree_provision(
+            &WorktreeProvisionIntent {
+                handle: "php-transformer@fix-14250".into(),
+                repo: "php-transformer".into(),
+                base: "main".into(),
+                head: "fix/14250".into(),
+                task_url: Some("https://github.com/Automattic/blocks-engine/issues/1189".into()),
+            },
+            &WorktreeProvisionLifecycle {
+                purpose: "agent_task_cook".into(),
+                owner_run_ref: "subdirectory-admission".into(),
+                cleanup_policy: WorktreeCleanupPolicy::PreserveOnFailure,
+            },
+        )
+        .expect("native provision accepts component identity distinct from owner");
+        let root = PathBuf::from(&provision.destination.ownership.path);
+        assert!(NativeWorktreeProvider
+            .resolve("php-transformer@fix-14250")
+            .unwrap()
+            .is_some());
+        let mut options =
+            batch_cook_options("cook-14250", Arc::new(AcceptedDetachedAttemptDispatcher));
+        let plan = &mut options.identity.initial_plan;
+        plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "component_id": "php-transformer", "component_registered": true
+        });
+        bind_materialized_cook_component_workspace(plan, &root, None).unwrap();
+        assert_eq!(
+            plan.metadata["gate_workspace"]["effective_cwd"],
+            serde_json::json!(root.join("php-transformer"))
+        );
+        for task in &plan.tasks {
+            assert_eq!(task.executor.config["component_cwd"], "php-transformer");
+        }
+        // Explicit component selection uses the same resolver as deferred admission.
+        bind_materialized_cook_component_workspace(plan, &root, Some("php-transformer")).unwrap();
+        assert_eq!(
+            homeboy_core::test_support::git_fixture_output(
+                &root,
+                &["rev-parse", "--show-toplevel"]
+            ),
+            root.display().to_string()
+        );
+        git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/wrong/repository.git",
+            ],
+        );
+        let error = bind_materialized_cook_component_workspace(plan, &root, None).unwrap_err();
+        assert!(error.message.contains("php-transformer"));
+        assert!(error.message.contains("blocks-engine"));
+        git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/Automattic/blocks-engine.git",
+            ],
+        );
+        std::fs::remove_dir_all(root.join("php-transformer")).unwrap();
+        let error = bind_materialized_cook_component_workspace(plan, &root, None).unwrap_err();
+        assert!(error.message.contains("php-transformer"));
+        assert!(error.message.contains("blocks-engine"));
     });
 }
 
