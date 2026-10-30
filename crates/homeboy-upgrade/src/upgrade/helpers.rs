@@ -219,7 +219,7 @@ pub fn run_upgrade_with_operation(
                 "--runner-only refreshes runners without promoting the controller, so there is no controller release to pin",
             ));
         }
-        return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
+        return run_targeted_runner_upgrade(method_override, runner_targets);
     }
 
     let mut operation = UpgradeOperation::start_durable("homeboy upgrade")?;
@@ -291,7 +291,6 @@ fn run_controller_upgrade_with_operation(
     // latest release" gate (#11750).
     let deliberate = controller_replacement_is_deliberate(force, pinned_version);
     let source_upgrade_path = source_upgrade_path_for_method(install_method, source_path)?;
-    let runner_method_override = runner_method_override_for_method(method_override, install_method);
 
     // Source upgrades converge on the requested build, not merely the latest
     // released semver. A distinct, verifiable source build at the same semver
@@ -367,11 +366,7 @@ fn run_controller_upgrade_with_operation(
     } else {
         current_version().to_string()
     };
-    let (convergence_runner_method, convergence_source_path) = convergence_inputs(
-        source_noop,
-        runner_method_override,
-        source_upgrade_path.as_deref(),
-    );
+
     let extension_preflight = if skip_extensions {
         Vec::new()
     } else {
@@ -390,15 +385,7 @@ fn run_controller_upgrade_with_operation(
         Vec::new()
     } else {
         super::with_runner_upgrade(|provider| {
-            provider.preflight_configured_runners_for_upgrade(
-                convergence_runner_method,
-                convergence_source_path,
-                // A resolved source workspace is the controller-selected build
-                // input, even when it was inferred from the source install.
-                convergence_source_path.is_some(),
-                runner_targets,
-                &candidate_version,
-            )
+            provider.preflight_configured_runners_for_upgrade(runner_targets, &candidate_version)
         })?
     };
     if !runner_preflight.is_empty() {
@@ -483,11 +470,7 @@ fn run_controller_upgrade_with_operation(
                     // acquisition and builds as well as publication.
                     refresh_configured_runners_with_progress(operation, || {
                         super::with_runner_upgrade(|p| {
-                            p.upgrade_configured_runners_with_explicit_source_path(
-                                force,
-                                convergence_runner_method,
-                                convergence_source_path,
-                                convergence_source_path.is_some(),
+                            p.upgrade_configured_runners(
                                 completion.build_identity.as_deref(),
                                 runner_targets,
                                 &extensions_updated,
@@ -680,9 +663,6 @@ fn run_controller_upgrade_with_operation(
                     } else {
                         super::with_runner_upgrade(|provider| {
                             provider.preflight_configured_runners_for_upgrade(
-                                runner_method_override,
-                                source_upgrade_path.as_deref(),
-                                source_upgrade_path.is_some(),
                                 runner_targets,
                                 &candidate_version,
                             )
@@ -913,11 +893,7 @@ fn run_controller_upgrade_with_operation(
             operation.set_phase_durable("refreshing configured runners")?;
             refresh_configured_runners_with_progress(operation, || {
                 super::with_runner_upgrade(|p| {
-                    p.upgrade_configured_runners_with_explicit_source_path(
-                        force,
-                        runner_method_override,
-                        source_upgrade_path.as_deref(),
-                        source_upgrade_path.is_some(),
+                    p.upgrade_configured_runners(
                         new_build_identity.as_deref(),
                         runner_targets,
                         &extensions_updated,
@@ -1571,13 +1547,10 @@ fn no_installable_release_error(selection: &InstallableSelection, target: Option
 }
 
 /// Upgrade only explicitly selected runners without promoting the controller.
-/// Source controllers pin their checkout identity; packaged controllers retain
-/// the runner's existing install-method contract.
+/// Runners converge to the initiating controller release through managed refresh.
 fn run_targeted_runner_upgrade(
-    force: bool,
     method_override: Option<InstallMethod>,
     runner_targets: &[String],
-    source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
     let previous_version = current_version().to_string();
     let previous_build_identity = build_identity::current().display;
@@ -1589,23 +1562,10 @@ fn run_targeted_runner_upgrade(
             None,
             None,
         )
-        .with_hint("Pass --method to select the runner upgrade policy."));
+        .with_hint("Use a released controller to upgrade runners; use runner dev-sync for unreleased builds."));
     }
-    let runner_method_override = runner_method_override_for_method(method_override, install_method);
-    let source_checkout = if runner_method_override == Some(InstallMethod::Source) {
-        Some(initiating_controller_source_checkout(
-            source_path,
-            &previous_build_identity,
-        )?)
-    } else {
-        None
-    };
     let (runners_updated, runners_skipped) = super::with_runner_upgrade(|provider| {
-        provider.upgrade_configured_runners_with_explicit_source_path(
-            force,
-            runner_method_override,
-            source_checkout.as_deref(),
-            source_checkout.is_some(),
+        provider.upgrade_configured_runners(
             Some(&previous_build_identity),
             runner_targets,
             &installed_extension_catalog(),
@@ -1656,7 +1616,6 @@ fn run_targeted_runner_upgrade(
             Some(previous_version.as_str()),
         )),
         message: targeted_runner_message(
-            source_checkout.is_some(),
             &previous_version,
             runner_targets,
             &runners_updated,
@@ -1959,7 +1918,6 @@ fn upgrade_message(
 }
 
 fn targeted_runner_message(
-    source_checkout: bool,
     controller_version: &str,
     runner_targets: &[String],
     updated: &[RunnerUpgradeEntry],
@@ -1972,11 +1930,7 @@ fn targeted_runner_message(
             .map(|runner| format!(" --upgrade-runner {runner}"))
             .collect::<String>()
     );
-    let prefix = if source_checkout {
-        "TARGETED RUNNER SCOPE: selected runners refreshed from the initiating controller source identity"
-    } else {
-        "TARGETED RUNNER SCOPE: selected runners refreshed without promoting the initiating controller"
-    };
+    let prefix = "TARGETED RUNNER SCOPE: selected runners refreshed without promoting the initiating controller";
     if runner_convergence_failed(updated, skipped, Some(controller_version)) {
         format!("PARTIAL: {prefix}; controller remains {controller_version}. Next convergence command: {next}")
     } else {
@@ -2053,65 +2007,6 @@ fn installed_extension_catalog_for(extension_ids: &[String]) -> Vec<ExtensionUpg
             },
         )
         .collect()
-}
-
-fn initiating_controller_source_checkout(
-    source_path: Option<&Path>,
-    expected_identity: &str,
-) -> Result<PathBuf> {
-    let checkout = if let Some(path) = source_path {
-        resolve_source_workspace(Some(path))?
-    } else {
-        let executable_checkout = std::env::current_exe()
-            .ok()
-            .and_then(|path| workspace_from_executable_path(&path));
-        executable_checkout
-            .or_else(|| resolve_source_workspace(None).ok())
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "upgrade-runner",
-                    "Runner-only upgrade requires the source checkout that built the initiating controller",
-                    None,
-                    None,
-                )
-                .with_hint("Run from the controller source checkout or pass --source-path <PATH>.")
-            })?
-    };
-    let identity =
-        super::with_runner_upgrade(|provider| provider.source_checkout_build_identity(&checkout))
-            .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "source_path",
-                "Runner-only upgrade source checkout has no verifiable build identity",
-                Some(checkout.display().to_string()),
-                None,
-            )
-        })?;
-    if identity != expected_identity {
-        return Err(Error::validation_invalid_argument(
-            "source_path",
-            format!(
-                "Runner-only upgrade source identity `{identity}` does not match initiating controller `{expected_identity}`"
-            ),
-            Some(checkout.display().to_string()),
-            None,
-        )
-        .with_hint("Pass the exact source checkout that built the initiating controller."));
-    }
-    Ok(checkout)
-}
-
-fn workspace_from_executable_path(exe_path: &Path) -> Option<PathBuf> {
-    let parent = exe_path.parent()?;
-    let build_dir = parent.file_name()?.to_string_lossy();
-    if build_dir != "release" && build_dir != "debug" {
-        return None;
-    }
-    let target_dir = parent.parent()?;
-    if target_dir.file_name()?.to_string_lossy() != "target" {
-        return None;
-    }
-    target_dir.parent().map(Path::to_path_buf)
 }
 
 // Upgrade output must remain visible when a controller captures stdout/stderr.
@@ -2369,26 +2264,6 @@ fn source_upgrade_path_for_method(
     }
 
     Ok(source_path.map(Path::to_path_buf))
-}
-
-fn runner_method_override_for_method(
-    method_override: Option<InstallMethod>,
-    install_method: InstallMethod,
-) -> Option<InstallMethod> {
-    method_override
-        .or_else(|| (install_method == InstallMethod::Source).then_some(InstallMethod::Source))
-}
-
-fn convergence_inputs(
-    source_noop: bool,
-    runner_method: Option<InstallMethod>,
-    source_path: Option<&Path>,
-) -> (Option<InstallMethod>, Option<&Path>) {
-    if source_noop {
-        (None, None)
-    } else {
-        (runner_method, source_path)
-    }
 }
 
 pub(crate) fn should_sync_after_upgrade(new_version: Option<&str>) -> bool {
@@ -3638,31 +3513,6 @@ mod runner_source_upgrade_tests {
     }
 
     #[test]
-    fn source_noop_uses_the_refresh_and_convergence_path() {
-        assert!(!controller_replacement_required_after_discovery(
-            true,
-            false,
-            Some(SourceUpgradeDecision::SameIdentity),
-            true,
-        ));
-        assert!(!controller_replacement_required_after_discovery(
-            true,
-            false,
-            Some(SourceUpgradeDecision::OlderVersion),
-            true,
-        ));
-        assert_eq!(
-            convergence_inputs(
-                true,
-                Some(InstallMethod::Source),
-                Some(Path::new("/tmp/rejected-source")),
-            ),
-            (None, None),
-            "a rejected source checkout must not drive runner convergence"
-        );
-    }
-
-    #[test]
     fn changed_runner_compatibility_revalidation_precedes_controller_mutation() {
         let events = RefCell::new(Vec::new());
         let changed_manifest_requires_homeboy = ">=3.0.0";
@@ -4120,25 +3970,6 @@ mod runner_source_upgrade_tests {
                 .unwrap()
                 .contains("unrefreshable extension manifest"));
         });
-    }
-
-    #[test]
-    fn detected_source_install_forwards_source_method_to_runners() {
-        assert_eq!(
-            runner_method_override_for_method(None, InstallMethod::Source),
-            Some(InstallMethod::Source)
-        );
-        assert_eq!(
-            runner_method_override_for_method(Some(InstallMethod::Binary), InstallMethod::Source),
-            Some(InstallMethod::Binary)
-        );
-        for method in [InstallMethod::Homebrew, InstallMethod::Binary] {
-            assert_eq!(runner_method_override_for_method(None, method), None);
-            assert_eq!(
-                runner_method_override_for_method(Some(method), method),
-                Some(method)
-            );
-        }
     }
 
     #[test]
@@ -4994,7 +4825,6 @@ mod convergence_tests {
     #[test]
     fn targeted_runner_only_scope_names_exact_convergence_command() {
         let message = targeted_runner_message(
-            false,
             "0.301.2",
             &["lab".to_string()],
             &[runner("0.301.2", "0.301.2", false)],
@@ -5009,7 +4839,6 @@ mod convergence_tests {
     #[test]
     fn targeted_runner_only_scope_is_partial_when_runner_remains_stale() {
         let message = targeted_runner_message(
-            false,
             "0.301.2",
             &["lab".to_string()],
             &[runner("0.299.0", "0.299.0", false)],

@@ -6,26 +6,20 @@
 //! contract here and the runner layer registers an implementation at startup.
 //!
 //! With no provider registered there are no runners to upgrade, so the
-//! [`NoopRunnerUpgradeProvider`] reports no upgrades and no build identity.
+//! [`NoopRunnerUpgradeProvider`] reports no upgrades.
 
-use std::path::Path;
-
-use crate::upgrade::{ExtensionUpgradeEntry, InstallMethod, RunnerCheckEntry, RunnerUpgradeEntry};
+use crate::upgrade::{ExtensionUpgradeEntry, RunnerCheckEntry, RunnerUpgradeEntry};
 use homeboy_core::error::Result;
 
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
 /// the runner layer and registered at startup.
 pub trait RunnerUpgradeProvider: Send + Sync {
     /// Read-only admission for selected runners before any controller,
-    /// extension, or runner mutation. Implementations validate source inputs
-    /// when relevant and runner extension manifests against `candidate_version`.
+    /// extension, or runner mutation. Implementations validate runner extension
+    /// manifests against `candidate_version`.
     /// Returns one bounded failure entry per runner.
-    #[allow(clippy::too_many_arguments)]
     fn preflight_configured_runners_for_upgrade(
         &self,
-        method_override: Option<InstallMethod>,
-        source_path: Option<&Path>,
-        explicit_source_path: bool,
         runner_targets: &[String],
         candidate_version: &str,
     ) -> Result<Vec<RunnerUpgradeEntry>>;
@@ -36,24 +30,15 @@ pub trait RunnerUpgradeProvider: Send + Sync {
         Ok(())
     }
 
-    /// Upgrade the configured runners from an explicit source checkout,
+    /// Refresh the configured runners into managed release slots,
     /// returning `(upgraded, skipped)` entries.
-    #[allow(clippy::too_many_arguments)]
-    fn upgrade_configured_runners_with_explicit_source_path(
+    fn upgrade_configured_runners(
         &self,
-        force: bool,
-        method_override: Option<InstallMethod>,
-        source_path: Option<&Path>,
-        explicit_source_path: bool,
         expected_controller_identity: Option<&str>,
         runner_targets: &[String],
         extension_updates: &[ExtensionUpgradeEntry],
         promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)>;
-
-    /// A short build-identity string for a source checkout (commit + dirty
-    /// marker), or `None` if it can't be identified.
-    fn source_checkout_build_identity(&self, source_path: &Path) -> Option<String>;
 
     /// Read-only `upgrade --check` view of the selected runners: each one's
     /// selected binary version and runner-service binary versions against
@@ -68,37 +53,26 @@ pub trait RunnerUpgradeProvider: Send + Sync {
 }
 
 /// Default provider used when no runner layer is registered: no runners to
-/// upgrade, no build identity.
+/// upgrade.
 struct NoopRunnerUpgradeProvider;
 
 impl RunnerUpgradeProvider for NoopRunnerUpgradeProvider {
     fn preflight_configured_runners_for_upgrade(
         &self,
-        _method_override: Option<InstallMethod>,
-        _source_path: Option<&Path>,
-        _explicit_source_path: bool,
         _runner_targets: &[String],
         _candidate_version: &str,
     ) -> Result<Vec<RunnerUpgradeEntry>> {
         Ok(Vec::new())
     }
 
-    fn upgrade_configured_runners_with_explicit_source_path(
+    fn upgrade_configured_runners(
         &self,
-        _force: bool,
-        _method_override: Option<InstallMethod>,
-        _source_path: Option<&Path>,
-        _explicit_source_path: bool,
         _expected_controller_identity: Option<&str>,
         _runner_targets: &[String],
         _extension_updates: &[ExtensionUpgradeEntry],
         _promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
     ) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
         Ok((Vec::new(), Vec::new()))
-    }
-
-    fn source_checkout_build_identity(&self, _source_path: &Path) -> Option<String> {
-        None
     }
 }
 
