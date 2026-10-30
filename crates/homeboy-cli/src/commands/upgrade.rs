@@ -15,15 +15,6 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Cancel live Cooks and runner jobs instead of waiting (each cancellation is reported).
-    #[arg(long, conflicts_with = "check")]
-    pub cancel_active: bool,
-
-    /// Opt in to waiting for live work in seconds (default: refuse immediately).
-    /// New admissions stay paused during this wait; --cancel-active allows 120s by default.
-    #[arg(long, default_value_t = 0)]
-    pub drain_timeout: u64,
-
     /// Skip extension updates (only upgrade the binary)
     #[arg(long)]
     pub skip_extensions: bool,
@@ -120,7 +111,7 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         })
         .transpose()?;
 
-    let result = upgrade::run_upgrade_with_drain(
+    let result = upgrade::run_upgrade_with_method(
         args.force,
         method_override,
         args.skip_extensions,
@@ -130,10 +121,6 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         &args.runners,
         args.source_path.as_deref(),
         args.pin_version.as_deref(),
-        upgrade::UpgradeDrainOptions {
-            timeout: std::time::Duration::from_secs(args.drain_timeout),
-            cancel_active: args.cancel_active,
-        },
     );
     waiting_upgrade_response(result)
 }

@@ -3226,8 +3226,8 @@ mod tests {
                 "runner homeboy-lab: extension a8c-review sync failed",
             ),
             (
-                json!({ "phase": "failed", "predicate": "upgrade_drain_timeout" }),
-                "upgrade_drain_timeout",
+                json!({ "phase": "failed", "predicate": "schema_change" }),
+                "schema_change",
             ),
         ] {
             let response = cli_response_for_json_result_for_identity(

@@ -127,7 +127,7 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// Why retry admission refused this attempt, when it did.
     pub retry_refusal: Option<&'a str>,
     /// The attempt was cancelled without an operator request (a runner-side
-    /// cancel, an upgrade drain, a wait budget) and retry admission accepts a
+    /// cancel, a wait budget) and retry admission accepts a
     /// fresh attempt from its plan. Continuation admission does not apply:
     /// the cancelled attempt has no terminal result to continue from.
     pub involuntary_cancellation_retry_admitted: bool,

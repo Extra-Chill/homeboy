@@ -217,33 +217,6 @@ pub fn run_upgrade_with_method(
     source_path: Option<&Path>,
     pinned_version: Option<&str>,
 ) -> Result<UpgradeResult> {
-    run_upgrade_with_drain(
-        force,
-        method_override,
-        skip_extensions,
-        skip_runners,
-        skip_services,
-        runner_only,
-        runner_targets,
-        source_path,
-        pinned_version,
-        super::UpgradeDrainOptions::default(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn run_upgrade_with_drain(
-    force: bool,
-    method_override: Option<InstallMethod>,
-    skip_extensions: bool,
-    skip_runners: bool,
-    skip_services: bool,
-    runner_only: bool,
-    runner_targets: &[String],
-    source_path: Option<&Path>,
-    pinned_version: Option<&str>,
-    drain_options: super::UpgradeDrainOptions,
-) -> Result<UpgradeResult> {
     if runner_only {
         if pinned_version.is_some() {
             return Err(pinned_version_scope_error(
@@ -263,7 +236,6 @@ pub fn run_upgrade_with_drain(
         source_path,
         pinned_version,
         UpgradeOperation::start_durable("homeboy upgrade")?,
-        drain_options,
     )
 }
 
@@ -278,31 +250,18 @@ pub(super) fn run_upgrade_with_operation(
     source_path: Option<&Path>,
     pinned_version: Option<&str>,
     mut operation: UpgradeOperation,
-    drain_options: super::UpgradeDrainOptions,
 ) -> Result<UpgradeResult> {
-    let mut drain_guard =
-        super::drain::drain(&mut operation, runner_targets, skip_runners, drain_options);
-    let upgrade_result = drain_guard
-        .as_mut()
-        .map_err(|error| error.clone())
-        .and_then(|guard| {
-            run_controller_upgrade_with_operation(
-                force,
-                method_override,
-                skip_extensions,
-                skip_runners,
-                skip_services,
-                runner_targets,
-                source_path,
-                pinned_version,
-                &mut operation,
-            )
-            .and_then(|result| {
-                operation.set_phase_durable("resuming_admission")?;
-                guard.resume()?;
-                Ok(result)
-            })
-        });
+    let upgrade_result = run_controller_upgrade_with_operation(
+        force,
+        method_override,
+        skip_extensions,
+        skip_runners,
+        skip_services,
+        runner_targets,
+        source_path,
+        pinned_version,
+        &mut operation,
+    );
     match upgrade_result {
         Ok(result) => complete_upgrade_operation(operation, result),
         Err(mut error) => {
@@ -370,16 +329,6 @@ fn run_controller_upgrade_with_operation(
         )
         .with_hint("Try: homeboy upgrade --method binary")
         .with_hint("Or reinstall using: brew install homeboy"));
-    }
-    // Packaged and source candidates are verified before they run their own
-    // target admission. Legacy admission cannot classify provenance added by a
-    // selected candidate, so it must not prevent building or staging it.
-    if !matches!(
-        install_method,
-        InstallMethod::Binary | InstallMethod::Source
-    ) {
-        operation.set_phase_durable("running_candidate_admission")?;
-        ensure_controller_upgrade_admission()?;
     }
     validate_pinned_version(pinned_version, install_method)?;
     // Pinning is as deliberate as `--force`: it names one release, possibly an
@@ -1668,30 +1617,6 @@ fn no_installable_release_error(selection: &InstallableSelection, target: Option
     .with_hint("Build from source instead with: homeboy upgrade --method source --source-path <PATH>")
 }
 
-/// Reject only ownership that remains live or cannot be verified. Stale records
-/// keep their durable audit trail and pinned runtime without blocking a binary
-/// replacement or being silently reconciled.
-fn ensure_controller_upgrade_admission() -> Result<()> {
-    let admission = super::ensure_controller_upgrade_admission()?;
-    if admission.allows_controller_replacement() {
-        let unhealthy_records = ["malformed", "legacy", "conflicting"]
-            .into_iter()
-            .map(|key| admission.record_health[key].as_u64().unwrap_or(0))
-            .sum::<u64>();
-        if unhealthy_records != 0 {
-            homeboy_core::log_status!(
-                "upgrade",
-                "agent-task record health: {} malformed, {} legacy, {} conflicting (samples capped)",
-                admission.record_health["malformed"].as_u64().unwrap_or(0),
-                admission.record_health["legacy"].as_u64().unwrap_or(0),
-                admission.record_health["conflicting"].as_u64().unwrap_or(0),
-            );
-        }
-        return Ok(());
-    }
-    unreachable!("failed admission returns before this point")
-}
-
 /// Upgrade only explicitly selected runners without promoting the controller.
 /// Source controllers pin their checkout identity; packaged controllers retain
 /// the runner's existing install-method contract.
@@ -2315,9 +2240,6 @@ fn converge_resident_daemon_after_controller_reconciliation(
         return converge_invoking_daemon();
     };
     let invoking = build_identity::current().display;
-    if invoking == installed_identity {
-        return converge_invoking_daemon();
-    }
     let status = homeboy_core::daemon::read_status()?;
     let daemon_identity = status
         .state
@@ -2329,44 +2251,13 @@ fn converge_resident_daemon_after_controller_reconciliation(
         installed_identity,
         status.running,
         daemon_identity,
-        status.freshness.active_jobs,
-        homeboy_core::daemon::recovery_actions::authorizes_automatic_idle_restart(&status)
-            // The shared lifecycle gate (#15557 C4): a live workload process or
-            // an unleased daemon process defers the restart.
-            && homeboy_core::daemon::lifecycle_plan::mutation_refusal(
-                &homeboy_core::daemon::lifecycle_plan::plan_local(),
-            )
-            .is_none(),
         status.freshness.lease_id.as_deref().is_some(),
     ) {
         PromotedDaemonStart::InProcess => converge_invoking_daemon(),
         PromotedDaemonStart::AlreadyInstalled => Ok(false),
         PromotedDaemonStart::PendingRestart => Err(upgrade_daemon_start_required(
-            if status.freshness.active_jobs > 0 {
-                "the stale resident daemon has jobs in flight"
-            } else {
-                "the stale resident daemon has no exact lease identity to stop safely"
-            },
+            "the stale resident daemon has no exact lease identity to stop safely",
         )),
-        PromotedDaemonStart::StopForLease => {
-            // Homeboy did not launch this daemon (for example a systemd unit
-            // running `daemon serve`), so it cannot restart it, but stopping an
-            // idle daemon by its exact lease is safe: the lease-bound stop
-            // fences new admissions and revalidates that no work is active.
-            // Its supervisor, or the next command, starts the installed binary.
-            // A refused stop (work admitted in between) leaves it pending
-            // rather than failing an otherwise complete upgrade (#15431).
-            let lease_id = status
-                .freshness
-                .lease_id
-                .as_deref()
-                .expect("StopForLease requires a lease");
-            homeboy_core::daemon::stop_for_lease(lease_id)
-                .map_err(|error| upgrade_daemon_start_required(&error.message))?;
-            // A supervisor may restart it itself. Starting via the installed
-            // binary is idempotent and verifies the new lease either way (#15967).
-            start_installed_daemon(installed_identity, None)
-        }
         PromotedDaemonStart::InstalledBinary => start_installed_daemon(installed_identity, None),
         PromotedDaemonStart::RestartInstalledBinary => {
             start_installed_daemon(installed_identity, status.freshness.lease_id.as_deref())
@@ -2380,7 +2271,6 @@ enum PromotedDaemonStart {
     AlreadyInstalled,
     InstalledBinary,
     RestartInstalledBinary,
-    StopForLease,
     PendingRestart,
 }
 
@@ -2389,30 +2279,23 @@ fn promoted_daemon_start(
     installed_identity: &str,
     daemon_running: bool,
     daemon_identity: Option<&str>,
-    active_jobs: usize,
-    idle_restart_authorized: bool,
     has_lease: bool,
 ) -> PromotedDaemonStart {
-    if invoking_identity == installed_identity {
+    if invoking_identity == installed_identity
+        && (!daemon_running || daemon_identity == Some(installed_identity))
+    {
         return PromotedDaemonStart::InProcess;
     }
     if !daemon_running {
-        if active_jobs > 0 {
-            return PromotedDaemonStart::PendingRestart;
-        }
         return PromotedDaemonStart::InstalledBinary;
     }
     if daemon_identity == Some(installed_identity) {
         return PromotedDaemonStart::AlreadyInstalled;
     }
-    if active_jobs > 0 || !has_lease {
+    if !has_lease {
         PromotedDaemonStart::PendingRestart
-    } else if idle_restart_authorized {
-        PromotedDaemonStart::RestartInstalledBinary
     } else {
-        // An externally supervised daemon cannot be automatically restarted by
-        // Homeboy, but an idle daemon with an exact lease can be safely stopped.
-        PromotedDaemonStart::StopForLease
+        PromotedDaemonStart::RestartInstalledBinary
     }
 }
 
@@ -2460,7 +2343,12 @@ fn upgrade_daemon_start_required(cause: &str) -> Error {
     error
 }
 
-fn start_installed_daemon(installed_identity: &str, stop_lease_id: Option<&str>) -> Result<bool> {
+/// Start the installed controller, first requesting stop of the exact resident
+/// lease when supplied. Startup recovery resumes that lease's interrupted work.
+pub fn start_installed_daemon(
+    installed_identity: &str,
+    stop_lease_id: Option<&str>,
+) -> Result<bool> {
     if let Some(lease_id) = stop_lease_id {
         // A refused stop leaves the old daemon serving; starting a second one
         // would only contend for its owner lock. Report it pending (#15436).
@@ -2770,9 +2658,6 @@ fn acquire_controller_upgrade_lease(
             |event| operation.record_promotion_wait(&event),
         )?
     };
-    lease.drain_for_binary_replacement(CONTROLLER_UPGRADE_PROMOTION_WAIT_TIMEOUT, |event| {
-        operation.record_promotion_wait(&event)
-    })?;
     operation.clear_promotion_wait_durable()?;
     operation.take_persistence_error()?;
     Ok(lease)
@@ -5423,11 +5308,11 @@ mod promoted_daemon_tests {
     #[test]
     fn stale_resident_after_binary_swap_selects_installed_binary_restart() {
         assert_eq!(
-            promoted_daemon_start(OLD, NEW, true, Some(OLD), 0, true, true),
+            promoted_daemon_start(OLD, NEW, true, Some(OLD), true),
             PromotedDaemonStart::RestartInstalledBinary
         );
         assert_eq!(
-            promoted_daemon_start(OLD, NEW, false, None, 0, false, false),
+            promoted_daemon_start(OLD, NEW, false, None, false),
             PromotedDaemonStart::InstalledBinary
         );
     }
@@ -5435,52 +5320,31 @@ mod promoted_daemon_tests {
     #[test]
     fn promotion_does_not_replace_a_daemon_that_already_matches_the_installed_binary() {
         assert_eq!(
-            promoted_daemon_start(OLD, NEW, true, Some(NEW), 0, true, true),
+            promoted_daemon_start(OLD, NEW, true, Some(NEW), true),
             PromotedDaemonStart::AlreadyInstalled
         );
     }
 
     #[test]
-    fn active_jobs_leave_restart_pending() {
-        let decision = promoted_daemon_start(OLD, NEW, true, Some(OLD), 1, false, true);
-        assert_eq!(decision, PromotedDaemonStart::PendingRestart);
+    fn stale_resident_with_exact_lease_restarts_in_place_even_from_the_installed_binary() {
+        // Live jobs do not matter: the requested stop re-arms their resume.
+        for invoking in [OLD, NEW] {
+            assert_eq!(
+                promoted_daemon_start(invoking, NEW, true, Some(OLD), true),
+                PromotedDaemonStart::RestartInstalledBinary
+            );
+        }
+        assert_eq!(
+            promoted_daemon_start(NEW, NEW, true, Some(NEW), true),
+            PromotedDaemonStart::InProcess
+        );
     }
 
     #[test]
     fn stale_resident_without_lease_leaves_restart_pending() {
-        let decision = promoted_daemon_start(OLD, NEW, true, Some(OLD), 0, true, false);
-        assert_eq!(decision, PromotedDaemonStart::PendingRestart);
-    }
-
-    #[test]
-    fn idle_non_restartable_resident_with_lease_selects_lease_bound_stop() {
         assert_eq!(
-            promoted_daemon_start(OLD, NEW, true, Some(OLD), 0, false, true),
-            PromotedDaemonStart::StopForLease
-        );
-    }
-
-    #[test]
-    fn idle_external_daemon_without_lease_is_pending_not_an_error() {
-        assert_eq!(
-            promoted_daemon_start(OLD, NEW, true, Some(OLD), 0, false, false),
+            promoted_daemon_start(OLD, NEW, true, Some(OLD), false),
             PromotedDaemonStart::PendingRestart
-        );
-    }
-
-    #[test]
-    fn active_jobs_leave_restart_pending_even_when_lease_is_known() {
-        assert_eq!(
-            promoted_daemon_start(OLD, NEW, true, Some(OLD), 1, false, true),
-            PromotedDaemonStart::PendingRestart
-        );
-    }
-
-    #[test]
-    fn restartable_daemon_keeps_the_existing_restart_path() {
-        assert_eq!(
-            promoted_daemon_start(OLD, NEW, true, Some(OLD), 0, true, true),
-            PromotedDaemonStart::RestartInstalledBinary
         );
     }
 
