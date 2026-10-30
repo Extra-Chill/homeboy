@@ -3059,10 +3059,6 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
         assert_eq!(admission.blockers[0].run_id, cook_id);
-        assert_eq!(
-            admission.blockers[0].recovery_command,
-            "homeboy runner reconcile lab"
-        );
         assert_eq!(admission.blockers[0].owner, "runner_generations");
         assert_eq!(admission.blockers[0].action, "homeboy runner reconcile lab");
     });
@@ -3140,10 +3136,10 @@ fn upgrade_admission_inspects_an_ambiguous_removed_runner_record_locally() {
         assert_eq!(blocker.run_id, cook_id);
         assert_eq!(blocker.owner, "durable_agent_tasks");
         assert_eq!(
-            blocker.recovery_command,
+            blocker.action,
             "homeboy --placement local agent-task reconcile concurrent-first-cook-run --dry-run"
         );
-        assert!(!blocker.recovery_command.contains("cancel"));
+        assert!(!blocker.action.contains("cancel"));
     });
 }
 
@@ -3163,7 +3159,7 @@ fn upgrade_admission_keeps_configured_disconnected_runner_ownership() {
         assert_eq!(admission.blockers.len(), 1);
         assert_eq!(admission.blockers[0].owner, "runner_generations");
         assert_eq!(
-            admission.blockers[0].recovery_command,
+            admission.blockers[0].action,
             "homeboy runner reconcile fixture-lab"
         );
         let report = reconcile_run(cook_id, false).expect("configured runner remains fail-closed");
@@ -3215,12 +3211,10 @@ fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reco
             "ownerless_queued_after_runner_reconciliation"
         );
         assert_eq!(
-            blocked.blockers[0].recovery_command,
+            blocked.blockers[0].action,
             format!("homeboy --placement local agent-task reconcile {run_id} --apply")
         );
-        assert!(!blocked.blockers[0]
-            .recovery_command
-            .contains("runner reconcile"));
+        assert!(!blocked.blockers[0].action.contains("runner reconcile"));
 
         let repaired = reconcile_run(&run_id, false).expect("bounded agent-task repair");
         assert_eq!(repaired.reconciled, 1, "{repaired:?}");
@@ -3627,7 +3621,7 @@ fn upgrade_admission_keeps_ownerless_queued_runner_record_on_runner_plane_withou
         assert_eq!(admission.blockers.len(), 1);
         assert_eq!(admission.blockers[0].owner, "runner_generations");
         assert_eq!(
-            admission.blockers[0].recovery_command,
+            admission.blockers[0].action,
             "homeboy runner reconcile homeboy-lab"
         );
         let report = reconcile_run(run_id, false).expect("runner plane remains fail-closed");
@@ -3704,7 +3698,7 @@ fn upgrade_admission_keeps_provider_unavailable_runner_ownership() {
         assert_eq!(admission.blockers.len(), 1);
         assert_eq!(admission.blockers[0].owner, "runner_generations");
         assert_eq!(
-            admission.blockers[0].recovery_command,
+            admission.blockers[0].action,
             "homeboy runner reconcile fixture-lab"
         );
         let report = reconcile_run(cook_id, false).expect("unknown runner remains fail-closed");
@@ -3806,13 +3800,13 @@ fn upgrade_admission_keeps_an_unindexed_handoff_child_independent_with_executabl
         assert_eq!(admission.blockers.len(), 2);
         assert!(admission.blockers.iter().any(|blocker| {
             blocker.run_id == cook_id
-                && blocker.recovery_command
+                && blocker.action
                     == format!("homeboy --placement local agent-task status {cook_id}")
                 && blocker.owner == "durable_agent_tasks"
         }));
         assert!(admission.blockers.iter().any(|blocker| {
             blocker.run_id == attempt_id
-                && blocker.recovery_command
+                && blocker.action
                     == format!("homeboy --placement local agent-task status {attempt_id}")
         }));
     });
@@ -4659,8 +4653,7 @@ fn controller_upgrade_admission_uses_liveness_and_active_record_health() {
         assert_eq!(admission.blockers.len(), 2);
         assert!(admission.blockers.iter().any(|blocker| {
             blocker.run_id == "live-owner"
-                && blocker.recovery_command
-                    == "homeboy --placement local agent-task status live-owner"
+                && blocker.action == "homeboy --placement local agent-task status live-owner"
         }));
         let runner = admission
             .blockers
@@ -4668,7 +4661,7 @@ fn controller_upgrade_admission_uses_liveness_and_active_record_health() {
             .find(|blocker| blocker.run_id == "unverified-runner")
             .expect("unverified runner blocks");
         assert_eq!(runner.reason, "runner_heartbeat_stale");
-        assert_eq!(runner.recovery_command, "homeboy runner reconcile lab");
+        assert_eq!(runner.action, "homeboy runner reconcile lab");
         assert!(!admission
             .blockers
             .iter()
@@ -4691,7 +4684,6 @@ fn stale_runner_blocker_clears_only_with_direct_zero_job_evidence() {
         liveness: "stale",
         reason: "runner_heartbeat_stale".to_string(),
         action: "homeboy runner reconcile lab".to_string(),
-        recovery_command: "homeboy runner reconcile lab".to_string(),
     };
 
     let admission = homeboy_upgrade::upgrade::ControllerUpgradeAdmission {
@@ -4749,10 +4741,10 @@ fn upgrade_admission_keeps_a_live_provider_owner_active_despite_heartbeat_lag() 
         assert_eq!(admission.blockers.len(), 1);
         assert_eq!(admission.blockers[0].liveness, "active");
         assert_eq!(
-            admission.blockers[0].recovery_command,
+            admission.blockers[0].action,
             format!("homeboy --placement local agent-task status {run_id}")
         );
-        assert!(!admission.blockers[0].recovery_command.contains("cancel"));
+        assert!(!admission.blockers[0].action.contains("cancel"));
     });
 }
 
@@ -4789,10 +4781,10 @@ fn upgrade_admission_keeps_ambiguous_provider_evidence_fail_closed_and_read_only
         assert_eq!(admission.blockers.len(), 1);
         assert_eq!(admission.blockers[0].liveness, "unreconciled");
         assert_eq!(
-            admission.blockers[0].recovery_command,
+            admission.blockers[0].action,
             format!("homeboy --placement local agent-task reconcile {run_id} --dry-run")
         );
-        assert!(!admission.blockers[0].recovery_command.contains("cancel"));
+        assert!(!admission.blockers[0].action.contains("cancel"));
     });
 }
 
@@ -4886,7 +4878,7 @@ fn fixture_runner_records_are_quarantined_without_hiding_unknown_runner_ownershi
         assert_eq!(admission.blockers.len(), 1);
         assert_eq!(admission.blockers[0].run_id, unknown_run_id);
         assert_eq!(
-            admission.blockers[0].recovery_command,
+            admission.blockers[0].action,
             "homeboy runner reconcile offline-unknown-runner"
         );
 
@@ -4964,7 +4956,7 @@ fn verified_target_bootstrap_recovers_only_fixture_residue_and_keeps_live_or_unk
             .any(|blocker| blocker.run_id == live_run_id));
         assert!(admission.blockers.iter().any(|blocker| {
             blocker.run_id == unknown_run_id
-                && blocker.recovery_command == "homeboy runner reconcile unknown-runner"
+                && blocker.action == "homeboy runner reconcile unknown-runner"
         }));
         assert_eq!(
             agent_task_lifecycle::record_health_summary_in_store(&test_lifecycle_store(),)

@@ -27,7 +27,7 @@ pub fn check_for_updates() -> Result<VersionCheck> {
         // evidence about the release train.
     }
 
-    let latest = fetch_latest_version(install_method).ok();
+    let latest = fetch_latest_version().ok();
     let update_available = latest
         .as_ref()
         .map(|l| version_is_newer(l, &current))

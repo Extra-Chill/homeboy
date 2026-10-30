@@ -28,8 +28,6 @@ pub struct ControllerUpgradeBlocker {
     pub reason: String,
     /// The single executable action selected for this blocker.
     pub action: String,
-    /// Compatibility alias for installer error remediation lists.
-    pub recovery_command: String,
 }
 
 /// Immutable installer facts reported when a staged candidate cannot replace
@@ -193,7 +191,7 @@ fn ensure_admission(
     let commands = admission
         .blockers
         .iter()
-        .map(|blocker| blocker.recovery_command.clone())
+        .map(|blocker| blocker.action.clone())
         .collect::<Vec<_>>();
     let mut error = Error::validation_invalid_argument(
         "controller_upgrade",
@@ -384,7 +382,6 @@ mod tests {
                 liveness: "live",
                 reason: "active".to_string(),
                 action: "homeboy agent-task reconcile run-1".to_string(),
-                recovery_command: "homeboy agent-task reconcile run-1".to_string(),
             }],
         };
         let target = VerifiedTargetUpgrade::classify(

@@ -63,9 +63,6 @@ pub enum UpgradeCommand {
         /// Operation id from a previous `homeboy upgrade`. Defaults to the latest upgrade run.
         id: Option<String>,
     },
-    /// Resume an admitted upgrade from its detached worker process.
-    #[command(hide = true)]
-    Continue { id: String },
 }
 
 pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
@@ -74,11 +71,6 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         let json = serde_json::to_value(result)
             .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
         return Ok((json, 0));
-    }
-
-    if let Some(UpgradeCommand::Continue { id }) = args.command.as_ref() {
-        let result = upgrade::continue_detached_upgrade(id)?;
-        return upgrade_response(&result);
     }
 
     if args.check {
@@ -111,7 +103,7 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         })
         .transpose()?;
 
-    let result = upgrade::run_upgrade_with_method(
+    let result = upgrade::run_upgrade_with_operation(
         args.force,
         method_override,
         args.skip_extensions,

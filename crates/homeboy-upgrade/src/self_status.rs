@@ -75,7 +75,7 @@ pub struct ProbeOutput {
 pub fn collect_status() -> SelfStatus {
     collect_status_with(
         std::env::current_exe().ok(),
-        || upgrade::fetch_latest_version(InstallMethod::Homebrew).map_err(|e| e.to_string()),
+        || upgrade::fetch_latest_version().map_err(|e| e.to_string()),
         run_external,
     )
 }

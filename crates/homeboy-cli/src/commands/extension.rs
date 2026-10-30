@@ -2264,7 +2264,6 @@ mod tests {
                     liveness: "live",
                     reason: "fixture controller ownership".to_string(),
                     action: "fixture recover".to_string(),
-                    recovery_command: "fixture recover".to_string(),
                 }],
             })
         }
