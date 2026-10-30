@@ -291,6 +291,11 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
 }
 
 fn status_once(args: StatusArgs) -> CmdResult<Value> {
+    if !args.exact {
+        if let Some(ci) = agent_task_service_direct::cook_ci_status(&args.run_id)? {
+            return Ok((ci, 0));
+        }
+    }
     if let Some(recipe_only) = recipe_only_status(&args.run_id, args.exact)? {
         return Ok((recipe_only, 0));
     }

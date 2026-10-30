@@ -6,6 +6,8 @@
 //! `crate::agent_task_service::*` unchanged.
 
 mod cook;
+mod cook_ci;
+pub use cook_ci::{cook_ci_status, repoll_cook_ci};
 mod cook_activity;
 mod cook_adoption;
 mod cook_baseline;

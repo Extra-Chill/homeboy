@@ -167,6 +167,10 @@ impl CookRecipeStore {
             .join("recipe.json")
     }
 
+    pub(crate) fn ci_path(&self, cook_id: &str) -> PathBuf {
+        self.recipe_path(cook_id).with_file_name("ci.json")
+    }
+
     fn driver_lock_path(&self, cook_id: &str) -> PathBuf {
         self.recipe_path(cook_id).with_file_name("driver.lock")
     }

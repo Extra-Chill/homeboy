@@ -36,6 +36,7 @@
 pub mod body_file;
 mod checks;
 mod client;
+pub mod cook_ci;
 #[cfg(all(test, unix))]
 mod fake_gh;
 mod fleet;
