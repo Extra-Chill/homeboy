@@ -58,17 +58,6 @@ pub fn refresh_live_progress() -> Option<RefreshLiveProgress> {
     })
 }
 
-pub(crate) fn begin_refresh_live_progress(sub_phase: &str) {
-    let mut live = REFRESH_LIVE.lock().expect("refresh live progress");
-    if live.is_none() {
-        *live = Some(RefreshLiveState {
-            sub_phase: normalize_refresh_sub_phase(sub_phase).to_string(),
-        });
-    } else {
-        set_refresh_live_sub_phase_locked(live.as_mut().expect("live progress"), sub_phase);
-    }
-}
-
 pub(crate) fn set_refresh_live_sub_phase(sub_phase: &str) {
     let mut live = REFRESH_LIVE.lock().expect("refresh live progress");
     if live.is_none() {
@@ -465,7 +454,7 @@ fn refresh_homeboy_binary_inner_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     options: HomeboyBinaryRefreshOptions,
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
-    begin_refresh_live_progress("prepare");
+    set_refresh_live_sub_phase("prepare");
     let _refresh_live = RefreshLiveGuard;
     let runner = super::load_in_roots(roots, &options.runner_id)?;
     let runner_id = runner.id;
@@ -538,30 +527,34 @@ fn refresh_homeboy_binary_inner_in_roots(
             }
         }
     };
+    let mut output = HomeboyBinaryRefreshOutput {
+        variant: "refresh_homeboy",
+        command: "runner.refresh_homeboy",
+        runner_id: plan.runner_id.clone(),
+        dry_run: options.dry_run,
+        identity: None,
+        updated_fields: Vec::new(),
+        phase_summary: Vec::new(),
+        daemon_refreshed: false,
+        interrupted_job_ids: Vec::new(),
+        selected_binary_path: plan.binary_path.clone(),
+        next_actions: Vec::new(),
+        reconnect_required: !plan.reconnect,
+        followup_commands: plan.followup_commands.clone(),
+        readiness: None,
+        reconnect_deferred: None,
+        failure: None,
+        bootstrap_provenance: None,
+        rollback: None,
+        build_transcript: None,
+        artifacts: None,
+        plan: plan.clone(),
+    };
     if options.dry_run {
         return Ok((
             HomeboyBinaryRefreshOutput {
-                variant: "refresh_homeboy",
-                command: "runner.refresh_homeboy",
-                runner_id: plan.runner_id.clone(),
-                dry_run: true,
-                identity: None,
-                updated_fields: Vec::new(),
-                phase_summary: Vec::new(),
-                daemon_refreshed: false,
-                interrupted_job_ids: Vec::new(),
-                selected_binary_path: plan.binary_path.clone(),
-                next_actions: Vec::new(),
-                reconnect_required: !plan.reconnect,
-                followup_commands: plan.followup_commands.clone(),
-                readiness: None,
-                reconnect_deferred: None,
-                failure: None,
-                bootstrap_provenance: None,
-                rollback: None,
-                build_transcript: None,
-                artifacts: None,
-                plan,
+                plan: plan.clone(),
+                ..output
             },
             0,
         ));
@@ -623,89 +616,21 @@ fn refresh_homeboy_binary_inner_in_roots(
     let (exec_output, exit_code) =
         exec_with_status_snapshot(&plan.runner_id, exec_options, connection_status.clone())?;
     set_refresh_live_sub_phase("verify");
+    output.plan = plan.clone();
+    output.build_transcript = Some(refresh_build_transcript(&exec_output));
     let execution_phase = refresh_phase(refresh_execution_phase_name(&plan), true, exit_code);
     if exit_code != 0 {
         return Ok((
             HomeboyBinaryRefreshOutput {
-                variant: "refresh_homeboy",
-                command: "runner.refresh_homeboy",
-                runner_id: plan.runner_id.clone(),
-                dry_run: false,
-                identity: None,
-                updated_fields: Vec::new(),
                 phase_summary: vec![execution_phase],
-                daemon_refreshed: false,
-                interrupted_job_ids: Vec::new(),
-                selected_binary_path: plan.binary_path.clone(),
-                next_actions: Vec::new(),
-                reconnect_required: !plan.reconnect,
-                followup_commands: plan.followup_commands.clone(),
                 readiness: Some(failed_refresh_readiness(&plan)),
-                reconnect_deferred: None,
                 failure: Some(refresh_failure(&plan, exec_output.clone(), exit_code)),
-                bootstrap_provenance: None,
-                rollback: None,
-                build_transcript: Some(refresh_build_transcript(&exec_output)),
-                artifacts: None,
-                plan,
+                ..output
             },
             exit_code,
         ));
     }
     let mut phase_summary = vec![execution_phase];
-
-    // A reconnect replaces the daemon control plane. Prove it is admissible
-    // before selecting the new global binary: a deferred refresh must leave
-    // the active daemon and its configured control binary untouched.
-    // Active jobs are now a rotation case, not a global reconnect barrier. The
-    // candidate is materialized and validated before it gets an independent
-    // daemon lease; the old lease remains the owner of its existing work.
-    let deferred_active_jobs: Option<Vec<homeboy_core::api_jobs::ActiveRunnerJobSummary>> = None;
-    if let Some(active_jobs) = deferred_active_jobs {
-        let active_job_ids = active_jobs
-            .iter()
-            .map(|job| job.job_id.clone())
-            .collect::<Vec<_>>();
-        let followup_commands = active_job_followups(&plan.runner_id, &active_job_ids);
-        return Ok((
-            HomeboyBinaryRefreshOutput {
-                variant: "refresh_homeboy",
-                command: "runner.refresh_homeboy",
-                runner_id: plan.runner_id.clone(),
-                dry_run: false,
-                plan: plan.clone(),
-                identity: parse_identity(&exec_output.stdout).ok(),
-                updated_fields: Vec::new(),
-                phase_summary: phase_summary.clone(),
-                daemon_refreshed: false,
-                interrupted_job_ids: Vec::new(),
-                selected_binary_path: plan.binary_path.clone(),
-                next_actions: Vec::new(),
-                reconnect_required: true,
-                followup_commands: followup_commands.clone(),
-                readiness: Some(HomeboyRefreshReadiness {
-                    state: HomeboyRefreshReadinessState::Draining,
-                    accepting_jobs: false,
-                    daemon_fresh: false,
-                    owners: active_job_ids.clone(),
-                    continuation: followup_commands.last().cloned(),
-                }),
-                reconnect_deferred: Some(HomeboyReconnectDeferred {
-                    reason: "active_daemon_jobs",
-                    active_job_ids,
-                    selected_binary_path: plan.binary_path.clone(),
-                    followup_commands,
-                    ownership_contention: None,
-                }),
-                failure: None,
-                bootstrap_provenance: None,
-                rollback: None,
-                build_transcript: Some(refresh_build_transcript(&exec_output)),
-                artifacts: None,
-            },
-            1,
-        ));
-    }
 
     // A Cook pin reserves its exact runtime from provider preflight through
     // durable runner-job binding. A refresh must drain that reservation rather
@@ -715,8 +640,12 @@ fn refresh_homeboy_binary_inner_in_roots(
         .ok()
         .and_then(|identity| identity_commit(&identity))
         .unwrap_or_else(|| format!("unverified-{}", uuid::Uuid::new_v4()));
-    let promotion_lease =
-        acquire_runner_binary_promotion_in_roots(roots, &options.runner_id, &promotion_candidate)?;
+    let promotion_lease = acquire_runner_binary_promotion_in_roots(
+        roots,
+        &options.runner_id,
+        &promotion_candidate,
+        super::lab_selection::emit_runtime_promotion_wait,
+    )?;
     // Materialization may have waited behind a newer refresh. Re-read every
     // authority while holding the promotion lease. In particular, a daemon can
     // connect while materialization runs, so reconnect decisions cannot use the
@@ -873,27 +802,11 @@ fn refresh_homeboy_binary_inner_in_roots(
             }
             return Ok((
                 HomeboyBinaryRefreshOutput {
-                    variant: "refresh_homeboy",
-                    command: "runner.refresh_homeboy",
-                    runner_id: plan.runner_id.clone(),
-                    dry_run: false,
                     identity: parse_identity(&exec_output.stdout).ok(),
-                    updated_fields: Vec::new(),
                     phase_summary,
-                    daemon_refreshed: false,
-                    interrupted_job_ids: Vec::new(),
-                    selected_binary_path: plan.binary_path.clone(),
-                    next_actions: Vec::new(),
-                    reconnect_required: !plan.reconnect,
-                    followup_commands: plan.followup_commands.clone(),
                     readiness: Some(failed_refresh_readiness(&plan)),
-                    reconnect_deferred: None,
                     failure: Some(failure),
-                    bootstrap_provenance: None,
-                    rollback: None,
-                    build_transcript: Some(refresh_build_transcript(&exec_output)),
-                    artifacts: None,
-                    plan,
+                    ..output
                 },
                 1,
             ));
@@ -906,6 +819,11 @@ fn refresh_homeboy_binary_inner_in_roots(
     let identity = bootstrap.identity.clone();
     let updated_fields = bootstrap.updated_fields.clone();
     let rollback = bootstrap.rollback.clone();
+
+    output.identity = Some(identity.clone());
+    output.updated_fields = updated_fields.clone();
+    output.rollback = rollback.clone();
+    output.selected_binary_path = selected_binary_path.clone();
 
     // The status captured under the promotion lease is the reconnect authority:
     // an old daemon that appeared while materializing must be retired, while a
@@ -979,30 +897,17 @@ fn refresh_homeboy_binary_inner_in_roots(
                 unconverged_refresh_failure(&plan, &exec_output, converged, Some(&readiness));
             return Ok((
                 HomeboyBinaryRefreshOutput {
-                    variant: "refresh_homeboy",
-                    command: "runner.refresh_homeboy",
-                    runner_id: plan.runner_id.clone(),
-                    dry_run: false,
-                    plan: plan.clone(),
-                    identity: Some(identity.clone()),
-                    updated_fields: updated_fields.clone(),
                     phase_summary,
                     // Rotation completed even when older generations still
                     // fence admission. `readiness` and the exit code report
                     // convergence without rewriting this operation fact.
                     daemon_refreshed: true,
-                    interrupted_job_ids: Vec::new(),
-                    selected_binary_path: selected_binary_path.clone(),
                     next_actions,
                     reconnect_required: reconnect_required_after_refresh(true),
                     followup_commands,
                     readiness: Some(readiness),
-                    reconnect_deferred: None,
                     failure,
-                    bootstrap_provenance: None,
-                    rollback: rollback.clone(),
-                    build_transcript: Some(refresh_build_transcript(&exec_output)),
-                    artifacts: None,
+                    ..output
                 },
                 if converged { 0 } else { 1 },
             ));
@@ -1025,18 +930,9 @@ fn refresh_homeboy_binary_inner_in_roots(
                     deferred_reconnect_failure(&plan, exec_output.clone(), &error, &deferred);
                 return Ok((
                     HomeboyBinaryRefreshOutput {
-                        variant: "refresh_homeboy",
-                        command: "runner.refresh_homeboy",
-                        runner_id: plan.runner_id.clone(),
-                        dry_run: false,
-                        plan: plan.clone(),
                         identity: Some(identity),
                         updated_fields: Vec::new(),
                         phase_summary,
-                        daemon_refreshed: false,
-                        interrupted_job_ids: Vec::new(),
-                        selected_binary_path: selected_binary_path.clone(),
-                        next_actions: Vec::new(),
                         reconnect_required: true,
                         followup_commands: deferred.followup_commands.clone(),
                         readiness: Some(HomeboyRefreshReadiness {
@@ -1048,10 +944,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                         }),
                         reconnect_deferred: Some(deferred),
                         failure: Some(failure),
-                        bootstrap_provenance: None,
-                        rollback: rollback.clone(),
-                        build_transcript: Some(refresh_build_transcript(&exec_output)),
-                        artifacts: None,
+                        ..output
                     },
                     1,
                 ));
@@ -1129,22 +1022,11 @@ fn refresh_homeboy_binary_inner_in_roots(
                 phase_summary.push(refresh_phase("reconnect_transport", true, 1));
                 return Ok((
                     HomeboyBinaryRefreshOutput {
-                        variant: "refresh_homeboy",
-                        command: "runner.refresh_homeboy",
-                        runner_id: plan.runner_id.clone(),
-                        dry_run: false,
-                        plan: plan.clone(),
-                        identity: Some(identity.clone()),
-                        updated_fields: updated_fields.clone(),
                         phase_summary,
-                        daemon_refreshed: false,
                         interrupted_job_ids,
-                        selected_binary_path: selected_binary_path.clone(),
-                        next_actions: Vec::new(),
                         reconnect_required: true,
                         followup_commands: readiness.continuation.clone().into_iter().collect(),
                         readiness: Some(readiness),
-                        reconnect_deferred: None,
                         failure: Some(refresh_verification_failure(
                             &plan,
                             exec_output.clone(),
@@ -1157,9 +1039,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                             &identity,
                             &updated_fields,
                         )),
-                        rollback: rollback.clone(),
-                        build_transcript: Some(refresh_build_transcript(&exec_output)),
-                        artifacts: None,
+                        ..output
                     },
                     1,
                 ));
@@ -1190,25 +1070,14 @@ fn refresh_homeboy_binary_inner_in_roots(
             phase_summary.push(refresh_phase("daemon_identity_verification", true, 1));
             return Ok((
                 HomeboyBinaryRefreshOutput {
-                    variant: "refresh_homeboy",
-                    command: "runner.refresh_homeboy",
-                    runner_id: plan.runner_id.clone(),
-                    dry_run: false,
-                    plan: plan.clone(),
-                    identity: Some(identity.clone()),
-                    updated_fields: updated_fields.clone(),
                     phase_summary,
-                    daemon_refreshed: false,
                     interrupted_job_ids,
-                    selected_binary_path: selected_binary_path.clone(),
-                    next_actions: Vec::new(),
                     reconnect_required: true,
                     followup_commands: blocked_refresh_readiness(&plan)
                         .continuation
                         .into_iter()
                         .collect(),
                     readiness: Some(blocked_refresh_readiness(&plan)),
-                    reconnect_deferred: None,
                     failure: Some(refresh_reconnect_failure(
                         &plan,
                         &identity,
@@ -1223,9 +1092,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                         &identity,
                         &updated_fields,
                     )),
-                    rollback: rollback.clone(),
-                    build_transcript: Some(refresh_build_transcript(&exec_output)),
-                    artifacts: None,
+                    ..output
                 },
                 reconnect_exit_code,
             ));
@@ -1264,25 +1131,14 @@ fn refresh_homeboy_binary_inner_in_roots(
                 phase_summary.push(refresh_phase("admission_readiness", true, 1));
                 return Ok((
                     HomeboyBinaryRefreshOutput {
-                        variant: "refresh_homeboy",
-                        command: "runner.refresh_homeboy",
-                        runner_id: plan.runner_id.clone(),
-                        dry_run: false,
-                        plan: plan.clone(),
-                        identity: Some(identity.clone()),
-                        updated_fields: updated_fields.clone(),
                         phase_summary,
-                        daemon_refreshed: false,
                         interrupted_job_ids,
-                        selected_binary_path: selected_binary_path.clone(),
-                        next_actions: Vec::new(),
                         reconnect_required: true,
                         followup_commands: blocked_refresh_readiness(&plan)
                             .continuation
                             .into_iter()
                             .collect(),
                         readiness: Some(blocked_refresh_readiness(&plan)),
-                        reconnect_deferred: None,
                         failure: Some(refresh_reconnect_failure(
                             &plan,
                             &identity,
@@ -1297,9 +1153,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                             &identity,
                             &updated_fields,
                         )),
-                        rollback: rollback.clone(),
-                        build_transcript: Some(refresh_build_transcript(&exec_output)),
-                        artifacts: None,
+                        ..output
                     },
                     1,
                 ));
@@ -1337,22 +1191,13 @@ fn refresh_homeboy_binary_inner_in_roots(
     let failure = unconverged_refresh_failure(&plan, &exec_output, converged, readiness.as_ref());
     Ok((
         HomeboyBinaryRefreshOutput {
-            variant: "refresh_homeboy",
-            command: "runner.refresh_homeboy",
-            runner_id: plan.runner_id.clone(),
-            dry_run: false,
-            plan: plan.clone(),
-            identity: Some(identity.clone()),
-            updated_fields: updated_fields.clone(),
             phase_summary,
             daemon_refreshed,
             interrupted_job_ids,
-            selected_binary_path: selected_binary_path.clone(),
             next_actions,
             reconnect_required: reconnect_required_after_refresh(daemon_refreshed),
             followup_commands,
             readiness,
-            reconnect_deferred: None,
             failure,
             bootstrap_provenance: Some(HomeboyBootstrapProvenance {
                 transport: if diagnostic_ssh_bootstrap {
@@ -1374,39 +1219,21 @@ fn refresh_homeboy_binary_inner_in_roots(
                 config_fields_changed: updated_fields.clone(),
             }),
             rollback,
-            build_transcript: Some(refresh_build_transcript(&exec_output)),
-            artifacts: None,
+            ..output
         },
         if converged { 0 } else { 1 },
     ))
 }
 
-/// [`acquire_runner_binary_promotion`] against an explicitly injected root.
-///
-/// The promotion lease store is machine-global by default, so an isolated
-/// refresh would otherwise contend against the host's live lease (#14362).
 fn acquire_runner_binary_promotion_in_roots(
     roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
-    candidate_commit: &str,
-) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    acquire_runner_binary_promotion_with_in_root(
-        &homeboy_core::paths::runtime_promotion_dir_in_root(roots.data()),
-        runner_id,
-        candidate_commit,
-        super::lab_selection::emit_runtime_promotion_wait,
-    )
-}
-
-fn acquire_runner_binary_promotion_with_in_root(
-    root: &std::path::Path,
     runner_id: &str,
     candidate_commit: &str,
     progress: impl FnMut(homeboy_core::runtime_promotion::RuntimePromotionWaitEvent),
 ) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
     let mut progress = progress;
     let lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible_key_in_root(
-        root,
+        &homeboy_core::paths::runtime_promotion_dir_in_root(roots.data()),
         "runner binary promotion",
         runner_id.to_string(),
         candidate_commit,
@@ -1834,7 +1661,11 @@ fn verify_refreshed_daemon_topology_status(
                 "runner `{runner_id}` reconnect did not persist a daemon build identity"
             ))
         })?;
-    if build_identity_commit(actual_identity) != Some(expected_commit) {
+    if actual_identity
+        .strip_prefix("homeboy ")
+        .and_then(build_identity_commit)
+        != Some(expected_commit)
+    {
         return Err(Error::internal_unexpected(format!(
             "runner `{runner_id}` reconnect started daemon `{actual_identity}`, expected commit `{expected_commit}`"
         )));
@@ -1847,7 +1678,11 @@ fn verify_refreshed_daemon_topology_status(
                 "runner `{runner_id}` reconnect did not read the configured job binary build identity"
             ))
         })?;
-    if build_identity_commit(configured_identity) != Some(expected_commit) {
+    if configured_identity
+        .strip_prefix("homeboy ")
+        .and_then(build_identity_commit)
+        != Some(expected_commit)
+    {
         return Err(Error::internal_unexpected(format!(
             "runner `{runner_id}` reconnect retained configured job binary `{configured_identity}`, expected commit `{expected_commit}`"
         )));
@@ -1855,8 +1690,8 @@ fn verify_refreshed_daemon_topology_status(
     Ok(())
 }
 
-fn build_identity_commit(identity: &str) -> Option<&str> {
-    let (_, commit) = identity.strip_prefix("homeboy ")?.split_once('+')?;
+pub(crate) fn build_identity_commit(identity: &str) -> Option<&str> {
+    let (_, commit) = identity.split_once('+')?;
     Some(commit.strip_suffix("-dirty").unwrap_or(commit))
 }
 
@@ -2218,13 +2053,19 @@ fn refresh_promotion_authorities_in_roots(
         .map(|path| configured_runner_homeboy_build_identity(&runner, path))
         .transpose()?
         .flatten()
-        .and_then(|identity| build_identity_commit(&identity).map(str::to_string));
+        .and_then(|identity| {
+            identity
+                .strip_prefix("homeboy ")
+                .and_then(build_identity_commit)
+                .map(str::to_string)
+        });
     Ok(RefreshPromotionAuthorities {
         controller: homeboy_product_identity::build_identity().git_commit,
         active_daemon: status
             .session
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.as_deref())
+            .and_then(|identity| identity.strip_prefix("homeboy "))
             .and_then(build_identity_commit)
             .map(str::to_string),
         configured_selected,

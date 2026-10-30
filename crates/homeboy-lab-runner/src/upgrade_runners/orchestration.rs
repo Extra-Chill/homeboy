@@ -630,10 +630,15 @@ mod manifest_preflight_tests {
     }
 }
 
-pub(crate) fn upgrade_configured_runners(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The provider keeps controller identity and promotion authority explicit."
+)]
+pub fn upgrade_configured_runners_with_explicit_source_path(
     force: bool,
     method_override: Option<InstallMethod>,
     source_path: Option<&Path>,
+    explicit_source_path: bool,
     expected_controller_identity: Option<&str>,
     runner_targets: &[String],
     extension_updates: &[ExtensionUpgradeEntry],
@@ -654,78 +659,8 @@ pub(crate) fn upgrade_configured_runners(
     // their compatibility is judged against, or a runner that converged to the
     // installed controller reads as skewed from the old one (#15552).
     let upgrade = || {
-        Ok(crate::controller_identity::with_converging_controller(
-            expected_controller_identity,
-            || {
-                let (updated, skipped) =
-                    upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
-                        &runners,
-                        force,
-                        method_override,
-                        source_path,
-                        extension_updates,
-                        runner::exec,
-                        runner::status,
-                        materialize_runner_source_path,
-                        expected_controller_identity,
-                    );
-                // A runner is converged only when its runner-service units
-                // run the converged binary too (#15733).
-                converge_service_binaries_for_entries(&runners, updated, skipped)
-            },
-        ))
-    };
-    match promotion_lease {
-        Some(lease) => lease.with_local_targets(
-            &runners
-                .iter()
-                .map(|runner| runner.id.clone())
-                .collect::<Vec<_>>(),
-            upgrade,
-        ),
-        None => upgrade(),
-    }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The runner-upgrade provider preserves its explicit controller identity and promotion authority inputs."
-)]
-pub fn upgrade_configured_runners_with_explicit_source_path(
-    force: bool,
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
-    explicit_source_path: bool,
-    expected_controller_identity: Option<&str>,
-    runner_targets: &[String],
-    extension_updates: &[ExtensionUpgradeEntry],
-    promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
-) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
-    if !explicit_source_path {
-        return upgrade_configured_runners(
-            force,
-            method_override,
-            source_path,
-            expected_controller_identity,
-            runner_targets,
-            extension_updates,
-            promotion_lease,
-        );
-    }
-
-    let runners = runner_upgrade_targets(runner_targets)?;
-    if runners.is_empty() {
-        return Ok((vec![], vec![]));
-    }
-
-    homeboy_core::log_status!(
-        "upgrade",
-        "Updating {} configured runner(s)...",
-        runners.len()
-    );
-    let upgrade = || {
-        let (updated, skipped) =
-            upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
+        let run = || {
+            let (updated, skipped) = upgrade_runners(
                 &runners,
                 force,
                 method_override,
@@ -733,12 +668,27 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
                 extension_updates,
                 runner::exec,
                 runner::status,
-                materialize_explicit_runner_source_path,
+                reconnect_runner_daemon,
+                if explicit_source_path {
+                    materialize_explicit_runner_source_path
+                } else {
+                    materialize_runner_source_path
+                },
+                update_runner_homeboy_path,
                 expected_controller_identity,
             );
-        Ok(converge_service_binaries_for_entries(
-            &runners, updated, skipped,
-        ))
+            // A runner is converged only when its runner-service units
+            // run the converged binary too (#15733).
+            converge_service_binaries_for_entries(&runners, updated, skipped)
+        };
+        Ok(if explicit_source_path {
+            run()
+        } else {
+            crate::controller_identity::with_converging_controller(
+                expected_controller_identity,
+                run,
+            )
+        })
     };
     match promotion_lease {
         Some(lease) => lease.with_local_targets(
@@ -766,121 +716,11 @@ pub(crate) fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Ru
         .collect())
 }
 
-#[cfg(test)]
-pub fn upgrade_runners_with_executor(
-    runners: &[Runner],
-    force: bool,
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
-    extension_updates: &[ExtensionUpgradeEntry],
-    mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-    status: impl Fn(&str) -> Result<RunnerStatusReport>,
-) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
-    upgrade_runners_with_executor_and_source_materializer(
-        runners,
-        force,
-        method_override,
-        source_path,
-        extension_updates,
-        &mut exec,
-        status,
-        materialize_runner_source_path,
-    )
-}
-
-#[cfg(test)]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Compatibility entry point exposes separately injectable upgrade operations for focused tests."
-)]
-pub fn upgrade_runners_with_executor_and_source_materializer(
-    runners: &[Runner],
-    force: bool,
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
-    extension_updates: &[ExtensionUpgradeEntry],
-    exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-    status: impl Fn(&str) -> Result<RunnerStatusReport>,
-    materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
-) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
-    upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
-        runners,
-        force,
-        method_override,
-        source_path,
-        extension_updates,
-        exec,
-        status,
-        materialize_source_path,
-        None,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The internal operation keeps expected controller identity explicit through source materialization."
-)]
-fn upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
-    runners: &[Runner],
-    force: bool,
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
-    extension_updates: &[ExtensionUpgradeEntry],
-    mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-    status: impl Fn(&str) -> Result<RunnerStatusReport>,
-    mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
-    expected_controller_identity: Option<&str>,
-) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
-    upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(
-        runners,
-        force,
-        method_override,
-        source_path,
-        extension_updates,
-        &mut exec,
-        status,
-        &mut materialize_source_path,
-        update_runner_homeboy_path,
-        expected_controller_identity,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The internal upgrade operation retains explicit controller identity and path mutation boundaries."
-)]
-pub(crate) fn upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(
-    runners: &[Runner],
-    force: bool,
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
-    extension_updates: &[ExtensionUpgradeEntry],
-    mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-    status: impl Fn(&str) -> Result<RunnerStatusReport>,
-    mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
-    mut update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
-    expected_controller_identity: Option<&str>,
-) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
-    upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(
-        runners,
-        force,
-        method_override,
-        source_path,
-        extension_updates,
-        &mut exec,
-        status,
-        reconnect_runner_daemon,
-        &mut materialize_source_path,
-        &mut update_homeboy_path,
-        expected_controller_identity,
-    )
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "The orchestration boundary keeps every mutating operation explicit for deterministic runner upgrade recovery."
 )]
-pub(crate) fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(
+pub(crate) fn upgrade_runners(
     runners: &[Runner],
     force: bool,
     method_override: Option<InstallMethod>,
@@ -1563,18 +1403,19 @@ pub(super) fn managed_immutable_runner_target_revision(
         .map(str::to_string)
         .or_else(|| {
             expected_controller_identity
-                .and_then(build_identity_commit)
+                .and_then(|identity| {
+                    // Upgrade identities historically select the final build suffix.
+                    let suffix = &identity[identity.rfind('+')?..];
+                    crate::homeboy_refresh::build_identity_commit(suffix)
+                })
+                .filter(|commit| {
+                    commit.len() >= 7
+                        && commit.len() <= 64
+                        && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
                 .map(str::to_string)
         })
         .or_else(|| homeboy_product_identity::build_identity().git_commit)
-}
-
-/// The commit in a `homeboy <version>+<commit>[-dirty]` build identity.
-fn build_identity_commit(identity: &str) -> Option<&str> {
-    let commit = identity.rsplit_once('+')?.1;
-    let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
-    (commit.len() >= 7 && commit.len() <= 64 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some(commit)
 }
 
 pub(super) fn managed_immutable_admission_ready(status: &crate::RunnerStatusReport) -> bool {

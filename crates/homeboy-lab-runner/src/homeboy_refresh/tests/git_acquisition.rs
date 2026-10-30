@@ -666,9 +666,13 @@ fn delayed_fetch_admits_local_cook_and_real_publication_is_fenced() {
             false,
         )
         .unwrap();
-        let lease =
-            acquire_runner_binary_promotion_in_roots(&roots, "publication-fixture", &fixture.new)
-                .unwrap();
+        let lease = acquire_runner_binary_promotion_in_roots(
+            &roots,
+            "publication-fixture",
+            &fixture.new,
+            crate::lab_selection::emit_runtime_promotion_wait,
+        )
+        .unwrap();
         let publication_pin = homeboy_core::runtime_promotion::pin_cook_generation_waiting(
             "publication-contender",
             Duration::from_millis(80),
