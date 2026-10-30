@@ -55,7 +55,9 @@ pub use resolution::{
     validate_local_path, RegisteredPathCandidates, RegisteredPrimaryPathResolution,
     RegistryLookupPolicy, ResolvedTarget, TargetSpec,
 };
-pub use scope::{resolve_component_scope, EffectiveScope, ScopeCommand};
+pub use scope::{
+    resolve_component_scope, resolve_component_scope_at, EffectiveScope, ScopeCommand,
+};
 pub use versioning::{
     normalize_version_pattern, parse_capability_extensions, parse_version_targets,
     validate_version_pattern, validate_version_target_conflict,

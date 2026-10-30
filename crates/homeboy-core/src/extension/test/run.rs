@@ -2003,9 +2003,17 @@ fn run_main_test_workflow_inner(
     if failure_analysis_input.is_none() && !output.success {
         failure_analysis_input = parse_compiler_failures(&output.stdout, &output.stderr);
     }
-    let findings = failure_analysis_input
+    let mut findings = failure_analysis_input
         .as_ref()
         .and_then(homeboy_findings_from_test_analysis_input);
+    if let Some(findings) = findings.as_mut() {
+        crate::component::resolve_component_scope_at(
+            component,
+            crate::component::ScopeCommand::Test,
+            source_path,
+        )
+        .filter_findings(source_path, findings);
+    }
     let test_runtime_evidence = (!inventory_mode).then(|| {
         runtime_test_evidence(
             &args.ci_env,

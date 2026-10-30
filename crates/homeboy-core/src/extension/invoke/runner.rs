@@ -978,6 +978,69 @@ mod tests {
     }
 
     #[test]
+    fn lint_and_test_runners_export_merged_scope_excludes() {
+        with_isolated_home(|home| {
+            let extension = home.path().join(".config/homeboy/extensions/fixture");
+            std::fs::create_dir_all(&extension).unwrap();
+            std::fs::write(extension.join("fixture.json"), r#"{"name":"fixture","version":"1.0.0","lint":{"extension_script":"lint.sh"},"test":{"extension_script":"test.sh"}}"#).unwrap();
+            let root = home.path().join("repo");
+            std::fs::create_dir_all(root.join("plugins/child")).unwrap();
+            std::fs::write(root.join("plugins/child/homeboy.json"), "{}").unwrap();
+            let component: Component = serde_json::from_value(serde_json::json!({
+                "id": "fixture", "local_path": root,
+                "extensions": {"fixture": {}},
+                "scopes": {
+                    "defaults": {"exclude": ["packages/"]},
+                    "lint": {"exclude": ["lint-only/"]},
+                    "test": {"exclude": ["test-only/"]}
+                }
+            }))
+            .unwrap();
+            let run_dir = RunDir::create().unwrap();
+            let lint = crate::extension::lint::build_lint_runner(
+                crate::extension::lint::LintRunnerRequest {
+                    component: &component,
+                    path_override: None,
+                    settings: &[],
+                    summary: true,
+                    file: None,
+                    glob: None,
+                    errors_only: false,
+                    sniffs: None,
+                    exclude_sniffs: None,
+                    category: None,
+                    step: None,
+                    changed_files: None,
+                    run_dir: &run_dir,
+                },
+            )
+            .unwrap();
+            let test = crate::extension::test::build_test_runner(
+                &component,
+                None,
+                &[],
+                &[],
+                true,
+                false,
+                None,
+                None,
+                &run_dir,
+            )
+            .unwrap();
+            for (runner, expected) in [
+                (lint, "lint-only/\npackages/\nplugins/child/"),
+                (test, "packages/\nplugins/child/\ntest-only/"),
+            ] {
+                assert!(runner
+                    .env_vars
+                    .iter()
+                    .any(|(key, value)| key == "HOMEBOY_SCOPE_EXCLUDE" && value == expected));
+            }
+            run_dir.cleanup();
+        });
+    }
+
+    #[test]
     fn with_run_dir_tracks_resource_artifact_path() {
         let run_dir = RunDir::create().expect("run dir");
         let runner = ExtensionRunner::for_context(context()).with_run_dir(&run_dir);

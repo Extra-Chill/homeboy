@@ -79,6 +79,16 @@ pub fn declares_lint_findings_sidecar(component: &Component) -> bool {
 }
 
 pub fn build_lint_runner(request: LintRunnerRequest<'_>) -> homeboy_core::Result<ExtensionRunner> {
+    let scope = crate::component::resolve_component_scope_at(
+        request.component,
+        crate::component::ScopeCommand::Lint,
+        std::path::Path::new(
+            request
+                .path_override
+                .as_deref()
+                .unwrap_or(&request.component.local_path),
+        ),
+    );
     let resolved = resolve_lint_command(request.component)?;
     let (string_settings, json_settings) = split_lint_settings(request.settings);
 
@@ -96,6 +106,7 @@ pub fn build_lint_runner(request: LintRunnerRequest<'_>) -> homeboy_core::Result
         .settings(&string_settings)
         .settings_json(&json_settings)
         .with_run_dir(request.run_dir)
+        .env("HOMEBOY_SCOPE_EXCLUDE", &scope.exclude.join("\n"))
         // Summary mode captures the lint/clippy stream into evidence rather than
         // tee-ing the full warning output to the terminal, so `--summary` renders
         // only the compact findings envelope on large repositories (#9845).
