@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.435.7] - 2026-10-30
+
+### Fixed
+- unblock release — externalize oversized run metadata, resolve remote-only worktree bases
+
 ## [0.435.6] - 2026-10-30
 
 ### Changed
