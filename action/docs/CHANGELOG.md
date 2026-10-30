@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.23.0] - 2026-10-30
+
+### Added
+- detect and fan out monorepo component checks (components: changed|all)
+
 ## [2.22.2] - 2026-10-22
 
 ### Changed
