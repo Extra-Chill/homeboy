@@ -4018,6 +4018,16 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
             record.metadata["provider_executions_consumed"] = serde_json::json!(1);
         })
         .unwrap();
+        let terminal_continuation = agent_task_lifecycle::reconcile_status(run_id)
+            .unwrap()
+            .metadata
+            .get("cook_continuation")
+            .cloned();
+        assert_eq!(
+            terminal_continuation.as_ref().map(|value| &value["state"]),
+            Some(&serde_json::json!("pending")),
+            "the terminal attempt queues its own continuation"
+        );
         let finalization_calls = Arc::new(AtomicUsize::new(0));
         let finalization_calls_for_finalizer = Arc::clone(&finalization_calls);
         let expected_base = advanced_base.clone();
@@ -4060,9 +4070,15 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
                 .metadata["provider_executions_consumed"],
             1
         );
-        assert!(crate::agent_task_service::claim_continuation()
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            agent_task_lifecycle::reconcile_status(run_id)
+                .unwrap()
+                .metadata
+                .get("cook_continuation")
+                .cloned(),
+            terminal_continuation,
+            "inline catch-up schedules no recovery continuation"
+        );
 
         // Content Cook did not promote makes the destination foreign: it is
         // never rebased.
