@@ -398,10 +398,15 @@ fn controller_lifecycle_process() {
     // `runner reconcile` is needed to retire the idle, drained B generation.
     crate::create(r#"{"id":"runner-a","kind":"local"}"#, false).unwrap();
     let binary = sync().join("selected-homeboy");
-    std::fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"data\":{\"git_commit\":\"refresh-fixture\",\"git_dirty\":false}}'\n").unwrap();
+    let identity = json!({"data": {
+        "version": homeboy_product_identity::product_version(),
+        "git_commit": "refresh-fixture",
+        "git_dirty": false
+    }});
+    std::fs::write(&binary, format!("#!/bin/sh\nprintf '%s\\n' '{identity}'\n")).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let (_, exit) = crate::refresh_homeboy_binary(crate::HomeboyBinaryRefreshOptions {
+    let (refresh, exit) = crate::refresh_homeboy_binary(crate::HomeboyBinaryRefreshOptions {
         runner_id: "runner-a".into(),
         mode: crate::HomeboyBinaryRefreshMode::Select {
             binary_path: binary.display().to_string(),
@@ -415,7 +420,7 @@ fn controller_lifecycle_process() {
         dry_run: false,
     })
     .unwrap();
-    assert_eq!(exit, 0);
+    assert_eq!(exit, 0, "{refresh:?}");
     assert!(!read("runner-a")
         .unwrap()
         .unwrap()
