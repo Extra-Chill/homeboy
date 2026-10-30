@@ -21,11 +21,11 @@ homeboy trace <component> <scenario> --span running:renderer.site_event_received
 homeboy trace <component> <scenario> --phase submit:ui.submit --phase cli:cli.start --phase ready:server.ready
 homeboy trace <component> <scenario> --rig <rig-id> --phase-preset create-site
 homeboy trace matrix <component> <scenario> --axis viewport=desktop,mobile --axis ece_locations=product,none
-homeboy trace <component> <scenario> --runs 5 --aggregate spans --schedule interleaved
+homeboy trace <component> <scenario> --repeat 5 --aggregate spans --schedule interleaved
 homeboy trace <component> <scenario> --attach logfile:/tmp/service.log --attach pid:1234
 homeboy trace compare before.json after.json --focus-span phase.wp_boot_start_to_wp_boot_ready
-homeboy trace compare <component> <scenario> --baseline-target develop --candidate HEAD --runs 5 --report markdown
-homeboy trace compare-variant --rig studio --scenario studio-app-create-site --runs 5 --overlay overlays/change.patch --output-dir /tmp/trace-experiments/change
+homeboy trace compare <component> <scenario> --baseline-target develop --candidate HEAD --repeat 5 --report markdown
+homeboy trace compare-variant --rig studio --scenario studio-app-create-site --repeat 5 --overlay overlays/change.patch --output-dir /tmp/trace-experiments/change
 homeboy trace <component> <scenario> --report=markdown
 homeboy trace <component> <scenario> --baseline
 homeboy trace <component> <scenario> --ratchet
@@ -171,13 +171,13 @@ contract.
 
 ## Baseline/Candidate Compare
 
-`homeboy trace compare <component> <scenario>` can run the same trace scenario against two local paths or git refs, aggregate the span timings, write JSON artifacts, and render a Markdown summary. This is the first-class A/B browser proof workflow for trace rigs: pass baseline and candidate targets, choose `--runs`, and Homeboy preserves per-run artifacts while producing reviewer-ready span and browser evidence tables.
+`homeboy trace compare <component> <scenario>` can run the same trace scenario against two local paths or git refs, aggregate the span timings, write JSON artifacts, and render a Markdown summary. This is the first-class A/B browser proof workflow for trace rigs: pass baseline and candidate targets, choose `--repeat`, and Homeboy preserves per-run artifacts while producing reviewer-ready span and browser evidence tables.
 
 ```sh
 homeboy trace compare woocommerce-gateway-stripe ece-product-page-waterfall \
   --baseline-target develop \
   --candidate HEAD \
-  --runs 5 \
+  --repeat 5 \
   --visual-compare \
   --visual-compare-provider <COMMAND> \
   --report markdown
@@ -204,10 +204,10 @@ Known trace lab plumbing issues are tracked separately and are not papered over 
 
 ## Repeated Runs
 
-Use `--runs N` to execute the same trace scenario multiple times and aggregate timing spans. `--repeat N` remains accepted as the same option.
+Use `--repeat N` to execute the same trace scenario multiple times and aggregate timing spans.
 
 ```sh
-homeboy trace woocommerce-gateway-stripe ece-product-page-waterfall --runs 5 --aggregate spans
+homeboy trace woocommerce-gateway-stripe ece-product-page-waterfall --repeat 5 --aggregate spans
 ```
 
 Aggregate JSON preserves each run's trace artifact path in `runs[].artifact_path` and keeps raw timing samples under each span:

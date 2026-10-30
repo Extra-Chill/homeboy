@@ -58,8 +58,8 @@ homeboy runs evidence "$run_id"
 ```
 
 If `runs evidence` reports success with zero artifacts, the workload is not yet
-reviewable. Keep the run id and output directory, then use the artifact
-promotion or attach command that matches the output shape:
+reviewable. Keep the run id and output directory, then attach the file output
+to the run:
 
 ```sh
 # Attach an existing runner-side file to an existing run.
@@ -67,17 +67,10 @@ homeboy runs artifact attach "$run_id" \
   --runner lab-runner \
   --path /workspace/example-component/artifacts/review/summary.json \
   --name review-summary
-
-# Proposed/upcoming: promote a runner-side directory to an existing run.
-homeboy runner artifact promote lab-runner "$run_id" \
-  --path artifacts/review \
-  --kind static_html \
-  --entry index.html
 ```
 
-Until directory promotion exists, prefer workflows that already register
-directory artifacts through the runner daemon, a command-specific artifact
-contract, CI artifact upload, or `runs import --from-gh-actions`.
+Directory artifacts register through the runner daemon, a command-specific
+artifact contract, CI artifact upload, or `runs import --from-gh-actions`.
 
 ## Static HTML Example
 
@@ -138,16 +131,6 @@ done
   --input artifacts/matrix \
   --output artifacts/matrix/index.html \
   --json artifacts/matrix/matrix-summary.json
-```
-
-Proposed/upcoming aggregate directory promotion shape:
-
-```sh
-homeboy runner artifact promote lab-runner "$run_id" \
-  --path artifacts/matrix \
-  --kind matrix_static_html \
-  --entry index.html
-homeboy runs evidence "$run_id"
 ```
 
 For rig matrix work, use rig artifacts when the rig owns setup, service state,

@@ -132,31 +132,13 @@ cmdkey /delete:ssh_key_<identity_file_hash>
 
 Note: The exact key name depends on the key file path hash.
 
-## SSH Agent Forwarding
-
-When `forward_agent` is enabled in server configuration, SSH keys from your local agent are forwarded to the remote server.
+## Locked Key Signing
 
 For agents that cannot sign while the controller is locked, configure
 `auth.mode: key_controlmaster` with an explicit `auth.persist` lifetime and run
 `homeboy server connect <server>` while the key is available. Homeboy commands
 then reuse that authenticated control socket until its configured idle lifetime
 expires.
-
-### Benefits
-
-- Remote servers can use your local SSH keys
-- Enables Git operations on remote server using your credentials
-- Reduces need for keys on remote servers
-
-### Configuration
-
-```bash
-homeboy server set production --forward-agent true
-```
-
-### Security Considerations
-
-SSH agent forwarding grants the remote server access to your forwarded SSH identities. Enable only on trusted servers.
 
 ## Key Types
 

@@ -95,14 +95,11 @@ window. The resolved policy is echoed as `retention` in the JSON output. See
 ```sh
 homeboy self docs [TOPIC]
 homeboy self docs list
-homeboy self docs map <component-id> [--write] [--include-private]
 ```
 
 Topic display is the default mode. `homeboy self docs <topic>` renders embedded
 markdown documentation from the Homeboy binary, and `homeboy self docs list`
-prints available topics. `homeboy self docs map <component-id>` generates a
-machine-optimized codebase map; pass `--write` to write markdown files under the
-component docs directory.
+prints available topics.
 
 ## Related
 

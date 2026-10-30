@@ -55,7 +55,7 @@ Use traces for black-box behavior and scenario timing:
 ```bash
 homeboy trace my-component list
 homeboy trace my-component checkout-flow --baseline
-homeboy trace my-component checkout-flow --runs 5 --aggregate spans
+homeboy trace my-component checkout-flow --repeat 5 --aggregate spans
 ```
 
 Trace output is most useful when paired with persisted artifacts or a Markdown report that can be attached to a PR or issue.

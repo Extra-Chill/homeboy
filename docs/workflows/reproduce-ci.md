@@ -7,7 +7,6 @@ Use Homeboy CI workflows when a component declares CI profiles that can be run t
 - You need to list the CI profiles a component exposes to Homeboy.
 - A failing PR check maps to a declared Homeboy lint, test, bench, or review profile.
 - You need differential classification between a baseline command and a head command.
-- An autofix job needs a dry-run transaction before pushing changes.
 
 ## 1. List Declared Profiles
 
@@ -66,21 +65,6 @@ homeboy review ci differential-gate \
 ```
 
 This is useful for reporting whether a branch newly broke the gate or inherited an existing failure.
-
-## 5. Dry-Run Autofix Transactions
-
-When CI is allowed to push autofixes, dry-run the transaction first:
-
-```bash
-homeboy review ci autofix \
-  --path /path/to/repo \
-  --target-repo owner/repo \
-  --target-branch pr-head-branch \
-  --message "chore(ci): apply Homeboy autofixes" \
-  --dry-run
-```
-
-The dry-run should report the changed files, target route, and whether it would push directly or create an autofix branch.
 
 ## Reference
 
