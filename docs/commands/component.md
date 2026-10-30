@@ -11,6 +11,21 @@ homeboy component [OPTIONS] <COMMAND>
 
 ## Subcommands
 
+### `changed`
+
+```sh
+homeboy component changed --base <ref> --head <ref> [--path <repo>] \
+  [--format json|matrix|ids] [--shared-path <glob> ...]
+```
+
+Discover components from checkout manifests, map changed files to their deepest
+owner, and expand to same-repo `validation_dependencies` dependents. Release and
+deploy scope excludes are respected. Shared paths select all components. Matrix
+output is raw `{"include":[{"component":"id","path":"dir"}]}` (root path `.`).
+
+See [monorepo deploys](../guides/monorepo-deploys.md) for detailed semantics and a
+deploy-on-merge GitHub Actions workflow using `homeboy deploy <id> --ref <sha>`.
+
 ### `create`
 
 ```sh

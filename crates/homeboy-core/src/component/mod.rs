@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod changed;
 // `config` and `model` are the pure serializable component shape declared in
 // `homeboy.json`. The extension-driven, fs-touching remote-path resolution over
 // `Component` lives in `remote_path` as free functions.
