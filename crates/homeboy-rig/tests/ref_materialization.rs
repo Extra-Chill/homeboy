@@ -1,13 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use homeboy_core::git::run_git;
 use homeboy_core::test_support::with_isolated_home;
 use homeboy_rig::{run_status, run_up, run_up_with_refs, RigSpec};
-
-fn git(path: &Path, args: &[&str]) -> String {
-    run_git(path, args, "test git").unwrap().trim().to_string()
-}
+use homeboy_test_support::git::output as git;
 
 #[test]
 fn local_pull_head_runs_in_detached_worktree_and_tracks_new_heads() {

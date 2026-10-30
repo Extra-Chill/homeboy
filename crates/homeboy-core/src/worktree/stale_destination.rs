@@ -439,21 +439,8 @@ fn quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
-    fn git(cwd: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use homeboy_test_support::git::output as git;
 
     /// An origin with `main`, a clone of it, and a linked derived worktree on
     /// `fix/issue-1-fixture` started from `origin/main`.

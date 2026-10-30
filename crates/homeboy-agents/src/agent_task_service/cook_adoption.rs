@@ -1680,7 +1680,6 @@ mod reuse_tests {
     use crate::agent_task_scheduler::AgentTaskPlan;
     use serde_json::json;
     use std::path::Path;
-    use std::process::Command;
 
     fn fixture_plan() -> AgentTaskPlan {
         AgentTaskPlan::new(
@@ -1715,19 +1714,7 @@ mod reuse_tests {
         )
     }
 
-    fn git(cwd: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    }
+    use homeboy_test_support::git::output as git;
 
     fn applied_promotion(run_id: &str, candidate_sha: &str, worktree: &Path) -> Value {
         json!({

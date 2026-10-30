@@ -987,21 +987,8 @@ fn is_conventional_prefix(prefix: &str) -> bool {
 mod tests {
     use super::*;
     use std::fs;
-    use std::process::Command;
 
-    fn git(path: &str, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("git command should run");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_test_support::git::run as git;
 
     fn init_repo() -> (tempfile::TempDir, String) {
         let dir = tempfile::TempDir::new().expect("tempdir");

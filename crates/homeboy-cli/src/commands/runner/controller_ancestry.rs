@@ -254,20 +254,7 @@ mod tests {
         assert!(long.chars().count() < MAX_DETAIL_CHARS * 2);
     }
 
-    fn git(path: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(args)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_test_support::git::run as git;
 
     fn git_stdout(path: &std::path::Path, args: &[&str]) -> String {
         let output = Command::new("git")

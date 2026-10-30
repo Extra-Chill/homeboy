@@ -328,19 +328,7 @@ fn run_cli<const N: usize>(args: [&str; N]) -> GitCommandOutput {
     output
 }
 
-fn git(dir: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("spawn git");
-    assert!(
-        output.status.success(),
-        "git {:?}: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_test_support::git::run as git;
 
 fn rev(dir: &Path, reference: &str) -> String {
     let output = Command::new("git")

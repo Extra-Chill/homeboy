@@ -189,18 +189,7 @@ fn homeboy_bin() -> PathBuf {
     PathBuf::from(std::env::var_os("CARGO_BIN_EXE_homeboy").expect("CARGO_BIN_EXE_homeboy"))
 }
 
-fn git(cwd: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("git");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_test_support::git::run as git;
 
 fn git_output(cwd: &Path, args: &[&str]) -> String {
     let output = Command::new("git")

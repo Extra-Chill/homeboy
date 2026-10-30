@@ -2,7 +2,6 @@ use super::*;
 use homeboy_core::component::ScopedExtensionConfig;
 use std::collections::HashMap;
 use std::fs;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn tmp_dir(name: &str) -> PathBuf {
@@ -13,19 +12,7 @@ fn tmp_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("homeboy-lint-fix-{name}-{nanos}"))
 }
 
-fn run_git(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_test_support::git::run as run_git;
 
 fn routed_component(root: &Path, extension_id: &str) -> Component {
     let mut component = Component::new(

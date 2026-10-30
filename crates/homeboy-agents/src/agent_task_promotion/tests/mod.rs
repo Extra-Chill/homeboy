@@ -333,19 +333,7 @@ pub(super) fn gate_home() -> homeboy_core::test_support::HomeGuard {
     homeboy_core::test_support::HomeGuard::new()
 }
 
-pub(super) fn git(cwd: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {} failed: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+pub(super) use homeboy_test_support::git::run as git;
 
 pub(super) fn promotion_options(to_worktree: &str) -> AgentTaskPromotionRequest {
     AgentTaskPromotionRequest {

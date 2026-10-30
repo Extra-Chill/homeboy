@@ -483,14 +483,7 @@ mod tests {
 
     use homeboy_core::test_support::run_git_command as run_git;
 
-    fn git_repo() -> tempfile::TempDir {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let dir = temp.path();
-        run_git(dir, &["init", "-q"]);
-        run_git(dir, &["config", "user.email", "homeboy@example.com"]);
-        run_git(dir, &["config", "user.name", "Homeboy Test"]);
-        temp
-    }
+    use homeboy_test_support::git::repo as git_repo;
 
     fn git_component(dir: &std::path::Path) -> Component {
         Component {

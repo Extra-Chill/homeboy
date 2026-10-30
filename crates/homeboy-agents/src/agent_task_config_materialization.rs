@@ -535,7 +535,7 @@ mod tests {
         init_repo(repo.path());
         fs::create_dir_all(repo.path().join("plugin")).expect("plugin dir");
         fs::write(repo.path().join("plugin/main.php"), "<?php").expect("plugin file");
-        commit_all(repo.path());
+        homeboy_test_support::git::commit_all(repo.path(), "fixture");
         let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
             .expect("head")
             .trim()
@@ -564,7 +564,7 @@ mod tests {
         init_repo(repo.path());
         fs::create_dir_all(repo.path().join("runtime")).expect("runtime dir");
         fs::write(repo.path().join("runtime/bootstrap.php"), "<?php").expect("runtime file");
-        commit_all(repo.path());
+        homeboy_test_support::git::commit_all(repo.path(), "fixture");
         let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
             .expect("head")
             .trim()
@@ -599,7 +599,7 @@ mod tests {
             "printf ready > ready.txt",
         )
         .expect("setup script");
-        commit_all(repo.path());
+        homeboy_test_support::git::commit_all(repo.path(), "fixture");
         let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
             .expect("head")
             .trim()
@@ -640,7 +640,7 @@ mod tests {
         init_repo(repo.path());
         fs::create_dir_all(repo.path().join("runtime")).expect("runtime dir");
         fs::write(repo.path().join("runtime/bootstrap.txt"), "runtime").expect("runtime file");
-        commit_all(repo.path());
+        homeboy_test_support::git::commit_all(repo.path(), "fixture");
         let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
             .expect("head")
             .trim()
@@ -678,7 +678,7 @@ mod tests {
         )
         .expect("conflict file");
         fs::write(repo.path().join("runtime/bootstrap.txt"), "runtime").expect("runtime file");
-        commit_all(repo.path());
+        homeboy_test_support::git::commit_all(repo.path(), "fixture");
         let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
             .expect("head")
             .trim()
@@ -706,10 +706,5 @@ mod tests {
         git::run_git(path, &["config", "user.name", "Test"], "name").expect("git name");
         git::run_git(path, &["config", "user.email", "test@example.com"], "email")
             .expect("git email");
-    }
-
-    fn commit_all(path: &Path) {
-        git::run_git(path, &["add", "."], "add").expect("git add");
-        git::run_git(path, &["commit", "-m", "fixture"], "commit").expect("git commit");
     }
 }

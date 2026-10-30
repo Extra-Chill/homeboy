@@ -312,16 +312,4 @@ fn tail(bytes: &[u8]) -> String {
     chars[chars.len().saturating_sub(4000)..].iter().collect()
 }
 
-fn git(path: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_test_support::git::run as git;

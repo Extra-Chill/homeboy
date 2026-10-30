@@ -235,20 +235,8 @@ mod tests {
     use super::recover;
     use homeboy_core::component::Component;
     use std::path::Path;
-    use std::process::Command;
 
-    fn git(root: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_test_support::git::run as git;
 
     fn component(root: &Path) -> Component {
         serde_json::from_value(serde_json::json!({

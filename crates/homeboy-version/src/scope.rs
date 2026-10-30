@@ -212,38 +212,11 @@ mod tests {
     use super::ReleaseScope;
     use homeboy_core::component::{CommandScopeConfig, Component, ScopeConfig};
 
-    fn run_git(dir: &std::path::Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: stdout={} stderr={}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_test_support::git::run as run_git;
 
-    fn commit_file(dir: &std::path::Path, name: &str, content: &str, message: &str) {
-        if let Some(parent) = dir.join(name).parent() {
-            std::fs::create_dir_all(parent).expect("create fixture parent");
-        }
-        std::fs::write(dir.join(name), content).expect("write fixture file");
-        run_git(dir, &["add", name]);
-        run_git(dir, &["commit", "-q", "-m", message]);
-    }
+    use homeboy_test_support::git::commit_file;
 
-    fn git_repo() -> tempfile::TempDir {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let dir = temp.path();
-        run_git(dir, &["init", "-q"]);
-        run_git(dir, &["config", "user.email", "homeboy@example.com"]);
-        run_git(dir, &["config", "user.name", "Homeboy Test"]);
-        temp
-    }
+    use homeboy_test_support::git::repo as git_repo;
 
     #[test]
     fn blocks_engine_style_package_scope_uses_package_tags_and_ignores_siblings() {

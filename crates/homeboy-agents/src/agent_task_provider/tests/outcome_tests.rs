@@ -435,9 +435,7 @@ fn empty_patch_with_substantive_evidence_is_flagged_for_review_not_noop() {
 /// no-change feedback loop handles it. Any drift keeps the #7719 salvage path.
 #[test]
 fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_unchanged() {
-    fn git(cwd: &std::path::Path, args: &[&str]) -> String {
-        homeboy_core::test_support::git_command_output(cwd, args)
-    }
+    use homeboy_test_support::git::output as git;
     let workspace = tempfile::tempdir().expect("attempt checkout");
     git(workspace.path(), &["init", "--quiet", "-b", "main"]);
     git(
@@ -545,9 +543,7 @@ fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_uncha
 /// `no_op` claim on a checkout that did change stays an unaudited `no_op`.
 #[test]
 fn no_op_without_change_artifact_is_verified_only_when_the_attempt_checkout_is_unchanged() {
-    fn git(cwd: &std::path::Path, args: &[&str]) -> String {
-        homeboy_core::test_support::git_command_output(cwd, args)
-    }
+    use homeboy_test_support::git::output as git;
     let workspace = tempfile::tempdir().expect("attempt checkout");
     git(workspace.path(), &["init", "--quiet", "-b", "main"]);
     git(
@@ -648,9 +644,7 @@ fn no_op_without_change_artifact_is_verified_only_when_the_attempt_checkout_is_u
 /// patch, is left untouched.
 #[test]
 fn succeeded_without_change_artifact_is_a_verified_no_change_attempt_when_a_patch_is_required() {
-    fn git(cwd: &std::path::Path, args: &[&str]) -> String {
-        homeboy_core::test_support::git_command_output(cwd, args)
-    }
+    use homeboy_test_support::git::output as git;
     let workspace = tempfile::tempdir().expect("attempt checkout");
     git(workspace.path(), &["init", "--quiet", "-b", "main"]);
     git(
@@ -761,9 +755,7 @@ fn succeeded_without_change_artifact_is_a_verified_no_change_attempt_when_a_patc
 /// exist and then failing the required `patch` artifact.
 #[test]
 fn review_form_only_failure_without_edits_records_the_verified_empty_patch() {
-    fn git(cwd: &std::path::Path, args: &[&str]) -> String {
-        homeboy_core::test_support::git_command_output(cwd, args)
-    }
+    use homeboy_test_support::git::output as git;
     let workspace = tempfile::tempdir().expect("attempt checkout");
     git(workspace.path(), &["init", "--quiet", "-b", "main"]);
     git(

@@ -495,14 +495,7 @@ fn write_registration_script(
     .expect("registration script");
 }
 
-fn git(repo: &std::path::Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {:?} failed", args);
-}
+use homeboy_test_support::git::run as git;
 
 fn git_output(repo: &std::path::Path, args: &[&str]) -> String {
     let output = Command::new("git")

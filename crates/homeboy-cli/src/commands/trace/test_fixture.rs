@@ -1,5 +1,4 @@
 use std::fs;
-use std::process::Command;
 
 pub(super) const TRACE_FIXTURE_EXTENSION_ID: &str = "trace-fixture";
 
@@ -175,19 +174,7 @@ pub(super) fn init_overlay_component(path: &std::path::Path) {
     );
 }
 
-fn run_git(path: &std::path::Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_test_support::git::run as run_git;
 
 pub(super) fn write_trace_rig(
     home: &tempfile::TempDir,

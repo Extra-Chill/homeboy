@@ -136,20 +136,7 @@ mod tests {
     const MERGE: &str = "07b0fa3d9b9464dc7efe8d7c9d96dda51d37c324";
     const PR: &str = r#"[{"merged_at":"2026-09-25T11:26:31Z","merge_commit_sha":"07b0fa3d9b9464dc7efe8d7c9d96dda51d37c324","base":{"repo":{"full_name":"Extra-Chill/homeboy"}}}]"#;
 
-    fn git(dir: &std::path::Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?}: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use homeboy_test_support::git::output as git;
 
     fn commit(dir: &std::path::Path, message: &str, contents: &str) -> String {
         std::fs::write(dir.join("file"), contents).expect("write fixture");

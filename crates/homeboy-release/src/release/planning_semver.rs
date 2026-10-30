@@ -464,23 +464,9 @@ mod tests {
 
     use homeboy_core::test_support::run_git_command as run_git;
 
-    fn commit_file(dir: &std::path::Path, name: &str, content: &str, message: &str) {
-        if let Some(parent) = dir.join(name).parent() {
-            std::fs::create_dir_all(parent).expect("create fixture parent");
-        }
-        std::fs::write(dir.join(name), content).expect("write fixture file");
-        run_git(dir, &["add", name]);
-        run_git(dir, &["commit", "-q", "-m", message]);
-    }
+    use homeboy_test_support::git::commit_file;
 
-    fn git_repo() -> tempfile::TempDir {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let dir = temp.path();
-        run_git(dir, &["init", "-q"]);
-        run_git(dir, &["config", "user.email", "homeboy@example.com"]);
-        run_git(dir, &["config", "user.name", "Homeboy Test"]);
-        temp
-    }
+    use homeboy_test_support::git::repo as git_repo;
 
     #[test]
     fn test_build_semver_recommendation() {

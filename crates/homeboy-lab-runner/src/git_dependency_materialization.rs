@@ -784,15 +784,7 @@ mod tests {
         }
     }
 
-    fn run_git(path: &Path, args: &[&str]) {
-        let output = GitRepository::new(path).execute(args);
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    use homeboy_test_support::git::run as run_git;
 
     fn git_output(path: &Path, args: &[&str]) -> String {
         let output = GitRepository::new(path).execute(args);

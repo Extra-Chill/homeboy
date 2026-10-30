@@ -353,18 +353,7 @@ mod tests {
     };
     use homeboy_core::component::Component;
 
-    fn run_git(dir: &std::path::Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("git");
-        assert!(
-            status.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&status.stderr)
-        );
-    }
+    use homeboy_test_support::git::run as run_git;
 
     fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")

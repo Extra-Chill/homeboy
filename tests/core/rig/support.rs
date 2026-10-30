@@ -1,8 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(crate) use homeboy_core::test_support::GitFixture;
-
 pub(crate) fn write_rig(package: &Path, id: &str, body: &str) -> PathBuf {
     let rig_dir = package.join("rigs").join(id);
     fs::create_dir_all(&rig_dir).expect("rig dir");
@@ -27,16 +25,7 @@ pub(crate) fn minimal_rig(id: &str) -> String {
     )
 }
 
-pub(crate) fn run_git(dir: &Path, args: &[&str]) {
-    let output = GitFixture::new(dir).execute(args);
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}{}",
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+pub(crate) use homeboy_test_support::git::run as run_git;
 
 pub(crate) fn init_main(dir: &Path) {
     run_git(dir, &["init", "-b", "main"]);

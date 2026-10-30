@@ -480,16 +480,8 @@ fn is_homeboy_component_id(path: &Path, dependency_id: &str) -> bool {
 #[cfg(test)]
 mod dependency_scoped_excludes_tests {
     use super::*;
-    use std::process::Command;
 
-    fn git(dir: &Path, args: &[&str]) {
-        assert!(Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .expect("git")
-            .success());
-    }
+    use homeboy_test_support::git::run as git;
 
     #[test]
     fn parent_gitignore_never_drops_a_tracked_dependency_lockfile() {

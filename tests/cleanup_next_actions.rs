@@ -638,18 +638,7 @@ fn write_executable(path: &Path, contents: &str) {
     homeboy_test_support::write_executable(path, contents, 0o755).expect("write executable");
 }
 
-fn run_git(path: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+use homeboy_test_support::git::run as run_git;
 
 fn homeboy_bin() -> PathBuf {
     PathBuf::from(std::env::var_os("CARGO_BIN_EXE_homeboy").expect("CARGO_BIN_EXE_homeboy"))

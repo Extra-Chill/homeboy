@@ -14,14 +14,7 @@ struct Fixture {
     noise_blob: String,
 }
 
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .expect("git");
-    assert!(status.success(), "git {args:?} failed");
-}
+use homeboy_test_support::git::run as git;
 
 fn git_output(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
