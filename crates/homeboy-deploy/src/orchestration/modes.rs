@@ -273,17 +273,21 @@ pub(super) fn run_dry_run_mode(
             if config.check {
                 result = result.with_component_status(status);
             }
-            Ok(result)
+            Ok(result.validate_version_downgrade(config))
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let failed = results
+        .iter()
+        .filter(|result| result.status == "failed")
+        .count() as u32;
     let total = results.len() as u32;
     Ok(DeployOrchestrationResult {
         results,
         summary: DeploySummary {
             total,
             succeeded: 0,
-            failed: 0,
+            failed,
             skipped: 0,
         },
         deploy_run_id: None,
@@ -804,9 +808,33 @@ mod tests {
             &config,
         )
         .expect("dry-run must report rather than refuse a remote-newer version");
-        assert_eq!(planned.results[0].status, "planned");
+        assert_eq!(planned.results[0].status, "failed");
+        assert_eq!(planned.summary.failed, 1);
+        assert_eq!(
+            planned.results[0].error_code.as_deref(),
+            Some("deploy.version_downgrade")
+        );
         assert_eq!(planned.results[0].local_version.as_deref(), Some("1.2.3"));
         assert_eq!(planned.results[0].remote_version.as_deref(), Some("1.3.0"));
+
+        let allowed = run_dry_run_mode(
+            &[Component {
+                id: planned.results[0].id.clone(),
+                deploy_strategy: Some("file".into()),
+                ..Default::default()
+            }],
+            &local_versions,
+            &remote_versions,
+            &Project::default(),
+            "/srv/site",
+            &DeployConfig {
+                allow_downgrade: true,
+                ..config
+            },
+        )
+        .expect("explicit rollback can be planned");
+        assert_eq!(allowed.results[0].status, "planned");
+        assert_eq!(allowed.summary.failed, 0);
     }
 
     #[test]

@@ -48,6 +48,13 @@ pub(crate) fn prepare_component_deploy(
     remote_version: Option<String>,
     release_artifact: Option<ReleaseArtifactLease>,
 ) -> std::result::Result<PreparedComponentDeploy, ComponentDeployResult> {
+    let version_check = ComponentDeployResult::new(component, base_path)
+        .with_versions(local_version.clone(), remote_version.clone())
+        .validate_version_downgrade(config);
+    if version_check.error_code.is_some() {
+        return Err(version_check);
+    }
+
     let is_git_deploy = component.deploy_strategy.as_deref() == Some("git");
     let is_file_deploy = component.deploy_strategy.as_deref() == Some("file");
 
@@ -391,6 +398,56 @@ fn selected_release_artifact(
 mod tests {
     use super::*;
     use crate::PreparedDeployArtifact;
+
+    #[test]
+    fn downgrade_preflight_blocks_before_build_even_with_force() {
+        let config = DeployConfig {
+            force: true,
+            ..Default::default()
+        };
+        let result = prepare_component_deploy(
+            &Component::default(),
+            &config,
+            "/srv/site",
+            &Project::default(),
+            Some("1.31.0".into()),
+            Some("1.32.0".into()),
+            None,
+        )
+        .err()
+        .expect("downgrade blocked");
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("deploy.version_downgrade")
+        );
+        let error = result.error.unwrap();
+        assert!(error.contains("1.31.0") && error.contains("1.32.0"));
+        assert_eq!(result.build_exit_code, None);
+    }
+
+    #[test]
+    fn version_guard_preserves_allowed_cases() {
+        for (local, remote, allow) in [
+            (Some("1.0.0"), Some("2.0.0"), true),
+            (Some("1.0.0"), Some("1.0.0"), false),
+            (Some("2.0.0"), Some("1.0.0"), false),
+            (Some("1.0.0"), None, false),
+            (None, Some("2.0.0"), false),
+            (Some("dev"), Some("2.0.0"), false),
+            (Some("1.0.0"), Some("dev"), false),
+        ] {
+            let result = ComponentDeployResult::new(&Component::default(), "/srv/site")
+                .with_status("planned")
+                .with_versions(local.map(str::to_string), remote.map(str::to_string))
+                .validate_version_downgrade(&DeployConfig {
+                    allow_downgrade: allow,
+                    ..Default::default()
+                });
+            assert_eq!(result.status, "planned", "{local:?} / {remote:?}");
+            assert!(result.error_code.is_none());
+        }
+    }
 
     #[test]
     fn prepared_artifact_does_not_inherit_an_unrelated_release_lease() {

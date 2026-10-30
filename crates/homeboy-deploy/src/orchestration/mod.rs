@@ -37,9 +37,8 @@ mod smoke_check;
 use modes::{extension_skipped_results, run_check_mode, run_dry_run_mode, CheckModeInput};
 use preflight::{
     check_uncommitted_changes, check_unreleased_commits, guard_checkout_required_selectors,
-    guard_head_matches_invocation_checkout, guard_local_build_downgrades,
-    guard_local_build_source_freshness, local_build_components, sync_components,
-    verify_expected_version, warn_non_default_branch,
+    guard_head_matches_invocation_checkout, guard_local_build_source_freshness,
+    local_build_components, sync_components, verify_expected_version, warn_non_default_branch,
 };
 #[cfg(test)]
 use prepared_payloads::prepare_component_deployments;
@@ -468,13 +467,6 @@ pub(super) fn prepare_components(
         .iter()
         .filter_map(|c| local_deploy_version(c).map(|v| (c.id.clone(), v)))
         .collect();
-
-    guard_local_build_downgrades(
-        &local_build_components,
-        &local_versions,
-        &remote_versions,
-        config,
-    )?;
 
     // Build and validate every local artifact before the first remote write.
     if let Some(observation) = observation {

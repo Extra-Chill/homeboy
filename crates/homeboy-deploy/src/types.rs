@@ -585,6 +585,8 @@ pub struct ComponentDeployResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) warnings: Vec<String>,
     pub(crate) error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
     pub(crate) artifact_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) artifact_source: Option<DeployArtifactSource>,
@@ -627,6 +629,25 @@ pub struct ComponentDeployResult {
 }
 
 impl ComponentDeployResult {
+    /// Block only proven downgrades, regardless of payload source or --force.
+    pub(crate) fn validate_version_downgrade(mut self, config: &DeployConfig) -> Self {
+        if !config.allow_downgrade
+            && compare_deployed_versions(
+                self.local_version.as_deref(),
+                self.remote_version.as_deref(),
+            ) == ComponentStatus::BehindRemote
+        {
+            self.status = "failed".to_string();
+            self.error_code = Some("deploy.version_downgrade".to_string());
+            self.error = Some(format!(
+                "Refusing version downgrade from remote {} to local {}; use --allow-downgrade for an intentional rollback",
+                self.remote_version.as_deref().unwrap(),
+                self.local_version.as_deref().unwrap(),
+            ));
+        }
+        self
+    }
+
     pub(super) fn new(component: &Component, base_path: &str) -> Self {
         Self {
             id: component.id.clone(),
@@ -646,6 +667,7 @@ impl ComponentDeployResult {
             behind_upstream: None,
             warnings: Vec::new(),
             error: None,
+            error_code: None,
             artifact_path: component.build_artifact.clone(),
             artifact_source: None,
             artifact_inputs: Vec::new(),

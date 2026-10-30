@@ -8,9 +8,7 @@ use homeboy_version::version;
 
 use super::super::execution::{release_artifact_plan, ReleaseArtifactPlan};
 use super::super::generated_artifacts::uncommitted_file_report_excluding_known_generated;
-use super::super::types::{
-    compare_deployed_versions, ComponentStatus, DeployConfig, DeploymentProvenanceEvidence,
-};
+use super::super::types::{DeployConfig, DeploymentProvenanceEvidence};
 
 /// Enforce an opt-in project source-provenance policy before any source sync,
 /// checkout, dependency install, build, or remote deployment work begins.
@@ -302,7 +300,8 @@ pub(super) fn guard_local_build_source_freshness(
 /// Refuse only proven semantic-version downgrades. Missing and non-semantic
 /// version values remain observable in check/dry-run output but cannot cause a
 /// false deployment refusal.
-pub(super) fn guard_local_build_downgrades(
+#[cfg(test)]
+fn guard_local_build_downgrades(
     components: &[Component],
     local_versions: &HashMap<String, String>,
     remote_versions: &HashMap<String, String>,
@@ -315,10 +314,18 @@ pub(super) fn guard_local_build_downgrades(
     let downgrades = components
         .iter()
         .filter_map(|component| {
-            let local = local_versions.get(&component.id)?;
-            let remote = remote_versions.get(&component.id)?;
-            (compare_deployed_versions(Some(local), Some(remote)) == ComponentStatus::BehindRemote)
-                .then(|| format!("{} (remote {remote} > local {local})", component.id))
+            let result = super::super::types::ComponentDeployResult::new(component, "/srv/site")
+                .with_versions(
+                    local_versions.get(&component.id).cloned(),
+                    remote_versions.get(&component.id).cloned(),
+                )
+                .validate_version_downgrade(config);
+            result.error.map(|_| {
+                format!(
+                    "{} (remote {} > local {})",
+                    component.id, remote_versions[&component.id], local_versions[&component.id],
+                )
+            })
         })
         .collect::<Vec<_>>();
 
