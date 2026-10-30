@@ -828,6 +828,118 @@ pub fn latest_release_tag_for_repo(
     Ok(tag)
 }
 
+/// Prefer this component's release namespace in a shared repository. GitHub's
+/// releases list is newest-first; paginate so busy siblings cannot hide it.
+/// Root-repository components retain the legacy latest-release fallback.
+pub fn latest_release_tag_for_component(
+    github: &GitHubRepo,
+    github_config: &GithubConfig,
+    component_id: &str,
+) -> Result<Option<String>> {
+    let token = github_auth_token(github, github_config);
+    let base = github.latest_release_api_url();
+    let base = base.trim_end_matches("/latest");
+    for page in 1.. {
+        let url = format!("{base}?per_page=100&page={page}");
+        let bytes = match fetch_raw_content(
+            &url,
+            token.as_deref(),
+            github_command_env(github, github_config),
+        )? {
+            FetchOutcome::NotFound => break,
+            FetchOutcome::Found(bytes) => bytes,
+        };
+        let releases: Vec<Value> = serde_json::from_slice(&bytes).map_err(|error| {
+            Error::internal_json(format!("Failed to parse releases: {error}"), None)
+        })?;
+        if let Some(tag) = component_release_tag(&releases, component_id) {
+            return Ok(Some(tag));
+        }
+        if releases.len() < 100 {
+            break;
+        }
+    }
+    // Never substitute a sibling's release when this component has none.
+    Ok(
+        latest_release_tag_for_repo(github, github_config)?.filter(|tag| {
+            tag.strip_prefix('v')
+                .and_then(|version| semver::Version::parse(version).ok())
+                .is_some()
+        }),
+    )
+}
+
+fn component_release_tag(releases: &[Value], component_id: &str) -> Option<String> {
+    let prefix = format!("{component_id}-v");
+    releases
+        .iter()
+        .filter(|release| {
+            release.get("draft").and_then(Value::as_bool) != Some(true)
+                && release.get("prerelease").and_then(Value::as_bool) != Some(true)
+        })
+        .find_map(|release| {
+            let tag = release.get("tag_name")?.as_str()?;
+            let version = semver::Version::parse(tag.strip_prefix(&prefix)?).ok()?;
+            (version.pre.is_empty()).then(|| tag.to_string())
+        })
+}
+
+/// Read a component's config at its release tag. Prefixed monorepo releases
+/// locate the config by its declared identity, not by an assumed directory.
+pub fn fetch_component_config_at_tag(
+    github: &GitHubRepo,
+    github_config: &GithubConfig,
+    tag: &str,
+    component_id: &str,
+) -> Result<Component> {
+    if !tag.starts_with(&format!("{component_id}-v")) {
+        return fetch_portable_config_at_tag(github, github_config, tag);
+    }
+    let bytes = download_release_zipball(github, github_config, tag)?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to read release source archive: {error}"),
+            None,
+        )
+    })?;
+    let mut matched = None;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).map_err(|error| {
+            Error::internal_io(format!("Failed to read archive entry: {error}"), None)
+        })?;
+        if file.name() != "homeboy.json" && !file.name().ends_with("/homeboy.json") {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|error| {
+            Error::internal_io(format!("Failed to read homeboy.json: {error}"), None)
+        })?;
+        let value: Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value.get("id").and_then(Value::as_str) != Some(component_id) {
+            continue;
+        }
+        if matched.is_some() {
+            return Err(Error::internal_io(
+                format!("Multiple homeboy.json files declare '{component_id}' at {tag}"),
+                None,
+            ));
+        }
+        matched = Some(crate::component::portable::component_from_portable_bytes(
+            &bytes,
+            Path::new(file.name()),
+        )?);
+    }
+    matched.ok_or_else(|| {
+        Error::internal_io(
+            format!("No homeboy.json declares '{component_id}' at {tag}"),
+            None,
+        )
+    })
+}
+
 fn parse_latest_release_tag(bytes: &[u8]) -> Result<Option<String>> {
     let value: Value = serde_json::from_slice(bytes).map_err(|error| {
         Error::internal_json(
@@ -2399,6 +2511,92 @@ mod tests {
             fixture = fixture_zip.display(),
         );
         write_executable(&bin_dir.join("curl"), &script);
+    }
+
+    #[test]
+    fn component_release_namespace_ignores_siblings_and_unstable_releases() {
+        let releases = serde_json::json!([
+            {"tag_name":"wp-native-v9.0.0"},
+            {"tag_name":"wp-native-auth-v0.5.0", "draft":true},
+            {"tag_name":"wp-native-auth-v0.5.0-rc.1", "prerelease":true},
+            {"tag_name":"wp-native-auth-vinvalid"},
+            {"tag_name":"wp-native-auth-v0.4.3"},
+            {"tag_name":"wp-native-auth-v0.4.2"}
+        ]);
+        assert_eq!(
+            component_release_tag(releases.as_array().unwrap(), "wp-native-auth"),
+            Some("wp-native-auth-v0.4.3".into())
+        );
+        assert_eq!(
+            component_release_tag(releases.as_array().unwrap(), "missing"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_less_monorepo_reads_component_config_and_asset() {
+        let _lock = crate::test_support::env_lock();
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_gh_with_token(bin.path());
+        write_fake_curl_body_status(
+            bin.path(),
+            &[(
+                "releases?",
+                r#"[{"tag_name":"sibling-v9.0.0"},{"tag_name":"wp-native-auth-v0.4.3"}]"#,
+                200,
+            )],
+        );
+        let _path = crate::test_support::EnvVarGuard::set("PATH", prefixed_path(bin.path()));
+        let github = GitHubRepo {
+            host: "github.com".into(),
+            owner: "chubes4".into(),
+            repo: "wp-native".into(),
+        };
+        let tag =
+            latest_release_tag_for_component(&github, &GithubConfig::default(), "wp-native-auth")
+                .unwrap()
+                .unwrap();
+        assert_eq!(tag, "wp-native-auth-v0.4.3");
+        let zip = build_zip(&[
+            (
+                "wp-native-sha/homeboy.json",
+                br#"{"id":"wp-native","build_artifact":"dist/wrong.zip"}"#,
+            ),
+            (
+                "wp-native-sha/plugins/wp-native-auth/homeboy.json",
+                br#"{"id":"wp-native-auth","build_artifact":"dist/wp-native-auth.zip"}"#,
+            ),
+            (
+                "wp-native-sha/plugins/sibling/homeboy.json",
+                br#"{"id":"sibling","build_artifact":"dist/sibling.zip"}"#,
+            ),
+        ]);
+        let fixture = bin.path().join("fixture.zip");
+        std::fs::write(&fixture, zip).unwrap();
+        write_fake_curl_zip_fallback(bin.path(), &fixture);
+        let component = fetch_component_config_at_tag(
+            &github,
+            &GithubConfig::default(),
+            &tag,
+            "wp-native-auth",
+        )
+        .unwrap();
+        assert_eq!(component.id, "wp-native-auth");
+        assert_eq!(
+            component.build_artifact.as_deref(),
+            Some("dist/wp-native-auth.zip")
+        );
+        assert!(github
+            .release_artifact_url(&tag, "wp-native-auth.zip")
+            .ends_with("/releases/download/wp-native-auth-v0.4.3/wp-native-auth.zip"));
+        assert!(fetch_component_config_at_tag(
+            &github,
+            &GithubConfig::default(),
+            "missing-v1.0.0",
+            "missing"
+        )
+        .is_err());
     }
 
     #[cfg(unix)]
