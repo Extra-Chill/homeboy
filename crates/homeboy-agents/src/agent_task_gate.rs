@@ -1,7 +1,7 @@
 pub mod failure_excerpt;
 pub mod placement;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -578,6 +578,15 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
     }
     candidates.sort();
     let mut evidence = Vec::new();
+    // Candidates sort before their descendants, so an ancestor selection root
+    // hydrates before any directory that resolves to it. A descendant whose
+    // selections all name an already-hydrated root is that root's own install
+    // seen from below — an upward adapter search matched the ancestor's
+    // lockfile — and hydrating it again would rerun the ancestor's install
+    // from inside a workspace member. A selection root that produced no
+    // hydration (its providers matched nothing) leaves its descendants to
+    // hydrate themselves.
+    let mut hydrated_roots: HashSet<PathBuf> = HashSet::new();
     for candidate in candidates {
         let relative = candidate
             .strip_prefix(checkout)
@@ -585,6 +594,14 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
             .display()
             .to_string();
         let relative = if relative.is_empty() { "." } else { &relative };
+        let selections = homeboy_core::deps::dependency_selection_roots(&candidate)?;
+        if !selections.is_empty()
+            && selections
+                .iter()
+                .all(|selection_root| hydrated_roots.contains(selection_root))
+        {
+            continue;
+        }
         let mut outcomes = homeboy_core::deps::hydrate_declared_dependencies_for_component(
             &candidate,
             workspace,
@@ -595,6 +612,9 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
         let failed = outcomes
             .iter()
             .any(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed);
+        if !outcomes.is_empty() {
+            hydrated_roots.insert(candidate);
+        }
         evidence.append(&mut outcomes);
         if failed {
             break;
@@ -8003,6 +8023,105 @@ mod tests {
             assert!(!root.join("dist/hydration-count").exists());
             assert!(!root.join("build/hydration-count").exists());
         });
+    }
+
+    /// A dependency adapter whose selection searches upward binds a workspace
+    /// member to the ancestor root carrying the lockfile, so the member is not
+    /// a dependency root of its own: hydrating it reran the ancestor's install
+    /// from inside the member, where the root's setup does not hold (#16692).
+    /// Each selection root hydrates once at that root; a nested directory
+    /// carrying its own lockfile is a distinct root.
+    #[test]
+    fn upward_selection_hydrates_each_selection_root_once_at_its_own_root() {
+        struct Case {
+            description: &'static str,
+            nested_lockfile: bool,
+            expected_roots: Vec<&'static str>,
+        }
+        let cases = [
+            Case {
+                description:
+                    "workspace member with only a project signal installs at the hydrated root",
+                nested_lockfile: false,
+                expected_roots: vec!["."],
+            },
+            Case {
+                description: "nested directory with its own lockfile is its own selection root",
+                nested_lockfile: true,
+                expected_roots: vec![".", "tools/generator"],
+            },
+        ];
+        for case in cases {
+            homeboy_core::test_support::with_isolated_home(|home| {
+                let checkout = tempfile::tempdir().expect("checkout");
+                let root = checkout.path();
+                fs::write(root.join("project.json"), r#"{"name":"workspace"}"#)
+                    .expect("root project signal");
+                fs::write(root.join("workspace.lock"), "").expect("root lockfile");
+                let member = root.join("apps/cli");
+                fs::create_dir_all(&member).expect("workspace member");
+                fs::write(member.join("project.json"), r#"{"name":"cli"}"#)
+                    .expect("member project signal");
+                if case.nested_lockfile {
+                    let nested = root.join("tools/generator");
+                    fs::create_dir_all(&nested).expect("nested root");
+                    fs::write(nested.join("project.json"), r#"{"name":"generator"}"#)
+                        .expect("nested project signal");
+                    fs::write(nested.join("workspace.lock"), "").expect("nested lockfile");
+                }
+                let adapters = home
+                    .path()
+                    .join(".config/homeboy/extensions/dependency-adapters");
+                fs::create_dir_all(&adapters).expect("adapter directory");
+                fs::write(
+                    adapters.join("index.json"),
+                    r#"{"schema":"homeboy-extension/dependency-adapter-index/v1","manifests":[{"id":"fixture","ecosystem":"fixture","path":"fixture.json"}]}"#,
+                )
+                .expect("adapter index");
+                fs::write(
+                    adapters.join("fixture.json"),
+                    r#"{"schema":"homeboy-extension/dependency-adapter-manifest/v1","id":"fixture","version":1,"ecosystem":"fixture","project_signals":{"root_files":["project.json"]},"package_managers":[{"id":"fixture","selection":{"priority":1,"files":["workspace.lock"],"search":"upward"},"commands":{"install":{"command":"mkdir -p deps && printf installed > deps/installed"}},"outputs":[{"path":"deps","kind":"directory"}]}]}"#,
+                )
+                .expect("adapter manifest");
+
+                let evidence = hydrate_gate_dependency_roots(root, true, "fixture")
+                    .expect("dependency hydration");
+                let roots = evidence
+                    .iter()
+                    .map(|setup| setup.package_root.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    roots, case.expected_roots,
+                    "{}: {evidence:?}",
+                    case.description
+                );
+                for setup in &evidence {
+                    assert_eq!(
+                        setup.status,
+                        homeboy_core::deps::DependencyHydrationStatus::Succeeded,
+                        "{}: {setup:?}",
+                        case.description
+                    );
+                }
+                // The install ran at each hydrated selection root and nowhere else.
+                assert!(
+                    root.join("deps/installed").is_file(),
+                    "{}",
+                    case.description
+                );
+                assert!(
+                    !member.join("deps/installed").exists(),
+                    "{}",
+                    case.description
+                );
+                assert_eq!(
+                    root.join("tools/generator/deps/installed").is_file(),
+                    case.nested_lockfile,
+                    "{}",
+                    case.description
+                );
+            });
+        }
     }
 
     #[cfg(unix)]

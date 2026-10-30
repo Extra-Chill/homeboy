@@ -334,6 +334,38 @@ pub(crate) fn resolve_dependency_providers_optional_with_control(
     Ok(providers)
 }
 
+/// The directories where the providers resolved at `path` would run their
+/// install commands. Dependency adapters whose selection searches upward
+/// report the matched selection root — an ancestor of `path` — so a workspace
+/// member resolves to the ancestor that carries its lockfile; adapters whose
+/// selection matches `path`, and manifest providers, report `path` itself.
+/// Provider kinds resolved only through an admitted component (component
+/// scripts, extensions) install at `path` and report no roots here.
+/// A directory no provider matches reports no roots.
+pub(crate) fn dependency_selection_roots(path: &Path) -> Result<Vec<PathBuf>> {
+    let local_adapter_providers = AdapterDependencyProvider::load_local(path)?;
+    if !local_adapter_providers.is_empty() {
+        return Ok(local_adapter_providers
+            .iter()
+            .map(|provider| provider.adapter.install_path.clone())
+            .collect());
+    }
+
+    if ManifestDependencyProvider::load(path)?.is_some() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+
+    let adapter_providers = AdapterDependencyProvider::load(path)?;
+    if !adapter_providers.is_empty() {
+        return Ok(adapter_providers
+            .iter()
+            .map(|provider| provider.adapter.install_path.clone())
+            .collect());
+    }
+
+    Ok(Vec::new())
+}
+
 pub(crate) fn dependency_provider_snapshot(
     component: &Component,
     path: &Path,
