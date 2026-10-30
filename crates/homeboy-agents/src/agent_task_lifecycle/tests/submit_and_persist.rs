@@ -1965,7 +1965,14 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
     let still_eligible = claim_next_eligible_queued_run_with_preflight_and_filter_in_store(
         &other,
         |record| record.run_id == queued_run_id,
-        |_, _| unreachable!("preflight runs only after the durable plan and runtime validate"),
+        |_, _| {
+            Err(homeboy_core::Error::validation_invalid_argument(
+                "preflight",
+                "fixture preflight refuses admission",
+                None,
+                None,
+            ))
+        },
     )
     .expect("scan the second root's own queue");
     assert_eq!(still_eligible.inspected, 1);
