@@ -2553,7 +2553,6 @@ printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$source" "" "$ref" "$ref" "$binary_sha" "$ide
 # Source/cache/ref describe acquisition, not immutable content identity.
 provenance_matches() {
   { IFS= read -r recorded_source && IFS= read -r recorded_cache && IFS= read -r recorded_ref && IFS= read -r recorded_target && IFS= read -r recorded_sha && IFS= read -r recorded_identity && ! IFS= read -r extra; } < "$provenance" &&
-    [ "$recorded_target" = "$ref" ] &&
     [ "$recorded_sha" = "$binary_sha" ] &&
     [ "$recorded_identity" = "$identity_record" ]
 }

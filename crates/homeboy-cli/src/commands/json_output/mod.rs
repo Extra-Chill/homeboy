@@ -802,6 +802,7 @@ fn refresh_failure_summary(failure: Option<&Value>) -> Value {
     };
     serde_json::json!({
         "exit_code": failure.get("exit_code").and_then(Value::as_i64),
+        "message": failure.get("verification").and_then(Value::as_str).filter(|text| !text.trim().is_empty()).map(bounded_refresh_text).or_else(|| failure.get("stderr").and_then(Value::as_str).filter(|text| !text.trim().is_empty()).map(|text| bounded_refresh_text(&text.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")))),
         "verification": failure.get("verification").and_then(Value::as_str).map(bounded_refresh_text),
         "verification_kind": failure.get("verification_kind").and_then(Value::as_str).map(bounded_refresh_text),
         "job_id": failure.get("job_id").and_then(Value::as_str).map(bounded_refresh_text),
@@ -1323,6 +1324,32 @@ mod tests {
             full["metadata"]["provider_launch_environment"]["OPENAI_API_KEY"],
             "[REDACTED]"
         );
+    }
+
+    #[test]
+    fn refresh_homeboy_failed_step_stderr_reaches_summary_and_diagnostics() {
+        let payload = serde_json::json!({
+            "runner_id": "lab",
+            "failure": {"exit_code": 1, "stderr": "immutable Homeboy slot provenance mismatch"},
+            "phase_summary": [{"name": "materialize", "status": "failed"}]
+        });
+        let projection = bounded_refresh_projection(&payload, 1, None);
+        let response = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(projection),
+            1,
+            "runner",
+            None,
+        );
+        let value = serde_json::to_value(response).unwrap();
+        for field in [&value["summary"], &value["diagnostics"]["message"]] {
+            assert!(
+                field
+                    .as_str()
+                    .unwrap()
+                    .contains("immutable Homeboy slot provenance mismatch"),
+                "{value}"
+            );
+        }
     }
 
     #[test]

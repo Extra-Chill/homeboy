@@ -771,7 +771,34 @@ pub fn upgrade_runner_with_executor(
         expected_controller_identity,
         extension_updates,
         exec,
+        crate::refresh_homeboy_binary,
     )
+}
+
+#[test]
+fn upgrade_runners_refresh_failure_keeps_attributed_cause() {
+    let runner = super::tests::ssh_runner("lab", Some("/homeboy"));
+    let entry = refresh_managed_immutable_runner(
+        &runner,
+        "/homeboy".into(),
+        None,
+        Some("homeboy 0.401.0+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        &[],
+        &mut |_, _| panic!("failed refresh must not execute reconciliation"),
+        |_| {
+            let mut error = homeboy_core::Error::internal_unexpected("IO error");
+            error.details =
+                serde_json::json!({"context": "publish slot", "error": "permission denied"});
+            Err(error)
+        },
+    );
+    assert!(
+        entry
+            .detail
+            .contains("IO error: publish slot: permission denied"),
+        "{}",
+        entry.detail
+    );
 }
 
 fn refresh_managed_immutable_runner(
@@ -781,6 +808,9 @@ fn refresh_managed_immutable_runner(
     expected_controller_identity: Option<&str>,
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+    refresh: impl FnOnce(
+        crate::HomeboyBinaryRefreshOptions,
+    ) -> Result<(crate::HomeboyBinaryRefreshOutput, i32)>,
 ) -> RunnerUpgradeEntry {
     let Some(controller_commit) =
         managed_immutable_runner_target_revision(expected_controller_identity)
@@ -809,7 +839,7 @@ fn refresh_managed_immutable_runner(
         allow_downgrade: false,
         dry_run: false,
     };
-    let (refreshed, exit_code) = match crate::refresh_homeboy_binary(options) {
+    let (refreshed, exit_code) = match refresh(options) {
         Ok(result) => result,
         Err(error) => {
             return managed_immutable_runner_failure_entry(
@@ -820,7 +850,7 @@ fn refresh_managed_immutable_runner(
                 1,
                 format!(
                     "managed immutable runner refresh failed: {}; recover with {}",
-                    error.message,
+                    error.attributed_message(),
                     recovery_commands.join(" && ")
                 ),
             );
@@ -851,8 +881,29 @@ fn refresh_managed_immutable_runner(
             service_binaries: Vec::new(),
             exit_code,
             detail: format!(
-                "managed immutable runner refresh failed: {:?}",
-                refreshed.failure
+                "managed immutable runner refresh failed in {} (exit {exit_code}): {}",
+                refreshed
+                    .phase_summary
+                    .iter()
+                    .find(|phase| phase.status == "failed")
+                    .map(|phase| phase.name)
+                    .unwrap_or("convergence"),
+                refreshed
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure
+                        .verification
+                        .as_deref()
+                        .unwrap_or(&failure.stderr)
+                        .lines()
+                        .rev()
+                        .take(10)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n"))
+                    .unwrap_or_default()
             ),
         };
     }
@@ -867,7 +918,7 @@ fn refresh_managed_immutable_runner(
                 1,
                 format!(
                     "managed immutable runner refresh completed but reconciliation failed: {}; recover with {}",
-                    error.message,
+                    error.attributed_message(),
                     recovery_commands.join(" && ")
                 ),
             );

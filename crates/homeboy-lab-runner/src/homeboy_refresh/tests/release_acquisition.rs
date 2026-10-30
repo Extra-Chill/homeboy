@@ -25,6 +25,70 @@ fi
 exit 64
 "#;
 
+#[test]
+fn upgrade_recovery_ref_passes_refresh_validation() {
+    let commands = crate::upgrade_runners::managed_immutable_runner_recovery_commands_with_commit(
+        "lab",
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+    );
+    let args: Vec<_> = commands[0].split_whitespace().collect();
+    let tag = args[args.iter().position(|arg| *arg == "--ref").unwrap() + 1].trim_matches('\'');
+    assert!(release_version(tag).is_ok(), "{tag}");
+}
+
+#[test]
+fn slot_provenance_matches_content_not_acquisition_metadata() {
+    let Some(triple) = host_release_triple() else {
+        return;
+    };
+    let fixture = release_fixture();
+    publish_release_archive(&fixture, triple, ReleaseArchive::Valid);
+    let root = binaries_root(&fixture);
+    let dir = root.join("acquisition");
+    let first = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let binary = refreshed_binary_path(
+        &ssh_bootstrap_plan(),
+        &String::from_utf8_lossy(&first.stdout),
+    )
+    .unwrap();
+    let provenance = Path::new(&binary).parent().unwrap().join("provenance");
+    let original = fs::read_to_string(&provenance).unwrap();
+    let mut fields: Vec<_> = original.lines().map(str::to_string).collect();
+    fields[0] = "different source".into();
+    fields[1] = "different cache".into();
+    fields[2] = "different ref".into();
+    fields[3] = fixture.commit.clone();
+    fs::write(&provenance, format!("{}\n", fields.join("\n"))).unwrap();
+    let reused = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+    assert!(
+        reused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reused.stderr)
+    );
+    assert_eq!(
+        refreshed_binary_path(
+            &ssh_bootstrap_plan(),
+            &String::from_utf8_lossy(&reused.stdout)
+        )
+        .unwrap(),
+        binary
+    );
+    for index in [4, 5] {
+        let mut mismatched = fields.clone();
+        mismatched[index] = "different content".into();
+        fs::write(&provenance, format!("{}\n", mismatched.join("\n"))).unwrap();
+        let refused = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr)
+            .contains("immutable Homeboy slot provenance mismatch"));
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ReleaseArchive {
     Valid,
