@@ -181,7 +181,10 @@ pub fn changed(
             }
         }
     }
-    while !direct_only {
+    loop {
+        if direct_only {
+            break;
+        }
         let mut added = Vec::new();
         for (index, (component, _, deps)) in components.iter().enumerate() {
             if selected.contains(&index) {
