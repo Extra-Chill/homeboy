@@ -87,9 +87,8 @@ fn is_pre_handoff_configuration_error(error: &Error) -> bool {
             .is_none_or(serde_json::Value::is_null)
 }
 
-/// The bounded public error for a failed Lab gate transport. Gate output stays
-/// in the private diagnostic artifact; a pre-handoff configuration error names
-/// its redacted cause so `status` shows something an operator can act on.
+/// Carry the redacted cause through the public transport error so the gate
+/// report does not replace actionable diagnostics with a generic message.
 fn lab_gate_public_error(error: &Error, artifact_ref: String) -> Error {
     let mut details = serde_json::json!({
         "stage": error.details.get("stage"),
@@ -97,19 +96,39 @@ fn lab_gate_public_error(error: &Error, artifact_ref: String) -> Error {
         "job_id": error.details.get("job_id"),
         "artifact_ref": artifact_ref,
     });
-    if !is_pre_handoff_configuration_error(error) {
-        return Error::new(error.code, LAB_GATE_PUBLIC_MESSAGE, details);
-    }
+    details["diagnostic"] = homeboy_core::redaction::redact_json(&serde_json::json!({
+        "code": error.code.as_str(), "message": error.message, "details": error.details,
+    }));
     let cause = homeboy_core::redaction::redact_string(&error.message);
-    details["pre_handoff_configuration_error"] = serde_json::json!(true);
+    let configuration_error = is_pre_handoff_configuration_error(error);
+    if configuration_error {
+        details["pre_handoff_configuration_error"] = serde_json::json!(true);
+    }
     details["cause_message"] = serde_json::json!(cause);
     let mut public = Error::new(
         error.code,
         format!("{LAB_GATE_PUBLIC_MESSAGE}: {cause}"),
         details,
     );
-    public.retryable = Some(false);
+    public.retryable = if configuration_error {
+        Some(false)
+    } else {
+        error.retryable
+    };
     public
+}
+
+/// Summarize a non-receipt envelope without copying arbitrary gate output.
+fn terminal_envelope_diagnostic(value: &serde_json::Value, stdout_bytes: usize) -> String {
+    let diagnostic = homeboy_core::redaction::redact_json(&serde_json::json!({
+        "schema": value.get("schema"),
+        "success": value.get("success"),
+        "summary": value.get("summary"),
+        "error_code": value.pointer("/diagnostics/code")
+            .or_else(|| value.pointer("/error/code")),
+        "stdout_bytes": stdout_bytes,
+    }));
+    diagnostic.to_string()
 }
 
 /// Secret identity names the admitted component's test capability declares.
@@ -467,16 +486,14 @@ fn execute_owned(
         Error::invalid_argument(
             "gate.receipt",
             format!(
-                "Lab gate returned no canonical receipt: {error}; {}",
+                "Lab gate stdout truncated/unparseable ({} bytes): {error}; {}",
+                stdout.len(),
                 if request.visibility
                     == homeboy_agents::agent_tasks::gate::AgentTaskGateVisibility::Private
                 {
                     "private terminal stderr withheld"
                 } else {
-                    result
-                        .get("stderr")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("")
+                    "terminal stderr retained in diagnostic artifact"
                 }
             ),
         )
@@ -497,11 +514,13 @@ fn execute_owned(
                 "private runner gate did not return terminal artifact evidence".to_string()
             } else {
                 format!(
-                    "runner gate did not return terminal artifact evidence: {}",
+                    "runner gate did not return terminal artifact evidence: {}; stderr: {}",
+                    terminal_envelope_diagnostic(&value, stdout.len()),
                     homeboy_core::redaction::redact_string(stderr)
                 )
             },
-            serde_json::json!({"stage":"terminal_projection", "job_id":job_id}),
+            serde_json::json!({"stage":"terminal_projection", "job_id":job_id,
+                "diagnostic": terminal_envelope_diagnostic(&value, stdout.len())}),
         ));
     }
     let receipt_path = resource_invocation
@@ -722,6 +741,21 @@ mod secret_env_tests {
 mod public_error_tests {
     use super::*;
 
+    #[test]
+    fn non_receipt_envelope_names_the_refusal_and_stream_size() {
+        let value = serde_json::json!({
+            "schema":"homeboy/command-result/v1", "success":false,
+            "summary":"Lab gate workspace differs from the controller candidate",
+            "diagnostics":{"code":"validation.invalid_argument"},
+            "stdout":"arbitrary private gate output",
+        });
+        let diagnostic = terminal_envelope_diagnostic(&value, 14000000);
+        assert!(diagnostic.contains("validation.invalid_argument"));
+        assert!(diagnostic.contains("workspace differs"));
+        assert!(diagnostic.contains("14000000"));
+        assert!(!diagnostic.contains("arbitrary private gate output"));
+    }
+
     fn missing_secret_ref() -> Error {
         Error::validation_invalid_argument(
             "secret_env",
@@ -750,19 +784,20 @@ mod public_error_tests {
     }
 
     #[test]
-    fn errors_after_runner_handoff_keep_the_bounded_public_message() {
+    fn errors_after_runner_handoff_preserve_the_redacted_cause() {
         let mut error = missing_secret_ref();
         error.details = serde_json::json!({"job_id": "job-1", "stage": "execution"});
 
         let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
 
-        assert_eq!(public.message, LAB_GATE_PUBLIC_MESSAGE);
-        assert!(public.details.get("cause_message").is_none());
+        assert!(public.message.contains(&error.message));
+        assert_eq!(public.details["diagnostic"]["code"], error.code.as_str());
+        assert_eq!(public.details["diagnostic"]["details"]["job_id"], "job-1");
         assert_eq!(public.retryable, None);
     }
 
     #[test]
-    fn transport_failures_keep_the_bounded_public_message() {
+    fn transport_failures_preserve_the_cause() {
         let error = Error::new(
             homeboy_core::ErrorCode::RunnerLabTransportFailure,
             "ssh: connection reset",
@@ -771,7 +806,11 @@ mod public_error_tests {
 
         let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
 
-        assert_eq!(public.message, LAB_GATE_PUBLIC_MESSAGE);
+        assert!(public.message.contains("ssh: connection reset"));
+        assert_eq!(
+            public.details["diagnostic"]["details"]["stage"],
+            "transport"
+        );
         assert_eq!(public.retryable, None);
     }
 }
