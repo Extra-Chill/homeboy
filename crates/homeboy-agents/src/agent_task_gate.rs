@@ -495,7 +495,7 @@ impl Default for VerifyGateOptions {
 pub type AgentTaskGateSetupEvidence = homeboy_core::deps::DependencyHydrationOutcome;
 
 /// Ask the generic dependency-provider resolver about the checkout root and its
-/// direct children. This layer does not inspect manifests, infer ecosystems, or
+/// non-ignored descendant directories. This layer does not inspect manifests, infer ecosystems, or
 /// construct install commands.
 #[cfg(test)]
 pub(crate) fn hydrate_gate_dependency_roots(
@@ -531,40 +531,47 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
         return Ok(Vec::new());
     }
     let mut candidates = vec![checkout.to_path_buf()];
-    for entry in fs::read_dir(checkout).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("read candidate dependency roots".to_string()),
-        )
-    })? {
-        let entry = entry.map_err(|error| {
+    let mut pending = vec![checkout.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let mut children = Vec::new();
+        for entry in fs::read_dir(&directory).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
-                Some("read candidate dependency root".to_string()),
+                Some("read candidate dependency roots".to_string()),
             )
-        })?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("read candidate dependency root type".to_string()),
-            )
-        })?;
-        // A linked directory can escape the detached candidate checkout. Setup
-        // is allowed only in the candidate root or a real direct child.
-        if file_type.is_dir()
-            && path.file_name().is_none_or(|name| name != ".git")
-            && !homeboy_core::deps::is_nested_repository(&path)
-        {
-            candidates.push(path);
+        })? {
+            let entry = entry.map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("read candidate dependency root".to_string()),
+                )
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("read candidate dependency root type".to_string()),
+                )
+            })?;
+            // A linked directory can escape the detached candidate checkout. Setup
+            // is allowed only in real directories beneath the checkout.
+            if file_type.is_dir()
+                && path.file_name().is_none_or(|name| name != ".git")
+                && !homeboy_core::deps::is_nested_repository(&path)
+            {
+                children.push(path);
+            }
+        }
+        // Prune ignored output before descending: generated manifests are not
+        // dependency roots, and dependency trees can contain thousands of dirs.
+        let ignored = git_ignored_children(checkout, &children);
+        for child in children {
+            if !ignored.contains(&child) {
+                pending.push(child.clone());
+                candidates.push(child);
+            }
         }
     }
-    // Ignored children are generated output (a build's `dist/` with its own
-    // `package.json` but no lockfile, `node_modules`, `target`), not package
-    // roots the checkout declares. Installing in them fails the gate on an
-    // artifact of a previous build.
-    let ignored = git_ignored_children(checkout, &candidates[1..]);
-    candidates.retain(|candidate| !ignored.contains(candidate));
     candidates.sort();
     let mut evidence = Vec::new();
     for candidate in candidates {
@@ -4965,7 +4972,7 @@ fn gate_failure_evidence(
                 "The Cargo test gate filter selected no tests. Choose a filter that selects at least one test before rerunning Cook.".to_string()
             })
     } else if let Some(bin) = missing_executable.as_deref() {
-        format!("The declared gate is invalid, not candidate-code feedback. The gate environment cannot run `{bin}`: executable not found. Declare an installed tool or add the setup step before rerunning Cook. Do not change candidate code to satisfy this gate.")
+        format!("The declared gate is invalid, not candidate-code feedback. The gate environment cannot run `{bin}`: executable not found. Declare an installed tool or add the setup step before rerunning Cook. Check dependency hydration at the gate's component path, including Composer dev dependencies in subdirectories. Do not change candidate code to satisfy this gate.")
     } else {
         match (missing_script, shell_rejection.as_deref()) {
             (Some(script), _) => format!(
@@ -5004,7 +5011,15 @@ fn gate_missing_executable(
     stdout: &str,
     stderr: &str,
 ) -> Option<String> {
-    if exit_code == 127 {
+    // Composer wraps a script's 127 in its own exit status (usually 1).
+    // Require its explicit script diagnostic, not an arbitrary test's text.
+    let composer_missing_command = exit_code != 0
+        && stderr.lines().any(|line| {
+            line.starts_with("Script ")
+                && line.contains(" handling the ")
+                && line.ends_with(" returned with error code 127")
+        });
+    if exit_code == 127 || composer_missing_command {
         for line in stderr.lines() {
             for suffix in [": command not found", ": not found"] {
                 if let Some(prefix) = line.trim().strip_suffix(suffix) {
@@ -5954,6 +5969,24 @@ mod tests {
             report.accept_inherited_failure();
             assert_eq!(report.status, AgentTaskGateStatus::Failed, "{command}");
         }
+    }
+
+    #[test]
+    fn composer_missing_dev_tool_cannot_be_accepted_as_inherited() {
+        let temp = tempfile::tempdir().unwrap();
+        let command = "printf '%s\\n' 'sh: 1: phpcs: not found' 'Script phpcs --standard=phpcs.xml.dist handling the lint:php event returned with error code 127' >&2; exit 1";
+        let mut report = run_gate_command(temp.path(), 1, command).unwrap();
+        report.accept_inherited_failure();
+        assert_eq!(report.status, AgentTaskGateStatus::Failed);
+        let evidence = report.failure_evidence.unwrap();
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::GateDeclaration
+        );
+        assert!(evidence.summary.contains("`phpcs`"));
+        assert!(evidence
+            .agent_feedback
+            .contains("Composer dev dependencies in subdirectories"));
     }
 
     #[test]
@@ -7829,6 +7862,72 @@ mod tests {
                 "hydrated"
             );
             assert_eq!(evidence.len(), 1);
+        });
+    }
+
+    /// Monorepo component roots can be more than one level below the checkout.
+    /// Use a portable provider fixture so this exercises setup and execution
+    /// without requiring Composer or network access on the test host.
+    #[test]
+    fn subdirectory_component_dev_tools_are_hydrated_before_gate_execution() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("checkout");
+            let root = checkout.path();
+            let git = |args: &[&str]| {
+                assert!(std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(root)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success());
+            };
+            git(&["init", "-q"]);
+            fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+            let provider = r#"{"id":"fixture-composer","deps":{"provider":"composer","commands":{"install":{"argv":["sh","-c","mkdir -p vendor/bin; printf '#!/bin/sh\\nexit 0\\n' > vendor/bin/phpcs; chmod +x vendor/bin/phpcs"]}}}}"#;
+            for component in [
+                "php-transformer",
+                "plugins/example",
+                "packages/example",
+                "ignored/deep",
+                "submodule/deep",
+            ] {
+                let path = root.join(component);
+                fs::create_dir_all(&path).unwrap();
+                fs::write(
+                    path.join("composer.json"),
+                    r#"{"require-dev":{"squizlabs/php_codesniffer":"*"}}"#,
+                )
+                .unwrap();
+                fs::write(path.join("homeboy.json"), provider).unwrap();
+            }
+            fs::write(
+                root.join("submodule/.git"),
+                "gitdir: ../.git/modules/submodule\n",
+            )
+            .unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(root.join("ignored"), root.join("linked")).unwrap();
+
+            let evidence = hydrate_gate_dependency_roots(root, true, "destination").unwrap();
+            assert_eq!(
+                evidence
+                    .iter()
+                    .map(|step| step.package_root.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["packages/example", "php-transformer", "plugins/example"]
+            );
+            for step in &evidence {
+                assert_eq!(
+                    step.status,
+                    homeboy_core::deps::DependencyHydrationStatus::Succeeded
+                );
+                let command = format!("cd {} && vendor/bin/phpcs", step.package_root);
+                let report = run_gate_command(root, 1, &command).unwrap();
+                assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+            }
+            assert!(!root.join("ignored/deep/vendor").exists());
+            assert!(!root.join("submodule/deep/vendor").exists());
         });
     }
 
