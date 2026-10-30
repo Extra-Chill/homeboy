@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.435.5] - 2026-10-30
+
+### Fixed
+- lock metadata payloads on a sidecar, never the SQLite database inode
+
 ## [0.435.4] - 2026-10-30
 
 ### Fixed
