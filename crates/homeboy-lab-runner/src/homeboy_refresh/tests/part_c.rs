@@ -14,7 +14,7 @@ use homeboy_core::error::Error;
 #[test]
 fn admission_reconciliation_reports_its_phase_before_the_probe() {
     crate::test_support::with_isolated_home(|_| {
-        begin_refresh_live_progress("prepare");
+        set_refresh_live_sub_phase("prepare");
         let guard = RefreshLiveGuard;
         let result = reconciled_refresh_admission_with(
             "lab",

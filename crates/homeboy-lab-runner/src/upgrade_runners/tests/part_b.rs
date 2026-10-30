@@ -139,7 +139,7 @@ fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
     let mut calls = Vec::new();
     let mut materialized = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor_and_source_materializer(
+    let (updated, skipped) = upgrade_runners(
         &[runner],
         true,
         Some(InstallMethod::Source),
@@ -158,10 +158,13 @@ fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
             Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
         },
         runner_status,
+        reconnect_runner_daemon,
         |runner, path| {
             materialized.push((runner.id.clone(), path.display().to_string()));
             Ok("/home/user/Developer/_lab_workspaces/homeboy-source".to_string())
         },
+        update_runner_homeboy_path,
+        None,
     );
 
     assert!(skipped.is_empty());
@@ -218,7 +221,7 @@ fn installs_missing_runner_extension_from_inventory() {
     }];
     let mut commands = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor(
+    let (updated, skipped) = upgrade_runners(
         &[runner],
         false,
         None,
@@ -241,6 +244,10 @@ fn installs_missing_runner_extension_from_inventory() {
             ))
         },
         runner_status,
+        reconnect_runner_daemon,
+        materialize_runner_source_path,
+        update_runner_homeboy_path,
+        None,
     );
 
     assert!(skipped.is_empty());
@@ -270,7 +277,7 @@ fn defers_extension_failures_when_runner_refresh_leaves_path_drift() {
     ];
     let mut commands = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor(
+    let (updated, skipped) = upgrade_runners(
         &[runner],
         true,
         None,
@@ -298,6 +305,10 @@ fn defers_extension_failures_when_runner_refresh_leaves_path_drift() {
             ))
         },
         runner_status,
+        reconnect_runner_daemon,
+        materialize_runner_source_path,
+        update_runner_homeboy_path,
+        None,
     );
 
     assert!(updated.is_empty());
@@ -337,7 +348,7 @@ fn fails_when_configured_runner_path_remains_older_than_local_after_successful_u
     let runner = ssh_runner("homeboy-lab", Some("/home/user/.cargo/bin/homeboy"));
     let mut commands = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor(
+    let (updated, skipped) = upgrade_runners(
         &[runner],
         true,
         None,
@@ -355,6 +366,10 @@ fn fails_when_configured_runner_path_remains_older_than_local_after_successful_u
             Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
         },
         runner_status,
+        reconnect_runner_daemon,
+        materialize_runner_source_path,
+        update_runner_homeboy_path,
+        None,
     );
 
     assert!(updated.is_empty());
@@ -394,7 +409,13 @@ fn version_addressed_binary_store_source_pin_realigns_to_materialized_controller
     let mut commands = Vec::new();
     let mut updates = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(&[runner], true, Some(InstallMethod::Source), Some(source_dir.path()), &[], |runner_id, options| {
+    let (updated, skipped) = upgrade_runners(
+        &[runner],
+        true,
+        Some(InstallMethod::Source),
+        Some(source_dir.path()),
+        &[],
+        |runner_id, options| {
             commands.push(options.command.clone());
             let (stdout, code) = match commands.len() {
                 1 => (format!("homeboy {}+stale\n", current_version()), 0),
@@ -409,10 +430,16 @@ fn version_addressed_binary_store_source_pin_realigns_to_materialized_controller
                 exec_output(runner_id, options.command, &stdout, "", code),
                 code,
             ))
-        }, runner_status, |_runner, _path| Ok(remote_source.to_string()), |runner_id, path| {
+        },
+        runner_status,
+        reconnect_runner_daemon,
+        |_runner, _path| Ok(remote_source.to_string()),
+        |runner_id, path| {
             updates.push((runner_id.to_string(), path.to_string()));
             Ok(())
-        }, None);
+        },
+        None,
+    );
 
     assert!(skipped.is_empty());
     assert_eq!(updated[0].homeboy_path, selected_binary);
@@ -435,7 +462,13 @@ fn realigns_stale_lab_workspace_homeboy_path_after_upgrade_failure() {
     let mut commands = Vec::new();
     let mut path_updates = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(&[runner], false, None, None, &[], |runner_id, options| {
+    let (updated, skipped) = upgrade_runners(
+        &[runner],
+        false,
+        None,
+        None,
+        &[],
+        |runner_id, options| {
             commands.push(options.command.clone());
             let (stdout, stderr, exit_code) = match commands.len() {
                 1 => ("homeboy 0.229.11\n", "", 0),
@@ -453,10 +486,16 @@ fn realigns_stale_lab_workspace_homeboy_path_after_upgrade_failure() {
                 exec_output(runner_id, options.command, stdout, stderr, exit_code),
                 exit_code,
             ))
-        }, runner_status, |_runner, _path| unreachable!("source materialization not used"), |runner_id, homeboy_path| {
+        },
+        runner_status,
+        reconnect_runner_daemon,
+        |_runner, _path| unreachable!("source materialization not used"),
+        |runner_id, homeboy_path| {
             path_updates.push((runner_id.to_string(), homeboy_path.to_string()));
             Ok(())
-        }, None);
+        },
+        None,
+    );
 
     assert!(skipped.is_empty());
     assert_eq!(updated.len(), 1);
@@ -493,7 +532,13 @@ fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
     let mut commands = Vec::new();
     let mut path_updates = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater_with_expected_controller_identity(&[runner], true, Some(InstallMethod::Source), Some(source_dir.path()), &[], |runner_id, options| {
+    let (updated, skipped) = upgrade_runners(
+        &[runner],
+        true,
+        Some(InstallMethod::Source),
+        Some(source_dir.path()),
+        &[],
+        |runner_id, options| {
             commands.push(options.command.clone());
             let (stdout, stderr, exit_code) = match commands.len() {
                 1 => (
@@ -535,14 +580,20 @@ fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
                 exec_output(runner_id, options.command, &stdout, &stderr, exit_code),
                 exit_code,
             ))
-        }, runner_status, |runner, path| {
+        },
+        runner_status,
+        reconnect_runner_daemon,
+        |runner, path| {
             assert_eq!(runner.id, "lab");
             assert_eq!(path, source_dir.path());
             Ok(remote_source.to_string())
-        }, |runner_id, homeboy_path| {
+        },
+        |runner_id, homeboy_path| {
             path_updates.push((runner_id.to_string(), homeboy_path.to_string()));
             Ok(())
-        }, None);
+        },
+        None,
+    );
 
     assert!(skipped.is_empty());
     assert_eq!(updated.len(), 1);
@@ -567,7 +618,7 @@ fn rejects_stale_source_runner_identity_before_extension_sync() {
     let extension_updates = vec![extension_update("required-extension", "48517ac3")];
     let mut commands = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor_and_source_materializer(
+    let (updated, skipped) = upgrade_runners(
         &[runner],
         true,
         Some(InstallMethod::Source),
@@ -602,7 +653,10 @@ fn rejects_stale_source_runner_identity_before_extension_sync() {
             Ok((exec_output(runner_id, options.command, &stdout, "", 0), 0))
         },
         runner_status,
+        reconnect_runner_daemon,
         |_runner, _path| Ok(remote_source.to_string()),
+        update_runner_homeboy_path,
+        None,
     );
 
     assert!(updated.is_empty());
@@ -726,7 +780,7 @@ fn reports_exact_runner_set_remediation_when_path_update_is_unsafe() {
     let runner = ssh_runner("lab", Some("/opt/homeboy/custom-homeboy"));
     let mut commands = Vec::new();
 
-    let (updated, skipped) = upgrade_runners_with_executor(
+    let (updated, skipped) = upgrade_runners(
         &[runner],
         false,
         None,
@@ -744,6 +798,10 @@ fn reports_exact_runner_set_remediation_when_path_update_is_unsafe() {
             Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
         },
         runner_status,
+        reconnect_runner_daemon,
+        materialize_runner_source_path,
+        update_runner_homeboy_path,
+        None,
     );
 
     assert!(updated.is_empty());
@@ -771,21 +829,32 @@ fn restarts_stale_connected_daemon_after_runner_upgrade() {
     let runner = ssh_runner("lab", None);
     let mut reconnects = Vec::new();
 
-    let (updated, skipped) =
-        upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(&[runner], false, None, None, &[], |runner_id, options| {
-                let stdout = match options.command.as_slice() {
-                    [_, flag] if flag == "--version" => "homeboy 0.228.5\n",
-                    _ => "{\"success\":true}\n",
-                };
-                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
-            }, stale_runner_status, |runner_id| {
-                reconnects.push(runner_id.to_string());
-                Ok((
-                    "connected runner daemon restarted after upgrade; session reports 0.228.5"
-                        .to_string(),
-                    Some("0.228.5".to_string()),
-                ))
-            }, |_runner, _path| unreachable!("source materialization not used"), |_runner_id, _homeboy_path| unreachable!("homeboy_path update not used"), None);
+    let (updated, skipped) = upgrade_runners(
+        &[runner],
+        false,
+        None,
+        None,
+        &[],
+        |runner_id, options| {
+            let stdout = match options.command.as_slice() {
+                [_, flag] if flag == "--version" => "homeboy 0.228.5\n",
+                _ => "{\"success\":true}\n",
+            };
+            Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+        },
+        stale_runner_status,
+        |runner_id| {
+            reconnects.push(runner_id.to_string());
+            Ok((
+                "connected runner daemon restarted after upgrade; session reports 0.228.5"
+                    .to_string(),
+                Some("0.228.5".to_string()),
+            ))
+        },
+        |_runner, _path| unreachable!("source materialization not used"),
+        |_runner_id, _homeboy_path| unreachable!("homeboy_path update not used"),
+        None,
+    );
 
     assert!(skipped.is_empty());
     assert_eq!(updated.len(), 1);
@@ -809,14 +878,25 @@ fn fails_when_reconnected_daemon_still_reports_the_old_version() {
     let _local_version = pin_local_version_for_fixtures();
     let runner = ssh_runner("lab", None);
 
-    let (updated, skipped) =
-        upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector_with_expected_controller_identity(&[runner], false, None, None, &[], |runner_id, options| {
-                let stdout = match options.command.as_slice() {
-                    [_, flag] if flag == "--version" => "homeboy 0.228.5\n",
-                    _ => "{\"success\":true}\n",
-                };
-                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
-            }, stale_runner_status, |_| Ok(("reconnected".to_string(), Some("0.228.4".to_string()))), |_runner, _path| unreachable!("source materialization not used"), |_runner_id, _homeboy_path| unreachable!("homeboy_path update not used"), None);
+    let (updated, skipped) = upgrade_runners(
+        &[runner],
+        false,
+        None,
+        None,
+        &[],
+        |runner_id, options| {
+            let stdout = match options.command.as_slice() {
+                [_, flag] if flag == "--version" => "homeboy 0.228.5\n",
+                _ => "{\"success\":true}\n",
+            };
+            Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+        },
+        stale_runner_status,
+        |_| Ok(("reconnected".to_string(), Some("0.228.4".to_string()))),
+        |_runner, _path| unreachable!("source materialization not used"),
+        |_runner_id, _homeboy_path| unreachable!("homeboy_path update not used"),
+        None,
+    );
 
     assert!(updated.is_empty());
     assert_eq!(skipped.len(), 1);

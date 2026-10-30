@@ -779,6 +779,7 @@ fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
                     &ambient_roots(),
                     "lab-local",
                     "abc123",
+                    crate::lab_selection::emit_runtime_promotion_wait,
                 )?;
                 promote_verified_runner_binary_in_roots(&ambient_roots(), &lease, "lab-local", path)
                     .map(|fields| (fields, None))
@@ -813,6 +814,7 @@ fn controller_binary_selection_reports_fresh_main_control_plane_fields() {
                     &ambient_roots(),
                     "lab-local",
                     "verified",
+                    crate::lab_selection::emit_runtime_promotion_wait,
                 )
                 .expect("promotion lease");
                 promote_verified_runner_binary_in_roots(
@@ -827,7 +829,12 @@ fn controller_binary_selection_reports_fresh_main_control_plane_fields() {
         );
         assert_eq!(
             {
-                let lease = acquire_runner_binary_promotion_in_roots(&ambient_roots(), "lab-local", "verified")
+                let lease = acquire_runner_binary_promotion_in_roots(
+&ambient_roots(),
+"lab-local",
+"verified",
+crate::lab_selection::emit_runtime_promotion_wait,
+)
                     .expect("promotion lease");
                 promote_verified_runner_binary_in_roots(
                 &ambient_roots(),
@@ -953,13 +960,17 @@ fn equivalent_refresh_waiter_reloads_the_owner_selection_after_promotion_handoff
         )
         .expect("create runner");
 
-        let owner =
-            acquire_runner_binary_promotion_in_roots(&ambient_roots(), "lab", "0123456789ab")
-                .expect("owner lease");
+        let owner = acquire_runner_binary_promotion_in_roots(
+            &ambient_roots(),
+            "lab",
+            "0123456789ab",
+            crate::lab_selection::emit_runtime_promotion_wait,
+        )
+        .expect("owner lease");
         let (queued_tx, queued_rx) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn(move || {
-            let _lease = acquire_runner_binary_promotion_with_in_root(
-                &homeboy_core::paths::runtime_promotion_dir_in_root(ambient_roots().data()),
+            let _lease = acquire_runner_binary_promotion_in_roots(
+                &ambient_roots(),
                 "lab",
                 "0123456789ab",
                 |event| queued_tx.send(event).expect("report queued owner"),
@@ -999,16 +1010,18 @@ fn divergent_refresh_candidate_is_rejected_while_owner_keeps_selection() {
             false,
         )
         .expect("create runner");
-        let owner = acquire_runner_binary_promotion_in_roots(&ambient_roots(), "lab", "newer")
-            .expect("owner lease");
+        let owner = acquire_runner_binary_promotion_in_roots(
+            &ambient_roots(),
+            "lab",
+            "newer",
+            crate::lab_selection::emit_runtime_promotion_wait,
+        )
+        .expect("owner lease");
 
         let error = std::thread::spawn(|| {
-            acquire_runner_binary_promotion_with_in_root(
-                &homeboy_core::paths::runtime_promotion_dir_in_root(ambient_roots().data()),
-                "lab",
-                "diverged",
-                |_| panic!("divergent candidate must not queue"),
-            )
+            acquire_runner_binary_promotion_in_roots(&ambient_roots(), "lab", "diverged", |_| {
+                panic!("divergent candidate must not queue")
+            })
         })
         .join()
         .expect("divergent contender exits")
@@ -1038,16 +1051,18 @@ fn strict_ancestor_refresh_candidate_is_rejected_while_owner_keeps_selection() {
             false,
         )
         .expect("create runner");
-        let owner = acquire_runner_binary_promotion_in_roots(&ambient_roots(), "lab", "descendant")
-            .expect("owner lease");
+        let owner = acquire_runner_binary_promotion_in_roots(
+            &ambient_roots(),
+            "lab",
+            "descendant",
+            crate::lab_selection::emit_runtime_promotion_wait,
+        )
+        .expect("owner lease");
 
         let error = std::thread::spawn(|| {
-            acquire_runner_binary_promotion_with_in_root(
-                &homeboy_core::paths::runtime_promotion_dir_in_root(ambient_roots().data()),
-                "lab",
-                "ancestor",
-                |_| panic!("strict ancestor candidate must not queue"),
-            )
+            acquire_runner_binary_promotion_in_roots(&ambient_roots(), "lab", "ancestor", |_| {
+                panic!("strict ancestor candidate must not queue")
+            })
         })
         .join()
         .expect("strict ancestor contender exits")
@@ -1970,9 +1985,14 @@ fn runner_binary_promotion_drains_a_live_foreign_cook_pin() {
         .expect("write foreign pin");
         let (stage_tx, stage_rx) = std::sync::mpsc::channel();
         let promotion = std::thread::spawn(move || {
-            acquire_runner_binary_promotion_with_in_root(&root, "lab", "0123456789ab", |event| {
-                let _ = stage_tx.send(event.wait_stage);
-            })
+            acquire_runner_binary_promotion_in_roots(
+                &ambient_roots(),
+                "lab",
+                "0123456789ab",
+                |event| {
+                    let _ = stage_tx.send(event.wait_stage);
+                },
+            )
             .map(drop)
         });
         let stage = stage_rx.recv_timeout(Duration::from_secs(5));
