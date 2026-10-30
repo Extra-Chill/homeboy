@@ -6358,7 +6358,7 @@ mod tests {
         );
 
         assert!(!options.allow_downgrade);
-        assert_eq!(options.git_ref.as_deref(), Some("required"));
+        assert_eq!(options.git_ref.as_deref(), Some("v1.2.3"));
     }
 
     #[test]
@@ -6802,7 +6802,7 @@ mod tests {
         assert_eq!(recovery.len(), 1);
         assert_eq!(
             recovery[0],
-            "homeboy runner refresh-homeboy lab-identity --ref required --reconnect"
+            "homeboy runner refresh-homeboy lab-identity --ref v1.2.3 --reconnect"
         );
         assert_eq!(
             error.details["homeboy_handoff_identity"]["configured_command_build_identity"],
@@ -6822,7 +6822,7 @@ mod tests {
         assert!(recovery.is_valid());
         assert_eq!(
             recovery.command(),
-            "homeboy runner refresh-homeboy lab-identity --ref required --reconnect"
+            "homeboy runner refresh-homeboy lab-identity --ref v1.2.3 --reconnect"
         );
     }
 
