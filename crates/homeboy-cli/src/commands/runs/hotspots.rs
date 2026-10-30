@@ -1,4 +1,4 @@
-//! Cross-run hotspot aggregation over persisted fuzz artifacts.
+//! Cross-run hotspot aggregation over durable phase spans and fuzz artifacts.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;

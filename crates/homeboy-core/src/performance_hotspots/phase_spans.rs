@@ -28,6 +28,11 @@ pub struct PhasePercentiles {
 pub struct PhaseHotspot {
     pub phase: String,
     pub timing: PhasePercentiles,
+    /// Exclusive time: each instant of a run counts once, for its innermost
+    /// (shortest) covering span, so wrapper phases do not double-count.
+    pub self_ms_total: f64,
+    /// Fraction of the cohort's summed exclusive time.
+    pub self_share: f64,
     pub failed: usize,
     pub skipped: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,8 +62,31 @@ struct Samples {
     all: Vec<f64>,
     baseline: Vec<f64>,
     candidate: Vec<f64>,
+    self_ms: f64,
     failed: usize,
     skipped: usize,
+}
+
+/// Attribute each elementary interval of one run to its innermost covering
+/// span (`(start_ms, end_ms, phase)`), returning exclusive milliseconds.
+fn exclusive_ms(intervals: &[(f64, f64, String)]) -> BTreeMap<&str, f64> {
+    let mut points = intervals
+        .iter()
+        .flat_map(|(start, end, _)| [*start, *end])
+        .collect::<Vec<_>>();
+    points.sort_by(f64::total_cmp);
+    points.dedup();
+    let mut exclusive = BTreeMap::new();
+    for window in points.windows(2) {
+        let innermost = intervals
+            .iter()
+            .filter(|(start, end, _)| *start <= window[0] && *end >= window[1])
+            .min_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)));
+        if let Some((_, _, phase)) = innermost {
+            *exclusive.entry(phase.as_str()).or_default() += window[1] - window[0];
+        }
+    }
+    exclusive
 }
 
 fn percentiles(mut values: Vec<f64>) -> Option<PhasePercentiles> {
@@ -109,6 +137,7 @@ pub(super) fn phase_hotspots_raw(
             }
         };
         let mut has_spans = false;
+        let mut intervals = Vec::new();
         for span in report.spans {
             let version = if span.homeboy_version.is_empty() {
                 run.homeboy_version.as_deref().unwrap_or_default()
@@ -122,7 +151,7 @@ pub(super) fn phase_hotspots_raw(
             {
                 continue;
             }
-            if chrono::DateTime::parse_from_rfc3339(&span.started_at).is_err() {
+            let Ok(started) = chrono::DateTime::parse_from_rfc3339(&span.started_at) else {
                 crate::log_status!(
                     "runs",
                     "skipping malformed phase timestamp for {}: {}",
@@ -130,7 +159,7 @@ pub(super) fn phase_hotspots_raw(
                     span.id
                 );
                 continue;
-            }
+            };
             has_spans = true;
             let group = groups.entry(span.id.clone()).or_default();
             if span.status == PhaseStatus::Skipped {
@@ -149,6 +178,8 @@ pub(super) fn phase_hotspots_raw(
                 continue;
             };
             group.all.push(ms);
+            let start = started.timestamp_micros() as f64 / 1000.0;
+            intervals.push((start, start + ms, span.id.clone()));
             if span.status == PhaseStatus::Failed {
                 group.failed += 1;
             }
@@ -159,10 +190,14 @@ pub(super) fn phase_hotspots_raw(
                 group.candidate.push(ms);
             }
         }
+        for (phase, ms) in exclusive_ms(&intervals) {
+            groups.entry(phase.to_string()).or_default().self_ms += ms;
+        }
         if has_spans {
             runs_with_spans += 1;
         }
     }
+    let self_ms_sum: f64 = groups.values().map(|samples| samples.self_ms).sum();
     let mut phases = groups
         .into_iter()
         .filter_map(|(phase, samples)| {
@@ -180,6 +215,12 @@ pub(super) fn phase_hotspots_raw(
             Some(PhaseHotspot {
                 phase,
                 timing,
+                self_ms_total: samples.self_ms,
+                self_share: if self_ms_sum > 0.0 {
+                    samples.self_ms / self_ms_sum
+                } else {
+                    0.0
+                },
                 failed: samples.failed,
                 skipped: samples.skipped,
                 baseline,
@@ -190,9 +231,8 @@ pub(super) fn phase_hotspots_raw(
         })
         .collect::<Vec<_>>();
     phases.sort_by(|a, b| {
-        b.timing
-            .p95_ms
-            .total_cmp(&a.timing.p95_ms)
+        b.self_ms_total
+            .total_cmp(&a.self_ms_total)
             .then(a.phase.cmp(&b.phase))
     });
     Ok(PhaseHotspots {
@@ -308,5 +348,66 @@ mod tests {
         assert_eq!(cook.timing.p95_ms, 400.0);
         assert_eq!(cook.p95_delta_ms, Some(-320.0));
         assert!(!summary.phases.iter().any(|phase| phase.phase == "publish"));
+    }
+    #[test]
+    fn performance_hotspots_rank_nested_phases_by_exclusive_self_time() {
+        use homeboy_engine_primitives::phase_timing::{PhaseSpan, PhaseTimingReport};
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(dir.path().join("o.sqlite")).unwrap();
+        let run = store
+            .start_run(NewRunRecord::builder("agent-task").build())
+            .unwrap();
+        // cook [0,100) contains job [10,90) contains gate [20,80);
+        // sibling [30,50) overlaps gate inside job.
+        let span = |id: &str, start_ms: i64, duration_ms: f64| PhaseSpan {
+            id: id.to_string(),
+            started_at: (chrono::DateTime::parse_from_rfc3339("2026-10-30T00:00:00Z").unwrap()
+                + chrono::Duration::milliseconds(start_ms))
+            .to_rfc3339(),
+            duration_ms: Some(duration_ms),
+            status: PhaseStatus::Ok,
+            homeboy_version: "v".to_string(),
+        };
+        let report = PhaseTimingReport {
+            spans: vec![
+                span("cook", 0, 100.0),
+                span("job", 10, 80.0),
+                span("gate", 20, 60.0),
+                span("sibling", 30, 20.0),
+            ],
+        };
+        store
+            .record_phase_spans(&run.id, "attempt-1", &report)
+            .unwrap();
+        let summary = phase_hotspots(
+            &store,
+            &PhaseHotspotQuery {
+                last: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let self_ms = |id: &str| {
+            summary
+                .phases
+                .iter()
+                .find(|phase| phase.phase == id)
+                .unwrap()
+                .self_ms_total
+        };
+        assert_eq!(self_ms("cook"), 20.0);
+        assert_eq!(self_ms("job"), 20.0);
+        assert_eq!(self_ms("gate"), 40.0);
+        assert_eq!(self_ms("sibling"), 20.0);
+        let total: f64 = summary.phases.iter().map(|phase| phase.self_ms_total).sum();
+        assert_eq!(
+            total, 100.0,
+            "exclusive time sums to the parent's wall time"
+        );
+        assert_eq!(
+            summary.phases[0].phase, "gate",
+            "the leaf outranks wrappers"
+        );
+        assert_eq!(summary.phases[0].self_share, 0.4);
     }
 }
