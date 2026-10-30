@@ -1044,22 +1044,35 @@ pub(super) fn prepare_reserved_cook_retry(
         }
         // The first successor write already froze this plan. Repair must not
         // overwrite a conflicting durable plan before recipe/index validation.
-        if !lifecycle_store.controller_plan_path(run_id).exists() {
-            agent_task_lifecycle::persist_controller_plan_in_store(
-                lifecycle_store,
-                run_id,
-                &preparation.plan,
-            )?;
-        } else if !cook_retry_plans_match(
-            &preparation.plan,
-            &lifecycle_store.read_controller_plan(run_id)?,
-        ) {
+        // Once the recipe binds this run, execution owns the controller plan
+        // (workspace materialization rewrites it) and the recipe keeps the
+        // frozen work, so a re-entered preparation validates against that.
+        let bound = recipes
+            .load_recipe(&preparation.cook_id)?
+            .attempts
+            .into_iter()
+            .find(|attempt| attempt.run_id == run_id)
+            .map(|attempt| attempt.plan);
+        let plan_path_exists = lifecycle_store.controller_plan_path(run_id).exists();
+        let frozen = match bound {
+            Some(plan) => Some(plan),
+            None if plan_path_exists => Some(lifecycle_store.read_controller_plan(run_id)?),
+            None => None,
+        };
+        if frozen.is_some_and(|plan| !cook_retry_plans_match(&preparation.plan, &plan)) {
             return Err(Error::validation_invalid_argument(
                 "retry_preparation",
                 "reserved controller plan differs from the frozen retry preparation",
                 Some(run_id.into()),
                 None,
             ));
+        }
+        if !plan_path_exists {
+            agent_task_lifecycle::persist_controller_plan_in_store(
+                lifecycle_store,
+                run_id,
+                &preparation.plan,
+            )?;
         }
         if preparation.replaces_source_attempt {
             recipes.record_recipe_attempt_replacement_with_plan(
@@ -3981,6 +3994,16 @@ mod tests {
                 store.read_controller_plan(&reserved.run_id).unwrap(),
                 preparation.plan
             );
+            // Execution materializes the bound attempt's workspace into the
+            // controller plan; a re-entered preparation still admits it (#16634).
+            let mut materialized = preparation.plan.clone();
+            materialized.tasks[0].metadata["cook_provision"] =
+                serde_json::json!({"action": "existing", "provider_identity": "native"});
+            store
+                .write_controller_plan(&reserved.run_id, &materialized)
+                .unwrap();
+            prepare_reserved_cook_retry(&store, &reserved.run_id, &preparation).unwrap();
+            assert!(prepare_reserved_cook_retry(&store, &reserved.run_id, &conflicting).is_err());
         });
     }
 
