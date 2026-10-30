@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.436.2] - 2026-10-30
+
+### Fixed
+- report the failed Git ancestry check when refresh falls back to GitHub provenance
+
 ## [0.436.1] - 2026-10-30
 
 ### Changed
