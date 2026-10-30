@@ -647,7 +647,7 @@ mod committed_harvest_tests {
             diagnostic.class == "agent_task.committed_harvest_git_failed"
                 && diagnostic.message.contains("content hash mismatch")
         }));
-        assert!(!failed.artifacts.iter().any(is_actionable_patch_artifact));
+        assert!(failed.outcome_candidate().is_none());
     }
 
     #[test]

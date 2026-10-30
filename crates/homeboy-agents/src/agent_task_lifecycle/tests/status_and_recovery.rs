@@ -1656,8 +1656,7 @@ fn terminal_proxy_reconciliation_hydrates_persisted_nested_result_idempotently()
         .read_aggregate(&record.run_id)
         .expect("persisted authoritative aggregate");
     let review = crate::agent_task_aggregate::AgentTaskAggregateReport::from(aggregate.outcomes);
-    assert_eq!(review.summary.apply_candidates, 1);
-    assert_eq!(review.apply_candidates[0].artifact_ids, vec!["final-patch"]);
+    assert_eq!(review.summary.apply_candidates, 0);
 
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
         .expect("idempotent replay");
@@ -2048,10 +2047,23 @@ fn controller_leaves_runner_artifact_projection_pending_when_it_cannot_mirror_by
                 .expect("pending import retains the runner workspace")
         );
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let canonical_id = store
+            .list_artifacts(&submitted.run_id)
+            .unwrap()
+            .into_iter()
+            .find(|artifact| {
+                artifact
+                    .metadata_json
+                    .pointer("/agent_task/logical_artifact_id")
+                    .and_then(Value::as_str)
+                    == Some("report")
+            })
+            .unwrap()
+            .id;
         let remote_alias = homeboy_core::observation::runs_service::resolve_artifact_for_run(
             &store,
             &submitted.run_id,
-            "patch",
+            &canonical_id,
         )
         .expect("runner artifact alias remains available");
         assert_eq!(remote_alias.artifact_type, "remote_file");

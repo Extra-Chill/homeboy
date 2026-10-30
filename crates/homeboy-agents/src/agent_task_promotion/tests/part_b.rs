@@ -171,7 +171,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
 
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let artifacts = store.list_artifacts(run_id).expect("projected artifacts");
-        assert_eq!(artifacts.len(), 4);
+        assert_eq!(artifacts.len(), 5);
         let patch = artifacts
             .iter()
             .find(|artifact| artifact.artifact_type == "file")

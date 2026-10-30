@@ -190,13 +190,9 @@ fn record_interrupted_local_owner_locked(
             )
         })
         .collect::<Vec<_>>();
-    let harvested = outcomes.iter().any(|outcome| {
-        outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
-            || outcome
-                .artifacts
-                .iter()
-                .any(crate::agent_task_evidence_discovery::is_actionable_patch_artifact)
-    });
+    let harvested = outcomes
+        .iter()
+        .any(|outcome| outcome.outcome_candidate().is_some());
     let ownership_state = if has_failed && !harvested {
         "provider_failed"
     } else if has_cancelled && !harvested {
@@ -382,7 +378,7 @@ fn harvest_interrupted_owner_candidate(
         outcome.diagnostics.extend(discovered.diagnostics);
     }
     harvest_git_workspace_candidate(run_id, task, outcome);
-    let harvested = outcome.candidate.is_some();
+    let harvested = outcome.outcome_candidate().is_some();
     if harvested {
         outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
         outcome.failure_classification = None;
@@ -1278,7 +1274,7 @@ pub fn record_remote_dispatch_failure(
     if aggregate
         .outcomes
         .iter()
-        .any(|outcome| outcome.candidate.is_some())
+        .any(|outcome| outcome.outcome_candidate().is_some())
     {
         let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
         crate::agent_task_promotion::candidate_bundle::fetch_run_candidates(
@@ -1502,7 +1498,7 @@ pub(crate) fn record_terminal_artifact_projection_in_store(
     aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
     let recovery_command = format!("homeboy agent-task status {}", record.run_id);
-    if record.runner_id().is_none() && aggregate_has_runner_backed_actionable_patch(aggregate) {
+    if record.runner_id().is_none() && aggregate_has_runner_backed_artifacts(aggregate) {
         match runner_id_from_artifact_provenance(aggregate) {
             Ok(runner_id) => {
                 record
@@ -1634,11 +1630,7 @@ fn runner_id_from_artifact_provenance(aggregate: &AgentTaskAggregate) -> Result<
         .outcomes
         .iter()
         .flat_map(|outcome| &outcome.artifacts)
-        .filter(|artifact| {
-            crate::agent_task_evidence_discovery::is_actionable_patch_artifact(artifact)
-                && artifact.size_bytes.is_some()
-                && artifact.sha256.is_some()
-        })
+        .filter(|artifact| requires_durable_lab_projection(artifact) && artifact.size_bytes.is_some() && artifact.sha256.is_some())
         .map(|artifact| {
             artifact_runner_id(artifact)
                 .map(str::to_string)
@@ -1690,13 +1682,13 @@ fn validate_artifact_runner_binding(
     Ok(())
 }
 
-fn aggregate_has_runner_backed_actionable_patch(aggregate: &AgentTaskAggregate) -> bool {
+fn aggregate_has_runner_backed_artifacts(aggregate: &AgentTaskAggregate) -> bool {
     aggregate
         .outcomes
         .iter()
         .flat_map(|outcome| &outcome.artifacts)
         .any(|artifact| {
-            crate::agent_task_evidence_discovery::is_actionable_patch_artifact(artifact)
+            requires_durable_lab_projection(artifact)
                 && artifact.path.as_deref().is_none_or(|path| {
                     let path = Path::new(path);
                     path.is_absolute() && !path.is_file()
@@ -1955,8 +1947,7 @@ fn project_terminal_artifacts_in_store(
     let mut projection_error = None;
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
-            let actionable =
-                crate::agent_task_evidence_discovery::is_actionable_patch_artifact(artifact);
+            let actionable = requires_durable_lab_projection(artifact);
             let remote_runner = record.runner_id().filter(|runner_id| {
                 super::lifecycle_ops::execution_runner_id().as_deref() != Some(*runner_id)
             });
@@ -2242,7 +2233,11 @@ fn controller_projected_local_artifact_path(
 }
 
 fn requires_durable_lab_projection(artifact: &AgentTaskArtifact) -> bool {
-    crate::agent_task_evidence_discovery::is_actionable_patch_artifact(artifact)
+    artifact
+        .metadata
+        .get("executor_artifact_finalized")
+        .and_then(Value::as_bool)
+        == Some(true)
         || matches!(
             artifact.kind.as_str(),
             "transcript" | "result" | "agent-result" | "agent_result" | "git_bundle"
@@ -2881,7 +2876,7 @@ pub(crate) fn apply_aggregate_to_record(
         .outcomes
         .iter()
         .rev()
-        .find_map(|outcome| outcome.candidate.clone());
+        .find_map(|outcome| outcome.outcome_candidate().cloned());
     update_lifecycle_from_record(record, plan);
     // The model each provider actually ran is aggregate evidence; it is
     // projected with the aggregate it came from, not repaired on a later read.
@@ -3118,7 +3113,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_runner_provenance_uses_only_actionable_patch_artifacts() {
+    fn runner_provenance_uses_candidate_bundle_artifacts() {
         let mut aggregate = AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
             plan_id: "plan".to_string(),
@@ -3134,9 +3129,9 @@ mod tests {
             task_id: "task".to_string(),
             status: AgentTaskOutcomeStatus::Succeeded,
             artifacts: vec![
-                artifact("patch", "patch", Some("runner-a")),
-                artifact("transcript", "transcript", None),
-                artifact("result", "result", None),
+                artifact("candidate-bundle", "git_bundle", Some("runner-a")),
+                artifact("transcript", "transcript", Some("runner-a")),
+                artifact("result", "result", Some("runner-a")),
                 artifact("runtime-log", "runtime-log", None),
             ],
             ..Default::default()
@@ -3146,9 +3141,11 @@ mod tests {
             runner_id_from_artifact_provenance(&aggregate).expect("consistent provenance"),
             "runner-a"
         );
-        aggregate.outcomes[0]
-            .artifacts
-            .push(artifact("second-patch", "patch", Some("runner-b")));
+        aggregate.outcomes[0].artifacts.push(artifact(
+            "second-bundle",
+            "git_bundle",
+            Some("runner-b"),
+        ));
         assert!(runner_id_from_artifact_provenance(&aggregate).is_err());
     }
 
