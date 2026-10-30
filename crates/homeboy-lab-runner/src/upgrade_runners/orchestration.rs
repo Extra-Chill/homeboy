@@ -157,34 +157,7 @@ fn runner_manifest_preflight_with_executor(
         );
     }
 
-    for extension_id in inventory.readable {
-        let options = runner_manifest_query_options(
-            runner,
-            vec![
-                homeboy_path.to_string(),
-                "extension".to_string(),
-                "show".to_string(),
-                extension_id.clone(),
-            ],
-            allow_diagnostic_ssh,
-        );
-        let (output, exit_code) = match exec(&runner.id, options) {
-            Ok(result) => result,
-            Err(error) => {
-                return Some(format!(
-                    "runner manifest preflight could not query installed extension `{extension_id}`: {}",
-                    error.message
-                ));
-            }
-        };
-        if exit_code != 0 {
-            return Some(format!("runner manifest preflight failed for installed extension `{extension_id}`; recover with: {homeboy_path} extension show {extension_id}"));
-        }
-        let requires_homeboy =
-            match runner_extension_requires_homeboy(&output.stdout, &extension_id) {
-                Ok(requires_homeboy) => requires_homeboy,
-                Err(detail) => return Some(detail),
-            };
+    for (extension_id, requires_homeboy) in inventory.readable {
         let Some(requires_homeboy) = requires_homeboy else {
             continue;
         };
@@ -246,7 +219,8 @@ fn diagnostic_ssh_is_permitted_for(status: &RunnerStatusReport) -> bool {
 
 #[derive(Debug, PartialEq, Eq)]
 struct RunnerExtensionInventory {
-    readable: Vec<String>,
+    /// Readable extensions with their declared `requires.homeboy`, if any.
+    readable: Vec<(String, Option<String>)>,
     candidate_owned: Vec<String>,
 }
 
@@ -299,51 +273,27 @@ fn runner_extension_inventory(
                 "runner extension `{id}` manifest is invalid ({error}){diagnostic}"
             ));
         }
-        inventory.readable.push(id.to_string());
+        let requires_homeboy = match extension
+            .get("core_compatibility")
+            .and_then(serde_json::Value::as_object)
+            .map(|compatibility| compatibility.get("requires_homeboy"))
+        {
+            None => {
+                return Err(format!(
+                    "runner extension `{id}` inventory omitted core_compatibility"
+                ))
+            }
+            Some(None | Some(serde_json::Value::Null)) => None,
+            Some(Some(serde_json::Value::String(requirement))) => Some(requirement.clone()),
+            Some(Some(_)) => {
+                return Err(format!(
+                    "runner extension `{id}` compatibility requirement was not a string"
+                ))
+            }
+        };
+        inventory.readable.push((id.to_string(), requires_homeboy));
     }
     Ok(inventory)
-}
-
-fn runner_extension_requires_homeboy(
-    stdout: &str,
-    expected_extension_id: &str,
-) -> std::result::Result<Option<String>, String> {
-    let value: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|error| {
-        format!("runner extension `{expected_extension_id}` manifest output was not valid JSON: {error}")
-    })?;
-    if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err(format!(
-            "runner extension `{expected_extension_id}` manifest query did not report success"
-        ));
-    }
-    let extension = value
-        .pointer("/data/extension")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| {
-            format!(
-                "runner extension `{expected_extension_id}` manifest query did not contain data.extension"
-            )
-        })?;
-    if extension.get("id").and_then(serde_json::Value::as_str) != Some(expected_extension_id) {
-        return Err(format!(
-            "runner extension manifest query returned the wrong extension for `{expected_extension_id}`"
-        ));
-    }
-    let compatibility = extension
-        .get("core_compatibility")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| {
-            format!(
-                "runner extension `{expected_extension_id}` manifest query omitted core_compatibility"
-            )
-        })?;
-    match compatibility.get("requires_homeboy") {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(requirement)) => Ok(Some(requirement.clone())),
-        Some(_) => Err(format!(
-            "runner extension `{expected_extension_id}` compatibility requirement was not a string"
-        )),
-    }
 }
 
 #[cfg(test)]
@@ -465,22 +415,21 @@ mod manifest_preflight_tests {
     }
 
     #[test]
-    fn reads_runner_manifest_compatibility_from_extension_show_json() {
-        let stdout = r#"{"success":true,"data":{"extension":{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0, <3.0.0"}}}}"#;
+    fn reads_runner_manifest_compatibility_from_the_extension_inventory() {
+        let stdout = r#"{"success":true,"data":{"entities":[{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0, <3.0.0"}},{"id":"example","core_compatibility":{"status":"undeclared"}}]}}"#;
         assert_eq!(
-            runner_extension_requires_homeboy(stdout, "rust")
-                .expect("valid manifest query")
-                .as_deref(),
-            Some(">=2.0.0, <3.0.0")
+            runner_extension_inventory(stdout)
+                .expect("valid inventory")
+                .readable,
+            vec![
+                ("rust".to_string(), Some(">=2.0.0, <3.0.0".to_string())),
+                ("example".to_string(), None),
+            ]
         );
-    }
-
-    #[test]
-    fn ignores_extension_show_without_a_compatibility_declaration() {
-        let stdout = r#"{"success":true,"data":{"extension":{"id":"example","core_compatibility":{"status":"undeclared"}}}}"#;
-        assert!(runner_extension_requires_homeboy(stdout, "example")
-            .expect("valid undeclared compatibility")
-            .is_none());
+        let missing = r#"{"success":true,"data":{"entities":[{"id":"rust"}]}}"#;
+        assert!(runner_extension_inventory(missing)
+            .expect_err("an entry without core_compatibility fails closed")
+            .contains("omitted core_compatibility"));
     }
 
     fn status_report(connected: bool) -> RunnerStatusReport {
@@ -584,10 +533,7 @@ mod manifest_preflight_tests {
             runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec,)
                 .is_none()
         );
-        assert_eq!(
-            call_count, 1,
-            "an absent controller extension is never shown"
-        );
+        assert_eq!(call_count, 1, "one inventory query answers the preflight");
     }
 
     #[test]
@@ -598,16 +544,9 @@ mod manifest_preflight_tests {
             let stdout = match call_count {
                 0 => {
                     assert_eq!(options.command, ["homeboy", "extension", "list"]);
-                    r#"{"success":true,"data":{"entities":[{"id":"runner-only"}]}}"#
+                    r#"{"success":true,"data":{"entities":[{"id":"runner-only","core_compatibility":{"requires_homeboy":">=3.0.0"}}]}}"#
                 }
-                1 => {
-                    assert_eq!(
-                        options.command,
-                        ["homeboy", "extension", "show", "runner-only"]
-                    );
-                    r#"{"success":true,"data":{"extension":{"id":"runner-only","core_compatibility":{"requires_homeboy":">=3.0.0"}}}}"#
-                }
-                _ => panic!("unexpected manifest query"),
+                _ => panic!("the inventory alone answers compatibility"),
             };
             call_count += 1;
             Ok(successful_output(runner_id, options.command, stdout))
@@ -617,7 +556,7 @@ mod manifest_preflight_tests {
             runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec)
                 .expect("runner-only incompatible extension blocks promotion");
         assert!(rejection.contains("incompatible with selected controller 2.1.0"));
-        assert_eq!(call_count, 2);
+        assert_eq!(call_count, 1);
     }
 
     #[test]
@@ -646,11 +585,7 @@ mod manifest_preflight_tests {
             let stdout = match call_count {
                 0 => {
                     assert_eq!(options.command, ["homeboy", "extension", "list"]);
-                    r#"{"success":true,"data":{"entities":[{"id":"discord","error":"manifest_deserialize_incompatible","diagnostic":"The extension manifest does not match the supported schema."},{"id":"rust"}]}}"#
-                }
-                1 => {
-                    assert_eq!(options.command, ["homeboy", "extension", "show", "rust"]);
-                    r#"{"success":true,"data":{"extension":{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0"}}}}"#
+                    r#"{"success":true,"data":{"entities":[{"id":"discord","error":"manifest_deserialize_incompatible","diagnostic":"The extension manifest does not match the supported schema."},{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0"}}]}}"#
                 }
                 _ => {
                     panic!("legacy-incompatible extension must not be queried by the legacy binary")
@@ -665,26 +600,21 @@ mod manifest_preflight_tests {
                 .is_none(),
             "the selected candidate owns compatibility for an unreadable legacy schema"
         );
-        assert_eq!(call_count, 2);
+        assert_eq!(call_count, 1);
     }
 
     #[test]
     fn changed_runner_manifest_is_rejected_by_revalidation_without_source_sync() {
         let runner = ssh_runner();
-        let manifests = [
-            r#"{"success":true,"data":{"extension":{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0"}}}}"#,
-            r#"{"success":true,"data":{"extension":{"id":"rust","core_compatibility":{"requires_homeboy":">=3.0.0"}}}}"#,
+        let inventories = [
+            r#"{"success":true,"data":{"entities":[{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0"}}]}}"#,
+            r#"{"success":true,"data":{"entities":[{"id":"rust","core_compatibility":{"requires_homeboy":">=3.0.0"}}]}}"#,
         ];
         let mut call_count = 0;
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
             assert_eq!(runner_id, "lab-a");
-            let stdout = if call_count % 2 == 0 {
-                assert_eq!(options.command, ["homeboy", "extension", "list"]);
-                r#"{"success":true,"data":{"entities":[{"id":"rust"}]}}"#
-            } else {
-                assert_eq!(options.command, ["homeboy", "extension", "show", "rust"]);
-                manifests[call_count / 2]
-            };
+            assert_eq!(options.command, ["homeboy", "extension", "list"]);
+            let stdout = inventories[call_count];
             assert!(!options.read_only_artifact_access);
             call_count += 1;
             Ok(successful_output(runner_id, options.command, stdout))
@@ -698,7 +628,7 @@ mod manifest_preflight_tests {
             runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec)
                 .expect("changed manifest is rejected during revalidation");
         assert!(rejection.contains("incompatible with selected controller 2.1.0"));
-        assert_eq!(call_count, 4);
+        assert_eq!(call_count, 2);
     }
 }
 
