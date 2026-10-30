@@ -714,7 +714,7 @@ fn bounded_refresh_error_projection(
             "exit_code": exit_code,
             "error": {
                 "code": error.code.as_str(),
-                "message": bounded_refresh_text(&error.message),
+                "message": bounded_refresh_text(&error.attributed_message()),
                 "details": {
                     "_homeboy_actions": bounded_refresh_error_actions(error),
                 },
@@ -1416,6 +1416,20 @@ mod tests {
         assert!(!serde_json::to_string(&projection)
             .unwrap()
             .contains(&"x".repeat(512)));
+    }
+
+    #[test]
+    fn refresh_homeboy_error_projection_names_the_io_cause() {
+        let error = homeboy::core::Error::internal_io(
+            "runner build identity mismatch",
+            Some("workspace materialization protocol".to_string()),
+        );
+
+        let projection = bounded_refresh_error_projection(&error, 1, None);
+        assert_eq!(
+            projection["error"]["message"],
+            "IO error: workspace materialization protocol: runner build identity mismatch"
+        );
     }
 
     #[test]

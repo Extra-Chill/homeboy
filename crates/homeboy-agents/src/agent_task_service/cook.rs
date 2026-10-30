@@ -1107,7 +1107,7 @@ pub(crate) fn bounded_error_diagnostic(error: &Error) -> Value {
             "code": error.code.as_str(),
             "field": details.get("field"),
             "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(
-                &attributed_error_message(&error.message, &details),
+                &error.attributed_message(),
             )),
         })
     });
@@ -1115,32 +1115,11 @@ pub(crate) fn bounded_error_diagnostic(error: &Error) -> Value {
         "status": "failed",
         "code": format!("{:?}", error.code),
         "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(
-            &attributed_error_message(&error.message, &details),
+            &error.attributed_message(),
         )),
         "details": details,
         "deepest_cause": deepest_cause,
     })
-}
-
-/// A generic error message ("IO error") names a class, not a failure. Internal
-/// I/O errors keep the failing operation in `details.context` and the OS error
-/// in `details.error`; fold both into the bounded message so compact cause
-/// projections (status, notifications) say what failed (#15297).
-fn attributed_error_message(message: &str, details: &Value) -> String {
-    let context = details
-        .get("context")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty());
-    let os_error = details
-        .get("error")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty());
-    match (context, os_error) {
-        (Some(context), Some(os_error)) => format!("{message}: {context}: {os_error}"),
-        (Some(context), None) => format!("{message}: {context}"),
-        (None, Some(os_error)) => format!("{message}: {os_error}"),
-        (None, None) => message.to_string(),
-    }
 }
 
 /// A failed nested Homeboy command result is more specific than the transport
