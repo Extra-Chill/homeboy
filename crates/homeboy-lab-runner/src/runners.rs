@@ -34,9 +34,9 @@ pub use crate::{
 pub use crate::{
     diagnostic_status, disconnect, disconnect_local_recovery, download_remote_artifact,
     evaluate_lab_runner_capabilities_for_runner, exec, exec_request, execute_lab_offload,
-    generation_retirement_readiness, hydrate_prepared_workspace_source_snapshot,
-    is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
-    is_retrievable_runner_artifact, lab_offload_changed_since_ref, lab_offload_metadata,
+    hydrate_prepared_workspace_source_snapshot, is_remote_runner_artifact_path,
+    is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
+    lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, lab_runner_readiness, list_workspaces,
     materialization_commit, materialization_plan, mirror_connected_runner_run,
     mirrored_runner_job_identity, persisted_status, persisted_status_until, persisted_statuses,

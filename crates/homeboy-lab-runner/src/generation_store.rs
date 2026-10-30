@@ -55,8 +55,111 @@ fn path(runner_id: &str) -> Result<PathBuf> {
 
 /// Lab-runner session discovery treats every JSON child as a session record,
 /// so retirement diagnostics live in a non-JSON sidecar.
-fn retirement_blockers_path(runner_id: &str) -> Result<PathBuf> {
-    Ok(path(runner_id)?.with_file_name("retirement-blockers.state"))
+fn retirement_verdicts_path(runner_id: &str) -> Result<PathBuf> {
+    Ok(path(runner_id)?.with_file_name("retirement-verdicts.state"))
+}
+
+/// Last retirement decision, owned by reconcile rather than a status probe.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct GenerationRetirementVerdict {
+    pub checked_at: String,
+    #[serde(flatten)]
+    pub verdict: GenerationRetirementDecision,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GenerationRetirementDecision {
+    Ready,
+    Blocked {
+        kind: GenerationRetirementBlockerKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationRetirementBlockerKind {
+    Ownership,
+    ActiveWork,
+    EndpointUnavailable,
+    RetainedEvidence,
+    StopUnconfirmed,
+}
+
+fn persist_retirement_verdicts(
+    runner_id: &str,
+    generations: &RollingGenerations<RunnerSession>,
+    blockers: &std::collections::BTreeMap<String, String>,
+    evidence_blockers: &std::collections::BTreeSet<String>,
+    evidence_runs: &std::collections::BTreeMap<String, String>,
+    ownership_blockers: &std::collections::BTreeSet<String>,
+    retired: &[String],
+) -> Result<()> {
+    let checked_at = Utc::now().to_rfc3339();
+    let verdicts = generations
+        .generations
+        .iter()
+        .filter(|(id, entry)| {
+            *id != &generations.admission_owner
+                && entry.drain_state == crate::RollingDrainState::Draining
+        })
+        .map(|(id, entry)| {
+            let reason = blockers.get(id).cloned();
+            let verdict = match reason {
+                None => GenerationRetirementDecision::Ready,
+                Some(reason) => {
+                    let kind = if evidence_blockers.contains(id) {
+                        GenerationRetirementBlockerKind::RetainedEvidence
+                    } else if ownership_blockers.contains(id) {
+                        GenerationRetirementBlockerKind::Ownership
+                    } else if entry.observed_active_jobs.is_some_and(|count| count > 0) {
+                        GenerationRetirementBlockerKind::ActiveWork
+                    } else if entry.observed_active_jobs.is_none() {
+                        GenerationRetirementBlockerKind::EndpointUnavailable
+                    } else {
+                        GenerationRetirementBlockerKind::StopUnconfirmed
+                    };
+                    GenerationRetirementDecision::Blocked {
+                        kind,
+                        run_id: evidence_runs.get(id).cloned(),
+                        reason,
+                    }
+                }
+            };
+            (
+                id.clone(),
+                GenerationRetirementVerdict {
+                    checked_at: checked_at.clone(),
+                    verdict,
+                },
+            )
+        })
+        .chain(retired.iter().map(|id| {
+            (
+                id.clone(),
+                GenerationRetirementVerdict {
+                    checked_at: checked_at.clone(),
+                    verdict: GenerationRetirementDecision::Ready,
+                },
+            )
+        }))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    write_durable_json(&retirement_verdicts_path(runner_id)?, &verdicts)
+}
+
+pub fn persisted_retirement_verdicts(
+    runner_id: &str,
+) -> Result<std::collections::BTreeMap<String, GenerationRetirementVerdict>> {
+    let path = retirement_verdicts_path(runner_id)?;
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 fn recovery_lock_path(runner_id: &str, generation: &str) -> Result<PathBuf> {
@@ -1956,7 +2059,18 @@ fn verify_retained_evidence(
     let mut discharged = false;
     let store = ObservationStore::open_initialized()?;
     let invalid = |id: &str, reason: &str| {
-        Error::internal_unexpected(format!("retained evidence {id}: {reason}"))
+        let mut error = Error::internal_unexpected(format!("retained evidence {id}: {reason}"));
+        let run_id = if runs.contains(id) {
+            Some(id.to_string())
+        } else {
+            store
+                .get_artifact(id)
+                .ok()
+                .flatten()
+                .map(|artifact| artifact.run_id)
+        };
+        error.details = serde_json::json!({"run_id": run_id});
+        error
     };
     // The admitting endpoint may still serve shared run evidence when the
     // owning endpoint is unreachable but has not been proven stopped.
@@ -2023,7 +2137,8 @@ fn verify_retained_evidence(
             // Only the stopped daemon held the inventory; every controller
             // copy it left must still be valid.
             for artifact in &local_artifacts {
-                verify_controller_copy(artifact, &local_artifacts)?;
+                verify_controller_copy(artifact, &local_artifacts)
+                    .map_err(|error| invalid(id, &error.message))?;
             }
             discharged = true;
             continue;
@@ -2036,7 +2151,8 @@ fn verify_retained_evidence(
             let source: homeboy_core::observation::ArtifactRecord =
                 serde_json::from_value(source.clone())
                     .map_err(|_| invalid(id, "source artifact metadata invalid"))?;
-            verify_controller_copy(&source, &local_artifacts)?;
+            verify_controller_copy(&source, &local_artifacts)
+                .map_err(|error| invalid(id, &error.message))?;
         }
         let Some(remote) = &inventories[1] else {
             if !proven_stopped() {
@@ -2074,7 +2190,8 @@ fn verify_retained_evidence(
                 "artifact has no retained run owned by this generation",
             ));
         }
-        verify_controller_copy(&artifact, &store.list_artifacts(&artifact.run_id)?)?;
+        verify_controller_copy(&artifact, &store.list_artifacts(&artifact.run_id)?)
+            .map_err(|error| invalid(id, &error.message))?;
     }
     Ok(discharged
         .then_some("daemon proven stopped; source inventory and findings checks discharged"))
@@ -2154,95 +2271,6 @@ fn audit_ownership(generations: &RollingGenerations<RunnerSession>) -> Ownership
     audit
 }
 
-pub(crate) fn retirement_readiness(
-    runner_id: &str,
-) -> Result<std::collections::BTreeMap<String, Option<String>>> {
-    let Some(generations) = read(runner_id)? else {
-        return Ok(Default::default());
-    };
-    let operations = HttpGenerationEndpointOperations {
-        client: reqwest::blocking::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .map_err(|error| Error::internal_unexpected(error.to_string()))?,
-    };
-    let runner = crate::load(runner_id).ok();
-    let remote = runner.as_ref().and_then(|runner| {
-        crate::connection::remote_daemon::resolve_ssh_runner(runner)
-            .ok()
-            .flatten()
-    });
-    if let Some((_, _, client)) = remote {
-        return retirement_readiness_with(
-            runner_id,
-            &generations,
-            &FallbackGenerationEndpointOperations {
-                primary: &operations,
-                fallback: &SshGenerationEndpointOperations { client: &client },
-            },
-        );
-    }
-    retirement_readiness_with(runner_id, &generations, &operations)
-}
-
-fn retirement_readiness_with(
-    runner_id: &str,
-    generations: &RollingGenerations<RunnerSession>,
-    operations: &impl GenerationEndpointOperations,
-) -> Result<std::collections::BTreeMap<String, Option<String>>> {
-    let audit = audit_ownership(generations);
-    let diagnostics_path = retirement_blockers_path(runner_id)?;
-    let previous: std::collections::BTreeMap<String, String> = std::fs::read(&diagnostics_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
-    Ok(generations
-        .generations
-        .iter()
-        .filter_map(|(id, entry)| {
-            if id == &generations.admission_owner
-                || entry.drain_state != crate::RollingDrainState::Draining
-            {
-                return None;
-            }
-            let reason = audit.retirement_blockers.get(id).cloned().or_else(|| {
-                if audit.fences_retirement {
-                    Some("generation ownership is ambiguous".to_string())
-                } else if entry.observed_active_jobs != Some(0) {
-                    Some(match entry.observed_active_jobs {
-                        Some(count) => format!("generation has {count} live jobs"),
-                        None => "generation active job count is unverified".to_string(),
-                    })
-                } else {
-                    verify_retained_evidence(
-                        runner_id,
-                        generations,
-                        id,
-                        &entry.endpoint,
-                        operations,
-                    )
-                    .err()
-                    .map(|error| error.to_string())
-                }
-            });
-            // Stop/settlement gates are mutating and cannot be retried by
-            // status. Preserve the last reconciler's exact reason for them.
-            let reason = reason.or_else(|| {
-                previous
-                    .get(id)
-                    .filter(|reason| {
-                        reason.as_str()
-                            == "authenticated idle stop or endpoint shutdown was not confirmed"
-                            || reason.as_str() == "ownership changed before stop"
-                    })
-                    .cloned()
-            });
-            Some((id.clone(), reason))
-        })
-        .collect())
-}
-
 pub(crate) fn reconcile(runner_id: &str) -> Result<GenerationReconcileResult> {
     reconcile_with_policy(runner_id, GenerationReconcilePolicy::default())
 }
@@ -2307,6 +2335,7 @@ fn reconcile_with_operations(
     policy: GenerationReconcilePolicy,
 ) -> Result<GenerationReconcileResult> {
     let mut evidence_blocked_generation_ids = std::collections::BTreeSet::new();
+    let mut evidence_runs = std::collections::BTreeMap::new();
     let mut released_unverified_evidence = std::collections::BTreeMap::new();
     let mut stopped_generation_job_owner_ids = std::collections::BTreeMap::new();
     let mut released_stopped_generation_jobs = std::collections::BTreeMap::new();
@@ -2317,7 +2346,28 @@ fn reconcile_with_operations(
         mut retirement_blockers,
         fences_retirement,
     } = audit_ownership(&generations);
+    let mut ownership_blockers = retirement_blockers
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     if fences_retirement {
+        for (id, entry) in &generations.generations {
+            if entry.drain_state == crate::RollingDrainState::Draining {
+                retirement_blockers
+                    .entry(id.clone())
+                    .or_insert_with(|| "generation ownership is ambiguous".to_string());
+                ownership_blockers.insert(id.clone());
+            }
+        }
+        persist_retirement_verdicts(
+            runner_id,
+            &generations,
+            &retirement_blockers,
+            &evidence_blocked_generation_ids,
+            &evidence_runs,
+            &ownership_blockers,
+            &[],
+        )?;
         return Ok(GenerationReconcileResult {
             retired_generation_ids: Vec::new(),
             retirement_blockers,
@@ -2413,6 +2463,7 @@ fn reconcile_with_operations(
                     && job_owner_ids_for(&generations, generation, &entry.endpoint)
                         == *prior_job_owner_ids;
                 if !state_unchanged {
+                    ownership_blockers.insert(generation.clone());
                     retirement_blockers.insert(
                         generation.clone(),
                         "ownership changed during observation".to_string(),
@@ -2449,6 +2500,13 @@ fn reconcile_with_operations(
             let evidence_error = match evidence_error {
                 Some(error) => {
                     evidence_blocked_generation_ids.insert(generation.clone());
+                    if let Some(run_id) = error
+                        .details
+                        .get("run_id")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        evidence_runs.insert(generation.clone(), run_id.to_string());
+                    }
                     if policy.release_unverified_evidence {
                         released_unverified_evidence
                             .insert(generation.clone(), error.message.clone());
@@ -2597,6 +2655,13 @@ fn reconcile_with_operations(
                     Ok(None) => {}
                     Err(error) => {
                         evidence_blocked_generation_ids.insert(generation.clone());
+                        if let Some(run_id) = error
+                            .details
+                            .get("run_id")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            evidence_runs.insert(generation.clone(), run_id.to_string());
+                        }
                         if policy.release_unverified_evidence {
                             released_unverified_evidence
                                 .insert(generation.clone(), error.message.clone());
@@ -2632,6 +2697,7 @@ fn reconcile_with_operations(
                 }
                 retired.push(generation.clone());
             } else {
+                ownership_blockers.insert(generation.clone());
                 retirement_blockers.insert(
                     generation.clone(),
                     "ownership changed before stop".to_string(),
@@ -2639,9 +2705,14 @@ fn reconcile_with_operations(
             }
         }
         write(runner_id, &generations)?;
-        homeboy_core::engine::local_files::write_json_file(
-            &retirement_blockers_path(runner_id)?,
+        persist_retirement_verdicts(
+            runner_id,
+            &generations,
             &retirement_blockers,
+            &evidence_blocked_generation_ids,
+            &evidence_runs,
+            &ownership_blockers,
+            &retired,
         )?;
         Ok(retired)
     })?;
@@ -3875,8 +3946,10 @@ mod tests {
                 ("lease-current".to_string(), 0),
             ]);
             assert_eq!(
-                retirement_readiness("runner-a").unwrap().get("lease-idle"),
-                Some(&None)
+                persisted_retirement_verdicts("runner-a")
+                    .unwrap()
+                    .get("lease-idle"),
+                None
             );
             let result = reconcile_with("runner-a", &operations).unwrap();
             assert_eq!(result.retired_generation_ids, ["lease-idle"]);
@@ -3906,8 +3979,12 @@ mod tests {
             assert!(outcome.retired_generation_ids.is_empty());
             let before = std::fs::read(path("runner-a").unwrap()).unwrap();
             assert_eq!(
-                retirement_readiness("runner-a").unwrap()["lease-idle"],
-                Some(outcome.retirement_blockers["lease-idle"].clone())
+                persisted_retirement_verdicts("runner-a").unwrap()["lease-idle"].verdict,
+                GenerationRetirementDecision::Blocked {
+                    kind: GenerationRetirementBlockerKind::StopUnconfirmed,
+                    run_id: None,
+                    reason: outcome.retirement_blockers["lease-idle"].clone(),
+                }
             );
             assert_eq!(before, std::fs::read(path("runner-a").unwrap()).unwrap());
             assert_eq!(operations.stopped_leases.borrow().len(), 1);
@@ -4245,6 +4322,29 @@ mod tests {
                 .get("lease-idle")
                 .is_some_and(|reason| reason.contains("retained evidence run-legacy")));
             assert!(operations.stopped_leases.borrow().is_empty());
+            let verdict = &persisted_retirement_verdicts("runner-a").unwrap()["lease-idle"];
+            assert!(chrono::DateTime::parse_from_rfc3339(&verdict.checked_at).is_ok());
+            assert_eq!(
+                verdict.verdict,
+                GenerationRetirementDecision::Blocked {
+                    kind: GenerationRetirementBlockerKind::RetainedEvidence,
+                    run_id: Some("run-legacy".into()),
+                    reason: result.retirement_blockers["lease-idle"].clone(),
+                }
+            );
+            // Status reports the operation's verdict even if the local evidence changes.
+            homeboy_core::observation::ObservationStore::open_initialized()
+                .unwrap()
+                .finish_run(
+                    "run-legacy",
+                    homeboy_core::observation::RunStatus::Pass,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                &persisted_retirement_verdicts("runner-a").unwrap()["lease-idle"],
+                verdict
+            );
         });
     }
 
@@ -4271,6 +4371,10 @@ mod tests {
             .expect("reconcile with release");
 
             assert_eq!(result.retired_generation_ids, ["lease-idle"]);
+            assert_eq!(
+                persisted_retirement_verdicts("runner-a").unwrap()["lease-idle"].verdict,
+                GenerationRetirementDecision::Ready
+            );
             assert!(result
                 .released_unverified_evidence
                 .get("lease-idle")

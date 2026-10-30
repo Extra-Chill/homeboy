@@ -2181,14 +2181,6 @@ pub fn reconcile_status_with_outcome_with_policy(
     reconcile_status_with_outcome_in_roots_with_policy(runner_id, policy)
 }
 
-/// Read-only retirement diagnostics for draining generations. A `None`
-/// reason means evidence is verified and the next reconcile can attempt stop.
-pub fn generation_retirement_readiness(
-    runner_id: &str,
-) -> Result<std::collections::BTreeMap<String, Option<String>>> {
-    super::generation_store::retirement_readiness(runner_id)
-}
-
 /// Lifecycle hook shared by reconnect, refresh, and upgrade (which refreshes).
 /// Use the normal reconciler and its default, fail-closed evidence policy.
 pub(crate) fn retire_drained_generations(runner: &Runner) -> Result<()> {

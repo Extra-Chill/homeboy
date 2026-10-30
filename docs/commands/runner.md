@@ -761,11 +761,15 @@ verified controller files or directory tree checksums and complete source
 inventories. `--release-unverified-evidence` remains an explicit operator choice
 for genuinely unverifiable evidence, not a default lifecycle policy.
 
-`runner status` includes `retirement_readiness` even without `--generations`:
-each draining generation maps to one blocking reason, or `null` when ready for
-the reconciler to attempt its authenticated stop. Unqualified status prefixes
-these keys with the runner ID. Status never performs the stop itself. Failed
-stop attempts remain visible until the next reconciliation.
+`runner status` includes `retirement_readiness` even without `--generations`.
+It reports the last reconcile-owned verdict, not a fresh retirement proof:
+`checked_at` is the decision timestamp and `state` is `ready` or `blocked`.
+Blocked verdicts include a typed `kind`, a `reason`, and a `run_id` when a
+retained run caused the blocker. Unqualified status prefixes generation keys
+with the runner ID. Generations without a recorded verdict are omitted, not
+assumed ready. Status makes no retained-evidence reads or stop attempts;
+reconcile and retirement retain those safety checks and publish the next verdict.
+Successful retirements are recorded as ready in the latest reconciliation.
 
 The command succeeds only when its postcondition has converged: the runner is
 accepting jobs and has no unresolved generation projection. A non-converged
