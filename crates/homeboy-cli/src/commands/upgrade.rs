@@ -264,7 +264,10 @@ mod tests {
                 .start_run(
                     NewRunRecord::builder("upgrade")
                         .command("homeboy upgrade")
-                        .metadata(json!({"phase": "resuming_admission"}))
+                        .metadata(json!({
+                            "schema": "homeboy/upgrade-operation/v1",
+                            "phase": "resuming_admission"
+                        }))
                         .build(),
                 )
                 .unwrap();
