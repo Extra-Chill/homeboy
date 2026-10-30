@@ -1085,6 +1085,7 @@ impl JobStore {
             .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
             .filter(|stored| self.executes_lease(stored.job.daemon_lease_id.as_deref()))
             .map(|stored| {
+                let re_adoptable = stored.re_adoptable_across_daemon_restart();
                 stored
                     .remote_runner
                     .as_ref()
@@ -1093,6 +1094,7 @@ impl JobStore {
                             &stored.job,
                             &remote.envelope,
                             now,
+                            re_adoptable,
                         )
                     })
                     .or_else(|| {
@@ -1101,11 +1103,16 @@ impl JobStore {
                                 &stored.job,
                                 local,
                                 now,
+                                re_adoptable,
                             )
                         })
                     })
                     .unwrap_or_else(|| {
-                        super::super::summary::active_daemon_job_summary(&stored.job, now)
+                        super::super::summary::active_daemon_job_summary(
+                            &stored.job,
+                            now,
+                            re_adoptable,
+                        )
                     })
             })
             .collect();
@@ -1150,6 +1157,7 @@ impl JobStore {
                     &stored.job,
                     envelope,
                     now,
+                    false,
                 ))
             })
             .collect();

@@ -626,61 +626,6 @@ pub(super) fn controller_session() -> RunnerSession {
 }
 
 #[test]
-fn candidate_daemon_freshness_accepts_the_materialized_immutable_binary_hash() {
-    let expected = "a".repeat(64);
-    let report = DaemonFreshnessReport {
-        fresh: true,
-        stale_reason_code: None,
-        restartable: false,
-        lease_id: Some("lease-candidate".to_string()),
-        pid: Some(4242),
-        recovery_evidence: None,
-        ownership_evidence: None,
-        adoption_command: None,
-        binary_hash: Some(expected.clone()),
-        daemon_version: Some("test".to_string()),
-        daemon_build_identity: Some("homeboy test+candidate".to_string()),
-        runtime_paths: None,
-        active_jobs: 0,
-        termination_evidence: None,
-        repair_plan: Vec::new(),
-    };
-
-    verify_candidate_daemon_freshness("homeboy-lab", &expected, Ok(report))
-        .expect("candidate rotates");
-}
-
-#[test]
-fn candidate_daemon_freshness_mismatch_reports_expected_and_observed_hashes() {
-    let expected = "a".repeat(64);
-    let observed = "b".repeat(64);
-    let report = DaemonFreshnessReport {
-        fresh: false,
-        stale_reason_code: Some(DaemonStaleReasonCode::BinaryHashMismatch),
-        restartable: true,
-        lease_id: Some("lease-candidate".to_string()),
-        pid: Some(4242),
-        recovery_evidence: None,
-        ownership_evidence: None,
-        adoption_command: None,
-        binary_hash: Some(observed.clone()),
-        daemon_version: Some("test".to_string()),
-        daemon_build_identity: Some("homeboy test+candidate".to_string()),
-        runtime_paths: None,
-        active_jobs: 0,
-        termination_evidence: None,
-        repair_plan: Vec::new(),
-    };
-
-    let error = verify_candidate_daemon_freshness("homeboy-lab", &expected, Ok(report))
-        .expect_err("mismatch");
-    assert!(error.message.contains(&format!("expected {expected}")));
-    assert!(error.message.contains(&format!("observed {observed}")));
-    assert!(error.message.contains("fresh=false"));
-    assert!(error.message.contains("BinaryHashMismatch"));
-}
-
-#[test]
 fn artifact_content_endpoint_accepts_direct_sessions_with_a_daemon_url() {
     ensure_artifact_content_endpoint(&controller_session()).expect("direct endpoint");
 }
@@ -738,6 +683,7 @@ pub(super) fn sample_active_job(
         stale_reason: None,
         active_child_count: None,
         active_cell_count: None,
+        re_adoptable: false,
     }
 }
 

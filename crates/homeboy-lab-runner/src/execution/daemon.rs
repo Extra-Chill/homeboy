@@ -1984,7 +1984,11 @@ fn refreshed_daemon_endpoint(
                     "verify refreshed runner daemon identity: {error}"
                 ))
             })?;
-        if actual_identity.trim() != expected_identity.trim() {
+        if !daemon_identity_is_accepted(
+            &actual_identity,
+            expected_identity,
+            super::super::generation_store::job_session(runner_id, job_id)?.as_ref(),
+        ) {
             return Err(Error::validation_invalid_argument(
                 "runner",
                 format!(
@@ -1996,6 +2000,23 @@ fn refreshed_daemon_endpoint(
         }
     }
     Ok(Some(local_url))
+}
+
+/// The daemon serving a polled job is accepted when it is the daemon the job
+/// was admitted to, or the daemon the durable ledger now names as the job's
+/// owner. The ledger only moves a job onto a different lease when a refresh
+/// restarted its daemon in place on the same state directory, so the restarted
+/// daemon re-adopted the job rather than replacing the daemon that ran it.
+pub(super) fn daemon_identity_is_accepted(
+    actual_identity: &str,
+    accepted_identity: &str,
+    ledger_owner: Option<&crate::RunnerSession>,
+) -> bool {
+    let actual_identity = actual_identity.trim();
+    actual_identity == accepted_identity.trim()
+        || ledger_owner
+            .and_then(|owner| owner.homeboy_build_identity.as_deref())
+            .is_some_and(|owner_identity| owner_identity.trim() == actual_identity)
 }
 
 pub(super) fn fetch_daemon_events(

@@ -721,6 +721,7 @@ mod tests {
             stale_reason: None,
             active_child_count: None,
             active_cell_count: None,
+            re_adoptable: false,
         };
 
         let summary =

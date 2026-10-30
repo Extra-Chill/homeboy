@@ -517,21 +517,6 @@ pub(super) fn daemon_http_version_body_with_timeout(
     daemon_http_body_at_with_timeout(local_url, "version", timeout).map(|response| response.body)
 }
 
-pub(super) fn daemon_http_freshness(
-    runner_id: &str,
-    local_url: &str,
-    expected_version: &str,
-    expected_identity: &str,
-) -> std::result::Result<DaemonFreshnessReport, String> {
-    daemon_http_freshness_with_timeout(
-        runner_id,
-        local_url,
-        expected_version,
-        expected_identity,
-        Duration::from_secs(2),
-    )
-}
-
 pub(super) fn daemon_http_freshness_with_timeout(
     runner_id: &str,
     local_url: &str,
@@ -930,11 +915,12 @@ mod tests {
                 .expect("health response");
         });
 
-        let report = daemon_http_freshness(
+        let report = daemon_http_freshness_with_timeout(
             "homeboy-lab",
             &format!("http://{address}"),
             "",
             "homeboy test+candidate",
+            Duration::from_secs(2),
         )
         .expect("freshness report");
         assert!(report.fresh);
