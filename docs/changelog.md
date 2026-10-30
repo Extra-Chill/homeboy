@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.436.9] - 2026-10-30
+
+### Changed
+- source upgrade command only builds since #16694
+- fix two red main tests from #16718 and environment-sensitive defaults
+
+### Fixed
+- Fix immutable refresh slot reuse and preserve failure causes
+- refuse version downgrades without explicit override
+- Fix derived-generation regression test worktree isolation
+- treat runner daemon build identity drift as ineligible at admission
+- scope daemon startup recovery to its own controller scope
+
 ## [0.436.8] - 2026-10-30
 
 ### Changed
