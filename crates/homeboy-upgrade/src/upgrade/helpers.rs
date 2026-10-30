@@ -25,7 +25,7 @@ use super::types::*;
 use super::update_check::RuntimeCompatibility;
 use super::validation::{check_for_updates, selects_an_installable_release};
 
-const CONTROLLER_UPGRADE_PROMOTION_WAIT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+pub(super) const CONTROLLER_UPGRADE_PROMOTION_WAIT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 pub fn current_version() -> &'static str {
     VERSION
@@ -2770,6 +2770,9 @@ fn acquire_controller_upgrade_lease(
             |event| operation.record_promotion_wait(&event),
         )?
     };
+    lease.drain_for_binary_replacement(CONTROLLER_UPGRADE_PROMOTION_WAIT_TIMEOUT, |event| {
+        operation.record_promotion_wait(&event)
+    })?;
     operation.clear_promotion_wait_durable()?;
     operation.take_persistence_error()?;
     Ok(lease)

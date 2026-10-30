@@ -479,7 +479,9 @@ fn selection_blocker_after_busy(
 
 /// Acquire the global writer lease. A nested call must retain the same target
 /// and generation. A child process must present the capability explicitly
-/// attached by [`RuntimePromotionLease::authorize_subprocess`].
+/// attached by [`RuntimePromotionLease::authorize_subprocess`]. Cook pins do not
+/// block acquisition; binary-replacing upgrades must drain them under the lease
+/// with [`RuntimePromotionLease::drain_for_binary_replacement`].
 pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimePromotionLease> {
     acquire_in_root(&paths::runtime_promotion_dir()?, operation, target)
 }
@@ -494,15 +496,7 @@ pub fn acquire_in_root(
     operation: &str,
     target: impl Into<String>,
 ) -> Result<RuntimePromotionLease> {
-    acquire_with_pin_policy(
-        root,
-        operation,
-        target.into(),
-        String::new(),
-        None,
-        ForeignPinPolicy::Block,
-        None,
-    )
+    acquire_lease(root, operation, target.into(), String::new(), None, None)
 }
 
 /// Wait for a compatible owner to finish, then acquire the writer lease.
@@ -633,13 +627,12 @@ fn acquire_waiting_for_compatible_key_and_status(
             progress: &mut progress,
             last_progress: &mut last_progress,
         };
-        match acquire_with_pin_policy(
+        match acquire_lease(
             root,
             operation,
             target.clone(),
             compatibility_key.clone(),
             owner_status.clone(),
-            ForeignPinPolicy::Block,
             Some(&mut admission),
         ) {
             Ok(lease) => return Ok(lease),
@@ -668,42 +661,6 @@ fn acquire_waiting_for_compatible_key_and_status(
             Err(error) => return Err(error),
         }
     }
-}
-
-/// Acquire the global writer lease for a generation-preserving rotation.
-///
-/// The caller must keep existing work routed to its pinned generation while a
-/// validated candidate becomes the owner of future admissions. The writer
-/// lease still serializes concurrent mutations; only the controller Cook pin
-/// barrier is relaxed for this transaction.
-pub fn acquire_for_generation_rotation(
-    operation: &str,
-    target: impl Into<String>,
-) -> Result<RuntimePromotionLease> {
-    acquire_for_generation_rotation_in_root(&paths::runtime_promotion_dir()?, operation, target)
-}
-
-/// [`acquire_for_generation_rotation`] below an already-resolved root.
-pub fn acquire_for_generation_rotation_in_root(
-    root: &Path,
-    operation: &str,
-    target: impl Into<String>,
-) -> Result<RuntimePromotionLease> {
-    acquire_with_pin_policy(
-        root,
-        operation,
-        target.into(),
-        String::new(),
-        None,
-        ForeignPinPolicy::Allow,
-        None,
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ForeignPinPolicy {
-    Block,
-    Allow,
 }
 
 struct BoundedAdmission<'a> {
@@ -743,13 +700,12 @@ impl BoundedAdmission<'_> {
     }
 }
 
-fn acquire_with_pin_policy(
+fn acquire_lease(
     root: &Path,
     operation: &str,
     target: String,
     compatibility_key: String,
     owner_status: Option<RuntimePromotionOwnerStatus>,
-    foreign_pin_policy: ForeignPinPolicy,
     mut admission: Option<&mut BoundedAdmission<'_>>,
 ) -> Result<RuntimePromotionLease> {
     fs::create_dir_all(root).map_err(io("create runtime promotion directory"))?;
@@ -790,13 +746,12 @@ fn acquire_with_pin_policy(
                 // after mkdir and before publication. Retry from acquisition;
                 // never return an unpublished guard.
                 if !path.exists() {
-                    return acquire_with_pin_policy(
+                    return acquire_lease(
                         root,
                         operation,
                         target,
                         compatibility_key,
                         owner_status,
-                        foreign_pin_policy,
                         admission.as_deref_mut(),
                     );
                 }
@@ -846,24 +801,22 @@ fn acquire_with_pin_policy(
                 // directory while former owners cannot remove its replacement.
                 match archive_stale_lease(root, &path, &held) {
                     Ok(_) => {
-                        return acquire_with_pin_policy(
+                        return acquire_lease(
                             root,
                             operation,
                             target,
                             compatibility_key,
                             owner_status,
-                            foreign_pin_policy,
                             admission.as_deref_mut(),
                         )
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        return acquire_with_pin_policy(
+                        return acquire_lease(
                             root,
                             operation,
                             target,
                             compatibility_key,
                             owner_status,
-                            foreign_pin_policy,
                             admission.as_deref_mut(),
                         )
                     }
@@ -874,16 +827,14 @@ fn acquire_with_pin_policy(
         }
     };
 
-    if foreign_pin_policy == ForeignPinPolicy::Block && lease.primary {
+    if lease.primary {
         let admission_lock = open_admission_lock(root)?;
         if let Some(admission) = admission.as_deref_mut() {
             wait_for_admission_lock(&lease, &admission_lock, admission)?;
-            wait_for_foreign_generation_pins(root, &lease, Some((&lease, admission)))?;
         } else {
             admission_lock
                 .lock_exclusive()
                 .map_err(io("reserve runtime promotion admission"))?;
-            wait_for_foreign_generation_pins(root, &lease, None)?;
         }
         lease.admission_lock = Some(admission_lock);
     }
@@ -931,6 +882,31 @@ where
 }
 
 impl RuntimePromotionLease {
+    /// Drain mutable Cook pins before replacing a binary. The writer lease
+    /// retains exclusive admission so no new pin can race the replacement.
+    /// Runner/session mutations must not call this.
+    pub fn drain_for_binary_replacement(
+        &self,
+        timeout: Duration,
+        mut progress: impl FnMut(RuntimePromotionWaitEvent),
+    ) -> Result<()> {
+        self.assert_generation()?;
+        let started = Instant::now();
+        let mut last_progress = None;
+        let mut admission = BoundedAdmission {
+            timeout,
+            started,
+            deadline: started + timeout,
+            progress: &mut progress,
+            last_progress: &mut last_progress,
+        };
+        wait_for_foreign_generation_pins(
+            self.path.parent().expect("lease root"),
+            self,
+            &mut admission,
+        )
+    }
+
     /// Run one nested local operation against a distinct target under this
     /// lease. The authority is thread-local and scoped to `operation`.
     pub fn with_local_targets<T>(
@@ -1974,7 +1950,7 @@ fn capability_matches_record(
 fn wait_for_foreign_generation_pins(
     root: &Path,
     waiting_lease: &RuntimePromotionLease,
-    mut bounded: Option<(&RuntimePromotionLease, &mut BoundedAdmission<'_>)>,
+    admission: &mut BoundedAdmission<'_>,
 ) -> Result<()> {
     let pins = root.join(PIN_DIR);
     if !pins.exists() {
@@ -2001,20 +1977,16 @@ fn wait_for_foreign_generation_pins(
             return Ok(());
         };
         let owner = pin_owner_record(foreign_pin);
-        if let Some((lease, admission)) = bounded.as_mut() {
-            heartbeat_wait(lease, admission, &owner, "foreign_generation_pins")?;
-            let remaining = admission.remaining();
-            if remaining.is_zero() {
-                return Err(wait_timeout_error(
-                    &owner,
-                    admission.timeout,
-                    "foreign_generation_pins",
-                ));
-            }
-            std::thread::sleep(remaining.min(PIN_DRAIN_POLL));
-        } else {
-            std::thread::sleep(PIN_DRAIN_POLL);
+        heartbeat_wait(waiting_lease, admission, &owner, "foreign_generation_pins")?;
+        let remaining = admission.remaining();
+        if remaining.is_zero() {
+            return Err(wait_timeout_error(
+                &owner,
+                admission.timeout,
+                "foreign_generation_pins",
+            ));
         }
+        std::thread::sleep(remaining.min(PIN_DRAIN_POLL));
     }
 }
 
@@ -2763,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_admission_deadline_covers_foreign_generation_pins() {
+    fn binary_replacement_drain_is_bounded_and_reports_foreign_generation_pins() {
         crate::test_support::with_isolated_home(|_| {
             let mut foreign_owner = Command::new("sleep")
                 .arg("30")
@@ -2799,7 +2771,12 @@ mod tests {
                 Duration::from_millis(250),
                 |event| events.lock().expect("collect admission events").push(event),
             )
-            .expect_err("foreign pins consume the same bounded deadline");
+            .and_then(|lease| {
+                lease.drain_for_binary_replacement(Duration::from_millis(250), |event| {
+                    events.lock().expect("collect drain events").push(event)
+                })
+            })
+            .expect_err("foreign pins consume the bounded drain deadline");
 
             foreign_owner.kill().expect("stop foreign owner");
             foreign_owner.wait().expect("reap foreign owner");
@@ -3177,6 +3154,7 @@ mod tests {
                 Duration::ZERO,
                 |_| {},
             )
+            .and_then(|lease| lease.drain_for_binary_replacement(Duration::ZERO, |_| {}))
             .expect_err("same-process pin is unrelated without an exact capability");
             assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
             assert_eq!(error.details["wait_stage"], "foreign_generation_pins");
@@ -3185,7 +3163,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_rotation_retains_writer_serialization_without_waiting_for_foreign_cooks() {
+    fn runner_reconnect_ignores_foreign_cook_pins_but_binary_replacement_drains() {
         crate::test_support::with_isolated_home(|_| {
             let mut foreign_owner = Command::new("sleep")
                 .arg("30")
@@ -3211,9 +3189,37 @@ mod tests {
             )
             .expect("write foreign pin");
 
-            let rotation = acquire_for_generation_rotation("runner rotation", "lab")
+            let reconnect = acquire_waiting_for_compatible(
+                "runner daemon reconnect",
+                "lab",
+                Duration::ZERO,
+                |_| {},
+            );
+            // Reap the fixture even when this regression fails on the old behavior.
+            if reconnect.is_err() {
+                foreign_owner.kill().expect("stop foreign pin owner");
+                foreign_owner.wait().expect("reap foreign pin owner");
+            }
+            let reconnect = reconnect.expect("runner reconnect must not drain live Cook pins");
+            drop(reconnect);
+            let error = acquire_waiting_for_target_with_status(
+                "controller upgrade",
+                "active controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "upgrade".into(),
+                    status_command: "homeboy upgrade status upgrade".into(),
+                },
+                Duration::ZERO,
+                |_| {},
+            )
+            .and_then(|lease| lease.drain_for_binary_replacement(Duration::ZERO, |_| {}))
+            .expect_err("binary replacement must drain live Cook pins");
+            assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+            assert_eq!(error.details["wait_stage"], "foreign_generation_pins");
+
+            let rotation = acquire("runner rotation", "lab")
                 .expect("generation-preserving rotation can acquire the writer lease");
-            let concurrent = acquire_for_generation_rotation("other rotation", "other")
+            let concurrent = acquire("other rotation", "other")
                 .expect_err("the writer lease still serializes generation rotations");
             assert_eq!(concurrent.code, ErrorCode::RuntimePromotionContended);
             drop(rotation);
@@ -3274,6 +3280,7 @@ mod tests {
                 Duration::from_millis(25),
                 |_| {},
             )
+            .and_then(|lease| lease.drain_for_binary_replacement(Duration::from_millis(25), |_| {}))
             .expect_err("unverified manifest retains replacement protection");
             assert_eq!(error.details["wait_stage"], "foreign_generation_pins");
             fs::write(root.join("validate"), b"").unwrap();
@@ -3302,7 +3309,10 @@ mod tests {
                 Duration::from_secs(1),
                 |_| {},
             )
-            .expect("future selection does not drain immutable execution");
+            .expect("future selection acquires writer lease");
+            upgrade
+                .drain_for_binary_replacement(Duration::from_secs(1), |_| {})
+                .expect("binary replacement does not drain immutable execution");
             let future = controller_runtime::activate_installed_generation(
                 &crate::test_support::controller_runtime_test_executable(),
             )
@@ -3403,6 +3413,9 @@ mod tests {
             let (release_promotion, release_promotion_result) = std::sync::mpsc::channel();
             let promotion = std::thread::spawn(move || {
                 let lease = acquire("controller replacement", "controller")
+                    .expect("promotion acquires writer lease");
+                lease
+                    .drain_for_binary_replacement(Duration::from_secs(10), |_| {})
                     .expect("promotion waits for existing pin");
                 promotion_ready
                     .send(())
@@ -3474,7 +3487,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_handoff_blocks_a_concurrent_runner_binary_promotion() {
+    fn pinned_handoff_blocks_a_concurrent_binary_promotion() {
         crate::test_support::with_isolated_home(|_| {
             let mut handoff = pinned_handoff_owner();
             let pins = paths::runtime_promotion_dir()
@@ -3490,7 +3503,10 @@ mod tests {
 
             let (promoted, promoted_result) = std::sync::mpsc::channel();
             let promotion = std::thread::spawn(move || {
-                let _lease = acquire("runner binary promotion", "runner-a")
+                let lease = acquire("runner binary promotion", "runner-a")
+                    .expect("promotion acquires writer lease");
+                lease
+                    .drain_for_binary_replacement(Duration::from_secs(10), |_| {})
                     .expect("promotion acquires after handoff drains");
                 promoted.send(()).expect("report promotion");
             });
@@ -3498,7 +3514,7 @@ mod tests {
                 promoted_result
                     .recv_timeout(Duration::from_millis(100))
                     .is_err(),
-                "runner promotion must not replace a generation while the handoff is pinned"
+                "binary promotion must not replace a generation while the handoff is pinned"
             );
 
             handoff.wait().expect("handoff exits and releases its pin");

@@ -1084,6 +1084,10 @@ fn complete_source_upgrade(
             &owned_promotion_lease
         }
     };
+    promotion_lease.drain_for_binary_replacement(
+        super::helpers::CONTROLLER_UPGRADE_PROMOTION_WAIT_TIMEOUT,
+        |_| {},
+    )?;
     let active_identity = installed_target_build_identity()?;
     if source_promotion_is_superseded(force, active_identity.as_ref(), &workspace_root)? {
         let active = active_identity.expect("identity checked above");

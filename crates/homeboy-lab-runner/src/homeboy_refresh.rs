@@ -1404,14 +1404,19 @@ fn acquire_runner_binary_promotion_with_in_root(
     candidate_commit: &str,
     progress: impl FnMut(homeboy_core::runtime_promotion::RuntimePromotionWaitEvent),
 ) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    homeboy_core::runtime_promotion::acquire_waiting_for_compatible_key_in_root(
+    let mut progress = progress;
+    let lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible_key_in_root(
         root,
         "runner binary promotion",
         runner_id.to_string(),
         candidate_commit,
         RUNNER_BINARY_PROMOTION_ADMISSION_TIMEOUT,
-        progress,
-    )
+        &mut progress,
+    )?;
+    // An admitted handoff pins its exact runtime until its runner job binds;
+    // replacing the runner binary must drain that reservation first.
+    lease.drain_for_binary_replacement(RUNNER_BINARY_PROMOTION_ADMISSION_TIMEOUT, progress)?;
+    Ok(lease)
 }
 
 fn should_rotate_daemon_generation(

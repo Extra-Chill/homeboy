@@ -1946,3 +1946,45 @@ fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
         assert_eq!(result.updated_fields, vec!["env", "homeboy_path"]);
     });
 }
+
+#[test]
+fn runner_binary_promotion_drains_a_live_foreign_cook_pin() {
+    crate::test_support::with_isolated_home(|_| {
+        let root = homeboy_core::paths::runtime_promotion_dir_in_root(ambient_roots().data());
+        let pins = root.join("pins");
+        std::fs::create_dir_all(&pins).expect("create pin directory");
+        let mut foreign = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("start live foreign pin owner");
+        std::fs::write(
+            pins.join("foreign-cook.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "pid": foreign.id(),
+                "cook_id": "foreign-cook",
+                "generation": "existing-generation",
+                "started_at": chrono::Utc::now().to_rfc3339(),
+            }))
+            .expect("serialize foreign pin"),
+        )
+        .expect("write foreign pin");
+        let (stage_tx, stage_rx) = std::sync::mpsc::channel();
+        let promotion = std::thread::spawn(move || {
+            acquire_runner_binary_promotion_with_in_root(&root, "lab", "0123456789ab", |event| {
+                let _ = stage_tx.send(event.wait_stage);
+            })
+            .map(drop)
+        });
+        let stage = stage_rx.recv_timeout(Duration::from_secs(5));
+        foreign.kill().expect("stop foreign pin owner");
+        foreign.wait().expect("reap foreign pin owner");
+        assert_eq!(
+            stage.expect("runner binary promotion waits for the live Cook pin"),
+            "foreign_generation_pins"
+        );
+        promotion
+            .join()
+            .expect("promotion exits")
+            .expect("promotion acquires once the pin drains");
+    });
+}
