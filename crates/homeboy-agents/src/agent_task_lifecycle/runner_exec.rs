@@ -871,6 +871,26 @@ pub(crate) fn is_generic_runner_exec_run_in_store(
 /// artifact-promotion checkpoint. Rooting it through the maintenance-deferring
 /// lifecycle opener would have changed behaviour rather than just its home
 /// (#7505).
+fn bounded_runner_diagnostics(mut value: Value) -> Value {
+    use sha2::{Digest, Sha256};
+    // Bound each subtree as well as the aggregate, so many small events cannot
+    // exceed the row cap. Keep ordinary event structure and messages intact.
+    fn bound(value: &mut Value) {
+        match value {
+            Value::Object(object) => object.values_mut().for_each(bound),
+            Value::Array(array) => array.iter_mut().for_each(bound),
+            _ => {}
+        }
+        let bytes = serde_json::to_vec(value).expect("JSON value serializes");
+        if bytes.len() > 16 * 1024 {
+            *value = json!({"truncated": true, "bytes": bytes.len(),
+                "sha256": format!("{:x}", Sha256::digest(&bytes))});
+        }
+    }
+    bound(&mut value);
+    value
+}
+
 pub fn project_terminal_runner_exec_result_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -915,7 +935,8 @@ pub fn project_terminal_runner_exec_result_in_store(
     }
     metadata.insert("runner_job_id".to_string(), json!(snapshot.job.id));
     metadata.insert("runner_job_status".to_string(), json!(snapshot.job.status));
-    metadata.insert("runner_job_events".to_string(), json!(snapshot.events));
+    let events = bounded_runner_diagnostics(json!(snapshot.events));
+    metadata.insert("runner_job_events".to_string(), events.clone());
     let mut execution_record = metadata
         .get("runner_execution_record")
         .cloned()
@@ -954,7 +975,7 @@ pub fn project_terminal_runner_exec_result_in_store(
     if snapshot.job.status != JobStatus::Succeeded {
         metadata.insert(
             "runner_failure_diagnostics".to_string(),
-            json!({ "job_status": snapshot.job.status, "events": snapshot.events }),
+            json!({ "job_status": snapshot.job.status, "events": events }),
         );
     }
     let status = if snapshot.job.status == JobStatus::Succeeded {
@@ -1257,4 +1278,30 @@ pub fn record_lab_offload_submission_intent_in_store(
         lifecycle_store.advance_record(&mut record, AgentTaskAdvance::PendLabHandoff)?;
     }
     Ok(record)
+}
+
+#[cfg(test)]
+mod bounded_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_runner_diagnostics_are_bounded_with_digest() {
+        use sha2::{Digest, Sha256};
+        let script = json!("x".repeat(300_000));
+        let bytes = serde_json::to_vec(&script).unwrap();
+        let events = bounded_runner_diagnostics(json!([{
+            "message": "immutable Homeboy slot provenance mismatch",
+            "data": {"command": ["sh", "-c", script]}
+        }]));
+        assert_eq!(
+            events[0]["message"],
+            "immutable Homeboy slot provenance mismatch"
+        );
+        let summary = &events[0]["data"]["command"][2];
+        assert_eq!(summary["bytes"], bytes.len());
+        assert_eq!(summary["sha256"], format!("{:x}", Sha256::digest(&bytes)));
+        assert!(serde_json::to_vec(&events).unwrap().len() < 16 * 1024);
+        let many = bounded_runner_diagnostics(Value::Array(vec![events; 1000]));
+        assert!(serde_json::to_vec(&many).unwrap().len() < 16 * 1024);
+    }
 }

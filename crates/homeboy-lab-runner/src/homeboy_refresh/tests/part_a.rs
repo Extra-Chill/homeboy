@@ -2948,3 +2948,39 @@ fn materialized_identity_rejects_explicit_dirty_state() {
 
     assert!(error.contains("not a clean build"));
 }
+
+#[test]
+fn immutable_provenance_reuses_tag_and_sha_but_refuses_content_mismatch() {
+    let fixture = tempfile::tempdir().unwrap();
+    let provenance = fixture.path().join("provenance");
+    let check = MATERIALIZE_SCRIPT
+        .split("provenance_matches() {")
+        .nth(1)
+        .unwrap()
+        .split("if [ -e \"$provenance\" ]; then")
+        .next()
+        .unwrap();
+    for (target, sha, identity, expected) in [
+        ("commit", "binary", "identity", true),
+        ("other", "binary", "identity", false),
+        ("commit", "other", "identity", false),
+        ("commit", "binary", "other", false),
+    ] {
+        std::fs::write(
+            &provenance,
+            format!("source\ncache\nv0.435.6\n{target}\n{sha}\n{identity}\n"),
+        )
+        .unwrap();
+        let script = format!("provenance_matches() {{{check}\nprovenance_matches");
+        let status = Command::new("sh")
+            .args(["-c", &script])
+            .env("provenance", &provenance)
+            .env("ref", "commit")
+            .env("target", "commit")
+            .env("binary_sha", "binary")
+            .env("identity_record", "identity")
+            .status()
+            .unwrap();
+        assert_eq!(status.success(), expected);
+    }
+}

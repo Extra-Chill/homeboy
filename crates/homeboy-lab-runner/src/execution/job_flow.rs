@@ -331,9 +331,12 @@ where
     };
     if flow.run_id_owns_generic_exec {
         if let Some(run_id) = flow.run_id.as_deref() {
-            homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
-                run_id,
-                &terminal_snapshot,
+            preserve_failed_job_result(
+                job.status,
+                homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
+                    run_id,
+                    &terminal_snapshot,
+                ),
             )?;
         }
     }
@@ -514,6 +517,18 @@ where
     Ok(RunnerExecCompletion::Terminal(output, exit_code))
 }
 
+// A failed job's output is authoritative; diagnostics are best effort. On a
+// successful job, persistence failures must still be reported to the caller.
+fn preserve_failed_job_result(status: JobStatus, persistence: Result<()>) -> Result<()> {
+    match persistence {
+        Err(error) if status != JobStatus::Succeeded => {
+            eprintln!("Secondary runner diagnostics persistence failure: {error}");
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 pub(super) fn terminal_notification_run_id<'a>(
     mirrored_run_id: Option<&'a str>,
     wrapper_run_id: Option<&'a str>,
@@ -579,6 +594,14 @@ fn settle_generation_job_ownership_after_terminal_snapshot(
 mod tests {
     use super::*;
     use crate::{generation_store, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
+
+    #[test]
+    fn failed_job_diagnostics_persistence_is_secondary() {
+        let failure = || Err(Error::internal_unexpected("metadata write failed"));
+        assert!(preserve_failed_job_result(JobStatus::Failed, failure()).is_ok());
+        assert!(preserve_failed_job_result(JobStatus::Cancelled, failure()).is_ok());
+        assert!(preserve_failed_job_result(JobStatus::Succeeded, failure()).is_err());
+    }
 
     fn direct_session() -> RunnerSession {
         RunnerSession {
