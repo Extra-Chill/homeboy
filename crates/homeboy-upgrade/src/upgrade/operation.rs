@@ -209,83 +209,6 @@ impl UpgradeOperation {
         self.observation.as_ref().map(ActiveObservation::run_id)
     }
 
-    /// Persist an exact detached request before creating its worker process.
-    pub(super) fn prepare_detached(&mut self, request: Value) -> Result<()> {
-        self.metadata["detached_request"] = request;
-        self.set_phase_durable("detached_worker_pending")
-    }
-
-    /// Transfer the observation to the spawned worker. The parent must not
-    /// terminalize the run on drop after the owner identity is persisted.
-    pub(super) fn handoff_detached(&mut self, pid: u32) -> Result<()> {
-        let identity = homeboy_core::process::process_start_identity(pid)
-            .map_err(Error::internal_unexpected)?
-            .ok_or_else(|| {
-                Error::internal_unexpected("detached upgrade worker exited before handoff")
-            })?;
-        self.metadata["homeboy_run_owner"] = json!({
-            "pid": pid,
-            "process_start_identity": identity,
-        });
-        self.set_phase_durable("detached_worker_admitted")?;
-        self.finished = true;
-        Ok(())
-    }
-
-    /// The worker resumes exactly the parent's operation, not a second run.
-    pub(super) fn resume_detached(id: &str) -> Result<Option<Self>> {
-        let observation = ActiveObservation::resume(id)?;
-        let metadata = observation.run().metadata_json.clone();
-        if metadata["phase"] == "detached_worker_pending" {
-            return Ok(None);
-        }
-        if metadata["homeboy_run_owner"]["pid"].as_u64() != Some(std::process::id() as u64) {
-            return Err(Error::validation_invalid_argument(
-                "operation_id",
-                "detached upgrade is owned by another worker",
-                Some(id.to_string()),
-                None,
-            ));
-        }
-        let expected: homeboy_core::process::ProcessStartIdentity =
-            serde_json::from_value(metadata["homeboy_run_owner"]["process_start_identity"].clone())
-                .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        if homeboy_core::process::process_start_identity(std::process::id())
-            .map_err(Error::internal_unexpected)?
-            != Some(expected)
-        {
-            return Err(Error::validation_invalid_argument(
-                "operation_id",
-                "detached worker process identity changed",
-                Some(id.to_string()),
-                None,
-            ));
-        }
-        Ok(Some(Self {
-            observation: Some(observation),
-            timed_phase: metadata["phase"].as_str().unwrap_or("admitted").to_string(),
-            metadata,
-            started: Instant::now(),
-            phase_started: Instant::now(),
-            finished: false,
-            pending_terminal: None,
-            controller_promoted: false,
-            persistence_error: None,
-            #[cfg(test)]
-            fail_terminal_writes_remaining: 0,
-            #[cfg(test)]
-            fail_next_progress_write: false,
-            #[cfg(test)]
-            before_terminal_writes: VecDeque::new(),
-            #[cfg(test)]
-            after_promotion_wait: None,
-        }))
-    }
-
-    pub(super) fn detached_request(&self) -> &Value {
-        &self.metadata["detached_request"]
-    }
-
     pub(super) fn record_cancelled_durable(&mut self, identity: &str) -> Result<()> {
         emit_upgrade_phase(&format!("cancelled {identity}"));
         if !self.metadata["cancelled"].is_array() {
@@ -778,9 +701,8 @@ pub fn load_upgrade_operation_status(id: Option<&str>) -> Result<UpgradeOperatio
 fn reconcile_dead_upgrade_owner(store: &ObservationStore, run: RunRecord) -> Result<RunRecord> {
     if run.kind != UPGRADE_OPERATION_KIND
         || run.status != RunStatus::Running.as_str()
-        || !(homeboy_core::observation::running_status_note(&run)
+        || !homeboy_core::observation::running_status_note(&run)
             .is_some_and(|note| note.starts_with("owner process is not running"))
-            || detached_owner_identity_lost(&run))
     {
         return Ok(run);
     }
@@ -789,7 +711,6 @@ fn reconcile_dead_upgrade_owner(store: &ObservationStore, run: RunRecord) -> Res
     let mut metadata = expected.clone();
     reconcile_replacement_projection(&mut metadata);
     metadata["phase"] = json!("interrupted");
-    metadata["outcome"] = json!("owner_interrupted");
     metadata["error"] = json!({
         "code": "InternalUnexpected",
         "message": "upgrade owner process exited before the operation completed",
@@ -823,30 +744,6 @@ fn reconcile_dead_upgrade_owner(store: &ObservationStore, run: RunRecord) -> Res
             run.id
         ))
     })
-}
-
-fn detached_owner_identity_lost(run: &RunRecord) -> bool {
-    let owner = &run.metadata_json["homeboy_run_owner"];
-    let Some(pid) = owner["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-    else {
-        return false;
-    };
-    let Ok(identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
-        owner["process_start_identity"].clone(),
-    ) else {
-        return false;
-    };
-    matches!(
-        homeboy_core::process::process_identity_state_with_start_identity(
-            pid,
-            None,
-            Some(&identity)
-        ),
-        homeboy_core::process::ProcessIdentityState::Dead
-            | homeboy_core::process::ProcessIdentityState::IdentityMismatch
-    )
 }
 
 pub fn persist_extension_progress(
@@ -1066,7 +963,7 @@ fn status_from_run(run: &RunRecord) -> Result<UpgradeOperationStatus> {
         .get("schema")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !schema.is_empty() && schema != UPGRADE_OPERATION_SCHEMA {
+    if schema != UPGRADE_OPERATION_SCHEMA {
         return Err(Error::validation_invalid_argument(
             "id",
             format!(
@@ -1354,33 +1251,27 @@ pub(crate) fn freeze_prior_pending_replacements(current_operation_id: &str) -> R
                     "replacement_applied",
                     "installed controller bytes prove the selected replacement was applied",
                 );
-                metadata["phase"] = json!("controller_replacement_applied");
             }
             "changed_unverified" => {
                 metadata["controller"] = component(
                     "replacement_changed_unverified",
                     "controller target changed, but the selected identity could not be verified",
                 );
-                metadata["phase"] = json!("controller_replacement_changed_unverified");
             }
             "not_applied" => {
                 metadata["controller"] = component(
                     "replacement_not_applied",
                     "controller replacement did not change the installed target",
                 );
-                metadata["phase"] = json!("controller_replacement_not_applied");
             }
             _ => {
                 metadata["controller"] = component(
                     "replacement_evidence_unavailable",
                     "controller replacement evidence could not be read",
                 );
-                metadata["phase"] = json!("controller_replacement_evidence_unavailable");
             }
         }
         metadata["phase"] = json!("controller_replacement_superseded");
-        metadata["outcome"] = json!("controller_replacement_interrupted");
-        metadata["superseded_by_operation_id"] = json!(current_operation_id);
         metadata["terminal_intent_id"] = json!(format!("upgrade-superseded:{}", run.id));
         let frozen = store.finish_running_run_if_metadata(
             &run.id,
@@ -1528,6 +1419,27 @@ mod tests {
     }
 
     #[test]
+    fn status_rejects_missing_or_unsupported_schema() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            let store = ObservationStore::open_initialized().expect("observation store");
+            let mut metadata = store.get_run(&id).unwrap().unwrap().metadata_json;
+            for schema in [None, Some(json!("unsupported"))] {
+                metadata.as_object_mut().unwrap().remove("schema");
+                if let Some(schema) = schema {
+                    metadata["schema"] = schema;
+                }
+                store
+                    .update_running_run_metadata(&id, metadata.clone())
+                    .unwrap();
+                let error = load_upgrade_operation_status(Some(&id)).unwrap_err();
+                assert!(error.message.contains("unsupported schema"));
+            }
+        });
+    }
+
+    #[test]
     fn status_terminalizes_an_upgrade_after_its_owner_exits() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let operation = UpgradeOperation::start("homeboy upgrade");
@@ -1548,7 +1460,6 @@ mod tests {
                 .get_run(&id)
                 .expect("read reconciled")
                 .expect("run exists");
-            assert_eq!(persisted.metadata_json["outcome"], "owner_interrupted");
             assert!(homeboy_core::observation::running_status_note(&persisted).is_none());
             drop(operation);
         });
@@ -2493,14 +2404,6 @@ mod tests {
                 .get_run(&operation_id)
                 .expect("read run")
                 .expect("run exists");
-            assert_eq!(
-                run.metadata_json["outcome"],
-                "controller_replacement_interrupted"
-            );
-            assert_eq!(
-                run.metadata_json["superseded_by_operation_id"],
-                "next-controller-operation"
-            );
             assert_eq!(
                 run.metadata_json["replacement"],
                 json!(checkpoint.with_state("changed_unverified"))

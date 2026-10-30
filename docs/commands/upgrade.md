@@ -36,7 +36,7 @@ binaries unchanged.
 - `--skip-runners`: Upgrade the controller only; cannot be combined with `--upgrade-runner`.
 - `--upgrade-runner`: Select configured runners to converge with the controller upgrade. Repeat to target multiple runners.
 - `--runner-only`: With `--upgrade-runner`, preserve the controller and refresh only the selected runners. The response explicitly reports this partial scope and the exact controller-plus-runner convergence command.
-- `--method`: Override install method detection (`homebrew|source|binary`; `cargo` is accepted as an alias for `binary`).
+- `--method`: Override install method detection (`homebrew|source|binary`).
 - `--version <TAG>`: Pin the published release to install (`v0.332.0` or `0.332.0`). When `--method` is omitted, this infers `--method binary` and reports that choice before mutation. An explicit incompatible method is rejected. A pin also implies `--force` at the release gate so a deliberate downgrade is not discarded as "already at latest".
 
 ## Release selection for binary installs

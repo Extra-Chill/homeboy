@@ -983,8 +983,7 @@ pub(crate) fn controller_upgrade_admission_for_records(
                     } else {
                         stale_reason_for_record(record)
                     },
-                    action: recovery_command.clone(),
-                    recovery_command,
+                    action: recovery_command,
                 }
             })
         })
@@ -1009,8 +1008,8 @@ pub(crate) fn controller_upgrade_admission_for_records(
                 .unwrap_or_else(|| group.remove(0))
         })
         .collect::<Vec<_>>();
-    blockers.sort_by(|left, right| left.recovery_command.cmp(&right.recovery_command));
-    blockers.dedup_by(|left, right| left.recovery_command == right.recovery_command);
+    blockers.sort_by(|left, right| left.action.cmp(&right.action));
+    blockers.dedup_by(|left, right| left.action == right.action);
     ControllerUpgradeAdmission {
         schema: "homeboy/controller-upgrade-admission/v1",
         active: summary.active,

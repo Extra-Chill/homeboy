@@ -62,8 +62,8 @@ fn fetch_latest_github_version_at(url: &str) -> Result<String> {
     Ok(version.to_string())
 }
 
-pub fn fetch_latest_version(method: InstallMethod) -> Result<String> {
-    fetch_latest_github_version_at(latest_version_endpoint(method))
+pub fn fetch_latest_version() -> Result<String> {
+    fetch_latest_github_version_at(GITHUB_RELEASES_API)
 }
 
 /// Read release-declared durable compatibility from the same daily update
@@ -110,10 +110,6 @@ fn runtime_compatibility_from_release_notes(body: &str) -> Result<Option<Runtime
             Some("parse release runtime compatibility".to_string()),
         )
     })
-}
-
-fn latest_version_endpoint(_method: InstallMethod) -> &'static str {
-    GITHUB_RELEASES_API
 }
 
 pub fn detect_install_method() -> InstallMethod {
@@ -206,7 +202,7 @@ pub fn version_is_newer(latest: &str, current: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn run_upgrade_with_method(
+pub fn run_upgrade_with_operation(
     force: bool,
     method_override: Option<InstallMethod>,
     skip_extensions: bool,
@@ -226,31 +222,7 @@ pub fn run_upgrade_with_method(
         return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
     }
 
-    run_upgrade_with_operation(
-        force,
-        method_override,
-        skip_extensions,
-        skip_runners,
-        skip_services,
-        runner_targets,
-        source_path,
-        pinned_version,
-        UpgradeOperation::start_durable("homeboy upgrade")?,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn run_upgrade_with_operation(
-    force: bool,
-    method_override: Option<InstallMethod>,
-    skip_extensions: bool,
-    skip_runners: bool,
-    skip_services: bool,
-    runner_targets: &[String],
-    source_path: Option<&Path>,
-    pinned_version: Option<&str>,
-    mut operation: UpgradeOperation,
-) -> Result<UpgradeResult> {
+    let mut operation = UpgradeOperation::start_durable("homeboy upgrade")?;
     let upgrade_result = run_controller_upgrade_with_operation(
         force,
         method_override,
@@ -282,23 +254,6 @@ pub(super) fn run_upgrade_with_operation(
             Err(error)
         }
     }
-}
-
-/// Freeze the published asset before admitting a detached binary upgrade. A
-/// later release becoming "latest" must never change a queued operation.
-pub(super) fn select_durable_release_tag(
-    method: InstallMethod,
-    pinned_version: Option<&str>,
-) -> Result<String> {
-    if method != InstallMethod::Binary {
-        return Err(Error::validation_invalid_argument(
-            "install_method",
-            "detached upgrade requires a published binary release",
-            Some(method.as_str()),
-            None,
-        ));
-    }
-    resolve_binary_release(pinned_version).map(|release| release.tag)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -997,11 +952,9 @@ fn run_controller_upgrade_with_operation(
     // Protect the reconciled controller identity while resident services are
     // restarted so their evidence cannot describe a later contender's binary.
     let (services_restarted, services_pending_restart) =
-        restart_resident_services_after_reconciliation(
-            completion_superseded,
-            &final_selection_guard,
-            || restart_resident_services_after_swap(success, skip_services),
-        );
+        restart_resident_services_after_reconciliation(completion_superseded, || {
+            restart_resident_services_after_swap(success, skip_services)
+        });
     converge_resident_daemon_after_controller_reconciliation(&completion)?;
 
     let runner_disposition = runner_convergence_disposition(
@@ -2210,7 +2163,6 @@ fn restart_resident_services_after_swap(
 
 fn restart_resident_services_after_reconciliation(
     completion_superseded: bool,
-    _selection_guard: &homeboy_core::runtime_promotion::RuntimeSelectionGuard,
     restart: impl FnOnce() -> (Vec<ServiceRestartEntry>, Vec<ServiceRestartEntry>),
 ) -> (Vec<ServiceRestartEntry>, Vec<ServiceRestartEntry>) {
     if completion_superseded {
@@ -3322,7 +3274,7 @@ mod runner_source_upgrade_tests {
     #[test]
     fn controller_upgrade_errors_preserve_the_durable_operation_id() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let error = run_upgrade_with_method(
+            let error = run_upgrade_with_operation(
                 false,
                 Some(InstallMethod::Unknown),
                 true,
@@ -3476,17 +3428,16 @@ mod runner_source_upgrade_tests {
                 drop(lease);
             });
 
-            let restarted =
-                restart_resident_services_after_reconciliation(false, &selection_guard, || {
-                    waiting_rx
-                        .recv_timeout(std::time::Duration::from_secs(1))
-                        .expect("contender reaches resident-service restart window");
-                    assert!(
-                        !acquired.load(std::sync::atomic::Ordering::Acquire),
-                        "contender cannot replace the reconciled controller during restart"
-                    );
-                    (Vec::new(), Vec::new())
-                });
+            let restarted = restart_resident_services_after_reconciliation(false, || {
+                waiting_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("contender reaches resident-service restart window");
+                assert!(
+                    !acquired.load(std::sync::atomic::Ordering::Acquire),
+                    "contender cannot replace the reconciled controller during restart"
+                );
+                (Vec::new(), Vec::new())
+            });
             assert_eq!(restarted, (Vec::new(), Vec::new()));
             assert!(!acquired.load(std::sync::atomic::Ordering::Acquire));
 
@@ -3770,18 +3721,6 @@ mod runner_source_upgrade_tests {
             runners_skipped,
         );
         assert_eq!(upgrade.outcome.as_deref(), Some("runner_preflight_failed"));
-    }
-
-    #[test]
-    fn every_install_method_discovers_versions_from_github_releases() {
-        for method in [
-            InstallMethod::Homebrew,
-            InstallMethod::Source,
-            InstallMethod::Binary,
-            InstallMethod::Unknown,
-        ] {
-            assert_eq!(latest_version_endpoint(method), GITHUB_RELEASES_API);
-        }
     }
 
     fn write_extension(dir: &Path, id: &str, manifest: &str) {
