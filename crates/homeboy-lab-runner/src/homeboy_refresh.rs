@@ -1,5 +1,4 @@
 use homeboy_engine_primitives::content_hash;
-use std::cell::RefCell;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -103,7 +102,6 @@ impl Drop for RefreshLiveGuard {
 }
 
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
-const DEFAULT_HOMEBOY_REF: &str = "main";
 const DISCONNECTED_SSH_REFRESH_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 // A reconnect owner is bounded by the runner connection contract. Admission
 // shares that bound so an equivalent refresh can converge while a stuck owner
@@ -272,25 +270,6 @@ fn refresh_phase(name: &'static str, required: bool, exit_code: i32) -> HomeboyR
     }
 }
 
-fn refresh_execution_phase(
-    name: &'static str,
-    required: bool,
-    execution: &RunnerExecOutput,
-) -> HomeboyRefreshPhase {
-    let mut phase = refresh_phase(name, required, execution.exit_code);
-    phase.job_id = execution.job_id.clone();
-    phase.mirror_run_id = execution.mirror_run_id.clone();
-    phase
-}
-
-fn refresh_ancestry_phase(execution: &RunnerExecOutput) -> HomeboyRefreshPhase {
-    refresh_execution_phase(
-        "downgrade_safety_probe",
-        execution.exit_code >= 2,
-        execution,
-    )
-}
-
 fn refresh_execution_phase_name(plan: &HomeboyBinaryRefreshPlan) -> &'static str {
     match plan.mode.as_str() {
         "select" => "select",
@@ -299,12 +278,10 @@ fn refresh_execution_phase_name(plan: &HomeboyBinaryRefreshPlan) -> &'static str
 }
 
 /// Evidence for an explicitly authorized rollback. `previous` names only
-/// authorities proven to be newer descendants than the selected candidate.
+/// installed versions newer than the selected candidate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HomeboyBinaryRefreshRollback {
     pub previous: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unproven: Vec<String>,
     pub requested: Option<String>,
     pub resolved: String,
     pub selected: String,
@@ -458,7 +435,7 @@ fn refresh_homeboy_binary_inner_in_roots(
     let _refresh_live = RefreshLiveGuard;
     let runner = super::load_in_roots(roots, &options.runner_id)?;
     let runner_id = runner.id;
-    let mut plan = match &options.mode {
+    let plan = match &options.mode {
         HomeboyBinaryRefreshMode::Select { binary_path } => {
             let binary_path = non_empty("select", binary_path)?;
             let script = identity_probe_script(binary_path);
@@ -489,12 +466,17 @@ fn refresh_homeboy_binary_inner_in_roots(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or(DEFAULT_HOMEBOY_REMOTE);
-            let git_ref = options
-                .git_ref
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(DEFAULT_HOMEBOY_REF);
+            let controller_tag = controller_refresh_ref();
+            let git_ref = options.git_ref.as_deref().unwrap_or(&controller_tag);
+            release_version(git_ref)?;
+            if source != DEFAULT_HOMEBOY_REMOTE {
+                return Err(Error::validation_invalid_argument(
+                    "source",
+                    "runner refresh installs official releases only; use runner dev-sync for unreleased builds",
+                    None,
+                    None,
+                ));
+            }
             let target_dir = options
                 .target_dir
                 .as_deref()
@@ -506,14 +488,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                 "{}/target/release/homeboy",
                 target_dir.trim_end_matches('/')
             );
-            let script = materialize_script(
-                source,
-                git_ref,
-                &target_dir,
-                &binary_path,
-                options.allow_downgrade,
-                &[],
-            );
+            let script = materialize_script(source, git_ref, &target_dir, &binary_path);
             HomeboyBinaryRefreshPlan {
                 runner_id: runner_id.clone(),
                 mode: "materialize".to_string(),
@@ -562,7 +537,7 @@ fn refresh_homeboy_binary_inner_in_roots(
 
     let required_commands = match &options.mode {
         HomeboyBinaryRefreshMode::Materialize => {
-            vec!["bash".to_string(), "git".to_string(), "cargo".to_string()]
+            vec!["bash".to_string()]
         }
         HomeboyBinaryRefreshMode::Select { .. } => vec!["bash".to_string()],
     };
@@ -578,26 +553,6 @@ fn refresh_homeboy_binary_inner_in_roots(
         .then(|| reconciled_refresh_admission_in_roots(&plan.runner_id))
         .transpose()?;
     let connection_status = admission.as_ref().map(|admission| admission.status.clone());
-    if plan.mode == "materialize" {
-        let authorities = match connection_status.as_ref() {
-            Some(status) => refresh_promotion_authorities_in_roots(&plan.runner_id, status)?,
-            None => fresh_refresh_promotion_authorities(),
-        };
-        plan.script = materialize_script(
-            plan.source
-                .as_deref()
-                .expect("materialize plans have a source"),
-            plan.git_ref
-                .as_deref()
-                .expect("materialize plans have a ref"),
-            plan.target_dir
-                .as_deref()
-                .expect("materialize plans have a target directory"),
-            &plan.binary_path,
-            options.allow_downgrade,
-            &refresh_authority_commits(&authorities),
-        );
-    }
     let diagnostic_ssh_bootstrap = fresh_ssh_bootstrap
         || refresh_execution_route(
             &runner,
@@ -660,38 +615,18 @@ fn refresh_homeboy_binary_inner_in_roots(
         Some(status) => refresh_promotion_authorities_in_roots(&plan.runner_id, status)?,
         None => fresh_refresh_promotion_authorities(),
     };
-    // Selection belongs to the controller-owned runner registry. It must be
-    // persisted after the candidate has been verified, whether or not this
-    // invocation also replaces the active daemon.
-    let ancestry_failure = RefCell::new(None);
+    // Persist selection only after verifying the candidate and version policy.
     set_refresh_live_sub_phase("promote");
     let bootstrap = if diagnostic_ssh_bootstrap {
         ssh_bootstrap_promote_with(
             &plan,
             || Ok(exec_output.stdout.clone()),
             |homeboy_path, identity| {
-                let ancestry_checkout =
-                    managed_slot_checkout(&plan, &exec_output.stdout, identity)?;
-                let comparison_source =
-                    refresh_comparison_source(&plan, &exec_output.stdout, identity)?;
                 let rollback = validate_refresh_promotion(
                     &plan,
                     identity,
                     options.allow_downgrade,
                     &promotion_authorities,
-                    |older, newer| {
-                        promotion_ancestry_check(
-                            &plan,
-                            ancestry_checkout.as_deref(),
-                            comparison_source.as_deref(),
-                            older,
-                            newer,
-                            diagnostic_ssh_bootstrap,
-                            connection_status.as_ref(),
-                            &mut phase_summary,
-                            &ancestry_failure,
-                        )
-                    },
                 )?;
                 Ok((
                     promote_verified_runner_binary_in_roots(
@@ -717,28 +652,11 @@ fn refresh_homeboy_binary_inner_in_roots(
                     )
                 },
             )?;
-            let comparison_source =
-                refresh_comparison_source(&plan, &exec_output.stdout, &identity)?;
             let rollback = validate_refresh_promotion(
                 &plan,
                 &identity,
                 options.allow_downgrade,
                 &promotion_authorities,
-                |older, newer| {
-                    let ancestry_checkout =
-                        managed_slot_checkout(&plan, &exec_output.stdout, &identity)?;
-                    promotion_ancestry_check(
-                        &plan,
-                        ancestry_checkout.as_deref(),
-                        comparison_source.as_deref(),
-                        older,
-                        newer,
-                        diagnostic_ssh_bootstrap,
-                        connection_status.as_ref(),
-                        &mut phase_summary,
-                        &ancestry_failure,
-                    )
-                },
             )?;
             let updated_fields = promote_verified_runner_binary_in_roots(
                 roots,
@@ -758,7 +676,6 @@ fn refresh_homeboy_binary_inner_in_roots(
         Ok(bootstrap) => bootstrap,
         Err(error) => {
             let verification = error.message;
-            let ancestry_failure = ancestry_failure.into_inner();
             let phase_name = if error.details.get("field").and_then(Value::as_str)
                 == Some("identity")
             {
@@ -766,16 +683,11 @@ fn refresh_homeboy_binary_inner_in_roots(
             } else if error.details.get("field").and_then(Value::as_str) == Some("allow_downgrade")
             {
                 "downgrade_validation"
-            } else if error.details.get("field").and_then(Value::as_str) == Some("history_diverged")
-            {
-                "downgrade_safety_probe"
             } else {
                 "configuration_promotion"
             };
-            if ancestry_failure.is_none() {
-                phase_summary.push(refresh_phase(phase_name, true, 1));
-            }
-            let mut failure = ancestry_failure.unwrap_or_else(|| {
+            phase_summary.push(refresh_phase(phase_name, true, 1));
+            let failure = {
                 let mut failure =
                     refresh_verification_failure(&plan, exec_output.clone(), verification.clone());
                 if error.details.get("field").and_then(Value::as_str) == Some("homeboy_path") {
@@ -795,11 +707,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                     ];
                 }
                 failure
-            });
-            if error.details.get("field").and_then(Value::as_str) == Some("history_diverged") {
-                failure.verification = Some(verification.clone());
-                failure.verification_kind = Some("history_diverged".to_string());
-            }
+            };
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     identity: parse_identity(&exec_output.stdout).ok(),
@@ -1992,18 +1900,19 @@ fn verify_materialized_identity(
     if plan.mode != "materialize" {
         return Ok(());
     }
-    let source_sha = source_sha_from_output(stdout)
-        .ok_or_else(|| "materialized refresh did not report its resolved source SHA".to_string())?;
+    let _ = stdout;
     let identity = identity.get("data").unwrap_or(identity);
+    let version = identity
+        .get("version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "materialized refresh identity did not report version".to_string())?;
+    if plan.git_ref.as_deref() != Some(format!("v{version}").as_str()) {
+        return Err("materialized refresh version does not match requested release".to_string());
+    }
     let built_commit = identity
         .get("git_commit")
         .and_then(Value::as_str)
         .ok_or_else(|| "materialized refresh identity did not report git_commit".to_string())?;
-    if !source_sha.starts_with(built_commit) {
-        return Err(format!(
-            "materialized refresh built identity commit `{built_commit}` does not match resolved ref `{source_sha}`"
-        ));
-    }
     match identity.get("git_dirty").and_then(Value::as_bool) {
         Some(false) => {}
         Some(true) => return Err("materialized refresh identity is not a clean build".to_string()),
@@ -2035,10 +1944,18 @@ struct RefreshPromotionAuthorities {
 
 fn fresh_refresh_promotion_authorities() -> RefreshPromotionAuthorities {
     RefreshPromotionAuthorities {
-        controller: homeboy_product_identity::build_identity().git_commit,
+        controller: Some(homeboy_product_identity::product_version().to_string()),
         active_daemon: None,
         configured_selected: None,
     }
+}
+
+fn build_identity_version(identity: &str) -> Option<String> {
+    identity
+        .strip_prefix("homeboy ")?
+        .split('+')
+        .next()
+        .map(str::to_string)
 }
 
 fn refresh_promotion_authorities_in_roots(
@@ -2053,298 +1970,78 @@ fn refresh_promotion_authorities_in_roots(
         .map(|path| configured_runner_homeboy_build_identity(&runner, path))
         .transpose()?
         .flatten()
-        .and_then(|identity| {
-            identity
-                .strip_prefix("homeboy ")
-                .and_then(build_identity_commit)
-                .map(str::to_string)
-        });
+        .and_then(|identity| build_identity_version(&identity));
     Ok(RefreshPromotionAuthorities {
-        controller: homeboy_product_identity::build_identity().git_commit,
+        controller: Some(homeboy_product_identity::product_version().to_string()),
         active_daemon: status
             .session
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.as_deref())
-            .and_then(|identity| identity.strip_prefix("homeboy "))
-            .and_then(build_identity_commit)
-            .map(str::to_string),
+            .and_then(build_identity_version),
         configured_selected,
     })
 }
 
-fn refresh_authority_commits(authorities: &RefreshPromotionAuthorities) -> Vec<&str> {
-    [
-        authorities.controller.as_deref(),
-        authorities.active_daemon.as_deref(),
-        authorities.configured_selected.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+fn release_version(tag: &str) -> Result<semver::Version> {
+    tag.strip_prefix('v').and_then(|version| semver::Version::parse(version).ok())
+        .filter(|version| version.pre.is_empty() && version.build.is_empty())
+        .ok_or_else(|| Error::validation_invalid_argument(
+            "ref", "runner refresh requires a release tag (vMAJOR.MINOR.PATCH); use runner dev-sync for unreleased builds", None, None,
+        ))
 }
 
-fn validate_refresh_promotion<IsAncestor>(
+fn validate_refresh_promotion(
     plan: &HomeboyBinaryRefreshPlan,
     candidate: &Value,
     allow_downgrade: bool,
     authorities: &RefreshPromotionAuthorities,
-    mut is_ancestor: IsAncestor,
-) -> Result<Option<HomeboyBinaryRefreshRollback>>
-where
-    IsAncestor: FnMut(&str, &str) -> Result<bool>,
-{
-    let candidate_commit = identity_commit(candidate).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "identity",
-            "selected Homeboy binary did not report an immutable git_commit",
-            Some(plan.runner_id.clone()),
-            None,
-        )
-    })?;
-    let authorities = [
-        ("controller", authorities.controller.as_deref()),
-        ("active daemon", authorities.active_daemon.as_deref()),
+) -> Result<Option<HomeboyBinaryRefreshRollback>> {
+    let version = candidate
+        .get("data")
+        .unwrap_or(candidate)
+        .get("version")
+        .and_then(Value::as_str)
+        .and_then(|version| semver::Version::parse(version).ok())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "identity",
+                "selected Homeboy binary did not report a semantic version",
+                Some(plan.runner_id.clone()),
+                None,
+            )
+        })?;
+    let mut previous = Vec::new();
+    for (name, current) in [
+        ("controller", &authorities.controller),
+        ("active daemon", &authorities.active_daemon),
         (
             "configured selected binary",
-            authorities.configured_selected.as_deref(),
+            &authorities.configured_selected,
         ),
-    ];
-    let mut previous = Vec::new();
-    let mut unproven = Vec::new();
-    for (name, authority) in authorities {
-        let Some(authority) = authority.filter(|authority| *authority != candidate_commit) else {
-            continue;
-        };
-        match is_ancestor(&candidate_commit, authority) {
-            Ok(true) => previous.push(format!("{name}:{authority}")),
-            Ok(false) => {}
-            Err(_) if allow_downgrade => unproven.push(format!("{name}:{authority}")),
-            Err(error)
-                if error.details.get("field").and_then(Value::as_str)
-                    == Some("history_diverged") =>
-            {
-                return Err(error);
-            }
-            Err(error) => {
-                return Err(Error::validation_invalid_argument(
-                    "allow_downgrade",
-                    format!(
-                        "cannot prove selected Homeboy binary is not a downgrade ({error}); pass --allow-downgrade only for an intentional rollback"
-                    ),
-                    Some(plan.runner_id.clone()),
-                    None,
-                ));
+    ] {
+        if let Some(current) = current
+            .as_deref()
+            .and_then(|value| semver::Version::parse(value).ok())
+        {
+            if version < current {
+                previous.push(format!("{name}:{current}"));
             }
         }
     }
-    if previous.is_empty() && unproven.is_empty() {
+    if previous.is_empty() {
         return Ok(None);
     }
-    let rollback = HomeboyBinaryRefreshRollback {
-        previous,
-        unproven,
-        requested: plan.git_ref.clone(),
-        resolved: candidate_commit.clone(),
-        selected: candidate_commit,
-    };
     if !allow_downgrade {
         return Err(Error::validation_invalid_argument(
-            "allow_downgrade",
-            "refusing Homeboy runner downgrade; pass --allow-downgrade only for an intentional rollback",
-            Some(plan.runner_id.clone()),
-            Some(vec![serde_json::to_string(&rollback).unwrap_or_default()]),
+            "allow_downgrade", "refusing Homeboy runner downgrade; pass --allow-downgrade only for an intentional rollback", Some(plan.runner_id.clone()), None,
         ));
     }
-    Ok(Some(rollback))
-}
-
-/// Resolve a squash-merge integration edge through GitHub, then independently
-/// require the merge commit to be reachable from the requested destination.
-fn github_integration_proves_forward(
-    plan: &HomeboyBinaryRefreshPlan,
-    repository: Option<&str>,
-    source: Option<&str>,
-    candidate: &str,
-    destination: &str,
-    disconnected_ssh: bool,
-    status_snapshot: Option<&super::RunnerStatusReport>,
-) -> Result<bool> {
-    let Some(source) = source else {
-        return Err(history_diverged_error(
-            plan,
-            "managed binary has no verified source repository provenance",
-        ));
-    };
-    if plan.mode == "select" && !github_integration::is_canonical_homeboy_source(source) {
-        return Err(history_diverged_error(
-            plan,
-            "managed binary source provenance is not the canonical Homeboy repository",
-        ));
-    }
-    match github_integration::proves_forward(
-        source,
-        candidate,
-        destination,
-        github_integration::github_api_get,
-        |merge_commit, destination| {
-            let script = if let Some(repository) = repository {
-                format!(
-                    "git -C {} merge-base --is-ancestor {} {}",
-                    quote_path(repository),
-                    quote_path(merge_commit),
-                    quote_path(destination)
-                )
-            } else {
-                let source = quote_path(source);
-                let merge = quote_path(merge_commit);
-                let target = quote_path(destination);
-                format!(
-                    "set -e\nrepo=$(mktemp -d)\ntrap 'rm -rf \"$repo\"' EXIT HUP INT TERM\ngit -C \"$repo\" init --bare --quiet\ngit -C \"$repo\" fetch --quiet {source} {merge} {target}\ngit -C \"$repo\" merge-base --is-ancestor {merge} {target}"
-                )
-            };
-            let options = if disconnected_ssh {
-                RunnerExecOptions::diagnostic_raw_shell(script)
-                    .with_diagnostic_ssh_timeout(DISCONNECTED_SSH_REFRESH_TIMEOUT)
-            } else {
-                RunnerExecOptions::raw_command(vec!["bash".into(), "-lc".into(), script])
-            }
-            .with_capability_preflight(RunnerCapabilityPreflight {
-                command: "runner.refresh-homeboy".into(),
-                required_commands: vec!["git".into(), "bash".into()],
-                timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
-                ..Default::default()
-            })
-            .without_handoff();
-            let (_, exit_code) =
-                exec_with_status_snapshot(&plan.runner_id, options, status_snapshot.cloned())
-                    .map_err(|_| {
-                        "runner could not execute the Git merge-ancestry check".to_string()
-                    })?;
-            match exit_code {
-                0 => Ok(true),
-                1 => Ok(false),
-                code => Err(format!(
-                    "runner Git merge-ancestry check failed with exit code {code}"
-                )),
-            }
-        },
-    ) {
-        Ok(true) => Ok(true),
-        Ok(false) => Err(history_diverged_error(
-            plan,
-            "GitHub PR merge commit is not reachable from the requested destination",
-        )),
-        Err(cause) => Err(history_diverged_error(plan, &cause)),
-    }
-}
-
-fn promotion_ancestry_check(
-    plan: &HomeboyBinaryRefreshPlan,
-    checkout: Option<&str>,
-    source: Option<&str>,
-    candidate: &str,
-    authority: &str,
-    disconnected_ssh: bool,
-    status_snapshot: Option<&super::RunnerStatusReport>,
-    phase_summary: &mut Vec<HomeboyRefreshPhase>,
-    ancestry_failure: &RefCell<Option<HomeboyBinaryRefreshFailure>>,
-) -> Result<bool> {
-    let compare = runner_commits_are_ancestral(
-        plan,
-        checkout,
-        candidate,
-        authority,
-        disconnected_ssh,
-        status_snapshot,
-    );
-    let prove = || {
-        // The authority is the potentially squash-merged installed PR head;
-        // the candidate is the requested release containing its merge.
-        github_integration_proves_forward(
-            plan,
-            checkout.or(plan.target_dir.as_deref()),
-            source,
-            authority,
-            candidate,
-            disconnected_ssh,
-            status_snapshot,
-        )
-    };
-    match compare {
-        Ok(comparison) => {
-            let relation = promotion_ancestry_decision(plan, &comparison, prove);
-            if matches!(comparison.relation, Some(RefreshHistoryRelation::Diverged))
-                || comparison.exit_code >= 2
-            {
-                if relation.is_ok() {
-                    phase_summary.push(refresh_phase("downgrade_safety_probe", true, 0));
-                    phase_summary.push(refresh_phase("github_pr_integration_probe", true, 0));
-                } else {
-                    phase_summary.push(refresh_ancestry_phase(&comparison.execution));
-                    if comparison.exit_code >= 2 {
-                        *ancestry_failure.borrow_mut() = Some(refresh_failure(
-                            plan,
-                            comparison.execution,
-                            comparison.exit_code,
-                        ));
-                    }
-                }
-            } else {
-                phase_summary.push(refresh_ancestry_phase(&comparison.execution));
-            }
-            relation
-        }
-        Err(error) => {
-            let relation = promotion_ancestry_unavailable(error, prove);
-            if relation.is_ok() {
-                phase_summary.push(refresh_phase("github_pr_integration_probe", true, 0));
-            }
-            relation
-        }
-    }
-}
-
-fn promotion_ancestry_decision(
-    plan: &HomeboyBinaryRefreshPlan,
-    comparison: &RefreshAncestryExecution,
-    prove_integration: impl FnOnce() -> Result<bool>,
-) -> Result<bool> {
-    match comparison.relation {
-        Some(RefreshHistoryRelation::Rollback) => Ok(true),
-        Some(RefreshHistoryRelation::Forward) => Ok(false),
-        Some(RefreshHistoryRelation::Diverged) | None => {
-            if prove_integration()? {
-                Ok(false)
-            } else {
-                Err(history_diverged_error(
-                    plan,
-                    "Git history is diverged and no integration proof was found",
-                ))
-            }
-        }
-    }
-}
-
-/// The runner's Git ancestry comparison could not run, so GitHub PR provenance
-/// is the only remaining proof. When that proof also fails, the comparison
-/// failure is the actionable cause: a release commit pushed without a PR can
-/// never satisfy the GitHub lookup, so reporting only the lookup hides why
-/// ordinary Git ancestry was not consulted.
-fn promotion_ancestry_unavailable(
-    comparison_error: Error,
-    prove_integration: impl FnOnce() -> Result<bool>,
-) -> Result<bool> {
-    match prove_integration() {
-        Ok(true) => Ok(false),
-        Ok(false) => Err(comparison_error),
-        Err(mut error) => {
-            error.message = format!(
-                "runner Git ancestry check could not run ({}); {}",
-                comparison_error.message, error.message
-            );
-            Err(error)
-        }
-    }
+    Ok(Some(HomeboyBinaryRefreshRollback {
+        previous,
+        requested: plan.git_ref.clone(),
+        resolved: version.to_string(),
+        selected: version.to_string(),
+    }))
 }
 
 fn identity_commit(identity: &Value) -> Option<String> {
@@ -2355,56 +2052,6 @@ fn identity_commit(identity: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|commit| !commit.is_empty())
         .map(str::to_string)
-}
-
-struct RefreshAncestryExecution {
-    execution: RunnerExecOutput,
-    relation: Option<RefreshHistoryRelation>,
-    exit_code: i32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RefreshHistoryRelation {
-    Rollback,
-    Forward,
-    Diverged,
-}
-
-#[cfg(test)]
-fn ancestry_comparison_error(plan: &HomeboyBinaryRefreshPlan) -> Error {
-    Error::validation_invalid_argument(
-        "allow_downgrade",
-        "authoritative source repository cannot compare selected Homeboy commits",
-        Some(plan.runner_id.clone()),
-        Some(vec!["Inspect the parent refresh failure evidence and retry once the runner repository is healthy.".to_string()]),
-    )
-}
-
-fn history_diverged_error(plan: &HomeboyBinaryRefreshPlan, cause: &str) -> Error {
-    let cause = bounded_history_cause(cause);
-    Error::validation_invalid_argument(
-        "history_diverged",
-        format!(
-            "cannot prove the installed Homeboy commit was integrated into the requested ref: {cause}. Verify the selected ref includes the merged PR and retry when GitHub provenance is available; use --allow-downgrade only for an intentional rollback."
-        ),
-        Some(plan.runner_id.clone()),
-        Some(vec![
-            "Verify the selected ref includes the merged PR and retry when its GitHub provenance is available; use --allow-downgrade only for an intentional rollback.".to_string(),
-        ]),
-    )
-}
-
-fn bounded_history_cause(cause: &str) -> String {
-    const LIMIT: usize = 240;
-    let one_line = cause.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.len() <= LIMIT {
-        return one_line;
-    }
-    let mut end = LIMIT - 3;
-    while !one_line.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &one_line[..end])
 }
 
 fn refresh_error_with_phase_summary(
@@ -2422,112 +2069,6 @@ fn refresh_build_transcript(execution: &RunnerExecOutput) -> String {
         "stdout:\n{}\n\nstderr:\n{}",
         execution.stdout, execution.stderr
     )
-}
-
-fn runner_commits_are_ancestral(
-    plan: &HomeboyBinaryRefreshPlan,
-    authoritative_checkout: Option<&str>,
-    older: &str,
-    newer: &str,
-    disconnected_ssh: bool,
-    status_snapshot: Option<&super::RunnerStatusReport>,
-) -> Result<RefreshAncestryExecution> {
-    runner_commits_are_ancestral_with(
-        plan,
-        authoritative_checkout,
-        older,
-        newer,
-        disconnected_ssh,
-        |runner_id, options| {
-            exec_with_status_snapshot(runner_id, options, status_snapshot.cloned())
-        },
-    )
-}
-
-fn runner_commits_are_ancestral_with(
-    plan: &HomeboyBinaryRefreshPlan,
-    authoritative_checkout: Option<&str>,
-    older: &str,
-    newer: &str,
-    disconnected_ssh: bool,
-    mut exec_runner: impl FnMut(&str, RunnerExecOptions) -> Result<(RunnerExecOutput, i32)>,
-) -> Result<RefreshAncestryExecution> {
-    let repository = authoritative_checkout
-        .or(plan.target_dir.as_deref())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-            "allow_downgrade",
-            "no authoritative source repository is available to compare selected Homeboy commits",
-            Some(plan.runner_id.clone()),
-            None,
-        )
-        })?;
-    let (mut execution, exit_code) = exec_runner(
-        &plan.runner_id,
-        refresh_ancestry_execution_options(repository, older, newer, disconnected_ssh),
-    )?;
-    execution.exit_code = exit_code;
-    if exit_code == 0 {
-        return Ok(RefreshAncestryExecution {
-            execution,
-            relation: Some(RefreshHistoryRelation::Rollback),
-            exit_code,
-        });
-    }
-    if exit_code >= 2 {
-        return Ok(RefreshAncestryExecution {
-            execution,
-            relation: None,
-            exit_code,
-        });
-    }
-
-    let (mut reverse_execution, reverse_exit_code) = exec_runner(
-        &plan.runner_id,
-        refresh_ancestry_execution_options(repository, newer, older, disconnected_ssh),
-    )?;
-    reverse_execution.exit_code = reverse_exit_code;
-    let relation = match reverse_exit_code {
-        0 => Some(RefreshHistoryRelation::Forward),
-        1 => Some(RefreshHistoryRelation::Diverged),
-        _ => None,
-    };
-    Ok(RefreshAncestryExecution {
-        execution: reverse_execution,
-        relation,
-        exit_code: reverse_exit_code,
-    })
-}
-
-fn refresh_ancestry_execution_options(
-    repository: &str,
-    older: &str,
-    newer: &str,
-    disconnected_ssh: bool,
-) -> RunnerExecOptions {
-    let command = vec![
-        "git".to_string(),
-        "-C".to_string(),
-        repository.to_string(),
-        "merge-base".to_string(),
-        "--is-ancestor".to_string(),
-        older.to_string(),
-        newer.to_string(),
-    ];
-    let options = if disconnected_ssh {
-        RunnerExecOptions::diagnostic_raw_command(command)
-            .with_diagnostic_ssh_timeout(DISCONNECTED_SSH_REFRESH_TIMEOUT)
-    } else {
-        RunnerExecOptions::raw_command(command)
-    };
-    options
-        .with_capability_preflight(RunnerCapabilityPreflight {
-            command: "runner.refresh-homeboy".to_string(),
-            required_commands: vec!["git".to_string()],
-            timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
-            ..Default::default()
-        })
-        .without_handoff()
 }
 
 pub fn plan_runner_dev_sync(options: &RunnerDevSyncOptions) -> Result<RunnerDevSyncPlan> {
@@ -2927,287 +2468,14 @@ fn installed_homeboy_env(
     env
 }
 
-/// Shell preflight that resolves `$ref` to `$target` and refuses implicit
-/// downgrades against every refresh authority before anything is built.
-///
-/// It first decides whether `$ref` names a published release: for the
-/// canonical source (`release_source=true`), a commit that a `v*` tag on
-/// `$source` points at is acquired through the canonical installer, so its Git
-/// history lives in the checkout-less `.homeboy-history` repository shared by
-/// every release slot. Any other ref keeps its per-ref checkout as the object
-/// cache.
-fn refresh_acquisition_preflight(authority_commits: &str) -> String {
-    r#"no_progress="${HOMEBOY_REFRESH_FETCH_NO_PROGRESS_SECONDS:-120}"
-overall="${HOMEBOY_REFRESH_FETCH_DEADLINE_SECONDS:-900}"
-case "$no_progress:$overall" in
-  *[!0-9:]*|:*|*:) echo "Invalid runner fetch deadlines" >&2; exit 1 ;;
-esac
-if [ "$no_progress" -le 0 ] || [ "$overall" -le 0 ]; then
-  echo "Runner fetch deadlines must be positive" >&2
-  exit 1
-fi
-emit_fetch_phase() {
-  printf '%s\n' "HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"$1\",\"metadata\":{\"status\":\"$2\",\"duration_ms\":$3,\"output_bytes\":$4}}"
-  echo "HOMEBOY_REFRESH_FETCH_PHASE phase=$1 status=$2 duration_ms=$3 output_bytes=$4" >&2
-}
-object_present() {
-  git -C "$cache" cat-file -e "$1^{commit}" >/dev/null 2>&1
-}
-is_full_sha() {
-  printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{40}$'
-}
-is_object_id() {
-  printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{7,40}$'
-}
-authority_matches_target() {
-  [ -z "$1" ] && return 0
-  [ "$1" = "$2" ] && return 0
-  return 1
-}
-stop_fetch() {
-  # Bash job control gives this acquisition its own process group, including
-  # Git's SSH/HTTP helpers. TERM is followed by KILL before reaping the leader.
-  kill -TERM -- "-$pid" 2>/dev/null || true
-  sleep 0.2
-  kill -KILL -- "-$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-}
-bounded_git() {
-  phase=$1
-  shift
-  start=$(date +%s)
-  fetch_output=$(mktemp)
-  emit_fetch_phase "$phase" "started" 0 0
-  set -m
-  GIT_TERMINAL_PROMPT=0 "$@" >"$fetch_output" 2>&1 &
-  pid=$!
-  set +m
-  last_size=0
-  last_change=$start
-  while kill -0 "$pid" 2>/dev/null; do
-    sleep 0.2
-    now=$(date +%s)
-    size=$(wc -c < "$fetch_output" | tr -d '[:space:]')
-    [ -n "$size" ] || size=0
-    if [ "$size" != "$last_size" ]; then
-      last_size=$size
-      last_change=$now
-    fi
-    if [ $((now - last_change)) -ge "$no_progress" ]; then
-      stop_fetch
-      duration=$(( (now - start) * 1000 ))
-      emit_fetch_phase "$phase" "no_progress" "$duration" "$size"
-      echo "HOMEBOY_REFRESH_FETCH_NO_PROGRESS phase=$phase duration_ms=$duration deadline_s=$no_progress" >&2
-      cat "$fetch_output" >&2
-      rm -f "$fetch_output"
-      exit 1
-    fi
-    if [ $((now - start)) -ge "$overall" ]; then
-      stop_fetch
-      duration=$(( (now - start) * 1000 ))
-      emit_fetch_phase "$phase" "deadline" "$duration" "$size"
-      echo "HOMEBOY_REFRESH_FETCH_DEADLINE phase=$phase duration_ms=$duration deadline_s=$overall" >&2
-      cat "$fetch_output" >&2
-      rm -f "$fetch_output"
-      exit 1
-    fi
-  done
-  fetch_status=0
-  wait "$pid" || fetch_status=$?
-  now=$(date +%s)
-  duration=$(( (now - start) * 1000 ))
-  bytes=$(wc -c < "$fetch_output" | tr -d '[:space:]')
-  [ -n "$bytes" ] || bytes=0
-  if [ "$fetch_status" -ne 0 ]; then
-    emit_fetch_phase "$phase" "failed" "$duration" "$bytes"
-    cat "$fetch_output" >&2
-    rm -f "$fetch_output"
-    return "$fetch_status"
-  fi
-  emit_fetch_phase "$phase" "fetched" "$duration" "$bytes"
-  return 0
-}
-release_tag=
-release_commit=
-if [ "$release_source" = true ]; then
-  if ! bounded_git resolve_release git ls-remote "$source" "$ref" "refs/heads/$ref" "refs/tags/$ref" "refs/tags/${ref}^{}" 'refs/tags/v*'; then
-    echo "Homeboy ref not found: $ref" >&2
-    exit 1
-  fi
-  if is_full_sha "$ref"; then
-    release_commit=$(printf '%s' "$ref" | tr 'A-F' 'a-f')
-  else
-    release_commit=$(awk -v ref="$ref" '$2 == "refs/heads/" ref || ($2 == ref && ref ~ /^refs\/heads\//) {print $1; exit}' "$fetch_output")
-    if [ -z "$release_commit" ]; then
-      release_commit=$(awk -v ref="$ref" '$2 == "refs/tags/" ref "^{}" || $2 == ref "^{}" {print $1; exit}' "$fetch_output")
-    fi
-    if [ -z "$release_commit" ]; then
-      release_commit=$(awk -v ref="$ref" '$2 == "refs/tags/" ref || $2 == ref {print $1; exit}' "$fetch_output")
-    fi
-  fi
-  if [ -n "$release_commit" ]; then
-    release_tag=$(awk -v commit="$release_commit" '$1 == commit && $2 ~ /^refs\/tags\/v/ { sub("refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2; exit }' "$fetch_output")
-  fi
-  rm -f "$fetch_output"
-fi
-if [ -n "$release_tag" ]; then
-  cache="$(dirname "$dir")/.homeboy-history"
-  echo "HOMEBOY_REFRESH_RELEASE_TAG=$release_tag" >&2
-else
-  cache="$dir"
-fi
-mkdir -p "$cache"
-if [ ! -d "$cache/.git" ]; then
-  git init --quiet "$cache"
-fi
-echo "HOMEBOY_REFRESH_OBJECT_CACHE=$cache" >&2
-skip_network=false
-if is_full_sha "$ref"; then
-  all_same=true
-  for authority in HOMEBOY_AUTHORITIES; do
-    if ! authority_matches_target "$authority" "$ref"; then
-      all_same=false
-    fi
-  done
-  if [ "$all_same" = true ] && object_present "$ref"; then
-    target=$(git -C "$cache" rev-parse --verify --quiet "${ref}^{commit}")
-    skip_network=true
-    emit_fetch_phase "fetch_target" "cached_identical" 0 0
-  fi
-fi
-if [ "$skip_network" != true ]; then
-  if ! is_object_id "$ref" || ! object_present "$ref"; then
-    if is_full_sha "$ref"; then
-      tip=$ref
-    else
-    if ! bounded_git fetch_symbolic git ls-remote "$source" "$ref" "refs/heads/$ref" "refs/tags/$ref" "refs/tags/${ref}^{}"; then
-      echo "Homeboy ref not found: $ref" >&2
-      exit 1
-    fi
-    # Preserve branch precedence and peel annotated tags, without choosing an
-    # unrelated suffix match from ls-remote's pattern output.
-    tip=$(awk -v ref="$ref" '$2 == "refs/heads/" ref || ($2 == ref && ref ~ /^refs\/heads\//) {print $1; exit}' "$fetch_output")
-    if [ -z "$tip" ]; then
-      tip=$(awk -v ref="$ref" '$2 == "refs/tags/" ref "^{}" || $2 == ref "^{}" {print $1; exit}' "$fetch_output")
-    fi
-    if [ -z "$tip" ]; then
-      tip=$(awk -v ref="$ref" '$2 == "refs/tags/" ref || $2 == ref {print $1; exit}' "$fetch_output")
-    fi
-    rm -f "$fetch_output"
-    if [ -z "$tip" ]; then
-      echo "Homeboy ref not found: $ref" >&2
-      exit 1
-    fi
-    fi
-    symbolic_same=true
-    for authority in HOMEBOY_AUTHORITIES; do
-      if ! authority_matches_target "$authority" "$tip"; then
-        symbolic_same=false
-      fi
-    done
-    if [ "$symbolic_same" = true ] && object_present "$tip"; then
-      target=$tip
-      skip_network=true
-      emit_fetch_phase "fetch_target" "cached_identical" 0 0
-    elif object_present "$tip"; then
-      target=$tip
-      emit_fetch_phase "fetch_target" "cached" 0 0
-    else
-      if ! bounded_git fetch_target git -C "$cache" fetch --no-tags --progress "$source" "$tip"; then
-        echo "Homeboy ref not found: $ref" >&2
-        exit 1
-      fi
-      rm -f "$fetch_output"
-      target=$(git -C "$cache" rev-parse --verify --quiet "FETCH_HEAD^{commit}")
-    fi
-  elif object_present "$ref"; then
-    target=$(git -C "$cache" rev-parse --verify --quiet "${ref}^{commit}")
-    emit_fetch_phase "fetch_target" "cached" 0 0
-  else
-    if ! bounded_git fetch_target git -C "$cache" fetch --no-tags --progress "$source" "$ref"; then
-      echo "Homeboy ref not found: $ref" >&2
-      exit 1
-    fi
-    rm -f "$fetch_output"
-    target=$(git -C "$cache" rev-parse --verify --quiet "FETCH_HEAD^{commit}")
-  fi
-fi
-if [ -z "$target" ]; then
-  echo "Homeboy ref did not resolve to a commit: $ref" >&2
-  exit 1
-fi
-# Fetch negotiation only advertises commits reachable from refs. Without this
-# anchor every fetch into the history cache re-downloads the whole history.
-git -C "$cache" update-ref refs/homeboy/fetched "$target"
-needs_history=false
-for comparison in HOMEBOY_AUTHORITIES "$(git -C "$cache" rev-parse --verify --quiet HEAD || true)"; do
-  resolved_comparison=$(git -C "$cache" rev-parse --verify --quiet "${comparison}^{commit}" || true)
-  comparison=${resolved_comparison:-$comparison}
-  if ! authority_matches_target "$comparison" "$target"; then
-    needs_history=true
-  fi
-done
-if [ "$needs_history" = true ] && [ "$(git -C "$cache" rev-parse --is-shallow-repository)" = true ]; then
-  bounded_git fetch_history git -C "$cache" fetch --no-tags --progress --unshallow "$source" "$target"
-  rm -f "$fetch_output"
-fi
-for authority in HOMEBOY_AUTHORITIES; do
-  if authority_matches_target "$authority" "$target"; then
-    continue
-  fi
-  resolved_authority=$(git -C "$cache" rev-parse --verify --quiet "${authority}^{commit}" || true)
-  if [ -n "$resolved_authority" ]; then
-    authority=$resolved_authority
-  fi
-  if authority_matches_target "$authority" "$target"; then
-    continue
-  fi
-  if ! object_present "$authority"; then
-    if ! bounded_git fetch_authority git -C "$cache" fetch --no-tags --progress "$source" "$authority"; then
-      rm -f "$fetch_output"
-      echo "HOMEBOY_REFRESH_AUTHORITY_UNRESOLVED=$authority" >&2
-      continue
-    fi
-    rm -f "$fetch_output"
-    resolved_authority=$(git -C "$cache" rev-parse --verify --quiet "FETCH_HEAD^{commit}" || true)
-    if [ -n "$resolved_authority" ]; then
-      authority=$resolved_authority
-    fi
-  fi
-  if authority_matches_target "$authority" "$target"; then
-    continue
-  fi
-  if git -C "$cache" merge-base --is-ancestor "$target" "$authority"; then
-    echo "HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$authority" >&2
-    echo "HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref" >&2
-    echo "HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target" >&2
-    if [ "$allow_downgrade" != true ]; then
-      echo "Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback" >&2
-      exit 1
-    fi
-  fi
-done
-"#
-    .replace("HOMEBOY_AUTHORITIES", authority_commits)
-}
-
-/// The runner materialization script: resolve `$ref`, refuse implicit
-/// downgrades, acquire the binary, then publish it into the content-addressed
-/// `homeboy-<sha256>/homeboy` slot with its `provenance` record.
-///
-/// A published release (see [`refresh_acquisition_preflight`]) is acquired by
-/// the canonical installer in stage-only mode: it downloads the release asset,
-/// verifies its checksum and archive members, checks the target version, and
-/// writes only `.stage-*/homeboy`. Releases never create a Git checkout. Any
-/// other ref is checked out into `$dir` and built from source.
+/// Acquire a verified release in stage-only mode and publish an immutable slot.
 const MATERIALIZE_SCRIPT: &str = r#"set -e
 printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"fetch"}'
 source=@SOURCE@
 ref=@REF@
 dir=@DIR@
 binary=@BINARY@
-allow_downgrade=@ALLOW_DOWNGRADE@
-release_source=@RELEASE_SOURCE@
+release_tag="$ref"
 homeboy_installer=@INSTALLER@
 hash_binary() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | awk '{print $1}'; }
 release_stage=
@@ -3217,18 +2485,7 @@ cleanup_release_stage() {
     release_stage=
   fi
 }
-@PREFLIGHT@mkdir -p "$(dirname "$dir")"
-if [ -n "$release_tag" ]; then
-  if [ "$target" != "$release_commit" ]; then
-    echo "Homeboy ref $ref resolved to $target, not release $release_tag ($release_commit)" >&2
-    exit 1
-  fi
-  current_remote=$(git -C "$cache" config --get remote.origin.url 2>/dev/null || true)
-  if [ "$current_remote" != "$source" ]; then
-    git -C "$cache" remote set-url origin "$source" 2>/dev/null || git -C "$cache" remote add origin "$source"
-  fi
-  echo "HOMEBOY_REFRESH_SOURCE_SHA=$target"
-  printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"build"}'
+mkdir -p "$(dirname "$dir")"
   # A tag already acquired here (e.g. by the upgrade's early acquisition)
   # resolves to its content-addressed slot once the slot's hash re-verifies.
   release_marker="$(dirname "$dir")/.release-$release_tag.sha256"
@@ -3244,45 +2501,6 @@ if [ -n "$release_tag" ]; then
     binary="$release_stage/homeboy"
     echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release:$release_tag"
   fi
-else
-  checkout_existed=false
-  if [ -d "$dir/.git" ]; then
-    checkout_existed=true
-  else
-    git init --quiet "$dir"
-  fi
-  current_remote=$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)
-  if [ "$current_remote" != "$source" ]; then
-    git -C "$dir" remote set-url origin "$source" 2>/dev/null || git -C "$dir" remote add origin "$source"
-  fi
-  if ! git -C "$dir" cat-file -e "${target}^{commit}" 2>/dev/null; then
-    git -C "$dir" fetch --quiet "$cache" "$target"
-  fi
-  requested=$target
-  if [ -z "$requested" ]; then
-    echo "Homeboy ref not found: $ref" >&2
-    exit 1
-  fi
-  target=$(git -C "$dir" rev-parse --verify --quiet "${requested}^{commit}")
-  current=
-  if [ "$checkout_existed" = true ]; then
-    current=$(git -C "$dir" rev-parse --verify --quiet HEAD || true)
-  fi
-  if [ -n "$current" ] && [ "$current" != "$target" ] && git -C "$dir" merge-base --is-ancestor "$target" "$current"; then
-    echo "HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current" >&2
-    echo "HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref" >&2
-    echo "HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target" >&2
-    if [ "$allow_downgrade" != true ]; then
-      echo "Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback" >&2
-      exit 1
-    fi
-  fi
-  git -C "$dir" checkout --quiet --force --detach "$target"
-  git -C "$dir" reset --hard "$target"
-  echo "HOMEBOY_REFRESH_SOURCE_SHA=$target"
-  printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"build"}'
-  cargo build --release --bin homeboy --manifest-path "$dir/Cargo.toml"
-fi
 binary_sha=$(hash_binary "$binary")
 if [ -z "$binary_sha" ]; then
   echo "could not hash materialized Homeboy binary" >&2
@@ -3325,18 +2543,17 @@ if [ -n "$release_tag" ]; then
 fi
 echo "HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha"
 echo "HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary"
-echo "HOMEBOY_REFRESH_HISTORY_REPOSITORY=$cache"
 printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"verify"}'
 identity=$("$immutable_binary" self identity)
 identity_record=$(printf '%s' "$identity" | tr -d '\n')
 provenance="$slot_dir/provenance"
 staged_provenance=$(mktemp "$slot_dir/.provenance.XXXXXX")
 trap 'rm -f "$staged_provenance"' EXIT HUP INT TERM
-printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$source" "$cache" "$ref" "$target" "$binary_sha" "$identity_record" > "$staged_provenance"
+printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$source" "" "$ref" "$ref" "$binary_sha" "$identity_record" > "$staged_provenance"
 # Source/cache/ref describe acquisition, not immutable content identity.
 provenance_matches() {
   { IFS= read -r recorded_source && IFS= read -r recorded_cache && IFS= read -r recorded_ref && IFS= read -r recorded_target && IFS= read -r recorded_sha && IFS= read -r recorded_identity && ! IFS= read -r extra; } < "$provenance" &&
-    [ "$recorded_target" = "$target" ] &&
+    [ "$recorded_target" = "$ref" ] &&
     [ "$recorded_sha" = "$binary_sha" ] &&
     [ "$recorded_identity" = "$identity_record" ]
 }
@@ -3353,6 +2570,7 @@ printf '%s\n' "$identity"
 /// Acquire `tag` into the runner's content-addressed binary slot without
 /// selecting it. A later refresh of the same release reuses the slot.
 pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<()> {
+    release_version(tag)?;
     let runner = load(runner_id)?;
     let root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::internal_unexpected(format!("runner {runner_id} has no workspace_root"))
@@ -3363,8 +2581,6 @@ pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<()> {
         tag,
         &dir,
         &format!("{dir}/target/release/homeboy"),
-        false,
-        &[],
     );
     let (output, code) = super::exec(runner_id, RunnerExecOptions::diagnostic_raw_shell(script))?;
     if code != 0 {
@@ -3376,27 +2592,8 @@ pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<()> {
     Ok(())
 }
 
-fn materialize_script(
-    source: &str,
-    git_ref: &str,
-    target_dir: &str,
-    binary_path: &str,
-    allow_downgrade: bool,
-    authority_commits: &[&str],
-) -> String {
-    let authority_commits = authority_commits
-        .iter()
-        .map(|authority| quote_path(authority))
-        .collect::<Vec<_>>()
-        .join(" ");
-    // Release assets are published only for the canonical repository, so only
-    // that source can resolve a ref to a release and ship the installer.
-    let release_source = github_integration::is_canonical_homeboy_source(source);
-    let installer = if release_source {
-        quote_path(homeboy_upgrade::RELEASE_INSTALLER_SCRIPT)
-    } else {
-        String::new()
-    };
+fn materialize_script(source: &str, git_ref: &str, target_dir: &str, binary_path: &str) -> String {
+    let installer = quote_path(homeboy_upgrade::RELEASE_INSTALLER_SCRIPT);
     fill_script_template(
         MATERIALIZE_SCRIPT,
         &[
@@ -3404,13 +2601,7 @@ fn materialize_script(
             ("@REF@", &quote_path(git_ref)),
             ("@DIR@", &quote_path(target_dir)),
             ("@BINARY@", &quote_path(binary_path)),
-            ("@ALLOW_DOWNGRADE@", &allow_downgrade.to_string()),
-            ("@RELEASE_SOURCE@", &release_source.to_string()),
             ("@INSTALLER@", &installer),
-            (
-                "@PREFLIGHT@",
-                &refresh_acquisition_preflight(&authority_commits),
-            ),
         ],
     )
 }
@@ -3438,88 +2629,6 @@ fn source_sha_from_output(stdout: &str) -> Option<String> {
             .filter(|sha| !sha.is_empty())
             .map(str::to_string)
     })
-}
-
-/// The runner Git repository that holds the candidate's history for ancestry
-/// checks: the history repository a materialization reports (a release slot
-/// has no checkout of its own), or the verified checkout recorded in a selected
-/// managed slot's provenance.
-fn managed_slot_checkout(
-    plan: &HomeboyBinaryRefreshPlan,
-    stdout: &str,
-    identity: &Value,
-) -> Result<Option<String>> {
-    let metadata = |name| {
-        stdout
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .filter(|value| !value.is_empty())
-    };
-    if plan.mode == "materialize" {
-        return Ok(metadata("HOMEBOY_REFRESH_HISTORY_REPOSITORY=").map(str::to_string));
-    }
-    if plan.mode != "select" {
-        return Ok(None);
-    }
-    let Some(commit) = metadata("HOMEBOY_REFRESH_MANAGED_COMMIT=") else {
-        return Ok(None);
-    };
-    if identity_commit(identity).as_deref() != Some(commit) {
-        return Err(Error::validation_invalid_argument(
-            "identity",
-            "managed Homeboy slot commit does not match selected binary identity",
-            Some(plan.runner_id.clone()),
-            None,
-        ));
-    }
-    let Some(checkout) = metadata("HOMEBOY_REFRESH_MANAGED_CHECKOUT=") else {
-        return Ok(None);
-    };
-    Ok(Some(checkout.to_string()))
-}
-
-fn refresh_comparison_source(
-    plan: &HomeboyBinaryRefreshPlan,
-    stdout: &str,
-    identity: &Value,
-) -> Result<Option<String>> {
-    if let Some(source) = plan.source.as_deref() {
-        return Ok(Some(source.to_string()));
-    }
-    if plan.mode != "select" {
-        return Ok(None);
-    }
-    let source = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("HOMEBOY_REFRESH_MANAGED_SOURCE="))
-        .filter(|source| !source.is_empty());
-    let commit = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("HOMEBOY_REFRESH_MANAGED_COMMIT="))
-        .filter(|commit| !commit.is_empty());
-    match (source, commit) {
-        (None, None) => Ok(None),
-        (Some(_), None) | (None, Some(_)) => Err(Error::validation_invalid_argument(
-            "identity",
-            "managed Homeboy slot provenance is incomplete",
-            Some(plan.runner_id.clone()),
-            None,
-        )),
-        (Some(source), Some(commit)) => {
-            if identity_commit(identity).as_deref() != Some(commit) {
-                return Err(Error::validation_invalid_argument(
-                    "identity",
-                    "managed Homeboy slot commit does not match selected binary identity",
-                    Some(plan.runner_id.clone()),
-                    None,
-                ));
-            }
-            if !github_integration::is_canonical_homeboy_source(source) {
-                return Ok(None);
-            }
-            Ok(Some(source.to_string()))
-        }
-    }
 }
 
 fn materialized_binary_sha256(stdout: &str) -> Option<String> {
@@ -3577,34 +2686,9 @@ fn rotation_candidate_identity(identity: &Value) -> Result<(&str, &str)> {
     Ok((version, display))
 }
 
-/// Probe a selected binary's identity. A binary in a managed
-/// `homeboy-<sha256>/homeboy` slot whose six-line `provenance` (source,
-/// history repository, ref, commit, binary SHA-256, single-line identity)
-/// still matches is reported as managed. Anything else fails closed to an
-/// unmanaged selection.
+/// Probe the selected binary without inspecting Git history.
 fn identity_probe_script(binary_path: &str) -> String {
-    r#"set -e
-binary=BINARY_PATH
-slot_dir=$(dirname "$binary")
-slot_name=$(basename "$slot_dir")
-hash_file() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | awk '{print $1}'; }
-identity=$("$binary" self identity)
-identity_record=$(printf '%s' "$identity" | tr -d '\n')
-binary_sha=$(hash_file "$binary")
-if [ "$binary" = "$slot_dir/homeboy" ] && [ "$slot_name" = "homeboy-$binary_sha" ] && [ -f "$slot_dir/provenance" ]; then
-  { IFS= read -r source && IFS= read -r checkout && IFS= read -r ref && IFS= read -r commit && IFS= read -r recorded_sha && IFS= read -r recorded_identity && ! IFS= read -r extra; } < "$slot_dir/provenance" || { source=; }
-  if [ -n "$source" ] && [ -n "$checkout" ] && [ -n "$ref" ] && [ -n "$commit" ] && [ "$recorded_sha" = "$binary_sha" ] && [ "$recorded_identity" = "$identity_record" ]; then
-    echo "HOMEBOY_REFRESH_MANAGED_SOURCE=$source"
-    echo "HOMEBOY_REFRESH_MANAGED_REF=$ref"
-    echo "HOMEBOY_REFRESH_MANAGED_COMMIT=$commit"
-    if [ -d "$checkout/.git" ] && [ "$(git -C "$checkout" config --get remote.origin.url 2>/dev/null || true)" = "$source" ] && [ "$(git -C "$checkout" rev-parse --verify --quiet "${commit}^{commit}" 2>/dev/null || true)" = "$commit" ]; then
-      echo "HOMEBOY_REFRESH_MANAGED_CHECKOUT=$checkout"
-    fi
-  fi
-fi
-printf '%s\n' "$identity"
-"#
-    .replace("BINARY_PATH", &quote_path(binary_path))
+    format!("set -e\n{} self identity\n", quote_path(binary_path))
 }
 
 fn parse_identity(stdout: &str) -> Result<Value> {
@@ -4401,9 +3485,7 @@ fn dev_sync_next_actions(runner_id: &str, options: &RunnerDevSyncOptions) -> Vec
 }
 
 pub(crate) fn controller_refresh_ref() -> String {
-    homeboy_product_identity::build_identity()
-        .git_commit
-        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
+    format!("v{}", homeboy_product_identity::product_version())
 }
 
 fn default_target_dir(workspace_root: &str, git_ref: &str) -> String {
@@ -4515,8 +3597,6 @@ fn sanitize_ref(value: &str) -> String {
 fn shell_arg(value: &str) -> String {
     quote_arg(value)
 }
-
-mod github_integration;
 
 #[cfg(test)]
 mod tests;

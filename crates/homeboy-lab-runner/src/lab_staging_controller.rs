@@ -560,11 +560,7 @@ fn handoff_identities_match(
 
 fn handoff_build_reference(identity: &str) -> String {
     let identity = canonical_homeboy_identity(identity);
-    identity
-        .split_once('+')
-        .map(|(_, commit)| commit.trim_end_matches("-dirty").to_string())
-        .filter(|commit| !commit.is_empty())
-        .unwrap_or_else(|| format!("v{}", identity.split('+').next().unwrap_or(identity)))
+    format!("v{}", identity.split('+').next().unwrap_or(identity))
 }
 
 fn immutable_handoff_recovery_action(
@@ -6362,7 +6358,7 @@ mod tests {
         );
 
         assert!(!options.allow_downgrade);
-        assert_eq!(options.git_ref.as_deref(), Some("required"));
+        assert_eq!(options.git_ref.as_deref(), Some("v1.2.3"));
     }
 
     #[test]
@@ -6806,7 +6802,7 @@ mod tests {
         assert_eq!(recovery.len(), 1);
         assert_eq!(
             recovery[0],
-            "homeboy runner refresh-homeboy lab-identity --ref required --reconnect"
+            "homeboy runner refresh-homeboy lab-identity --ref v1.2.3 --reconnect"
         );
         assert_eq!(
             error.details["homeboy_handoff_identity"]["configured_command_build_identity"],
@@ -6826,7 +6822,7 @@ mod tests {
         assert!(recovery.is_valid());
         assert_eq!(
             recovery.command(),
-            "homeboy runner refresh-homeboy lab-identity --ref required --reconnect"
+            "homeboy runner refresh-homeboy lab-identity --ref v1.2.3 --reconnect"
         );
     }
 

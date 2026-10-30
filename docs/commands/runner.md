@@ -212,21 +212,23 @@ and warnings when configured paths mix a stale checkout with the managed cache.
 ### `refresh-homeboy`
 
 ```sh
-homeboy runner refresh-homeboy <runner-id> --ref main --reconnect
-homeboy runner refresh-homeboy <runner-id> --source https://github.com/Extra-Chill/homeboy.git --ref <branch-or-sha>
+homeboy runner refresh-homeboy <runner-id> --reconnect
+homeboy runner refresh-homeboy <runner-id> --ref v0.434.30 --dry-run
 homeboy runner refresh-homeboy <runner-id> --select /path/to/homeboy --reconnect
-homeboy runner refresh-homeboy <runner-id> --ref <branch-or-sha> --dry-run
-homeboy runner refresh-homeboy <runner-id> --ref <branch-or-sha> --full
 ```
 
-Builds or selects the Homeboy binary used by runner/Lab job execution without
-mutating a runner's primary checkout. Materialize mode clones/fetches the
-Homeboy source into a managed runner-side cache under the runner workspace root
-unless `--target-dir` is supplied, hard-resets that isolated checkout to the
-requested ref, builds `target/release/homeboy`, probes `self identity`, and then
-updates the runner `homeboy_path` to the clean binary. Select mode skips the
-build and probes the exact binary passed to `--select` before updating
-`homeboy_path`.
+Installs the controller's release tag by default. Materialize mode uses the
+existing verified release installer in stage-only mode, then publishes the
+binary into a content-addressed slot and updates `homeboy_path`. An explicit
+`--ref` must be a release tag (`vMAJOR.MINOR.PATCH`); branches, commits, and
+alternate source repositories are not supported. Select mode probes the exact
+binary passed to `--select` before updating `homeboy_path`.
+
+The downgrade guard compares semantic versions with the controller, active
+daemon, and configured binary. An intentional rollback requires
+`--allow-downgrade`. No Git history or ancestry proof is fetched.
+Unreleased builds reach Lab only through `runner dev-sync`; a source-built
+controller no longer automatically converges Lab to its commit.
 
 Use `--reconnect` when the active daemon/session should be refreshed immediately.
 Without it, the JSON output includes follow-up `disconnect`, `connect`, and
@@ -242,10 +244,10 @@ one `refresh-homeboy --select <previous-path> --reconnect` continuation command.
 Do not delete the receipt as a recovery step.
 
 When a configured SSH runner is disconnected, `refresh-homeboy` automatically
-uses its configured SSH server transport to run the same managed build/select
+uses its configured SSH server transport to run the same release install/select
 script with a bounded deadline. The selected binary and runner configuration are
-updated only after that script reports a clean identity matching the resolved
-source commit. The fallback is restricted to configured SSH runners; local
+updated only after that script reports a clean identity matching the requested
+release version. The fallback is restricted to configured SSH runners; local
 runners retain their existing direct execution path.
 
 Refreshing back to a release changes only the selected `homeboy_path`; existing
@@ -1220,12 +1222,7 @@ distinguishes "the Lab is wedged" from "there is nothing to report".
 The same ledger carries `readonly_probe.unavailable`, which is *not* a remote
 timeout: a probe that reads the controller's own ambient environment could not
 run there at all. Its `timeout_seconds` is `0` and its hint is labelled
-`DEGRADED PROBE (...)` so it cannot be mistaken for a wedged runner. The
-controller-side git ancestry probe (`controller_git_ancestry`) reports this way
-when `runner status --full` runs outside a Homeboy checkout: recovery guidance
-falls back to the controller's own build ref, git's `fatal: not a git
-repository` is captured into `detail` instead of being printed in front of the
-result envelope, and the runner answer itself is unaffected (#10525).
+`DEGRADED PROBE (...)` so it cannot be mistaken for a wedged runner.
 
 `runs list --include-active-runner-jobs` deliberately reads the latency-bounded
 indexed active-job snapshot rather than the full status report: it does not

@@ -1271,7 +1271,7 @@ fn refresh_managed_immutable_runner(
         runner_id: runner.id.clone(),
         mode: crate::HomeboyBinaryRefreshMode::Materialize,
         source: None,
-        git_ref: Some(controller_commit.clone()),
+        git_ref: Some(crate::homeboy_refresh::controller_refresh_ref()),
         target_dir: None,
         reconnect: true,
         force: false,

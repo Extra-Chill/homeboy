@@ -2,53 +2,7 @@
 
 use super::*;
 use crate::{RunnerExecMode, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
-use std::time::{Duration, Instant};
-
-#[test]
-fn materialized_identity_rejects_dirty_display_when_state_is_unknown() {
-    let plan = ssh_bootstrap_plan();
-
-    for display in [
-        "homeboy 0.284.1+abc123-dirty",
-        "homeboy 0.284.1+abc123 (dirty)",
-    ] {
-        let identity = serde_json::json!({
-            "data": {
-                "version": "0.284.1",
-                "git_commit": "abc123",
-                "display": display
-            }
-        });
-        let error =
-            verify_materialized_identity(&plan, "HOMEBOY_REFRESH_SOURCE_SHA=abc123\n", &identity)
-                .expect_err("dirty display is rejected");
-
-        assert!(error.contains("not a canonical clean build"));
-    }
-}
-
-#[test]
-fn materialized_identity_requires_commit_and_matching_source_sha() {
-    let plan = ssh_bootstrap_plan();
-    let missing_commit = serde_json::json!({
-        "data": { "git_dirty": false }
-    });
-    let missing_error = verify_materialized_identity(
-        &plan,
-        "HOMEBOY_REFRESH_SOURCE_SHA=abc123\n",
-        &missing_commit,
-    )
-    .expect_err("commit is required");
-    assert!(missing_error.contains("did not report git_commit"));
-
-    let mismatch = serde_json::json!({
-        "data": { "git_commit": "def456", "git_dirty": false }
-    });
-    let mismatch_error =
-        verify_materialized_identity(&plan, "HOMEBOY_REFRESH_SOURCE_SHA=abc123\n", &mismatch)
-            .expect_err("source SHA mismatch is rejected");
-    assert!(mismatch_error.contains("does not match resolved ref"));
-}
+use std::time::Duration;
 
 #[test]
 fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
@@ -1162,7 +1116,7 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
         std::fs::write(
             &binary,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{commit}\",\"git_dirty\":false}}}}'\n"
+                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"version\":\"1.2.3\",\"git_commit\":\"{commit}\",\"git_dirty\":false}}}}'\n"
             ),
         )
         .expect("write selected binary");
@@ -1362,7 +1316,7 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
         std::fs::write(
             &binary,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{commit}\",\"git_dirty\":false}}}}'\n"
+                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"version\":\"1.2.3\",\"git_commit\":\"{commit}\",\"git_dirty\":false}}}}'\n"
             ),
         )
         .expect("write selected binary");
@@ -1461,7 +1415,7 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
         std::fs::write(
             &second_binary,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{commit}\",\"git_dirty\":false}}}}'\n"
+                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"version\":\"1.2.3\",\"git_commit\":\"{commit}\",\"git_dirty\":false}}}}'\n"
             ),
         )
         .expect("write selected binary");
@@ -1569,214 +1523,6 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
                 .as_deref(),
             second_binary.to_str()
         );
-    });
-}
-
-#[test]
-fn select_without_source_rejects_implicit_downgrade_before_selection_or_reconnect() {
-    crate::test_support::with_isolated_home(|_| {
-        let controller_commit = homeboy_product_identity::build_identity()
-            .git_commit
-            .expect("test build has an immutable controller commit");
-        let fixture = tempfile::tempdir().expect("fixture");
-        let binary = fixture.path().join("older-homeboy");
-        let older = "0000000000000000000000000000000000000000";
-        std::fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{older}\",\"git_dirty\":false}}}}'\n"
-            ),
-        )
-        .expect("write selected binary");
-        assert!(Command::new("chmod")
-            .args(["0755", binary.to_str().expect("binary path")])
-            .status()
-            .expect("make selected binary executable")
-            .success());
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
-        let options = HomeboyBinaryRefreshOptions {
-            runner_id: "lab-local".to_string(),
-            mode: HomeboyBinaryRefreshMode::Select {
-                binary_path: binary.display().to_string(),
-            },
-            source: None,
-            git_ref: Some("rollback-request".to_string()),
-            target_dir: None,
-            reconnect: true,
-            force: false,
-            allow_downgrade: false,
-            dry_run: false,
-        };
-
-        let (rejected, exit_code) =
-            refresh_homeboy_binary(options.clone()).expect("rejection output");
-        assert_eq!(exit_code, 1);
-        assert!(rejected
-            .failure
-            .expect("failure")
-            .verification
-            .unwrap()
-            .contains("allow-downgrade"));
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/old/homeboy")
-        );
-
-        let (rolled_back, exit_code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
-            allow_downgrade: true,
-            reconnect: false,
-            ..options
-        })
-        .expect("explicit rollback");
-        assert_eq!(exit_code, 0);
-        let rollback = rolled_back.rollback.expect("structured rollback evidence");
-        assert!(rollback
-            .unproven
-            .iter()
-            .any(|authority| authority.contains(&controller_commit)));
-        assert!(rollback.previous.is_empty());
-        assert_eq!(rollback.requested, None, "select mode has no requested ref");
-        assert_eq!(rollback.resolved, older);
-        assert_eq!(rollback.selected, older);
-    });
-}
-
-#[test]
-fn contending_refreshes_cannot_let_an_old_materialized_request_replace_new_selection() {
-    crate::test_support::with_isolated_home(|_| {
-        let fixture = tempfile::tempdir().expect("git fixture");
-        for args in [
-            vec!["init", "--quiet"],
-            vec!["config", "user.email", "homeboy@example.test"],
-            vec!["config", "user.name", "Homeboy Test"],
-        ] {
-            assert!(Command::new("git")
-                .args(args)
-                .current_dir(fixture.path())
-                .status()
-                .expect("git")
-                .success());
-        }
-        std::fs::write(fixture.path().join("release"), "old\n").expect("old");
-        for args in [vec!["add", "."], vec!["commit", "-m", "old"]] {
-            assert!(Command::new("git")
-                .args(args)
-                .current_dir(fixture.path())
-                .status()
-                .expect("commit old")
-                .success());
-        }
-        let revision = || {
-            String::from_utf8(
-                Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(fixture.path())
-                    .output()
-                    .expect("revision")
-                    .stdout,
-            )
-            .expect("utf8")
-            .trim()
-            .to_string()
-        };
-        let old = revision();
-        std::fs::write(fixture.path().join("release"), "new\n").expect("new");
-        assert!(Command::new("git")
-            .args(["commit", "-am", "new"])
-            .current_dir(fixture.path())
-            .status()
-            .expect("commit new")
-            .success());
-        let new = revision();
-        let marker = fixture.path().join("old-materialized");
-        let old_binary = fixture.path().join("old-homeboy");
-        let new_binary = fixture.path().join("new-homeboy");
-        std::fs::write(
-            &old_binary,
-            format!(
-                "#!/bin/sh\ntouch {}\nsleep 1\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{old}\",\"git_dirty\":false}}}}'\n",
-                marker.display()
-            ),
-        )
-        .expect("old binary");
-        std::fs::write(
-            &new_binary,
-            format!("#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"git_commit\":\"{new}\",\"git_dirty\":false}}}}'\n"),
-        )
-        .expect("new binary");
-        for binary in [&old_binary, &new_binary] {
-            assert!(Command::new("chmod")
-                .args(["0755", binary.to_str().expect("binary")])
-                .status()
-                .expect("chmod")
-                .success());
-        }
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
-        let old_options = HomeboyBinaryRefreshOptions {
-            runner_id: "lab-local".to_string(),
-            mode: HomeboyBinaryRefreshMode::Select {
-                binary_path: old_binary.display().to_string(),
-            },
-            source: None,
-            git_ref: Some("old".to_string()),
-            target_dir: Some(fixture.path().display().to_string()),
-            reconnect: false,
-            force: false,
-            allow_downgrade: false,
-            dry_run: false,
-        };
-        let old_refresh = std::thread::spawn(move || refresh_homeboy_binary(old_options));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !marker.exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(marker.exists(), "old request materialized before selection");
-        let (new_output, new_code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
-            runner_id: "lab-local".to_string(),
-            mode: HomeboyBinaryRefreshMode::Select {
-                binary_path: new_binary.display().to_string(),
-            },
-            source: None,
-            git_ref: Some("new".to_string()),
-            target_dir: Some(fixture.path().display().to_string()),
-            reconnect: false,
-            force: false,
-            allow_downgrade: true,
-            dry_run: false,
-        })
-        .expect("new refresh");
-        assert_eq!(new_code, 0);
-        let (old_output, old_code) = old_refresh
-            .join()
-            .expect("old refresh thread")
-            .expect("old refresh");
-        assert_eq!(old_code, 1);
-        assert!(old_output.failure.is_some());
-        assert!(!old_output.daemon_refreshed);
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            new_binary.to_str()
-        );
-        assert!(!new_output.daemon_refreshed);
-        assert!(crate::connection::recorded_session("lab-local")
-            .expect("session")
-            .is_none());
     });
 }
 

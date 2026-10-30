@@ -1,5 +1,4 @@
 use super::*;
-use crate::commands::runner::controller_ancestry::{commits_are_ancestral, CommitAncestry};
 use std::collections::BTreeSet;
 use types::{RunnerCheck, RunnerDoctorStatus, RunnerRepairAction, ToolProbe};
 
@@ -177,142 +176,33 @@ pub(crate) fn homeboy_version_skew_check(
     runner_id: &str,
     server_id: &str,
 ) -> Option<RunnerCheck> {
-    homeboy_version_skew_check_with(
-        local_version,
-        local_build_identity,
-        remote_build_identity,
-        runner_id,
-        server_id,
-        commits_are_ancestral,
-    )
-}
-
-pub(super) fn homeboy_version_skew_check_with(
-    local_version: &str,
-    local_build_identity: &str,
-    remote_build_identity: &str,
-    runner_id: &str,
-    server_id: &str,
-    mut ancestry: impl FnMut(&str, &str) -> CommitAncestry,
-) -> Option<RunnerCheck> {
-    let local_version = local_version.trim();
-    let local_build_identity = normalize_homeboy_build_identity(local_build_identity);
-    let remote_build_identity = normalize_homeboy_build_identity(remote_build_identity);
-    if local_version.is_empty()
-        || local_build_identity.is_empty()
-        || remote_build_identity.is_empty()
-        || remote_build_identity == "unknown"
-        || local_build_identity == remote_build_identity
-    {
+    let local = normalize_homeboy_build_identity(local_build_identity);
+    let remote = normalize_homeboy_build_identity(remote_build_identity);
+    if local.is_empty() || remote.is_empty() || remote == "unknown" || local == remote {
         return None;
     }
-
     let mut details = BTreeMap::new();
     details.insert("local_version".to_string(), local_version.to_string());
-    details.insert(
-        "local_build_identity".to_string(),
-        local_build_identity.to_string(),
-    );
-    details.insert(
-        "remote_version".to_string(),
-        remote_build_identity.to_string(),
-    );
-    let controller_commit = build_identity_commit(local_build_identity);
-    let runner_commit = build_identity_commit(remote_build_identity);
-    let message = format!(
-        "Local Homeboy {local_build_identity} differs from remote runner Homeboy {remote_build_identity}"
-    );
-    match (controller_commit, runner_commit) {
-        (Some(controller), Some(runner))
-            if ancestry(controller, runner) == CommitAncestry::Ancestor =>
-        {
-            details.insert("direction".to_string(), "runner_ahead".to_string());
-            Some(error(
-                "homeboy.version_skew",
-                message,
-                Some(format!(
-                    "Runner `{runner_id}` is ahead of this controller. Upgrade the controller, then rerun `homeboy runner doctor {runner_id}`; alternatively select a common newer published or source revision. Do not refresh the runner to the older controller revision. Inspect it with `homeboy ssh {server_id} -- homeboy --version`"
-                )),
-                details,
-            ))
-        }
-        (Some(controller), Some(runner))
-            if ancestry(runner, controller) == CommitAncestry::Ancestor =>
-        {
-            details.insert("direction".to_string(), "controller_ahead".to_string());
-            let quoted_runner_id = shell::quote_arg(runner_id);
-            let refresh_ref = homeboy_product_identity::build_identity()
-                .git_commit
-                .unwrap_or_else(|| format!("v{local_version}"));
-            Some(
-                error(
-                    "homeboy.version_skew",
-                    message,
-                    Some(format!(
-                        "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref {refresh_ref} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
-                    )),
-                    details,
-                )
-                .with_action(RunnerRepairAction::RefreshHomeboy {
-                    git_ref: Some(refresh_ref),
-                    allow_downgrade: false,
-                }),
-            )
-        }
-        _ => {
-            let ancestry_unavailable = match (controller_commit, runner_commit) {
-                (Some(controller), Some(runner)) => {
-                    ancestry(controller, runner) == CommitAncestry::Unavailable
-                }
-                _ => true,
-            };
-            if ancestry_unavailable {
-                let quoted_runner_id = shell::quote_arg(runner_id);
-                details.insert(
-                    "direction".to_string(),
-                    "diverged_or_unverified".to_string(),
-                );
-                let refresh_ref = homeboy_product_identity::build_identity().git_commit;
-                details.insert(
-                    "recovery_ref_source".to_string(),
-                    "controller_build_identity".to_string(),
-                );
-                let remediation = format!(
-                "Ancestry could not be verified. Safely try aligning runner `{runner_id}` to controller ref `{}` with `homeboy runner refresh-homeboy {quoted_runner_id} --ref {} --reconnect`; the refresh refuses a downgrade. If it is rejected, select a common published or source revision and inspect it with `homeboy ssh {server_id} -- homeboy --version`",
-                refresh_ref.as_deref().unwrap_or("unavailable"),
-                refresh_ref.as_deref().unwrap_or("unavailable"),
-            );
-                let mut check = error("homeboy.version_skew", message, Some(remediation), details);
-                if let Some(git_ref) = refresh_ref {
-                    check = check.with_action(RunnerRepairAction::RefreshHomeboy {
-                        git_ref: Some(git_ref),
-                        allow_downgrade: false,
-                    });
-                }
-                Some(check)
-            } else {
-                details.insert(
-                    "direction".to_string(),
-                    "diverged_or_unverified".to_string(),
-                );
-                Some(error(
-                "homeboy.version_skew",
-                message,
-                Some(format!(
-                    "Controller and runner commits are divergent. Select a common published or source revision before refreshing runner `{runner_id}`; use `--allow-downgrade` only for an intentional rollback authorized by an operator. Inspect it with `homeboy ssh {server_id} -- homeboy --version`"
-                )),
-                details,
-            ))
-            }
-        }
+    details.insert("remote_version".to_string(), remote.to_string());
+    let remote_version = remote
+        .split('+')
+        .next()
+        .and_then(|version| semver::Version::parse(version).ok());
+    let controller_version = semver::Version::parse(local_version).ok();
+    let message = format!("Local Homeboy {local} differs from remote runner Homeboy {remote}");
+    if matches!((controller_version, remote_version), (Some(local), Some(remote)) if remote > local)
+    {
+        details.insert("direction".to_string(), "runner_ahead".to_string());
+        return Some(error("homeboy.version_skew", message,
+            Some(format!("Runner `{runner_id}` is ahead of this controller. Upgrade the controller; inspect with `homeboy ssh {server_id} -- homeboy --version`")), details));
     }
-}
-
-fn build_identity_commit(identity: &str) -> Option<&str> {
-    let commit = identity.rsplit_once('+')?.1;
-    let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
-    (commit.len() >= 7 && commit.len() <= 64 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some(commit)
+    let reference = format!("v{local_version}");
+    Some(error("homeboy.version_skew", message, Some(format!(
+        "Align runner with `homeboy runner refresh-homeboy {} --ref {reference} --reconnect`; use runner dev-sync for unreleased builds",
+        shell::quote_arg(runner_id),
+    )), details).with_action(RunnerRepairAction::RefreshHomeboy {
+        git_ref: Some(reference), allow_downgrade: false,
+    }))
 }
 
 fn normalize_homeboy_build_identity(identity: &str) -> &str {
