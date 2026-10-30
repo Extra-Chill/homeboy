@@ -560,11 +560,7 @@ fn handoff_identities_match(
 
 fn handoff_build_reference(identity: &str) -> String {
     let identity = canonical_homeboy_identity(identity);
-    identity
-        .split_once('+')
-        .map(|(_, commit)| commit.trim_end_matches("-dirty").to_string())
-        .filter(|commit| !commit.is_empty())
-        .unwrap_or_else(|| format!("v{}", identity.split('+').next().unwrap_or(identity)))
+    format!("v{}", identity.split('+').next().unwrap_or(identity))
 }
 
 fn immutable_handoff_recovery_action(

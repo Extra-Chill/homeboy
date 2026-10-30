@@ -71,13 +71,14 @@ pub(crate) fn managed_immutable_runner_recovery_commands_with_commit(
     runner_id: &str,
     commit: Option<&str>,
 ) -> Vec<String> {
-    let Some(commit) = commit else {
+    if commit.is_none() {
         return Vec::new();
-    };
+    }
+    let tag = crate::homeboy_refresh::controller_refresh_ref();
     vec![format!(
         "homeboy runner refresh-homeboy {} --ref {} --reconnect",
         shell_arg(runner_id),
-        shell_arg(commit)
+        shell_arg(&tag)
     )]
 }
 

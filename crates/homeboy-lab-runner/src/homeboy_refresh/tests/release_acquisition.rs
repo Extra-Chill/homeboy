@@ -211,8 +211,6 @@ fn materialize(fixture: &ReleaseFixture, source: &str, git_ref: &str, dir: &Path
         dir.join("target/release/homeboy")
             .to_str()
             .expect("binary path"),
-        false,
-        &[],
     );
     fixture_shell(fixture, &script)
         .output()
@@ -248,44 +246,6 @@ fn published_slots(root: &Path) -> Vec<String> {
 }
 
 #[test]
-fn materialized_slot_provenance_round_trips_a_multi_line_identity() {
-    let fixture = release_fixture();
-    let root = binaries_root(&fixture);
-    let dir = root.join("homeboy-main");
-    let source = fixture.source.to_str().expect("source path");
-    let output = materialize(&fixture, source, "main", &dir);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("materialize output");
-    let immutable = refreshed_binary_path(&ssh_bootstrap_plan(), &stdout).expect("immutable path");
-
-    let probe = select_probe(&fixture, &immutable);
-    assert!(
-        probe.contains(&format!("HOMEBOY_REFRESH_MANAGED_SOURCE={source}\n")),
-        "a slot published with a multi-line identity is read back as managed: {probe}"
-    );
-    assert!(
-        probe.contains("HOMEBOY_REFRESH_MANAGED_REF=main\n"),
-        "{probe}"
-    );
-    assert!(
-        probe.contains(&format!(
-            "HOMEBOY_REFRESH_MANAGED_COMMIT={}\n",
-            fixture.commit
-        )),
-        "{probe}"
-    );
-    let identity = parse_identity(&probe).expect("selected identity");
-    assert_eq!(
-        identity_commit(&identity).as_deref(),
-        Some(fixture.commit.as_str())
-    );
-}
-
-#[test]
 fn release_acquisition_publishes_a_verified_slot_without_a_git_checkout() {
     let Some(triple) = host_release_triple() else {
         return;
@@ -310,10 +270,6 @@ fn release_acquisition_publishes_a_verified_slot_without_a_git_checkout() {
     assert!(
         !fixture.cargo_log.exists(),
         "a released tag is never built from source"
-    );
-    assert!(
-        stdout.contains(&format!("HOMEBOY_REFRESH_SOURCE_SHA={}\n", fixture.commit)),
-        "{stdout}"
     );
     let immutable = refreshed_binary_path(&ssh_bootstrap_plan(), &stdout).expect("immutable path");
     let slot = Path::new(&immutable).parent().expect("slot");
@@ -340,40 +296,8 @@ fn release_acquisition_publishes_a_verified_slot_without_a_git_checkout() {
     };
     verify_materialized_identity(&materialize_plan, &stdout, &identity)
         .expect("release identity matches the resolved tag commit");
-    let history = root.join(".homeboy-history");
-    assert_eq!(
-        managed_slot_checkout(&materialize_plan, &stdout, &identity)
-            .expect("history repository")
-            .as_deref(),
-        Some(history.to_str().expect("history path")),
-        "ancestry checks for a release slot use the shared history repository"
-    );
-    assert!(
-        !history.join("README.md").exists(),
-        "history is never checked out"
-    );
-    assert_eq!(
-        run(Command::new("git")
-            .args(["rev-list", "--all", "-1"])
-            .current_dir(&history)),
-        fixture.commit,
-        "the fetched release commit is ref-reachable, so the next fetch negotiates from it instead of re-downloading the history"
-    );
-
-    let probe = select_probe(&fixture, &immutable);
-    assert!(
-        probe.contains(&format!(
-            "HOMEBOY_REFRESH_MANAGED_SOURCE={CANONICAL_SOURCE}\n"
-        )),
-        "{probe}"
-    );
-    assert!(
-        probe.contains(&format!(
-            "HOMEBOY_REFRESH_MANAGED_COMMIT={}\n",
-            fixture.commit
-        )),
-        "{probe}"
-    );
+    assert!(!root.join(".homeboy-history").exists());
+    parse_identity(&select_probe(&fixture, &immutable)).expect("selected identity");
 }
 
 #[test]
@@ -465,40 +389,4 @@ fn release_acquisition_rejects_a_traversal_member() {
         ReleaseArchive::TraversalMember,
         "Release archive contains an unsafe member path",
     );
-}
-
-#[test]
-fn release_acquisition_refuses_an_implicit_downgrade() {
-    let fixture = release_fixture();
-    fs::write(fixture.source.join("README.md"), "newer\n").expect("newer source");
-    run(Command::new("git")
-        .args(["commit", "-q", "-am", "newer"])
-        .current_dir(&fixture.source));
-    let newer = run(Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(&fixture.source));
-    let root = binaries_root(&fixture);
-    let dir = root.join(format!("homeboy-{RELEASE_TAG}"));
-    let script = materialize_script(
-        CANONICAL_SOURCE,
-        RELEASE_TAG,
-        dir.to_str().expect("target dir"),
-        dir.join("target/release/homeboy")
-            .to_str()
-            .expect("binary path"),
-        false,
-        &[&newer],
-    );
-    let output = fixture_shell(&fixture, &script)
-        .output()
-        .expect("run materialization");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("Refusing Homeboy runner downgrade"),
-        "{stderr}"
-    );
-    assert!(stderr.contains(&format!("HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS={newer}")));
-    assert!(!dir.exists(), "a refused release creates no checkout");
-    assert!(published_slots(&root).is_empty(), "no slot is published");
 }

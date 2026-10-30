@@ -11,9 +11,7 @@ fn admission_capability(
 }
 
 fn expected_controller_refresh_ref() -> String {
-    homeboy_product_identity::build_identity()
-        .git_commit
-        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
+    format!("v{}", homeboy_product_identity::product_version())
 }
 
 #[test]

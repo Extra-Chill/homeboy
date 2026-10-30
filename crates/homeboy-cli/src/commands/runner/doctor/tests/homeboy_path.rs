@@ -1,7 +1,6 @@
 use super::super::*;
-use crate::commands::runner::controller_ancestry::CommitAncestry;
 use std::collections::BTreeMap;
-use types::{HomeboyProbe, RunnerDoctorStatus, RunnerRepairAction};
+use types::{HomeboyProbe, RunnerDoctorStatus};
 
 fn configured_homeboy(version: &str) -> HomeboyProbe {
     HomeboyProbe {
@@ -240,46 +239,6 @@ fn homeboy_version_skew_check_is_absent_for_matching_build_identities() {
 /// materialize a different build than the remediation told the operator to,
 /// which is worse than either being wrong alone. This is that tie (#13551).
 #[test]
-fn version_skew_action_and_prose_carry_the_same_ref() {
-    let check = checks::homeboy_version_skew_check_with(
-        "0.290.0",
-        "homeboy 0.290.0+ccccccc",
-        "homeboy 0.290.0+aaaaaaa",
-        "lab",
-        "lab",
-        |older, newer| {
-            (older == "aaaaaaa" && newer == "ccccccc")
-                .then_some(CommitAncestry::Ancestor)
-                .unwrap_or(CommitAncestry::NotAncestor)
-        },
-    )
-    .expect("version skew error");
-
-    let Some(RunnerRepairAction::RefreshHomeboy {
-        git_ref,
-        allow_downgrade,
-    }) = check.remediation_action.clone()
-    else {
-        panic!("version skew must carry a typed refresh action");
-    };
-
-    let git_ref = git_ref.expect("the action pins an explicit ref");
-    assert!(
-        check
-            .remediation
-            .as_deref()
-            .is_some_and(|prose| prose.contains(&git_ref)),
-        "the prose must name the same ref the action would materialize"
-    );
-    assert!(
-        !allow_downgrade,
-        "a skew repair aligns the runner forward; downgrading is an operator decision"
-    );
-}
-
-/// A check with no automatic repair carries no action, so the repair loop
-/// cannot invent one from a remediation sentence.
-#[test]
 fn a_check_without_an_automatic_repair_carries_no_action() {
     let check = checks::warning(
         "example.manual",
@@ -287,153 +246,6 @@ fn a_check_without_an_automatic_repair_carries_no_action() {
         Some("Ask the operator".to_string()),
     );
     assert!(check.remediation.is_some());
-    assert!(check.remediation_action.is_none());
-}
-
-#[test]
-fn homeboy_version_skew_check_warns_for_different_build_identities() {
-    let check = checks::homeboy_version_skew_check_with(
-        "0.290.0",
-        "homeboy 0.290.0+00d2756ef115",
-        "0.290.0+differentbuild",
-        "lab",
-        "lab",
-        |_, _| CommitAncestry::Unavailable,
-    )
-    .expect("version skew error");
-
-    assert_eq!(check.id, "homeboy.version_skew");
-    assert_eq!(check.status, RunnerDoctorStatus::Error);
-    assert!(check.message.contains("0.290.0+00d2756ef115"));
-    assert!(check.message.contains("0.290.0+differentbuild"));
-    assert_eq!(
-        check.details.get("local_version").map(String::as_str),
-        Some("0.290.0")
-    );
-    assert_eq!(
-        check
-            .details
-            .get("local_build_identity")
-            .map(String::as_str),
-        Some("0.290.0+00d2756ef115")
-    );
-    assert_eq!(
-        check.details.get("remote_version").map(String::as_str),
-        Some("0.290.0+differentbuild")
-    );
-    assert!(check
-        .remediation
-        .as_deref()
-        .is_some_and(|value| value.contains("Ancestry could not be verified")));
-    assert!(matches!(
-        check.remediation_action,
-        Some(RunnerRepairAction::RefreshHomeboy {
-            allow_downgrade: false,
-            ..
-        })
-    ));
-    assert_eq!(
-        check.details.get("recovery_ref_source").map(String::as_str),
-        Some("controller_build_identity")
-    );
-}
-
-#[test]
-fn homeboy_version_skew_recommends_refresh_only_when_controller_is_ahead() {
-    let check = checks::homeboy_version_skew_check_with(
-        "0.290.0",
-        "homeboy 0.290.0+ccccccc",
-        "homeboy 0.290.0+aaaaaaa",
-        "lab",
-        "lab",
-        |older, newer| {
-            (older == "aaaaaaa" && newer == "ccccccc")
-                .then_some(CommitAncestry::Ancestor)
-                .unwrap_or(CommitAncestry::NotAncestor)
-        },
-    )
-    .expect("version skew error");
-
-    assert_eq!(check.status, RunnerDoctorStatus::Error);
-    assert_eq!(
-        check.details.get("direction").map(String::as_str),
-        Some("controller_ahead")
-    );
-    assert!(check
-        .remediation
-        .as_deref()
-        .is_some_and(|value| value.contains("refresh-homeboy")));
-    assert!(matches!(
-        check.remediation_action,
-        Some(RunnerRepairAction::RefreshHomeboy {
-            allow_downgrade: false,
-            ..
-        })
-    ));
-    let next = check
-        .remediation_action
-        .as_ref()
-        .and_then(|action| action.to_next_action("lab"))
-        .expect("version skew renders a refresh next action");
-    assert!(
-        next.command
-            .starts_with("homeboy runner refresh-homeboy lab --ref "),
-        "{}",
-        next.command
-    );
-    assert!(next.command.ends_with(" --reconnect"), "{}", next.command);
-}
-
-#[test]
-fn homeboy_version_skew_keeps_a_runner_ahead_of_the_controller() {
-    let check = checks::homeboy_version_skew_check_with(
-        "0.290.0",
-        "homeboy 0.290.0+ccccccc",
-        "homeboy 0.290.0+aaaaaaa",
-        "lab",
-        "lab",
-        |older, newer| {
-            (older == "ccccccc" && newer == "aaaaaaa")
-                .then_some(CommitAncestry::Ancestor)
-                .unwrap_or(CommitAncestry::NotAncestor)
-        },
-    )
-    .expect("version skew error");
-
-    assert_eq!(check.status, RunnerDoctorStatus::Error);
-    assert_eq!(
-        check.details.get("direction").map(String::as_str),
-        Some("runner_ahead")
-    );
-    assert!(check
-        .remediation
-        .as_deref()
-        .is_some_and(|value| value.contains("Upgrade the controller")));
-    assert!(check.remediation_action.is_none());
-}
-
-#[test]
-fn homeboy_version_skew_withholds_refresh_for_diverged_commits() {
-    let check = checks::homeboy_version_skew_check_with(
-        "0.290.0",
-        "homeboy 0.290.0+ccccccc",
-        "homeboy 0.290.0+aaaaaaa",
-        "lab",
-        "lab",
-        |_, _| CommitAncestry::NotAncestor,
-    )
-    .expect("version skew error");
-
-    assert_eq!(check.status, RunnerDoctorStatus::Error);
-    assert_eq!(
-        check.details.get("direction").map(String::as_str),
-        Some("diverged_or_unverified")
-    );
-    assert!(
-        check.remediation.as_deref().is_some_and(
-            |value| value.contains("--allow-downgrade` only for an intentional rollback")
-        )
-    );
     assert!(check.remediation_action.is_none());
 }
 

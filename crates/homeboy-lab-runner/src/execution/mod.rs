@@ -342,13 +342,6 @@ impl RunnerExecOptions {
         self.print_handoff = false;
         self
     }
-
-    /// Keep durable evidence for a parent-owned substep without emitting an
-    /// independently actionable handoff while that parent is still running.
-    pub(crate) fn without_handoff(mut self) -> Self {
-        self.print_handoff = false;
-        self
-    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

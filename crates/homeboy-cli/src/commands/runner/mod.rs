@@ -11,7 +11,6 @@ mod workspace;
 
 mod broker;
 mod cli;
-mod controller_ancestry;
 mod dispatch;
 mod env;
 mod exec;

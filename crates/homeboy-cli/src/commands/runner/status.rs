@@ -15,7 +15,6 @@ use homeboy_engine_primitives::shell::shell_arg;
 use homeboy_runner_contract::RunnerKind;
 
 use super::super::CmdResult;
-use super::controller_ancestry::{commits_are_ancestral, CommitAncestry};
 use super::types::{
     LabFollowup, LabRunnerConnectionCapability, LabRunnerHomeboyOutput, LabSelectedRunnerOutput,
     RunnerArtifactFeatureDiagnostics, RunnerConnectionOutput,
@@ -1739,26 +1738,9 @@ pub(crate) fn selected_admission_summary(
     selected_status.map(|report| report.admission_summary(0))
 }
 
-/// Select only a refresh whose exact immutable commit is proven monotonic.
-fn recovery_refresh_guidance(status: &RunnerStatusReport) -> RecoveryRefreshGuidance {
-    let controller = homeboy_product_identity::build_identity();
-    let runner_commit = status
-        .session
-        .as_ref()
-        .and_then(|session| session.homeboy_build_identity.as_deref())
-        .and_then(build_identity_commit);
-    recovery_refresh_guidance_with(
-        controller.git_commit.as_deref(),
-        runner_commit,
-        commits_are_ancestral,
-    )
-}
-
-fn build_identity_commit(identity: &str) -> Option<&str> {
-    let commit = identity.rsplit_once('+')?.1;
-    let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
-    (commit.len() >= 7 && commit.len() <= 64 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some(commit)
+/// Recovery targets the controller release; refresh enforces the version guard.
+fn recovery_refresh_guidance(_status: &RunnerStatusReport) -> RecoveryRefreshGuidance {
+    RecoveryRefreshGuidance::Refresh(format!("v{}", homeboy_product_identity::product_version()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1803,46 +1785,6 @@ fn stale_daemon_output(
         fields.remove("refresh_command");
     }
     Some(warning)
-}
-
-fn recovery_refresh_guidance_with(
-    controller_commit: Option<&str>,
-    runner_commit: Option<&str>,
-    mut ancestry: impl FnMut(&str, &str) -> CommitAncestry,
-) -> RecoveryRefreshGuidance {
-    let Some(runner_commit) = runner_commit else {
-        return RecoveryRefreshGuidance::IdentityDrift {
-            controller: controller_commit.map(str::to_string),
-            runner: "unavailable".to_string(),
-        };
-    };
-    let Some(controller_commit) = controller_commit else {
-        return RecoveryRefreshGuidance::IdentityDrift {
-            controller: None,
-            runner: runner_commit.to_string(),
-        };
-    };
-    if runner_commit == controller_commit {
-        return RecoveryRefreshGuidance::Refresh(controller_commit.to_string());
-    }
-    match ancestry(controller_commit, runner_commit) {
-        CommitAncestry::Ancestor => RecoveryRefreshGuidance::Refresh(runner_commit.to_string()),
-        CommitAncestry::NotAncestor => match ancestry(runner_commit, controller_commit) {
-            CommitAncestry::Ancestor => {
-                RecoveryRefreshGuidance::Refresh(controller_commit.to_string())
-            }
-            CommitAncestry::NotAncestor | CommitAncestry::Unavailable => {
-                RecoveryRefreshGuidance::IdentityDrift {
-                    controller: Some(controller_commit.to_string()),
-                    runner: runner_commit.to_string(),
-                }
-            }
-        },
-        CommitAncestry::Unavailable => RecoveryRefreshGuidance::IdentityDrift {
-            controller: Some(controller_commit.to_string()),
-            runner: runner_commit.to_string(),
-        },
-    }
 }
 
 pub(crate) fn declared_run_followups(
@@ -2252,10 +2194,8 @@ mod tests {
         assert!(hint.contains("job command binary"));
         assert!(hint.contains("homeboy 0.262.0+binary"));
         let job_binary_refresh = format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-            homeboy_product_identity::build_identity()
-                .git_commit
-                .expect("test build has an immutable controller commit")
+            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
+            homeboy_product_identity::product_version()
         );
         assert!(hint.contains(&job_binary_refresh));
 
@@ -2267,10 +2207,8 @@ mod tests {
     }
 
     #[test]
-    fn active_refresh_guidance_uses_an_immutable_controller_commit_when_known() {
-        let expected = homeboy_product_identity::build_identity()
-            .git_commit
-            .expect("test build has an immutable controller commit");
+    fn active_refresh_guidance_uses_controller_release_tag() {
+        let expected = format!("v{}", homeboy_product_identity::product_version());
         let report = stale_daemon_report();
         let commands = lab_runner_homeboy_refresh_commands("homeboy-lab", &report);
         let followups = runner_followups(Some("homeboy-lab"), Some(&report));
@@ -2349,90 +2287,6 @@ mod tests {
             inspection.runner_unavailable[0].refresh_command,
             "homeboy runner status --full"
         );
-    }
-
-    #[test]
-    fn recovery_guidance_keeps_a_verified_newer_same_semver_runner_build() {
-        let post_tag_controller = "99ec629c04ca";
-        let newer_runner = "c7367571a217";
-        let runner_identity = "homeboy 0.320.0+c7367571a217";
-
-        let guidance = recovery_refresh_guidance_with(
-            Some(post_tag_controller),
-            build_identity_commit(runner_identity),
-            |older, newer| {
-                (older == post_tag_controller && newer == newer_runner)
-                    .then_some(CommitAncestry::Ancestor)
-                    .unwrap_or(CommitAncestry::NotAncestor)
-            },
-        );
-
-        assert_eq!(
-            guidance,
-            RecoveryRefreshGuidance::Refresh(newer_runner.to_string())
-        );
-    }
-
-    #[test]
-    fn recovery_guidance_surfaces_same_semver_drift_without_a_refresh_command() {
-        let controller = "99ec629c04ca";
-        let runner = "c7367571a217";
-
-        let guidance = recovery_refresh_guidance_with(Some(controller), Some(runner), |_, _| {
-            CommitAncestry::Unavailable
-        });
-        assert_eq!(
-            guidance,
-            RecoveryRefreshGuidance::IdentityDrift {
-                controller: Some(controller.to_string()),
-                runner: runner.to_string(),
-            }
-        );
-        assert!(recovery_refresh_command("homeboy-lab", guidance).is_none());
-    }
-
-    #[test]
-    fn recovery_guidance_uses_the_controller_exact_commit_only_when_it_is_newer() {
-        let controller = "7e29bde24e00";
-        let runner = "93bc3e103459";
-
-        assert_eq!(
-            recovery_refresh_guidance_with(Some(controller), Some(runner), |older, newer| {
-                (older == runner && newer == controller)
-                    .then_some(CommitAncestry::Ancestor)
-                    .unwrap_or(CommitAncestry::NotAncestor)
-            }),
-            RecoveryRefreshGuidance::Refresh(controller.to_string())
-        );
-    }
-
-    #[test]
-    fn recovery_guidance_withholds_refresh_when_the_controller_commit_is_absent() {
-        assert_eq!(
-            recovery_refresh_guidance_with(None, Some("7e29bde24e00"), |_, _| {
-                CommitAncestry::Ancestor
-            }),
-            RecoveryRefreshGuidance::IdentityDrift {
-                controller: None,
-                runner: "7e29bde24e00".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn recovery_guidance_withholds_mutable_version_tags_without_a_runner_commit() {
-        let guidance = recovery_refresh_guidance_with(Some("93bc3e103459"), None, |_, _| {
-            CommitAncestry::Ancestor
-        });
-
-        assert_eq!(
-            guidance,
-            RecoveryRefreshGuidance::IdentityDrift {
-                controller: Some("93bc3e103459".to_string()),
-                runner: "unavailable".to_string(),
-            }
-        );
-        assert!(recovery_refresh_command("homeboy-lab", guidance).is_none());
     }
 
     #[test]
