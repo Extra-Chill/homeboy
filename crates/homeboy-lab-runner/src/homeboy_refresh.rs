@@ -3481,10 +3481,17 @@ provenance="$slot_dir/provenance"
 staged_provenance=$(mktemp "$slot_dir/.provenance.XXXXXX")
 trap 'rm -f "$staged_provenance"' EXIT HUP INT TERM
 printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$source" "$cache" "$ref" "$target" "$binary_sha" "$identity_record" > "$staged_provenance"
+# Source/cache/ref describe acquisition, not immutable content identity.
+provenance_matches() {
+  { IFS= read -r recorded_source && IFS= read -r recorded_cache && IFS= read -r recorded_ref && IFS= read -r recorded_target && IFS= read -r recorded_sha && IFS= read -r recorded_identity && ! IFS= read -r extra; } < "$provenance" &&
+    [ "$recorded_target" = "$target" ] &&
+    [ "$recorded_sha" = "$binary_sha" ] &&
+    [ "$recorded_identity" = "$identity_record" ]
+}
 if [ -e "$provenance" ]; then
-  cmp -s "$staged_provenance" "$provenance" || { echo "immutable Homeboy slot provenance mismatch" >&2; exit 1; }
+  provenance_matches || { echo "immutable Homeboy slot provenance mismatch" >&2; exit 1; }
 elif ! ln "$staged_provenance" "$provenance"; then
-  [ -e "$provenance" ] && cmp -s "$staged_provenance" "$provenance" || { echo "immutable Homeboy slot provenance publication failed" >&2; exit 1; }
+  [ -e "$provenance" ] && provenance_matches || { echo "immutable Homeboy slot provenance publication failed" >&2; exit 1; }
 fi
 rm -f "$staged_provenance"
 trap - EXIT HUP INT TERM

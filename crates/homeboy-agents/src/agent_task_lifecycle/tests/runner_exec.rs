@@ -425,7 +425,13 @@ fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
             )
             .expect("declared artifact contract persists before execution");
 
-            let snapshot = runner_snapshot(status);
+            let mut snapshot = runner_snapshot(status);
+            if status == "failed" {
+                snapshot.events[0].message =
+                    Some("immutable Homeboy slot provenance mismatch".into());
+                snapshot.events[0].data.as_mut().unwrap()["command"] =
+                    json!(["sh", "-c", "x".repeat(300_000)]);
+            }
             record_runner_exec_terminal_checkpoint(run_id, &snapshot)
                 .expect("terminal snapshot checkpoint persists before promotion");
             record_runner_exec_artifact_refs_in_store(&test_lifecycle_store(), run_id, &[])
@@ -463,6 +469,15 @@ fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
                 run.metadata_json["runner_exec_artifact_declarations"]["summaries"][0],
                 "results.json"
             );
+            if status == "failed" {
+                let event = &run.metadata_json["runner_failure_diagnostics"]["events"][0];
+                assert_eq!(
+                    event["message"],
+                    "immutable Homeboy slot provenance mismatch"
+                );
+                assert_eq!(event["data"]["command"][2]["truncated"], true);
+                assert!(serde_json::to_vec(&run.metadata_json).unwrap().len() < 262144);
+            }
             if status != "succeeded" {
                 assert_eq!(
                     run.metadata_json["runner_failure_diagnostics"]["job_status"],
