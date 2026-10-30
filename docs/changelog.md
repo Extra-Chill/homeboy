@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.436.7] - 2026-10-30
+
+### Changed
+- make candidate_sha the only has-changes signal
+- status reports the persisted retirement verdict instead of re-verifying evidence
+- prove a release candidate once; collapse replacement checkpoints
+
 ## [0.436.6] - 2026-10-30
 
 ### Fixed
