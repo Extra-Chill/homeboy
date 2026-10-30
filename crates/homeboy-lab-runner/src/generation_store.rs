@@ -1320,8 +1320,13 @@ trait GenerationEndpointOperations {
     ) -> bool {
         false
     }
-    fn evidence(&self, _session: &RunnerSession, _path: &str) -> Option<serde_json::Value> {
-        None
+    /// Returns one inventory result per path, in request order.
+    fn evidence(
+        &self,
+        _session: &RunnerSession,
+        paths: &[String],
+    ) -> Vec<Option<serde_json::Value>> {
+        vec![None; paths.len()]
     }
     /// The endpoint's own record for one job it owns, used to release ledger
     /// ownership for work that already finished. It is read while the
@@ -1460,18 +1465,27 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
             .ok()
     }
 
-    fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
-        self.client
-            .get(format!(
-                "{}{path}",
-                session.local_url.as_deref()?.trim_end_matches('/')
-            ))
-            .send()
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
-            .ok()
+    fn evidence(
+        &self,
+        session: &RunnerSession,
+        paths: &[String],
+    ) -> Vec<Option<serde_json::Value>> {
+        paths
+            .iter()
+            .map(|path| {
+                self.client
+                    .get(format!(
+                        "{}{path}",
+                        session.local_url.as_deref()?.trim_end_matches('/')
+                    ))
+                    .send()
+                    .ok()?
+                    .error_for_status()
+                    .ok()?
+                    .json()
+                    .ok()
+            })
+            .collect()
     }
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
         if self.active_jobs(session).is_none() {
@@ -1663,8 +1677,40 @@ impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
         serde_json::from_str(&self.request("GET", session, &format!("/jobs/{encoded}"), None)?).ok()
     }
 
-    fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
-        serde_json::from_str(&self.request("GET", session, path, None)?).ok()
+    fn evidence(
+        &self,
+        session: &RunnerSession,
+        paths: &[String],
+    ) -> Vec<Option<serde_json::Value>> {
+        if paths.is_empty() {
+            return Vec::new();
+        }
+        let mut command = String::new();
+        for path in paths {
+            let Some(url) = Self::endpoint_url(session, path) else {
+                return vec![None; paths.len()];
+            };
+            // A raw record separator cannot occur in a valid JSON body. Keep
+            // failed curl output out of its frame, but always emit the separator.
+            command.push_str(&format!(
+                "body=$(curl --fail --silent --show-error --max-time 5 {} ) && printf '%s' \"$body\"; printf '\\036'; ",
+                shell::quote_arg(&url),
+            ));
+        }
+        let timeout = Duration::from_secs(5 * paths.len() as u64 + 5);
+        let output = self.client.execute_with_timeout(&command, timeout);
+        if !output.success {
+            return vec![None; paths.len()];
+        }
+        let mut bodies = output.stdout.split_terminator('\u{001e}');
+        paths
+            .iter()
+            .map(|_| {
+                bodies
+                    .next()
+                    .and_then(|body| serde_json::from_str(body).ok())
+            })
+            .collect()
     }
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
         self.authenticated_health(session).is_some()
@@ -1737,10 +1783,16 @@ where
             || self.fallback.cancel_job(session, job_id, request)
     }
 
-    fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
-        self.primary
-            .evidence(session, path)
-            .or_else(|| self.fallback.evidence(session, path))
+    fn evidence(
+        &self,
+        session: &RunnerSession,
+        paths: &[String],
+    ) -> Vec<Option<serde_json::Value>> {
+        let mut results = self.primary.evidence(session, paths);
+        fill_missing_evidence(&mut results, paths, |missing| {
+            self.fallback.evidence(session, missing)
+        });
+        results
     }
 
     fn job_record(&self, session: &RunnerSession, job_id: &str) -> Option<serde_json::Value> {
@@ -1842,6 +1894,28 @@ fn verify_controller_copy(
 /// Deleted controller runs have released their evidence obligation. Retained
 /// runs must be terminal with verified controller-owned bytes and complete
 /// source inventories. Unknown/legacy references remain fail-closed.
+/// Fill each unread entry of `results` from `fallback`, which receives only
+/// the unread paths, in request order.
+fn fill_missing_evidence(
+    results: &mut [Option<serde_json::Value>],
+    paths: &[String],
+    fallback: impl FnOnce(&[String]) -> Vec<Option<serde_json::Value>>,
+) {
+    let missing: Vec<String> = paths
+        .iter()
+        .zip(results.iter())
+        .filter(|(_, result)| result.is_none())
+        .map(|(path, _)| path.clone())
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let mut filled = fallback(&missing).into_iter();
+    for result in results.iter_mut().filter(|result| result.is_none()) {
+        *result = filled.next().flatten();
+    }
+}
+
 fn verify_retained_evidence(
     runner_id: &str,
     generations: &RollingGenerations<RunnerSession>,
@@ -1890,11 +1964,7 @@ fn verify_retained_evidence(
         .generations
         .get(&generations.admission_owner)
         .map(|entry| &entry.endpoint);
-    let evidence = |path: &str| {
-        operations
-            .evidence(endpoint, path)
-            .or_else(|| operations.evidence(admitting?, path))
-    };
+    let mut retained_runs = Vec::new();
     let mut released_runs = std::collections::BTreeSet::new();
     for id in &runs {
         // Controller retention has already released this run's evidence.
@@ -1920,11 +1990,33 @@ fn verify_retained_evidence(
         {
             return Err(invalid(id, "controller run is not terminal"));
         }
+        retained_runs.push(*id);
+    }
+    let paths: Vec<_> = retained_runs
+        .iter()
+        .flat_map(|id| {
+            let encoded = homeboy_core::execution_contract::encode_uri_component(id);
+            [
+                format!("/runs/{encoded}/artifacts"),
+                format!("/runs/{encoded}/findings"),
+            ]
+        })
+        .collect();
+    let mut evidence = if paths.is_empty() {
+        Vec::new()
+    } else {
+        operations.evidence(endpoint, &paths)
+    };
+    if let Some(admitting) = admitting.filter(|admitting| *admitting != endpoint) {
+        fill_missing_evidence(&mut evidence, &paths, |missing| {
+            operations.evidence(admitting, missing)
+        });
+    }
+    for (id, inventories) in retained_runs.iter().zip(evidence.chunks_exact(2)) {
         let local_artifacts = store.list_artifacts(id)?;
         // A valid local file does not prove the whole remote result was copied.
         // Compare exhaustive source inventories before releasing its daemon.
-        let encoded = homeboy_core::execution_contract::encode_uri_component(id);
-        let Some(remote) = evidence(&format!("/runs/{encoded}/artifacts")) else {
+        let Some(remote) = &inventories[0] else {
             if !proven_stopped() {
                 return Err(invalid(id, "source artifact inventory unavailable"));
             }
@@ -1946,7 +2038,7 @@ fn verify_retained_evidence(
                     .map_err(|_| invalid(id, "source artifact metadata invalid"))?;
             verify_controller_copy(&source, &local_artifacts)?;
         }
-        let Some(remote) = evidence(&format!("/runs/{encoded}/findings")) else {
+        let Some(remote) = &inventories[1] else {
             if !proven_stopped() {
                 return Err(invalid(id, "source findings unavailable"));
             }
@@ -3519,6 +3611,7 @@ mod tests {
     struct FakeEndpointOperations {
         queued: RefCell<Vec<crate::RunnerJob>>,
         evidence: RefCell<std::collections::BTreeMap<String, serde_json::Value>>,
+        evidence_calls: RefCell<Vec<(String, Vec<String>)>>,
         evidence_unreachable_leases: RefCell<std::collections::BTreeSet<String>>,
         cancelled: RefCell<Vec<(String, String)>>,
         active_jobs: RefCell<std::collections::BTreeMap<String, usize>>,
@@ -3531,15 +3624,22 @@ mod tests {
     }
 
     impl GenerationEndpointOperations for FakeEndpointOperations {
-        fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
-            if self
-                .evidence_unreachable_leases
-                .borrow()
-                .contains(session.remote_daemon_lease_id.as_deref()?)
-            {
-                return None;
+        fn evidence(
+            &self,
+            session: &RunnerSession,
+            paths: &[String],
+        ) -> Vec<Option<serde_json::Value>> {
+            let lease = session.remote_daemon_lease_id.as_deref().expect("lease");
+            self.evidence_calls
+                .borrow_mut()
+                .push((lease.to_string(), paths.to_vec()));
+            if self.evidence_unreachable_leases.borrow().contains(lease) {
+                return vec![None; paths.len()];
             }
-            self.evidence.borrow().get(path).cloned()
+            paths
+                .iter()
+                .map(|path| self.evidence.borrow().get(path).cloned())
+                .collect()
         }
 
         fn queued_jobs(&self, _session: &RunnerSession) -> Option<Vec<crate::RunnerJob>> {
@@ -3668,8 +3768,8 @@ mod tests {
                 .expect("client"),
         };
         assert_eq!(
-            operations.evidence(&endpoint, "/runs/terminal-run/artifacts"),
-            Some(serde_json::json!({"data":{"body":{"artifacts":[]}}}))
+            operations.evidence(&endpoint, &["/runs/terminal-run/artifacts".to_string()]),
+            vec![Some(serde_json::json!({"data":{"body":{"artifacts":[]}}}))]
         );
         server.join().expect("fixture server");
     }
@@ -4939,6 +5039,130 @@ mod tests {
             );
             assert!(operations.stopped_leases.borrow().is_empty());
             assert!(operations.terminated_pids.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn retained_runs_read_one_evidence_batch_per_endpoint() {
+        crate::test_support::with_isolated_home(|_| {
+            use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
+            let store = ObservationStore::open_initialized().expect("store");
+            let endpoint = session("lease-owner", "daemon-owner", Some(101));
+            let admitting = session("lease-admitting", "daemon-admitting", Some(202));
+            let mut generations = RollingGenerations::new("lease-admitting", admitting);
+            generations.begin("lease-owner", endpoint.clone());
+            let operations = FakeEndpointOperations::default();
+            for index in 0..4 {
+                let id = format!("retained-{index}");
+                store
+                    .start_run_with_id(
+                        NewRunRecord::builder("runner_execution")
+                            .metadata(serde_json::json!({"runner_id":"runner-a"}))
+                            .build(),
+                        id.clone(),
+                    )
+                    .expect("run");
+                store
+                    .finish_run(&id, RunStatus::Pass, None)
+                    .expect("terminal");
+                generations
+                    .run_owners
+                    .insert(id.clone(), "lease-owner".to_string());
+                for (kind, body) in [
+                    (
+                        "artifacts",
+                        serde_json::json!({"data":{"body":{"artifacts":[]}}}),
+                    ),
+                    (
+                        "findings",
+                        serde_json::json!({"data":{"body":{"findings":[]}}}),
+                    ),
+                ] {
+                    operations
+                        .evidence
+                        .borrow_mut()
+                        .insert(format!("/runs/{id}/{kind}"), body);
+                }
+            }
+            // Exercise both the owner-only and owner-to-admitting batch paths.
+            for unreachable in [false, true] {
+                operations.evidence_calls.borrow_mut().clear();
+                if unreachable {
+                    operations
+                        .evidence_unreachable_leases
+                        .borrow_mut()
+                        .insert("lease-owner".to_string());
+                }
+                assert_eq!(
+                    verify_retained_evidence(
+                        "runner-a",
+                        &generations,
+                        "lease-owner",
+                        &endpoint,
+                        &operations
+                    )
+                    .expect("verified"),
+                    None
+                );
+                let calls = operations.evidence_calls.borrow();
+                assert_eq!(calls.len(), if unreachable { 2 } else { 1 });
+                assert_eq!(calls[0].0, "lease-owner");
+                assert_eq!(calls[0].1.len(), 8);
+                if unreachable {
+                    assert_eq!(calls[1].0, "lease-admitting");
+                    assert_eq!(calls[1].1, calls[0].1);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn retained_run_local_blocker_prevents_all_evidence_reads() {
+        crate::test_support::with_isolated_home(|_| {
+            use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
+            let store = ObservationStore::open_initialized().expect("store");
+            let endpoint = session("lease-a", "daemon-a", Some(101));
+            let mut generations = RollingGenerations::new("lease-a", endpoint.clone());
+            let operations = FakeEndpointOperations::default();
+            // The valid run sorts first, so an interleaved implementation would
+            // already have read evidence before encountering the local blocker.
+            for id in ["a-valid", "z-blocked"] {
+                store
+                    .start_run_with_id(
+                        NewRunRecord::builder("runner_execution")
+                            .metadata(serde_json::json!({"runner_id":"runner-a"}))
+                            .build(),
+                        id.to_string(),
+                    )
+                    .expect("run");
+                generations
+                    .run_owners
+                    .insert(id.to_string(), "lease-a".to_string());
+            }
+            store
+                .finish_run("a-valid", RunStatus::Pass, None)
+                .expect("terminal");
+            operations.evidence.borrow_mut().insert(
+                "/runs/a-valid/artifacts".to_string(),
+                serde_json::json!({"data":{"body":{"artifacts":[]}}}),
+            );
+            operations.evidence.borrow_mut().insert(
+                "/runs/a-valid/findings".to_string(),
+                serde_json::json!({"data":{"body":{"findings":[]}}}),
+            );
+            let error = verify_retained_evidence(
+                "runner-a",
+                &generations,
+                "lease-a",
+                &endpoint,
+                &operations,
+            )
+            .expect_err("local blocker");
+            assert!(
+                error.message.contains("controller run is not terminal"),
+                "{error:?}"
+            );
+            assert!(operations.evidence_calls.borrow().is_empty());
         });
     }
 
