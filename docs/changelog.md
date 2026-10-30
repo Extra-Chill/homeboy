@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.435.1] - 2026-10-30
+
+### Fixed
+- stage workspace root npm lockfile in component release commits
+- resolve nested cook components to enclosing repository
+- only binary replacement drains Cook generation pins
+- validate re-entered retry preparation against the recipe-bound plan
+
 ## [0.435.0] - 2026-10-30
 
 ### Added
