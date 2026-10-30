@@ -15,6 +15,7 @@ Reference pages are intentionally dense. If you are deciding what to run next, s
 ## Configuration
 
 - [Configuration reference](configuration.md)
+- [Lint/test scope and extension env contract](validation-scope.md)
 - [Template variables](template-variables.md)
 - [Agent-task prompt templates](prompt-templates.md)
 - [Configuration schemas](schemas/index.md)

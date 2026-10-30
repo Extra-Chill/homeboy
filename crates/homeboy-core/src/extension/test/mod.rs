@@ -178,6 +178,11 @@ pub fn build_test_runner(
     changed_test_files: Option<&[String]>,
     run_dir: &homeboy_core::engine::run_dir::RunDir,
 ) -> homeboy_core::Result<ExtensionRunner> {
+    let scope = crate::component::resolve_component_scope_at(
+        component,
+        crate::component::ScopeCommand::Test,
+        std::path::Path::new(path_override.as_deref().unwrap_or(&component.local_path)),
+    );
     let resolved = resolve_test_command(component)?;
     let extension_id = resolved.extension_id.clone();
     let test_config = crate::extension::catalog::load_extension(&extension_id)?.test;
@@ -198,6 +203,7 @@ pub fn build_test_runner(
         .with_run_dir(run_dir)
         .secret_env_names(secret_env_names)
         .test_secret_env_projections(secret_env_projections)
+        .env("HOMEBOY_SCOPE_EXCLUDE", &scope.exclude.join("\n"))
         .env_if(skip_lint, "HOMEBOY_SKIP_LINT", "1")
         .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1");
 

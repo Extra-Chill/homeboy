@@ -179,8 +179,14 @@ pub fn run_main_lint_workflow(
 
     let mut lint_findings = Vec::new();
     let mut producer_summaries = Vec::new();
-    for evidence in evidence {
+    let scope = crate::component::resolve_component_scope_at(
+        component,
+        crate::component::ScopeCommand::Lint,
+        source_path,
+    );
+    for mut evidence in evidence {
         let had_findings = !evidence.findings.is_empty();
+        scope.filter_findings(source_path, &mut evidence.findings);
         let declared_producers_empty = evidence.declared_producers.is_empty();
         let scoped_run = evidence
             .changed_files
@@ -204,7 +210,7 @@ pub fn run_main_lint_workflow(
             evidence.exit_code,
             evidence.step.as_deref(),
         );
-        if evidence.changed_files.is_some()
+        if (evidence.changed_files.is_some() || !scope.exclude.is_empty())
             && had_findings
             && route_findings.is_empty()
             && evidence.exit_code == 1
