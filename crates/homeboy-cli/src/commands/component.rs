@@ -21,6 +21,21 @@ pub struct ComponentArgs {
 
 #[derive(Subcommand)]
 enum ComponentCommand {
+    /// Detect changed monorepo components and same-repo dependents
+    Changed {
+        #[arg(long)]
+        base: String,
+        #[arg(long)]
+        head: String,
+        /// Repository checkout (must contain the head revision's manifests)
+        #[arg(long, default_value = ".")]
+        path: String,
+        #[arg(long, value_enum, default_value = "json")]
+        format: ChangedFormat,
+        /// Repository-relative shared path/glob selecting all components (repeatable)
+        #[arg(long = "shared-path")]
+        shared_paths: Vec<String>,
+    },
     /// Initialize portable component config for a repo
     Create {
         /// Absolute path to local source directory (writes homeboy.json there)
@@ -226,8 +241,55 @@ pub struct ComponentInventoryPhase {
 
 pub type ComponentOutput = EntityCrudOutput<Value, ComponentExtra>;
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ChangedFormat {
+    Json,
+    Matrix,
+    Ids,
+}
+
+pub fn is_changed(args: &ComponentArgs) -> bool {
+    matches!(args.command, ComponentCommand::Changed { .. })
+}
+
+pub fn run_changed(args: ComponentArgs) -> CmdResult<String> {
+    let ComponentCommand::Changed {
+        base,
+        head,
+        path,
+        format,
+        shared_paths,
+    } = args.command
+    else {
+        return Err(homeboy::core::Error::internal_unexpected(
+            "Expected component changed",
+        ));
+    };
+    let output = component::changed::changed(Path::new(&path), &base, &head, &shared_paths)?;
+    let text = match format {
+        ChangedFormat::Matrix => serde_json::to_string(&output),
+        ChangedFormat::Json => serde_json::to_string(&output.include),
+        ChangedFormat::Ids => {
+            return Ok((
+                output
+                    .include
+                    .iter()
+                    .map(|c| c.component.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                0,
+            ))
+        }
+    }
+    .map_err(|e| homeboy::core::Error::internal_unexpected(e.to_string()))?;
+    Ok((text, 0))
+}
+
 pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
     match args.command {
+        ComponentCommand::Changed { .. } => Err(homeboy::core::Error::internal_unexpected(
+            "component changed requires raw output routing",
+        )),
         ComponentCommand::Create {
             local_path,
             remote_path,
@@ -1087,6 +1149,73 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         component: ComponentArgs,
+    }
+
+    #[test]
+    fn component_changed_raw_matrix() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        fs::write(dir.path().join("homeboy.json"), r#"{"id":"network"}"#).unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "init",
+        ]);
+        fs::write(dir.path().join("plugin.php"), "changed").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "change",
+        ]);
+        for (format, expected) in [
+            (
+                "matrix",
+                r#"{"include":[{"component":"network","path":"."}]}"#,
+            ),
+            ("json", r#"[{"component":"network","path":"."}]"#),
+            ("ids", "network"),
+        ] {
+            let cli = TestCli::try_parse_from([
+                "component",
+                "changed",
+                "--base",
+                "HEAD^",
+                "--head",
+                "HEAD",
+                "--path",
+                dir.path().to_str().unwrap(),
+                "--format",
+                format,
+            ])
+            .unwrap();
+            assert!(is_changed(&cli.component));
+            let (text, code) = run_changed(cli.component).unwrap();
+            assert_eq!(code, 0);
+            assert_eq!(text, expected);
+        }
     }
 
     #[test]

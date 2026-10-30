@@ -44,6 +44,9 @@ impl Commands {
         }
 
         match self {
+            Commands::Component(args) if crate::commands::component::is_changed(args) => {
+                raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
+            }
             Commands::Ssh(args) if ssh::is_raw_command(args) => {
                 raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }
@@ -182,6 +185,32 @@ mod tests {
                 spec.output_descriptor(CommandOutputFileMode::None),
                 "default output descriptor drifted for `{}`",
                 spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn component_changed_preserves_raw_output_routing() {
+        let spec = crate::command_contract::COMMAND_SPECS
+            .iter()
+            .find(|s| s.name == "component")
+            .unwrap();
+        for format in ["json", "matrix", "ids"] {
+            let cli = Cli::try_parse_from([
+                "homeboy",
+                "component",
+                "changed",
+                "--base",
+                "HEAD^",
+                "--head",
+                "HEAD",
+                "--format",
+                format,
+            ])
+            .unwrap();
+            assert_eq!(
+                cli.command.output_descriptor(spec, false).response_mode,
+                CommandResponseMode::Raw(CommandRawOutputMode::PlainText)
             );
         }
     }
