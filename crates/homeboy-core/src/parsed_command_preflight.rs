@@ -338,7 +338,7 @@ pub fn resolve_parsed_command_preflight(
             .then(|| local_route_inadmissible_reason(&local_admission))
             .flatten();
         let local_fallback_rejected = local_reason.is_some();
-        let mut remediation = if auto_split_placement_requires_lab {
+        let mut remediation = {
             policy
                 .lab_readiness
                 .as_ref()
@@ -351,8 +351,6 @@ pub fn resolve_parsed_command_preflight(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
-        } else {
-            Vec::new()
         };
         remediation.extend(runner_reason.clone());
         remediation.extend(local_reason.clone());
@@ -376,7 +374,7 @@ pub fn resolve_parsed_command_preflight(
                 "selected runner requires admitted connected readiness evidence".to_string()
             },
             policy.selected_runner_id.clone(),
-            auto_split_placement_requires_lab.then_some(remediation),
+            Some(remediation),
         ));
     }
     if policy.auto_local_capacity_fallback
@@ -577,7 +575,15 @@ pub fn resolve_parsed_command_preflight(
 /// leaving the operator with no explanation at all.
 fn lab_readiness_fallback_reason(readiness: &LabReadinessSnapshot) -> Option<String> {
     if !readiness.reasons.is_empty() {
-        return Some(readiness.reasons.join("; "));
+        return Some(
+            readiness
+                .reasons
+                .iter()
+                .chain(readiness.remediation_commands.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
     }
     let described = match readiness.state.as_str() {
         "connected_ready" => return None,
@@ -1510,6 +1516,54 @@ mod tests {
             lab_route: LabRouteIntent::Supported { automatic: true },
             provenance: ProvenanceRequirement::None,
         }
+    }
+
+    #[test]
+    fn automatic_route_records_identity_mismatch_and_recovery() {
+        let mut policy = auto_route_policy(
+            None,
+            "stale",
+            Vec::new(),
+            vec!["daemon de88dcd != controller 20f3a44".into()],
+            false,
+            ResourceAdmissionEvidence::Unavailable,
+        );
+        policy.lab_readiness.as_mut().unwrap().remediation_commands =
+            vec!["homeboy runner refresh lab-b".into()];
+        let result = resolve_parsed_command_preflight(Vec::new(), auto_route_input(), policy)
+            .expect("automatic route can fall back");
+        assert_eq!(
+            result.placement.selected,
+            EffectiveExecutionPlacement::Local
+        );
+        let reason = result.placement.fallback.reason.unwrap();
+        assert!(reason.contains("de88dcd"));
+        assert!(reason.contains("20f3a44"));
+        assert!(reason.contains("homeboy runner refresh lab-b"));
+    }
+
+    #[test]
+    fn explicit_cook_route_refuses_identity_mismatch_before_execution() {
+        let mut input = explicit_runner_input();
+        input.identity.family = "agent-task".into();
+        input.identity.operation = vec!["cook".into()];
+        input.controller_execution = ControllerExecution::SplitPlacementCoordinator;
+        let mut policy = explicit_runner_policy("stale", Vec::new(), false);
+        let readiness = policy.lab_readiness.as_mut().unwrap();
+        readiness.reasons = vec![
+            "active_daemon_control_plane_build_identity != job_command_binary_build_identity: daemon de88dcd, controller 20f3a44".into(),
+        ];
+        readiness.remediation_commands = vec!["homeboy runner refresh lab-b".into()];
+
+        // Preflight is pure: refusal precedes the execution layer that creates
+        // worktrees and durable Cook records.
+        let error = resolve_parsed_command_preflight(Vec::new(), input, policy)
+            .expect_err("incompatible runner must not reach Cook execution");
+        assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+        let evidence = format!("{error:?}");
+        assert!(evidence.contains("de88dcd"));
+        assert!(evidence.contains("20f3a44"));
+        assert!(evidence.contains("homeboy runner refresh lab-b"));
     }
 
     fn explicit_runner_policy(
