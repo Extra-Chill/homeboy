@@ -1979,10 +1979,12 @@ fn verify_retained_evidence(
             .or_else(|| run.metadata_json.pointer("/lab_offload/runner_id"))
             .or_else(|| run.metadata_json.pointer("/runner_id"))
             .and_then(serde_json::Value::as_str);
-        if owner != Some(runner_id) {
+        // run_owners is authoritative; recovery-only agent-task metadata may
+        // have no runner identity. Reject an explicit conflicting identity.
+        if owner.is_some_and(|owner| owner != runner_id) {
             return Err(invalid(
                 id,
-                "controller run runner identity is missing or inconsistent",
+                "controller run runner identity is inconsistent",
             ));
         }
         if !homeboy_core::observation::RunStatus::from_label(&run.status)
@@ -3851,6 +3853,56 @@ mod tests {
     }
 
     #[test]
+    fn recovery_only_agent_task_retires_using_ledger_ownership() {
+        crate::test_support::with_isolated_home(|_| {
+            use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("agent-task")
+                        .metadata(serde_json::json!({"recovery":{"reason":"reconciled"}}))
+                        .build(),
+                )
+                .expect("agent-task run");
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("terminal run");
+            let idle = session("lease-idle", "daemon-idle", Some(101));
+            let current = session("lease-current", "daemon-current", Some(303));
+            let mut generations = RollingGenerations::new("lease-current", current);
+            generations.begin("lease-idle", idle);
+            generations
+                .run_owners
+                .insert(run.id.clone(), "lease-idle".into());
+            write("runner-a", &generations).expect("persist generations");
+            let operations = FakeEndpointOperations::default();
+            operations.active_jobs.borrow_mut().extend([
+                ("lease-idle".to_string(), 0),
+                ("lease-current".to_string(), 0),
+            ]);
+            let encoded = homeboy_core::execution_contract::encode_uri_component(&run.id);
+            operations.evidence.borrow_mut().extend([
+                (
+                    format!("/runs/{encoded}/artifacts"),
+                    serde_json::json!({"data":{"body":{"artifacts":[]}}}),
+                ),
+                (
+                    format!("/runs/{encoded}/findings"),
+                    serde_json::json!({"data":{"body":{"findings":[]}}}),
+                ),
+            ]);
+
+            let result = reconcile_with("runner-a", &operations).expect("reconcile");
+            assert_eq!(result.retired_generation_ids, ["lease-idle"]);
+            assert!(result.evidence_blocked_generation_ids.is_empty());
+            assert!(result.released_unverified_evidence.is_empty());
+            let status = status_projection("runner-a").expect("status");
+            assert_eq!(status.len(), 1);
+            assert_eq!(status[0].generation, "lease-current");
+        });
+    }
+
+    #[test]
     fn missing_controller_run_releases_evidence_without_attestation() {
         crate::test_support::with_isolated_home(|_| {
             let idle = session("lease-idle", "daemon-idle", Some(101));
@@ -5213,7 +5265,7 @@ mod tests {
                     assert!(result
                         .expect_err("mismatched runner")
                         .message
-                        .contains("runner identity is missing or inconsistent"));
+                        .contains("runner identity is inconsistent"));
                 }
             }
         });
