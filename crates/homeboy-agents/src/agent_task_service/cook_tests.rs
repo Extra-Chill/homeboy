@@ -20498,6 +20498,15 @@ fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
             serde_json::to_vec(&stored.metadata_json).unwrap().len()
                 < homeboy_core::observation::store::metadata_payloads::RUN_METADATA_CAP
         );
+        // Finalization reads the externalized report through the resolving
+        // reader instead of rejecting the payload reference (#16664).
+        let mut backend = RealAgentTaskPrFinalizationBackend;
+        let proof = backend.hydrate_gate_proof(run_id).unwrap();
+        assert_eq!(gate_feedback_current_diff(&proof.promotion), large_diff);
+        let proof = backend
+            .hydrate_gate_proof_in_store(&test_lifecycle_store(), run_id)
+            .unwrap();
+        assert_eq!(gate_feedback_current_diff(&proof.promotion), large_diff);
     });
 }
 

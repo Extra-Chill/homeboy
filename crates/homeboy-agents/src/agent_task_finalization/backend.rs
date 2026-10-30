@@ -4,7 +4,7 @@ use super::{
     AgentTaskPrQuarantineCapability, AgentTaskPrRef, AgentTaskPrResolvedBase,
     AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
 };
-use crate::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotionReport};
+use crate::agent_task_promotion::AgentTaskPromotionCandidate;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{
     classify_git_push_failure, commit_at, get_uncommitted_changes, pr_create_with_token,
@@ -82,20 +82,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
     fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof> {
         let record = crate::agent_task_lifecycle::reconcile_status(run_id)?;
-        let promotion = crate::agent_task_service::recorded_promotion_report(&record.metadata).cloned().ok_or_else(|| Error::validation_invalid_argument("run_id", "normal finalization requires the run's persisted applied promotion; run agent-task promote first or use --manual-finalization", None, None))?;
-        let promotion: AgentTaskPromotionReport =
-            serde_json::from_value(promotion).map_err(|_| {
-                Error::validation_invalid_argument(
-                    "run_id",
-                    "durable latest promotion record is invalid",
-                    None,
-                    None,
-                )
-            })?;
-        Ok(AgentTaskPrDurableGateProof {
-            run_id: record.run_id,
-            promotion,
-        })
+        optional_gate_proof(record)?.ok_or_else(missing_promotion)
     }
 
     fn hydrate_optional_gate_proof(
@@ -119,21 +106,13 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
         run_id: &str,
     ) -> Result<AgentTaskPrDurableGateProof> {
-        let record = lifecycle_store.read_record(run_id)?;
-        let promotion = crate::agent_task_service::recorded_promotion_report(&record.metadata).cloned().ok_or_else(|| Error::validation_invalid_argument("run_id", "normal finalization requires the run's persisted applied promotion; run agent-task promote first or use --manual-finalization", None, None))?;
-        let promotion: AgentTaskPromotionReport =
-            serde_json::from_value(promotion).map_err(|_| {
-                Error::validation_invalid_argument(
-                    "run_id",
-                    "durable latest promotion record is invalid",
-                    None,
-                    None,
-                )
-            })?;
-        Ok(AgentTaskPrDurableGateProof {
-            run_id: record.run_id,
-            promotion,
-        })
+        let run_id = lifecycle_store.read_record(run_id)?.run_id;
+        let promotion = crate::agent_task_service::persisted_promotion_for_attempt_in_store(
+            lifecycle_store,
+            &run_id,
+        )?
+        .ok_or_else(missing_promotion)?;
+        Ok(AgentTaskPrDurableGateProof { run_id, promotion })
     }
 
     fn hydrate_optional_gate_proof_in_store(
@@ -840,26 +819,26 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     }
 }
 
+/// Finalization consumes the persisted promotion's content, so it reads it
+/// through the resolving reader: large reports are stored as metadata
+/// payload references, not inline (#16664).
 fn optional_gate_proof(
     record: crate::agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<AgentTaskPrDurableGateProof>> {
-    let Some(value) =
-        crate::agent_task_service::recorded_promotion_report(&record.metadata).cloned()
-    else {
-        return Ok(None);
-    };
-    let promotion = serde_json::from_value(value).map_err(|_| {
-        Error::validation_invalid_argument(
-            "run_id",
-            "durable latest promotion record is invalid",
-            None,
-            None,
-        )
-    })?;
-    Ok(Some(AgentTaskPrDurableGateProof {
-        run_id: record.run_id,
-        promotion,
-    }))
+    let run_id = record.run_id.clone();
+    Ok(
+        crate::agent_task_service::persisted_promotion_from_record(&run_id, record)?
+            .map(|promotion| AgentTaskPrDurableGateProof { run_id, promotion }),
+    )
+}
+
+fn missing_promotion() -> Error {
+    Error::validation_invalid_argument(
+        "run_id",
+        "normal finalization requires the run's persisted applied promotion; run agent-task promote first or use --manual-finalization",
+        None,
+        None,
+    )
 }
 
 fn committed_changed_files(path: &str, base: &str) -> Result<Vec<String>> {
@@ -1238,11 +1217,9 @@ fn validate_real_candidate_fingerprint_from_record(
     options: &AgentTaskPrFinalizationOptions,
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<()> {
-    let promotion: AgentTaskPromotionReport = deserialize_persisted_value(
-        crate::agent_task_service::recorded_promotion_report(&record.metadata).cloned(),
-        "normal finalization requires a persisted Cook delivery promotion",
-        "persisted Cook delivery promotion is invalid",
-    )?;
+    let promotion =
+        crate::agent_task_service::persisted_promotion_from_record(&record.run_id, record.clone())?
+            .ok_or_else(missing_promotion)?;
     let expected: AgentTaskPromotionCandidate = deserialize_persisted_value(
         promotion.provenance.get("candidate").cloned(),
         "applied promotion is missing a candidate capability; rerun promotion before normal finalization or use --manual-finalization to record the explicit bypass",

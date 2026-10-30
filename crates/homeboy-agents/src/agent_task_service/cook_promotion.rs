@@ -1111,7 +1111,7 @@ pub(crate) fn persisted_promotion_for_attempt(
     persisted_promotion_from_record(run_id, record)
 }
 
-pub(super) fn persisted_promotion_from_record(
+pub(crate) fn persisted_promotion_from_record(
     requested_run_id: &str,
     record: agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<AgentTaskPromotionReport>> {
