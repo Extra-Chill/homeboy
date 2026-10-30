@@ -352,6 +352,13 @@ fn release_acquisition_publishes_a_verified_slot_without_a_git_checkout() {
         !history.join("README.md").exists(),
         "history is never checked out"
     );
+    assert_eq!(
+        run(Command::new("git")
+            .args(["rev-list", "--all", "-1"])
+            .current_dir(&history)),
+        fixture.commit,
+        "the fetched release commit is ref-reachable, so the next fetch negotiates from it instead of re-downloading the history"
+    );
 
     let probe = select_probe(&fixture, &immutable);
     assert!(
