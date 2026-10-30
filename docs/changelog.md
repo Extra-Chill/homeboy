@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.436.3] - 2026-10-30
+
+### Fixed
+- read externalized promotion reports through the resolving reader
+
 ## [0.436.2] - 2026-10-30
 
 ### Fixed
