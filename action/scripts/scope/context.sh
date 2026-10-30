@@ -21,7 +21,7 @@ scope_context() {
   printf '%s\n' "${SCOPE_CONTEXT:-manual}"
 }
 
-# What's the base ref for diffing? (empty if not scoped)
+# What's the base ref for diffing? May also be set for full-scope PR gating.
 scope_base_ref() {
   printf '%s\n' "${SCOPE_BASE_REF:-}"
 }

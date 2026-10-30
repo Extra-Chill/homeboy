@@ -15,7 +15,7 @@
 #
 # Outputs (GITHUB_ENV + GITHUB_OUTPUT):
 #   SCOPE_CONTEXT      — pr | push | cron | manual
-#   SCOPE_BASE_REF     — merge base SHA (empty for non-PR or full scope)
+#   SCOPE_BASE_REF     — PR base SHA with verified common ancestry (also for full scope)
 #   SCOPE_MODE         — changed | full
 #   SCOPE_IS_FORK      — true | false
 
@@ -66,9 +66,8 @@ case "${SCOPE_INPUT}" in
     ;;
 esac
 
-if [ "${SCOPE_INPUT}" = "full" ]; then
-  SCOPE_MODE="full"
-elif [ "${SCOPE_CONTEXT}" = "pr" ] || [ "${SCOPE_INPUT}" = "changed" ]; then
+# PR base resolution supports differential gating independently of candidate scope.
+if [ "${SCOPE_CONTEXT}" = "pr" ] || [ "${SCOPE_INPUT}" = "changed" ]; then
   if [ -n "${BASE_SHA:-}" ]; then
     # Fetch enough ancestry for three-dot diff (base...HEAD) to find the merge base.
     # GitHub's default checkout is --depth=1 (shallow), which only has the tip commits.
@@ -91,7 +90,9 @@ elif [ "${SCOPE_CONTEXT}" = "pr" ] || [ "${SCOPE_INPUT}" = "changed" ]; then
       MERGE_BASE=$(git merge-base "${BASE_SHA}" HEAD)
       echo "Merge base found: ${MERGE_BASE:0:8}"
       SCOPE_BASE_REF="${BASE_SHA}"
-      SCOPE_MODE="changed"
+      if [ "${SCOPE_INPUT}" != "full" ]; then
+        SCOPE_MODE="changed"
+      fi
     else
       echo "::warning::Could not find merge base — falling back to full scope"
       SCOPE_MODE="full"

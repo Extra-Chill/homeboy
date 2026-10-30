@@ -5,6 +5,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_SCRIPT="${SCRIPT_DIR}/resolve.sh"
 
+# Resolve against local history only, without fetching from the project remote.
+test_dir="$(mktemp -d)"
+trap 'rm -rf "${test_dir}"' EXIT
+git init -q "${test_dir}/repo"
+cd "${test_dir}/repo"
+git -c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m base
+base_sha="$(git rev-parse HEAD)"
+git -c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m candidate
+
 assert_env_contains() {
   local file="$1"
   local expected="$2"
@@ -22,8 +31,8 @@ assert_env_contains() {
 
 run_resolve() {
   local env_file output_file
-  env_file="$(mktemp)"
-  output_file="$(mktemp)"
+  env_file="$(mktemp "${test_dir}/env.XXXXXX")"
+  output_file="$(mktemp "${test_dir}/output.XXXXXX")"
 
   GITHUB_ENV="${env_file}" \
     GITHUB_OUTPUT="${output_file}" \
@@ -36,8 +45,23 @@ run_resolve() {
 env_file="$(run_resolve env GITHUB_EVENT_NAME=push SCOPE_INPUT=auto)"
 assert_env_contains "${env_file}" "SCOPE_MODE=full" "auto push uses full scope"
 
-env_file="$(run_resolve env GITHUB_EVENT_NAME=pull_request SCOPE_INPUT=full BASE_SHA=missing)"
-assert_env_contains "${env_file}" "SCOPE_MODE=full" "explicit full scope bypasses PR base resolution"
+for event in pull_request pull_request_target; do
+  env_file="$(run_resolve env GITHUB_EVENT_NAME="${event}" SCOPE_INPUT=full BASE_SHA="${base_sha}")"
+  assert_env_contains "${env_file}" "SCOPE_MODE=full" "explicit full ${event} keeps full candidate scope"
+  assert_env_contains "${env_file}" "SCOPE_BASE_REF=${base_sha}" "explicit full ${event} resolves baseline ref"
+done
+
+for event in push schedule workflow_dispatch; do
+  env_file="$(run_resolve env GITHUB_EVENT_NAME="${event}" SCOPE_INPUT=full BASE_SHA="${base_sha}")"
+  assert_env_contains "${env_file}" "SCOPE_MODE=full" "explicit full ${event} keeps full scope"
+  assert_env_contains "${env_file}" "SCOPE_BASE_REF=" "explicit full ${event} has no baseline ref"
+done
+
+for base in '' missing; do
+  env_file="$(run_resolve env GITHUB_EVENT_NAME=pull_request SCOPE_INPUT=full BASE_SHA="${base}")"
+  assert_env_contains "${env_file}" "SCOPE_MODE=full" "full PR without resolvable base keeps full scope"
+  assert_env_contains "${env_file}" "SCOPE_BASE_REF=" "full PR without resolvable base has no baseline ref"
+done
 
 env_file="$(run_resolve env GITHUB_EVENT_NAME=workflow_dispatch SCOPE_INPUT=changed)"
 assert_env_contains "${env_file}" "SCOPE_MODE=full" "changed scope without base falls back to full"
@@ -45,10 +69,23 @@ assert_env_contains "${env_file}" "SCOPE_MODE=full" "changed scope without base 
 env_file="$(run_resolve env GITHUB_EVENT_NAME=push SCOPE_INPUT=unexpected)"
 assert_env_contains "${env_file}" "SCOPE_MODE=full" "invalid scope falls back to auto"
 
-base_sha="$(git rev-parse HEAD~1)"
-env_file="$(run_resolve env GITHUB_EVENT_NAME=pull_request SCOPE_INPUT=auto BASE_SHA="${base_sha}" PR_HEAD_REPO=Extra-Chill/homeboy-action GITHUB_REPOSITORY=Extra-Chill/homeboy-action)"
-assert_env_contains "${env_file}" "SCOPE_MODE=changed" "auto PR uses changed scope"
-assert_env_contains "${env_file}" "SCOPE_BASE_REF=${base_sha}" "auto PR records base ref"
+for scope in auto changed; do
+  env_file="$(run_resolve env GITHUB_EVENT_NAME=pull_request SCOPE_INPUT="${scope}" BASE_SHA="${base_sha}" PR_HEAD_REPO=Extra-Chill/homeboy-action GITHUB_REPOSITORY=Extra-Chill/homeboy-action)"
+  assert_env_contains "${env_file}" "SCOPE_MODE=changed" "${scope} PR uses changed scope"
+  assert_env_contains "${env_file}" "SCOPE_BASE_REF=${base_sha}" "${scope} PR records base ref"
+done
+
+# A baseline ref must not imply changed-file behaviour in context helpers.
+(
+  source "${SCRIPT_DIR}/context.sh"
+  export SCOPE_MODE=full SCOPE_BASE_REF="${base_sha}"
+  if is_scoped || [ -n "$(scope_note_for lint)" ] || [ -n "$(scope_note_for test)" ]; then
+    printf 'FAIL: full scope with baseline must not be described as changed-only\n'
+    exit 1
+  fi
+  [ "$(scope_base_ref)" = "${base_sha}" ]
+)
+printf 'PASS: full scope context retains baseline without changed-only notes\n'
 
 # --- scope_flags_for -------------------------------------------------------
 
