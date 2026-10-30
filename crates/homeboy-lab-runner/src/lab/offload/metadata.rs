@@ -495,9 +495,9 @@ fn canonical_build_identity(identity: &str) -> &str {
         .unwrap_or(identity.trim())
 }
 
-/// Build drift is informational unless exact-build fencing was requested.
-fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
-    let controller = homeboy_product_identity::build_identity();
+/// Compare the recorded daemon to the controller's compatibility identity.
+pub(crate) fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
+    let controller = crate::controller_identity::compatibility_controller_identity();
     status
         .session
         .as_ref()

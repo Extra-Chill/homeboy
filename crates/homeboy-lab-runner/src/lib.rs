@@ -1065,9 +1065,21 @@ fn lab_runner_admission_candidate(
     // the lease is published and matched.
     let unverified_daemon = !lease_verdict.lease_published;
 
-    let admission_warning = status.admission_blocking_stale_daemon().filter(|_| {
-        lab::offload::metadata::lab_runner_homeboy_has_blocking_status_drift(status, exact_version)
+    let controller = crate::controller_identity::compatibility_controller_identity();
+    let controller_warning = status.session.as_ref().and_then(|session| {
+        lab::offload::metadata::lab_runner_homeboy_version_drift(status).then(|| {
+            RunnerStaleDaemonWarning::new(
+                runner_id,
+                session.homeboy_version.clone(),
+                controller.version,
+                session.homeboy_build_identity.clone(),
+                Some(controller.display),
+            )
+        })
     });
+    let admission_warning = controller_warning
+        .as_ref()
+        .or_else(|| status.admission_blocking_stale_daemon());
     DefaultLabRunnerCandidate {
         id: runner_id.to_string(),
         connected: status.connected,
@@ -1079,10 +1091,9 @@ fn lab_runner_admission_candidate(
             exact_version,
         ),
         admission_failure_reason: admission_warning
-            .map(|warning| warning.mismatch_predicate.to_string()),
+            .map(|warning| format!("{}: {}", warning.mismatch_predicate, warning.message)),
         admission_remediation: admission_warning
-            .and_then(|_| status.admission_action())
-            .map(|action| action.render_command()),
+            .map(|warning| warning.safe_recovery_commands().join(" && ")),
         active_jobs: status.active_job_count.max(status.active_jobs.len()),
         active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
         capabilities_ready,
@@ -2177,15 +2188,27 @@ mod tests {
     }
 
     #[test]
-    fn current_release_refresh_selects_provider_ready_compatible_skewed_runner() {
-        let status = skewed_runner_status(patch_drift_version());
+    fn placement_rejects_recorded_daemon_identity_drift() {
+        let mut status =
+            skewed_runner_status(homeboy_product_identity::product_version().to_string());
+        status.session.as_mut().unwrap().homeboy_build_identity =
+            Some("homeboy 0.435.6+de88dcd".to_string());
         let candidate =
             lab_runner_admission_candidate("homeboy-lab", Some(1), &status, true, false);
         let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
 
-        assert_eq!(readiness.state, LabRunnerReadinessState::ConnectedReady);
-        assert_eq!(readiness.selected_runner_id.as_deref(), Some("homeboy-lab"));
-        assert_eq!(readiness.available_runner_ids, ["homeboy-lab"]);
+        assert_eq!(readiness.state, LabRunnerReadinessState::Stale);
+        assert!(readiness.selected_runner_id.is_none());
+        assert!(readiness.available_runner_ids.is_empty());
+        assert!(readiness.reasons.iter().any(|reason| {
+            reason.contains(
+                "active_daemon_control_plane_build_identity != job_command_binary_build_identity",
+            ) && reason.contains("homeboy 0.435.6+de88dcd")
+                && reason.contains(
+                    &crate::controller_identity::compatibility_controller_identity().display,
+                )
+        }));
+        assert!(!readiness.remediation_commands.is_empty());
     }
 
     #[test]

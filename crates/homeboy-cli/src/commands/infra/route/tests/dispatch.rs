@@ -1579,34 +1579,36 @@ fn runner_resident_run_plan_does_not_require_a_second_controller_session() {
 
 #[test]
 fn nested_command_targeting_parent_runner_does_not_require_a_second_controller_session() {
-    let _env = EnvGuard::set_many(&[
-        (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, None),
-        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, None),
-        (homeboy::runner::RUNNER_ID_ENV, None),
-        (
-            homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV,
-            Some("homeboy-lab"),
-        ),
-    ]);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "--runner".to_string(),
-        "homeboy-lab".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--to-worktree".to_string(),
-        "homeboy@nested-runner-context".to_string(),
-        "--prompt".to_string(),
-        "run a nested workload".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
+    crate::test_support::with_isolated_home(|_| {
+        let _env = EnvGuard::set_many(&[
+            (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
+            (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, None),
+            (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, None),
+            (homeboy::runner::RUNNER_ID_ENV, None),
+            (
+                homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV,
+                Some("homeboy-lab"),
+            ),
+        ]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--to-worktree".to_string(),
+            "homeboy@nested-runner-context".to_string(),
+            "--prompt".to_string(),
+            "run a nested workload".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
 
-    assert_eq!(
-        route_after_parse_with_provenance(&cli, &normalized, None, None)
-            .expect("runner-resident cook stays local"),
-        None
-    );
+        assert_eq!(
+            route_after_parse_with_provenance(&cli, &normalized, None, None)
+                .expect("runner-resident cook stays local"),
+            None
+        );
+    });
 }
 
 #[test]
