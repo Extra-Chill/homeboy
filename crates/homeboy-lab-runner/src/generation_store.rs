@@ -402,14 +402,19 @@ fn with_lock_until<T>(
                             .num_milliseconds()
                             .max(0)
                     });
-                let mut error = Error::internal_io(
-                    format!(
-                        "timed out after {}ms waiting for runner generation registry lock",
-                        lock_timeout.as_millis()
-                    ),
-                    Some("lock generation registry".to_string()),
+                let message = format!(
+                    "timed out after {}ms waiting for runner generation registry lock held by pid {} (phase {}, held {}ms)",
+                    lock_timeout.as_millis(),
+                    lock_owner.get("owner_pid").map(ToString::to_string).unwrap_or_else(|| "unknown".to_string()),
+                    lock_owner.get("phase").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
+                    owner_age_ms.map(|age| age.to_string()).unwrap_or_else(|| "unknown".to_string()),
                 );
-                error.details = serde_json::json!({
+                let mut error = Error::new(
+                    homeboy_core::error::ErrorCode::InternalIoError,
+                    message.clone(),
+                    serde_json::json!({
+                    "error": message,
+                    "context": "lock generation registry",
                     "kind": "runner_generation_lock_timeout",
                     "runner_id": runner_id,
                     "timeout_ms": lock_timeout.as_millis(),
@@ -419,7 +424,8 @@ fn with_lock_until<T>(
                     "owner_age_ms": owner_age_ms,
                     "deadline_ms": lock_timeout.as_millis(),
                     "legal_action": format!("homeboy runner status {runner_id} --full"),
-                });
+                    }),
+                );
                 error.retryable = Some(true);
                 return Err(error);
             }
@@ -2331,6 +2337,29 @@ fn reconcile_with(
     reconcile_with_operations(runner_id, operations, GenerationReconcilePolicy::default())
 }
 
+/// The generation's retained run and artifact ownership is unchanged since
+/// `prior` was observed, so evidence verified against it still applies.
+fn retained_ownership_unchanged(
+    current: &RollingGenerations<RunnerSession>,
+    prior: &RollingGenerations<RunnerSession>,
+    generation: &str,
+    session: &RunnerSession,
+) -> bool {
+    fn owned<'a>(
+        owners: &'a std::collections::BTreeMap<String, String>,
+        generation: &str,
+        session: &RunnerSession,
+    ) -> Vec<(&'a String, &'a String)> {
+        owners
+            .iter()
+            .filter(|(_, owner)| owner_matches_generation(owner, generation, session))
+            .collect()
+    }
+    owned(&current.run_owners, generation, session) == owned(&prior.run_owners, generation, session)
+        && owned(&current.artifact_owners, generation, session)
+            == owned(&prior.artifact_owners, generation, session)
+}
+
 fn reconcile_with_operations(
     runner_id: &str,
     operations: &impl GenerationEndpointOperations,
@@ -2430,6 +2459,11 @@ fn reconcile_with_operations(
             };
             let proven_stopped =
                 draining && observed_active_jobs.is_none() && operations.proven_stopped(&session);
+            let evidence = if draining && (observed_active_jobs == Some(0) || proven_stopped) {
+                verify_retained_evidence(runner_id, &generations, &generation, &session, operations)
+            } else {
+                Ok(None)
+            };
             (
                 generation,
                 session,
@@ -2438,12 +2472,14 @@ fn reconcile_with_operations(
                 proven_stopped,
                 unclaimed,
                 settled_job_ids,
+                evidence,
             )
         })
         .collect::<Vec<_>>();
     // Observe outside the lock; recheck the exact endpoint and ownership before
     // committing an observation. The bounded stop/retirement transaction below
     // fences concurrent registry writers.
+    let observed_generations = &generations;
     let stoppable = with_registry_lock(runner_id, || {
         let Some(mut generations) = read(runner_id)? else {
             return Ok((Vec::new(), Vec::new()));
@@ -2458,12 +2494,19 @@ fn reconcile_with_operations(
             proven_stopped,
             unclaimed,
             settled_job_ids,
+            evidence,
         ) in &observations
         {
             if let Some(entry) = generations.generations.get(generation) {
                 let state_unchanged = entry.endpoint == *prior_session
                     && job_owner_ids_for(&generations, generation, &entry.endpoint)
-                        == *prior_job_owner_ids;
+                        == *prior_job_owner_ids
+                    && retained_ownership_unchanged(
+                        &generations,
+                        observed_generations,
+                        generation,
+                        prior_session,
+                    );
                 if !state_unchanged {
                     ownership_blockers.insert(generation.clone());
                     retirement_blockers.insert(
@@ -2484,18 +2527,7 @@ fn reconcile_with_operations(
             for job_id in settled_job_ids {
                 generations.complete_job_preserving_drained(job_id);
             }
-            let evidence_error = if observed_active_jobs == &Some(0) || *proven_stopped {
-                verify_retained_evidence(
-                    runner_id,
-                    &generations,
-                    generation,
-                    prior_session,
-                    operations,
-                )
-                .err()
-            } else {
-                None
-            };
+            let evidence_error = evidence.as_ref().err();
             // Only evidence verification stands between this idle generation
             // and retirement. Record it, and release it when the operator
             // explicitly asked (#15653); otherwise it stays a blocker.
@@ -2644,34 +2676,28 @@ fn reconcile_with_operations(
                             || released_stopped_generation_jobs.get(generation) == Some(&owners))
                 });
             if should_remove {
-                match verify_retained_evidence(
-                    runner_id,
+                let (_, _, _, _, _, _, _, evidence) = observations
+                    .iter()
+                    .find(|(id, ..)| id == generation)
+                    .expect("observed candidate");
+                let ownership_unchanged = retained_ownership_unchanged(
                     &generations,
+                    observed_generations,
                     generation,
                     session,
-                    operations,
-                ) {
-                    Ok(Some(reason)) => {
-                        released_unverified_evidence.insert(generation.clone(), reason.to_string());
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        evidence_blocked_generation_ids.insert(generation.clone());
-                        if let Some(run_id) = error
-                            .details
-                            .get("run_id")
-                            .and_then(serde_json::Value::as_str)
-                        {
-                            evidence_runs.insert(generation.clone(), run_id.to_string());
-                        }
-                        if policy.release_unverified_evidence {
-                            released_unverified_evidence
-                                .insert(generation.clone(), error.message.clone());
-                        } else {
-                            retirement_blockers.insert(generation.clone(), error.to_string());
-                            continue;
-                        }
-                    }
+                );
+                if !ownership_unchanged {
+                    ownership_blockers.insert(generation.clone());
+                    retirement_blockers.insert(
+                        generation.clone(),
+                        "ownership changed during observation".to_string(),
+                    );
+                    continue;
+                }
+                // Errors already fenced candidacy (or were explicitly released)
+                // when the observation was committed above.
+                if let Ok(Some(reason)) = evidence {
+                    released_unverified_evidence.insert(generation.clone(), reason.to_string());
                 }
                 if !already_stopped.contains(generation) && !operations.stop(session) {
                     retirement_blockers.insert(
@@ -3220,6 +3246,15 @@ mod tests {
                     )
                     .expect_err("second descriptor waits for the held flock");
 
+                    assert!(error.message.contains("timed out after 75ms"));
+                    assert!(error
+                        .message
+                        .contains(&format!("held by pid {}", std::process::id())));
+                    assert!(error
+                        .message
+                        .contains("phase generation_registry_mutation, held "));
+                    assert_eq!(error.details["error"], error.message);
+                    assert_eq!(error.details["context"], "lock generation registry");
                     assert_eq!(error.retryable, Some(true));
                     assert_eq!(error.details["owner_pid"], std::process::id());
                     assert_eq!(error.details["phase"], "generation_registry_mutation");
@@ -3685,6 +3720,7 @@ mod tests {
         queued: RefCell<Vec<crate::RunnerJob>>,
         evidence: RefCell<std::collections::BTreeMap<String, serde_json::Value>>,
         evidence_calls: RefCell<Vec<(String, Vec<String>)>>,
+        evidence_hook: Option<Box<dyn Fn()>>,
         evidence_unreachable_leases: RefCell<std::collections::BTreeSet<String>>,
         cancelled: RefCell<Vec<(String, String)>>,
         active_jobs: RefCell<std::collections::BTreeMap<String, usize>>,
@@ -3702,6 +3738,9 @@ mod tests {
             session: &RunnerSession,
             paths: &[String],
         ) -> Vec<Option<serde_json::Value>> {
+            if let Some(hook) = &self.evidence_hook {
+                hook();
+            }
             let lease = session.remote_daemon_lease_id.as_deref().expect("lease");
             self.evidence_calls
                 .borrow_mut()
@@ -4398,6 +4437,72 @@ mod tests {
                 verdict
             );
         });
+    }
+
+    fn reconcile_evidence_with_concurrent_registry_writer(change_owner: bool) {
+        crate::test_support::with_isolated_home(|_| {
+            idle_generation_with_unverifiable_evidence();
+            homeboy_core::observation::ObservationStore::open_initialized()
+                .unwrap()
+                .finish_run(
+                    "run-legacy",
+                    homeboy_core::observation::RunStatus::Pass,
+                    None,
+                )
+                .unwrap();
+            let operations = FakeEndpointOperations {
+                evidence_hook: Some(Box::new(move || {
+                    with_runner_registry_lock("runner-a", || {
+                        if change_owner {
+                            let mut registry = read("runner-a")?.expect("registry");
+                            registry
+                                .run_owners
+                                .insert("run-legacy".into(), "lease-current".into());
+                            write("runner-a", &registry)?;
+                        }
+                        Ok(())
+                    })
+                    .expect("evidence reads must not hold the registry lock");
+                })),
+                ..Default::default()
+            };
+            operations.active_jobs.borrow_mut().extend([
+                ("lease-idle".to_string(), 0),
+                ("lease-current".to_string(), 0),
+            ]);
+            operations.evidence.borrow_mut().extend([
+                (
+                    "/runs/run-legacy/artifacts".into(),
+                    serde_json::json!({"data":{"body":{"artifacts": []}}}),
+                ),
+                (
+                    "/runs/run-legacy/findings".into(),
+                    serde_json::json!({"data":{"body":{"findings": []}}}),
+                ),
+            ]);
+            let result = reconcile_with("runner-a", &operations).expect("reconcile");
+            assert!(!operations.evidence_calls.borrow().is_empty());
+            if change_owner {
+                assert!(result.retired_generation_ids.is_empty(), "{result:?}");
+                assert_eq!(
+                    result.retirement_blockers["lease-idle"],
+                    "ownership changed during observation"
+                );
+                assert!(operations.stopped_leases.borrow().is_empty());
+            } else {
+                assert_eq!(result.retired_generation_ids, ["lease-idle"], "{result:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn reconcile_evidence_allows_concurrent_registry_writer() {
+        reconcile_evidence_with_concurrent_registry_writer(false);
+    }
+
+    #[test]
+    fn reconcile_rejects_evidence_after_run_ownership_changes() {
+        reconcile_evidence_with_concurrent_registry_writer(true);
     }
 
     /// #15653: the explicit release retires the idle generation and keeps its
