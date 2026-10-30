@@ -3279,6 +3279,9 @@ if [ -z "$target" ]; then
   echo "Homeboy ref did not resolve to a commit: $ref" >&2
   exit 1
 fi
+# Fetch negotiation only advertises commits reachable from refs. Without this
+# anchor every fetch into the history cache re-downloads the whole history.
+git -C "$cache" update-ref refs/homeboy/fetched "$target"
 needs_history=false
 for comparison in HOMEBOY_AUTHORITIES "$(git -C "$cache" rev-parse --verify --quiet HEAD || true)"; do
   resolved_comparison=$(git -C "$cache" rev-parse --verify --quiet "${comparison}^{commit}" || true)
