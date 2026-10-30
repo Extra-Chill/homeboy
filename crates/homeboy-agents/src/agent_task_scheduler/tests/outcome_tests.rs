@@ -283,7 +283,7 @@ fn nested_executor_failure_context_wins_over_missing_required_artifacts() {
 }
 
 #[test]
-fn empty_required_patch_artifact_is_valid_no_diff_evidence() {
+fn empty_required_artifact_is_invalid_regardless_of_patch_kind() {
     let temp = tempfile::tempdir().expect("tempdir");
     let patch_path = temp.path().join("patch.diff");
     fs::write(&patch_path, "").expect("empty patch");
@@ -294,17 +294,11 @@ fn empty_required_patch_artifact_is_valid_no_diff_evidence() {
     }));
 
     let aggregate = scheduler.run(plan_with_required_artifacts(&["patch"]));
-
-    assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
-    assert_eq!(aggregate.totals.succeeded, 1);
-    assert_eq!(
-        aggregate.outcomes[0].status,
-        AgentTaskOutcomeStatus::Succeeded
-    );
+    assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
     assert!(aggregate.outcomes[0]
         .diagnostics
         .iter()
-        .all(|diagnostic| diagnostic.class != "agent_task.required_typed_artifacts_invalid"));
+        .any(|diagnostic| diagnostic.class == "agent_task.required_typed_artifacts_invalid"));
 }
 
 #[test]
@@ -616,6 +610,11 @@ fn missing_only_review_form_is_deferred_to_the_cook_loop() {
         .output_declarations
         .push(crate::agent_task_review_dossier::review_form_output_declaration());
     let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
+    outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
+        base_sha: "base".into(),
+        candidate_sha: "candidate".into(),
+        tree_sha: "tree".into(),
+    });
     outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
     outcome.summary =
         Some("Pi completed without required structured output(s): review_form.".to_string());
@@ -679,14 +678,10 @@ fn non_empty_candidate_missing_only_review_form_is_still_deferred() {
     outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
     outcome.summary =
         Some("Pi completed without required structured output(s): review_form.".to_string());
-    outcome.artifacts.push(AgentTaskArtifact {
-        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-        id: "provider-patch".to_string(),
-        kind: "patch".to_string(),
-        role: Some("patch".to_string()),
-        size_bytes: Some(42),
-        metadata: json!({}),
-        ..Default::default()
+    outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
+        base_sha: "base".into(),
+        candidate_sha: "candidate".into(),
+        tree_sha: "tree".into(),
     });
 
     AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &form_request);

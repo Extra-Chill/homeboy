@@ -616,7 +616,7 @@ impl AgentTaskScheduleSupport {
 
             // Homeboy's harvested candidate commit is the change set (#16303).
             if name == "patch" {
-                if let Some(candidate) = outcome.candidate.as_ref() {
+                if let Some(candidate) = outcome.outcome_candidate() {
                     outcome
                         .typed_artifacts
                         .push(typed_artifact_from_candidate(candidate));
@@ -994,7 +994,7 @@ impl AgentTaskScheduleSupport {
                 | AgentTaskOutcomeStatus::NoOp
                 | AgentTaskOutcomeStatus::Cancelled
                 | AgentTaskOutcomeStatus::CandidateRecoverable
-        ) || outcome.candidate.is_none()
+        ) || outcome.outcome_candidate().is_none()
         {
             return;
         }
@@ -1072,10 +1072,7 @@ impl AgentTaskScheduleSupport {
         // ordinary completion finalization. Bind it before this outcome can be
         // selected as a recoverable candidate or persisted for continuation.
 
-        let actionable_patch = outcome.candidate.is_some()
-            || (running.task_base_sha.is_none()
-                && outcome.metadata.get("actionable").and_then(Value::as_bool) != Some(false)
-                && outcome.artifacts.iter().any(is_actionable_patch_artifact));
+        let actionable_patch = outcome.outcome_candidate().is_some();
         if actionable_patch {
             outcome.status = AgentTaskOutcomeStatus::Succeeded;
             outcome.failure_classification = None;
@@ -1084,7 +1081,7 @@ impl AgentTaskScheduleSupport {
                     .to_string(),
             );
         } else if outcome.status == AgentTaskOutcomeStatus::Succeeded
-            && outcome.artifacts.iter().any(is_empty_patch_artifact)
+            && outcome.outcome_candidate().is_none()
         {
             outcome.status = AgentTaskOutcomeStatus::NoOp;
             outcome.failure_classification = None;

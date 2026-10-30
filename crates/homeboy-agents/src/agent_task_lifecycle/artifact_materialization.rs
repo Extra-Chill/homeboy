@@ -5,97 +5,9 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::agent_task::AgentTaskArtifact;
-use crate::agent_task_evidence_discovery::is_patch_artifact_kind;
 use homeboy_core::{Error, Result};
 
-use super::{
-    apply_aggregate_to_record, reconcile_status, store,
-    verified_controller_artifact_projection_path,
-};
-
-/// Materialize recovered patch artifacts for a controller-side promotion.
-///
-/// Controller-retained projections are authoritative for controller-local
-/// execution. Remote retrieval is only available to artifacts that retain a
-/// complete runner/job provenance binding.
-pub fn materialize_recovered_patch_artifact(
-    run_id: &str,
-    task_id: Option<&str>,
-    artifact_id: Option<&str>,
-) -> Result<bool> {
-    let mut record = reconcile_status(run_id)?;
-    let mut aggregate = store::read_aggregate(&record.run_id)?;
-    let mut changed = false;
-    for outcome in &mut aggregate.outcomes {
-        if task_id.is_some_and(|expected| expected != outcome.task_id) {
-            continue;
-        }
-        for artifact in &mut outcome.artifacts {
-            if artifact_id.is_some_and(|expected| expected != artifact.id)
-                || !is_patch_artifact_kind(&artifact.kind)
-            {
-                continue;
-            }
-            // A historical aggregate can retain a deleted producer path even
-            // after terminal reconciliation copied verified bytes. Hydrate the
-            // durable controller projection before considering runner recovery.
-            if let Some(path) = verified_controller_artifact_projection_path(
-                &record.run_id,
-                &outcome.task_id,
-                artifact,
-            )? {
-                artifact.path = Some(path.display().to_string());
-                set_materialization_metadata(artifact, "controller_retained_bytes", None);
-                changed = true;
-                continue;
-            }
-            if !is_recovered_artifact(artifact, record.runner_id().zip(record.runner_job_id())) {
-                continue;
-            }
-            changed |= materialize_artifact(
-                artifact,
-                &record.run_id,
-                &outcome.task_id,
-                record.runner_id().zip(record.runner_job_id()),
-            )?;
-        }
-        let finalized = outcome.artifacts.clone();
-        for typed in &mut outcome.typed_artifacts {
-            if let Some(artifact) = &mut typed.artifact {
-                if let Some(finalized) = finalized.iter().find(|value| value.id == artifact.id) {
-                    *artifact = finalized.clone();
-                }
-            }
-        }
-    }
-    if changed {
-        let aggregate_path = store::aggregate_path(&record.run_id)?.display().to_string();
-        let plan = super::load_plan(&record.run_id)?;
-        let decided_from = record.state();
-        apply_aggregate_to_record(&mut record, &plan, &aggregate, aggregate_path);
-        super::AgentTaskLifecycleStore::from_current_environment()?.project_terminal_aggregate(
-            &record,
-            decided_from,
-            &aggregate,
-        )?;
-    }
-    Ok(changed)
-}
-
-fn is_recovered_artifact(
-    artifact: &AgentTaskArtifact,
-    runner_binding: Option<(&str, &str)>,
-) -> bool {
-    runner_binding.is_some()
-        || artifact
-            .url
-            .as_deref()
-            .is_some_and(|url| url.starts_with("homeboy://agent-task/run/"))
-        || artifact
-            .path
-            .as_deref()
-            .is_some_and(|path| path.starts_with("runner-artifact://"))
-}
+use super::verified_controller_artifact_projection_path;
 
 pub(crate) fn materialize_artifact(
     artifact: &mut AgentTaskArtifact,

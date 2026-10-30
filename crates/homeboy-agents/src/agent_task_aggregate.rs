@@ -1,4 +1,3 @@
-use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
@@ -8,7 +7,6 @@ use super::agent_task::{
     AgentTaskFollowUp, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskUsage,
     AgentTaskUsageCompleteness,
 };
-use crate::agent_task_evidence_discovery::is_patch_artifact_kind;
 use homeboy_core::markdown::escape_markdown_table_cell;
 
 pub const AGENT_TASK_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-aggregate/v1";
@@ -471,7 +469,7 @@ fn count_status(summary: &mut AgentTaskAggregateSummary, status: AgentTaskOutcom
 fn reconcile_outcome(
     outcome: &AgentTaskOutcome,
 ) -> (AgentTaskReconciliationDecision, String, Vec<String>) {
-    if outcome.status == AgentTaskOutcomeStatus::NoOp && has_known_empty_change_set(outcome) {
+    if outcome.status == AgentTaskOutcomeStatus::NoOp && outcome.outcome_candidate().is_none() {
         return (
             AgentTaskReconciliationDecision::NoOp,
             "known empty change artifact; provider produced no file changes".to_string(),
@@ -494,20 +492,14 @@ fn reconcile_outcome(
         );
     }
 
-    if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable {
-        let artifact_ids = outcome
-            .artifacts
-            .iter()
-            .filter(|artifact| is_verified_recoverable_patch(outcome, artifact))
-            .map(|artifact| artifact.id.clone())
-            .collect::<Vec<_>>();
-        if artifact_ids.len() == 1 {
-            return (
-                AgentTaskReconciliationDecision::ApplyCandidate,
-                "timed-out provider produced a verified recoverable patch candidate".to_string(),
-                artifact_ids,
-            );
-        }
+    if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
+        && outcome.outcome_candidate().is_some()
+    {
+        return (
+            AgentTaskReconciliationDecision::ApplyCandidate,
+            "harvested recoverable candidate".to_string(),
+            Vec::new(),
+        );
     }
 
     if matches!(
@@ -547,18 +539,13 @@ fn reconcile_outcome(
         );
     }
 
-    let apply_artifact_ids = outcome
-        .artifacts
-        .iter()
-        .filter(|artifact| is_apply_artifact(artifact))
-        .map(|artifact| artifact.id.clone())
-        .collect::<Vec<_>>();
-    if matches!(outcome.status, AgentTaskOutcomeStatus::Succeeded) && !apply_artifact_ids.is_empty()
+    if matches!(outcome.status, AgentTaskOutcomeStatus::Succeeded)
+        && outcome.outcome_candidate().is_some()
     {
         return (
             AgentTaskReconciliationDecision::ApplyCandidate,
             "succeeded with reviewable patch/artifact output".to_string(),
-            apply_artifact_ids,
+            Vec::new(),
         );
     }
 
@@ -571,8 +558,9 @@ fn reconcile_outcome(
             }
             AgentTaskOutcomeStatus::Cancelled => "cancelled task needs review".to_string(),
             AgentTaskOutcomeStatus::Failed => "failed task needs review".to_string(),
-            AgentTaskOutcomeStatus::Succeeded => empty_or_unknown_patch_reason(outcome)
-                .unwrap_or_else(|| "succeeded without apply-back artifact".to_string()),
+            AgentTaskOutcomeStatus::Succeeded => {
+                "succeeded without a harvested candidate".to_string()
+            }
             AgentTaskOutcomeStatus::CandidateRecoverable => {
                 "recoverable patch candidate needs review or explicit adoption".to_string()
             }
@@ -582,62 +570,6 @@ fn reconcile_outcome(
         },
         artifact_ids(outcome),
     )
-}
-
-/// Timeout recovery is promotable only from an immutable, fully bound artifact.
-/// Promotion repeats the content validation before applying the patch.
-fn is_verified_recoverable_patch(outcome: &AgentTaskOutcome, artifact: &AgentTaskArtifact) -> bool {
-    if !is_apply_artifact(artifact)
-        || outcome.failure_classification != Some(AgentTaskFailureClassification::Timeout)
-        || artifact.metadata.get("task_id").and_then(Value::as_str) != Some(&outcome.task_id)
-        || !non_empty_metadata_string(artifact, "run_id")
-        || !artifact
-            .metadata
-            .get("producer_attempt")
-            .is_some_and(Value::is_u64)
-        || !non_empty_metadata_string(artifact, "base_ref")
-        || !non_empty_metadata_string(artifact, "provider_backend")
-        || !non_empty_metadata_string(artifact, "repository_identity")
-        || !non_empty_metadata_string(artifact, "workspace_identity")
-    {
-        return false;
-    }
-    let Some(expected_sha256) = artifact.sha256.as_deref() else {
-        return false;
-    };
-    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return false;
-    }
-    let Some(path) = artifact.path.as_deref() else {
-        return false;
-    };
-    let Ok(content) = std::fs::read(path) else {
-        return false;
-    };
-    !content.is_empty()
-        && artifact.size_bytes == Some(content.len() as u64)
-        && expected_sha256 == content_hash::sha256_hex(&content)
-}
-
-fn non_empty_metadata_string(artifact: &AgentTaskArtifact, key: &str) -> bool {
-    artifact
-        .metadata
-        .get(key)
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.is_empty())
-}
-
-fn has_known_empty_change_set(outcome: &AgentTaskOutcome) -> bool {
-    let patch_artifacts = outcome
-        .artifacts
-        .iter()
-        .filter(|artifact| is_apply_kind_artifact(artifact))
-        .collect::<Vec<_>>();
-    !patch_artifacts.is_empty()
-        && patch_artifacts
-            .iter()
-            .all(|artifact| artifact.size_bytes == Some(0))
 }
 
 fn artifact_ids(outcome: &AgentTaskOutcome) -> Vec<String> {
@@ -661,58 +593,6 @@ fn inventory_item(task_id: &str, artifact: &AgentTaskArtifact) -> AgentTaskArtif
         url: artifact.url.clone(),
         size_bytes: artifact.size_bytes,
         sha256: artifact.sha256.clone(),
-    }
-}
-
-fn is_apply_artifact(artifact: &AgentTaskArtifact) -> bool {
-    !artifact_flag(artifact, "review_only")
-        && is_apply_kind_artifact(artifact)
-        && artifact_has_nonzero_size(artifact)
-}
-
-fn is_apply_kind_artifact(artifact: &AgentTaskArtifact) -> bool {
-    is_patch_artifact_kind(&artifact.kind)
-        || matches!(artifact.kind.as_str(), "change_artifact" | "artifact")
-        || artifact_flag(artifact, "approved")
-}
-
-fn artifact_has_nonzero_size(artifact: &AgentTaskArtifact) -> bool {
-    // A patch counts as a promotion candidate only when there is positive
-    // evidence of non-empty content. An unknown (`None`) size is treated as
-    // empty/uncertain rather than as a valid candidate, so cook runs whose
-    // provider only wrote 0-byte patches (or omitted size entirely) are not
-    // reported as successful fixes (#4610).
-    matches!(artifact.size_bytes, Some(size) if size > 0)
-}
-
-/// When a `Succeeded` outcome produced patch-shaped artifacts that were all
-/// empty or unknown-size, surface a per-cell reason explaining why no apply
-/// candidate was promoted. Returns `None` when there were no patch artifacts or
-/// when at least one had non-empty content.
-fn empty_or_unknown_patch_reason(outcome: &AgentTaskOutcome) -> Option<String> {
-    let patch_artifacts: Vec<&AgentTaskArtifact> = outcome
-        .artifacts
-        .iter()
-        .filter(|artifact| {
-            !artifact_flag(artifact, "review_only") && is_apply_kind_artifact(artifact)
-        })
-        .collect();
-    if patch_artifacts.is_empty() {
-        return None;
-    }
-    if patch_artifacts
-        .iter()
-        .any(|artifact| artifact_has_nonzero_size(artifact))
-    {
-        return None;
-    }
-    if patch_artifacts
-        .iter()
-        .any(|artifact| artifact.size_bytes == Some(0))
-    {
-        Some("patch artifact was empty (0 bytes); provider produced no file changes".to_string())
-    } else {
-        Some("patch artifact size unknown; cannot confirm changes were produced".to_string())
     }
 }
 
@@ -748,14 +628,25 @@ mod tests {
     use serde_json::json;
     use sha2::{Digest, Sha256};
 
+    fn candidate() -> crate::agent_task::AgentTaskCandidate {
+        crate::agent_task::AgentTaskCandidate {
+            base_sha: "base".into(),
+            candidate_sha: "candidate".into(),
+            tree_sha: "tree".into(),
+        }
+    }
+
     #[test]
     fn aggregate_outcomes_classifies_apply_retry_issue_and_review_candidates() {
         let outcomes = vec![
-            outcome(
-                "apply",
-                AgentTaskOutcomeStatus::Succeeded,
-                vec![artifact("patch-1", "patch", json!({ "approved": true }))],
-            ),
+            AgentTaskOutcome {
+                candidate: Some(candidate()),
+                ..outcome(
+                    "apply",
+                    AgentTaskOutcomeStatus::Succeeded,
+                    vec![artifact("patch-1", "patch", json!({ "approved": true }))],
+                )
+            },
             AgentTaskOutcome {
                 failure_classification: Some(AgentTaskFailureClassification::Provider),
                 ..outcome("retry", AgentTaskOutcomeStatus::ProviderError, Vec::new())
@@ -793,7 +684,7 @@ mod tests {
         assert_eq!(report.summary.issue_report_candidates, 1);
         assert_eq!(report.summary.review_candidates, 1);
         assert_eq!(report.apply_candidates[0].task_id, "apply");
-        assert_eq!(report.apply_candidates[0].artifact_ids, vec!["patch-1"]);
+        assert!(report.apply_candidates[0].artifact_ids.is_empty());
         assert_eq!(report.retry_plan[0].task_id, "retry");
         assert_eq!(report.issue_report_candidates[0].task_id, "issue");
         assert_eq!(report.review_candidates[0].task_id, "review");
@@ -829,6 +720,7 @@ mod tests {
         std::fs::write(&patch_path, patch).expect("write patch");
         let sha256 = format!("{:x}", Sha256::digest(patch));
         let recoverable = AgentTaskOutcome {
+            candidate: Some(candidate()),
             failure_classification: Some(AgentTaskFailureClassification::Timeout),
             ..outcome(
                 "timed-out",
@@ -861,7 +753,7 @@ mod tests {
         assert_eq!(report.summary.retry_candidates, 0);
         assert_eq!(
             report.apply_candidates[0].artifact_ids,
-            vec!["uncommitted-changes"]
+            Vec::<String>::new()
         );
     }
 
@@ -986,17 +878,20 @@ mod tests {
         let mut non_empty_patch = artifact("sample-patch", "patch", json!({}));
         non_empty_patch.size_bytes = Some(128);
 
-        let report = aggregate_agent_task_outcomes(&[outcome(
-            "non-empty-patch",
-            AgentTaskOutcomeStatus::Succeeded,
-            vec![non_empty_patch],
-        )]);
+        let report = aggregate_agent_task_outcomes(&[AgentTaskOutcome {
+            candidate: Some(candidate()),
+            ..outcome(
+                "non-empty-patch",
+                AgentTaskOutcomeStatus::Succeeded,
+                vec![non_empty_patch],
+            )
+        }]);
 
         assert_eq!(report.summary.apply_candidates, 1);
         assert_eq!(report.apply_candidates[0].task_id, "non-empty-patch");
         assert_eq!(
             report.apply_candidates[0].artifact_ids,
-            vec!["sample-patch"]
+            Vec::<String>::new()
         );
     }
 
@@ -1036,7 +931,7 @@ mod tests {
         assert_eq!(report.review_candidates[0].task_id, "legacy-patch");
         assert_eq!(
             report.review_candidates[0].reason,
-            "patch artifact size unknown; cannot confirm changes were produced"
+            "succeeded without a harvested candidate"
         );
     }
 
@@ -1076,7 +971,7 @@ mod tests {
         assert_eq!(report.summary.review_candidates, 3);
         assert!(report.review_candidates.iter().all(|candidate| candidate
             .reason
-            .starts_with("patch artifact was empty (0 bytes)")));
+            .starts_with("succeeded without a harvested candidate")));
     }
 
     #[test]
@@ -1092,8 +987,8 @@ mod tests {
         assert!(markdown.contains("## Agent Task Outcomes"));
         assert!(markdown.contains("- total: 1"));
         assert!(markdown.contains("| Task | Status | Decision | Reason | Artifacts |"));
-        assert!(markdown.contains("| task\\|one | no_op | review_candidate |"));
-        assert!(markdown.contains("no-op outcome needs review"));
+        assert!(markdown.contains("| task\\|one | no_op | no_op |"));
+        assert!(markdown.contains("provider produced no file changes"));
     }
 
     #[test]

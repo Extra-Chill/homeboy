@@ -337,7 +337,7 @@ fn homeboy_local_artifact_normalization_measures_empty_nonempty_and_unavailable_
     }];
     normalize_homeboy_local_artifact_sizes(&mut empty_outcome, root.path(), &provenance, None);
 
-    assert_eq!(empty_outcome.status, AgentTaskOutcomeStatus::NoOp);
+    assert_eq!(empty_outcome.status, AgentTaskOutcomeStatus::Succeeded);
     assert_eq!(empty_outcome.artifacts[0].size_bytes, Some(0));
     assert_eq!(
         empty_outcome.typed_artifacts[0]
@@ -417,16 +417,12 @@ fn empty_patch_with_substantive_evidence_is_flagged_for_review_not_noop() {
 
     assert_eq!(
         outcome.status,
-        AgentTaskOutcomeStatus::CandidateRecoverable,
-        "empty patch beside substantive evidence must be reviewable, not NoOp"
+        AgentTaskOutcomeStatus::Succeeded,
+        "evidence cannot assert or invalidate a candidate before harvest"
     );
     assert_eq!(outcome.artifacts[0].size_bytes, Some(0));
     assert!(outcome.artifacts[1].size_bytes.unwrap_or_default() > 0);
-    assert!(outcome
-        .summary
-        .as_deref()
-        .unwrap_or_default()
-        .contains("needs review"));
+    assert!(outcome.outcome_candidate().is_none());
 }
 
 /// #15364: an empty patch beside a transcript is only a patch-capture risk if
@@ -482,7 +478,8 @@ fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_uncha
             &provenance,
             Some(workspace.path()),
         );
-        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        outcome.status = AgentTaskOutcomeStatus::NoOp;
         outcome
     };
 
@@ -503,7 +500,7 @@ fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_uncha
         Some(workspace.path()),
         None,
     );
-    assert_eq!(unknown.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+    assert_eq!(unknown.status, AgentTaskOutcomeStatus::NoOp);
 
     // Uncommitted work the patch capture missed.
     fs::write(workspace.path().join("lib.rs"), "changed\n").expect("dirty");
@@ -513,7 +510,7 @@ fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_uncha
         Some(workspace.path()),
         Some(&base),
     );
-    assert_eq!(dirty.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+    assert_eq!(dirty.status, AgentTaskOutcomeStatus::NoOp);
 
     // Committed work the patch capture missed.
     git(
@@ -526,10 +523,7 @@ fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_uncha
         Some(workspace.path()),
         Some(&base),
     );
-    assert_eq!(
-        committed.status,
-        AgentTaskOutcomeStatus::CandidateRecoverable
-    );
+    assert_eq!(committed.status, AgentTaskOutcomeStatus::NoOp);
     assert!(committed
         .metadata
         .get("homeboy_empty_attempt_verified")
@@ -614,11 +608,8 @@ fn no_op_without_change_artifact_is_verified_only_when_the_attempt_checkout_is_u
             "provider produced no change; Homeboy verified the attempt checkout is unchanged from its base"
         )
     );
-    let [patch] = clean.artifacts.as_slice() else {
-        panic!("one empty patch artifact: {:?}", clean.artifacts);
-    };
-    assert_eq!(patch.kind, "patch");
-    assert_eq!(patch.size_bytes, Some(0));
+    assert!(clean.artifacts.is_empty());
+    assert!(clean.outcome_candidate().is_none());
 
     // No attempt base recorded: cannot verify.
     assert_unaudited(&normalize(None));
@@ -733,10 +724,8 @@ fn succeeded_without_change_artifact_is_a_verified_no_change_attempt_when_a_patc
         .iter()
         .filter(|artifact| artifact.kind == "patch")
         .collect::<Vec<_>>();
-    let [patch] = patches.as_slice() else {
-        panic!("one empty patch artifact: {:?}", clean.artifacts);
-    };
-    assert_eq!(patch.size_bytes, Some(0));
+    assert!(patches.is_empty());
+    assert!(clean.outcome_candidate().is_none());
 
     // A request that never asked for a patch keeps its provider result.
     assert_untouched(&normalize(
@@ -823,7 +812,7 @@ fn review_form_only_failure_without_edits_records_the_verified_empty_patch() {
     // Clean checkout: the empty change set is known, which is what the
     // scheduler's review_form deferral consults before deferring.
     let clean = normalize(&form_request(true));
-    assert_eq!(patch_count(&clean), 1, "{:?}", clean.artifacts);
+    assert_eq!(patch_count(&clean), 0, "{:?}", clean.artifacts);
     assert!(
         super::super::outcome_normalization::has_known_empty_change_set(&clean),
         "{:?}",

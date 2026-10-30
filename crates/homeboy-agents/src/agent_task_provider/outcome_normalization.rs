@@ -55,7 +55,6 @@ fn strip_reserved_provider_metadata(outcome: &mut AgentTaskOutcome) {
     if let Some(metadata) = outcome.metadata.as_object_mut() {
         for key in [
             HOMEBOY_INTENTIONAL_NO_CHANGE_VERIFIED_KEY,
-            HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY,
             HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY,
         ] {
             metadata.remove(key);
@@ -114,12 +113,7 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
     }
 }
 
-/// The shared empty-change classification of a provider outcome (#7719, #15294,
-/// #15850). Successful outcomes are classified here at the owning normalization
-/// layer; the scheduler reuses the same rules inside
-/// `defer_missing_review_form_to_cook_loop` because a review-form deferral must
-/// not promote an empty change set to a gate-eligible candidate (#15880), so
-/// both entry points reach one verdict.
+/// Validate explicit review verdicts. Only harvest decides whether code changed.
 pub(crate) fn classify_empty_change_outcome(
     outcome: &mut AgentTaskOutcome,
     workspace_root: Option<&std::path::Path>,
@@ -141,89 +135,29 @@ pub(crate) fn classify_empty_change_outcome(
             outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
             outcome.summary = Some(message);
         }
-        IntentionalNoChangeValidation::Absent
-            if has_known_empty_change_set(outcome)
-                && has_substantive_non_change_evidence(outcome) =>
-        {
-            // An empty change artifact next to substantive work evidence
-            // (a transcript, report, log, or other content-bearing artifact)
-            // is not a clean "nothing happened" — it is a patch-capture
-            // failure that would otherwise silently discard real changes,
-            // including committed ones (#7719). Surface it for controller
-            // review/salvage instead of collapsing it to NoOp.
-            outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
-            outcome.summary = Some(
-            "provider reported success with an empty change artifact but produced substantive work evidence; the patch may have failed to capture real changes and needs review"
-                .to_string(),
-        );
-            if !outcome.metadata.is_object() {
-                outcome.metadata = json!({});
-            }
-            outcome.metadata[HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY] = Value::Bool(true);
-        }
-        IntentionalNoChangeValidation::Absent if has_known_empty_change_set(outcome) => {
-            outcome.status = AgentTaskOutcomeStatus::NoOp;
-            outcome.summary = Some("provider produced an empty change artifact".to_string());
-        }
         IntentionalNoChangeValidation::Absent => {}
     }
 }
 
-/// Set when an empty change artifact sat beside substantive work evidence, so
-/// the outcome was parked for patch-capture review (#7719).
-const HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY: &str = "homeboy_empty_change_with_evidence";
-
-/// Distinguish "the provider changed nothing" from "the patch capture lost the
-/// provider's changes" (#15364).
-///
-/// Two outcomes claim an attempt changed nothing:
-/// - an empty change artifact beside a transcript, parked as
-///   `CandidateRecoverable` so a capture failure cannot discard real work
-///   (#7719);
-/// - a `no_op` whose change set is known empty, including a provider `no_op`
-///   without any change artifact once [`materialize_verified_no_change_set`]
-///   recorded its empty patch (#15855).
-///
-/// When the attempt checkout itself proves nothing changed (HEAD is still the
-/// attempt base and the tree is clean apart from runner metadata), there is
-/// nothing to salvage. The outcome becomes `Succeeded` and records
-/// [`HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY`], so promotion reports a no-change
-/// attempt without running gates and Cook's no-change feedback loop acts on it
-/// instead of parking it for an operator (#15294). A claim on a checkout that
-/// did change is left untouched and still requires an audited candidate.
+/// Verify a provider no-op against its checkout; artifact declarations are not proof.
 pub(crate) fn accept_verified_unchanged_empty_attempt(
     outcome: &mut AgentTaskOutcome,
     workspace_root: Option<&std::path::Path>,
     attempt_base: Option<&str>,
 ) {
-    let claims_no_change = match outcome.status {
-        AgentTaskOutcomeStatus::CandidateRecoverable => {
-            outcome.metadata[HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY] == Value::Bool(true)
-        }
-        AgentTaskOutcomeStatus::NoOp => has_known_empty_change_set(outcome),
-        _ => false,
-    };
+    let claims_no_change =
+        outcome.status == AgentTaskOutcomeStatus::NoOp && outcome.outcome_candidate().is_none();
     if !claims_no_change || !verify_unchanged_empty_checkout(workspace_root, attempt_base) {
         return;
     }
     record_verified_unchanged_empty_attempt(outcome);
 }
 
-/// A provider may finish without any change artifact: declaring `no_op`, e.g.
-/// the local shell executor finishing without edits (#15855), or ending a
-/// clean turn as `succeeded` without editing, e.g. a CLI runtime whose patch
-/// Homeboy captures from the workspace. When the attempt checkout proves
-/// nothing changed, Homeboy records that empty change set as its own empty
-/// patch in the executor artifact root, before artifact finalization, so the
-/// attempt carries the same durable patch identity as a provider's empty patch
-/// and follows the verified no-change path end to end. Without it, a
-/// `succeeded` attempt that must produce a patch fails its required-artifact
-/// check and is reported as a provider failure although the provider ran
-/// cleanly.
+/// Record verified unchanged execution without manufacturing a patch artifact.
 pub(super) fn materialize_verified_no_change_set(
     outcome: &mut AgentTaskOutcome,
     request: &AgentTaskRequest,
-    artifact_root: &std::path::Path,
+    _artifact_root: &std::path::Path,
     provenance: &AgentTaskArtifactsPathProvenance,
     workspace_root: Option<&std::path::Path>,
     attempt_base: Option<&str>,
@@ -252,37 +186,13 @@ pub(super) fn materialize_verified_no_change_set(
     if !claims_no_change
         || provenance.owner != "homeboy"
         || provenance.locality != "runner"
-        || outcome.artifacts.iter().any(is_change_artifact)
+        || outcome.outcome_candidate().is_some()
         || !verify_unchanged_empty_checkout(workspace_root, attempt_base)
     {
         return;
     }
-    // Artifact finalization stages only files under the canonical root.
-    let Ok(artifact_root) = artifact_root.canonicalize() else {
-        return;
-    };
-    let path = artifact_root.join(HOMEBOY_VERIFIED_NO_CHANGE_PATCH);
-    if std::fs::write(&path, b"").is_err() {
-        return;
-    }
-    outcome.artifacts.push(AgentTaskArtifact {
-        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-        id: "patch".to_string(),
-        kind: "patch".to_string(),
-        name: Some("patch".to_string()),
-        label: None,
-        role: None,
-        semantic_key: None,
-        path: Some(path.display().to_string()),
-        url: None,
-        mime: None,
-        size_bytes: None,
-        sha256: None,
-        metadata: json!({ "homeboy_verified_no_change": true }),
-    });
+    record_verified_unchanged_empty_attempt(outcome);
 }
-
-const HOMEBOY_VERIFIED_NO_CHANGE_PATCH: &str = "homeboy-verified-no-change.patch";
 
 /// Whether an attempt checkout is provably unchanged from its attempt base:
 /// `HEAD` is still the attempt base and the tree is clean apart from runner
@@ -391,20 +301,6 @@ fn intentional_no_change_verdict(
     IntentionalNoChangeValidation::Verified
 }
 
-/// Evidence that the executor did real work even though its change artifact is
-/// empty: any content-bearing artifact that is not itself a change/patch — a
-/// transcript, report, log, or any other artifact with positive size. Used to
-/// distinguish a genuine no-op from a failed patch capture that would
-/// otherwise silently discard committed work (#7719).
-fn has_substantive_non_change_evidence(outcome: &AgentTaskOutcome) -> bool {
-    outcome.artifacts.iter().any(|artifact| {
-        !matches!(
-            artifact.kind.as_str(),
-            "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
-        ) && matches!(artifact.size_bytes, Some(size) if size > 0)
-    })
-}
-
 fn measure_homeboy_local_artifact(
     artifact: &mut AgentTaskArtifact,
     artifact_root: &std::path::Path,
@@ -432,24 +328,8 @@ fn measure_homeboy_local_artifact(
     }
 }
 
-fn is_change_artifact(artifact: &AgentTaskArtifact) -> bool {
-    matches!(
-        artifact.kind.as_str(),
-        "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
-    )
-}
-
 pub(crate) fn has_known_empty_change_set(outcome: &AgentTaskOutcome) -> bool {
-    let changes = outcome
-        .artifacts
-        .iter()
-        .filter(|artifact| is_change_artifact(artifact))
-        .collect::<Vec<_>>();
-
-    !changes.is_empty()
-        && changes
-            .iter()
-            .all(|artifact| artifact.size_bytes == Some(0))
+    outcome.outcome_candidate().is_none()
 }
 
 fn normalize_provider_result_contract(

@@ -356,7 +356,7 @@ mod timeout_tests {
     }
 
     #[test]
-    fn timeout_with_completed_runtime_artifacts_is_discoverable_and_promotable() {
+    fn timeout_runtime_artifacts_are_evidence_not_a_candidate() {
         let temp = tempfile::tempdir().expect("tempdir");
         let artifact_root = temp.path().join("task-1-artifacts");
         fs::create_dir_all(&artifact_root).expect("artifact root");
@@ -407,20 +407,9 @@ mod timeout_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(
-            aggregate.status(),
-            crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-        );
-        assert_eq!(aggregate.totals.candidate_recoverable, 1);
-        assert_eq!(aggregate.totals.recoverable_candidates, 1);
-        assert_eq!(aggregate.totals.timed_out, 0);
-        assert!(aggregate
-            .events
-            .iter()
-            .any(|event| event.task_id == "task-1"
-                && event.state == AgentTaskState::CandidateRecoverable));
         let outcome = &aggregate.outcomes[0];
-        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+        assert!(outcome.outcome_candidate().is_none());
+        assert_ne!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
         assert!(outcome.artifacts.iter().any(|artifact| {
             artifact.kind == "patch"
                 && artifact.path.as_deref() == Some(&patch_path.to_string_lossy())
@@ -434,13 +423,12 @@ mod timeout_tests {
             .iter()
             .any(|evidence| evidence.kind == "agent_result"
                 && evidence.uri == agent_result_path.display().to_string()));
-        assert!(outcome.diagnostics.iter().any(|diagnostic| {
-            diagnostic.class == "scheduler_timeout"
-                && diagnostic
-                    .data
-                    .get("candidate_recoverable")
-                    .and_then(Value::as_bool)
-                    == Some(true)
+        assert!(!outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .data
+                .get("candidate_recoverable")
+                .and_then(Value::as_bool)
+                == Some(true)
         }));
     }
 

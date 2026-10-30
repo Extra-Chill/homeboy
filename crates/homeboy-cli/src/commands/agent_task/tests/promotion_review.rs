@@ -6,6 +6,18 @@ use clap::Parser;
 /// The tests below drive the store-rooted entry points. Resolving the store
 /// once here keeps the ambient lookup in one place and lets the ambient
 /// wrappers be deleted (#7505).
+fn record_candidate(run_id: &str) {
+    let store = test_lifecycle_store();
+    let plan = agent_task_lifecycle::load_plan_in_store(&store, run_id).unwrap();
+    let mut aggregate = store.read_aggregate(run_id).unwrap();
+    aggregate.outcomes[0].candidate = Some(homeboy::agents::agent_task::AgentTaskCandidate {
+        base_sha: "base".into(),
+        candidate_sha: "patch-a".into(),
+        tree_sha: "tree".into(),
+    });
+    agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate).unwrap();
+}
+
 fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
     homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
         .expect("lifecycle store")
@@ -122,6 +134,7 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
             .expect("persist Cook recipe");
         run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
             .expect("run Cook attempt");
+        record_candidate(run_id);
         let (review_value, _) = review::review(ReviewArgs {
             run_id: run_id.to_string(),
             full: true,
@@ -295,6 +308,7 @@ fn promotion_resume_reference_keeps_private_gates_out_of_review_commands() {
         };
         run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
             .expect("run completed");
+        record_candidate(run_id);
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             homeboy_agents::agent_task_service::set_cook_delivery_artifact_for_test(
                 &mut record.metadata,
@@ -373,6 +387,7 @@ fn review_does_not_advertise_a_command_for_an_invalid_resume_gate_contract() {
         let run_id = "run-invalid-resume-gates";
         run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
             .expect("run completed");
+        record_candidate(run_id);
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             homeboy_agents::agent_task_service::set_cook_delivery_artifact_for_test(
                 &mut record.metadata,
@@ -442,6 +457,7 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
             Arc::new(ApplyArtifactExecutor),
         )
         .expect("run completed");
+        record_candidate("run-review-completed");
         let (value, exit_code) = review::review(ReviewArgs {
             run_id: "run-review-completed".to_string(),
             full: true,
@@ -471,6 +487,7 @@ fn default_review_is_bounded_and_points_to_full_evidence() {
             Arc::new(ApplyArtifactExecutor),
         )
         .expect("run completed");
+        record_candidate("run-review-default-bounded");
         let (value, exit_code) = review::review(ReviewArgs {
             run_id: "run-review-default-bounded".to_string(),
             full: false,
@@ -1011,12 +1028,6 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
             ), 0o755)
         .expect("write promotion provider");
 
-        agent_task_lifecycle::materialize_recovered_patch_artifact(
-            candidate_run_id,
-            Some(task_id),
-            Some(artifact_id),
-        )
-        .expect("recover retained patch into the canonical aggregate");
         let git_value = |args: &[&str]| {
             let output = Command::new("git")
                 .args(args)

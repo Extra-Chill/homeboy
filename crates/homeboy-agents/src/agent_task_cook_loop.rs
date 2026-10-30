@@ -730,26 +730,7 @@ fn strip_gate_failure_prompt_section(instructions: &str) -> &str {
 pub(crate) fn request_requires_substantive_candidate(
     request: &crate::agent_task::AgentTaskRequest,
 ) -> bool {
-    fn is_change_artifact(value: &str) -> bool {
-        matches!(
-            value,
-            "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
-        )
-    }
-
     request.policy.write == "patch"
-        || request
-            .expected_artifacts
-            .iter()
-            .any(|artifact| is_change_artifact(artifact))
-        || request.artifact_declarations.iter().any(|artifact| {
-            artifact.required
-                && (is_change_artifact(&artifact.name)
-                    || artifact
-                        .artifact_type
-                        .as_deref()
-                        .is_some_and(is_change_artifact))
-        })
 }
 
 /// Returns `Some(feedback)` describing why the AI review form is not yet
@@ -1318,7 +1299,7 @@ mod tests {
             request.policy.tools.execution_location_for("read"),
             AgentToolExecutionLocation::Runner
         );
-        assert_eq!(request.policy.write, "artifacts_only");
+        assert_eq!(request.policy.write, "patch");
     }
 
     #[test]
@@ -2959,7 +2940,10 @@ mod tests {
             source_refs: Vec::new(),
             workspace: AgentTaskWorkspace::default(),
             component_contracts: Vec::new(),
-            policy: AgentTaskPolicy::default(),
+            policy: AgentTaskPolicy {
+                write: "patch".into(),
+                ..Default::default()
+            },
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec!["patch".to_string()],
             artifact_declarations: Vec::new(),

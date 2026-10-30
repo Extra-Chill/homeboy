@@ -23,8 +23,8 @@ use crate::agent_task::{
     AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::agent_task_evidence_discovery::{
-    append_unique_artifacts, append_unique_evidence_refs, is_actionable_patch_artifact,
-    is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
+    append_unique_artifacts, append_unique_evidence_refs, merge_timeout_outcome,
+    TimeoutArtifactDiscovery,
 };
 pub use crate::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyAction, AgentTaskAdaptiveConcurrencyDecision,

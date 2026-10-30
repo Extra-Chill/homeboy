@@ -1279,7 +1279,7 @@ impl AgentTaskScheduler {
                     // that patch into the next provider.
                     let candidate_ready_for_convergence = outcome.failure_classification
                         != Some(AgentTaskFailureClassification::Stalled)
-                        && outcome.candidate.is_some();
+                        && outcome.outcome_candidate().is_some();
                     let rotation_takes_over = !candidate_ready_for_convergence
                         && AgentTaskScheduleSupport::rotation_policy_for_request(
                             &running_task.request,
@@ -1307,9 +1307,7 @@ impl AgentTaskScheduler {
                         // result proves the provider no longer owns the checkout.
                         // Harvest above is therefore race-free.
                         super::mark_timeout_workspace_candidates_incomplete(&mut outcome);
-                        let recovered = outcome.candidate.is_some()
-                            || (running_task.task_base_sha.is_none()
-                                && outcome.artifacts.iter().any(is_actionable_patch_artifact));
+                        let recovered = outcome.outcome_candidate().is_some();
                         outcome.status = if recovered && !rotation_takes_over {
                             AgentTaskOutcomeStatus::CandidateRecoverable
                         } else {
@@ -1491,22 +1489,9 @@ impl AgentTaskScheduler {
                                 let entry = &policy.entries[running_task.rotation_index];
                                 let adoption = match entry.adoption.as_ref() {
                                     Some(template) => {
-                                        let mut candidate_artifacts =
-                                            running_task.candidate_artifacts.clone();
-                                        append_unique_artifacts(
-                                            &mut candidate_artifacts,
-                                            outcome
-                                                .artifacts
-                                                .iter()
-                                                .filter(|artifact| {
-                                                    is_actionable_patch_artifact(artifact)
-                                                })
-                                                .cloned()
-                                                .collect(),
-                                        );
                                         match select_candidate_adoption(
                                             template,
-                                            outcome.candidate.as_ref(),
+                                            outcome.outcome_candidate(),
                                             &running_task,
                                         ) {
                                             Ok(adoption) => Some(adoption),
@@ -2077,7 +2062,7 @@ pub(super) fn complete_deferred_cleanup_recovery(
         .map_err(|error| format!("cannot read deferred cleanup descriptor: {error}"))?;
     let mut action: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|error| format!("cannot parse deferred cleanup descriptor: {error}"))?;
-    let candidate = outcome.candidate.as_ref();
+    let candidate = outcome.outcome_candidate();
     action["completed_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
     match (cleanup, candidate.is_none()) {
         (Err(error), false) => {
@@ -2243,7 +2228,9 @@ fn recoverable_commit_proof(
     running: &RunningTask,
     workspace: &AttemptWorkspace,
 ) -> Result<RecoverableCommitProof, String> {
-    let candidate = outcome.candidate.as_ref().ok_or("no immutable candidate")?;
+    let candidate = outcome
+        .outcome_candidate()
+        .ok_or("no immutable candidate")?;
     crate::agent_task_promotion::validate_candidate_commit(workspace.root(), candidate)
         .map_err(|error| error.message)?;
     crate::agent_task_candidate_tree::validate_immutable_candidate_tree(
@@ -2538,7 +2525,7 @@ fn execution_deadline_outcome(
 fn reset_attempt_request(
     mut request: AgentTaskRequest,
     source_workspace_root: Option<String>,
-    mut candidate_artifacts: Vec<AgentTaskArtifact>,
+    candidate_artifacts: Vec<AgentTaskArtifact>,
     outcome: &AgentTaskOutcome,
     carry_candidate: bool,
 ) -> (AgentTaskRequest, Vec<AgentTaskArtifact>) {
@@ -2565,7 +2552,7 @@ fn reset_attempt_request(
     if let (true, Some(attempt), Some(candidate)) = (
         carry_candidate,
         request.workspace.attempt.as_mut(),
-        outcome.candidate.as_ref(),
+        outcome.outcome_candidate(),
     ) {
         attempt.adoption = Some(crate::agent_task::AgentTaskCandidateAdoption {
             source_attempt: attempt.identity.clone(),
@@ -2575,15 +2562,6 @@ fn reset_attempt_request(
             decision: "retry previous candidate commit".to_string(),
         });
     }
-    append_unique_artifacts(
-        &mut candidate_artifacts,
-        outcome
-            .artifacts
-            .iter()
-            .filter(|artifact| is_actionable_patch_artifact(artifact))
-            .cloned()
-            .collect(),
-    );
     (request, candidate_artifacts)
 }
 

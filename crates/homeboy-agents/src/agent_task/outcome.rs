@@ -131,7 +131,47 @@ impl Default for AgentTaskOutcome {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn outcome_candidate_table() {
+    AgentTaskOutcome::candidate_accessor_ignores_patch_evidence();
+}
+
 impl AgentTaskOutcome {
+    /// The immutable change set recorded by harvest, never inferred from evidence.
+    pub fn outcome_candidate(&self) -> Option<&AgentTaskCandidate> {
+        self.candidate.as_ref()
+    }
+
+    #[cfg(test)]
+    fn candidate_accessor_ignores_patch_evidence() {
+        for (present, metadata) in [
+            (false, Value::Null),
+            (false, serde_json::json!({"approved": true})),
+            (
+                true,
+                serde_json::json!({"review_only": true, "actionable": false}),
+            ),
+        ] {
+            let candidate = AgentTaskCandidate {
+                base_sha: "base".into(),
+                candidate_sha: "candidate".into(),
+                tree_sha: "tree".into(),
+            };
+            let outcome = AgentTaskOutcome {
+                candidate: present.then_some(candidate.clone()),
+                artifacts: vec![AgentTaskArtifact {
+                    kind: "patch".into(),
+                    size_bytes: Some(0),
+                    metadata,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            assert_eq!(outcome.outcome_candidate(), present.then_some(&candidate));
+        }
+    }
+
     /// Read the normalized provider usage retained in outcome metadata.
     pub fn usage(&self) -> Option<AgentTaskUsage> {
         serde_json::from_value(self.metadata.get(AGENT_TASK_USAGE_METADATA_KEY)?.clone()).ok()

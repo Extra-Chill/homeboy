@@ -73,7 +73,6 @@ pub use acceptance_verifier::{
 };
 pub use action_eligibility::*;
 pub(crate) use aggregate_transition::*;
-pub use artifact_materialization::*;
 pub use cancellation::*;
 pub use control_plane_identities::{
     canonical_control_plane_identities, canonical_control_plane_identities_for_run,
