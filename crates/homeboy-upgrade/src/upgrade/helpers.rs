@@ -436,7 +436,7 @@ fn run_controller_upgrade_with_operation(
             // Acquiring shared admission proves every prior installer mutation
             // fence has drained. Freeze its pending byte evidence before this
             // operation can return the same-version/no-update result.
-            super::operation::freeze_prior_pending_replacements(
+            super::operation::freeze_prior_replacements(
                 operation
                     .id()
                     .expect("controller upgrades require a durable operation"),
@@ -637,7 +637,7 @@ fn run_controller_upgrade_with_operation(
     // their final install shares this lease rather than opening a TOCTOU window.
     let controller_mutation_lease =
         acquire_controller_upgrade_lease(operation, "controller upgrade")?;
-    super::operation::freeze_prior_pending_replacements(
+    super::operation::freeze_prior_replacements(
         operation
             .id()
             .expect("controller upgrades require a durable operation"),
@@ -748,13 +748,13 @@ fn run_controller_upgrade_with_operation(
                                 }
                                 result
                             };
-                            let mut replacement_checkpoint =
-                                |checkpoint: &super::execution::ReplacementCheckpoint| {
+                            let mut replacement_evidence =
+                                |checkpoint: &super::execution::ReplacementEvidence| {
                                     let _phase =
                                         phase_sync.lock().expect("serialize upgrade progress");
                                     operation
                                         .borrow_mut()
-                                        .record_replacement_checkpoint_durable(checkpoint)
+                                        .record_replacement_evidence_durable(checkpoint)
                                 };
                             if install_method == InstallMethod::Source {
                                 operation.borrow_mut().mark_controller_durable(
@@ -772,7 +772,7 @@ fn run_controller_upgrade_with_operation(
                                 selected_release.as_ref(),
                                 Some(&controller_mutation_lease),
                                 &mut report_phase,
-                                &mut replacement_checkpoint,
+                                &mut replacement_evidence,
                             )
                         },
                     );

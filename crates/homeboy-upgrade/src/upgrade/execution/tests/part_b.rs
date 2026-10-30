@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use super::*;
-use crate::upgrade::planning::resolve_binary_on_path_var;
 
 #[test]
 fn test_verify_upgrade_with_retry() {
@@ -30,108 +29,6 @@ fn test_verify_upgrade_with_retry() {
 }
 
 #[test]
-fn explicit_binary_upgrade_requires_the_selected_release_version() {
-    // #11152: a successful installer process is insufficient when it leaves a
-    // stale or shadowed executable on PATH. Explicit binary mode must verify
-    // the release selected before the swap, not just any newer version.
-    let reads = std::cell::RefCell::new(vec![
-        Some(ActiveBinaryInfo {
-            version: Some("0.326.1".to_string()),
-            build_identity: Some("homeboy 0.326.1".to_string()),
-        }),
-        Some(ActiveBinaryInfo {
-            version: Some("0.326.1".to_string()),
-            build_identity: Some("homeboy 0.326.1".to_string()),
-        }),
-    ]);
-
-    let (success, observed) = verify_binary_upgrade_with_retry_reader(
-        "0.326.2",
-        2,
-        Duration::ZERO,
-        || reads.borrow_mut().remove(0),
-        |_| {},
-    );
-
-    assert!(!success, "a different release must not verify as success");
-    assert_eq!(
-        observed.and_then(|info| info.version).as_deref(),
-        Some("0.326.1")
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn binary_upgrade_verifies_the_path_active_destination_after_launcher_replacement() {
-    // A promoted binary can replace a symlinked launcher. The old launcher path
-    // is then gone, but a fresh PATH lookup reaches the installed executable.
-    let directory = tempfile::tempdir().expect("tempdir");
-    let launcher_dir = directory.path().join("launcher");
-    let installed_dir = directory.path().join("installed");
-    std::fs::create_dir_all(&launcher_dir).expect("launcher directory");
-    std::fs::create_dir_all(&installed_dir).expect("installed directory");
-    let launcher = launcher_dir.join("homeboy");
-    let installed = installed_dir.join("homeboy");
-    homeboy_test_support::write_executable(
-        &installed,
-        "#!/bin/sh\nprintf 'homeboy 0.326.0\\n'\n",
-        0o755,
-    )
-    .expect("old installed binary");
-
-    std::os::unix::fs::symlink(&installed, &launcher).expect("launcher symlink");
-
-    // Model the installer's promotion: publish the replacement, then retire the
-    // launcher it had used before the promotion.
-    homeboy_test_support::write_executable(
-        &installed,
-        "#!/bin/sh\nprintf 'homeboy 0.326.1\\n'\n",
-        0o755,
-    )
-    .expect("replacement binary");
-
-    std::fs::remove_file(&launcher).expect("retire replaced launcher");
-    let path_var = format!("{}:{}", launcher_dir.display(), installed_dir.display());
-
-    let (success, observed, destination) = verify_binary_upgrade_with_retry_at(
-        "0.326.1",
-        1,
-        Duration::ZERO,
-        || resolve_binary_on_path_var(&path_var),
-        |_| {},
-    );
-
-    assert!(success, "the promoted PATH destination must verify");
-    assert_eq!(
-        observed.and_then(|info| info.version).as_deref(),
-        Some("0.326.1")
-    );
-    assert_eq!(destination.as_deref(), Some(installed.as_path()));
-}
-
-#[test]
-fn explicit_binary_upgrade_accepts_the_selected_release_version() {
-    let (success, observed) = verify_binary_upgrade_with_retry_reader(
-        "0.326.1",
-        1,
-        Duration::ZERO,
-        || {
-            Some(ActiveBinaryInfo {
-                version: Some("0.326.1".to_string()),
-                build_identity: Some("homeboy 0.326.1".to_string()),
-            })
-        },
-        |_| {},
-    );
-
-    assert!(success);
-    assert_eq!(
-        observed.and_then(|info| info.version).as_deref(),
-        Some("0.326.1")
-    );
-}
-
-#[test]
 fn binary_swap_failure_identifies_the_target_and_observed_destination() {
     let err = binary_swap_failure(
         "0.326.1",
@@ -151,33 +48,6 @@ fn binary_swap_failure_identifies_the_target_and_observed_destination() {
         .any(|hint| hint.message.contains("type -a homeboy")));
 }
 
-#[test]
-fn staged_verification_names_the_stage_when_unverifiable() {
-    let directory = tempfile::tempdir().expect("stage directory");
-    let staged = directory.path().join("homeboy");
-    std::fs::write(&staged, "not executable").expect("write stage");
-
-    let error = verify_staged_release_candidate_with("0.376.1", &staged, |_| Ok(None))
-        .expect_err("an unverifiable stage cannot verify");
-
-    assert!(
-        error
-            .message
-            .contains("staged release candidate did not report a verifiable version"),
-        "{}",
-        error.message
-    );
-    assert!(!error.message.contains("observed"), "{}", error.message);
-    assert_eq!(
-        error.details["context"].as_str(),
-        Some("verify staged release candidate")
-    );
-    assert_eq!(
-        error.details["staged_candidate"],
-        staged.display().to_string()
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn staged_verification_rejects_a_wrong_candidate_version() {
@@ -185,7 +55,7 @@ fn staged_verification_rejects_a_wrong_candidate_version() {
     let staged = directory.path().join("homeboy");
     homeboy_test_support::write_executable(
         &staged,
-        "#!/bin/sh\nprintf 'homeboy 0.376.0\\n'\n",
+        "#!/bin/sh\necho '{\"identity\":\"0.376.0\",\"observation_schema_version\":0}'\n",
         0o755,
     )
     .expect("write stale staged candidate");

@@ -91,39 +91,26 @@ struct SourceSwapVerification<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ReplacementCheckpoint {
-    pub state: String,
+pub(crate) struct ReplacementEvidence {
     pub target: PathBuf,
     pub expected_version: Option<String>,
     pub expected_build_identity: Option<String>,
-    pub expected_sha256: Option<String>,
-    pub previous_build_identity: Option<String>,
-    pub previous_sha256: String,
+    pub expected_sha256: String,
 }
 
-impl ReplacementCheckpoint {
-    pub(crate) fn pending(
+impl ReplacementEvidence {
+    pub(crate) fn new(
         target: &Path,
         expected_version: Option<&str>,
         expected_build_identity: Option<&str>,
-        expected_sha256: Option<String>,
+        expected_sha256: String,
     ) -> Result<Self> {
         Ok(Self {
-            state: "pending".to_string(),
             target: target.to_path_buf(),
             expected_version: expected_version.map(str::to_string),
             expected_build_identity: expected_build_identity.map(str::to_string),
             expected_sha256,
-            previous_build_identity: installed_target_build_identity_from_disk(target)?
-                .map(|identity| identity.display),
-            previous_sha256: sha256_file(target)?,
         })
-    }
-
-    pub(crate) fn with_state(&self, state: &str) -> Self {
-        let mut checkpoint = self.clone();
-        checkpoint.state = state.to_string();
-        checkpoint
     }
 }
 
@@ -188,7 +175,7 @@ pub(crate) fn execute_upgrade(
     selected_release: Option<&SelectedRelease>,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
     phase: &mut dyn FnMut(&str) -> Result<()>,
-    replacement_checkpoint: &mut dyn FnMut(&ReplacementCheckpoint) -> Result<()>,
+    replacement_evidence: &mut dyn FnMut(&ReplacementEvidence) -> Result<()>,
 ) -> UpgradeExecutionResult {
     let selected_binary_version = selected_release.map(|release| release.version.as_str());
     let defaults = defaults::load_defaults();
@@ -199,13 +186,6 @@ pub(crate) fn execute_upgrade(
     let release_binary = method == InstallMethod::Binary;
     let binary_destination = release_binary.then(active_binary_path).transpose()?;
     if release_binary {
-        promotion_lease
-            .ok_or_else(|| {
-                Error::internal_unexpected(
-                    "release replacement eligibility must be revalidated under promotion ownership",
-                )
-            })?
-            .assert_generation()?;
         validate_binary_replacement_eligibility(
             deliberate_replacement,
             selected_binary_version.expect("release upgrades select a release"),
@@ -220,20 +200,6 @@ pub(crate) fn execute_upgrade(
         phase("running_candidate_admission")?;
         phase("installing_controller")?;
     }
-    let binary_checkpoint = if release_binary {
-        let checkpoint = ReplacementCheckpoint::pending(
-            binary_destination
-                .as_deref()
-                .expect("release upgrades capture a destination"),
-            selected_binary_version,
-            None,
-            None,
-        )?;
-        replacement_checkpoint(&checkpoint)?;
-        Some(checkpoint)
-    } else {
-        None
-    };
     let release_stage = release_binary
         .then(|| {
             tempfile::Builder::new()
@@ -262,11 +228,14 @@ pub(crate) fn execute_upgrade(
             )?
         }
         InstallMethod::Binary => {
-            match run_installer_shell_command(
+            let lease = promotion_lease.ok_or_else(|| {
+                Error::internal_unexpected("release staging requires promotion ownership")
+            })?;
+            match supervise_installer_shell_command(
                 RELEASE_INSTALLER_SCRIPT,
-                promotion_lease,
                 INSTALLER_UPGRADE_TIMEOUT,
                 "run release binary upgrade",
+                |command| lease.authorize_mutating_subprocess(command),
                 |command| {
                     configure_release_installer(
                         command,
@@ -279,11 +248,6 @@ pub(crate) fn execute_upgrade(
             ) {
                 Ok(output) => output,
                 Err(error) => {
-                    if let Some(checkpoint) = binary_checkpoint.as_ref() {
-                        replacement_checkpoint(
-                            &checkpoint.with_state(replacement_observed_state(checkpoint)?),
-                        )?;
-                    }
                     return Err(Error::internal_io(
                         error.to_string(),
                         Some("run release binary upgrade".to_string()),
@@ -341,7 +305,7 @@ pub(crate) fn execute_upgrade(
                 source_revision,
                 promotion_lease,
                 phase,
-                replacement_checkpoint,
+                replacement_evidence,
             );
         }
         InstallMethod::Unknown => {
@@ -355,10 +319,6 @@ pub(crate) fn execute_upgrade(
     };
 
     if !output.status.success() {
-        if let Some(checkpoint) = binary_checkpoint.as_ref() {
-            let state = replacement_observed_state(checkpoint)?;
-            replacement_checkpoint(&checkpoint.with_state(state))?;
-        }
         // Keep both bounded streams: installers may log progress to stderr while
         // a staged candidate returns the actionable failure contract on stdout.
         let error_detail = upgrade_failure_detail(&output.stderr, &output.stdout)
@@ -371,9 +331,6 @@ pub(crate) fn execute_upgrade(
     }
 
     if release_binary {
-        let checkpoint = binary_checkpoint
-            .as_ref()
-            .expect("release replacement has a pending checkpoint");
         let staged = staged_release_binary
             .as_deref()
             .expect("release upgrades have an isolated stage");
@@ -387,24 +344,46 @@ pub(crate) fn execute_upgrade(
         // not stand in for the candidate it is about to be replaced by.
         // The controller is the single admission point for the staged
         // candidate; the installer runs in stage-only mode and skips its own.
-        let admitted = verify_staged_release_candidate(selected_version, staged)
-            .and_then(|()| run_verified_target_admission(staged));
-        if let Err(error) = admitted {
-            replacement_checkpoint(
-                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
-            )?;
-            return Err(error);
-        }
+        let candidate = verify_staged_release_candidate(selected_version, staged)?;
+        let replacement = ReplacementEvidence::new(
+            destination,
+            candidate.version.as_deref(),
+            candidate.build_identity.as_deref(),
+            sha256_file(staged)?,
+        )?;
+        replacement_evidence(&replacement)?;
+        // Copy into the destination filesystem before the fenced atomic rename.
+        let parent = destination
+            .parent()
+            .ok_or_else(|| Error::internal_unexpected("release destination has no parent"))?;
+        let temporary = parent.join(format!(".homeboy-upgrade.{}.tmp", std::process::id()));
+        let _guard = TempFileGuard::new(temporary.clone());
+        std::fs::copy(staged, &temporary).map_err(|e| Error::internal_io(e.to_string(), None))?;
+        make_source_install_executable(&temporary)?;
+        File::open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| Error::internal_io(e.to_string(), None))?;
         promotion_lease
             .expect("release replacement requires promotion ownership")
             .assert_generation()?;
-        finalize_release_replacement(
-            checkpoint,
-            staged,
-            destination,
-            selected_version,
-            replacement_checkpoint,
-        )?;
+        std::fs::rename(&temporary, destination)
+            .map_err(|e| Error::internal_io(e.to_string(), None))?;
+        sync_source_install_parent(parent)?;
+        if !replacement_was_applied(&replacement)? {
+            return Err(binary_swap_failure(
+                selected_version,
+                Some(destination),
+                None,
+            ));
+        }
+        phase("verifying_install")?;
+        return Ok((
+            true,
+            candidate.version,
+            candidate.build_identity,
+            None,
+            false,
+        ));
     }
 
     phase("verifying_install")?;
@@ -416,40 +395,21 @@ pub(crate) fn execute_upgrade(
     // false-negative `upgraded: false` / `new_version: null` on a successful
     // upgrade. Retry the read-back until it reports a verifiable version before
     // giving up. See issue #3463.
-    let (success, active_binary, binary_destination) =
-        if let Some(selected_version) = selected_binary_version {
-            verify_binary_upgrade_with_retry(
-                selected_version,
-                VERIFY_READBACK_ATTEMPTS,
-                VERIFY_READBACK_DELAY,
-                std::thread::sleep,
-            )
-        } else {
-            let (success, active_binary) = verify_upgrade_with_retry(
-                method,
-                force,
-                current_version(),
-                previous_build_identity,
-                VERIFY_READBACK_ATTEMPTS,
-                VERIFY_READBACK_DELAY,
-                || active_binary_info().ok().flatten(),
-                std::thread::sleep,
-            );
-            (success, active_binary, None)
-        };
+    let (success, active_binary) = verify_upgrade_with_retry(
+        method,
+        force,
+        current_version(),
+        previous_build_identity,
+        VERIFY_READBACK_ATTEMPTS,
+        VERIFY_READBACK_DELAY,
+        || active_binary_info().ok().flatten(),
+        std::thread::sleep,
+    );
 
     let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
     let new_build_identity = active_binary
         .as_ref()
         .and_then(|info| info.build_identity.clone());
-
-    if release_binary && !success {
-        return Err(binary_swap_failure(
-            selected_binary_version.expect("release upgrades select a release version"),
-            binary_destination.as_deref(),
-            active_binary.as_ref(),
-        ));
-    }
 
     // A source upgrade's command is responsible for swapping the freshly built
     // artifact into the active binary on disk. When that command exits 0 but the
@@ -909,49 +869,6 @@ pub(super) fn bounded_upgrade_cause(detail: &str) -> String {
     result
 }
 
-/// Promote a verified staged release over the PATH-active destination and
-/// prove the destination now holds it.
-///
-/// The staged artifact is digest evidence for the selected release, so its
-/// sha256 is recorded as the checkpoint's expected bytes before any mutation.
-/// That makes an already-active exact release (a forced reinstall whose staged
-/// bytes equal the installed bytes) provably applied instead of an
-/// unchanged-bytes "not activated" failure (#15733). An installer that staged
-/// nothing never reaches this point: verification of the missing stage fails.
-fn finalize_release_replacement(
-    checkpoint: &ReplacementCheckpoint,
-    candidate: &Path,
-    destination: &Path,
-    selected_version: &str,
-    replacement_checkpoint: &mut dyn FnMut(&ReplacementCheckpoint) -> Result<()>,
-) -> Result<()> {
-    let mut checkpoint = checkpoint.clone();
-    checkpoint.expected_sha256 = Some(sha256_file(candidate)?);
-    replacement_checkpoint(&checkpoint)?;
-    if let Err(error) = install_source_built_binary(candidate, destination) {
-        replacement_checkpoint(&checkpoint.with_state(replacement_observed_state(&checkpoint)?))?;
-        return Err(error);
-    }
-    if !replacement_was_applied(&checkpoint)? {
-        replacement_checkpoint(&checkpoint.with_state(replacement_observed_state(&checkpoint)?))?;
-        let mut error = binary_swap_failure(
-            selected_version,
-            Some(destination),
-            active_binary_info_at(&checkpoint.target)
-                .ok()
-                .flatten()
-                .as_ref(),
-        );
-        error.details["staged_candidate"] = serde_json::json!(candidate.display().to_string());
-        error.details["expected_sha256"] = serde_json::json!(checkpoint.expected_sha256);
-        error.details["previous_sha256"] = serde_json::json!(checkpoint.previous_sha256);
-        error.details["observed_sha256"] = serde_json::json!(sha256_file(&checkpoint.target).ok());
-        return Err(error);
-    }
-    replacement_checkpoint(&checkpoint.with_state("applied"))?;
-    Ok(())
-}
-
 fn binary_swap_failure(
     selected_version: &str,
     destination: Option<&Path>,
@@ -1013,7 +930,7 @@ fn complete_source_upgrade(
     source_revision: Option<String>,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
     phase: &mut dyn FnMut(&str) -> Result<()>,
-    replacement_checkpoint: &mut dyn FnMut(&ReplacementCheckpoint) -> Result<()>,
+    replacement_evidence: &mut dyn FnMut(&ReplacementEvidence) -> Result<()>,
 ) -> UpgradeExecutionResult {
     let replacement_target = replacement_target.ok_or_else(|| {
         Error::internal_unexpected("active binary path unavailable for source upgrade install")
@@ -1054,26 +971,20 @@ fn complete_source_upgrade(
     )?;
     promotion_lease.assert_generation()?;
     phase("installing_controller")?;
-    let replacement = ReplacementCheckpoint::pending(
+    let replacement = ReplacementEvidence::new(
         replacement_target,
         candidate_identity.version.as_deref(),
         candidate_identity.build_identity.as_deref(),
-        Some(sha256_file(&built_binary)?),
+        sha256_file(&built_binary)?,
     )?;
-    replacement_checkpoint(&replacement)?;
+    replacement_evidence(&replacement)?;
     upgrade_phase("installing source-built binary");
-    if let Err(error) = install_source_built_binary(&built_binary, replacement_target) {
-        let state = replacement_observed_state(&replacement)?;
-        replacement_checkpoint(&replacement.with_state(state))?;
-        return Err(error);
-    }
+    install_source_built_binary(&built_binary, replacement_target)?;
     if !replacement_was_applied(&replacement)? {
-        replacement_checkpoint(&replacement.with_state(replacement_observed_state(&replacement)?))?;
         return Err(Error::internal_unexpected(
             "source installer completed without an observable controller byte transition",
         ));
     }
-    replacement_checkpoint(&replacement.with_state("applied"))?;
     phase("verifying_install")?;
     upgrade_phase("verifying installed source binary");
 
@@ -1605,90 +1516,8 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-pub(crate) fn replacement_applied_identity(
-    checkpoint: &ReplacementCheckpoint,
-) -> Result<Option<homeboy_core::build_identity::BuildIdentity>> {
-    let current_sha256 = match sha256_file(&checkpoint.target) {
-        Ok(digest) => digest,
-        Err(_) => return Ok(None),
-    };
-    if (current_sha256 == checkpoint.previous_sha256
-        && !target_already_holds_expected_bytes(checkpoint, &current_sha256))
-        || checkpoint
-            .expected_sha256
-            .as_ref()
-            .is_some_and(|expected| expected != &current_sha256)
-    {
-        return Ok(None);
-    }
-    let Some(identity) = installed_target_build_identity_from_disk(&checkpoint.target)? else {
-        return Ok(None);
-    };
-    let matches_expected = checkpoint.expected_build_identity.as_deref().map_or_else(
-        || {
-            checkpoint
-                .expected_version
-                .as_deref()
-                .is_some_and(|expected| identity.version == expected)
-        },
-        |expected| identity.display == expected,
-    );
-    Ok(matches_expected.then_some(identity))
-}
-
-/// Whether the target was already exactly the selected artifact before the
-/// replacement began: unchanged bytes that equal recorded expected bytes. This
-/// is digest evidence, not a version guess, so a successful no-op installer
-/// with no expected digest is never mistaken for an applied replacement.
-fn target_already_holds_expected_bytes(
-    checkpoint: &ReplacementCheckpoint,
-    current_sha256: &str,
-) -> bool {
-    current_sha256 == checkpoint.previous_sha256
-        && checkpoint.expected_sha256.as_deref() == Some(current_sha256)
-}
-
-pub(crate) fn replacement_was_applied(checkpoint: &ReplacementCheckpoint) -> Result<bool> {
-    let current_sha256 = match sha256_file(&checkpoint.target) {
-        Ok(digest) => digest,
-        Err(_) => return Ok(false),
-    };
-    if target_already_holds_expected_bytes(checkpoint, &current_sha256) {
-        return Ok(true);
-    }
-    if current_sha256 == checkpoint.previous_sha256 {
-        return Ok(false);
-    }
-    if let Some(expected) = checkpoint.expected_sha256.as_deref() {
-        return Ok(current_sha256 == expected);
-    }
-    Ok(replacement_applied_identity(checkpoint)
-        .ok()
-        .flatten()
-        .is_some())
-}
-
-fn replacement_target_changed(checkpoint: &ReplacementCheckpoint) -> Option<bool> {
-    if !checkpoint.target.exists() {
-        return None;
-    }
-    sha256_file(&checkpoint.target)
-        .ok()
-        .map(|current| current != checkpoint.previous_sha256)
-}
-
-pub(crate) fn replacement_observed_state(
-    checkpoint: &ReplacementCheckpoint,
-) -> Result<&'static str> {
-    if replacement_was_applied(checkpoint)? {
-        Ok("applied")
-    } else {
-        match replacement_target_changed(checkpoint) {
-            Some(true) => Ok("changed_unverified"),
-            Some(false) => Ok("not_applied"),
-            None => Ok("evidence_unavailable"),
-        }
-    }
+pub(crate) fn replacement_was_applied(replacement: &ReplacementEvidence) -> Result<bool> {
+    Ok(sha256_file(&replacement.target)? == replacement.expected_sha256)
 }
 
 /// Read back the active binary version after a successful swap, retrying while
@@ -1738,112 +1567,6 @@ where
 
         // Hold onto the most informative read so the caller can still report a
         // version even if verification never flips to success.
-        if active_binary
-            .as_ref()
-            .and_then(|info| info.version.as_deref())
-            .is_some()
-            || last_seen.is_none()
-        {
-            last_seen = active_binary;
-        }
-
-        if attempt + 1 < attempts {
-            sleep(delay);
-        }
-    }
-
-    (false, last_seen)
-}
-
-fn verify_binary_upgrade_with_retry<S>(
-    selected_version: &str,
-    attempts: u32,
-    delay: Duration,
-    sleep: S,
-) -> (bool, Option<ActiveBinaryInfo>, Option<PathBuf>)
-where
-    S: FnMut(Duration),
-{
-    verify_binary_upgrade_with_retry_at(
-        selected_version,
-        attempts,
-        delay,
-        || active_binary_path().ok(),
-        sleep,
-    )
-}
-
-/// Resolve the executable after promotion rather than retaining a pre-install
-/// launcher path: installers may replace a symlink or retire a launcher while
-/// preserving a PATH-visible installed binary elsewhere.
-fn verify_binary_upgrade_with_retry_at<R, S>(
-    selected_version: &str,
-    attempts: u32,
-    delay: Duration,
-    mut resolve_destination: R,
-    sleep: S,
-) -> (bool, Option<ActiveBinaryInfo>, Option<PathBuf>)
-where
-    R: FnMut() -> Option<PathBuf>,
-    S: FnMut(Duration),
-{
-    let mut destination = None;
-    let (success, active) = verify_binary_upgrade_with_retry_reader(
-        selected_version,
-        attempts,
-        delay,
-        || {
-            let path = resolve_destination()?;
-            let info = active_binary_info_at(&path).ok().flatten();
-            destination = Some(path);
-            info
-        },
-        sleep,
-    );
-    (success, active, destination)
-}
-
-fn verify_binary_upgrade_with_retry_reader<R, S>(
-    selected_version: &str,
-    attempts: u32,
-    delay: Duration,
-    read_active: R,
-    sleep: S,
-) -> (bool, Option<ActiveBinaryInfo>)
-where
-    R: FnMut() -> Option<ActiveBinaryInfo>,
-    S: FnMut(Duration),
-{
-    verify_with_retry(
-        attempts,
-        delay,
-        read_active,
-        |info| info.version.as_deref() == Some(selected_version),
-        sleep,
-    )
-}
-
-fn verify_with_retry<R, V, S>(
-    attempts: u32,
-    delay: Duration,
-    mut read_active: R,
-    mut verified: V,
-    mut sleep: S,
-) -> (bool, Option<ActiveBinaryInfo>)
-where
-    R: FnMut() -> Option<ActiveBinaryInfo>,
-    V: FnMut(&ActiveBinaryInfo) -> bool,
-    S: FnMut(Duration),
-{
-    let attempts = attempts.max(1);
-    let mut last_seen: Option<ActiveBinaryInfo> = None;
-
-    for attempt in 0..attempts {
-        let active_binary = read_active();
-        if active_binary.as_ref().is_some_and(&mut verified) {
-            return (true, active_binary);
-        }
-
         if active_binary
             .as_ref()
             .and_then(|info| info.version.as_deref())
@@ -2222,25 +1945,17 @@ fn verify_active_binary_io_error(program: &Path, error: impl std::fmt::Display) 
 
 /// Verify the candidate the release installer placed in the isolated stage
 /// before it is admitted or promoted over the live destination.
-fn verify_staged_release_candidate(expected_version: &str, staged: &Path) -> Result<()> {
-    verify_staged_release_candidate_with(expected_version, staged, active_binary_info_at)
-}
-
-fn verify_staged_release_candidate_with<R>(
+fn verify_staged_release_candidate(
     expected_version: &str,
     staged: &Path,
-    mut read_info: R,
-) -> Result<()>
-where
-    R: FnMut(&Path) -> Result<Option<ActiveBinaryInfo>>,
-{
+) -> Result<ActiveBinaryInfo> {
     if !staged.is_file() {
         return Err(staged_candidate_error(
             "release installer exited without staging a candidate",
             staged,
         ));
     }
-    let info = read_info(staged)?.ok_or_else(|| {
+    let info = active_binary_info_at(staged)?.ok_or_else(|| {
         staged_candidate_error(
             "staged release candidate did not report a verifiable version",
             staged,
@@ -2253,7 +1968,19 @@ where
             Some(&info),
         ));
     }
-    Ok(())
+    // Releases older than the schema query report nothing; that is only
+    // refused while live work would observe a schema change.
+    let schema = command_output_with_timeout(
+        Command::new(staged).arg("--observation-schema-version"),
+        Duration::from_secs(5),
+        "query candidate observation schema",
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .and_then(|output| String::from_utf8(output.stdout).ok())
+    .and_then(|value| value.trim().parse::<i64>().ok());
+    ensure_candidate_schema(schema)?;
+    Ok(info)
 }
 
 fn staged_candidate_error(summary: &str, staged: &Path) -> Error {
