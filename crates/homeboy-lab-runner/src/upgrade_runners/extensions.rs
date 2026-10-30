@@ -159,68 +159,6 @@ pub(crate) fn runner_supports_extension_sync(runner: &Runner, extension_id: &str
             .any(|supported| supported == extension_id)
 }
 
-pub fn defer_extension_failures_for_path_drift(
-    path_drift: Option<&str>,
-    skipped: &mut Vec<RunnerExtensionSyncEntry>,
-    failed: &mut Vec<RunnerExtensionSyncEntry>,
-) {
-    let Some(path_drift) = path_drift else {
-        return;
-    };
-    if failed.is_empty() {
-        return;
-    }
-
-    skipped.extend(failed.drain(..).map(|mut entry| {
-        let original_detail = entry
-            .detail
-            .take()
-            .unwrap_or_else(|| "no failure detail".to_string());
-        entry.detail = Some(format!(
-            "deferred because runner executable drift was detected after binary refresh: {path_drift}; original failure: {original_detail}"
-        ));
-        entry
-    }));
-}
-
-pub fn defer_runner_extensions_for_binary_drift(
-    extension_updates: &[ExtensionUpgradeEntry],
-    path_drift: &str,
-) -> Vec<RunnerExtensionSyncEntry> {
-    extension_updates
-        .iter()
-        .map(|extension| {
-            let Some(source_revision) = extension.source_revision.as_ref() else {
-                return RunnerExtensionSyncEntry {
-                    extension_id: extension.extension_id.clone(),
-                    source_revision: String::new(),
-                    synced: false,
-                    detail: Some("unrefreshable: installed extension lacks reproducible source URL or revision".to_string()),
-                    recovery_commands: Vec::new(),
-                };
-            };
-            if extension.source_url.is_none() {
-                return RunnerExtensionSyncEntry {
-                    extension_id: extension.extension_id.clone(),
-                    source_revision: source_revision.clone(),
-                    synced: false,
-                    detail: Some("unrefreshable: installed extension lacks reproducible source URL or revision".to_string()),
-                    recovery_commands: Vec::new(),
-                };
-            }
-            RunnerExtensionSyncEntry {
-                extension_id: extension.extension_id.clone(),
-                source_revision: source_revision.clone(),
-                synced: false,
-                detail: Some(format!(
-                    "deferred because runner executable did not converge: {path_drift}"
-                )),
-                recovery_commands: Vec::new(),
-            }
-        })
-        .collect()
-}
-
 fn runner_extension_install_recovery_command(
     homeboy_path: &str,
     source_url: &str,

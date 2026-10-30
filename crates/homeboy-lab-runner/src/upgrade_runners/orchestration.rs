@@ -5,16 +5,10 @@ use crate::RunnerExecOptions;
 use crate::RunnerStatusReport;
 use homeboy_core::Result;
 use homeboy_runner_contract::RunnerKind;
-use homeboy_upgrade::upgrade::version_is_newer;
 use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
-use homeboy_upgrade::upgrade::InstallMethod;
 use homeboy_upgrade::upgrade::RunnerUpgradeEntry;
-use std::path::Path;
 
 pub fn preflight_configured_runners_for_upgrade(
-    _method_override: Option<InstallMethod>,
-    _source_path: Option<&Path>,
-    _explicit_source_path: bool,
     runner_targets: &[String],
     candidate_version: &str,
 ) -> Result<Vec<RunnerUpgradeEntry>> {
@@ -251,7 +245,7 @@ fn runner_extension_inventory(
             let error = error.as_str().ok_or_else(|| {
                 format!("runner extension `{id}` inventory error was not a string")
             })?;
-            // The selected runner upgrade executes with --skip-extensions and
+            // The selected runner refresh installs the binary and
             // synchronizes extensions only after the new binary is active. A
             // schema the legacy binary cannot deserialize therefore belongs to
             // candidate validation; requiring the legacy reader here creates a
@@ -630,15 +624,7 @@ mod manifest_preflight_tests {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The provider keeps controller identity and promotion authority explicit."
-)]
-pub fn upgrade_configured_runners_with_explicit_source_path(
-    force: bool,
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
-    explicit_source_path: bool,
+pub fn upgrade_configured_runners(
     expected_controller_identity: Option<&str>,
     runner_targets: &[String],
     extension_updates: &[ExtensionUpgradeEntry],
@@ -662,33 +648,19 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
         let run = || {
             let (updated, skipped) = upgrade_runners(
                 &runners,
-                force,
-                method_override,
-                source_path,
                 extension_updates,
                 runner::exec,
                 runner::status,
-                reconnect_runner_daemon,
-                if explicit_source_path {
-                    materialize_explicit_runner_source_path
-                } else {
-                    materialize_runner_source_path
-                },
-                update_runner_homeboy_path,
                 expected_controller_identity,
             );
             // A runner is converged only when its runner-service units
             // run the converged binary too (#15733).
             converge_service_binaries_for_entries(&runners, updated, skipped)
         };
-        Ok(if explicit_source_path {
-            run()
-        } else {
-            crate::controller_identity::with_converging_controller(
-                expected_controller_identity,
-                run,
-            )
-        })
+        Ok(crate::controller_identity::with_converging_controller(
+            expected_controller_identity,
+            run,
+        ))
     };
     match promotion_lease {
         Some(lease) => lease.with_local_targets(
@@ -716,21 +688,11 @@ pub(crate) fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Ru
         .collect())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The orchestration boundary keeps every mutating operation explicit for deterministic runner upgrade recovery."
-)]
 pub(crate) fn upgrade_runners(
     runners: &[Runner],
-    force: bool,
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
     extension_updates: &[ExtensionUpgradeEntry],
     mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: impl Fn(&str) -> Result<RunnerStatusReport>,
-    mut reconnect_stale_daemon: impl FnMut(&str) -> Result<(String, Option<String>)>,
-    mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
-    mut update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
     expected_controller_identity: Option<&str>,
 ) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
     let mut updated = Vec::new();
@@ -739,15 +701,9 @@ pub(crate) fn upgrade_runners(
     for runner in runners {
         let entry = upgrade_runner_with_executor(
             runner,
-            force,
-            method_override,
-            source_path,
             extension_updates,
             &mut exec,
             &status,
-            &mut reconnect_stale_daemon,
-            &mut materialize_source_path,
-            &mut update_homeboy_path,
             expected_controller_identity,
         );
         if entry.deferred {
@@ -775,21 +731,11 @@ pub(crate) fn upgrade_runners(
     (updated, skipped)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "A single runner upgrade retains explicit diagnostic inputs and operations to preserve callback order."
-)]
 pub fn upgrade_runner_with_executor(
     runner: &Runner,
-    force: bool,
-    method_override: Option<InstallMethod>,
-    source_path: Option<&Path>,
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: &impl Fn(&str) -> Result<RunnerStatusReport>,
-    reconnect_stale_daemon: &mut impl FnMut(&str) -> Result<(String, Option<String>)>,
-    materialize_source_path: &mut impl FnMut(&Runner, &Path) -> Result<String>,
-    update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
     expected_controller_identity: Option<&str>,
 ) -> RunnerUpgradeEntry {
     let original_homeboy_path = runner
@@ -818,442 +764,27 @@ pub fn upgrade_runner_with_executor(
     let previous_version = runner_homeboy_version(runner, &original_homeboy_path, exec)
         .ok()
         .flatten();
-    let selected_source_revision = source_path.and_then(source_checkout_revision);
-    if is_managed_immutable_homeboy_path(runner, &original_homeboy_path) {
-        return refresh_managed_immutable_runner(
-            runner,
-            original_homeboy_path,
-            previous_version,
-            selected_source_revision.as_deref(),
-            expected_controller_identity,
-            extension_updates,
-            exec,
-        );
-    }
-    let expected_build_identity = expected_controller_identity
-        .map(str::to_string)
-        .or_else(|| {
-            (method_override == Some(InstallMethod::Source))
-                .then(|| source_path.and_then(source_checkout_build_identity))
-                .flatten()
-        });
-    let selected_source_url = source_path.and_then(homeboy_core::git::remote_origin_url);
-    let command_source_path = match runner_upgrade_source_path(
+    refresh_managed_immutable_runner(
         runner,
-        method_override,
-        source_path,
-        materialize_source_path,
-    ) {
-        Ok(path) => path,
-        Err(err) => {
-            return runner_upgrade_failure_entry(
-                &runner.id,
-                original_homeboy_path,
-                previous_version,
-                1,
-                err.message,
-            );
-        }
-    };
-    if let Some(err) = prepare_runner_source_checkout_for_upgrade(
-        runner,
-        method_override,
-        command_source_path.as_deref(),
-        exec,
-    ) {
-        return runner_upgrade_failure_entry(
-            &runner.id,
-            original_homeboy_path,
-            previous_version,
-            1,
-            err,
-        );
-    }
-    let mut upgrade_homeboy_path = original_homeboy_path.clone();
-    let mut path_update_detail = None;
-    let upgrade = exec(
-        &runner.id,
-        runner_exec_options(
-            runner,
-            runner_upgrade_command(
-                &upgrade_homeboy_path,
-                force,
-                method_override,
-                command_source_path.as_deref(),
-            ),
-        ),
-    );
-
-    // Both the non-zero-exit and hard-error upgrade arms attempt the same
-    // recovery: realign the runner homeboy_path, then retry the upgrade.
-    let recovery_outcome = match upgrade {
-        Ok((output, exit_code)) if exit_code == 0 => {
-            Ok((exit_code, runner_upgrade_detail(&output), None))
-        }
-        Ok((output, exit_code)) => recover_and_retry_failed_upgrade(
-            runner,
-            force,
-            method_override,
-            command_source_path.as_deref(),
-            &original_homeboy_path,
-            previous_version.as_deref(),
-            expected_build_identity.as_deref(),
-            selected_source_revision.as_deref(),
-            selected_source_url.as_deref(),
-            FailedUpgradeOutcome {
-                exit_code,
-                detail: runner_upgrade_detail(&output),
-            },
-            update_homeboy_path,
-            exec,
-        ),
-        Err(err) => recover_and_retry_failed_upgrade(
-            runner,
-            force,
-            method_override,
-            command_source_path.as_deref(),
-            &original_homeboy_path,
-            previous_version.as_deref(),
-            expected_build_identity.as_deref(),
-            selected_source_revision.as_deref(),
-            selected_source_url.as_deref(),
-            FailedUpgradeOutcome {
-                exit_code: 1,
-                detail: err.message,
-            },
-            update_homeboy_path,
-            exec,
-        ),
-    };
-
-    let (exit_code, detail) = match recovery_outcome {
-        Ok((exit_code, detail, recovery)) => {
-            if let Some(recovery) = recovery {
-                upgrade_homeboy_path = recovery.homeboy_path;
-                path_update_detail = Some(recovery.detail);
-            }
-            (exit_code, detail)
-        }
-        Err(mut entry) => {
-            entry.previous_version = previous_version;
-            return entry;
-        }
-    };
-
-    let mut homeboy_path = upgrade_homeboy_path.clone();
-    let mut new_version = runner_homeboy_version(runner, &upgrade_homeboy_path, exec)
-        .ok()
-        .flatten();
-    let mut source_path_realigned = false;
-    if let Some(realignment) = source_upgrade_homeboy_path_realignment(
-        runner,
-        &original_homeboy_path,
-        method_override,
-        command_source_path.as_deref(),
-        &upgrade_homeboy_path,
-        new_version.as_deref(),
-        expected_build_identity.as_deref(),
-        exec,
-    ) {
-        match update_homeboy_path(&runner.id, &realignment.homeboy_path) {
-            Ok(()) => {
-                homeboy_path = realignment.homeboy_path;
-                new_version = Some(realignment.version);
-                source_path_realigned = true;
-                path_update_detail = Some(realignment.detail);
-            }
-            Err(err) => {
-                path_update_detail = Some(format!(
-                    "source-built runner homeboy_path realignment failed: {}",
-                    err.message
-                ));
-            }
-        }
-    }
-    let mut bare_homeboy_version = None;
-    let alignment = if !source_path_realigned && is_auto_realignable_homeboy_path(&homeboy_path) {
-        bare_homeboy_version = runner_bare_homeboy_version(runner, &upgrade_homeboy_path, exec);
-        runner_homeboy_path_alignment(
-            &runner.id,
-            &homeboy_path,
-            new_version.as_deref(),
-            bare_homeboy_version.as_deref(),
-        )
-    } else {
-        None
-    };
-    let mut path_drift = alignment
-        .as_ref()
-        .and_then(|alignment| alignment.drift.clone());
-
-    if let Some(alignment) = alignment {
-        if alignment.update_to.is_none()
-            && is_disposable_lab_workspace_homeboy_path(&homeboy_path)
-            && matches!(
-                (new_version.as_deref(), bare_homeboy_version.as_deref()),
-                (Some(configured), Some(bare)) if version_is_newer(configured, bare)
-            )
-        {
-            let repair = repair_stale_bare_homeboy_after_upgrade(
-                runner,
-                force,
-                method_override,
-                command_source_path.as_deref(),
-                new_version.as_deref().unwrap_or_default(),
-                exec,
-            );
-            bare_homeboy_version = repair.bare_version;
-            path_drift = repair.path_drift;
-            path_update_detail = Some(repair.detail);
-        } else {
-            apply_runner_homeboy_path_alignment(
-                runner,
-                &runner.id,
-                alignment,
-                &original_homeboy_path,
-                bare_homeboy_version.as_deref(),
-                &mut homeboy_path,
-                &mut new_version,
-                &mut path_drift,
-                &mut path_update_detail,
-                update_homeboy_path,
-                expected_build_identity.as_deref(),
-                exec,
-            );
-        }
-    }
-
-    let mut source_identity_drift = if path_drift.is_none() {
-        runner_build_identity_drift(
-            runner,
-            &homeboy_path,
-            expected_build_identity.as_deref(),
-            exec,
-        )
-    } else {
-        None
-    };
-    if path_drift.is_none() {
-        path_drift = source_identity_drift.clone();
-    }
-    let (extensions_synced, mut extensions_skipped, mut extensions_failed) =
-        if let Some(drift) = path_drift.as_deref() {
-            (
-                Vec::new(),
-                defer_runner_extensions_for_binary_drift(extension_updates, drift),
-                Vec::new(),
-            )
-        } else {
-            sync_runner_extensions(runner, &homeboy_path, extension_updates, exec)
-        };
-    if path_drift.is_some() && is_auto_realignable_homeboy_path(&homeboy_path) {
-        let refreshed_bare_homeboy_version =
-            runner_bare_homeboy_version(runner, &homeboy_path, exec);
-        if refreshed_bare_homeboy_version.is_some() {
-            bare_homeboy_version = refreshed_bare_homeboy_version;
-            match runner_homeboy_path_alignment(
-                &runner.id,
-                &homeboy_path,
-                new_version.as_deref(),
-                bare_homeboy_version.as_deref(),
-            ) {
-                Some(alignment) => {
-                    path_drift = alignment.drift.clone();
-                    apply_runner_homeboy_path_alignment(
-                        runner,
-                        &runner.id,
-                        alignment,
-                        &original_homeboy_path,
-                        bare_homeboy_version.as_deref(),
-                        &mut homeboy_path,
-                        &mut new_version,
-                        &mut path_drift,
-                        &mut path_update_detail,
-                        update_homeboy_path,
-                        expected_build_identity.as_deref(),
-                        exec,
-                    );
-                }
-                None => {
-                    path_drift = None;
-                }
-            }
-        }
-    }
-    if bare_homeboy_version.is_none() && !source_path_realigned {
-        bare_homeboy_version = runner_bare_homeboy_version(runner, &homeboy_path, exec);
-    }
-    if path_drift.is_none() && !source_path_realigned {
-        if let Some(alignment) = runner_homeboy_path_alignment(
-            &runner.id,
-            &homeboy_path,
-            new_version.as_deref(),
-            bare_homeboy_version.as_deref(),
-        ) {
-            path_drift = alignment.drift.clone();
-            apply_runner_homeboy_path_alignment(
-                runner,
-                &runner.id,
-                alignment,
-                &original_homeboy_path,
-                bare_homeboy_version.as_deref(),
-                &mut homeboy_path,
-                &mut new_version,
-                &mut path_drift,
-                &mut path_update_detail,
-                update_homeboy_path,
-                expected_build_identity.as_deref(),
-                exec,
-            );
-        }
-    }
-    let local_version_drift = runner_local_version_drift(
-        &runner.id,
-        &homeboy_path,
-        previous_version.as_deref(),
-        new_version.as_deref(),
-    );
-    if path_drift.is_none() {
-        path_drift = local_version_drift;
-    }
-    // PATH alignment is semver-only. Re-check the final configured executable
-    // so an equal-version bare binary cannot erase source identity divergence.
-    source_identity_drift = runner_build_identity_drift(
-        runner,
-        &homeboy_path,
-        expected_build_identity.as_deref(),
-        exec,
-    );
-    if path_drift.is_none() {
-        path_drift = source_identity_drift.clone();
-    }
-
-    defer_extension_failures_for_path_drift(
-        path_drift.as_deref(),
-        &mut extensions_skipped,
-        &mut extensions_failed,
-    );
-    let selected_materialized_binary = (path_drift.is_some()
-        && !selected_source_url
-            .as_deref()
-            .is_some_and(source_url_is_runner_reachable))
-    .then(|| {
-        verified_materialized_source_binary(
-            runner,
-            command_source_path.as_deref(),
-            expected_build_identity.as_deref(),
-            exec,
-        )
-    })
-    .flatten();
-    let recovery_commands = runner_recovery_commands(
-        &runner.id,
-        &homeboy_path,
-        path_drift.as_ref(),
-        new_version.as_deref(),
-        bare_homeboy_version.as_deref(),
-        selected_source_revision.as_deref(),
-        selected_source_url.as_deref(),
-        selected_materialized_binary.as_deref(),
-        expected_build_identity.as_deref(),
-    );
-    let mut stale_daemon_repair_detail = None;
-    let mut stale_daemon = runner_stale_daemon(runner, status);
-    let mut daemon_previous_version = None;
-    let mut daemon_new_version = None;
-    if stale_daemon.is_some() && path_drift.is_none() {
-        let daemon_before = stale_daemon
-            .as_ref()
-            .map(|daemon| daemon.session_homeboy_version.clone())
-            .unwrap_or_else(|| "unknown".to_string());
-        daemon_previous_version = Some(daemon_before.clone());
-        match reconnect_stale_daemon(&runner.id) {
-            Ok((detail, observed_version)) => {
-                daemon_new_version = observed_version.clone();
-                let daemon_after = observed_version.as_deref().unwrap_or("unknown");
-                if matches!(
-                    (observed_version.as_deref(), new_version.as_deref()),
-                    (Some(observed), Some(expected))
-                        if crate::connection::versions_match(observed, expected)
-                ) {
-                    stale_daemon = None;
-                    stale_daemon_repair_detail = Some(format!(
-                        "runner daemon identity: {daemon_before} -> {daemon_after}; {detail}"
-                    ));
-                } else {
-                    stale_daemon_repair_detail = Some(format!(
-                        "runner daemon reconnect did not converge: expected {}, observed {daemon_after}; {detail}",
-                        new_version.as_deref().unwrap_or("the configured runner version")
-                    ));
-                }
-            }
-            Err(err) => {
-                stale_daemon_repair_detail = Some(format!(
-                    "automatic stale runner daemon restart failed: {}",
-                    err.message
-                ));
-            }
-        }
-    }
-    let upgraded = source_path_realigned
-        || match (previous_version.as_deref(), new_version.as_deref()) {
-            (Some(previous), Some(new)) => new != previous,
-            _ => false,
-        };
-    let success = new_version.is_some()
-        && path_drift.is_none()
-        && extensions_failed.is_empty()
-        && stale_daemon.is_none();
-    let detail =
-        runner_version_report_detail(detail, previous_version.as_deref(), new_version.as_deref());
-    let detail = runner_upgrade_final_detail(
-        &runner.id,
-        detail,
-        &homeboy_path,
-        path_update_detail.as_deref(),
-        stale_daemon_repair_detail.as_deref(),
-        path_drift.as_deref(),
-        stale_daemon.as_ref(),
-        &extensions_skipped,
-        &extensions_failed,
-    );
-
-    RunnerUpgradeEntry {
-        runner_id: runner.id.clone(),
-        homeboy_path,
-        success,
-        upgraded,
-        deferred: false,
+        original_homeboy_path,
         previous_version,
-        new_version,
-        bare_homeboy_version,
-        path_drift,
-        recovery_commands,
-        extensions_synced,
-        extensions_skipped,
-        extensions_failed,
-        stale_daemon,
-        daemon_previous_version,
-        daemon_new_version,
-        service_binaries: Vec::new(),
-        exit_code,
-        detail,
-    }
+        expected_controller_identity,
+        extension_updates,
+        exec,
+    )
 }
 
 fn refresh_managed_immutable_runner(
     runner: &Runner,
     previous_homeboy_path: String,
     previous_version: Option<String>,
-    selected_source_revision: Option<&str>,
     expected_controller_identity: Option<&str>,
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> RunnerUpgradeEntry {
-    let Some(controller_commit) = managed_immutable_runner_target_revision(
-        selected_source_revision,
-        expected_controller_identity,
-    ) else {
+    let Some(controller_commit) =
+        managed_immutable_runner_target_revision(expected_controller_identity)
+    else {
         return managed_immutable_runner_failure_entry(
             &runner.id,
             previous_homeboy_path,
@@ -1388,33 +919,27 @@ fn refresh_managed_immutable_runner(
     }
 }
 
-/// The commit a managed immutable runner converges to: an explicitly selected
-/// source revision, else the commit of the controller the upgrade installed,
+/// The commit a managed immutable runner converges to: the controller the upgrade installed,
 /// else this process's own build.
 ///
 /// `homeboy upgrade` runs its runner phase in the pre-upgrade process. Falling
 /// straight back to this process's build commit refreshed runners to the
 /// version being replaced, and its recovery command named that old commit too.
 pub(super) fn managed_immutable_runner_target_revision(
-    selected_source_revision: Option<&str>,
     expected_controller_identity: Option<&str>,
 ) -> Option<String> {
-    selected_source_revision
-        .map(str::to_string)
-        .or_else(|| {
-            expected_controller_identity
-                .and_then(|identity| {
-                    // Upgrade identities historically select the final build suffix.
-                    let suffix = &identity[identity.rfind('+')?..];
-                    crate::homeboy_refresh::build_identity_commit(suffix)
-                })
-                .filter(|commit| {
-                    commit.len() >= 7
-                        && commit.len() <= 64
-                        && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
-                .map(str::to_string)
+    expected_controller_identity
+        .and_then(|identity| {
+            // Upgrade identities historically select the final build suffix.
+            let suffix = &identity[identity.rfind('+')?..];
+            crate::homeboy_refresh::build_identity_commit(suffix)
         })
+        .filter(|commit| {
+            commit.len() >= 7
+                && commit.len() <= 64
+                && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .map(str::to_string)
         .or_else(|| homeboy_product_identity::build_identity().git_commit)
 }
 

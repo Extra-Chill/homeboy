@@ -75,6 +75,50 @@ fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
     });
 }
 
+#[test]
+fn bare_homeboy_runner_is_adopted_through_refresh_promotion() {
+    crate::test_support::with_isolated_home(|_| {
+        homeboy_core::server::create(
+            r#"{"id":"adopt","host":"example.test","user":"user"}"#,
+            false,
+        )
+        .expect("create server");
+        crate::create(
+            r#"{"id":"adopt","kind":"ssh","server_id":"adopt","workspace_root":"/runner/ws","homeboy_path":"homeboy"}"#,
+            false,
+        ).expect("create bare runner");
+        let selected = format!(
+            "/runner/ws/_homeboy_binaries/homeboy-{}/homeboy",
+            "a".repeat(64)
+        );
+        promote_verified_runner_binary_with(
+            || Ok(()),
+            "adopt",
+            &selected,
+            |runner_id, homeboy_path| {
+                let patch = refreshed_runner_patch_in_roots(runner_id, homeboy_path)?;
+                match merge(Some(runner_id), &patch.to_string(), &[])? {
+                    MergeOutput::Single(result) => Ok(result.updated_fields),
+                    MergeOutput::Bulk(_) => panic!("single runner promotion"),
+                }
+            },
+            |runner_id| Ok(crate::load(runner_id)?.settings.homeboy_path),
+        )
+        .expect("refresh adopts bare runner");
+        let adopted = crate::load("adopt").expect("reload adopted runner");
+        assert_eq!(
+            adopted.settings.homeboy_path.as_deref(),
+            Some(selected.as_str())
+        );
+        assert_eq!(
+            crate::effective_env("adopt")
+                .expect("effective env")
+                .get("HOMEBOY_COMMAND"),
+            Some(&selected)
+        );
+    });
+}
+
 fn create_ssh_runner_with_path_env(runner_id: &str, workspace: &std::path::Path, path_env: &str) {
     homeboy_core::server::create(
         &format!(r#"{{"id":"{runner_id}","host":"192.168.86.63","user":"user"}}"#),
