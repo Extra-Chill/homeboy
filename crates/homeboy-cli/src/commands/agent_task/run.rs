@@ -6917,7 +6917,7 @@ pub(crate) fn resolve_cook_repository(
     Ok(root.map(|root| {
         let remote = homeboy::core::git::resolve_default_remote(&root);
         let origin_url = if remote == "origin" {
-            component.remote_url.clone()
+            cook_component_repository_remote(&component)
         } else {
             homeboy::core::git::remote_origin_url(&root)
         };
@@ -6966,13 +6966,15 @@ fn bind_cook_repository_identity_from_config(
         .and_then(|component| homeboy::core::git::repo_root(Path::new(&component.local_path)));
     let repository_name = component
         .as_ref()
-        .and_then(|c| c.remote_url.as_deref())
+        .and_then(cook_component_repository_remote)
+        .as_deref()
         .map(normalize_repository_name)
         .unwrap_or_else(|| normalize_repository_name(&repo));
     let component_id = component.as_ref().map(|c| c.id.clone());
     let remote_identity = component
         .as_ref()
-        .and_then(|c| c.remote_url.as_deref())
+        .and_then(cook_component_repository_remote)
+        .as_deref()
         .and_then(canonical_remote_identity);
     let component_cwd = component
         .as_ref()
@@ -7063,10 +7065,39 @@ pub(super) fn cook_repository_names_for_selection(
         .unwrap_or_else(|| normalize_repository_name(repo));
     let repository_name = component
         .as_ref()
-        .and_then(|component| component.remote_url.as_deref())
+        .and_then(cook_component_repository_remote)
+        .as_deref()
         .map(normalize_repository_name)
         .unwrap_or_else(|| normalize_repository_name(repo));
     Ok((repository_name, component_id))
+}
+
+/// A nested component is owned by its enclosing checkout, not by a historical
+/// standalone remote (or its component ID). Keep root-component configured
+/// mappings intact: they may intentionally select a non-default remote.
+fn cook_component_repository_remote(
+    component: &homeboy::core::component::Component,
+) -> Option<String> {
+    let path = Path::new(&component.local_path);
+    // Both ordinary checkouts and linked worktrees have a .git entry. Avoid
+    // probing Git for root components, especially unrelated inventory entries.
+    if path.join(".git").exists()
+        || !path
+            .ancestors()
+            .skip(1)
+            .any(|parent| parent.join(".git").exists())
+    {
+        return component.remote_url.clone();
+    }
+    if let (Ok(path), Some(root)) = (path.canonicalize(), homeboy::core::git::repo_root(path)) {
+        if path != root && path.starts_with(&root) {
+            let remote = homeboy::core::git::resolve_default_remote(&root);
+            if let Some(url) = homeboy::core::git::remote_url(&root, &remote) {
+                return Some(url);
+            }
+        }
+    }
+    component.remote_url.clone()
 }
 
 fn validate_cook_repository_component_selection(
@@ -7074,8 +7105,7 @@ fn validate_cook_repository_component_selection(
     component: &homeboy::core::component::Component,
 ) -> homeboy::core::Result<()> {
     let component_id = &component.id;
-    let repository = component
-        .remote_url
+    let repository = cook_component_repository_remote(component)
         .as_deref()
         .map(normalize_repository_name)
         .unwrap_or_else(|| normalize_repository_name(&component.id));
@@ -7171,8 +7201,7 @@ fn cook_components_matching_repository_name(
                     .aliases
                     .iter()
                     .any(|alias| normalize_repository_name(alias) == repository_name)
-                || component
-                    .remote_url
+                || cook_component_repository_remote(component)
                     .as_deref()
                     .is_some_and(|remote| normalize_repository_name(remote) == repository_name)
         })
@@ -7281,8 +7310,7 @@ pub(super) fn cook_repository_identities_for_workspace(
             continue;
         };
         for component in configured {
-            let Some(component_identity) = component
-                .remote_url
+            let Some(component_identity) = cook_component_repository_remote(component)
                 .as_deref()
                 .and_then(canonical_remote_identity)
             else {

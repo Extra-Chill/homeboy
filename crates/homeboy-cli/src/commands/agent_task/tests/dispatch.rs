@@ -1021,6 +1021,79 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
 }
 
 #[test]
+fn cook_resolves_monorepo_components_with_missing_or_stale_standalone_remotes() {
+    with_isolated_home(|_| {
+        let checkout = tempfile::tempdir().expect("monorepo");
+        init_runtime_component_checkout(checkout.path());
+        let remote = "https://github.com/chubes4/wp-native.git";
+        add_remote(checkout.path(), "origin", remote);
+        register_component("wp-native", checkout.path(), remote);
+        for (id, relative, configured_remote) in [
+            (
+                "wp-native-auth",
+                "plugins/wp-native-auth",
+                Some("https://github.com/chubes4/wp-native-auth.git"),
+            ),
+            ("api-client", "packages/api-client", None),
+        ] {
+            let path = checkout.path().join(relative);
+            std::fs::create_dir_all(&path).unwrap();
+            homeboy::core::component::write_standalone_component_config(
+                &homeboy::core::component::Component {
+                    id: id.into(),
+                    local_path: path.display().to_string(),
+                    remote_url: configured_remote.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                super::super::run::cook_repository_names_for_selection(id).unwrap(),
+                ("wp-native".into(), id.into())
+            );
+            for repo in ["wp-native", id] {
+                for with_cwd in [false, true] {
+                    let mut argv: Vec<String> = vec![
+                        "homeboy",
+                        "agent-task",
+                        "cook",
+                        "--prompt",
+                        "fix nested component",
+                        "--repo",
+                        repo,
+                        "--component",
+                        id,
+                        "--no-finalize",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                    if with_cwd {
+                        argv.extend(["--cwd".into(), path.display().to_string()]);
+                    }
+                    let mut args = cook_args_from_cli(argv);
+                    let _repository = super::super::run::resolve_cook_repository(&mut args)
+                        .expect("admit monorepo component")
+                        .expect("local repository");
+                    assert_eq!(args.dispatch.repo.as_deref(), Some("wp-native"));
+                    assert_eq!(args.component.as_deref(), Some(id));
+                    let identity = args.repository_identity.unwrap();
+                    assert_eq!(identity["component_cwd"], relative);
+                    assert_eq!(
+                        identity["remote_identity"],
+                        "git://github.com/chubes4/wp-native"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            super::super::run::cook_repository_names_for_selection("wp-native").unwrap(),
+            ("wp-native".into(), "wp-native".into())
+        );
+    });
+}
+
+#[test]
 fn cook_keeps_root_repository_for_an_explicit_subdirectory_component() {
     with_isolated_home(|_| {
         let checkout = tempfile::tempdir().expect("repository checkout");
