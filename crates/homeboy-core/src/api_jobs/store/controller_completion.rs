@@ -337,6 +337,7 @@ impl JobStore {
         completion: Completion,
         cancellation_requested: bool,
         controller: &ControllerJobState,
+        daemon_scope: Option<&DaemonScope>,
     ) -> Result<Completion> {
         let Some(persistence) = &self.persistence else {
             return Ok(completion);
@@ -379,6 +380,7 @@ impl JobStore {
                     || serde_json::json!({"message": completion.message, "data": completion.data}),
                 ),
                 cancellation_requested,
+                daemon_scope,
             )? {
                 super::terminal_delivery::retain_on(&transaction, &delivery, true)?;
             }
@@ -471,6 +473,7 @@ impl JobStore {
             },
             controller.cancellation_requested,
             controller,
+            stored.daemon_scope.as_ref(),
         )?;
         // Copy only once a real, legal mutation has durable completion custody.
         let prior = inner.clone();
@@ -541,13 +544,21 @@ impl JobStore {
         else {
             return Ok(());
         };
+        // Only this scope's jobs: another scope's completion custody is
+        // settled by its own daemon.
         let mut statement = connection
-            .prepare("SELECT job_id, payload FROM controller_completions ORDER BY rowid LIMIT 32")
+            .prepare(
+                "SELECT completion.job_id, completion.payload FROM controller_completions AS completion
+                 JOIN daemon_jobs AS job ON job.job_id = completion.job_id
+                 WHERE json_extract(job.body, '$.daemon_scope') IS ?1
+                 ORDER BY completion.rowid LIMIT 32",
+            )
             .map_err(index_error)?;
         let completions = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
+            .query_map(
+                [self.daemon_scope.as_ref().map(DaemonScope::as_str)],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
             .map_err(index_error)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(index_error)?;

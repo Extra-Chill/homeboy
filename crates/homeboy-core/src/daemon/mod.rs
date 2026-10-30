@@ -1433,6 +1433,16 @@ pub(super) fn state_path() -> Result<PathBuf> {
     paths::daemon_state_file()
 }
 
+/// This daemon's stable job-ownership scope: its resolved state directory.
+/// A restart in place keeps the scope while minting a new lease (#16104).
+pub(crate) fn daemon_scope() -> Result<crate::api_jobs::DaemonScope> {
+    Ok(daemon_scope_for_state_path(&state_path()?))
+}
+
+pub(super) fn daemon_scope_for_state_path(state_path: &Path) -> crate::api_jobs::DaemonScope {
+    crate::api_jobs::DaemonScope::from_state_dir(state_path.parent().unwrap_or(state_path))
+}
+
 pub fn read_status() -> Result<DaemonStatus> {
     read_status_for_state_path(state_path()?)
 }
@@ -1790,8 +1800,15 @@ where
         None
     };
     let state = write_state(local_addr)?;
-    let job_store = JobStore::open_without_reconciliation(paths::observation_db()?)
-        .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
+    // The ledger is shared by every daemon of this Unix user; the scope keeps
+    // this daemon's startup sweeps and counts to its own jobs (#16104).
+    let scope = daemon_scope()?;
+    let job_store =
+        JobStore::open_without_reconciliation(paths::observation_db()?).map(|store| {
+            store
+                .with_daemon_lease(state.lease_id.clone())
+                .with_daemon_scope(scope.clone())
+        })?;
     // A restart cannot resume the thread that owned a pre-spawn reservation.
     // Expire only reservations that never recorded a child identity.
     job_store.reconcile_expired_local_child_reservations()?;
@@ -1950,7 +1967,7 @@ where
         // checkpoint on the next start, which re-arms its resume (#15936).
         // With jobs still active keep the lease, so dead-lease recovery also
         // re-admits staged direct work.
-        let active_jobs = JobStore::active_count_at_path(paths::observation_db()?)?;
+        let active_jobs = JobStore::active_count_at_path(paths::observation_db()?, Some(&scope))?;
         let clean = active_jobs == 0;
         write_termination_evidence(&DaemonTerminationEvidence {
             classification: DaemonTerminationClassification::CleanStop,
@@ -5662,7 +5679,8 @@ mod tests {
         });
         let store =
             JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
-                .expect("durable store");
+                .expect("durable store")
+                .with_daemon_scope(daemon_scope().expect("daemon scope"));
         let outcome = store
             .admit_controller_job(
                 "controller.lab.staging-dispatch".to_string(),
@@ -7194,7 +7212,8 @@ mod tests {
             let store = JobStore::open_without_reconciliation(
                 paths::observation_db().expect("daemon jobs path"),
             )
-            .expect("open daemon jobs");
+            .expect("open daemon jobs")
+            .with_daemon_scope(daemon_scope().expect("daemon scope"));
             let queued = store.create("runner.exec");
             let running = store.create("runner.exec");
             store.start(running.id).expect("start durable job");

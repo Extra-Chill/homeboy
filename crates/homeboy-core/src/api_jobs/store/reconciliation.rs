@@ -482,6 +482,7 @@ impl JobStore {
                 .values()
                 .filter(|stored| {
                     matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                        && self.owns(stored)
                 })
                 .filter(|stored| {
                     never_started(stored)

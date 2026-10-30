@@ -27,7 +27,7 @@ use super::persistence::{
     JobStoreCompactionEvidence, ReplayTombstone, ReplayTombstoneKind,
 };
 use super::store::{ControllerJobSubmission, DurableJobStore, RemoteRunnerSubmission, StoredJob};
-use super::types::JobEvent;
+use super::types::{DaemonScope, JobEvent};
 use crate::error::{Error, Result};
 
 const REMOTE_RUNNER_KIND: &str = "remote_runner";
@@ -335,6 +335,7 @@ fn write_changes(
                         stored.job.status.is_terminal().then_some(stored.job.status),
                         None,
                         controller.cancellation_requested,
+                        stored.daemon_scope.as_ref(),
                     )? {
                         super::store::terminal_delivery::retain_on(transaction, &delivery, false)?;
                     }
@@ -602,14 +603,19 @@ pub(super) fn read_job_and_controller_submissions(
     Ok(Some((stored, submissions)))
 }
 
-pub(super) fn pending_step_delivery_count_readonly(path: &Path) -> Result<usize> {
+/// Pending deliveries carry their job's daemon scope in the payload, because a
+/// delivery can outlive its pruned job row.
+pub(super) fn pending_step_delivery_count_readonly(
+    path: &Path,
+    daemon_scope: Option<&DaemonScope>,
+) -> Result<usize> {
     let Some(connection) = open_sql_store_readonly(path)? else {
         return Ok(0);
     };
     connection
         .query_row(
-            "SELECT COUNT(*) FROM step_terminal_deliveries WHERE receipt IS NULL",
-            [],
+            "SELECT COUNT(*) FROM step_terminal_deliveries WHERE receipt IS NULL AND (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.daemon_scope') END) IS ?1",
+            [daemon_scope.map(DaemonScope::as_str)],
             |row| row.get(0),
         )
         .map_err(|error| store_error(path, "count pending terminal deliveries", error))

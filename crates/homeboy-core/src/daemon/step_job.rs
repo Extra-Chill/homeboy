@@ -337,6 +337,9 @@ pub struct StepTerminalDelivery {
     /// The child was stopped because the step job was cancelled.
     pub cancelled: bool,
     pub log_path: PathBuf,
+    /// The step job's daemon scope; only that scope's daemon delivers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_scope: Option<crate::api_jobs::DaemonScope>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1052,6 +1055,7 @@ pub(crate) fn terminal_delivery(
     status: Option<crate::api_jobs::JobStatus>,
     error: Option<Value>,
     cancelled: bool,
+    daemon_scope: Option<&crate::api_jobs::DaemonScope>,
 ) -> Result<Option<StepTerminalDelivery>> {
     // No synthesis for old in-flight rows that did not name a consumer.
     if request.get("terminal_consumer").is_none() {
@@ -1103,6 +1107,7 @@ pub(crate) fn terminal_delivery(
         log_path: step_job_dir(job_id)
             .map(|dir| dir.join(STEP_LOG_FILE))
             .unwrap_or_default(),
+        daemon_scope: daemon_scope.cloned(),
     }))
 }
 
@@ -1794,7 +1799,7 @@ mod tests {
             let fresh = crate::api_jobs::JobStore::open_without_reconciliation(&path).unwrap();
             assert_eq!(fresh.pending_step_terminal_deliveries().unwrap().len(), 1);
             assert_eq!(
-                crate::api_jobs::JobStore::active_count_at_path(&path).unwrap(),
+                crate::api_jobs::JobStore::active_count_at_path(&path, None).unwrap(),
                 1,
                 "pending custody keeps its job active in the daemon store"
             );
@@ -1813,7 +1818,7 @@ mod tests {
             assert!(fresh.pending_step_terminal_deliveries().unwrap().is_empty());
             assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst), 1);
             assert_eq!(
-                crate::api_jobs::JobStore::active_count_at_path(&path).unwrap(),
+                crate::api_jobs::JobStore::active_count_at_path(&path, None).unwrap(),
                 0
             );
         });

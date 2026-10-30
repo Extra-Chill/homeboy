@@ -17,6 +17,27 @@ use homeboy_runner_contract::{
     JobArtifactMetadata, PathMaterializationPlan, RunnerJobLifecycleMetadata, RunnerLifecycleOwner,
 };
 
+/// Stable identity of the daemon that owns a job: its resolved daemon state
+/// directory (`--state-dir` / `HOMEBOY_DAEMON_STATE_DIR`, or the default
+/// daemon state directory). Every daemon of one Unix user shares one job
+/// ledger, so startup recovery, expiry, adoption, delivery, and stop/idle
+/// counts act only on jobs of their own scope (#16104). Unlike the daemon
+/// lease id, the scope survives a restart in place, so a restarted daemon
+/// still re-adopts its own work.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DaemonScope(String);
+
+impl DaemonScope {
+    pub fn from_state_dir(state_dir: &std::path::Path) -> Self {
+        Self(state_dir.to_string_lossy().into_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {

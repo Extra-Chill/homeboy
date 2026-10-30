@@ -392,16 +392,32 @@ mod redaction_tests {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::api_jobs::{JobEventKind, JobStatus, LocalChildStartDiscriminator};
+    use crate::api_jobs::{DaemonScope, JobEventKind, JobStatus, LocalChildStartDiscriminator};
     use crate::test_support::with_isolated_home;
     use std::time::Instant;
+
+    fn scope(name: &str) -> DaemonScope {
+        DaemonScope::from_state_dir(Path::new(&format!("/state/controllers/{name}")))
+    }
 
     /// A child spawned the way the daemon spawns it, by a daemon that then
     /// died: its custody is released and its store handle is gone.
     fn spawn_then_lose_daemon(path: &Path, script: &str) -> (Uuid, Child) {
+        spawn_then_lose_scoped_daemon(path, script, Some(scope("own")))
+    }
+
+    fn spawn_then_lose_scoped_daemon(
+        path: &Path,
+        script: &str,
+        daemon_scope: Option<DaemonScope>,
+    ) -> (Uuid, Child) {
         let store = JobStore::open_without_reconciliation(path)
             .unwrap()
             .with_daemon_lease("dead-daemon".to_string());
+        let store = match daemon_scope {
+            Some(daemon_scope) => store.with_daemon_scope(daemon_scope),
+            None => store,
+        };
         let job = store.create("runner.exec");
         store
             .reserve_local_child_at_with_runner_capacity(
@@ -428,10 +444,12 @@ mod tests {
         (job.id, child)
     }
 
+    /// The same daemon scope restarted in place: a new lease, the same scope.
     fn restarted_daemon(path: &Path) -> JobStore {
         JobStore::open_without_reconciliation(path)
             .unwrap()
             .with_daemon_lease("restarted-daemon".to_string())
+            .with_daemon_scope(scope("own"))
     }
 
     fn wait_terminal(store: &JobStore, job_id: Uuid) -> crate::api_jobs::Job {
@@ -566,6 +584,55 @@ mod tests {
                 .and_then(|event| event.data)
                 .unwrap();
             assert_eq!(error["reason"], "runner_exec_exit_unrecorded");
+        });
+    }
+    /// Another controller's daemon shares the ledger but never adopts this
+    /// scope's child, even while its owner is down and custody is free
+    /// (#16104). Nor does any daemon adopt a scope-less (pre-scope) child.
+    /// The owning scope, restarted with a new lease, adopts it exactly once.
+    #[test]
+    fn only_the_owning_scope_re_adopts_a_child() {
+        with_isolated_home(|home| {
+            let path = home.path().join("jobs.sqlite");
+            let counter = home.path().join("spawns");
+            let script = format!("echo spawn >> {}; sleep 1; exit 0", counter.display());
+            let (job_id, mut child) = spawn_then_lose_daemon(&path, &script);
+            let (legacy_id, mut legacy_child) =
+                spawn_then_lose_scoped_daemon(&path, "sleep 1; exit 0", None);
+            let reaper = std::thread::spawn(move || child.wait());
+            let legacy_reaper = std::thread::spawn(move || legacy_child.wait());
+
+            let other = JobStore::open_without_reconciliation(&path)
+                .unwrap()
+                .with_daemon_lease("other-controller-daemon".to_string())
+                .with_daemon_scope(scope("other"));
+            assert!(other.foreign_runner_exec_children().is_empty());
+            recover_runner_exec_jobs(&other);
+            assert!(other.adopt_runner_exec_job(job_id).is_err());
+            let untouched = other.get(job_id).unwrap();
+            assert_eq!(untouched.status, JobStatus::Running);
+            assert_eq!(untouched.daemon_lease_id.as_deref(), Some("dead-daemon"));
+
+            let store = restarted_daemon(&path);
+            let foreign = store.foreign_runner_exec_children();
+            assert_eq!(
+                foreign.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+                vec![job_id],
+                "the owning scope sees only its own child, never the scope-less one"
+            );
+            recover_runner_exec_jobs(&store);
+            recover_runner_exec_jobs(&store);
+            let job = wait_terminal(&store, job_id);
+            reaper.join().unwrap().unwrap();
+            legacy_reaper.join().unwrap().unwrap();
+
+            assert_eq!(job.status, JobStatus::Succeeded);
+            assert_eq!(
+                std::fs::read_to_string(&counter).unwrap().lines().count(),
+                1,
+                "re-adoption must not spawn the child again"
+            );
+            assert_eq!(store.get(legacy_id).unwrap().status, JobStatus::Running);
         });
     }
 }

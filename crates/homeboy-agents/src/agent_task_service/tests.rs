@@ -2798,6 +2798,7 @@ fn cancelled_workflow_cook_step_cancels_the_attempt_its_cook_redirected_to() {
             exit_code: None,
             cancelled: true,
             log_path: std::path::PathBuf::new(),
+            daemon_scope: None,
         };
         super::cook_step::observe_cook_step_exit(&exit).expect("observe cancelled exit");
 

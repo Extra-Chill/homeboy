@@ -279,7 +279,7 @@ fn restart_recovery_runs_on_the_sql_store() {
         event_count
     );
     assert_eq!(
-        JobStore::active_count_at_path(&path).expect("active count"),
+        JobStore::active_count_at_path(&path, None).expect("active count"),
         0
     );
 }
@@ -378,7 +378,7 @@ fn opening_and_reading_an_unchanged_store_leaves_the_database_file_untouched() {
         .durable_transaction(|_| Ok(()))
         .expect("no-op transaction");
     JobStore::open_without_reconciliation(&path).expect("reopen");
-    JobStore::active_count_at_path(&path).expect("active count");
+    JobStore::active_count_at_path(&path, None).expect("active count");
     JobStore::retained_owner_report_at_path(&path).expect("owner report");
     store
         .reconcile_controller_completions()

@@ -354,7 +354,10 @@ fn supervise_child_with_lifetime(
         lease_id: state.as_ref().map(|state| state.lease_id.clone()).or_else(|| prior.and_then(|evidence| evidence.lease_id)),
         pid: Some(pid),
         binary_identity: state.as_ref().map(|state| state.build_identity.display.clone()),
-        active_jobs: super::JobStore::active_count_at_path(crate::paths::observation_db()?)?,
+        active_jobs: super::JobStore::active_count_at_path(
+            crate::paths::observation_db()?,
+            Some(&super::daemon_scope_for_state_path(state_path)),
+        )?,
         resource_evidence: "unavailable: launcher does not collect OS resource snapshots".to_string(),
         os_evidence: "unavailable: no OS evidence collected; exit status and signal are launcher observations only".to_string(),
         exit_code, signal,
@@ -397,8 +400,9 @@ fn wait_for_daemon_with_lifetime(
             .and_then(|validation| validation.state)
             .filter(|state| state.pid == child.id());
         if let Some(state) = state {
+            let scope = super::daemon_scope_for_state_path(state_path);
             let idle_jobs = crate::paths::observation_db()
-                .and_then(super::JobStore::active_count_at_path)
+                .and_then(|jobs| super::JobStore::active_count_at_path(jobs, Some(&scope)))
                 .is_ok_and(|count| count == 0);
             if !idle_jobs || launcher.as_ref().is_some_and(|launcher| launcher.is_live()) {
                 idle.touch();
@@ -2444,7 +2448,10 @@ pub fn reconcile_unleased_candidates(
             continue;
         }
         let token = candidate.startup_token.as_deref();
-        let active_jobs = super::JobStore::active_count_at_path(&jobs_path)?;
+        let active_jobs = super::JobStore::active_count_at_path(
+            &jobs_path,
+            Some(&super::daemon_scope_for_state_path(&state_path)),
+        )?;
         result.active_jobs = active_jobs;
         if active_jobs != 0 {
             result.blocked_pids.push(candidate.pid);

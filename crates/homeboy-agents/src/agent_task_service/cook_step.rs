@@ -579,6 +579,7 @@ mod tests {
                 exit_code: Some(1),
                 cancelled: false,
                 log_path: home.path().join("step.log"),
+                daemon_scope: None,
             };
             observe_cook_step_exit(&exit).unwrap();
             let after = store.read_record(cook_id).unwrap();

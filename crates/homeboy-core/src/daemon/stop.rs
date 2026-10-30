@@ -606,7 +606,10 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
     if pid_is_running(pid) && !force {
         return stop_supervised_daemon(&path, &identity, state, state_path_display);
     }
-    let active_jobs = JobStore::active_count_at_path(paths::observation_db()?)?;
+    let active_jobs = JobStore::active_count_at_path(
+        paths::observation_db()?,
+        Some(&daemon_scope_for_state_path(&path)),
+    )?;
     if pid_is_running(pid) {
         write_termination_evidence(&DaemonTerminationEvidence {
             classification: DaemonTerminationClassification::CleanStop,
@@ -648,21 +651,17 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
     })
 }
 
+/// Active jobs of this daemon's scope. Another controller's daemon shares the
+/// ledger; its work neither blocks this daemon's stop nor is touched by it.
 pub(super) fn active_daemon_job_ids() -> Result<Vec<Uuid>> {
-    let store = JobStore::open_without_reconciliation(paths::observation_db()?)?;
+    let store = JobStore::open_without_reconciliation(paths::observation_db()?)?
+        .with_daemon_scope(daemon_scope()?);
     // Replacement is authorized without an operator attestation when durable
     // terminal evidence proves no workload remains, so first reconcile every
     // active job whose evidence already proves it. Live children, live linked
     // runs, and unknown-ownership jobs stay untouched and keep blocking.
     let _ = store.reconcile_terminal_linked_daemon_jobs();
-    let mut job_ids = store
-        .list()
-        .into_iter()
-        .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
-        .map(|job| job.id)
-        .collect::<Vec<_>>();
-    job_ids.sort();
-    Ok(job_ids)
+    Ok(store.active_job_ids())
 }
 
 #[cfg(test)]
