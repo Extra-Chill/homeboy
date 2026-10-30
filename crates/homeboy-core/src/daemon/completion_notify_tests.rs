@@ -11,7 +11,7 @@ fn run(id: &str, status: &str, finished_at: &str, owner: Option<&str>) -> RunRec
     }
     RunRecord {
         id: id.to_string(),
-        kind: "agent-task".to_string(),
+        kind: "command".to_string(),
         component_id: Some("blocks-engine".to_string()),
         started_at: "2026-10-13T15:00:00Z".to_string(),
         finished_at: Some(finished_at.to_string()),
@@ -88,6 +88,26 @@ fn a_stale_sweep_is_one_summary_not_one_notification_per_run() {
         commands,
         ["homeboy runs list --status stale --since 2026-10-13T15:00:00Z"]
     );
+}
+
+#[test]
+fn cook_rows_leave_terminal_announcement_to_cook() {
+    let cook_row = |id, status, owner| RunRecord {
+        kind: "agent-task".to_string(),
+        ..run(id, status, "2026-10-13T15:32:28Z", owner)
+    };
+    let notifications = completion_notifications(claimed(vec![
+        cook_row("cook", "fail", None),
+        cook_row("cook-attempt-1", "pass", Some("cook")),
+        cook_row("orphaned-cook", "stale", None),
+        run("standalone", "pass", "2026-10-13T15:32:28Z", None),
+    ]));
+
+    let ids: Vec<&str> = notifications
+        .iter()
+        .map(|(event, _)| event.run_id.as_str())
+        .collect();
+    assert_eq!(ids, ["orphaned-cook", "standalone"]);
 }
 
 #[test]
