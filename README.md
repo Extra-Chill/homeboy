@@ -2,6 +2,8 @@
 
 Homeboy is a component-aware automation CLI for modern software work: many branches, many worktrees, many agents, and many projects moving at once.
 
+Coding agents are powerful but nondeterministic: the same task can produce different changes on every run. Homeboy makes that work more deterministic by surrounding it with fixed structure: isolated worktrees, deterministic gates, durable evidence, and gated pull-request finalization.
+
 It gives local developers, CI jobs, scheduled automation, and coding agents the same operational surface for checks, reviews, tests, benchmarks, traces, releases, and evidence. Humans get readable terminal output; automation gets stable JSON artifacts.
 
 Homeboy core is intentionally domain-agnostic. The CLI owns orchestration, configuration, structured output, persisted runs, baselines, remote execution, and release/evidence workflows. Domain-specific behavior lives in extensions such as Rust, WordPress, Node.js, GitHub, Homebrew, Swift, and custom team extensions.
