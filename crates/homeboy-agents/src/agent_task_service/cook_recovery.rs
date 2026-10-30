@@ -230,6 +230,9 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
         | CookStatus::ExecutionBudgetExhausted
         | CookStatus::RetriesExhausted
         | CookStatus::PreExecutionFailure => false,
+        // Infrastructure deferral consumes neither a provider retry nor budget:
+        // continuation re-verifies the already materialized candidate.
+        CookStatus::GatesDeferred => true,
         status if status.is_gate_failure() => inputs.retry_admitted,
         _ => true,
     };
@@ -1081,6 +1084,14 @@ mod tests {
 
     #[test]
     fn step_decision_covers_every_variant() {
+        assert_eq!(
+            step("gates_deferred", |inputs| {
+                inputs.retry_admitted = false;
+                inputs.continuation_rearm_required = true;
+            }),
+            CookRecoveryStep::Rearm,
+            "infrastructure recovery does not require provider retry budget"
+        );
         assert_eq!(
             step("verification_pending", |_| {}),
             CookRecoveryStep::Continue

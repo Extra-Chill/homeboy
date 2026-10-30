@@ -783,12 +783,17 @@ pub fn preflight_cook_promotion_for_observation_in_store(
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Value> {
     if let Some(promotion) = persisted_promotion_from_record(run_id, record.clone())? {
-        let behavior = if promotion.status == AgentTaskPromotionStatus::VerificationPending {
+        let behavior = if promotion.status == AgentTaskPromotionStatus::GateDeferred {
+            "resume_deferred_gates"
+        } else if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             "resume_verification_pending"
         } else {
             "load_persisted"
         };
-        if promotion.status != AgentTaskPromotionStatus::VerificationPending {
+        if !matches!(
+            promotion.status,
+            AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::GateDeferred
+        ) {
             return Ok(json!({
                 "behavior": behavior,
                 "status": promotion.status,
@@ -831,7 +836,9 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         aggregate,
     )?;
     if let Some(promotion) = persisted_promotion_from_record(run_id, record.clone())? {
-        let behavior = if promotion.status == AgentTaskPromotionStatus::VerificationPending {
+        let behavior = if promotion.status == AgentTaskPromotionStatus::GateDeferred {
+            "resume_deferred_gates"
+        } else if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             "resume_verification_pending"
         } else {
             "load_persisted"
@@ -996,7 +1003,12 @@ pub(crate) fn promote_or_load_attempt_in_store(
         .map(|store| store.run_phase_guard(run_id, "promote.recover.candidate"));
     let _identities = crate::agent_task_gate::placement::runner_identity_scope();
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
-        if promotion.status != AgentTaskPromotionStatus::VerificationPending {
+        // Infrastructure deferral has no verdict to replay. Reverify the
+        // fingerprint-bound candidate without invoking the provider again.
+        if !matches!(
+            promotion.status,
+            AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::GateDeferred
+        ) {
             if promotion.provenance.get("replacement_gate_proof").is_some() {
                 validate_replacement_promotion_in_store(lifecycle_store, &promotion)?;
             }
@@ -1021,7 +1033,10 @@ pub(crate) fn promote_or_load_attempt_in_store(
         })?;
     promotion_executed_model_in_store(lifecycle_store, run_id, outcome)?;
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
-        if promotion.status == AgentTaskPromotionStatus::VerificationPending {
+        if matches!(
+            promotion.status,
+            AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::GateDeferred
+        ) {
             let target_path = promotion.target.path.as_deref().or_else(|| {
                 promotion.provenance.get("worktree_path").and_then(Value::as_str)
             }).map(PathBuf::from).or_else(|| {
