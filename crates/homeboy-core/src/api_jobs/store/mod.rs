@@ -25,12 +25,14 @@ use super::persistence::{
 use super::remote_runner;
 use super::remote_runner::JobArtifactMetadata;
 use super::sql_store::{self, SqlSyncState};
-use super::types::{Job, JobEvent, JobEventKind, JobStatus, RunnerJobProjection};
+use super::types::{DaemonScope, Job, JobEvent, JobEventKind, JobStatus, RunnerJobProjection};
 use crate::error::{Error, Result};
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::source_snapshot::SourceSnapshot;
 
 mod controller_completion;
+#[cfg(test)]
+mod daemon_scope_tests;
 mod reconciliation;
 pub(super) mod terminal_delivery;
 
@@ -63,6 +65,8 @@ pub struct JobStore {
     pub(super) next_event_sequence: Arc<AtomicU64>,
     pub(super) persistence: Option<Arc<JobStorePersistence>>,
     pub(super) daemon_lease_id: Option<String>,
+    /// The daemon scope this store acts for; see [`JobStore::owns`].
+    pub(super) daemon_scope: Option<DaemonScope>,
     #[cfg(test)]
     terminal_write_failures: Arc<AtomicU64>,
     #[cfg(test)]
@@ -323,6 +327,11 @@ pub(crate) struct StoredJob {
     pub(super) local_runner: Option<LocalRunnerJob>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) local_child: Option<LocalChildExecution>,
+    /// Daemon scope that created or admitted this job (#16104). Records
+    /// persisted before scopes existed carry none: they are owned by no daemon
+    /// scope, and every scoped sweep skips them. No reader guesses an owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) daemon_scope: Option<DaemonScope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -621,6 +630,7 @@ impl JobStore {
                 Some(stored.job.status),
                 error,
                 controller.cancellation_requested || stored.job.status == JobStatus::Cancelled,
+                stored.daemon_scope.as_ref(),
             )? {
                 terminal_deliveries.push(delivery);
             }
@@ -711,16 +721,23 @@ impl JobStore {
     ///
     /// Daemon status runs in a separate CLI process, so using [`Self::open`]
     /// here would reconcile live jobs as though the daemon had restarted.
-    pub(crate) fn active_count_at_path(path: impl Into<PathBuf>) -> Result<usize> {
+    /// Only jobs and pending deliveries of `daemon_scope` count: another
+    /// scope's work neither keeps this daemon alive nor blocks its stop.
+    pub(crate) fn active_count_at_path(
+        path: impl Into<PathBuf>,
+        daemon_scope: Option<&DaemonScope>,
+    ) -> Result<usize> {
         let path = path.into();
         let Some(active) = sql_store::read_active_jobs_readonly(&path)? else {
             return Ok(0);
         };
         let now = timestamp_ms();
-        let pending_deliveries = sql_store::pending_step_delivery_count_readonly(&path)?;
+        let pending_deliveries =
+            sql_store::pending_step_delivery_count_readonly(&path, daemon_scope)?;
         Ok(active
             .into_iter()
             .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
+            .filter(|stored| stored.daemon_scope.as_ref() == daemon_scope)
             // Status commands run outside the daemon and must not persist a
             // lifecycle transition, but an expired admission is no longer an
             // owner of daemon capacity. Startup/the daemon reconciler records
@@ -847,6 +864,7 @@ impl JobStore {
                 terminal_job_retention_bytes,
             ))),
             daemon_lease_id: None,
+            daemon_scope: None,
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -928,6 +946,7 @@ impl JobStore {
                 terminal_job_retention_bytes,
             ))),
             daemon_lease_id: None,
+            daemon_scope: None,
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -942,6 +961,23 @@ impl JobStore {
     pub(crate) fn with_daemon_lease(mut self, daemon_lease_id: String) -> Self {
         self.daemon_lease_id = Some(daemon_lease_id);
         self
+    }
+
+    /// Act for one daemon scope: jobs this store creates are stamped with it,
+    /// and its scoped sweeps see only jobs stamped with it.
+    pub fn with_daemon_scope(mut self, daemon_scope: DaemonScope) -> Self {
+        self.daemon_scope = Some(daemon_scope);
+        self
+    }
+
+    /// Whether a stored job belongs to this store's daemon scope (#16104).
+    /// Every daemon of one Unix user shares one ledger, so a daemon never
+    /// expires, recovers, adopts, delivers, or waits on another scope's job.
+    /// A daemon always has a scope, so it never owns a scope-less record
+    /// (persisted before scopes existed). A store opened without a scope acts
+    /// only for scope-less records.
+    pub(super) fn owns(&self, stored: &StoredJob) -> bool {
+        stored.daemon_scope == self.daemon_scope
     }
 
     /// Snapshot-less job creation convenience. Production code creates jobs via
@@ -1376,11 +1412,14 @@ impl JobStore {
             .and_then(|runner| runner.workspace_owner_lease.clone()))
     }
 
+    /// Fail this scope's expired admissions; another scope's admissions are
+    /// its own daemon's handoff window.
     pub(crate) fn reconcile_expired_admissions_at(&self, now: u64) -> Result<Vec<Uuid>> {
         self.durable_transaction(|inner| {
             let expired = inner
                 .jobs
                 .values_mut()
+                .filter(|stored| self.owns(stored))
                 .filter_map(|stored| {
                     let lease = stored.admission_lease.as_ref()?;
                     if !stored.job.status.is_terminal() && lease.expires_at_ms <= now {
@@ -1515,6 +1554,7 @@ impl JobStore {
                 remote_runner: None,
                 local_runner,
                 local_child: None,
+                daemon_scope: self.daemon_scope.clone(),
             },
         );
         if let (Some(idempotency_key), true) =
@@ -2253,6 +2293,7 @@ impl JobStore {
                 remote_runner: None,
                 local_runner: None,
                 local_child: None,
+                daemon_scope: self.daemon_scope.clone(),
             };
             stored.job.event_count = stored.events.len();
             inner.jobs.insert(job_id, stored);
@@ -2413,8 +2454,10 @@ impl JobStore {
         })
     }
 
-    /// Running local children recorded under another daemon
-    /// lease, with their Linux kernel start identity (#16681).
+    /// Running local children of this daemon scope recorded under another
+    /// lease of it (an earlier run of this daemon), with their Linux kernel
+    /// start identity (#16681). Another scope's children are never foreign to
+    /// this daemon: they belong to their own daemon, live or down (#16104).
     pub(crate) fn foreign_runner_exec_children(&self) -> Vec<(Uuid, u32, u64)> {
         self.inner
             .lock()
@@ -2423,6 +2466,7 @@ impl JobStore {
             .values()
             .filter(|stored| {
                 stored.job.status == JobStatus::Running
+                    && self.owns(stored)
                     && stored.job.daemon_lease_id != self.daemon_lease_id
             })
             .filter_map(|stored| {
@@ -2447,13 +2491,28 @@ impl JobStore {
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
-                .filter(|stored| stored.job.status == JobStatus::Running)
+                .filter(|stored| stored.job.status == JobStatus::Running && self.owns(stored))
                 .ok_or_else(|| job_not_found(job_id))?;
             stored.job.daemon_lease_id = Some(lease_id);
             Ok(())
         })
     }
 
+    /// This scope's queued or running job ids, sorted; what its stop waits on.
+    pub(crate) fn active_job_ids(&self) -> Vec<Uuid> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let mut job_ids = inner
+            .jobs
+            .values()
+            .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
+            .filter(|stored| self.owns(stored))
+            .map(|stored| stored.job.id)
+            .collect::<Vec<_>>();
+        job_ids.sort();
+        job_ids
+    }
+
+    /// This scope's active controller jobs, the only ones its recovery resumes.
     pub(crate) fn active_controller_jobs(&self) -> Vec<(Uuid, ControllerJobState)> {
         self.inner
             .lock()
@@ -2461,6 +2520,7 @@ impl JobStore {
             .jobs
             .values()
             .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
+            .filter(|stored| self.owns(stored))
             .filter_map(|stored| {
                 stored
                     .controller_job
@@ -2752,7 +2812,7 @@ impl JobStore {
         inner
             .jobs
             .values()
-            .filter(|stored| stored.job.status.is_terminal())
+            .filter(|stored| stored.job.status.is_terminal() && self.owns(stored))
             .filter_map(|stored| {
                 stored
                     .local_runner
@@ -2958,6 +3018,7 @@ impl JobStore {
                 .values()
                 .filter(|stored| {
                     stored.job.status == JobStatus::Queued
+                        && self.owns(stored)
                         && stored.local_child.as_ref().is_some_and(|child| {
                             child.process.is_none()
                                 && child

@@ -68,7 +68,7 @@ fn active_count_reads_durable_jobs_without_reconciling_them() {
     store.start(job.id).expect("start job");
 
     assert_eq!(
-        JobStore::active_count_at_path(&path).expect("active count"),
+        JobStore::active_count_at_path(&path, None).expect("active count"),
         1
     );
     assert_eq!(
@@ -88,7 +88,7 @@ fn status_excludes_an_expired_admission_before_daemon_restart_reconciles_it() {
         .expect("create already-expired admission");
 
     assert_eq!(
-        JobStore::active_count_at_path(&path).expect("status capacity"),
+        JobStore::active_count_at_path(&path, None).expect("status capacity"),
         0,
         "a caller that died before release cannot make an idle daemon report work"
     );

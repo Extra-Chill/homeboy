@@ -1135,6 +1135,7 @@ impl JobStore {
                 remote_runner: Some(stored_remote_runner),
                 local_runner: None,
                 local_child: None,
+                daemon_scope: self.daemon_scope.clone(),
             },
         );
         if let (Some(submission_key), Some(fingerprint)) =

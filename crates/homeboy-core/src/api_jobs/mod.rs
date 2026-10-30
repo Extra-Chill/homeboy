@@ -29,9 +29,10 @@ pub use store::{JobHandle, JobRunner, JobStore, RecoveredTerminalJob};
 pub use summary::{active_runner_job_run_summary, active_runner_job_run_summary_if_durable};
 pub use types::{
     ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonActiveJobRecoveryDisposition,
-    DaemonActiveJobRecoveryEvidence, DaemonLeaseJobDiagnostics, DaemonLinkedDurableRunState, Job,
-    JobClaimMetadata, JobEvent, JobEventKind, JobStatus, LeaselessOrphanAffectedJob,
-    LeaselessOrphanJobDiagnostics, RunnerJobLogSnapshot, RunnerJobProjection, RunnerJobSource,
+    DaemonActiveJobRecoveryEvidence, DaemonLeaseJobDiagnostics, DaemonLinkedDurableRunState,
+    DaemonScope, Job, JobClaimMetadata, JobEvent, JobEventKind, JobStatus,
+    LeaselessOrphanAffectedJob, LeaselessOrphanJobDiagnostics, RunnerJobLogSnapshot,
+    RunnerJobProjection, RunnerJobSource,
 };
 
 /// Read-only projection for inspecting one durable daemon job without exposing

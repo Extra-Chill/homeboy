@@ -34,7 +34,8 @@ pub(crate) fn retain_on(
 }
 
 impl JobStore {
-    /// Read pending private evidence, including deliveries whose job was pruned.
+    /// Read this scope's pending private evidence, including deliveries whose
+    /// job was pruned. Another scope's deliveries belong to its own daemon.
     pub fn pending_step_terminal_deliveries(&self) -> Result<Vec<StepTerminalDelivery>> {
         self.step_delivery_rows(false)
             .map(|rows| rows.into_iter().map(|(_, delivery)| delivery).collect())
@@ -46,10 +47,11 @@ impl JobStore {
         };
         let connection = super::super::persistence::open_ledger(&path)?;
         let mut statement = connection.prepare(
-            "SELECT attempts, payload FROM step_terminal_deliveries AS delivery WHERE receipt IS NULL AND (?1 = 0 OR (next_attempt_ms <= ?2 AND NOT EXISTS (SELECT 1 FROM daemon_jobs AS job WHERE job.job_id = delivery.job_id AND job.active = 1))) ORDER BY next_attempt_ms, rowid LIMIT 32"
+            "SELECT attempts, payload FROM step_terminal_deliveries AS delivery WHERE receipt IS NULL AND (?1 = 0 OR (next_attempt_ms <= ?2 AND NOT EXISTS (SELECT 1 FROM daemon_jobs AS job WHERE job.job_id = delivery.job_id AND job.active = 1))) AND (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.daemon_scope') END) IS ?3 ORDER BY next_attempt_ms, rowid LIMIT 32"
         ).map_err(sql_error)?;
+        let scope = self.daemon_scope.as_ref().map(DaemonScope::as_str);
         let rows = statement
-            .query_map(params![due_only, timestamp_ms() as i64], |row| {
+            .query_map(params![due_only, timestamp_ms() as i64, scope], |row| {
                 Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
             })
             .map_err(sql_error)?

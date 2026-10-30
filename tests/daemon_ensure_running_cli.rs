@@ -3,7 +3,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use homeboy_core::api_jobs::{JobStatus, JobStore};
+use homeboy_core::api_jobs::{DaemonScope, JobStatus, JobStore};
 use homeboy_core::test_support::{
     bounded_output, HermeticDaemonGuard, HermeticTestContext, TestBinary,
 };
@@ -72,7 +72,9 @@ fn idle_shutdown_preserves_active_durable_jobs_then_reaps_after_completion() {
             .data_dir()
             .join(homeboy_core::paths::OBSERVATION_DB_FILENAME),
     )
-    .unwrap();
+    .unwrap()
+    // Idle shutdown counts only its own scope's work (#16104).
+    .with_daemon_scope(DaemonScope::from_state_dir(&context.daemon_dir()));
     let job = jobs.create("idle-lifetime-active-regression");
     jobs.start(job.id).unwrap();
     thread::sleep(Duration::from_secs(5));

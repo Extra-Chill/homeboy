@@ -957,6 +957,7 @@ pub(crate) mod execution_step_fixtures {
             exit_code: None,
             cancelled: false,
             log_path: Default::default(),
+            daemon_scope: None,
         }
     }
 

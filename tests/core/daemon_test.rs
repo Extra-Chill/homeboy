@@ -2291,7 +2291,8 @@ fn force_stop_with_active_jobs_keeps_the_lease_and_never_signals_an_unowned_pid(
     let store =
         JobStore::open_without_reconciliation(&crate::paths::observation_db().expect("jobs path"))
             .expect("store")
-            .with_daemon_lease(state.lease_id.clone());
+            .with_daemon_lease(state.lease_id.clone())
+            .with_daemon_scope(crate::daemon::daemon_scope().expect("daemon scope"));
     let job = store.create("runner.exec");
     store.start(job.id).expect("start job");
 
