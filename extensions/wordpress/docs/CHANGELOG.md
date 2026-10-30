@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.8] - 2026-10-30
+
+### Fixed
+- honor component scope exclusions in lint runners
+
 ## [3.53.7] - 2026-10-29
 
 ### Changed
