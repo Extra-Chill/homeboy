@@ -35,6 +35,7 @@ expected = "${{ inputs.max-changed-test-files }}"
 for job_name, step_name in [
     ("candidate", "Run candidate ${{ matrix.title }}"),
     ("baseline", "Run baseline ${{ matrix.title }}"),
+    ("component-ci", "Run component CI (candidate and differential baseline)"),
 ]:
     step = phase_step(job_name, step_name)
     if step is None:
@@ -55,8 +56,8 @@ if problems:
     sys.exit(1)
 PY
 
-if [ "$(grep -Fc 'HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}' "${WORKFLOW}")" -ne 2 ]; then
-  printf 'FAIL: candidate and baseline phases must forward max-changed-test-files exactly twice\n'
+if [ "$(grep -Fc 'HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}' "${WORKFLOW}")" -ne 3 ]; then
+  printf 'FAIL: candidate, baseline, and component CI must forward max-changed-test-files exactly three times\n'
   exit 1
 fi
 if grep -Fq 'TEST_SCOPE_CAP:' "${WORKFLOW}"; then

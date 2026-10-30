@@ -412,7 +412,7 @@ fi
 if [ "$(grep -c 'HOMEBOY_RUST_TEST_RUNNER: nextest' "${WORKFLOW}")" -ne 2 ]; then
   printf 'FAIL: Rust shard jobs do not explicitly select nextest\n'; exit 1
 fi
-if [ "$(grep -c 'prepare-test-shard-workspace.sh' "${WORKFLOW}")" -ne 6 ]; then
+if [ "$(grep -c 'prepare-test-shard-workspace.sh' "${WORKFLOW}")" -ne 10 ]; then
   printf 'FAIL: candidate binary and Test shard jobs do not reserve and restore action-owned paths symmetrically\n'; exit 1
 fi
 if [ "$(grep -c 'Refusing to overwrite consumer path reserved for the Homeboy Action checkout' "${WORKFLOW}")" -ne 2 ]; then

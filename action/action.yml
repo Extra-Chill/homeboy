@@ -57,7 +57,7 @@ inputs:
     required: false
     default: ''
   component:
-    description: 'Component name override. Auto-detected from homeboy.json if not set.'
+    description: 'Component directory containing homeboy.json, or component name override. Subdirectories resolve their own ID and toolchain. Auto-detected from root homeboy.json if unset. Use ci.yml components for monorepo fan-out.'
     required: false
     default: ''
   args:

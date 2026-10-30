@@ -100,6 +100,37 @@ jobs:
     secrets: inherit
 ```
 
+### Monorepo CI
+
+Select only PR/push-touched components without a consumer-owned detect job:
+
+```yaml
+name: CI
+on: [pull_request, push]
+permissions: {contents: write, pull-requests: write, issues: write}
+jobs:
+  homeboy:
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
+    with:
+      components: changed
+      shared-paths: '.github/**'
+    secrets: inherit
+```
+
+Require the stable `homeboy / Components` check in branch protection. Empty
+matrices pass; detection errors or any component failure fail that check.
+`shared-paths` accepts newline-separated globs. Detection uses the PR base/head
+SHAs or push before/SHA (including initial pushes), with Homeboy v0.436.4.
+Use `components: all` for nightly/dispatch runs; it discovers tracked and
+unignored `homeboy.json` files, including the root. Changed mode needs a PR or
+push range. Each selected directory resolves its own component ID, extensions,
+and PHP/Node toolchain and runs the action's candidate/baseline differential
+path. Nested boundaries and scope excludes are honored by Homeboy.
+
+Omit `components` to retain the existing root/`component` workflow. Monorepo
+mode runs unsharded per-component CI (`test-shards` is not used); it does not
+run PR merge policies. Keep PR merging in a separate job gated on Components.
+
 ### Reusable Workflow Permissions
 
 The reusable workflow requests `contents: write`, `pull-requests: write`, and

@@ -63,7 +63,7 @@ assert_not_contains 'gh release create' "${WORKFLOW}" "release workflow does not
 assert_not_contains 'docs/CHANGELOG.md' "${WORKFLOW}" "release workflow does not parse changelog notes"
 
 # GitHub-hosted workflow dependencies must use Node 24-capable action majors (#321).
-assert_count 'actions/checkout@v6' '17' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v6 for every checkout"
+assert_count 'actions/checkout@v6' '21' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v6 for every checkout"
 assert_count 'actions/cache/restore@v5' '1' "${CI_WORKFLOW}" "reusable CI workflow restores one candidate build cache"
 assert_count 'actions/cache/save@v5' '1' "${CI_WORKFLOW}" "reusable CI workflow saves one shared candidate build cache"
 assert_count 'actions/cache@v5' '2' "${ROOT_DIR}/action.yml" "composite action owns release and extension caches"
@@ -72,7 +72,7 @@ assert_count 'actions/cache/save@v5' '1' "${ROOT_DIR}/action.yml" "composite act
 assert_contains 'actions/upload-artifact@v7' "${CI_WORKFLOW}" "reusable CI workflow uses artifact upload v7"
 assert_not_contains 'actions/upload-artifact@[^v]\|actions/upload-artifact@v[^7]\|actions/upload-artifact@v7[[:alnum:]._-]' "${CI_WORKFLOW}" "every reusable CI upload uses the supported v7 contract"
 assert_count 'actions/download-artifact@v7' '8' "${CI_WORKFLOW}" "reusable CI workflow uses artifact download v7"
-assert_count 'actions/create-github-app-token@v3' '3' "${CI_WORKFLOW}" "reusable CI workflow uses app-token v3"
+assert_count 'actions/create-github-app-token@v3' '4' "${CI_WORKFLOW}" "reusable CI workflow uses app-token v3"
 assert_not_contains 'actions/checkout@v4' "${CI_WORKFLOW}" "reusable CI workflow has no checkout v4 references"
 assert_not_contains 'actions/cache@v4' "${CI_WORKFLOW}" "reusable CI workflow has no cache v4 references"
 assert_not_contains 'actions/\(upload\|download\)-artifact@v4' "${CI_WORKFLOW}" "reusable CI workflow has no artifact v4 references"

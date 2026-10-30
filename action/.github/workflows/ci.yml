@@ -17,6 +17,14 @@ on:
         description: 'Component name override.'
         type: string
         default: ''
+      components:
+        description: 'Monorepo CI mode: changed or all. Empty preserves single-component CI.'
+        type: string
+        default: ''
+      shared-paths:
+        description: 'Newline-separated repository-relative globs that select all components in changed mode.'
+        type: string
+        default: ''
       extension:
         description: 'Single extension ID override.'
         type: string
@@ -219,6 +227,153 @@ permissions:
   issues: write
 
 jobs:
+  detect-components:
+    name: Detect components
+    needs: plan
+    if: ${{ !inputs.contract-probe && inputs.components != '' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      enabled: ${{ steps.detect.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - name: Hide detector checkout from component discovery
+        id: prepare-detection
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh prepare .homeboy-action
+      # Detection is registry-free and does not require a root homeboy.json.
+      # Pin the detector independently of the consumer's candidate binary.
+      - name: Install component detector (Homeboy >= 0.436.4)
+        env:
+          HOMEBOY_VERSION: '0.436.4'
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'install component detector' -- bash .homeboy-action/scripts/setup/install-homeboy-release.sh
+      - name: Detect component matrix
+        id: detect
+        env:
+          COMPONENTS: ${{ inputs.components }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SHARED_PATHS: ${{ inputs.shared-paths }}
+        run: python3 .homeboy-action/scripts/core/plan-components.py
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-detection.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
+
+  component-ci:
+    name: Component ${{ matrix.component }}
+    needs: [plan, detect-components]
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.detect-components.result == 'success' && needs.detect-components.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-components.outputs.matrix) }}
+    env:
+      NEXTEST_PROFILE: ${{ inputs.nextest-profile || 'default' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - name: Hide action checkout during component CI
+        id: prepare-component
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh prepare .homeboy-action
+      - name: Install build toolchain
+        if: inputs.build-command != '' && inputs.rust-toolchain != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+      - name: Build candidate binary
+        if: inputs.build-command != ''
+        run: ${{ inputs.build-command }}
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+      - name: Run component CI (candidate and differential baseline)
+        uses: ./.homeboy-action
+        env:
+          HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}
+        with:
+          # The input selects a directory; read-portable-config resolves its ID.
+          component: ${{ matrix.path }}
+          commands: ${{ inputs.commands }}
+          version: ${{ inputs.version }}
+          source: ${{ inputs.source }}
+          binary-path: ${{ inputs.build-command != '' && inputs.build-artifact-path || inputs.binary-path }}
+          rust-toolchain: ${{ inputs.rust-toolchain }}
+          source-build-profile: ${{ inputs.source-build-profile }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
+          args: ${{ inputs.args }}
+          scope: ${{ inputs.scope }}
+          rig: ${{ inputs.rig }}
+          scenario: ${{ inputs.scenario }}
+          runs: ${{ inputs.runs }}
+          iterations: ${{ inputs.iterations }}
+          regression-threshold: ${{ inputs.regression-threshold }}
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          differential-gating: ${{ inputs.differential-gating }}
+          baseline-commands: ${{ inputs.baseline-commands }}
+          retry-introduced-test-failures: ${{ inputs.retry-introduced-test-failures }}
+          retry-introduced-test-attempts: ${{ inputs.retry-introduced-test-attempts }}
+          observation-window: ${{ inputs.observation-window }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
+          config-dir: ${{ inputs.config-dir }}
+          app-token: ${{ steps.app-token.outputs.token || github.token }}
+          pr-comment: ${{ inputs.pr-comment }}
+          comment-key: ${{ inputs.comment-key }}
+          comment-section-key: ${{ inputs.comment-section-key || matrix.component }}
+          comment-section-title: ${{ inputs.comment-section-title || matrix.component }}
+          # No individual component may merge a PR before the other jobs finish.
+          pr-policy-merge: 'false'
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-component.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
+
+  components-result:
+    name: Components
+    needs: [plan, detect-components, component-ci]
+    if: ${{ always() && !inputs.contract-probe && inputs.components != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require detection and every selected component to pass
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          DETECT_RESULT: ${{ needs.detect-components.result }}
+          ENABLED: ${{ needs.detect-components.outputs.enabled }}
+          COMPONENT_RESULT: ${{ needs.component-ci.result }}
+        run: |
+          test "${PLAN_RESULT}" = success
+          test "${DETECT_RESULT}" = success
+          if [ "${ENABLED}" = true ]; then
+            test "${COMPONENT_RESULT}" = success
+          else
+            test "${ENABLED}" = false && test "${COMPONENT_RESULT}" = skipped
+          fi
+
   contract-probe:
     name: Consumer contract
     if: inputs.contract-probe
@@ -230,7 +385,7 @@ jobs:
     name: Prepare candidate Homeboy binary
     # needs plan solely for needs.plan.outputs.action-sha; plan is pure bash.
     needs: plan
-    if: '!inputs.contract-probe'
+    if: ${{ !inputs.contract-probe && inputs.components == '' }}
     runs-on: ubuntu-latest
     # Caps third-party setup actions such as cache restore, which cannot be
     # enclosed by the action's subprocess supervisor.
@@ -375,9 +530,9 @@ jobs:
         id: plan
         shell: bash
         env:
-          COMMANDS: ${{ inputs.commands }}
+          COMMANDS: ${{ inputs.components == '' && inputs.commands || '' }}
           BASELINE_COMMANDS: ${{ inputs.baseline-commands }}
-          TEST_SHARDS: ${{ inputs.test-shards }}
+          TEST_SHARDS: ${{ inputs.components == '' && inputs.test-shards || '1' }}
         run: |
           declare -A selected_commands=()
           unknown_commands=()
@@ -1324,7 +1479,7 @@ jobs:
   policy:
     name: PR Policy
     needs: [reconcile, reconcile-test-shards, plan]
-    if: ${{ !inputs.contract-probe && !cancelled() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (needs.plan.outputs.test-shards-enabled != 'true' || needs.reconcile-test-shards.result == 'success') }}
+    if: ${{ !inputs.contract-probe && inputs.components == '' && !cancelled() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (needs.plan.outputs.test-shards-enabled != 'true' || needs.reconcile-test-shards.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
