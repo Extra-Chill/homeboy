@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.23.1] - 2026-10-30
+
+### Changed
+- Add serial monorepo release mode
+
 ## [2.23.0] - 2026-10-30
 
 ### Added
