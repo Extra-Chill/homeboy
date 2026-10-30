@@ -7345,7 +7345,8 @@ const MAX_DERIVED_COOK_GENERATIONS: u32 = 50;
 /// every later cook on the same issue ("is no longer active"). Multi-phase
 /// work on one issue is normal, so a derived destination advances to the next
 /// generation (`-2`, `-3`, ...) instead. Finished PRs and destinations owned
-/// by another live run also retire a generation. A generation headed by an
+/// by another live run or bound to another source checkout also retire a
+/// generation. A generation headed by an
 /// open PR is returned with that PR's URL so the cook adopts PR rework.
 /// Explicit `--to-worktree` and `--head` never reach this path.
 pub(super) fn next_live_derived_cook_branch(
@@ -7363,6 +7364,21 @@ pub(super) fn next_live_derived_cook_branch(
         };
         let handle = format!("{repository}@{}", slugify_cook_branch(&branch));
         let record = homeboy::core::worktree::resolve_workspace_ref_if_present(&handle)?;
+        if let (Some(source), Some(homeboy::core::worktree::WorkspaceRefRecord::Task(record))) =
+            (source_checkout, record.as_ref())
+        {
+            let record_source = Path::new(&record.source_checkout);
+            if record_source
+                .canonicalize()
+                .unwrap_or_else(|_| record_source.to_path_buf())
+                != source
+                    .canonicalize()
+                    .unwrap_or_else(|_| source.to_path_buf())
+            {
+                // Even a terminal owner cannot make a different source's record reusable.
+                continue;
+            }
+        }
         let path = source_checkout.or_else(|| {
             record.as_ref().map(|record| match record {
                 homeboy::core::worktree::WorkspaceRefRecord::Task(record) => {

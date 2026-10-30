@@ -3750,6 +3750,73 @@ fn derived_generations_follow_pr_state() {
 }
 
 #[test]
+fn derived_generation_skips_another_source_checkout_but_reuses_same_source() {
+    with_isolated_home(|_| {
+        // Task destinations are siblings of the source checkout. Keep them inside
+        // this test's root so parallel tests cannot collide on the same handle.
+        let root = tempfile::tempdir().unwrap();
+        let primary = tempfile::tempdir_in(root.path()).unwrap();
+        init_runtime_component_checkout(primary.path());
+        register_component(
+            "fixture",
+            primary.path(),
+            "https://github.com/example/fixture.git",
+        );
+        let secondary = tempfile::tempdir_in(root.path()).unwrap();
+        homeboy_test_support::git::run(
+            primary.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                secondary.path().to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        for generation in ["fix/issue-1-fixture", "fix/issue-1-fixture-2"] {
+            let created =
+                homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+                    component_id: "fixture".into(),
+                    branch: generation.into(),
+                    from: None,
+                    task_url: None,
+                    run_id: None,
+                    cleanup_policy: None,
+                    require_handoff_freshness: false,
+                    source_path: None,
+                })
+                .unwrap();
+            if generation == "fix/issue-1-fixture" {
+                homeboy::core::worktree::remove(homeboy::core::worktree::WorktreeRemoveOptions {
+                    id: created.record.id,
+                    force: true,
+                    cleanup_branch: false,
+                    allow_unmerged_branch: false,
+                    reason: None,
+                    reaper: None,
+                })
+                .unwrap();
+            }
+        }
+        for (source, expected) in [
+            (secondary.path(), "fix/issue-1-fixture-3"),
+            (primary.path(), "fix/issue-1-fixture-2"),
+        ] {
+            assert_eq!(
+                super::super::run::next_live_derived_cook_branch(
+                    "fixture",
+                    "fix/issue-1-fixture",
+                    Some(source),
+                    None,
+                )
+                .unwrap(),
+                (expected.to_string(), None)
+            );
+        }
+    });
+}
+
+#[test]
 fn derived_generation_separates_live_owners_but_reuses_same_run() {
     with_isolated_home(|_| {
         let primary = tempfile::tempdir().unwrap();
