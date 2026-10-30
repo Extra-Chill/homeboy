@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.435.2] - 2026-10-30
+
+### Fixed
+- hydrate nested component dependency roots and diagnose missing Composer tools
+- validate subdirectory components against owning repository
+
 ## [0.435.1] - 2026-10-30
 
 ### Fixed
