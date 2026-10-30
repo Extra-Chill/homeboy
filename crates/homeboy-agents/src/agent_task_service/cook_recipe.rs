@@ -5430,8 +5430,8 @@ mod tests {
             .unwrap();
         let mut aggregate = succeeded_aggregate(&plan);
         aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
-            id: "unprojected-patch".to_string(),
-            kind: "patch".to_string(),
+            id: "unprojected-transcript".to_string(),
+            kind: "transcript".to_string(),
             ..Default::default()
         });
         agent_task_lifecycle::record_run_aggregate_in_store(
@@ -5448,10 +5448,10 @@ mod tests {
             &recipe,
             "run",
         )
-        .expect_err("unprojected patch blocks continuation reconciliation");
+        .expect_err("unprojected transcript blocks continuation reconciliation");
         let observing =
             preflight_recipe_attempt_for_continuation_in_store(&lifecycle_store, &recipe, "run")
-                .expect_err("unprojected patch blocks continuation observation");
+                .expect_err("unprojected transcript blocks continuation observation");
 
         for error in [reconciling, observing] {
             assert!(
