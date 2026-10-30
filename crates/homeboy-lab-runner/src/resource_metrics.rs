@@ -513,8 +513,6 @@ struct ResourceMetricsCollector {
     handle: Option<thread::JoinHandle<()>>,
     guard_limits: Option<RunnerResourceGuardLimits>,
     cgroup_memory: CgroupMemoryCollector,
-    #[cfg(target_os = "linux")]
-    registered_root_pid: Option<u32>,
 }
 
 impl ResourceMetricsCollector {
@@ -537,8 +535,6 @@ impl ResourceMetricsCollector {
                 handle: None,
                 guard_limits,
                 cgroup_memory,
-                #[cfg(target_os = "linux")]
-                registered_root_pid: None,
             };
         }
 
@@ -555,26 +551,30 @@ impl ResourceMetricsCollector {
         let thread_state = Arc::clone(&state);
         let thread_guard_limits = guard_limits.clone();
         let mut last_heartbeat = Instant::now();
-        let handle = thread::spawn(move || loop {
-            sample(
-                root_pid,
-                &thread_state,
-                guard_violation.as_ref(),
-                thread_guard_limits.as_ref(),
-            );
-            if let Some(progress) = progress_sink.as_ref() {
-                if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
-                    let _ = progress(runner_command_heartbeat_data(
-                        started.elapsed(),
-                        root_pid,
-                        process_tree_resource_summary(root_pid),
-                    ));
-                    last_heartbeat = Instant::now();
+        // The sampler owns the active-runner registration: it stops on an
+        // explicit stop or when the collector is dropped (sender disconnected)
+        // and releases the registration on every exit path (#16684).
+        let handle = thread::spawn(move || {
+            sampler_loop(&stop_rx, || {
+                sample(
+                    root_pid,
+                    &thread_state,
+                    guard_violation.as_ref(),
+                    thread_guard_limits.as_ref(),
+                );
+                if let Some(progress) = progress_sink.as_ref() {
+                    if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                        let _ = progress(runner_command_heartbeat_data(
+                            started.elapsed(),
+                            root_pid,
+                            process_tree_resource_summary(root_pid),
+                        ));
+                        last_heartbeat = Instant::now();
+                    }
                 }
-            }
-            if stop_rx.recv_timeout(SAMPLE_INTERVAL).is_ok() {
-                break;
-            }
+            });
+            #[cfg(target_os = "linux")]
+            unregister_active_runner(root_pid);
         });
 
         Self {
@@ -584,8 +584,6 @@ impl ResourceMetricsCollector {
             handle: Some(handle),
             guard_limits,
             cgroup_memory,
-            #[cfg(target_os = "linux")]
-            registered_root_pid: Some(root_pid),
         }
     }
 
@@ -595,10 +593,6 @@ impl ResourceMetricsCollector {
         }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(root_pid) = self.registered_root_pid.take() {
-            unregister_active_runner(root_pid);
         }
         let state = self.state.lock().expect("resource metrics mutex poisoned");
         let cgroup_memory = self.cgroup_memory.finish();
@@ -628,6 +622,20 @@ impl ResourceMetricsCollector {
             } else {
                 "duration_only".to_string()
             },
+        }
+    }
+}
+
+/// Run `tick` once per sample interval until the collector stops or is
+/// dropped; a disconnected stop channel ends the loop instead of spinning.
+fn sampler_loop(stop_rx: &mpsc::Receiver<()>, mut tick: impl FnMut()) {
+    loop {
+        tick();
+        if !matches!(
+            stop_rx.recv_timeout(SAMPLE_INTERVAL),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ) {
+            break;
         }
     }
 }
@@ -1106,6 +1114,45 @@ fn clock_ticks_per_second() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sampler_loop_ends_when_the_collector_is_dropped() {
+        let (stop, stop_rx) = std::sync::mpsc::channel::<()>();
+        drop(stop);
+        let mut ticks = 0;
+        super::sampler_loop(&stop_rx, || ticks += 1);
+        assert_eq!(ticks, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropped_collector_releases_its_active_runner_rss() {
+        let pid = std::process::id();
+        let collector = super::ResourceMetricsCollector::start(
+            pid,
+            std::time::Instant::now(),
+            None,
+            None,
+            None,
+        );
+        assert!(super::active_runner_rss()
+            .lock()
+            .unwrap()
+            .contains_key(&pid));
+        drop(collector);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while super::active_runner_rss()
+            .lock()
+            .unwrap()
+            .contains_key(&pid)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dropped collector kept its RSS registration"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     use super::*;
     use homeboy_core::daemon::runner_exec_driver::RunnerChildIdentity;
     use std::sync::atomic::{AtomicU32, Ordering};
