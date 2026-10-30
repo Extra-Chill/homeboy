@@ -90,6 +90,9 @@ struct GateExecution<'a> {
 /// field group lives in exactly one place.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerifyGateOptions {
+    /// Defer full verification to required PR checks after local gates pass.
+    #[serde(default)]
+    pub verify_ci: bool,
     /// Deterministic verification commands run after each promotion/apply.
     #[serde(default)]
     pub verify: Vec<String>,
@@ -472,6 +475,7 @@ fn npm_run_script(command: &str) -> Option<&str> {
 impl Default for VerifyGateOptions {
     fn default() -> Self {
         Self {
+            verify_ci: false,
             verify: Vec::new(),
             private_verify: Vec::new(),
             test_execution_plan: None,

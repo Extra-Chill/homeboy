@@ -236,6 +236,10 @@ pub struct VerifyGateArgs {
     /// gates; every one must pass. Its output is included in the review evidence.
     #[arg(long = "verify", value_name = "COMMAND")]
     pub verify: Vec<String>,
+    /// Defer full verification to the PR's required CI checks. Cheap --verify
+    /// gates still run before publication. Recover re-polls CI.
+    #[arg(long)]
+    pub verify_ci: bool,
     /// Read one public verification shell program from a file. Prefer this for
     /// loops, quotes, multiline programs, or `$variables`; Homeboy snapshots the
     /// exact file bytes before submission. Relative paths use the controller's
@@ -608,6 +612,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
     fn from(args: VerifyGateArgs) -> Self {
         Self {
             verify: args.verify,
+            verify_ci: args.verify_ci,
             private_verify: args.private_verify,
             test_execution_plan: None,
             input_sources: args.input_sources,
@@ -988,6 +993,24 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn cook_ci_flag_persists_with_local_gates() {
+        let options: VerifyGateOptions = TestCli::try_parse_from([
+            "homeboy",
+            "--verify-ci",
+            "--verify",
+            "cargo fmt --all --check",
+        ])
+        .unwrap()
+        .gates
+        .into();
+        assert!(options.verify_ci);
+        assert_eq!(options.verify, ["cargo fmt --all --check"]);
+        let restored: VerifyGateOptions =
+            serde_json::from_value(serde_json::to_value(options).unwrap()).unwrap();
+        assert!(restored.verify_ci);
     }
 
     #[test]

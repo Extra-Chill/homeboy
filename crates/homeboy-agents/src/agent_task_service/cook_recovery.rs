@@ -610,6 +610,36 @@ pub fn recover_cook(
         replace_gates,
         publish,
     } = request;
+    if let Some(ci) = super::cook_ci::cook_ci_status(id)? {
+        let ci = if preflight {
+            ci
+        } else {
+            super::cook_ci::repoll_cook_ci(id)?.unwrap_or(ci)
+        };
+        let status = ci["status"].as_str().unwrap_or("awaiting_ci").to_owned();
+        let exit = i32::from(matches!(
+            status.as_str(),
+            "ci_gate_failed" | "ci_infrastructure"
+        ));
+        return Ok((
+            CookRecoveryReport {
+                schema: COOK_RECOVERY_SCHEMA,
+                cook_id: ci["cook_id"].as_str().unwrap_or(id).to_owned(),
+                run_id: id.to_owned(),
+                status,
+                step: CookRecoveryStep::None {
+                    reason: "CI verification poll; automatic retry dispatch is not yet supported"
+                        .into(),
+                },
+                preflight,
+                overrides: None,
+                admission: None,
+                result: Some(ci),
+                failure: None,
+            },
+            exit,
+        ));
+    }
     let mut plan = plan_cook_recovery(id)?;
     validate_step_inputs(&mut plan, &overrides, replace_gates.is_some(), &publish)?;
     if !overrides.is_empty() {

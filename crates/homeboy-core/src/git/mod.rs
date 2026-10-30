@@ -2,6 +2,7 @@ mod changes;
 mod commits;
 mod gh_client;
 mod github;
+pub use github::cook_ci;
 pub mod github_app;
 mod github_comment_sections;
 mod github_pr_comments;

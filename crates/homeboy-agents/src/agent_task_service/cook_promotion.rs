@@ -6079,6 +6079,20 @@ pub(crate) fn cook_report_with_stores(
         exit_code,
         invocation_latest_run_id,
     } = input;
+    let ci_deferred = recipe_store
+        .and_then(|store| store.load_recipe(&cook_id).ok())
+        .is_some_and(|recipe| recipe.gate_policy["verify_ci"] == true);
+    let awaiting_ci = ci_deferred
+        && finalization
+            .as_ref()
+            .and_then(|value| value["pr_url"].as_str())
+            .is_some();
+    let status = if awaiting_ci { "awaiting_ci" } else { status };
+    let disposition = if awaiting_ci {
+        CookDisposition::InFlight
+    } else {
+        disposition
+    };
     // Defense in depth, not a second source of truth: `disposition` remains
     // authoritative in release builds. This only catches an exit whose
     // declared disposition contradicts the status it reports, which is a

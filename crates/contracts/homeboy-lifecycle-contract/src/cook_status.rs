@@ -108,6 +108,8 @@ pub enum CookStatus {
     GateDeclarationInvalid,
     /// Waiting on an independent acceptance verdict.
     AwaitingAcceptance,
+    /// Published candidate waiting for required PR checks.
+    AwaitingCi,
     /// Stopped, but the candidate can still be recovered.
     CandidateRecoverable,
     /// Stopped because a dependency was not satisfied.
@@ -166,6 +168,7 @@ impl CookStatus {
             "gates_deferred" => Self::GatesDeferred,
             "gate_declaration_invalid" => Self::GateDeclarationInvalid,
             "awaiting_acceptance" => Self::AwaitingAcceptance,
+            "awaiting_ci" => Self::AwaitingCi,
             "candidate_recoverable" => Self::CandidateRecoverable,
             "blocked_by_dependency" => Self::BlockedByDependency,
             "blocked" => Self::Blocked,
@@ -203,6 +206,7 @@ impl CookStatus {
             Self::GatesDeferred => "gates_deferred",
             Self::GateDeclarationInvalid => "gate_declaration_invalid",
             Self::AwaitingAcceptance => "awaiting_acceptance",
+            Self::AwaitingCi => "awaiting_ci",
             Self::CandidateRecoverable => "candidate_recoverable",
             Self::BlockedByDependency => "blocked_by_dependency",
             Self::Blocked => "blocked",
@@ -233,7 +237,10 @@ impl CookStatus {
     /// Unlike the terminal side, this set is closed: it is internal to the
     /// Cook loop and never sourced from finalization JSON.
     pub fn is_in_flight(&self) -> bool {
-        matches!(self, Self::Queued | Self::Running | Self::InFlight)
+        matches!(
+            self,
+            Self::Queued | Self::Running | Self::InFlight | Self::AwaitingCi
+        )
     }
 
     /// Whether a deterministic gate rejected the candidate, with or without a
@@ -252,6 +259,7 @@ impl CookStatus {
             Self::Queued
                 | Self::Running
                 | Self::InFlight
+                | Self::AwaitingCi
                 | Self::ReviewReady
                 | Self::DraftPublished
                 | Self::GreenNoFinalize
@@ -390,6 +398,15 @@ mod tests {
     }
 
     /// The classification must never rewrite a status it did not recognize.
+    #[test]
+    fn awaiting_ci_is_distinct_and_in_flight() {
+        let status = CookStatus::from_status("awaiting_ci");
+        assert_eq!(status, CookStatus::AwaitingCi);
+        assert!(status.is_in_flight());
+        assert!(status.is_success_exit());
+        assert!(!status.is_gate_failure());
+    }
+
     #[test]
     fn unknown_statuses_round_trip_losslessly() {
         let raw = "some_status_from_a_newer_binary";

@@ -907,7 +907,7 @@ fn finalize_with_operation_claim_in_store(
     finalize: &mut dyn FnMut(&CookRequest, &str, &AgentTaskPromotionReport) -> Result<Value>,
 ) -> Result<Value> {
     let observation = lifecycle_store.open_observation_initialized()?;
-    observation.time_run_phase(run_id, "publish", || {
+    let result = observation.time_run_phase(run_id, "publish", || {
         let operation_key = finalization_operation_key(run_id, promotion);
         match lifecycle_store.claim_cook_operation(
             run_id,
@@ -946,7 +946,20 @@ fn finalize_with_operation_claim_in_store(
                 Ok(finalization)
             }
         }
-    })
+    })?;
+    if options.gates.verify_ci {
+        if let Some(url) = result["pr_url"].as_str() {
+            let store = super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store);
+            super::cook_ci::save(
+                &store,
+                &options.identity.cook_id,
+                &serde_json::json!({
+                    "cook_id": options.identity.cook_id, "pr_url": url, "status": "awaiting_ci"
+                }),
+            )?;
+        }
+    }
+    Ok(result)
 }
 
 /// Automatic promotion retries after a gate setup failure (#15364).
@@ -5694,6 +5707,14 @@ fn run_cook_spine(
             options.retry_policy.max_attempts,
             &options.identity.initial_plan.options.execution_budget,
         )?;
+    }
+    if options.gates.verify_ci && options.finalization.no_finalize {
+        return Err(Error::validation_invalid_argument(
+            "verify_ci",
+            "CI-deferred verification requires PR publication",
+            None,
+            None,
+        ));
     }
     project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);

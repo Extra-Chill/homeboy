@@ -138,7 +138,7 @@ impl From<&CookStatus> for RunLifecycleStatus {
         match status {
             // --- in flight ---
             CookStatus::Queued => Self::Queued,
-            CookStatus::Running | CookStatus::InFlight => Self::Running,
+            CookStatus::Running | CookStatus::InFlight | CookStatus::AwaitingCi => Self::Running,
 
             // --- terminal, successful ---
             // The Cook did the job it was asked to do. `ReviewReady`,
@@ -317,7 +317,7 @@ mod tests {
             let expected = match &status {
                 CookStatus::Queued => RunLifecycleStatus::Queued,
                 CookStatus::Running => RunLifecycleStatus::Running,
-                CookStatus::InFlight => RunLifecycleStatus::Running,
+                CookStatus::InFlight | CookStatus::AwaitingCi => RunLifecycleStatus::Running,
                 CookStatus::Completed => RunLifecycleStatus::Succeeded,
                 CookStatus::ReviewReady => RunLifecycleStatus::Succeeded,
                 CookStatus::DraftPublished => RunLifecycleStatus::Succeeded,
