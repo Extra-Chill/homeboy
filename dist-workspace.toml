@@ -35,5 +35,9 @@ publish-jobs = ["homebrew"]
 # that no longer exists. See `release_catalog::target_triple_for`.
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 # Allow manual CI edits
-# Allow manual CI edits
 allow-dirty = ["ci"]
+
+# dist 0.31 defaults Apple Silicon builds to `macos-14`, an image GitHub retires
+# on 2026-11-02 and browns out before then.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
