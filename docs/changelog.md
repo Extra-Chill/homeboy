@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.435.0] - 2026-10-30
+
+### Added
+- rank phase hotspots by exclusive self time
+
 ## [0.434.35] - 2026-10-30
 
 ### Changed
