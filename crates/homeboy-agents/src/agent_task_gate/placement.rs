@@ -328,12 +328,22 @@ fn gate_non_execution_report(
         .get("gate_disposition")
         .and_then(serde_json::Value::as_str)
         == Some("unavailable");
+    let diagnostic = homeboy_core::redaction::redact_json(&serde_json::json!({
+        "code": error.code.as_str(),
+        "message": error.message,
+        "details": error.details,
+    }));
+    let message = format!(
+        "Lab gate did not produce verified execution evidence: [{}] {}",
+        error.code.as_str(),
+        diagnostic["message"].as_str().unwrap_or("unknown cause"),
+    );
     let mut report = AgentTaskGateReport::new(
         format!("gate-{index}"),
         argv,
         1,
         "",
-        "Lab gate did not produce verified execution evidence",
+        &message,
         None,
         visibility,
         reveal_policy,
@@ -353,6 +363,10 @@ fn gate_non_execution_report(
     report.lab_receipt = Some(
         serde_json::json!({"schema":LAB_GATE_DISPOSITION_SCHEMA, "disposition": error.details.get("gate_disposition").and_then(serde_json::Value::as_str).unwrap_or("failed"), "executed":false, "error_code":error.code.as_str(), "stage":error.details.get("stage"), "job_id":error.details.get("job_id"), "artifact_ref":error.details.get("artifact_ref")}),
     );
+    report
+        .lab_receipt
+        .as_mut()
+        .expect("non-execution disposition")["diagnostic"] = diagnostic;
     report.step = PlanStep::builder(report.id.clone(), "agent_task.gate", PlanStepStatus::Failed)
         .gate_result(HomeboyGateResult::new(
             report.id.clone(),
@@ -765,6 +779,30 @@ fn failed_lab_gate_setup_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_execution_diagnostic_preserves_cause_code_and_redacted_details() {
+        let error = Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            "runner receipt stream was truncated",
+            serde_json::json!({"stage":"terminal_projection", "stdout_bytes":9000000,
+                "gate_disposition":"unavailable", "password":"do-not-publish"}),
+        );
+        let report = gate_non_execution_report(
+            1,
+            vec!["test".into()],
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            &error,
+        );
+        assert!(report.stderr.contains(&error.message));
+        assert!(report.stderr.contains(error.code.as_str()));
+        let receipt = report.lab_receipt.unwrap();
+        assert_eq!(receipt["executed"], false);
+        assert_eq!(receipt["diagnostic"]["details"]["stdout_bytes"], 9000000);
+        assert!(!receipt.to_string().contains("do-not-publish"));
+        assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
+    }
 
     #[test]
     fn canonical_closure_comparison_checks_terminal_shared_evidence_and_destinations() {
