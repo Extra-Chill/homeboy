@@ -3,24 +3,18 @@
 //! Core's controller-runtime retention logic asks which pinned executables are
 //! still referenced by a durable agent-task record. That query is agent-task
 //! behavior — it reads the lifecycle store and inspects each record's
-//! canonical lifecycle-action eligibility and age — so it is provided to core
+//! non-terminal state — so it is provided to core
 //! through the `ControllerPinReferenceProvider` hook instead of core calling
 //! the agent-task subsystem directly.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::agent_task_lifecycle::lifecycle_action_eligibility;
-use homeboy_control_plane_contract::ControlPlaneActionAvailability;
 use homeboy_core::controller_pin_reference::{
     register_controller_pin_reference_provider, ControllerPinProtectionReason,
     ControllerPinReferenceProvider, ReferencedControllerPin,
-};
-use homeboy_core::controller_runtime::{
-    resolve_cleanup_options, ControllerRuntimeRetentionOverrides,
 };
 use homeboy_core::Result;
 
@@ -37,11 +31,9 @@ impl ControllerPinReferenceProvider for AgentTaskControllerPinReferenceProvider 
         // name one installation (#7505).
         let lifecycle_store = super::AgentTaskLifecycleStore::from_current_environment()?;
         let (records, _) = super::list_records_with_health_in_store(&lifecycle_store)?;
-        let min_age =
-            resolve_cleanup_options(false, ControllerRuntimeRetentionOverrides::default()).min_age;
         let mut referenced = BTreeMap::new();
         for record in records {
-            let Some(reason) = state_retains_pin(&record, min_age) else {
+            let Some(reason) = state_retains_pin(&record) else {
                 continue;
             };
             for pointer in [ORIGINATING_EXECUTABLE_POINTER, PINNED_EXECUTABLE_POINTER] {
@@ -67,49 +59,11 @@ impl ControllerPinReferenceProvider for AgentTaskControllerPinReferenceProvider 
     }
 }
 
-/// A record retains its pin while a mutating lifecycle action remains
-/// available or indeterminate and the record is still inside the configured
-/// retention window. In-flight records keep the pin regardless of age.
+/// Only non-terminal work needs its Cook child runtime copy.
 fn state_retains_pin(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
-    min_age: Duration,
 ) -> Option<ControllerPinProtectionReason> {
-    if !record.state().is_terminal() {
-        return Some(ControllerPinProtectionReason::ProtectedInFlight);
-    }
-    if !mutating_lifecycle_action_remains_open(record) {
-        return None;
-    }
-    if record_age_seconds(record).is_some_and(|age| age >= min_age.as_secs()) {
-        return None;
-    }
-    Some(ControllerPinProtectionReason::ProtectedByPendingMutation)
-}
-
-fn mutating_lifecycle_action_remains_open(
-    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
-) -> bool {
-    lifecycle_action_eligibility(record, None)
-        .actions
-        .iter()
-        .any(|eligibility| {
-            eligibility.action.is_mutating()
-                && matches!(
-                    eligibility.availability,
-                    ControlPlaneActionAvailability::Available
-                        | ControlPlaneActionAvailability::Indeterminate
-                )
-        })
-}
-
-fn record_age_seconds(record: &crate::agent_task_lifecycle::AgentTaskRunRecord) -> Option<u64> {
-    chrono::DateTime::parse_from_rfc3339(&record.submitted_at)
-        .ok()
-        .map(|submitted| {
-            (chrono::Utc::now() - submitted.with_timezone(&chrono::Utc))
-                .num_seconds()
-                .max(0) as u64
-        })
+    (!record.state().is_terminal()).then_some(ControllerPinProtectionReason::ProtectedInFlight)
 }
 
 /// Register the agent-task controller pin-reference provider. Called once at
@@ -122,9 +76,7 @@ pub fn register() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_task_lifecycle::{
-        AgentTaskAcceptanceVerdict, AgentTaskRunRecord, AgentTaskRunState,
-    };
+    use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
     use homeboy_core::run_lifecycle_record::ArtifactRetentionStatus;
 
     fn record(state: AgentTaskRunState, submitted_at: &str) -> AgentTaskRunRecord {
@@ -139,62 +91,26 @@ mod tests {
         .expect("record")
     }
 
-    fn exhaust_repair_budget(record: &mut AgentTaskRunRecord) {
-        record.acceptance = serde_json::from_value(serde_json::json!({
-            "requirement": { "authority": "test", "policy": "test" },
-            "verdict": AgentTaskAcceptanceVerdict::Accepted,
-            "candidate": {
-                "schema": "homeboy/agent-task-candidate-fingerprint/v1",
-                "target_path": "/tmp",
-                "head": "0",
-                "base": "0",
-                "changed_files": [],
-                "sha256": "0"
-            },
-            "base_sha": "0",
-            "repair_attempts": 2
-        }))
-        .expect("acceptance");
-    }
-
     #[test]
     fn controller_pin_in_flight_records_retain_regardless_of_age() {
-        let min_age = Duration::ZERO;
         for state in [AgentTaskRunState::Queued, AgentTaskRunState::Running] {
             assert_eq!(
-                state_retains_pin(&record(state, "2020-01-01T00:00:00Z"), min_age),
+                state_retains_pin(&record(state, "2020-01-01T00:00:00Z")),
                 Some(ControllerPinProtectionReason::ProtectedInFlight)
             );
         }
     }
 
     #[test]
-    fn controller_pin_pending_mutation_inside_the_window_retains() {
-        let min_age = Duration::from_secs(86_400);
-        let now = chrono::Utc::now().to_rfc3339();
-        assert_eq!(
-            state_retains_pin(&record(AgentTaskRunState::Succeeded, &now), min_age),
-            Some(ControllerPinProtectionReason::ProtectedByPendingMutation)
-        );
-        assert_eq!(
-            state_retains_pin(&record(AgentTaskRunState::Failed, &now), min_age),
-            Some(ControllerPinProtectionReason::ProtectedByPendingMutation)
-        );
-    }
-
-    #[test]
-    fn controller_pin_terminal_outside_the_window_does_not_retain_artifact_retention() {
-        let min_age = Duration::from_secs(86_400);
-        let mut retained = record(AgentTaskRunState::Succeeded, "2020-01-01T00:00:00Z");
-        retained.lifecycle.artifact_retention.status = ArtifactRetentionStatus::Retained;
-        assert_eq!(state_retains_pin(&retained, min_age), None);
-    }
-
-    #[test]
-    fn controller_pin_read_only_actions_do_not_retain() {
-        let min_age = Duration::from_secs(u64::MAX);
-        let mut failed = record(AgentTaskRunState::Failed, "2026-01-01T00:00:00Z");
-        exhaust_repair_budget(&mut failed);
-        assert_eq!(state_retains_pin(&failed, min_age), None);
+    fn terminal_records_never_retain_pins_even_with_open_mutations_and_retained_artifacts() {
+        for state in [
+            AgentTaskRunState::Succeeded,
+            AgentTaskRunState::Failed,
+            AgentTaskRunState::Cancelled,
+        ] {
+            let mut retained = record(state, &chrono::Utc::now().to_rfc3339());
+            retained.lifecycle.artifact_retention.status = ArtifactRetentionStatus::Retained;
+            assert_eq!(state_retains_pin(&retained), None);
+        }
     }
 }

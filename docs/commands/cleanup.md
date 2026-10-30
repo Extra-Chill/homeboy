@@ -279,7 +279,7 @@ apply.
 | `release-artifacts` | — (aggregate only) | Superseded durable release copies under `<artifact-root>/release/<repo>/<version>/` | Version directory under a repository directory in the release store; the database is deliberately **not** consulted. `orphaned-artifact-bytes` cannot reach these — they are referenced by durable release records and correctly inventory as zero orphans | `retention.release_artifact_max_count` (default 5) and `retention.release_artifact_max_bytes` (default 2 GiB), both per repository, stricter wins. The newest release of every repository is structurally unreachable, a fixed 1h floor covers an in-flight publication, and retention is monotone in age. Sizes are hardlink-corrected, so the numbered and canonical copies of one payload are billed once |
 | `controller-scratch` | — (aggregate only) | Released controller scratch resources, including ephemeral attempt Git worktrees | Scratch index ownership with pid liveness; a linked worktree is proved by Git's own two-way `.git`/`gitdir` pointers, never by a database join | Per-resource retention window (P7D) unless `--older-than-days` is typed. A linked attempt worktree is additionally retained unless every commit reachable from its HEAD is already reachable from a branch, tag, or remote-tracking ref in its source repository. Removal goes through `git worktree remove`; a worktree that cannot be unregistered is reported and retained, never deleted behind Git. Also owns `<artifact_root>/controller-scratch-recovery/<run>`: reclaimed once the run is terminal, none of its leases remain on disk, and it is older than `retention.controller_scratch_recovery_days` (14); `--older-than-days` does not apply to it |
 | `shared-cargo-targets` | — (aggregate only) | Shared Cargo target stores | Store layout below Homeboy's data directory | `retention.shared_store_days` and byte budget; an unexpired lease preserves the store independently |
-| `controller-runtimes` | `homeboy runtime controller-prune` | Unreferenced immutable controller runtime identities | Content-addressed pin path not referenced by a nonterminal durable record or the active generation, under the admission lock | `retention.controller_runtime_days` and byte budget; `--ignore-retention` is the explicit destructive opt-out |
+| `controller-runtimes` | `homeboy runtime controller-prune` | Unreferenced immutable controller runtime identities | Content-addressed pin path not referenced by nonterminal work, under the admission lock | `retention.limit`; no age window |
 
 ### Why the specialists still exist
 
@@ -295,8 +295,6 @@ aggregate deliberately never applies:
 - `runner workspace prune` / `runner cache-prune` — per-runner targeting plus
   `--passes`/`--cursor` pagination against a single remote host.
 - `self cleanup-runtime-tmp` — `--prefix`.
-- `runtime controller-prune` — `--ignore-retention`, the explicit destructive
-  purge the aggregate never offers.
 `homeboy runs retention` had nothing on that list — its `--apply`,
 `--older-than-days`, and `--limit` were exactly the aggregate's — so it was
 deleted. `homeboy cleanup --include terminal-runs` is the only surface for

@@ -922,10 +922,7 @@ impl ProtectedControllerExecutables {
 
     fn resolve_for_inventory() -> Result<Self> {
         Ok(Self {
-            paths: crate::controller_runtime::active_generation_executables()?
-                .into_iter()
-                .map(|path| canonical_or_owned(&path))
-                .collect(),
+            paths: Default::default(),
         })
     }
 
@@ -3662,53 +3659,6 @@ mod tests {
         assert_eq!(output.applied_count, 2);
         assert!(!repo.path().join("target").exists());
         assert!(!repo.path().join(".cargo-target").exists());
-    }
-
-    #[test]
-    fn controller_runtime_recovery_executable_protects_its_target_only() {
-        crate::test_support::with_isolated_home(|_| {
-            let protected_repo = repo_with_ignored_artifacts();
-            let unrelated_repo = repo_with_ignored_artifacts();
-            let protected_binary = protected_repo.path().join("target/release/homeboy");
-            write_file(&protected_binary, "selected recovery executable");
-            write_file(
-                &unrelated_repo.path().join("target/release/homeboy"),
-                "unrelated build output",
-            );
-            let runtime_root = crate::controller_runtime::runtime_root_in(
-                &homeboy_paths::homeboy_data().expect("data root"),
-            )
-            .expect("runtime root");
-            fs::write(
-                runtime_root.join("active.json"),
-                serde_json::json!({
-                    "originating": { "executable": protected_binary }
-                })
-                .to_string(),
-            )
-            .expect("register active controller runtime");
-
-            let retained = cleanup_artifacts(ArtifactCleanupOptions {
-                path: Some(protected_repo.path().to_path_buf()),
-                apply: true,
-                ..Default::default()
-            })
-            .expect("cleanup protected source checkout");
-            let reclaimed = cleanup_artifacts(ArtifactCleanupOptions {
-                path: Some(unrelated_repo.path().to_path_buf()),
-                apply: true,
-                ..Default::default()
-            })
-            .expect("cleanup unrelated source checkout");
-
-            assert_eq!(retained.applied_count, 0);
-            assert!(retained.skipped.iter().any(|row| {
-                row.relative_path == "target" && row.reason.contains("controller runtime recovery")
-            }));
-            assert_eq!(reclaimed.applied_count, 1);
-            assert!(protected_binary.exists());
-            assert!(!unrelated_repo.path().join("target").exists());
-        });
     }
 
     #[cfg(unix)]

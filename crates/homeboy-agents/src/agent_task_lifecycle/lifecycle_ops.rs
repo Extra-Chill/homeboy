@@ -3396,81 +3396,6 @@ pub fn validate_controller_runtime_in_store(
     Ok(record)
 }
 
-/// Resolve the compatible immutable executable for a lifecycle mutation.
-pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::PathBuf>> {
-    // One root for the whole read: resolving the run id and reading the record
-    // are one operation (#7505).
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    let resolved = resolve_run_id_in_store(&lifecycle_store, run_id)?;
-    let record = lifecycle_store.read_record(&resolved)?;
-    homeboy_core::controller_runtime::pinned_executable_for_mutation(
-        &record.metadata,
-        &homeboy_core::build_identity::current().display,
-    )
-    .map_err(|mut error| {
-        // A bad pin must never become a recursive re-exec suggestion. Name the
-        // narrow repair operation against the durable record instead.
-        error.details["next_actions"] = serde_json::json!([format!(
-            "homeboy agent-task runtime-recover {} --artifact <trusted-controller-executable>",
-            homeboy_core::engine::shell::quote_arg(&record.run_id)
-        )]);
-        error
-    })
-}
-
-/// A v2 controller-runtime pin that belongs to a persisted runner transport,
-/// rather than the controller filesystem currently handling a continuation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunnerPinnedRuntime {
-    pub runner_id: String,
-    pub executable: std::path::PathBuf,
-}
-
-/// Resolve a runner-owned v2 pin before attempting local migration or
-/// validation. Historical Lab records stored the runner's immutable path as the
-/// controller pin; re-executing it through the recorded runner lets that host
-/// retain the normal digest and identity checks.
-pub fn runner_pinned_runtime_for_mutation(run_id: &str) -> Result<Option<RunnerPinnedRuntime>> {
-    let record = store::read_record(&resolve_run_id(run_id)?)?;
-    let Some(runner_id) = record
-        .runner_id()
-        .filter(|runner_id| !runner_id.trim().is_empty())
-    else {
-        return Ok(None);
-    };
-    let Some(runtime) = record
-        .metadata
-        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-    else {
-        return Ok(None);
-    };
-    // Only v2 metadata carries the immutable digest that the runner validates.
-    if runtime
-        .pointer("/originating/sha256")
-        .and_then(Value::as_str)
-        .is_none_or(str::is_empty)
-    {
-        return Ok(None);
-    }
-    let Some(executable) = runtime
-        .pointer("/originating/pinned_executable")
-        .and_then(Value::as_str)
-        .filter(|executable| !executable.trim().is_empty())
-        .map(std::path::PathBuf::from)
-    else {
-        return Ok(None);
-    };
-    // Existing local pins retain the established migration and validation path.
-    // A missing v2 path on a runner-backed record is runner-owned provenance.
-    if executable.is_file() {
-        return Ok(None);
-    }
-    Ok(Some(RunnerPinnedRuntime {
-        runner_id: runner_id.to_string(),
-        executable,
-    }))
-}
-
 /// Seal the currently executing controller into an immutable runtime before a
 /// new cook begins its local routing and admission work.  Participates in the
 /// FIFO admission queue so concurrent seals wait their turn instead of
@@ -3504,7 +3429,7 @@ pub fn pin_current_controller_runtime(
 }
 
 /// Prune immutable controller pins through the durable lifecycle ownership
-/// boundary so in-flight and pending-mutation records remain authoritative
+/// boundary so non-terminal records remain authoritative
 /// retention roots.
 ///
 /// Retention policy is resolved by core from the operator's configuration; this
@@ -3514,50 +3439,6 @@ pub fn prune_controller_runtime_pins(
     overrides: homeboy_core::controller_runtime::ControllerRuntimeRetentionOverrides,
 ) -> Result<homeboy_core::controller_runtime::ControllerRuntimePruneResult> {
     homeboy_core::controller_runtime::prune_pins(apply, overrides)
-}
-
-/// Repair a run's pinned controller executable against an explicitly rooted
-/// store.
-///
-/// This is the re-entry repair step: a run whose pin no longer resolves cannot
-/// be resumed or retried until the provenance it names is restored. Both
-/// lifecycle halves follow the injected root — the record the provenance is read
-/// from and the record the recovered pin is written back to — because recovering
-/// against one home's provenance and persisting into another leaves the run this
-/// operator is trying to re-enter still holding the broken pin.
-///
-/// Recovery republishes the immutable pin under this lifecycle store's runtime
-/// root before persisting the repaired reference.
-pub fn recover_controller_runtime_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    artifact: Option<&std::path::Path>,
-    source: Option<&std::path::Path>,
-) -> Result<Value> {
-    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    let runtime = record
-        .metadata
-        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "controller_runtime",
-                "durable run has no controller runtime pin",
-                Some(record.run_id.clone()),
-                None,
-            )
-        })?;
-    let runtime = runtime.clone();
-    let recovered = homeboy_core::controller_runtime::recover_pin_and_persist(
-        &runtime,
-        artifact,
-        source,
-        |recovered| {
-            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
-                recovered.clone();
-            lifecycle_store.commit_record(&mut record)
-        },
-    )?;
-    Ok(recovered)
 }
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -3570,11 +3451,6 @@ pub fn mark_running_in_store(
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = lifecycle_store.read_record(&run_id)?;
-    homeboy_core::controller_runtime::validate_for_mutation(
-        &record.metadata,
-        &homeboy_core::build_identity::current().display,
-    )?;
     let mut error = None;
     lifecycle_store.transition_when(&run_id, |stored| {
         let mut prepared = stored.clone();
@@ -4758,9 +4634,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
             });
         }
         inspected += 1;
-        let mut plan = match validate_controller_runtime_in_store(lifecycle_store, &record.run_id)
-            .and_then(|_| load_controller_plan_in_store(lifecycle_store, &record.run_id))
-        {
+        let mut plan = match load_controller_plan_in_store(lifecycle_store, &record.run_id) {
             Ok(plan) => plan,
             Err(error) => {
                 quarantine_queued_run_in_store(lifecycle_store, &record, None, &error)?;
@@ -4810,8 +4684,7 @@ pub(crate) fn claim_exact_execution_intent_in_store(
     if !intent.authorizes(&record) {
         return Ok(None);
     }
-    let mut plan = validate_controller_runtime_in_store(lifecycle_store, &record.run_id)
-        .and_then(|_| load_controller_plan_in_store(lifecycle_store, &record.run_id))?;
+    let mut plan = load_controller_plan_in_store(lifecycle_store, &record.run_id)?;
     preflight(&record, &mut plan)?;
     lifecycle_store.bind_controller_plan_and_claim_queued_run_when(
         &record.run_id,

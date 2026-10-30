@@ -1,8 +1,6 @@
 use clap::{Args, Subcommand};
 use homeboy::core::controller_runtime::ControllerRuntimeRetentionOverrides;
 use serde::Serialize;
-#[cfg(unix)]
-use std::process::Command;
 
 use crate::commands::utils::args::MutationArgs;
 use crate::commands::CmdResult;
@@ -37,26 +35,9 @@ enum RuntimeCommand {
     PromotionTakeover,
     /// Plan or apply pruning for unreferenced immutable controller runtimes.
     ControllerPrune {
-        // Delete pins not retained by nonterminal durable runs or the active
-        // generation. Shared plan-default mutation group (#11139).
+        // Delete pins not retained by nonterminal durable runs.
         #[command(flatten)]
         mutation: MutationArgs,
-
-        /// Purge every unreferenced pin, ignoring the configured controller
-        /// runtime retention window. Destructive: prefer the configured window.
-        #[arg(long)]
-        ignore_retention: bool,
-    },
-    /// Build and pin an exact controller candidate, optionally continuing one command.
-    MaterializeController {
-        #[arg(long)]
-        source: String,
-        #[arg(long)]
-        commit: String,
-        #[arg(long)]
-        identity: String,
-        #[arg(last = true)]
-        invocation: Vec<String>,
     },
 }
 
@@ -80,7 +61,6 @@ pub enum RuntimeOutput {
     RuntimePackageRefresh(RuntimePackageRefreshOutput),
     RuntimePromotionTakeover(RuntimePromotionTakeoverOutput),
     ControllerPrune(ControllerRuntimePruneOutput),
-    MaterializeController(ControllerMaterializationOutput),
 }
 
 #[derive(Serialize)]
@@ -114,33 +94,10 @@ pub struct RuntimePromotionTakeoverOutput {
 pub struct ControllerRuntimePruneOutput {
     command: String,
     apply: bool,
-    /// Retention policy actually applied, so an operator can see the configured
-    /// window is honored instead of inferring it from what disappeared.
-    ignore_retention: bool,
-    min_age_seconds: u64,
-    max_total_bytes: u64,
     limit: usize,
     retained: Vec<String>,
     eligible: Vec<String>,
     removed: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct ControllerMaterializationOutput {
-    command: String,
-    source: String,
-    commit: String,
-    identity: String,
-    pinned_executable: String,
-    command_prefix: Vec<String>,
-    invocation: Vec<String>,
-    next_actions: Vec<ControllerMaterializationNextAction>,
-}
-
-#[derive(Serialize)]
-pub struct ControllerMaterializationNextAction {
-    label: String,
-    command: Vec<String>,
 }
 
 pub fn run(args: RuntimeArgs) -> CmdResult<RuntimeOutput> {
@@ -154,16 +111,7 @@ pub fn run(args: RuntimeArgs) -> CmdResult<RuntimeOutput> {
             revision,
         } => refresh_runtime_package(&runtime_id, &source, revision.as_deref()),
         RuntimeCommand::PromotionTakeover => promotion_takeover(),
-        RuntimeCommand::ControllerPrune {
-            mutation,
-            ignore_retention,
-        } => controller_prune(mutation.is_apply(), ignore_retention),
-        RuntimeCommand::MaterializeController {
-            source,
-            commit,
-            identity,
-            invocation,
-        } => materialize_controller(&source, &commit, &identity, invocation),
+        RuntimeCommand::ControllerPrune { mutation } => controller_prune(mutation.is_apply()),
     }
 }
 
@@ -174,8 +122,7 @@ pub(crate) fn is_plain_mode(args: &RuntimeArgs) -> bool {
         },
         RuntimeCommand::Refresh { .. }
         | RuntimeCommand::PromotionTakeover
-        | RuntimeCommand::ControllerPrune { .. }
-        | RuntimeCommand::MaterializeController { .. } => false,
+        | RuntimeCommand::ControllerPrune { .. } => false,
     }
 }
 
@@ -195,20 +142,14 @@ pub(crate) fn run_plain_text(args: RuntimeArgs) -> homeboy::core::Result<(String
         },
         RuntimeCommand::Refresh { .. }
         | RuntimeCommand::PromotionTakeover
-        | RuntimeCommand::ControllerPrune { .. }
-        | RuntimeCommand::MaterializeController { .. } => {
+        | RuntimeCommand::ControllerPrune { .. } => {
             unreachable!("runtime mutation has no plain mode")
         }
     }
 }
 
-fn controller_prune(apply: bool, ignore_retention: bool) -> CmdResult<RuntimeOutput> {
-    let overrides = ControllerRuntimeRetentionOverrides {
-        limit: None,
-        ignore_retention,
-    };
-    // Resolved by the same core helper the prune itself uses, so the reported
-    // policy cannot describe a window the deletion did not apply.
+fn controller_prune(apply: bool) -> CmdResult<RuntimeOutput> {
+    let overrides = ControllerRuntimeRetentionOverrides::default();
     let policy = homeboy::core::controller_runtime::resolve_cleanup_options(apply, overrides);
     let result =
         homeboy::agents::agent_tasks::lifecycle::prune_controller_runtime_pins(apply, overrides)?;
@@ -222,9 +163,6 @@ fn controller_prune(apply: bool, ignore_retention: bool) -> CmdResult<RuntimeOut
         RuntimeOutput::ControllerPrune(ControllerRuntimePruneOutput {
             command: "runtime.controller_prune".to_string(),
             apply,
-            ignore_retention,
-            min_age_seconds: policy.min_age.as_secs(),
-            max_total_bytes: policy.max_total_bytes,
             limit: policy.limit,
             retained: stringify(result.retained),
             eligible: stringify(result.eligible),
@@ -232,70 +170,6 @@ fn controller_prune(apply: bool, ignore_retention: bool) -> CmdResult<RuntimeOut
         }),
         0,
     ))
-}
-
-fn materialize_controller(
-    source: &str,
-    commit: &str,
-    identity: &str,
-    invocation: Vec<String>,
-) -> CmdResult<RuntimeOutput> {
-    let pin =
-        homeboy::core::controller_runtime::materialize_source_commit(source, commit, identity)?;
-    let pinned_executable = pin
-        .pointer("/originating/pinned_executable")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            homeboy::core::Error::internal_unexpected(
-                "controller runtime pin omitted its executable path",
-            )
-        })?
-        .to_string();
-    if !invocation.is_empty() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            let error = Command::new(&pinned_executable).args(&invocation).exec();
-            return Err(homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some("re-exec pinned controller candidate".to_string()),
-            ));
-        }
-    }
-
-    Ok((
-        RuntimeOutput::MaterializeController(controller_materialization_output(
-            source,
-            commit,
-            identity,
-            pinned_executable,
-            invocation,
-        )),
-        0,
-    ))
-}
-
-fn controller_materialization_output(
-    source: &str,
-    commit: &str,
-    identity: &str,
-    pinned_executable: String,
-    invocation: Vec<String>,
-) -> ControllerMaterializationOutput {
-    let command_prefix = vec![pinned_executable.clone()];
-    ControllerMaterializationOutput {
-        command: "runtime.materialize_controller".to_string(),
-        source: source.to_string(),
-        commit: commit.to_string(),
-        identity: identity.to_string(),
-        pinned_executable,
-        command_prefix: command_prefix.clone(),
-        invocation,
-        next_actions: vec![ControllerMaterializationNextAction {
-            label: "run_pinned_controller_candidate".to_string(),
-            command: command_prefix,
-        }],
-    }
 }
 
 fn promotion_takeover() -> CmdResult<RuntimeOutput> {
@@ -411,23 +285,5 @@ mod tests {
             assert!(output.path.ends_with("agent-runtimes/neutral-runtime"));
             assert!(std::path::Path::new(&output.manifest_path).is_file());
         });
-    }
-
-    #[test]
-    fn controller_materialization_output_exposes_a_pinned_command_prefix() {
-        let output = controller_materialization_output(
-            "https://example.test/homeboy.git",
-            "exact-commit",
-            "homeboy 1.2.3+exact-commit",
-            "/controller/controller-runtimes/candidate/homeboy".to_string(),
-            Vec::new(),
-        );
-
-        assert_eq!(
-            output.command_prefix,
-            ["/controller/controller-runtimes/candidate/homeboy"]
-        );
-        assert_eq!(output.next_actions[0].command, output.command_prefix);
-        assert!(output.invocation.is_empty());
     }
 }

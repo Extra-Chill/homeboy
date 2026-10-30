@@ -6490,9 +6490,17 @@ fn recover_replacement_file_gates_are_snapshotted_before_execution() {
 }
 
 #[test]
-fn resume_command_executes_existing_run_and_returns_the_replayable_acknowledgement() {
+fn resume_from_a_different_build_executes_in_process_and_returns_replayable_acknowledgement() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-resume-cli")).expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test("run-resume-cli", |record| {
+            record.metadata["controller_runtime"]["originating"] = json!({
+                "build_identity": "homeboy previous-build",
+                "pinned_executable": "/missing/previous-build/homeboy",
+                "sha256": "unavailable"
+            });
+        })
+        .expect("stamp previous build identity");
         let observed_status = Arc::new(Mutex::new(None));
 
         let (value, exit_code) = run_resume_with_executor(

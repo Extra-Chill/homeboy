@@ -1030,69 +1030,6 @@ fn candidate_adoption_cancellation_persists_request_before_group_termination() {
         .expect("reap isolated gate");
 }
 
-#[cfg(unix)]
-#[test]
-fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
-    with_isolated_home(|_| {
-        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
-        let identity = homeboy_core::build_identity::current().display;
-        let artifact = temporary.path().join("exact-homeboy");
-        let digest = fake_controller_artifact(&artifact, &identity, "exact artifact");
-        let legacy = temporary.path().join("legacy-homeboy");
-        std::fs::write(&legacy, b"corrupted legacy bytes").expect("write corrupted legacy pin");
-        let record = submit_plan(&test_plan(), Some("recover-reject-artifact")).expect("submit");
-
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
-                "originating": {
-                    "build_identity": identity,
-                    "pinned_executable": legacy,
-                    "sha256": "00",
-                }
-            });
-        })
-        .expect("project wrong hash pin");
-        let before_hash = reconcile_status(&record.run_id).expect("record before wrong hash");
-        let hash_error = recover_controller_runtime_in_store(
-            &test_lifecycle_store(),
-            &record.run_id,
-            Some(&artifact),
-            None,
-        )
-        .expect_err("wrong hash rejected");
-        assert!(hash_error.message.contains("hash mismatch"));
-        assert_eq!(
-            reconcile_status(&record.run_id).expect("record after wrong hash"),
-            before_hash
-        );
-
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
-                "originating": {
-                    "build_identity": "homeboy test+wrong-identity",
-                    "pinned_executable": legacy,
-                    "sha256": digest,
-                }
-            });
-        })
-        .expect("project wrong identity pin");
-        let before_identity =
-            reconcile_status(&record.run_id).expect("record before wrong identity");
-        let identity_error = recover_controller_runtime_in_store(
-            &test_lifecycle_store(),
-            &record.run_id,
-            Some(&artifact),
-            None,
-        )
-        .expect_err("wrong identity rejected");
-        assert!(identity_error.message.contains("build identity mismatch"));
-        assert_eq!(
-            reconcile_status(&record.run_id).expect("record after wrong identity"),
-            before_identity
-        );
-    });
-}
-
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The closing assertion is that the plan file was *not* rewritten, so
 /// the execution read has to address the same `plan.json` this test replaced —

@@ -142,27 +142,6 @@ pub struct DiagnoseArgs {
     pub full: bool,
 }
 #[derive(Args, Debug)]
-pub struct RuntimeRecoverArgs {
-    /// Durable run whose exact controller executable should be rematerialized.
-    pub run_id: String,
-    /// Trusted source checkout used to rebuild the recorded runtime revision.
-    #[arg(
-        long,
-        value_name = "PATH",
-        required_unless_present = "artifact",
-        conflicts_with = "artifact"
-    )]
-    pub source: Option<String>,
-    /// Exact prebuilt controller executable. Its hash and self identity must match the durable pin.
-    #[arg(
-        long,
-        value_name = "PATH",
-        required_unless_present = "source",
-        conflicts_with = "source"
-    )]
-    pub artifact: Option<String>,
-}
-#[derive(Args, Debug)]
 pub struct RuntimeValidateArgs {
     /// Durable run to validate without executing its provider lifecycle.
     pub run_id: String,
@@ -176,43 +155,6 @@ mod tests {
         cli_surface::{Cli, Commands},
         commands::agent_task::AgentTaskCommand,
     };
-
-    #[test]
-    fn runtime_recovery_requires_one_trusted_input() {
-        assert!(
-            Cli::try_parse_from(["homeboy", "agent-task", "runtime-recover", "run-a"]).is_err()
-        );
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "runtime-recover",
-            "run-a",
-            "--artifact",
-            "/trusted/homeboy",
-            "--source",
-            "/trusted/source",
-        ])
-        .is_err());
-
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "runtime-recover",
-            "run-a",
-            "--artifact",
-            "/trusted/homeboy",
-        ])
-        .expect("artifact recovery parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::RuntimeRecover(args) = agent_task.command else {
-            panic!("expected runtime recovery command");
-        };
-        assert_eq!(args.run_id, "run-a");
-        assert_eq!(args.artifact.as_deref(), Some("/trusted/homeboy"));
-        assert!(args.source.is_none());
-    }
 
     #[test]
     fn placement_update_requires_explicit_local_confirmation() {

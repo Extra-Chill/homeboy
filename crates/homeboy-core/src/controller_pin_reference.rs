@@ -1,15 +1,12 @@
 //! Controller-runtime pin-reference hook.
 //!
 //! Controller runtime pins (immutable homeboy executables) are retained while a
-//! durable agent-task record can still mutate them and remains inside the
-//! configured retention window. In-flight (`Queued` / `Running`) records keep
-//! their pin regardless of age so an executing run cannot lose its binary.
-//! Outside that window the pin is reclaimable; `recover_pin` can republish it
-//! from a verified artifact or the recorded source revision.
+//! durable agent-task record is non-terminal. Terminal records are owned by
+//! the current binary and no longer retain their originating runtime.
 //!
 //! Discovering which pins are still referenced requires reading the agent-task
-//! lifecycle store and inspecting each record's lifecycle-action eligibility
-//! and age, which is agent-task behavior. It is inverted behind this provider
+//! lifecycle store and inspecting each record's state, which is agent-task
+//! behavior. It is inverted behind this provider
 //! so the controller runtime's retention logic (pin classification, disk scan,
 //! pruning) stays in core without core depending on the agent-task subsystem.
 //!
@@ -27,9 +24,6 @@ use crate::Result;
 /// that must win when several records name the same path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ControllerPinProtectionReason {
-    /// A mutating lifecycle action remains available or indeterminate and the
-    /// record is still inside the configured retention window.
-    ProtectedByPendingMutation,
     /// The record is genuinely in flight (`Queued` or `Running`).
     ProtectedInFlight,
 }
@@ -37,7 +31,6 @@ pub enum ControllerPinProtectionReason {
 impl ControllerPinProtectionReason {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::ProtectedByPendingMutation => "protected_by_pending_mutation",
             Self::ProtectedInFlight => "protected_in_flight",
         }
     }

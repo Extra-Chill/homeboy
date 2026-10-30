@@ -37,8 +37,7 @@ pub use args::{
     FinalizePrArgs, GateFeedbackArgs, ListArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs,
     PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs, RecoverArgs,
     ReplayProviderBoundaryArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs,
-    ReviewArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, ValidatePlanArgs,
-    VerifyGateArgs,
+    ReviewArgs, RunPlanArgs, RuntimeValidateArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs,
 };
 
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
@@ -378,7 +377,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::RetainedArtifacts(args) => retained_artifacts::run(args),
         AgentTaskCommand::Evidence(evidence_args) => status::evidence(evidence_args),
         AgentTaskCommand::Diagnose(diagnose_args) => status::diagnose(diagnose_args),
-        AgentTaskCommand::RuntimeRecover(args) => status::recover_runtime(args),
         AgentTaskCommand::RuntimeValidate(args) => status::validate_runtime(args),
         AgentTaskCommand::ReplayProviderBoundary(replay_args) => {
             status::replay_provider_boundary(replay_args)

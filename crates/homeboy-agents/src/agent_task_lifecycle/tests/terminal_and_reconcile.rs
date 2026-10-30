@@ -367,57 +367,6 @@ fn cancellation_routes_managed_service_cleanup_to_its_lab_owner() {
     });
 }
 
-#[cfg(unix)]
-#[test]
-fn artifact_recovery_replaces_only_the_recorded_legacy_pin() {
-    with_isolated_home(|_| {
-        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
-        let identity = homeboy_core::build_identity::current().display;
-        let artifact = temporary.path().join("exact-homeboy");
-        let digest = fake_controller_artifact(&artifact, &identity, "exact artifact");
-        let legacy = temporary.path().join("legacy-homeboy");
-        std::fs::write(&legacy, b"corrupted legacy bytes").expect("write corrupted legacy pin");
-        let record = submit_plan(&test_plan(), Some("recover-exact-artifact")).expect("submit");
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
-                "originating": {
-                    "build_identity": identity,
-                    "pinned_executable": legacy,
-                    "sha256": digest,
-                }
-            });
-        })
-        .expect("project legacy pin");
-
-        let recovered = recover_controller_runtime_in_store(
-            &test_lifecycle_store(),
-            &record.run_id,
-            Some(&artifact),
-            None,
-        )
-        .expect("recover exact artifact");
-        let pinned = std::path::PathBuf::from(
-            recovered["originating"]["pinned_executable"]
-                .as_str()
-                .expect("recovered pin path"),
-        );
-        assert_ne!(pinned, legacy);
-        assert!(pinned.is_file());
-        assert_eq!(
-            std::fs::read(&legacy).expect("legacy bytes retained"),
-            b"corrupted legacy bytes"
-        );
-        assert_eq!(
-            reconcile_status(&record.run_id)
-                .expect("recovered record")
-                .metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY],
-            recovered
-        );
-        validate_controller_runtime_in_store(&test_lifecycle_store(), &record.run_id)
-            .expect("recovered runtime validates");
-    });
-}
-
 /// Omitted authored budgets use the current default without mutating a stored
 /// plan during inspection or execution readback.
 #[test]
@@ -453,57 +402,6 @@ fn execution_budget_defaults_are_current_and_plan_reads_preserve_bytes() {
         .expect("canonical execution read");
     assert_eq!(executed, preview);
     assert_eq!(std::fs::read_to_string(&record.plan_path).unwrap(), before);
-}
-
-#[cfg(unix)]
-#[test]
-fn pinned_runtime_recovery_retains_the_existing_lab_proxy_identity() {
-    with_isolated_home(|_| {
-        let temporary = tempfile::tempdir().expect("temporary controller directory");
-        let pinned = temporary.path().join("runtime-a-homeboy");
-        let identity = "homeboy runtime-a";
-        let digest = fake_controller_artifact(&pinned, identity, "runtime A");
-        record_lab_offload_planned(LabOffloadProxyPlan {
-            run_id: "runtime-a-lab-proxy",
-            runner_id: "homeboy-lab",
-            remote_workspace: "/runner/workspace",
-            remote_command: &[
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "run".to_string(),
-            ],
-            durable_plan: None,
-        })
-        .expect("runtime A created proxy");
-        rewrite_record_for_test("runtime-a-lab-proxy", |record| {
-            let runtime = &mut record.metadata
-                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY];
-            runtime["requested"] = json!(identity);
-            runtime["originating"]["build_identity"] = json!(identity);
-            runtime["originating"]["executable"] = json!(&pinned);
-            runtime["originating"]["pinned_executable"] = json!(&pinned);
-            runtime["originating"]["sha256"] = json!(digest);
-            runtime["current"] = json!(identity);
-            runtime["executed"] = json!(identity);
-        })
-        .expect("record runtime A provenance");
-
-        let pinned = pinned_runtime_for_mutation("runtime-a-lab-proxy")
-            .expect("runtime B resolves the verified runtime A pin")
-            .expect("runtime B delegates to runtime A");
-        let record = reconcile_status("runtime-a-lab-proxy").expect("same durable proxy remains");
-
-        assert!(pinned.is_file());
-        assert_eq!(record.run_id, "runtime-a-lab-proxy");
-        assert_eq!(record.state(), AgentTaskRunState::Queued);
-        assert_eq!(
-            list_records_in_store(&test_lifecycle_store())
-                .expect("one durable record")
-                .len(),
-            1
-        );
-        assert!(record.provider_handles.is_empty());
-    });
 }
 
 #[test]

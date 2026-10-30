@@ -156,8 +156,6 @@ pub struct CleanupPolicy {
     pub shared_store_lease_seconds: u64,
     pub shared_store_reserve_bytes: u64,
     pub shared_store_reserve_inodes: u64,
-    pub controller_runtime_days: u64,
-    pub controller_runtime_max_bytes: u64,
     pub controller_scratch_recovery_days: u64,
     pub release_artifact_max_count: usize,
     pub release_artifact_max_bytes: u64,
@@ -199,12 +197,6 @@ impl CleanupPolicy {
     #[must_use]
     pub fn shared_store_lease_ttl(self) -> Duration {
         Duration::from_secs(self.shared_store_lease_seconds)
-    }
-
-    /// Age floor for unreferenced controller runtime identities.
-    #[must_use]
-    pub fn controller_runtime_min_age(self) -> Duration {
-        Duration::from_secs(self.controller_runtime_days.saturating_mul(SECONDS_PER_DAY))
     }
 
     /// Age after which a terminal run's controller scratch recovery is
@@ -315,8 +307,6 @@ pub fn cleanup_policy_from_retention(
         shared_store_lease_seconds: retention.shared_store_lease_seconds,
         shared_store_reserve_bytes: retention.shared_store_reserve_bytes,
         shared_store_reserve_inodes: retention.shared_store_reserve_inodes,
-        controller_runtime_days: retention.controller_runtime_days,
-        controller_runtime_max_bytes: retention.controller_runtime_max_bytes,
         controller_scratch_recovery_days: retention.controller_scratch_recovery_days,
         release_artifact_max_count: overrides
             .release_artifact_max_count
@@ -502,7 +492,6 @@ mod tests {
         let configured = RetentionConfig {
             runtime_tmp_days: 3,
             shared_store_days: 4,
-            controller_runtime_days: 5,
             controller_scratch_recovery_days: 6,
             shared_store_lease_seconds: 61,
             ..retention()
@@ -517,10 +506,6 @@ mod tests {
         assert_eq!(
             policy.shared_store_min_age(),
             Duration::from_secs(4 * SECONDS_PER_DAY)
-        );
-        assert_eq!(
-            policy.controller_runtime_min_age(),
-            Duration::from_secs(5 * SECONDS_PER_DAY)
         );
         assert_eq!(
             policy.controller_scratch_recovery_min_age(),

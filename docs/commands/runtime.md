@@ -43,26 +43,18 @@ source "$(homeboy runtime helper path --plain runner-prelude.sh)"
 
 `homeboy runtime controller-prune` is the specialist command behind the
 `controller_runtimes` cleanup category. It removes only content-addressed
-controller pins that no nonterminal durable run and no active admission
-generation still reference.
+controller pins that no nonterminal durable run references.
 
 ```bash
 homeboy runtime controller-prune
 homeboy runtime controller-prune --apply
 ```
 
-Pruning honors the configured retention policy — `retention.controller_runtime_days`,
-`retention.controller_runtime_max_bytes`, and `retention.limit` — resolved from
-the same helper `homeboy cleanup --include controller-runtimes` uses, so the two
-entry points always apply the identical window. The resolved policy is echoed in
-the command output as `min_age_seconds`, `max_total_bytes`, and `limit`.
+Pruning uses `retention.limit`, shared with `homeboy cleanup --include
+controller-runtimes`. There is no age window or active-generation copy.
+`eligible` lists unreferenced pins within this pass's removal limit.
 
-`--ignore-retention` discards that window and purges every unreferenced pin. It
-is destructive and never the default; reference-based retention still applies,
-but the operator's age and size budget does not.
-
-`eligible` lists only pins a prune under the current policy can actually remove.
-Every retention decision — an active reference, the active generation, the
-configured age and size budget, or this pass's removal limit — is recorded in the
-identity's `retention_reasons` and clears its `eligible` flag, so a pin can never
-be advertised as reclaimable while something still protects it.
+Run, Resume and Accept execute on the current binary regardless of the record's
+originating build identity. Incompatible record shapes fail closed with a
+re-cook error; old binaries are never recovered or re-executed for compatibility.
+Cook child pinning remains in use for live non-terminal work.
