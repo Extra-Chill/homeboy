@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.436.5] - 2026-10-30
+
+### Changed
+- batch retained generation evidence reads, check local blockers first
+
+### Fixed
+- resolve externalized promotion reports in every reader
+
 ## [0.436.4] - 2026-10-30
 
 ### Changed
