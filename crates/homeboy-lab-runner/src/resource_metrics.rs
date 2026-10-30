@@ -508,13 +508,42 @@ fn read_cgroup_file(file: Option<&mut std::fs::File>) -> Option<String> {
 
 struct ResourceMetricsCollector {
     supported: bool,
-    stop: Option<mpsc::Sender<()>>,
     state: Arc<Mutex<MetricsState>>,
-    handle: Option<thread::JoinHandle<()>>,
+    sampler: ActiveSampler,
     guard_limits: Option<RunnerResourceGuardLimits>,
     cgroup_memory: CgroupMemoryCollector,
+}
+
+/// The sampling thread and this job's entry in the active-runner RSS registry.
+/// Stopping on drop releases both on every exit path, including a failed wait,
+/// so a finished job never keeps reducing the RSS budget of later jobs.
+#[derive(Default)]
+struct ActiveSampler {
+    stop: Option<mpsc::Sender<()>>,
+    handle: Option<thread::JoinHandle<()>>,
     #[cfg(target_os = "linux")]
     registered_root_pid: Option<u32>,
+}
+
+impl ActiveSampler {
+    fn stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(root_pid) = self.registered_root_pid.take() {
+            unregister_active_runner(root_pid);
+        }
+    }
+}
+
+impl Drop for ActiveSampler {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 impl ResourceMetricsCollector {
@@ -532,13 +561,10 @@ impl ResourceMetricsCollector {
         if !supported && progress_sink.is_none() {
             return Self {
                 supported,
-                stop: None,
                 state,
-                handle: None,
+                sampler: ActiveSampler::default(),
                 guard_limits,
                 cgroup_memory,
-                #[cfg(target_os = "linux")]
-                registered_root_pid: None,
             };
         }
 
@@ -579,27 +605,20 @@ impl ResourceMetricsCollector {
 
         Self {
             supported,
-            stop: Some(stop),
             state,
-            handle: Some(handle),
+            sampler: ActiveSampler {
+                stop: Some(stop),
+                handle: Some(handle),
+                #[cfg(target_os = "linux")]
+                registered_root_pid: Some(root_pid),
+            },
             guard_limits,
             cgroup_memory,
-            #[cfg(target_os = "linux")]
-            registered_root_pid: Some(root_pid),
         }
     }
 
     fn finish(mut self, duration: Duration) -> RunnerResourceMetrics {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(root_pid) = self.registered_root_pid.take() {
-            unregister_active_runner(root_pid);
-        }
+        self.sampler.stop();
         let state = self.state.lock().expect("resource metrics mutex poisoned");
         let cgroup_memory = self.cgroup_memory.finish();
         let mut guard_limits = self.guard_limits;
@@ -1109,6 +1128,28 @@ mod tests {
     use super::*;
     use homeboy_core::daemon::runner_exec_driver::RunnerChildIdentity;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropped_collector_releases_its_active_rss_registration() {
+        let mut child = Command::new("sleep").arg("5").spawn().expect("spawn sleep");
+        let pid = child.id();
+        let collector = ResourceMetricsCollector::start(pid, Instant::now(), None, None, Some(1));
+        let registered = || {
+            active_runner_rss()
+                .lock()
+                .expect("active runner rss mutex poisoned")
+                .contains_key(&pid)
+        };
+        assert!(registered());
+
+        // A failed wait returns before `finish`; the job must still leave the
+        // registry or its last RSS keeps shrinking every later job's budget.
+        drop(collector);
+        assert!(!registered());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     #[cfg(target_os = "linux")]
     use std::os::unix::process::ExitStatusExt;
