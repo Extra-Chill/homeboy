@@ -787,13 +787,19 @@ fn refresh_homeboy_binary_inner_in_roots(
             }
         };
         interrupted_job_ids = restart.interrupted_job_ids();
-        // Every active job is re-adoptable: restart the connected daemon on its
-        // same state directory, so it re-adopts them and the controller keeps
-        // observing them.
-        let in_place_session = refresh_session
-            .as_ref()
-            .filter(|_| restart == DaemonRestart::InPlace);
-        if service_managed && in_place_session.is_none() {
+        // When every active job is re-adoptable, restart the connected daemon on
+        // its same state directory, so it re-adopts them and the controller
+        // keeps observing them.
+        let route = refresh_reconnect_route(&restart, refresh_session.as_ref(), service_managed);
+        let in_place_session = match route {
+            RefreshReconnectRoute::RestartInPlace(session) => Some(session),
+            RefreshReconnectRoute::Reconnect { .. } => None,
+        };
+        if let RefreshReconnectRoute::Reconnect {
+            restart_service: true,
+            ..
+        } = route
+        {
             // The operator forced the restart, or no daemon is connected. Point
             // the unit at the promoted binary and restart it; the reconnect
             // below attaches to the restarted daemon.
@@ -818,8 +824,8 @@ fn refresh_homeboy_binary_inner_in_roots(
             }
             phase_summary.push(refresh_phase("service_restart", true, 0));
         }
-        if in_place_session.is_none() {
-            if let Err(error) = disconnect_before_reconnect(refresh_session.as_ref(), |session| {
+        if let RefreshReconnectRoute::Reconnect { disconnect, .. } = route {
+            if let Err(error) = disconnect_before_reconnect(disconnect, |session| {
                 super::connection::disconnect_with_session(
                     &plan.runner_id,
                     Some(session),
@@ -848,7 +854,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                     refresh_error_with_phase_summary(error, &phases)
                 });
             }
-            if refresh_session.is_some() {
+            if disconnect.is_some() {
                 phase_summary.push(refresh_phase("disconnect", true, 0));
             }
         }
@@ -1184,6 +1190,39 @@ fn reconnect_transport_exit_code(connected: bool) -> i32 {
         0
     } else {
         1
+    }
+}
+
+/// How a reconnecting refresh reaches the promoted binary's daemon, once
+/// `plan_daemon_restart` has decided which active jobs (if any) it interrupts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshReconnectRoute<'a> {
+    /// Restart the connected daemon on its own state directory and rebind its
+    /// lease's jobs (`restart_in_place`). Nothing is disconnected and no
+    /// active job is interrupted.
+    RestartInPlace(&'a super::RunnerSession),
+    /// Retire whatever is connected (`disconnect`, honouring `--force`) and
+    /// connect afresh. A service-managed runner first repoints and restarts
+    /// its unit (`service_restart`).
+    Reconnect {
+        restart_service: bool,
+        disconnect: Option<&'a super::RunnerSession>,
+    },
+}
+
+fn refresh_reconnect_route<'a>(
+    restart: &DaemonRestart,
+    refresh_session: Option<&'a super::RunnerSession>,
+    service_managed: bool,
+) -> RefreshReconnectRoute<'a> {
+    match refresh_session {
+        Some(session) if *restart == DaemonRestart::InPlace => {
+            RefreshReconnectRoute::RestartInPlace(session)
+        }
+        disconnect => RefreshReconnectRoute::Reconnect {
+            restart_service: service_managed,
+            disconnect,
+        },
     }
 }
 

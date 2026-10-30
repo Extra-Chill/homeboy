@@ -71,6 +71,72 @@ fn re_adoptable_active_jobs_restart_the_daemon_in_place() {
     );
 }
 
+/// #16680: with a connected daemon and one active re-adoptable exec job,
+/// refresh takes the `restart_in_place` route, which restarts the daemon on
+/// its state dir and rebinds the job's owner. It does not take disconnect
+/// plus connect, and for a service-managed runner it never defers and never
+/// interrupts the job. The restart itself is covered end to end in
+/// `execution::tests::restart_in_place`.
+#[test]
+fn re_adoptable_active_job_routes_refresh_through_restart_in_place() {
+    let session = crate::test_support::direct_ssh_session("lease-old");
+    let mut exec_job = active_admission("exec-job");
+    exec_job.re_adoptable = true;
+
+    for service_managed in [false, true] {
+        let restart = plan_daemon_restart("homeboy-lab", std::slice::from_ref(&exec_job), false)
+            .expect("a re-adoptable job never defers the refresh");
+        assert!(
+            restart.interrupted_job_ids().is_empty(),
+            "service_managed={service_managed}: the job is not interrupted"
+        );
+        assert_eq!(
+            refresh_reconnect_route(&restart, Some(&session), service_managed),
+            RefreshReconnectRoute::RestartInPlace(&session),
+            "service_managed={service_managed}: restart in place, not disconnect plus connect"
+        );
+    }
+}
+
+/// The negative case. A job the restarted daemon cannot re-adopt defers the
+/// refresh before any route is taken, so the daemon is neither stopped nor
+/// disconnected. `--force` takes the disconnect route instead and names the
+/// job it interrupts.
+#[test]
+fn non_re_adoptable_job_defers_refresh_and_force_interrupts_it() {
+    let session = crate::test_support::direct_ssh_session("lease-old");
+    let queued = active_admission("queued-job");
+
+    let deferred = plan_daemon_restart("homeboy-lab", std::slice::from_ref(&queued), false)
+        .expect_err("a non-re-adoptable job defers the refresh");
+    assert_eq!(
+        deferred.details["active_job_ids"],
+        serde_json::json!(["queued-job"])
+    );
+
+    for service_managed in [false, true] {
+        let forced = plan_daemon_restart("homeboy-lab", std::slice::from_ref(&queued), true)
+            .expect("--force permits the interruption");
+        assert_eq!(forced.interrupted_job_ids(), vec!["queued-job".to_string()]);
+        assert_eq!(
+            refresh_reconnect_route(&forced, Some(&session), service_managed),
+            RefreshReconnectRoute::Reconnect {
+                restart_service: service_managed,
+                disconnect: Some(&session),
+            },
+            "service_managed={service_managed}: --force disconnects the connected daemon"
+        );
+    }
+    assert_eq!(
+        refresh_reconnect_route(&DaemonRestart::InPlace, None, false),
+        RefreshReconnectRoute::Reconnect {
+            restart_service: false,
+            disconnect: None,
+        },
+        "with no connected daemon there is nothing to restart in place"
+    );
+}
+
 #[test]
 fn one_job_that_cannot_be_re_adopted_defers_the_whole_restart() {
     let mut exec_job = active_admission("exec-job");

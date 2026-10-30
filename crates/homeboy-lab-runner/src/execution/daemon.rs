@@ -1965,7 +1965,7 @@ fn reattach_failure_is_transient(error: &Error) -> bool {
     daemon_poll_transport_was_lost(error) || error.retryable == Some(true)
 }
 
-fn refreshed_daemon_endpoint(
+pub(super) fn refreshed_daemon_endpoint(
     runner_id: &str,
     job_id: &str,
     expected_identity: Option<&str>,
