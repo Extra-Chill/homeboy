@@ -203,20 +203,14 @@ pub(crate) fn finalize_provider_file_artifacts(
 }
 
 /// Preserves declared regular files from a Cook attempt workspace for native Pi
-/// execution, or when another provider fails before serializing an outcome. Sources remain
+/// execution. Sources remain
 /// provider-owned only until they are copied into the executor root; the normal
 /// finalizer then moves the copied bytes into Homeboy-owned storage.
 pub(crate) fn retain_declared_workspace_artifacts(
     outcome: &mut AgentTaskOutcome,
     request: &AgentTaskExecutorRequest,
 ) -> Result<()> {
-    if (request.request.executor.backend != "pi"
-        && matches!(
-            outcome.status,
-            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
-        ))
-        || !outcome.artifacts.is_empty()
-    {
+    if !outcome.artifacts.is_empty() {
         return Ok(());
     }
     request.artifacts_root_identity.verify()?;
@@ -227,9 +221,7 @@ pub(crate) fn retain_declared_workspace_artifacts(
         .request
         .metadata
         .get("cook_attempt_workspace_identity");
-    if attestation.is_none() && request.request.executor.backend != "pi" {
-        return Ok(());
-    }
+
     let workspace = Path::new(workspace);
     if attestation.is_some_and(|attestation| {
         !crate::agent_task_workspace_identity::workspace_matches_attestation(workspace, attestation)
@@ -367,41 +359,41 @@ pub(crate) fn retain_declared_workspace_artifacts(
             None,
         ));
     }
-    if request.request.executor.backend == "pi" {
-        let missing = request
-            .request
-            .canonical_artifact_declarations()
-            .into_iter()
-            .filter(|d| {
-                d.required
-                    && d.path.is_some()
-                    && !outcome
-                        .artifacts
-                        .iter()
-                        .any(|a| a.name.as_deref() == Some(&d.name))
-            })
-            .map(|d| d.name)
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            if outcome.status == AgentTaskOutcomeStatus::Succeeded {
-                outcome.status = AgentTaskOutcomeStatus::Failed;
-                outcome.failure_classification =
-                    Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed);
-                outcome.summary = Some(format!(
-                    "Declared artifact harvesting failed: {}.",
-                    missing.join(", ")
-                ));
-            }
-            outcome.diagnostics.push(AgentTaskDiagnostic {
-                class: "agent_task.required_declared_artifact_missing".into(),
-                message: format!(
-                    "Required declared artifact is absent: {}.",
-                    missing.join(", ")
-                ),
-                data: json!({"missing_artifacts": missing}),
-            });
+
+    let missing = request
+        .request
+        .canonical_artifact_declarations()
+        .into_iter()
+        .filter(|d| {
+            d.required
+                && d.path.is_some()
+                && !outcome
+                    .artifacts
+                    .iter()
+                    .any(|a| a.name.as_deref() == Some(&d.name))
+        })
+        .map(|d| d.name)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        if outcome.status == AgentTaskOutcomeStatus::Succeeded {
+            outcome.status = AgentTaskOutcomeStatus::Failed;
+            outcome.failure_classification =
+                Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed);
+            outcome.summary = Some(format!(
+                "Declared artifact harvesting failed: {}.",
+                missing.join(", ")
+            ));
         }
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.required_declared_artifact_missing".into(),
+            message: format!(
+                "Required declared artifact is absent: {}.",
+                missing.join(", ")
+            ),
+            data: json!({"missing_artifacts": missing}),
+        });
     }
+
     finalize_provider_file_artifacts(outcome, &request.artifacts_root_identity)
 }
 

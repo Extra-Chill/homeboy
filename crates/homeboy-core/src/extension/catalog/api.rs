@@ -15,11 +15,10 @@ use homeboy_extension_contract::api::v1::{
     ExtensionApiReadinessResponse, ExtensionApiReadinessState, ExtensionApiReadinessStatus,
     ExtensionApiResolveRequest, ExtensionApiResolveResponse, ExtensionApiRuntimeRequirement,
     ExtensionApiToolRequirement, ExtensionApiVersion, ACTION_CAPABILITY_PREFIX,
-    AGENT_TASK_EXECUTOR_CAPABILITY_PREFIX, COMPONENT_ENV_CAPABILITY_ID,
-    DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX, ENVIRONMENT_CAPABILITY_ID, EXECUTE_CAPABILITY_ID,
-    EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA, EXTENSION_API_ACTION_INVOKE_RESPONSE_SCHEMA,
-    EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_CATALOG_RESPONSE_SCHEMA,
-    EXTENSION_API_COMPONENT_ENV_DETECT_REQUEST_SCHEMA,
+    COMPONENT_ENV_CAPABILITY_ID, DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX, ENVIRONMENT_CAPABILITY_ID,
+    EXECUTE_CAPABILITY_ID, EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA,
+    EXTENSION_API_ACTION_INVOKE_RESPONSE_SCHEMA, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
+    EXTENSION_API_CATALOG_RESPONSE_SCHEMA, EXTENSION_API_COMPONENT_ENV_DETECT_REQUEST_SCHEMA,
     EXTENSION_API_COMPONENT_ENV_DETECT_RESPONSE_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_RESPONSE_SCHEMA, EXTENSION_API_DESCRIPTOR_SCHEMA,
@@ -157,20 +156,6 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
             .iter()
             .map(|runtime| capability_descriptor(&format!("agent-runtime.{}", runtime.id))),
     );
-    // An executor is registered as its own capability so discovery, install
-    // validation, and dispatch all resolve the same advertised identity rather
-    // than re-deriving it from the runtime's opaque declarations.
-    capabilities.extend(extension.agent_runtimes.iter().flat_map(|runtime| {
-        runtime
-            .agent_task_executors
-            .iter()
-            .filter_map(|declared| declared.get("id").and_then(|id| id.as_str()))
-            .filter(|id| !id.trim().is_empty())
-            .map(|id| {
-                capability_descriptor(&format!("{AGENT_TASK_EXECUTOR_CAPABILITY_PREFIX}{id}"))
-            })
-            .collect::<Vec<_>>()
-    }));
     capabilities.sort_by(|left, right| left.id.cmp(&right.id));
     capabilities.dedup_by(|left, right| left.id == right.id);
 
