@@ -822,7 +822,6 @@ function finalizeWorkspaceReview(config, workspace, publication, delta, lifecycl
     '--ai-tool', config.ai_tool || config.aiTool || 'Pi',
     '--ai-model', config.ai_model || config.aiModel || 'not recorded',
     '--ci-expected', config.ci_expected || config.ciExpected || 'Homeboy CI after push',
-    '--ai-used-for', config.ai_used_for || config.aiUsedFor || 'Drafted implementation and tests; Chris reviews and owns the change.',
   ];
   for (const gateArg of gateArgs) {
     args.push('--gate-result', gateArg);
