@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.437.0] - 2026-10-31
+
+### Added
+- restart the runner daemon in place instead of rotating a generation
+
+### Changed
+- Spawn Pi directly from Rust using the existing supervisor
+- route runner jobs by the one current session and extract restart safety from the generation store
+
 ## [0.436.10] - 2026-10-31
 
 ### Changed
