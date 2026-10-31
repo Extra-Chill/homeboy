@@ -1,6 +1,6 @@
 {
   "name": "Node.js",
-  "version": "3.8.3",
+  "version": "3.8.4",
   "icon": "server.rack",
   "description": "Node.js project type — discovery, lint/test runners, and npm release lifecycle",
   "author": "Extra Chill",

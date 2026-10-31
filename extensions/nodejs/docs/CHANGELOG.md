@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.8.4] - 2026-10-31
+
+### Fixed
+- parse node --test spec reporter summaries
+
 ## [3.8.3] - 2026-10-25
 
 ### Changed
