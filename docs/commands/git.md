@@ -67,7 +67,7 @@ By default, `commit` stages all changes before committing. Use `--staged-only`, 
 `commit` also accepts a JSON spec. The spec can be passed positionally, through `--json`, from stdin with `-`, or from a file with `@file.json`:
 
 ```sh
-homeboy git commit '{"message":"Update docs","include_files":["README.md"]}'
+homeboy git commit '{"message":"Update docs","files":["README.md"]}'
 homeboy git commit --json '@commit.json'
 ```
 
@@ -329,7 +329,7 @@ homeboy git pr comment homeboy \
   "id": "homeboy",
   "message": "Update git docs",
   "staged_only": false,
-  "include_files": ["docs/commands/git.md"]
+  "files": ["docs/commands/git.md"]
 }
 ```
 
@@ -337,7 +337,7 @@ Notes:
 
 - `id` is optional when the component is supplied positionally or auto-detected from CWD.
 - `staged_only` defaults to `false`.
-- `include_files` stages only the listed paths.
+- `files` stages only the listed paths.
 - `exclude_files` stages all changes and then unstages the excluded paths.
 
 ### BulkCommitInput

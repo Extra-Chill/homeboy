@@ -19,9 +19,9 @@ struct CommitSpec {
     message: String,
     #[serde(default)]
     staged_only: bool,
-    #[serde(default, alias = "include_files")]
+    #[serde(default)]
     files: Option<Vec<String>>,
-    #[serde(default, alias = "exclude_files")]
+    #[serde(default)]
     exclude_files: Option<Vec<String>>,
 }
 

@@ -413,7 +413,6 @@ enum RuntimeSetCompatibility {
     #[default]
     UnknownLegacy,
     Exact,
-    #[serde(alias = "compatible_patch_drift")]
     ContractCompatible,
     WireOrLifecycleIncompatible,
 }

@@ -28,11 +28,7 @@ pub struct AgentTaskAuthStatusArgs {
     pub backend: Option<String>,
 
     /// Provider id to disambiguate when more than one provider exists for the backend.
-    #[arg(
-        long = "selector",
-        visible_alias = "provider-id",
-        value_name = "PROVIDER_ID"
-    )]
+    #[arg(long = "selector", value_name = "PROVIDER_ID")]
     pub selector: Option<String>,
 
     /// Secret environment variable name to check without exposing its value.

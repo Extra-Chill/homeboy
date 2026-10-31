@@ -6210,25 +6210,6 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
     });
 }
 
-#[test]
-fn retry_force_alias_parses_as_force() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "retry",
-        "retry-source",
-        "--allow-duplicate",
-    ])
-    .expect("retry force alias parses");
-    let Commands::AgentTask(args) = cli.command else {
-        panic!("agent-task retry command");
-    };
-    let AgentTaskCommand::Retry(args) = args.command else {
-        panic!("retry command");
-    };
-    assert!(args.force);
-}
-
 fn parse_recover(argv: &[&str]) -> super::super::RecoverArgs {
     let mut full = vec!["homeboy", "agent-task", "recover"];
     full.extend_from_slice(argv);

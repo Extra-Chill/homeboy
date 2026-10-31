@@ -173,9 +173,9 @@ pub struct BenchMetricPolicy {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BenchMetricDirection {
-    #[serde(rename = "lower_is_better", alias = "lower")]
+    #[serde(rename = "lower_is_better")]
     LowerIsBetter,
-    #[serde(rename = "higher_is_better", alias = "higher")]
+    #[serde(rename = "higher_is_better")]
     HigherIsBetter,
 }
 

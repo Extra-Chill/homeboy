@@ -241,10 +241,9 @@ pub enum AgentTaskPromotionStatus {
     /// Distinct from `GateFailed` so a run whose gates could not execute is
     /// never classified as rejected (#14731).
     ///
-    /// Written as `gates_deferred`, the one spelling the Cook status and the
-    /// delivery blocker share (#16049); promotions recorded earlier spelled it
-    /// `gate_deferred`.
-    #[serde(rename = "gates_deferred", alias = "gate_deferred")]
+    /// Written as `gates_deferred`, the spelling shared with Cook status and
+    /// the delivery blocker (#16049).
+    #[serde(rename = "gates_deferred")]
     GateDeferred,
     /// A provider produced no patch, but the pinned candidate workspace passed
     /// every declared deterministic verification gate.

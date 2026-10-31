@@ -67,11 +67,9 @@ pub struct FinalizePrEvidenceArgs {
     #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
     pub ai_tool: String,
 
-    /// Actual model identifier for AI disclosure. Use `--model`; `--ai-model`
-    /// is a deprecated compatibility alias and will be removed in the next
-    /// minor release. Finalization requires a recorded model; Cook
+    /// Actual model identifier for AI disclosure. Finalization requires a recorded model; Cook
     /// publication through `recover` uses durable provenance instead.
-    #[arg(long = "model", alias = "ai-model", value_name = "MODEL")]
+    #[arg(long = "model", value_name = "MODEL")]
     pub ai_model: Option<String>,
 
     /// Source finding id shared by sibling generated PRs.
@@ -2998,7 +2996,7 @@ fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
         "layers": [
             {
                 "layer": "extension_provider_selector",
-                "flags": ["--selector", "--provider-id"],
+                "flags": ["--selector"],
                 "selects": "Which Homeboy extension executor provider handles the task.",
                 "value_is": "A registered executor provider id (see the `providers[].id` values below), NOT a model or AI provider family.",
                 "registered_provider_ids": selectable_ids,
@@ -4637,7 +4635,7 @@ mod tests {
                 "feature.txt",
                 "--targeted-check-run",
                 "cargo test fixture",
-                "--ai-model",
+                "--model",
                 "fixture-model",
             ]);
             assert!(
@@ -4681,7 +4679,7 @@ mod tests {
                 "printf 'first gate output'",
                 "--verify",
                 "printf 'Authorization: Bearer manual-secret' >&2; false",
-                "--ai-model",
+                "--model",
                 "fixture-model",
             ]);
             assert!(failed_gate
@@ -4729,7 +4727,7 @@ mod tests {
                 "feature.txt",
                 "--verify",
                 "printf 'changed by gate' > feature.txt",
-                "--ai-model",
+                "--model",
                 "fixture-model",
             ]);
             assert!(changed_checkout
@@ -4769,7 +4767,7 @@ mod tests {
                 "feature.txt",
                 "--verify",
                 &race_gate,
-                "--ai-model",
+                "--model",
                 "fixture-model",
             ]);
             assert!(mutation

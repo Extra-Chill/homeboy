@@ -70,7 +70,7 @@ pub struct DeployArgs {
     #[arg(long)]
     pub confirm_dangerous: bool,
     /// Check component status without building or deploying
-    #[arg(long, visible_alias = "status")]
+    #[arg(long)]
     pub check: bool,
     /// Deploy even with uncommitted changes
     #[arg(long)]

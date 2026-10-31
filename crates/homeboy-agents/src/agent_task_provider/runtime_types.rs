@@ -405,12 +405,7 @@ impl AgentTaskRuntimeNormalization {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentTaskRuntimeOutputArtifactMapping {
     pub name: String,
-    #[serde(
-        default,
-        rename = "type",
-        alias = "artifact_type",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub artifact_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_schema: Option<String>,

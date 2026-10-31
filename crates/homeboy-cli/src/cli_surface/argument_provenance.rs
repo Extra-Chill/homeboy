@@ -183,7 +183,7 @@ mod tests {
         flattened: FlattenedArgs,
         #[arg(long, env = "HOMEBOY_PROVENANCE_TEST_ENV")]
         from_env: Option<String>,
-        #[arg(long, visible_alias = "base-branch", default_value = "main")]
+        #[arg(long, default_value = "main")]
         base: String,
         #[arg(long, hide = true)]
         compatibility: bool,
@@ -215,7 +215,7 @@ mod tests {
                 "cook",
                 "--max-attempts",
                 "3",
-                "--base-branch",
+                "--base",
                 "main",
                 "--compatibility",
                 "--labels",

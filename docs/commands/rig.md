@@ -261,7 +261,7 @@ homeboy rig install https://github.com/example-org/homeboy-rigs.git//packages --
 
 Installs rigs from a local directory or git-backed package. Package discovery accepts either a single `rig.json` or a package layout with `rigs/<id>/rig.json`.
 
-Use `--reinstall` when the intent is to explicitly refresh an existing matching rig install from the same package source. `rig install` still refuses user-owned conflicts, such as an existing rig config that declares a different ID. `--force` is accepted as a reinstall alias for users who reach for overwrite wording; `--placement local` remains a separate global resource-policy choice and does not control install replacement behavior.
+Use `--reinstall` when the intent is to explicitly refresh an existing matching rig install from the same package source. `rig install` still refuses user-owned conflicts, such as an existing rig config that declares a different ID. `--placement local` remains a separate global resource-policy choice and does not control install replacement behavior.
 
 Git sources may include a Terraform-style `repo.git//subpath` selector. Homeboy clones the package root, records source metadata, and discovers rigs from the selected subpath. Local package sources are linked in place and are updated outside Homeboy.
 

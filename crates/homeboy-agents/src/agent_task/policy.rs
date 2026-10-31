@@ -18,11 +18,7 @@ pub struct AgentTaskPolicy {
     pub write: String,
     #[serde(default = "default_apply_policy")]
     pub apply: String,
-    #[serde(
-        default,
-        alias = "toolPolicy",
-        skip_serializing_if = "AgentToolPolicy::is_default"
-    )]
+    #[serde(default, skip_serializing_if = "AgentToolPolicy::is_default")]
     pub tools: AgentToolPolicy,
 }
 
@@ -135,11 +131,7 @@ pub struct AgentToolPolicy {
     /// The per-tool rules above choose an execution location for a tool name;
     /// this constrains the command a shell-shaped tool is about to execute
     /// (#11481).
-    #[serde(
-        default,
-        alias = "commandPolicy",
-        skip_serializing_if = "AgentCommandPolicy::is_default"
-    )]
+    #[serde(default, skip_serializing_if = "AgentCommandPolicy::is_default")]
     pub commands: AgentCommandPolicy,
 }
 

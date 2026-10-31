@@ -66,7 +66,7 @@ pub struct AgentTaskExecutorProvider {
         skip_serializing_if = "String::is_empty"
     )]
     pub command: String,
-    #[serde(default, alias = "argv", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command_argv: Vec<String>,
     #[serde(default, skip_serializing_if = "CommandInvocation::is_empty")]
     pub invocation: CommandInvocation,

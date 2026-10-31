@@ -157,7 +157,7 @@ pub struct TraceArgs {
     pub experiment: Option<String>,
 
     /// Run the same trace scenario multiple times.
-    #[arg(long, alias = "runs", value_name = "N", default_value_t = 1)]
+    #[arg(long, value_name = "N", default_value_t = 1)]
     pub repeat: usize,
 
     /// Aggregate repeated trace output.
@@ -255,7 +255,7 @@ pub struct TraceArgs {
     #[arg(long)]
     pub canonical: bool,
     /// Allow intentionally local/development evidence. The output is marked non-canonical.
-    #[arg(long, alias = "allow-local-evidence")]
+    #[arg(long)]
     pub allow_local_toolchain: bool,
 
     /// Clean only stale trace overlay locks.

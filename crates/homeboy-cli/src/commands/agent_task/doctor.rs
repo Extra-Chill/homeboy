@@ -123,7 +123,7 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
                             "No provider for backend `{backend}` matched provider id `{}`",
                             args.selector.as_deref().unwrap_or("")
                         ),
-                        "remediation": "List providers with `homeboy agent-task providers` and pass --provider-id/--selector with a declared provider id, not a model or provider family",
+                        "remediation": "List providers with `homeboy agent-task providers` and pass --selector with a declared provider id, not a model or provider family",
                         })),
                         json!({
                         "selected_backend": backend,

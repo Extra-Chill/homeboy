@@ -37,26 +37,6 @@ fn provider_manifest_defaults_core_owned_schema_ids() {
 }
 
 #[test]
-fn provider_manifest_accepts_typed_command_argv_aliases() {
-    let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
-        "id": "argv.provider",
-        "backend": "argv",
-        "argv": ["{{extension_path}}/bin/provider", "--runtime", "{{runtime_path}}"]
-    }))
-    .expect("provider manifest");
-
-    assert!(provider.command.is_empty());
-    assert_eq!(
-        provider.command_argv,
-        vec![
-            "{{extension_path}}/bin/provider".to_string(),
-            "--runtime".to_string(),
-            "{{runtime_path}}".to_string(),
-        ]
-    );
-}
-
-#[test]
 fn provider_manifest_accepts_command_invocation_contract() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "invocation.provider",

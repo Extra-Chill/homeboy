@@ -549,11 +549,7 @@ pub struct ProvidersArgs {
     #[arg(long = "backend", value_name = "BACKEND")]
     pub backend: Option<String>,
     /// Restrict results to this backend-specific provider selector.
-    #[arg(
-        long = "selector",
-        visible_alias = "provider-id",
-        value_name = "PROVIDER_ID"
-    )]
+    #[arg(long = "selector", value_name = "PROVIDER_ID")]
     pub selector: Option<String>,
     /// Validate or report this exact model selection using Cook's provider route.
     #[arg(long = "model", value_name = "MODEL")]
@@ -614,11 +610,7 @@ pub struct AgentTaskCapacityArgs {
     #[arg(long = "backend", value_name = "BACKEND")]
     pub backend: Option<String>,
     /// Narrow the rotation walk to this backend-specific provider selector.
-    #[arg(
-        long = "selector",
-        visible_alias = "provider-id",
-        value_name = "PROVIDER_ID"
-    )]
+    #[arg(long = "selector", value_name = "PROVIDER_ID")]
     pub selector: Option<String>,
     /// Narrow the rotation walk to this model selection.
     #[arg(long = "model", value_name = "MODEL")]
@@ -633,7 +625,7 @@ pub struct AgentTaskDoctorArgs {
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
     /// Restrict diagnostics to this backend-specific provider selector.
-    #[arg(long, visible_alias = "provider-id", value_name = "PROVIDER_ID")]
+    #[arg(long, value_name = "PROVIDER_ID")]
     pub selector: Option<String>,
     /// Add this directory to the runner diagnostic path search.
     #[arg(long, value_name = "PATH")]
