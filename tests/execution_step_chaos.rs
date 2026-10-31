@@ -51,7 +51,7 @@ impl Drop for Teardown<'_> {
 }
 
 fn command(context: &HermeticTestContext) -> Command {
-    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut command = context.command(TestBinary::HomeboyFixture);
     command.env("HOMEBOY_TEST_SUBPROCESS_BUDGET_SECS", "15");
     // Admission freezes every ambient HOMEBOY_* variable into the step
     // environment. Keep the operator's (e.g. a session notifier) out of it.

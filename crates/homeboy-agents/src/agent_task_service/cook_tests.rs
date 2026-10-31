@@ -13630,45 +13630,6 @@ fn cook_pins_runtime_generation_before_preparing_transport() {
 }
 
 #[test]
-fn cook_persists_controller_runtime_mismatch_before_provider_execution() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "cook-runtime-mismatch-attempt-1";
-        let mut options = batch_cook_options(
-            "cook-runtime-mismatch",
-            Arc::new(AdmissionFailingAttemptDispatcher {
-                message: "pinned controller executable hash mismatch: expected fixture, found replacement",
-                runtime_recovery: None,
-                phase: "controller_admission",
-                retryable: false,
-            }),
-        );
-        options.provider_transport.provider_invocation =
-            Some(homeboy_core::command_invocation::CommandInvocation {
-                argv: vec!["fixture-provider".to_string()],
-
-                ..Default::default()
-            });
-        options.identity.initial_run_id = run_id.to_string();
-        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
-            .expect("cook returns the persisted runtime mismatch");
-
-        let record = agent_task_lifecycle::reconcile_status(run_id)
-            .expect("runtime mismatch attempt exists");
-        assert_eq!(result.exit_code, 1);
-        assert_eq!(
-            record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Failed
-        );
-        assert!(record.provider_handles.is_empty());
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
-        assert!(record.metadata["pre_execution_failure"]["message"]
-            .as_str()
-            .expect("failure message")
-            .contains("hash mismatch"));
-    });
-}
-
-#[test]
 fn cook_lab_workspace_stage_failure_advertises_runtime_refresh_and_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-invalid-input-attempt-1";

@@ -255,7 +255,7 @@ and an unmeasured size is reported as zero and never inferred.
 
 The additive `filesystem` object is the root-accounting contract. It inventories
 every top-level data-root entry, including `artifacts`, `cargo-targets`,
-`controller-runtimes`, `controller-scratch`, and the SQLite store, and labels
+`controller-scratch`, and the SQLite store, and labels
 unrecognized entries `unknown/unmanaged`. It also includes configured artifact
 roots outside the data root as `managed/external`. `apparent_bytes` is the sum
 of file lengths; `physical_bytes` is allocated filesystem blocks. Sparse files,

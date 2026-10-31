@@ -36,7 +36,7 @@ use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary
 /// ceiling and cannot be interrupted by libtest (#10687).
 fn homeboy(args: &[&str]) -> Output {
     let context = HermeticTestContext::new();
-    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut command = context.command(TestBinary::HomeboyFixture);
     command.args(args);
     bounded_output(command)
 }
@@ -99,7 +99,7 @@ fn cook_handoff_subprocesses_do_not_inherit_controller_transport() {
     // above `run_split_placement_cook` swallows every rejection this file
     // asserts, and the suite hangs instead of failing (#10917).
     let context = HermeticTestContext::new();
-    let command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let command = context.command(TestBinary::HomeboyFixture);
     let removed_env = command
         .get_envs()
         .filter_map(|(key, value)| value.is_none().then(|| key.to_string_lossy().into_owned()))
@@ -130,7 +130,7 @@ fn contradictory_cook_arguments_survive_controller_transport_context() {
     // 666 MB pin per invocation on a gate that was already at its ceiling.
     let cook = |args: &[&str]| {
         let context = HermeticTestContext::new();
-        let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+        let mut command = context.command(TestBinary::HomeboyFixture);
         command
             .env(
                 homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV,
@@ -242,7 +242,7 @@ fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
         r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
     )
     .expect("disable host-capacity admission for fixture worktree");
-    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut command = context.command(TestBinary::HomeboyFixture);
     command
         // Bound the launcher's wait so an unresolvable destination reports an
         // honest handoff state promptly instead of holding the default budget.
@@ -291,7 +291,7 @@ fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
         stdout.contains("local-detach-exits-before-attempt-attempt-1-"),
         "{stdout}"
     );
-    let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut status = context.command(TestBinary::HomeboyFixture);
     status.args(["agent-task", "status", "local-detach-exits-before-attempt"]);
     let status = bounded_output(status);
     let status_stdout = String::from_utf8_lossy(&status.stdout);
@@ -326,7 +326,7 @@ fn explicit_wait_and_runner_owned_cooks_return_terminal_failure() {
             "terminal-failure",
         );
         let started_file = context.root().join("provider-started");
-        let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+        let mut command = context.command(TestBinary::HomeboyFixture);
         command
             .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &started_file)
             .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "1000");
@@ -382,7 +382,7 @@ fn explicit_wait_and_runner_owned_cooks_return_terminal_failure() {
 #[test]
 fn cook_id_is_reserved_for_the_daemon_step() {
     let context = HermeticTestContext::new();
-    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut command = context.command(TestBinary::HomeboyFixture);
     command.args([
         "--placement",
         "local",
@@ -424,7 +424,7 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
     .expect("disable host-capacity admission for fixture worktree");
     let cook_id = "local-detach-materializes-attempt";
     let output_path = context.root().join("local-detach-handoff.json");
-    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut command = context.command(TestBinary::HomeboyFixture);
     command.args([
         "--placement",
         "local",
@@ -474,7 +474,7 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
         .as_str()
         .and_then(|job_id| uuid::Uuid::parse_str(job_id).ok())
         .unwrap_or_else(|| panic!("accepted handoff names its controller job\n{stdout}"));
-    let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut status = context.command(TestBinary::HomeboyFixture);
     status.args(["agent-task", "status", &attempt_id]);
     let status = bounded_output(status);
     let status_stdout = String::from_utf8_lossy(&status.stdout);
@@ -522,7 +522,7 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
     // Cancel through the durable Cook alias, then wait on the returned attempt.
     // The controller job owns process-tree termination and reaping; this keeps
     // the fixture from leaking its detached child across hermetic teardown.
-    let mut cancel = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut cancel = context.command(TestBinary::HomeboyFixture);
     cancel.args(["agent-task", "cancel", cook_id]);
     let cancelled = bounded_output(cancel);
     let cancelled_stdout = String::from_utf8_lossy(&cancelled.stdout);
@@ -532,7 +532,7 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
     );
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
+        let mut status = context.command(TestBinary::HomeboyFixture);
         status.args(["agent-task", "status", &attempt_id]);
         let status = bounded_output(status);
         let status_stdout = String::from_utf8_lossy(&status.stdout);
@@ -581,7 +581,7 @@ fn cancelling_interrupted_pre_projection_launcher_leaves_no_admitted_orphan() {
     .expect("disable host-capacity admission for fixture worktree");
     let cook_id = "cancel-interrupted-pre-projection";
     let pause_marker = context.root().join("controller-started");
-    let mut launcher = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut launcher = context.command(TestBinary::HomeboyFixture);
     launcher
         // Keep the blocked child bounded after its interrupted launcher cannot
         // publish the token that authorizes Cook materialization.
@@ -706,7 +706,7 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
     .expect("disable host-capacity admission for fixture worktree");
     let cook_id = "crash-interrupted-pre-projection";
     let pause_marker = context.root().join("controller-started");
-    let mut launcher = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut launcher = context.command(TestBinary::HomeboyFixture);
     launcher
         .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "1000")
         .env(
@@ -753,10 +753,10 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
         .as_u64()
         .and_then(|pid| i32::try_from(pid).ok())
         .expect("persisted launcher owner PID");
-    assert_ne!(
+    assert_eq!(
         launcher_owner_pid as u32,
         launcher.id(),
-        "pinned runtime must take durable pre-projection launcher custody"
+        "the launcher itself holds durable pre-projection custody"
     );
 
     let killed = unsafe { libc::kill(launcher_owner_pid, libc::SIGKILL) };
@@ -806,7 +806,7 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
     }
 
     // A second launcher for the same Cook id cannot start another Cook.
-    let mut replacement = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut replacement = context.command(TestBinary::HomeboyFixture);
     replacement
         .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "10000")
         .args([
@@ -929,7 +929,7 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
         .expect("bind provider release socket");
     let client_stdout = context.root().join("foreground-client.stdout");
     let client_stderr = context.root().join("foreground-client.stderr");
-    let mut client = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut client = context.command(TestBinary::HomeboyFixture);
     client
         .env("HOMEBOY_FIXTURE_PROVIDER_RELEASE_SOCKET", &release_socket)
         .env("GITHUB_ACTIONS", "true")
@@ -972,7 +972,7 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     // independently of progress text and its output channel.
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
+        let mut status = context.command(TestBinary::HomeboyFixture);
         status.args(["agent-task", "status", cook_id, "--full"]);
         let provider_status = bounded_output(status);
         let provider_status_json =
@@ -1011,7 +1011,7 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let (output, completed, completed_json) = loop {
-        let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
+        let mut status = context.command(TestBinary::HomeboyFixture);
         status.args(["agent-task", "status", cook_id]);
         let output = bounded_output(status);
         let completed = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -1050,7 +1050,7 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
         .pointer("/data/run")
         .and_then(serde_json::Value::as_str)
         .expect("completed run id");
-    let mut artifacts = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut artifacts = context.command(TestBinary::HomeboyFixture);
     artifacts.args(["agent-task", "artifacts", completed_run_id]);
     let artifacts = bounded_output(artifacts);
     assert!(
@@ -1097,7 +1097,7 @@ fn attached_nonlocal_cook_observes_terminal_execution() {
         r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
     )
     .expect("disable host-capacity admission for fixture worktree");
-    let mut cook = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut cook = context.command(TestBinary::HomeboyFixture);
     // The resource policy's local-admission gate reads real host load average
     // by default. This host runs other real ambient work (this is a shared
     // VPS, not a clean CI runner), so under sustained load the gate classifies
@@ -1156,7 +1156,7 @@ fn no_runner_lab_or_local_cook_reaches_local_execution() {
         "local-fallback",
     );
     let terminal_output = context.root().join("terminal.json");
-    let mut cook = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut cook = context.command(TestBinary::HomeboyFixture);
     cook.env("GITHUB_ACTIONS", "true");
     cook.env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0");
     cook.args([
@@ -1241,7 +1241,7 @@ fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
     }
     drop(store);
 
-    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut command = context.command(TestBinary::HomeboyFixture);
     command
         .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "30000")
         .args([
@@ -1320,7 +1320,7 @@ fn cook_rejects_queue_only_before_worktree_resolution() {
 #[test]
 fn required_lab_route_without_a_selected_runner_fails_deterministically() {
     let context = HermeticTestContext::new();
-    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut command = context.command(TestBinary::HomeboyFixture);
     command
         // Resource admission is tested independently. This routing test needs
         // the no-runner diagnostic even when the host is deliberately warm.

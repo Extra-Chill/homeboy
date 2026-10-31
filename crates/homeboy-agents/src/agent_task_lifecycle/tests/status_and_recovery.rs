@@ -2453,45 +2453,7 @@ fn cancel_run_signals_live_running_record() {
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let plan = test_plan();
-    let identity = homeboy_core::build_identity::current().display;
-    let artifact = context.root().join("fake-controller");
-    let digest = fake_controller_artifact(&artifact, &identity, "live cancellation fixture");
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&plan, "run-cancel-live", |_| {
-            Ok(json!({
-                "originating": {
-                    "build_identity": identity,
-                    "pinned_executable": artifact,
-                    "sha256": digest,
-                }
-            }))
-        })
-        .expect("submitted");
-    // Drop the stub admission before marking running (#12721).
-    //
-    // `mark_running_in_store` validates the pin before it mutates, and
-    // validation skips only when the key is ABSENT -- an empty object is
-    // present, so `validate_pin` demands `/originating/pinned_executable`
-    // and fails closed. That contract is
-    // correct: `{}` is malformed durable metadata and refusing to mutate on
-    // it is the point. What is wrong is persisting `{}` in the first place.
-    //
-    // Cancellation reads `runner_pid` and never touches the runtime pin, so
-    // the record this test needs is one with no pin at all. This mirrors
-    // `mark_running_reclaims_stale_running_record`, which uses the same stub
-    // and passes only because it replaces metadata wholesale first.
-    let mut submitted = lifecycle_store
-        .read_record("run-cancel-live")
-        .expect("submitted record");
-    submitted
-        .metadata
-        .as_object_mut()
-        .expect("record metadata is an object")
-        .remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
-    lifecycle_store
-        .write_record(&submitted)
-        .expect("drop stub controller runtime pin");
-
+    submit_plan_in_store(&lifecycle_store, &plan, Some("run-cancel-live")).expect("submitted");
     mark_running_in_store(&lifecycle_store, "run-cancel-live").expect("marked running");
 
     // The test binary cannot be a cancellation target: process cleanup

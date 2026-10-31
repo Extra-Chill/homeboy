@@ -37,7 +37,6 @@ mod aggregate_transition;
 pub(crate) mod artifact_materialization;
 mod cancellation;
 mod control_plane_identities;
-pub mod controller_pin_reference_provider;
 mod conversion;
 mod cook_delivery_writer;
 mod cook_workspace_restore;
@@ -87,7 +86,6 @@ pub use durable_state_probe::{
 pub use failure_recording::canonical_runner_artifact_ref;
 pub use failure_recording::*;
 pub use health::*;
-pub use homeboy_core::controller_runtime::ControllerRuntimePruneResult;
 pub use lab_handoff_reconciliation::*;
 pub use lab_offload::*;
 pub use lifecycle_candidate_adoption::*;

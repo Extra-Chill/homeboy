@@ -39,22 +39,21 @@ Use `--plain` when a shell wrapper needs a sourceable path without parsing JSON:
 source "$(homeboy runtime helper path --plain runner-prelude.sh)"
 ```
 
-## Controller Runtime Pruning
+## Cook execution
 
-`homeboy runtime controller-prune` is the specialist command behind the
-`controller_runtimes` cleanup category. It removes only content-addressed
-controller pins that no nonterminal durable run references.
-
-```bash
-homeboy runtime controller-prune
-homeboy runtime controller-prune --apply
-```
-
-Pruning uses `retention.limit`, shared with `homeboy cleanup --include
-controller-runtimes`. There is no age window or active-generation copy.
-`eligible` lists unreferenced pins within this pass's removal limit.
+Cook runs in-process on the current binary without copying or sealing it.
+Children spawned after an atomic upgrade use the current binary; already-running
+processes keep their executable inode. Runtime-generation pins still block
+promotion while a cook runs, including bounded promotion-admission deferral.
 
 Run, Resume and Accept execute on the current binary regardless of the record's
 originating build identity. Incompatible record shapes fail closed with a
 re-cook error; old binaries are never recovered or re-executed for compatibility.
-Cook child pinning remains in use for live non-terminal work.
+
+The immutable controller store, `runtime controller-prune`, and the
+`controller-runtimes` cleanup category are removed. To reclaim a leftover store
+once (adjust for a custom data root):
+
+```sh
+rm -rf "${HOMEBOY_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/homeboy}/controller-runtimes"
+```

@@ -340,7 +340,7 @@ if (args[0] === '--version') {{
     std::fs::write(&provider_config, r#"{"provider":"anthropic"}"#)
         .expect("write file-backed provider configuration");
     let provider_config_ref = format!("@{}", provider_config.display());
-    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut command = context.command(TestBinary::HomeboyFixture);
     command
         .args([
             "--wait",

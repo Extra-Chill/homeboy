@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -466,19 +465,6 @@ const TEST_DAEMON_NAMESPACE_ENV: &str = "HOMEBOY_TEST_DAEMON_NAMESPACE";
 /// cancelled, so a daemon must not create a detached session that escapes it.
 pub const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
 
-static SHARED_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
-#[cfg(unix)]
-static SHARED_CONTROLLER_RUNTIME_VERSION_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
-static SHARED_HOMEBOY_CONTROLLER_RUNTIME_FIXTURE: OnceLock<TempDir> = OnceLock::new();
-/// Destinations whose controller fixture bytes this process has already
-/// published. Keeps the copy to at most once per process per fixture path —
-/// including a path inherited from a parent test process — and serializes
-/// concurrent materialization so two threads never copy the same binary twice.
-static PUBLISHED_CONTROLLER_FIXTURES: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
-/// File name every controller-runtime fixture is published under. Reading it
-/// back off the destination path is what lets `ensure_test_controller_fixture`
-/// tell *our* fixture apart from a binary a test chose for itself.
-const CONTROLLER_FIXTURE_FILE_NAME: &str = "homeboy-controller-fixture";
 static EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static SHORT_EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 /// Runs the leaked-tempdir sweep exactly once per test process.
@@ -645,37 +631,6 @@ impl HermeticTestContext {
             .env_remove(crate::runner_job_execution_context::RUNNER_CHILD_RESERVATION_ENV)
             .env_remove(crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV)
             .env("HOMEBOY_NO_UPDATE_CHECK", "1");
-        command
-    }
-
-    /// Build an isolated command with the deterministic controller-runtime
-    /// fixture required by tests that submit or resume agent-task work.
-    pub fn controller_runtime_command(&self, binary: TestBinary) -> Command {
-        let mut command = self.command(binary);
-        command
-            .env(
-                crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
-                TEST_DAEMON_BINARY_SHA,
-            )
-            // Destination and source travel together. The child materializes
-            // the fixture itself the first time it reads the contract, so this
-            // parent never copies a binary the child may not even need.
-            .env(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-                test_controller_fixture_path(binary),
-            )
-            .env(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV,
-                test_controller_fixture_source(binary),
-            )
-            .env(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
-                crate::build_identity::current().display,
-            )
-            .env(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_USE_ENV,
-                "1",
-            );
         command
     }
 }
@@ -975,9 +930,6 @@ pub struct HomeGuard {
     prior_invocation_runtime: Option<String>,
     prior_no_update_check: Option<String>,
     prior_daemon_binary_sha: Option<String>,
-    prior_controller_runtime_executable: Option<String>,
-    prior_controller_runtime_source: Option<String>,
-    prior_controller_runtime_identity: Option<String>,
     context: HermeticTestContext,
     // Each isolated-home test is its own "CLI invocation": it must not observe
     // a controller preflight captured by a concurrently running test.
@@ -1010,21 +962,10 @@ impl Drop for ArtifactRootOverrideGuard {
 
 impl HomeGuard {
     pub fn new() -> Self {
-        Self::with_controller_runtime(TestBinary::CurrentTest)
+        Self::new_with_guard(Some(home_env_guard()))
     }
 
-    /// Isolate in-process Homeboy state while selecting the controller runtime
-    /// fixture that the test will pin or re-exec.
-    ///
-    /// Integration tests that exercise controller subprocesses must select
-    /// [`TestBinary::HomeboyFixture`]. Their libtest executable is not the CLI
-    /// and therefore cannot satisfy the production `--version` identity check.
-    pub fn with_controller_runtime(binary: TestBinary) -> Self {
-        let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
-        Self::new_with_guard(binary, Some(guard))
-    }
-
-    fn new_with_guard(binary: TestBinary, guard: Option<MutexGuard<'static, ()>>) -> Self {
+    fn new_with_guard(guard: Option<MutexGuard<'static, ()>>) -> Self {
         reset_cached_test_state();
         let prior = std::env::var("HOME").ok();
         let prior_xdg_config_home = std::env::var("XDG_CONFIG_HOME").ok();
@@ -1047,12 +988,6 @@ impl HomeGuard {
         let prior_no_update_check = std::env::var("HOMEBOY_NO_UPDATE_CHECK").ok();
         let prior_daemon_binary_sha =
             std::env::var(crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV).ok();
-        let prior_controller_runtime_executable =
-            std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV).ok();
-        let prior_controller_runtime_source =
-            std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV).ok();
-        let prior_controller_runtime_identity =
-            std::env::var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV).ok();
         // The isolated HOME hosts `~/.config/homeboy/extensions/**/*.sh`
         // capability scripts that tests execute. On `noexec`-`/tmp` hosts a
         // plain `TempDir::new()` lands the whole HOME on a `noexec` mount,
@@ -1105,22 +1040,6 @@ impl HomeGuard {
             crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
             TEST_DAEMON_BINARY_SHA,
         );
-        // Name the fixture and its source, but do not copy anything: the copy
-        // is a multi-hundred-megabyte binary and almost no test on this path
-        // ever reads the contract. `ensure_test_controller_fixture` produces
-        // the bytes at the few call sites that do.
-        std::env::set_var(
-            crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-            test_controller_fixture_path(binary),
-        );
-        std::env::set_var(
-            crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV,
-            test_controller_fixture_source(binary),
-        );
-        std::env::set_var(
-            crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
-            crate::build_identity::current().display,
-        );
         Self {
             prior,
             prior_xdg_config_home,
@@ -1136,9 +1055,6 @@ impl HomeGuard {
             prior_invocation_runtime,
             prior_no_update_check,
             prior_daemon_binary_sha,
-            prior_controller_runtime_executable,
-            prior_controller_runtime_source,
-            prior_controller_runtime_identity,
             context,
             _captured_preflight: crate::parsed_command_preflight::isolate_captured_result_for_test(
             ),
@@ -1569,33 +1485,6 @@ impl Drop for HomeGuard {
             Some(value) => std::env::set_var(crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV, value),
             None => std::env::remove_var(crate::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV),
         }
-        match &self.prior_controller_runtime_executable {
-            Some(value) => std::env::set_var(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-                value,
-            ),
-            None => std::env::remove_var(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV,
-            ),
-        }
-        match &self.prior_controller_runtime_source {
-            Some(value) => std::env::set_var(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV,
-                value,
-            ),
-            None => {
-                std::env::remove_var(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV)
-            }
-        }
-        match &self.prior_controller_runtime_identity {
-            Some(value) => std::env::set_var(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
-                value,
-            ),
-            None => std::env::remove_var(
-                crate::controller_runtime::TEST_CONTROLLER_RUNTIME_IDENTITY_ENV,
-            ),
-        }
         reset_cached_test_state();
     }
 }
@@ -1610,178 +1499,6 @@ fn test_binary_path(binary: TestBinary) -> PathBuf {
                 .expect("CARGO_BIN_EXE_homeboy fixture binary"),
         ),
     }
-}
-
-/// The source for a controller-runtime fixture. A unit-test executable is a
-/// libtest harness, not the Homeboy CLI: invoking it with `--version` reports
-/// its filtered test count. Give in-process tests a deterministic version
-/// responder instead; integration tests that need a real re-exec select
-/// `HomeboyFixture` explicitly.
-fn test_controller_fixture_source(binary: TestBinary) -> PathBuf {
-    match binary {
-        TestBinary::CurrentTest => {
-            #[cfg(unix)]
-            {
-                SHARED_CONTROLLER_RUNTIME_VERSION_FIXTURE
-                    .get_or_init(|| {
-                        let root = SHARED_CONTROLLER_RUNTIME_FIXTURE.get_or_init(exec_capable_tempdir);
-                        let source = root.path().join("homeboy-controller-version-fixture");
-                        let identity = crate::build_identity::current().display.clone();
-                        let identity_json = serde_json::json!({
-                            "data": { "display": identity }
-                        });
-                        homeboy_test_support::write_executable(&source, format!(
-                                "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then\n  printf '%s\\n' '{identity}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = self ] && [ \"${{2:-}}\" = identity ]; then\n  printf '%s\\n' '{identity_json}'\n  exit 0\nfi\nexit 64\n"
-                            ), 0o500)
-                        .expect("write controller version fixture");
-
-                        source
-                    })
-                    .clone()
-            }
-            #[cfg(not(unix))]
-            {
-                test_binary_path(binary)
-            }
-        }
-        TestBinary::HomeboyFixture => test_binary_path(binary),
-    }
-}
-
-/// Where this process publishes its controller-runtime fixture for `binary`.
-///
-/// Allocating the path is cheap — one tempdir per process, shared by every
-/// isolated home. The expensive part, copying the source executable, is
-/// deferred to [`ensure_test_controller_fixture`].
-fn test_controller_fixture_path(binary: TestBinary) -> PathBuf {
-    let fixture = match binary {
-        TestBinary::CurrentTest => &SHARED_CONTROLLER_RUNTIME_FIXTURE,
-        TestBinary::HomeboyFixture => &SHARED_HOMEBOY_CONTROLLER_RUNTIME_FIXTURE,
-    };
-    fixture
-        .get_or_init(exec_capable_tempdir)
-        .path()
-        .join(CONTROLLER_FIXTURE_FILE_NAME)
-}
-
-/// Materialize the controller-runtime fixture named by `path`, once.
-///
-/// The fixture is a byte-identical copy of the running test binary, which is
-/// ~700 MB unoptimized (see the `profile.dev.package.sha2` note in the
-/// workspace `Cargo.toml`). It used to be copied eagerly from
-/// [`HomeGuard::new`], i.e. once per *process*. Under `cargo test` that is once
-/// per test binary — already paid by every binary whose tests never touch the
-/// contract. Under nextest, which runs one process per test, it is once per
-/// **test**: all ~2,600 `with_isolated_home` call sites paying for the handful
-/// that read `TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV`. Those readers call this
-/// instead, so the copy happens only where the bytes are actually used.
-///
-/// Deliberately defensive, because it can be handed any path a test put in the
-/// contract. It writes only when *all* of the following hold:
-/// - nothing exists at `path` yet,
-/// - `path` carries the fixture's own file name,
-/// - `path` is exactly what the contract currently names, and
-/// - a source executable is recorded alongside it.
-///
-/// A test that points the contract at a binary of its own therefore keeps
-/// precisely the bytes it chose.
-pub(crate) fn ensure_test_controller_fixture(path: &Path) {
-    // The branch every call after the first takes, in this process or in the
-    // parent that handed the path down.
-    if path.exists() {
-        return;
-    }
-    if path.file_name().and_then(|name| name.to_str()) != Some(CONTROLLER_FIXTURE_FILE_NAME) {
-        return;
-    }
-    let Some(destination) =
-        std::env::var_os(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_EXECUTABLE_ENV)
-    else {
-        return;
-    };
-    if Path::new(&destination) != path {
-        return;
-    }
-    let Some(source) =
-        std::env::var_os(crate::controller_runtime::TEST_CONTROLLER_RUNTIME_SOURCE_ENV)
-    else {
-        return;
-    };
-    let source = PathBuf::from(source);
-
-    let mut published = PUBLISHED_CONTROLLER_FIXTURES
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // Re-check under the lock. A sibling thread may have published while we
-    // waited, and paying the copy twice is the one thing this exists to avoid.
-    if published.contains(path) || path.exists() {
-        return;
-    }
-    publish_test_controller_fixture(&source, path);
-    published.insert(path.to_path_buf());
-}
-
-/// Copy `source` into place at `destination` so that `destination` never
-/// appears in a partial state.
-///
-/// The copy lands on a per-process staging name and is linked into place, which
-/// fails cleanly if someone else got there first. That matters because one
-/// destination can now be shared by more than one process: a child test process
-/// materializes into the tempdir its parent named, and a plain `fs::copy`
-/// straight to the destination would let one observe the other's half-written
-/// file. The two racers copy the same source bytes, so either winner is correct.
-///
-/// The link is deliberately *staging to destination* and never *source to
-/// destination*: the fixture is sealed read-only, and a hard link to the source
-/// would seal the real test binary along with it.
-fn publish_test_controller_fixture(source: &Path, destination: &Path) {
-    let parent = destination
-        .parent()
-        .expect("controller fixture destination has a parent directory");
-    fs::create_dir_all(parent).expect("create controller fixture directory");
-    let staging = parent.join(format!(
-        "{CONTROLLER_FIXTURE_FILE_NAME}.staging.{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_file(&staging);
-    fs::copy(source, &staging).expect("copy controller fixture");
-    make_test_controller_fixture_read_only(&staging);
-    match fs::hard_link(&staging, destination) {
-        Ok(()) => {}
-        // Another process published the same source bytes first.
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => panic!(
-            "publish controller fixture at {}: {error}",
-            destination.display()
-        ),
-    }
-    let _ = fs::remove_file(&staging);
-}
-
-fn make_test_controller_fixture_read_only(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(path, fs::Permissions::from_mode(0o500))
-            .expect("seal controller fixture");
-    }
-    #[cfg(not(unix))]
-    {
-        let mut permissions = fs::metadata(path)
-            .expect("inspect controller fixture")
-            .permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(path, permissions).expect("seal controller fixture");
-    }
-}
-
-/// Source executable selected by the hermetic controller-runtime test contract.
-///
-/// Materializes the fixture, so callers may execute, hash, or stat the returned
-/// path exactly as they could when the copy was made eagerly.
-pub fn controller_runtime_test_executable() -> PathBuf {
-    test_controller_fixture_source(TestBinary::CurrentTest)
 }
 
 pub fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
@@ -2151,7 +1868,7 @@ mod tests {
                 _guard: guard,
             };
             setup();
-            scope.home = Some(HomeGuard::new_with_guard(TestBinary::CurrentTest, None));
+            scope.home = Some(HomeGuard::new_with_guard(None));
             scope
         }
 
@@ -2207,7 +1924,7 @@ mod tests {
         std::env::set_var(crate::paths::HOMEBOY_DATA_DIR_ENV, &data_root);
         std::env::set_var(crate::paths::HOMEBOY_ARTIFACT_ROOT_ENV, &artifact_root);
 
-        let home = HomeGuard::new_with_guard(TestBinary::CurrentTest, Some(lock));
+        let home = HomeGuard::new_with_guard(Some(lock));
         with_isolated_home_guard(home, |isolated| {
             for name in crate::paths::HOMEBOY_ROOT_ENV_VARS {
                 assert!(std::env::var_os(name).is_none(), "{name} must be cleared");
@@ -2773,22 +2490,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn current_test_controller_fixture_answers_with_the_cli_identity() {
-        let source = test_controller_fixture_source(TestBinary::CurrentTest);
-        let output = Command::new(source)
-            .arg("--version")
-            .output()
-            .expect("run controller version fixture");
-        assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8(output.stdout)
-                .expect("version output")
-                .trim(),
-            crate::build_identity::current().display
-        );
-    }
-
-    #[test]
     fn hermetic_commands_allow_explicit_complete_lab_transport_metadata() {
         let context = HermeticTestContext::new();
         let source = crate::observation::SOURCE_SNAPSHOT_METADATA_ENV;
@@ -2879,66 +2580,6 @@ mod tests {
             .expect("backdate directory mtime");
     }
 
-    #[test]
-    fn isolated_homes_share_the_read_only_controller_fixture_and_not_pins() {
-        let first = with_isolated_home(|_| {
-            let fixture = controller_runtime_test_executable();
-            let runtime = crate::controller_runtime::pin_current_in_root(
-                &crate::controller_runtime::runtime_root_in(
-                    &crate::paths::PathRoots::from_environment()
-                        .expect("path roots")
-                        .data()
-                        .to_path_buf(),
-                )
-                .expect("runtime root"),
-            )
-            .expect("pin first fixture");
-            let pin = runtime["originating"]["pinned_executable"]
-                .as_str()
-                .map(PathBuf::from)
-                .expect("first pinned fixture");
-            (fixture, pin)
-        });
-        let second = with_isolated_home(|_| {
-            let fixture = controller_runtime_test_executable();
-            let runtime = crate::controller_runtime::pin_current_in_root(
-                &crate::controller_runtime::runtime_root_in(
-                    &crate::paths::PathRoots::from_environment()
-                        .expect("path roots")
-                        .data()
-                        .to_path_buf(),
-                )
-                .expect("runtime root"),
-            )
-            .expect("pin second fixture");
-            let pin = runtime["originating"]["pinned_executable"]
-                .as_str()
-                .map(PathBuf::from)
-                .expect("second pinned fixture");
-            (fixture, pin)
-        });
-
-        assert_eq!(first.0, second.0);
-        assert_ne!(
-            first.0,
-            std::env::current_exe().expect("current test executable")
-        );
-        assert_ne!(first.1, second.1);
-        assert!(first.0.is_file());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mode = fs::metadata(&first.0)
-                .expect("fixture metadata")
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o222, 0);
-            assert_ne!(mode & 0o111, 0);
-        }
-    }
-
-    #[cfg(unix)]
     #[test]
     fn tempdir_names_carry_their_owning_pid() {
         let prefix = owned_tempdir_prefix();

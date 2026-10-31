@@ -350,28 +350,14 @@ pub fn submit_plan_in_store(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    let runtime_root =
-        homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
     submit_plan_with_runtime_admission_in_store(
         lifecycle_store,
         plan,
         requested_run_id,
         execution_runner_id(),
         None,
-        Some(&|run_id| {
-            homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
-        }),
-        |run_id| {
-            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
-                &runtime_root,
-                run_id,
-                || {
-                    Ok(crate::agent_task_service::cook_pre_execution::runtime_admission_cancellation_requested(
-                        &lifecycle_store.read_record(run_id)?,
-                    ))
-                },
-            )
-        },
+        None,
+        |_| Ok(homeboy_core::controller_runtime::current()),
     )
 }
 
@@ -695,23 +681,14 @@ pub fn prepare_unmaterialized_cook_admission(
                 reason,
             ),
         );
-        let runtime_root = homeboy_core::controller_runtime::runtime_root_in(store.roots().data())?;
         submit_plan_with_runtime_admission_in_store(
             &store,
             &plan,
             Some(&cook_id),
             execution_runner_id(),
             Some(submission_metadata),
-            Some(&|run_id| {
-                homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
-            }),
-            |run_id| {
-                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
-                    &runtime_root,
-                    run_id,
-                    || Ok(store.read_record(run_id)?.state().is_terminal()),
-                )
-            },
+            None,
+            |_| Ok(homeboy_core::controller_runtime::current()),
         )
     })
 }
@@ -857,24 +834,14 @@ fn record_unmaterialized_cook_admission_locked(
             "unmaterialized_cook_admission".to_string(),
             unmaterialized_admission_value(&cook_id, binding, state, state, reason),
         );
-        let runtime_root =
-            homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
         let record = submit_plan_with_runtime_admission_in_store(
             lifecycle_store,
             &plan,
             Some(&cook_id),
             execution_runner_id(),
             Some(submission_metadata),
-            Some(&|run_id| {
-                homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
-            }),
-            |run_id| {
-                homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
-                    &runtime_root,
-                    run_id,
-                    || Ok(lifecycle_store.read_record(run_id)?.state().is_terminal()),
-                )
-            },
+            None,
+            |_| Ok(homeboy_core::controller_runtime::current()),
         )?;
         return record_cook_progress_in_store(
             lifecycle_store,
@@ -2152,11 +2119,7 @@ mod execution_placement_tests {
                 Some("local-continuation"),
                 execution_runner_id(),
                 None,
-                Some(
-                    &crate::agent_task_service::cook_pre_execution::store_admission_status(
-                        &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-                    ),
-                ),
+                None,
                 |_| Ok(json!({})),
             )
             .expect("submit routed Lab attempt");
@@ -2241,11 +2204,7 @@ mod execution_placement_tests {
                 Some("lab-only-continuation"),
                 execution_runner_id(),
                 None,
-                Some(
-                    &crate::agent_task_service::cook_pre_execution::store_admission_status(
-                        &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-                    ),
-                ),
+                None,
                 |_| Ok(json!({})),
             )
             .expect("submit Lab-required attempt");
@@ -2285,11 +2244,7 @@ mod execution_placement_tests {
                 Some("placement-run"),
                 execution_runner_id(),
                 None,
-                Some(
-                    &crate::agent_task_service::cook_pre_execution::store_admission_status(
-                        &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-                    ),
-                ),
+                None,
                 |_| Ok(json!({ "runtime": "test" })),
             )
             .expect("submit plan");
@@ -2326,11 +2281,7 @@ mod execution_placement_tests {
                 Some("local-run"),
                 execution_runner_id(),
                 None,
-                Some(
-                    &crate::agent_task_service::cook_pre_execution::store_admission_status(
-                        &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-                    ),
-                ),
+                None,
                 |_| Ok(json!({ "runtime": "test" })),
             )
             .expect("submit plan");
@@ -2367,11 +2318,7 @@ mod execution_placement_tests {
                 Some("legacy-run"),
                 execution_runner_id(),
                 None,
-                Some(
-                    &crate::agent_task_service::cook_pre_execution::store_admission_status(
-                        &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-                    ),
-                ),
+                None,
                 |_| Ok(json!({})),
             )
             .expect("submit plan");
@@ -2436,11 +2383,7 @@ mod execution_placement_tests {
                 Some("stamped-run"),
                 execution_runner_id(),
                 None,
-                Some(
-                    &crate::agent_task_service::cook_pre_execution::store_admission_status(
-                        &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-                    ),
-                ),
+                None,
                 |_| Ok(json!({})),
             )
             .expect("submit plan");
@@ -2487,11 +2430,7 @@ mod execution_placement_tests {
                 Some("placement-run"),
                 execution_runner_id(),
                 None,
-                Some(
-                    &crate::agent_task_service::cook_pre_execution::store_admission_status(
-                        &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-                    ),
-                ),
+                None,
                 |_| Ok(json!({})),
             )
             .expect("submit plan");
@@ -2518,11 +2457,7 @@ mod execution_placement_tests {
                 Some("placement-run"),
                 execution_runner_id(),
                 None,
-                Some(
-                    &crate::agent_task_service::cook_pre_execution::store_admission_status(
-                        &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-                    ),
-                ),
+                None,
                 |_| Ok(json!({})),
             )
             .expect("submit plan");
@@ -2541,22 +2476,6 @@ mod execution_placement_tests {
     }
 }
 
-pub(crate) trait RuntimeAdmissionEvidence {
-    fn runtime(&self) -> Value;
-}
-
-impl RuntimeAdmissionEvidence for homeboy_core::controller_runtime::RuntimeAdmission {
-    fn runtime(&self) -> Value {
-        self.runtime.clone()
-    }
-}
-
-impl RuntimeAdmissionEvidence for Value {
-    fn runtime(&self) -> Value {
-        self.clone()
-    }
-}
-
 // `submit_plan_with_runtime_admission_on_runner_with_metadata` lived here. Its
 // only caller was the retry admission, which now calls
 // `submit_plan_with_runtime_admission_in_store` with the store it was handed
@@ -2569,7 +2488,7 @@ impl RuntimeAdmissionEvidence for Value {
 // `execution_runner_id`, which is what every remaining caller already does with
 // the store it was handed (#7505).
 
-pub(crate) fn submit_plan_with_runtime_admission_in_store<F, A>(
+pub(crate) fn submit_plan_with_runtime_admission_in_store<F>(
     lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
@@ -2579,8 +2498,7 @@ pub(crate) fn submit_plan_with_runtime_admission_in_store<F, A>(
     admit_runtime: F,
 ) -> Result<AgentTaskRunRecord>
 where
-    F: FnOnce(&str) -> Result<A>,
-    A: RuntimeAdmissionEvidence,
+    F: FnOnce(&str) -> Result<Value>,
 {
     submit_plan_with_runtime_admission_in_store_optional(
         lifecycle_store,
@@ -2617,7 +2535,7 @@ fn submit_plan_with_runtime_admission_in_store_without_runtime(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    submit_plan_with_runtime_admission_in_store_optional::<fn(&str) -> Result<Value>, Value>(
+    submit_plan_with_runtime_admission_in_store_optional::<fn(&str) -> Result<Value>>(
         lifecycle_store,
         plan,
         requested_run_id,
@@ -2628,7 +2546,7 @@ fn submit_plan_with_runtime_admission_in_store_without_runtime(
     )
 }
 
-fn submit_plan_with_runtime_admission_in_store_optional<F, A>(
+fn submit_plan_with_runtime_admission_in_store_optional<F>(
     lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
@@ -2638,8 +2556,7 @@ fn submit_plan_with_runtime_admission_in_store_optional<F, A>(
     admit_runtime: Option<F>,
 ) -> Result<AgentTaskRunRecord>
 where
-    F: FnOnce(&str) -> Result<A>,
-    A: RuntimeAdmissionEvidence,
+    F: FnOnce(&str) -> Result<Value>,
 {
     let workspace_claim_store = lifecycle_store.workspace_claim_store();
     let mut normalized_plan = plan.clone();
@@ -2987,16 +2904,10 @@ where
             if let Some(runner_job_id) = existing.runner_job_id() {
                 record.metadata["runner_job_id"] = json!(runner_job_id);
             }
-            // The runner can re-submit after its workspace has been reaped,
-            // including before the handoff acceptance projection is durable.
-            // Its local pin is execution evidence only; continuations remain
-            // owned by the controller seat that created this record. Fail closed
-            // if that controller pin is unavailable rather than replacing it
-            // with the runner's host-local executable.
-            preserved_controller_runtime = Some(controller_runtime_for_runner_execution(
-                &existing,
-                execution_runner_id.as_deref(),
-            )?);
+            preserved_controller_runtime = existing
+                .metadata
+                .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+                .cloned();
             if existing.lab_handoff.as_ref().is_some_and(|handoff| {
                 handoff.state == AgentTaskLabHandoffState::Accepted
                     && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
@@ -3064,11 +2975,11 @@ where
                 record.metadata
                     [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                     controller_runtime;
-                record.metadata["runner_execution_runtime"] = admission.runtime();
+                record.metadata["runner_execution_runtime"] = admission.clone();
             } else {
                 record.metadata
                     [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
-                    admission.runtime();
+                    admission.clone();
             }
             if pre_execution_recovery {
                 // Clear the terminal pre-provider projection. The record
@@ -3144,32 +3055,6 @@ pub(crate) fn persist_controller_plan_in_store(
     lifecycle_store
         .write_controller_plan(run_id, plan)
         .map(|_| ())
-}
-
-pub(crate) fn controller_runtime_for_runner_execution(
-    existing: &AgentTaskRunRecord,
-    execution_runner_id: Option<&str>,
-) -> Result<Value> {
-    if existing
-        .runner_id()
-        .is_some_and(|runner_id| Some(runner_id) != execution_runner_id)
-    {
-        return Err(Error::internal_unexpected(
-            "runner execution identity does not match the controller-owned Lab handoff",
-        ));
-    }
-    existing
-        .metadata
-        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-        .cloned()
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "controller_runtime",
-                "accepted Lab handoff has no controller runtime pin",
-                Some(existing.run_id.clone()),
-                None,
-            )
-        })
 }
 
 pub(crate) fn execution_runner_id() -> Option<String> {
@@ -3367,78 +3252,6 @@ pub fn load_plan_for_execution_in_store(
 ) -> Result<AgentTaskPlan> {
     let run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
     lifecycle_store.read_controller_plan(&run_id)
-}
-
-/// Validate a queued lifecycle's pinned controller against an explicitly rooted
-/// store.
-///
-/// The record read and the immutable controller runtime both follow
-/// `lifecycle_store`. A pin that is not in the current immutable shape fails
-/// validation; it is never migrated (#15742).
-pub fn validate_controller_runtime_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskRunRecord> {
-    let record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    homeboy_core::controller_runtime::validate(
-        record
-            .metadata
-            .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "controller_runtime",
-                    "durable run has no controller runtime pin",
-                    Some(record.run_id.clone()),
-                    None,
-                )
-            })?,
-    )?;
-    Ok(record)
-}
-
-/// Seal the currently executing controller into an immutable runtime before a
-/// new cook begins its local routing and admission work.  Participates in the
-/// FIFO admission queue so concurrent seals wait their turn instead of
-/// fast-failing.
-pub fn pin_current_controller_runtime(
-    data_root: &std::path::Path,
-    request_id: &str,
-    cancellation_requested: impl Fn() -> Result<bool>,
-) -> Result<std::path::PathBuf> {
-    // The seal joins the FIFO admission queue, and that queue's lock lives under
-    // the runtime root. Taking the caller's data root is what keeps two
-    // installations from serializing against each other's queue (#7505).
-    let runtime_root = homeboy_core::controller_runtime::runtime_root_in(data_root)?;
-    let runtime = homeboy_core::controller_runtime::pin_current_queued_in_root(
-        &runtime_root,
-        request_id,
-        cancellation_requested,
-    )?;
-    runtime
-        .pointer("/originating/pinned_executable")
-        .and_then(Value::as_str)
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "controller_runtime",
-                "new controller runtime pin has no immutable executable",
-                None,
-                None,
-            )
-        })
-}
-
-/// Prune immutable controller pins through the durable lifecycle ownership
-/// boundary so non-terminal records remain authoritative
-/// retention roots.
-///
-/// Retention policy is resolved by core from the operator's configuration; this
-/// boundary only forwards the overrides an operator typed.
-pub fn prune_controller_runtime_pins(
-    apply: bool,
-    overrides: homeboy_core::controller_runtime::ControllerRuntimeRetentionOverrides,
-) -> Result<homeboy_core::controller_runtime::ControllerRuntimePruneResult> {
-    homeboy_core::controller_runtime::prune_pins(apply, overrides)
 }
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -3709,38 +3522,7 @@ pub fn record_provider_launch_context_in_store(
 /// Seal the current controller with a caller-owned bound on FIFO admission.
 /// The request ID is also the durable Cook identity, so the queue timeout points
 /// back to the record that the caller can inspect and retry.
-pub fn pin_current_controller_runtime_with_timeout(
-    data_root: &std::path::Path,
-    request_id: &str,
-    wait_timeout: std::time::Duration,
-    cancellation_requested: impl Fn() -> Result<bool>,
-) -> Result<std::path::PathBuf> {
-    let runtime_root = homeboy_core::controller_runtime::runtime_root_in(data_root)?;
-    let runtime = homeboy_core::controller_runtime::pin_current_queued_in_root_with_timeout(
-        &runtime_root,
-        request_id,
-        wait_timeout,
-        cancellation_requested,
-    )?;
-    runtime
-        .pointer("/originating/pinned_executable")
-        .and_then(Value::as_str)
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "controller_runtime",
-                "new controller runtime pin has no immutable executable",
-                None,
-                None,
-            )
-        })
-}
 
-/// Bind a reserved provider execution to the subprocess that actually runs it.
-///
-/// Fanout workers are threads and therefore share the coordinator PID. The
-/// provider subprocess is the first process identity unique to one child run;
-/// using it keeps liveness and activity evidence from crossing child records.
 pub(crate) fn record_provider_execution_process(
     run_id: &str,
     task_id: &str,
@@ -3751,15 +3533,6 @@ pub(crate) fn record_provider_execution_process(
     record_provider_execution_process_in_store(&lifecycle_store, run_id, task_id, attempt, pid)
 }
 
-/// Bind a reserved provider execution to its subprocess inside an explicitly
-/// rooted store.
-///
-/// The reservation this binding looks for was made in one store, so the lookup
-/// has to happen there too. An ambient reach would either find no reservation
-/// and reject a legitimate process, or bind this run's provider PID onto
-/// another home's identically-keyed execution — and process liveness read back
-/// from the wrong record is exactly the evidence this write exists to keep
-/// separate across child runs.
 pub fn record_provider_execution_process_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -6256,8 +6029,6 @@ fn retry_with_force_inner_in_store(
     reservation_metadata: Option<serde_json::Map<String, Value>>,
     preflight: Option<&dyn Fn(&AgentTaskPlan) -> Result<()>>,
 ) -> Result<AgentTaskRunRecord> {
-    let runtime_root =
-        homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
     retry_with_runtime_admission_with_metadata_in_store(
         lifecycle_store,
         run_id,
@@ -6266,16 +6037,8 @@ fn retry_with_force_inner_in_store(
         enforce_lineage_reservation,
         reservation_metadata,
         preflight,
-        Some(&|run_id| {
-            homeboy_core::controller_runtime::admission_status_at(&runtime_root, run_id).ok()
-        }),
-        |run_id| {
-            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check_in_root(
-                &runtime_root,
-                run_id,
-                || Ok(lifecycle_store.read_record(run_id)?.state().is_terminal()),
-            )
-        },
+        None,
+        |_| Ok(homeboy_core::controller_runtime::current()),
     )
 }
 
@@ -6301,7 +6064,7 @@ fn retry_with_force_inner_in_store(
 /// cancellation check inside it reads *lifecycle* state, and that read is rooted
 /// by the caller that owns the store.
 #[cfg(test)]
-pub(crate) fn retry_with_runtime_admission_in_store<F, A>(
+pub(crate) fn retry_with_runtime_admission_in_store<F>(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     requested_run_id: Option<&str>,
@@ -6311,8 +6074,7 @@ pub(crate) fn retry_with_runtime_admission_in_store<F, A>(
     admit_runtime: F,
 ) -> Result<AgentTaskRunRecord>
 where
-    F: FnOnce(&str) -> Result<A>,
-    A: RuntimeAdmissionEvidence,
+    F: FnOnce(&str) -> Result<Value>,
 {
     retry_with_runtime_admission_with_metadata_in_store(
         lifecycle_store,
@@ -6327,7 +6089,7 @@ where
     )
 }
 
-fn retry_with_runtime_admission_with_metadata_in_store<F, A>(
+fn retry_with_runtime_admission_with_metadata_in_store<F>(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     requested_run_id: Option<&str>,
@@ -6339,8 +6101,7 @@ fn retry_with_runtime_admission_with_metadata_in_store<F, A>(
     admit_runtime: F,
 ) -> Result<AgentTaskRunRecord>
 where
-    F: FnOnce(&str) -> Result<A>,
-    A: RuntimeAdmissionEvidence,
+    F: FnOnce(&str) -> Result<Value>,
 {
     let source = lifecycle_store.read_record(&resolve_run_id_in_store(lifecycle_store, run_id)?)?;
     if let Some(cook_id) = source.metadata["cook_id"].as_str() {
