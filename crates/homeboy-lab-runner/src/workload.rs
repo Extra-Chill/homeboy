@@ -216,9 +216,7 @@ pub(crate) fn lab_runner_workload_agent_task_from_command(
                 dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
                     LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
-                // A run-plan has no dispatch handoff. Declaring `None` rather
-                // than leaving the field unset keeps "no handoff to mirror"
-                // distinguishable from "emitter predates the field".
+                // A run-plan declares no dispatch handoff.
                 handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
                 wait_budget_ms: agent_task_wait_budget_ms(plan, args, 0),
             })
@@ -1750,8 +1748,7 @@ mod tests {
             agent_task.lifecycle_mirror_policy,
             LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
         );
-        // A run-plan has no dispatch handoff, and says so explicitly rather
-        // than leaving the field unset (which means "emitter predates it").
+        // A run-plan explicitly declares no dispatch handoff.
         assert_eq!(
             agent_task.handoff_mirror_policy,
             Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None)

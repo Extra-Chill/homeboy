@@ -121,9 +121,6 @@ enum DaemonCommand {
         /// unreachable endpoint were proven by this invocation.
         #[arg(long)]
         apply: bool,
-        /// Exact review token emitted by the preview for a legacy candidate.
-        #[arg(long)]
-        review_token: Option<String>,
         /// Controller-generated idempotency key for this replacement operation.
         #[arg(long)]
         replacement_operation_id: Option<String>,
@@ -493,13 +490,11 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         DaemonCommand::ReconcileUnleasedCandidates {
             addr,
             apply,
-            review_token,
             replacement_operation_id,
         } => Ok((
             DaemonOutput::ReconcileUnleasedCandidates(daemon::reconcile_unleased_candidates(
                 &addr,
                 apply,
-                review_token.as_deref(),
                 replacement_operation_id.as_deref(),
             )?),
             0,
@@ -1188,21 +1183,17 @@ fn execute_recovery_plan(
     let mut applied_steps = Vec::new();
     for step in &plan.steps {
         match step.code.as_str() {
-            // A lease-bound stop refuses to kill a daemon other than the exact
-            // one the report described, which is why the lease is carried here
-            // rather than left to a bare `homeboy daemon stop`. The advertised
-            // repair-plan argv is now already self-sufficient (the stop step
-            // renders its own `--lease-id`, #11220); this injection stays as a
-            // fallback for reports produced by older binaries that still carry
-            // the bare stop.
-            code if code == actions::DAEMON_STOP => match lease_id {
-                Some(lease_id) => {
-                    daemon::stop_for_lease(lease_id)?;
-                }
-                None => {
-                    daemon::stop()?;
-                }
-            },
+            code if code == actions::DAEMON_STOP => {
+                let lease_id = lease_id.ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "lease_id",
+                        "the status report named a lease-bound stop but carried no lease id",
+                        None,
+                        None,
+                    )
+                })?;
+                daemon::stop_for_lease(lease_id)?;
+            }
             code if code == actions::DAEMON_START => {
                 daemon::start_background(addr)?;
             }

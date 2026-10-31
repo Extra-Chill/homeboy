@@ -13,10 +13,6 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-#[cfg(target_os = "linux")]
-use sha2::{Digest, Sha256};
-
 use crate::error::{Error, Result};
 use crate::execution_contract::encode_uri_component;
 #[cfg(target_os = "linux")]
@@ -28,6 +24,7 @@ use crate::process::{
     pid_has_ownership_token, pid_is_running, process_start_identity, signal_pid, wait_for_pid_exit,
     SIGNAL_KILL, SIGNAL_TERMINATE,
 };
+use serde::{Deserialize, Serialize};
 
 use super::acquire_daemon_job_admission_fence;
 use super::{
@@ -2281,7 +2278,6 @@ pub fn reconcile_leaseless_orphans(
 pub fn reconcile_unleased_candidates(
     addr: &str,
     apply: bool,
-    review_token: Option<&str>,
     replacement_operation_id: Option<&str>,
 ) -> Result<DaemonCandidateReconciliationResult> {
     parse_bind_addr(addr)?;
@@ -2303,7 +2299,6 @@ pub fn reconcile_unleased_candidates(
                 candidates: status.process_candidates,
                 retired_pids: Vec::new(),
                 blocked_pids: Vec::new(),
-                review_token: None,
                 evidence: vec![format!("replayed replacement operation {operation_id}")],
                 replacement: Some(DaemonStartResult {
                     pid: state.pid,
@@ -2335,7 +2330,6 @@ pub fn reconcile_unleased_candidates(
         candidates,
         retired_pids: Vec::new(),
         blocked_pids: Vec::new(),
-        review_token: None,
         evidence: Vec::new(),
         replacement: None,
     };
@@ -2356,8 +2350,6 @@ pub fn reconcile_unleased_candidates(
     let jobs_path = crate::paths::observation_db()?;
     let state_path = crate::paths::daemon_state_file()?;
     let state_dir = state_path.parent().unwrap_or(&state_path);
-    let legacy_candidates = legacy_review_candidates(&result.candidates);
-    let legacy_review_token = legacy_review_token(&legacy_candidates);
     for candidate in &result.candidates {
         match candidate.ownership {
             DaemonProcessOwnership::Unrelated => evidence.push(format!(
@@ -2389,12 +2381,6 @@ pub fn reconcile_unleased_candidates(
                         "pid {} is a proven orphan candidate: same store, current binary, exact startup token, and unreachable endpoint",
                         candidate.pid
                     ));
-                } else if legacy_candidates.len() == 1 && legacy_candidates[0].pid == candidate.pid
-                {
-                    evidence.push(format!(
-                        "pid {} is an attributable legacy zero-job candidate; review token is required before signaling",
-                        candidate.pid
-                    ));
                 } else {
                     result.blocked_pids.push(candidate.pid);
                     evidence.push(format!(
@@ -2406,24 +2392,8 @@ pub fn reconcile_unleased_candidates(
         }
     }
     if !apply || !result.blocked_pids.is_empty() {
-        result.review_token = legacy_review_token;
         result.evidence = evidence;
         return Ok(result);
-    }
-
-    if let Some(expected_review_token) = legacy_review_token.as_deref() {
-        if review_token != Some(expected_review_token) {
-            result
-                .blocked_pids
-                .extend(legacy_candidates.iter().map(|candidate| candidate.pid));
-            result.review_token = Some(expected_review_token.to_string());
-            evidence.push(
-                "legacy candidate apply requires the exact review token from a prior preview"
-                    .to_string(),
-            );
-            result.evidence = evidence;
-            return Ok(result);
-        }
     }
 
     // A free owner lock is the final no-owner proof. An unreachable endpoint is
@@ -2521,63 +2491,10 @@ pub fn reconcile_unleased_candidates(
     Ok(result)
 }
 
-/// A legacy daemon predates startup tokens. It remains eligible only as one
-/// same-store, same-binary, zero-job process; all other candidate shapes stay
-/// fail-closed.
-#[cfg(target_os = "linux")]
-fn legacy_review_candidates(candidates: &[DaemonProcessCandidate]) -> Vec<&DaemonProcessCandidate> {
-    let owning = candidates
-        .iter()
-        .filter(|candidate| candidate.ownership == DaemonProcessOwnership::Owning)
-        .collect::<Vec<_>>();
-    if candidates
-        .iter()
-        .any(|candidate| candidate.ownership == DaemonProcessOwnership::Ambiguous)
-    {
-        return Vec::new();
-    }
-    owning
-        .into_iter()
-        .filter(|candidate| {
-            candidate.startup_token.is_none()
-                && candidate.build_identity.is_some()
-                && candidate.executable_digest.is_some()
-                && candidate.process_start_identity.is_some()
-                && candidate.bind_endpoint.is_some()
-                && candidate.state_dir.is_some()
-        })
-        .collect()
-}
-
-#[cfg(target_os = "linux")]
-fn legacy_review_token(candidates: &[&DaemonProcessCandidate]) -> Option<String> {
-    (candidates.len() == 1).then(|| {
-        let candidate = candidates[0];
-        let mut hasher = Sha256::new();
-        for value in [
-            candidate.executable.as_str(),
-            candidate.executable_digest.as_deref().unwrap_or_default(),
-            candidate.state_dir.as_deref().unwrap_or_default(),
-            candidate.bind_endpoint.as_deref().unwrap_or_default(),
-            candidate.startup_token.as_deref().unwrap_or_default(),
-            &candidate
-                .process_start_identity
-                .as_ref()
-                .map(|identity| format!("{identity:?}"))
-                .unwrap_or_default(),
-        ] {
-            hasher.update(value.as_bytes());
-            hasher.update([0]);
-        }
-        format!("legacy-v1:{:x}", hasher.finalize())
-    })
-}
-
 #[cfg(not(target_os = "linux"))]
 pub fn reconcile_unleased_candidates(
     _addr: &str,
     _apply: bool,
-    _review_token: Option<&str>,
     _replacement_operation_id: Option<&str>,
 ) -> Result<DaemonCandidateReconciliationResult> {
     Err(Error::validation_invalid_argument(
@@ -2594,7 +2511,7 @@ mod unleased_candidate_platform_tests {
 
     #[test]
     fn reconciliation_preflight_is_unsupported_without_pidfd() {
-        let error = reconcile_unleased_candidates("127.0.0.1:0", true, None, Some("operation"))
+        let error = reconcile_unleased_candidates("127.0.0.1:0", true, Some("operation"))
             .expect_err("non-Linux must reject candidate signaling before mutation");
 
         assert!(error.message.contains("requires Linux pidfd"));

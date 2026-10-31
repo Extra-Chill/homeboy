@@ -353,9 +353,7 @@ fn active_job_recovery_guidance(daemon: &RemoteDaemon) -> String {
 
 fn health_identity_matches(report: &DaemonHealthReport, daemon: &RemoteDaemon) -> bool {
     report.freshness.lease_id == daemon.lease_id
-        // Older daemons did not return their PID from /health. Their live PID
-        // was independently verified by bounded remote daemon status above.
-        && report.pid.is_none_or(|pid| Some(pid) == daemon.pid)
+        && report.pid.is_some_and(|pid| Some(pid) == daemon.pid)
 }
 
 fn open_daemon_tunnel(
@@ -1037,10 +1035,10 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_health_accepts_legacy_response_without_pid() {
+    fn tunnel_health_requires_pid() {
         let mut report = report("lease-live", 7331);
         report.pid = None;
-        assert!(health_identity_matches(&report, &daemon()));
+        assert!(!health_identity_matches(&report, &daemon()));
     }
 
     #[test]

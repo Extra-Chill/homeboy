@@ -1015,11 +1015,8 @@ pub(crate) fn exec_lab_context(
     }
 
     mirror_agent_task_run_plan_lifecycle(
-        request.normalized_args,
         agent_task_workload.as_ref(),
         notification_route.as_ref(),
-        &stdout,
-        output_file_content.as_deref(),
         exec_output.job_events.as_deref(),
     )?;
 
@@ -1048,8 +1045,6 @@ pub(crate) fn exec_lab_context(
             if let Some(handoff) = resolve_offloaded_agent_task_handoff(
                 agent_task_workload.as_ref(),
                 exec_output.job_events.as_deref(),
-                &stdout,
-                &exec_output.stderr,
             )? {
                 if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
                     agent_task_lifecycle::AgentTaskRemoteDispatchFailure {

@@ -52,22 +52,8 @@ pub struct LabRunnerWorkloadAgentTask {
     pub resolved_provider_policy: Option<crate::agent_task_config::ResolvedAgentTaskProviderPolicy>,
     pub dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind,
     pub lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
-    /// How the controller should recover a cook/dispatch handoff document.
-    ///
-    /// `lifecycle_mirror_policy` only covers the `run-plan` aggregate replay.
-    /// The cook/dispatch handoff took a different route entirely: the
-    /// controller scraped stdout and stderr for a
-    /// `homeboy/agent-task-lab-handoff/v1` (or legacy
-    /// `homeboy/agent-task-dispatch/v1`) document, so any change to what the
-    /// remote command printed silently broke failure-evidence mirroring even
-    /// though the workload itself carried the run identity all along.
-    ///
-    /// This is `Option` rather than a new `lifecycle_mirror_policy` variant on
-    /// purpose. `lifecycle_mirror_policy` is a required field, so a peer that
-    /// predates a new variant would fail to deserialize the *entire* workload.
-    /// A new optional field is ignored by such a peer instead, and `None` here
-    /// unambiguously means "the emitting side predates the typed handoff
-    /// event", which is exactly when the stdout fallback must still run.
+    /// Whether the controller mirrors a typed cook/dispatch handoff event.
+    /// An absent policy declares no handoff mirroring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_mirror_policy: Option<LabRunnerWorkloadAgentTaskHandoffMirrorPolicy>,
     /// The workload's own declared wall-clock budget, in milliseconds: its

@@ -2014,17 +2014,7 @@ fn fetch_daemon_watch(
     after_sequence: u64,
 ) -> Result<RunnerApiWatchResponse> {
     let path = format!("/jobs/{job_id}/watch?after_sequence={after_sequence}");
-    let data = daemon_get(client, local_url, &path).map_err(|error| {
-        // A daemon that does not serve the route predates the Runner API
-        // watch operation. Refreshing the runner is the only supported fix.
-        if error.details["http_status"] == 404 {
-            error.with_hint(
-                "The runner daemon does not serve the Runner API watch operation. Run `homeboy runner refresh <runner-id>` to upgrade it.".to_string(),
-            )
-        } else {
-            error
-        }
-    })?;
+    let data = daemon_get(client, local_url, &path)?;
     let body = canonical_daemon_body(&data, "daemon job watch response")?;
     let response: RunnerApiWatchResponse = serde_json::from_value(body["response"].clone())
         .map_err(|err| {

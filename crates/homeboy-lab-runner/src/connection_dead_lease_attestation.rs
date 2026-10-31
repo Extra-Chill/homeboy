@@ -28,8 +28,7 @@ use crate::Runner;
 /// fake that records the executed command.
 pub(crate) trait RemoteDeadLeaseAttestationTransport {
     /// The runner daemon's own lifecycle plan (`daemon plan` in its frame).
-    /// `Ok(None)` when the runner's Homeboy predates `daemon plan`.
-    fn lifecycle_plan(&self, runner_id: &str) -> std::result::Result<Option<Plan>, String>;
+    fn lifecycle_plan(&self, runner_id: &str) -> std::result::Result<Plan, String>;
 
     /// The remote homeboy executable the state-dir-bound commands run.
     fn homeboy(&self) -> &str;
@@ -66,7 +65,7 @@ impl SshRemoteDeadLeaseAttestationTransport {
 }
 
 impl RemoteDeadLeaseAttestationTransport for SshRemoteDeadLeaseAttestationTransport {
-    fn lifecycle_plan(&self, runner_id: &str) -> std::result::Result<Option<Plan>, String> {
+    fn lifecycle_plan(&self, runner_id: &str) -> std::result::Result<Plan, String> {
         remote_daemon_lifecycle_plan(&self.client, runner_id, &self.homeboy_path)
     }
 
@@ -102,21 +101,13 @@ fn run_attested_reconcile_with_transport(
         .lifecycle_plan(runner_id)
         .map_err(|error| resolution_refused(runner_id, &error))?;
     let attestation = match planned {
-        Some(Plan::NeedsAttestation(attestation)) => attestation,
-        Some(other) => {
+        Plan::NeedsAttestation(attestation) => attestation,
+        other => {
             return Err(resolution_refused(
                 runner_id,
                 &format!(
                     "runner `{runner_id}`: the runner's lifecycle plan does not call for a workload-absence attestation: {}",
                     describe_plan(&other)
-                ),
-            ))
-        }
-        None => {
-            return Err(resolution_refused(
-                runner_id,
-                &format!(
-                    "runner `{runner_id}`: the runner's Homeboy predates `daemon plan`, so it cannot name the exact dead lease to attest; refresh the runner's Homeboy and retry"
                 ),
             ))
         }
@@ -161,8 +152,7 @@ pub(crate) fn run_attested_dead_lease_reconcile(
 }
 
 /// The runner daemon's own lifecycle plan, read-only (#15557 C5).
-/// `None` when the runner's Homeboy predates `daemon plan`.
-pub fn remote_lifecycle_plan(runner_id: &str) -> Result<Option<Plan>> {
+pub fn remote_lifecycle_plan(runner_id: &str) -> Result<Plan> {
     let runner = crate::load(runner_id)?;
     let transport = SshRemoteDeadLeaseAttestationTransport::for_runner(&runner)?;
     transport
@@ -213,7 +203,7 @@ mod tests {
 
     struct FakeTransport {
         homeboy_path: String,
-        lifecycle: std::result::Result<Option<Plan>, String>,
+        lifecycle: std::result::Result<Plan, String>,
         executed: RefCell<Vec<String>>,
         execute_result: RefCell<std::result::Result<Value, String>>,
     }
@@ -224,12 +214,12 @@ mod tests {
             let job_ids: Vec<Uuid> = job_ids.iter().map(|id| Uuid::from_u128(*id)).collect();
             Self {
                 homeboy_path: "/opt/homeboy".to_string(),
-                lifecycle: Ok(Some(Plan::NeedsAttestation(Attestation {
+                lifecycle: Ok(Plan::NeedsAttestation(Attestation {
                     lease_id: lease_id.to_string(),
                     state_dir: std::path::PathBuf::from(STATE_DIR),
                     job_ids: job_ids.clone(),
                     confirmation: "confirm-workload-processes-absent".to_string(),
-                }))),
+                })),
                 executed: RefCell::new(Vec::new()),
                 execute_result: RefCell::new(Ok(serde_json::json!({
                     "recovered_lease_id": lease_id,
@@ -244,7 +234,7 @@ mod tests {
     }
 
     impl RemoteDeadLeaseAttestationTransport for FakeTransport {
-        fn lifecycle_plan(&self, _runner_id: &str) -> std::result::Result<Option<Plan>, String> {
+        fn lifecycle_plan(&self, _runner_id: &str) -> std::result::Result<Plan, String> {
             self.lifecycle.clone()
         }
 
@@ -307,22 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn a_runner_without_daemon_plan_is_refused_without_running_anything() {
-        let mut transport = FakeTransport::dead_lease("lease-lab", &[1]);
-        transport.lifecycle = Ok(None);
-
-        let error = run_attested_reconcile_with_transport("homeboy-lab", &transport)
-            .expect_err("no plan, no recovery");
-
-        assert!(
-            error.message.contains("refresh the runner's Homeboy"),
-            "{}",
-            error.message
-        );
-        assert!(transport.executed_commands().is_empty());
-    }
-
-    #[test]
     fn a_runner_plan_that_waits_or_blocks_is_refused_with_its_reason() {
         for plan in [
             Plan::Wait {
@@ -336,7 +310,7 @@ mod tests {
             Plan::Converged,
         ] {
             let mut transport = FakeTransport::dead_lease("lease-lab", &[1]);
-            transport.lifecycle = Ok(Some(plan.clone()));
+            transport.lifecycle = Ok(plan.clone());
             let error = run_attested_reconcile_with_transport("homeboy-lab", &transport)
                 .expect_err("refused");
             assert!(
