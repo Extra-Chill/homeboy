@@ -997,7 +997,11 @@ fn component_build_artifact_packages_before_github_release_without_extension() {
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
     assert!(step_index(&ids, "preflight.package") < step_index(&ids, "package"));
     assert!(step_index(&ids, "package") < step_index(&ids, "github.release"));
-    assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["git.commit"]);
+    assert_eq!(steps[step_index(&ids, "package")].needs, vec!["git.commit"]);
+    assert_eq!(
+        steps[step_index(&ids, "git.tag")].needs,
+        vec!["artifacts.authority"]
+    );
     assert_eq!(
         steps[step_index(&ids, "cleanup")].needs,
         vec!["github.release"]
@@ -1533,7 +1537,7 @@ fn declared_release_gates_run_after_commit_and_before_tag_in_declaration_order()
     assert!(commit_index < first_gate_index);
     assert!(first_gate_index < second_gate_index);
     assert!(second_gate_index < tag_index);
-    assert_eq!(steps[first_gate_index].needs, vec!["git.commit"]);
+    assert_eq!(steps[first_gate_index].needs, vec!["artifacts.authority"]);
     assert_eq!(
         steps[second_gate_index].needs,
         vec!["release.gate.html-site-import"]
