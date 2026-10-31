@@ -26,7 +26,7 @@ fn archive(root: &Path, destination: &Path, fixture: ArchiveFixture) {
     let candidate = target.join("homeboy");
     write_executable(
         &candidate,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy %s\\n' \"${HOMEBOY_TEST_TARGET_VERSION:-0.351.3+fixture}\"; exit 0; fi\nif [ \"$1\" = self ] && [ \"$2\" = upgrade-admission ]; then\n  printf '%s|%s|%s|%s\\n' \"$0\" \"$4\" \"$6\" \"$8\" > \"$HOMEBOY_TEST_EVIDENCE\"\n  printf 'admission\\n' >> \"$HOMEBOY_TEST_EVENTS\"\n  exit ${HOMEBOY_TEST_CANDIDATE_EXIT:-0}\nfi\nexit 64\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy %s\\n' \"${HOMEBOY_TEST_TARGET_VERSION:-0.351.3+fixture}\"; exit 0; fi\nexit 64\n",
     );
 
     let mut entries = vec![TARGET.to_string()];
@@ -84,14 +84,12 @@ fn archive(root: &Path, destination: &Path, fixture: ArchiveFixture) {
 
 fn run_installer(
     fixture: ArchiveFixture,
-    candidate_exit: i32,
     legacy_installed: bool,
     force_sudo: bool,
     non_writable_parent: bool,
-) -> (std::process::Output, String, String, String) {
+) -> (std::process::Output, String, String) {
     run_installer_mode(
         fixture,
-        candidate_exit,
         legacy_installed,
         force_sudo,
         non_writable_parent,
@@ -101,18 +99,16 @@ fn run_installer(
 
 fn run_installer_mode(
     fixture: ArchiveFixture,
-    candidate_exit: i32,
     legacy_installed: bool,
     force_sudo: bool,
     non_writable_parent: bool,
     stage_only: bool,
-) -> (std::process::Output, String, String, String) {
+) -> (std::process::Output, String, String) {
     let temp = tempfile::tempdir().expect("tempdir");
     let tools = temp.path().join("tools");
     let install_dir = temp.path().join("missing-parent/bin");
     fs::create_dir_all(&tools).expect("tools directory");
     let installed = install_dir.join("homeboy");
-    let evidence = temp.path().join("admission-evidence");
     let events = temp.path().join("events");
     let archive_path = temp.path().join("homeboy.tar.xz");
     let archive_root = temp.path().join("archive-root");
@@ -155,8 +151,6 @@ fn run_installer_mode(
         ))
         .env("HOMEBOY_INSTALL_PATH", &installed)
         .env("HOMEBOY_TEST_ARCHIVE", &archive_path)
-        .env("HOMEBOY_TEST_CANDIDATE_EXIT", candidate_exit.to_string())
-        .env("HOMEBOY_TEST_EVIDENCE", &evidence)
         .env("HOMEBOY_TEST_EVENTS", &events)
         .env("HOMEBOY_TEST_BIN_DIR", &install_dir)
         .env("HOMEBOY_UPGRADE_RELEASE_TAG", "v0.351.3")
@@ -172,32 +166,8 @@ fn run_installer_mode(
     }
     let output = command.output().expect("run installer");
     let installed_bytes = fs::read_to_string(&installed).unwrap_or_default();
-    let evidence = fs::read_to_string(&evidence).unwrap_or_default();
     let events = fs::read_to_string(&events).unwrap_or_default();
-    (output, installed_bytes, evidence, events)
-}
-
-#[test]
-fn installer_admits_a_staged_candidate_and_preserves_bytes_on_admission_failure() {
-    let (allowed, installed, evidence, _) =
-        run_installer(ArchiveFixture::Valid, 0, true, false, false);
-    assert!(allowed.status.success(), "{allowed:?}");
-    assert!(installed.contains("upgrade-admission"));
-    assert!(evidence.contains("legacy-controller-identity"));
-    assert!(evidence.contains("0.351.3"));
-    assert!(evidence.contains("v0.351.3"));
-    assert!(evidence
-        .split('|')
-        .next()
-        .is_some_and(|candidate| candidate.ends_with("/homeboy")));
-
-    for exit_code in [1, 70] {
-        let (blocked, installed, evidence, _) =
-            run_installer(ArchiveFixture::Valid, exit_code, true, false, false);
-        assert!(!blocked.status.success());
-        assert!(installed.contains("legacy-controller-identity"));
-        assert!(evidence.contains("legacy-controller-identity"));
-    }
+    (output, installed_bytes, events)
 }
 
 #[test]
@@ -237,48 +207,43 @@ fn installer_rejects_a_digest_verified_candidate_with_the_wrong_target_version()
         fs::read_to_string(&installed).expect("installed bytes"),
         "#!/bin/sh\nprintf 'legacy'\n"
     );
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("Target-version bootstrap recovery refused"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Target-version check refused"));
 }
 
 #[test]
 fn installer_creates_a_first_install_parent_before_staging_the_replacement() {
-    let (output, installed, evidence, _) =
-        run_installer(ArchiveFixture::Valid, 0, false, false, false);
+    let (output, installed, _) = run_installer(ArchiveFixture::Valid, false, false, false);
 
     assert!(output.status.success(), "{output:?}");
-    assert!(installed.contains("upgrade-admission"));
-    assert!(evidence.contains("unavailable"));
+    assert!(installed.contains("0.351.3+fixture"));
 }
 
 #[test]
-fn installer_uses_privileged_atomic_replacement_after_staged_admission() {
-    let (output, installed, evidence, events) =
-        run_installer(ArchiveFixture::Valid, 0, true, true, false);
+fn installer_uses_privileged_atomic_replacement() {
+    let (output, installed, events) = run_installer(ArchiveFixture::Valid, true, true, false);
 
     assert!(output.status.success(), "{output:?}");
-    assert!(installed.contains("upgrade-admission"));
-    assert!(evidence.contains("legacy-controller-identity"));
+    assert!(installed.contains("0.351.3+fixture"));
     assert_eq!(
         events.lines().collect::<Vec<_>>(),
-        ["admission", "sudo:install", "sudo:mv"]
+        ["sudo:install", "sudo:mv"]
     );
 }
 
 #[test]
 fn installer_uses_privilege_when_binary_is_writable_but_parent_is_not_replaceable() {
-    let (output, installed, _, events) = run_installer(ArchiveFixture::Valid, 0, true, false, true);
+    let (output, installed, events) = run_installer(ArchiveFixture::Valid, true, false, true);
 
     assert!(output.status.success(), "{output:?}");
-    assert!(installed.contains("upgrade-admission"));
+    assert!(installed.contains("0.351.3+fixture"));
     assert_eq!(
         events.lines().collect::<Vec<_>>(),
-        ["admission", "sudo:install", "sudo:mv"]
+        ["sudo:install", "sudo:mv"]
     );
 }
 
 #[test]
-fn installer_rejects_unsafe_or_ambiguous_archive_members_before_admission() {
+fn installer_rejects_unsafe_or_ambiguous_archive_members_before_replacement() {
     for fixture in [
         ArchiveFixture::MissingCandidate,
         ArchiveFixture::AdditionalCandidate,
@@ -287,25 +252,23 @@ fn installer_rejects_unsafe_or_ambiguous_archive_members_before_admission() {
         ArchiveFixture::SymlinkCandidate,
         ArchiveFixture::HardlinkCandidate,
     ] {
-        let (output, installed, evidence, events) = run_installer(fixture, 0, true, false, false);
+        let (output, installed, events) = run_installer(fixture, true, false, false);
         assert!(!output.status.success(), "{output:?}");
         assert!(installed.contains("legacy-controller-identity"));
-        assert!(evidence.is_empty());
         assert!(events.is_empty());
     }
 }
 
 /// `homeboy upgrade` runs this installer in stage-only mode: it places the
-/// verified candidate at HOMEBOY_INSTALL_PATH without running admission or
-/// escalating privilege, because the controller owns both.
+/// verified candidate at HOMEBOY_INSTALL_PATH without escalating privilege,
+/// because the controller owns installation.
 #[test]
-fn stage_only_mode_places_the_candidate_without_admission_or_privilege() {
-    let (output, staged, evidence, events) =
-        run_installer_mode(ArchiveFixture::Valid, 1, false, true, false, true);
+fn stage_only_mode_places_the_candidate_without_privilege() {
+    let (output, staged, events) =
+        run_installer_mode(ArchiveFixture::Valid, false, true, false, true);
 
     assert!(output.status.success(), "{output:?}");
-    assert!(staged.contains("upgrade-admission"));
-    assert!(evidence.is_empty(), "stage-only mode must not admit");
+    assert!(staged.contains("0.351.3+fixture"));
     assert!(
         events.is_empty(),
         "stage-only mode must not use sudo: {events}"

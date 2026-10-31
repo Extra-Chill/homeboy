@@ -27,14 +27,6 @@ pub enum SelfCommand {
     /// Report the active binary build identity without external probes
     #[command(alias = "inspect")]
     Identity(SelfIdentityArgs),
-    /// Internal installer admission probe for a candidate controller. This is
-    /// intentionally hidden from normal operator help; installers invoke it
-    /// before replacement and use its structured blocker routing.
-    #[command(
-        hide = true,
-        long_about = "Internal installer admission probe for a candidate controller. It reports upgrade blockers with one owning reconciler/action and is not an operator recovery workflow."
-    )]
-    UpgradeAdmission(UpgradeAdmissionArgs),
     /// Report one authoritative binary/runtime view across the controller and
     /// every configured runner, including version drift signals and host
     /// resource pressure (machine load, hot Homeboy-adjacent processes, rig
@@ -59,19 +51,6 @@ pub struct SelfStatusArgs {}
 #[derive(Args)]
 pub struct SelfIdentityArgs {}
 
-#[derive(Args)]
-pub struct UpgradeAdmissionArgs {
-    /// Build identity reported by the controller invoking the installer
-    #[arg(long)]
-    pub legacy_identity: String,
-    /// Exact version expected from the checksum-verified staged release.
-    #[arg(long)]
-    pub target_version: Option<String>,
-    /// Release tag or artifact selected by the installer for this candidate.
-    #[arg(long)]
-    pub selected_tag_or_artifact: Option<String>,
-}
-
 #[derive(Serialize)]
 struct SelfIdentityReport {
     active_binary: String,
@@ -80,15 +59,6 @@ struct SelfIdentityReport {
     lab_contract_version: u32,
     lab_handoff_capabilities: Vec<homeboy_lab_contract::LabCapabilityVersion>,
     daemon_recovery_capabilities: Vec<homeboy_lab_contract::LabCapabilityVersion>,
-}
-
-#[derive(Serialize)]
-struct UpgradeAdmissionReport {
-    schema: &'static str,
-    legacy_identity: String,
-    candidate_identity: String,
-    admission_authority: &'static str,
-    admission: homeboy_upgrade::upgrade::ControllerUpgradeAdmission,
 }
 
 pub(crate) fn identity_report() -> Value {
@@ -163,40 +133,6 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
             Ok((json, 0))
         }
         SelfCommand::Identity(_) => Ok((identity_report(), 0)),
-        SelfCommand::UpgradeAdmission(args) => {
-            let admission = match args.target_version.as_deref() {
-                Some(target_version) => {
-                    if target_version != homeboy_upgrade::upgrade::current_version() {
-                        return Err(homeboy::core::Error::validation_invalid_argument(
-                            "target_version",
-                            format!(
-                                "verified target-version bootstrap recovery expected {target_version}, but this candidate is {}",
-                                homeboy_upgrade::upgrade::current_version()
-                            ),
-                            Some(target_version.to_string()),
-                            None,
-                        ));
-                    }
-                    let target = homeboy_upgrade::upgrade::VerifiedTargetUpgrade::classify(
-                        args.legacy_identity.clone(),
-                        build_identity::current().display,
-                        args.selected_tag_or_artifact.clone(),
-                    );
-                    homeboy_upgrade::upgrade::ensure_verified_target_upgrade_admission(&target)?
-                }
-                None => homeboy_upgrade::upgrade::ensure_controller_upgrade_admission()?,
-            };
-            let report = UpgradeAdmissionReport {
-                schema: "homeboy/controller-upgrade-bootstrap/v1",
-                legacy_identity: args.legacy_identity,
-                candidate_identity: build_identity::current().display,
-                admission_authority: "candidate_controller",
-                admission,
-            };
-            let json = serde_json::to_value(report)
-                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
-            Ok((json, 0))
-        }
         SelfCommand::Doctor(_) => {
             let view = self_status::build_runtime_view(
                 collect_controller_input(),

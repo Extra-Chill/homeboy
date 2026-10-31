@@ -1065,15 +1065,6 @@ impl AgentTaskLifecycleStore {
 
     /// This store's bounded page of raw durable agent-task observation rows.
     ///
-    /// Record-health reconciliation classifies rows it cannot parse into typed
-    /// records, so it cannot go through [`AgentTaskLifecycleStore::read_records`],
-    /// which silently drops them. It needs the raw rows — and it needs them from
-    /// the same roots it is about to commit the repaired record, or the
-    /// quarantine stamp, back into (#7505).
-    pub(crate) fn observation_runs(&self) -> Result<Vec<RunRecord>> {
-        observation_runs_bounded_in_store(self, 1000)
-    }
-
     pub fn read_records_with_health_bounded(
         &self,
         limit: usize,
