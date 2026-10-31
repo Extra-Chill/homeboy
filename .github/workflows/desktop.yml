@@ -1,0 +1,55 @@
+name: Desktop
+
+# Builds the macOS app and runs its contract tests (tests/ContractTests.swift
+# compiles the test runner with the app models it covers), so a model or
+# command-registry change that breaks a fixture fails here.
+
+on:
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Desktop / Build and contract tests
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Homeboy.xcodeproj \
+            -scheme Homeboy \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/desktop-derived-data" \
+            CODE_SIGNING_ALLOWED=NO \
+            | tail -n 200
+
+      - name: Contract tests
+        run: swift tests/ContractTests.swift "$PWD/tests"

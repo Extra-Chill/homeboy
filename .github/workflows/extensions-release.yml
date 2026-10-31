@@ -1,8 +1,11 @@
-name: Extensions release
+name: Extensions and desktop release
 
-# Releases each extension under extensions/ that has releasable commits since
-# its own `<id>-vX.Y.Z` tag (e.g. wordpress-v3.22.1). Core releases separately
-# through release.yml, whose scope excludes extensions/ and desktop/.
+# Releases each extension under extensions/, and the desktop app, when it has
+# releasable commits since its own `<id>-vX.Y.Z` tag (e.g. wordpress-v3.22.1,
+# homeboy-desktop-v0.11.3). Core releases separately through release.yml, whose
+# scope excludes extensions/ and desktop/. Desktop releases bump
+# MARKETING_VERSION and publish the tag and changelog; a signed DMG is not
+# built here (it needs signing credentials).
 #
 # Gated until cutover (#16783): the imported per-extension tags must exist in
 # this repository first, or the first run would treat each extension's whole
@@ -14,7 +17,17 @@ on:
     branches: [main]
     paths:
       - 'extensions/**'
+      - 'desktop/**'
   workflow_dispatch:
+    inputs:
+      path:
+        description: 'Release only this component path (e.g. desktop or extensions/wordpress). Empty releases every changed component.'
+        type: string
+        default: ''
+      bump:
+        description: 'Explicit bump for that component: major, minor, patch or X.Y.Z. Needed when breaking commits are held back with major-requires-flag.'
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -27,27 +40,42 @@ concurrency:
 
 jobs:
   release:
-    name: Release ${{ matrix.component }}
+    name: Release ${{ matrix.path }}
     if: vars.EXTENSIONS_RELEASE_AUTOMATION == 'enabled'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        component:
-          - discord
-          - go
-          - nodejs
-          - rust
-          - ssh-checkout-deploy
-          - swift
-          - wordpress
+        path:
+          - extensions/discord
+          - extensions/go
+          - extensions/nodejs
+          - extensions/rust
+          - extensions/ssh-checkout-deploy
+          - extensions/swift
+          - extensions/wordpress
+          - desktop
     steps:
+      - name: Skip components not selected by a manual run
+        id: select
+        env:
+          SELECTED: ${{ inputs.path || '' }}
+          CURRENT: ${{ matrix.path }}
+        run: |
+          if [ -n "$SELECTED" ] && [ "$SELECTED" != "$CURRENT" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.select.outputs.run == 'true'
         with:
           fetch-depth: 0
 
       - name: Generate app token
+        if: steps.select.outputs.run == 'true'
         id: app-token
         uses: actions/create-github-app-token@v1
         continue-on-error: true
@@ -56,7 +84,9 @@ jobs:
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
       - uses: Extra-Chill/homeboy-action@v2
+        if: steps.select.outputs.run == 'true'
         with:
-          component: extensions/${{ matrix.component }}
+          component: ${{ matrix.path }}
           commands: release
+          args: ${{ inputs.path && inputs.bump && format('--bump {0} --force-lower-bump', inputs.bump) || '' }}
           app-token: ${{ steps.app-token.outputs.token || '' }}

@@ -6,7 +6,7 @@ Homeboy, its extensions, and the desktop app live in this one repository (#16783
 |---|---|---|---|
 | `crates/`, root `Cargo.toml` | The Homeboy CLI and its internal crates | `release.yml`, tagged `vX.Y.Z` | `ci.yml` (skips extension- and desktop-only changes) |
 | `extensions/` | The extensions (`wordpress`, `rust`, `nodejs`, …), formerly `Extra-Chill/homeboy-extensions` | `extensions-release.yml`, tagged `<extension-id>-vX.Y.Z` | `extensions-self-checks.yml`, `extensions-wp-codebox-test-runtime-canary.yml` |
-| `desktop/` | The macOS app, formerly `Extra-Chill/homeboy-desktop` | none yet (it was released by hand) | none yet |
+| `desktop/` | The macOS app, formerly `Extra-Chill/homeboy-desktop` | `extensions-release.yml`, tagged `homeboy-desktop-vX.Y.Z` (tag and changelog; no signed DMG yet) | `desktop.yml` (macOS build and contract tests) |
 
 Both imports kept their full history, so `git log -- extensions/wordpress` and
 `git blame` work across the move. Tags that collided with core's `vX.Y.Z` were
@@ -29,10 +29,11 @@ homeboy-desktop's are `homeboy-desktop-v*`. Per-extension tags kept their names.
 finds the extension under `extensions/` and clones only that path. The old
 `Extra-Chill/homeboy-extensions` URL keeps working for existing installs.
 
-## Not moved yet
+## Reusable workflows
 
-`extensions/.github/workflows/` still holds `runtime-agent-full-run.yml` and
-`actions-run-once.yml`. Those are reusable workflows (`workflow_call`), and
-GitHub only runs them from a repository's root `.github/workflows/`. Callers
-pin them in `Extra-Chill/homeboy-extensions` by SHA, and those pins keep
-resolving after that repository is frozen. They move to the root at cutover.
+`runtime-agent-full-run.yml` and `actions-run-once.yml` are reusable
+(`workflow_call`) workflows, so they live in the root `.github/workflows/`.
+Call them as `Extra-Chill/homeboy/.github/workflows/<name>@<ref>`; see
+[reusable-workflows.md](reusable-workflows.md). Pins to the old
+`Extra-Chill/homeboy-extensions/.github/workflows/...` paths keep resolving from
+the frozen repository.

@@ -1,7 +1,7 @@
 {
   "ci": {
     "pin_repositories": {
-      "extension-ref": "Extra-Chill/homeboy-extensions"
+      "extension-ref": "Extra-Chill/homeboy"
     }
   },
   "auto_cleanup": false,

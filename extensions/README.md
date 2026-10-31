@@ -63,10 +63,10 @@ GitHub Releases are handled by Homeboy core. Rust binary archives and Homebrew f
 Install extensions one at a time. Homeboy clones this repo, detects the monorepo layout, and extracts just the extension you asked for into `~/.config/homeboy/extensions/<id>/`.
 
 ```bash
-homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id wordpress
-homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id rust
-homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id nodejs
-homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id discord
+homeboy extension install https://github.com/Extra-Chill/homeboy --id wordpress
+homeboy extension install https://github.com/Extra-Chill/homeboy --id rust
+homeboy extension install https://github.com/Extra-Chill/homeboy --id nodejs
+homeboy extension install https://github.com/Extra-Chill/homeboy --id discord
 ```
 
 Remote runners need the same extension IDs installed on the runner host before
@@ -88,9 +88,9 @@ homeboy extension show wordpress
 Local path installs are for active extension development:
 
 ```bash
-git clone https://github.com/Extra-Chill/homeboy-extensions.git
-homeboy extension install ./homeboy-extensions/wordpress
-homeboy extension install ./homeboy-extensions/rust
+git clone https://github.com/Extra-Chill/homeboy.git
+homeboy extension install ./homeboy/extensions/wordpress
+homeboy extension install ./homeboy/extensions/rust
 ```
 
 ### Install modes and updates
@@ -98,10 +98,10 @@ homeboy extension install ./homeboy-extensions/rust
 For normal use, install from the GitHub monorepo URL with `--id <extension>`. Homeboy manages the cloned/extracted install and can update that installed copy:
 
 ```bash
-homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id wordpress
+homeboy extension install https://github.com/Extra-Chill/homeboy --id wordpress
 ```
 
-Local path installs are linked installs. The active extension code is whatever the installed symlink target points at, so updating the primary `homeboy-extensions` checkout does not update an extension linked to another checkout or feature worktree. Avoid linking installed extensions to short-lived worktrees unless you are intentionally testing that branch.
+Local path installs are linked installs. The active extension code is whatever the installed symlink target points at, so updating the primary `homeboy` checkout does not update an extension linked to another checkout or feature worktree. Avoid linking installed extensions to short-lived worktrees unless you are intentionally testing that branch.
 
 To repair a runner that was accidentally left linked to a stale or dirty checkout, use the standard bootstrap script with `--replace-existing`. For linked installs, Homeboy removes only the installed symlink, preserves the linked checkout, and installs a managed extracted copy from the configured repository URL:
 

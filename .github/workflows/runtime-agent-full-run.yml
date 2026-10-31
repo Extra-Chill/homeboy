@@ -4,7 +4,7 @@ name: Runtime Agent Full Run (reusable)
   workflow_call:
     inputs:
       homeboy_extensions_ref:
-        description: Ref of Extra-Chill/homeboy-extensions to check out for runner scripts.
+        description: Ref of Extra-Chill/homeboy to check out for the extensions' runner scripts (the input keeps its pre-monorepo name).
         type: string
         default: main
       run_agent:
@@ -359,13 +359,14 @@ jobs:
         if: ${{ inputs.run_agent }}
         uses: actions/checkout@v4
 
-      - name: Checkout homeboy-extensions
+      - name: Checkout Homeboy extensions
         if: ${{ inputs.run_agent }}
         uses: actions/checkout@v4
         with:
-          repository: Extra-Chill/homeboy-extensions
+          repository: Extra-Chill/homeboy
           ref: ${{ inputs.homeboy_extensions_ref }}
-          path: .ci/homeboy-extensions
+          path: .ci/homeboy
+          sparse-checkout: extensions
 
       - name: Set up Node.js
         if: ${{ inputs.run_agent }}
@@ -379,7 +380,7 @@ jobs:
         env:
           HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
           HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/auth.cjs detect-credentials
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/auth.cjs detect-credentials
 
       - name: Require Homeboy app credentials
         if: ${{ inputs.run_agent && ! inputs.dry_run && inputs.require_homeboy_app_token && steps.homeboy-app-creds.outputs.available != 'true' }}
@@ -399,7 +400,7 @@ jobs:
           APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
           TARGET_REPO: ${{ inputs.target_repo }}
           CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/auth.cjs resolve-token-scope
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/auth.cjs resolve-token-scope
 
       - name: Generate Homeboy app token
         id: app-token
@@ -426,7 +427,7 @@ jobs:
           CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
           REQUIRE_HOMEBOY_APP_TOKEN: ${{ inputs.require_homeboy_app_token }}
           DRY_RUN: ${{ inputs.dry_run }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/auth.cjs report-mode
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/auth.cjs report-mode
 
       - name: Checkout runtime dependencies
         if: ${{ inputs.run_agent }}
@@ -438,14 +439,14 @@ jobs:
           AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
           PROVIDER: ${{ inputs.provider }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/materialize-dependencies.cjs
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/materialize-dependencies.cjs
 
       - name: Download workflow input artifacts
         if: ${{ inputs.run_agent && inputs.actions_artifact_downloads != '[]' && inputs.actions_artifact_downloads != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ACTIONS_ARTIFACT_DOWNLOADS: ${{ inputs.actions_artifact_downloads }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/actions-artifact-downloads.cjs
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/actions-artifact-downloads.cjs
 
       - name: Prepare runtime payload
         if: ${{ inputs.run_agent && inputs.prepare_payload_command != '' }}
@@ -463,7 +464,7 @@ jobs:
           AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
           PROVIDER: ${{ inputs.provider }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/setup-runtime.cjs
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/setup-runtime.cjs
 
       - name: Build runner config
         id: config
@@ -540,14 +541,14 @@ jobs:
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/build-runner-config.cjs
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/build-runner-config.cjs
 
       - name: Materialize declared GitHub secret env
         if: ${{ inputs.run_agent && inputs.materialize_secret_env_from_github_secrets }}
         env:
           CONFIG_FILE: ${{ steps.config.outputs.config_path }}
           HOMEBOY_SECRET_ENV_BINDINGS: ${{ inputs.secret_env_bindings }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/auth.cjs materialize-secret-env
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/auth.cjs materialize-secret-env
 
       - name: Run runtime agent
         if: ${{ inputs.run_agent }}
@@ -568,7 +569,7 @@ jobs:
           HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE: ${{ runner.temp }}/runtime-agent-run/loop-result.json
           HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE: ${{ runner.temp }}/runtime-agent-run/loop-policy.json
           HOMEBOY_RUNTIME_AGENT_REPLAY_BUNDLE_DIR: ${{ inputs.replay_bundle_artifact_name != '' && format('{0}/runtime-agent-replay-bundles', runner.temp) || '' }}
-        run: node .ci/homeboy-extensions/runtime-agent-ci/scripts/run-headless-loop.cjs --spec "${{ steps.config.outputs.config_path }}" ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: node .ci/homeboy/extensions/runtime-agent-ci/scripts/run-headless-loop.cjs --spec "${{ steps.config.outputs.config_path }}" ${{ inputs.dry_run && '--dry-run' || '' }}
 
       - name: Run host runner lifecycle
         if: ${{ inputs.run_agent && ! inputs.dry_run }}
@@ -579,7 +580,7 @@ jobs:
           CONFIG_FILE: ${{ steps.config.outputs.config_path }}
         run: |
           set -euo pipefail
-          node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/run-host-runner-lifecycle.cjs \
+          node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/run-host-runner-lifecycle.cjs \
             --results "$RESULTS_FILE" \
             --config "$CONFIG_FILE" \
             --scenario "${{ inputs.workload_id }}" \
@@ -592,7 +593,7 @@ jobs:
           RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
         run: |
           set -euo pipefail
-          bash .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/extract-engine-data.sh \
+          bash .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/extract-engine-data.sh \
             --results "$RESULTS_FILE" \
             --scenario "${{ inputs.workload_id }}" \
             --field job_status=metadata.job_status \
@@ -608,7 +609,7 @@ jobs:
           RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
         run: |
           set -euo pipefail
-          bash .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/extract-engine-data.sh \
+          bash .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/extract-engine-data.sh \
             --results "$RESULTS_FILE" \
             --scenario "${{ inputs.workload_id }}" \
             --field job_status=metadata.job_status \
@@ -625,14 +626,14 @@ jobs:
           RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
           RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
           FLOW_SLUG: ${{ inputs.workload_id }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/project-engine-data.cjs
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/project-engine-data.cjs
 
       - name: Project callback data
         id: callback-data
         if: ${{ inputs.run_agent }}
         env:
           CALLBACK_DATA: ${{ inputs.callback_data }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/project-callback-data.cjs
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/project-callback-data.cjs
 
       - name: Assert success
         if: ${{ inputs.run_agent && ! inputs.dry_run }}
@@ -640,7 +641,7 @@ jobs:
           RESULTS_FILE: ${{ runner.temp }}/runtime-agent-run/results.json
           FLOW_SLUG: ${{ inputs.workload_id }}
           SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/assert-success.cjs
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/assert-success.cjs
 
       - name: Resolve transcript artifact path
         id: transcript-artifact
@@ -650,7 +651,7 @@ jobs:
           FLOW_SLUG: ${{ inputs.workload_id }}
           TRANSCRIPT_JSON: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json }}
           TRANSCRIPT_HOST_DIR: ${{ steps.config.outputs.transcript_host_dir }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/artifacts-and-comments.cjs resolve-transcript
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/artifacts-and-comments.cjs resolve-transcript
 
       - name: Upload transcript artifact
         if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' && steps.transcript-artifact.outputs.path != '' }}
@@ -696,7 +697,7 @@ jobs:
           JOB_STATUS: ${{ steps.extract.outputs.job_status }}
           TRANSCRIPT_ARTIFACT_NAME: ${{ inputs.transcript_artifact_name }}
           ENGINE_DATA_JSON: ${{ steps.engine-data.outputs.engine_data_json }}
-        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/artifacts-and-comments.cjs prepare-pr-comment
+        run: node .ci/homeboy/extensions/.github/scripts/runtime-agent-full-run/artifacts-and-comments.cjs prepare-pr-comment
 
       - name: Comment prepared PR summary
         if: ${{ inputs.run_agent && inputs.comment_pr_summary && github.event_name == 'pull_request' && ! inputs.dry_run }}
