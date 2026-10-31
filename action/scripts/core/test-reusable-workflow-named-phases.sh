@@ -33,6 +33,10 @@ for job_name, job in workflow["jobs"].items():
     for step in job.get("steps", []):
         if step.get("uses") == "./.homeboy-action" and not step.get("name"):
             problems.append(f"{job_name} has an anonymous Homeboy Action invocation")
+        # Every invocation reads homeboy.json, so every one must honor the
+        # component input or a subdirectory component fails at the root.
+        if step.get("uses") == "./.homeboy-action" and "component" not in (step.get("with") or {}):
+            problems.append(f"{job_name} step {step.get('name')!r} does not pass the component input")
 
 if problems:
     print("\n".join(problems))

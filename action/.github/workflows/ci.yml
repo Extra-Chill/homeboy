@@ -453,6 +453,9 @@ jobs:
         with:
           commands: __prepare__
           prepare-only: 'true'
+          # The setup reads homeboy.json; a component in a subdirectory
+          # (single-component CI inside a monorepo) has none at the root.
+          component: ${{ inputs.component }}
           version: ${{ inputs.version }}
           source: ${{ inputs.source }}
           binary-path: ${{ inputs.build-command != '' && inputs.build-artifact-path || inputs.binary-path }}
