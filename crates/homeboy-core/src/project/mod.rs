@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 pub mod component;
 mod effective_remote_path;
-pub mod files;
 mod path_resolution;
 pub mod pins;
 mod readiness;
@@ -36,7 +35,6 @@ pub use component::{
 pub use effective_remote_path::{
     component_remote_path, project_with_detected_path_roots, resolve_effective_remote_path,
 };
-pub use files::{FileEntry, GrepMatch, LineChange};
 pub use path_resolution::resolve_project_remote_path;
 pub use pins::{
     add_pin, list_pins, remove_pin, rename_pin, update_pin, PinUpdateOptions, ProjectPinChange,
