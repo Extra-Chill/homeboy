@@ -405,15 +405,6 @@ const fn with_risk_exemption(
     }
 }
 
-/// Operator-gated but non-mutating: an explicit operator entry point that only
-/// renders a plan.
-const fn operator_read_only() -> CommandSafetySpec {
-    CommandSafetySpec {
-        operator: true,
-        ..CommandSafetySpec::read_only()
-    }
-}
-
 const fn paths_safety(
     paths: &'static [&'static str],
     safety: CommandSafetySpec,
