@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.11] - 2026-10-31
+
+### Fixed
+- managed PHPUnit bootstrap honors activation order and extra plugins
+
 ## [3.53.10] - 2026-10-31
 
 ### Fixed
