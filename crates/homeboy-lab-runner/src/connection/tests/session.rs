@@ -436,6 +436,38 @@ fn admission_reconnects_when_concurrent_rotation_removes_the_session() {
     );
 }
 
+/// Admission with a recorded session only re-establishes the transport to
+/// that daemon. An identity mismatch from `ensure_transport` is the answer:
+/// admission never falls back to the full `connect` that could replace it.
+#[test]
+fn admission_with_a_recorded_session_never_reaches_connect() {
+    let session = direct_ssh_session("lease-recorded");
+    let error = status_for_admission_with(
+        "homeboy-lab",
+        |_| Ok(admission_status(&session, false)),
+        |runner_id| {
+            reach_runner_with(
+                runner_id,
+                |_| Ok(true),
+                |runner_id| {
+                    Err(transport::transport_error(
+                        runner_id,
+                        TransportFailure::IdentityMismatch,
+                        "remote daemon health identity changed".to_string(),
+                    ))
+                },
+                |_| panic!("admission with a recorded session must never reach connect"),
+            )
+        },
+    )
+    .expect_err("identity mismatch fails admission closed");
+
+    assert_eq!(
+        TransportFailure::of(&error),
+        Some(TransportFailure::IdentityMismatch)
+    );
+}
+
 #[test]
 fn admission_refuses_a_lease_mismatch_without_retrying_status() {
     let session = direct_ssh_session("lease-recorded");

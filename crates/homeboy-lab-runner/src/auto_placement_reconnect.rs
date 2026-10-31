@@ -23,8 +23,14 @@
 //! (`DaemonStaleReasonCode::TransportUnreachable`) also returns `None` from
 //! `admission_action` — unreachable and ownership-uncertain both count as "no
 //! typed proof survived". But unreachability carries no job or lease evidence
-//! to misinterpret, so attempting `connect()` anyway cannot mutate anything;
-//! it can only fail cleanly with a bounded, reportable cause. Treating it as
+//! to misinterpret, so attempting to reach the runner anyway cannot mutate
+//! anything; it can only fail cleanly with a bounded, reportable cause.
+//!
+//! Reaching the runner is transport only when it has a recorded session:
+//! [`connection::ensure_transport`] re-establishes the tunnel to the recorded
+//! daemon and never restarts it. The full `connect` (idempotent
+//! `ensure-running`) runs only for a runner with no daemon session, or when
+//! the recorded daemon is unreachable. Treating it as
 //! eligible turns a silent skip into the "attempted and failed" outcome the
 //! issue asks for, without touching the reasoning that fences a *reachable*
 //! but unprovable daemon.
@@ -197,7 +203,7 @@ fn attempt_with(
         },
         Err(error) => (
             observed.clone(),
-            AutoPlacementReconnect::attempt_failed(runner_id, error.message),
+            AutoPlacementReconnect::attempt_failed(runner_id, failed_reconnect_reason(&error)),
         ),
     }
 }
@@ -269,34 +275,53 @@ fn reconnect_bounded(runner_id: &str, deadline: Instant) -> Result<()> {
         AUTO_PLACEMENT_RECONNECT_PROBE,
         "connect",
         deadline,
-        move || connect_within_deadline(&runner_id_owned, deadline),
+        move || reach_within_deadline(&runner_id_owned, deadline),
     )
 }
 
-fn connect_within_deadline(runner_id: &str, deadline: Instant) -> Result<()> {
+/// Reach the runner on the placement deadline. A runner with a recorded
+/// current session only gets its transport re-established through
+/// [`connection::ensure_transport`]; the full `connect`, which may discover,
+/// start or restart a daemon, runs only when no daemon session exists at all
+/// (see [`connection::reach_runner`]).
+fn reach_within_deadline(runner_id: &str, deadline: Instant) -> Result<()> {
     let runner_id = runner_id.to_string();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = connection::connect(&runner_id);
-        let _ = tx.send(result);
+        let _ = tx.send(connection::reach_runner(&runner_id));
     });
 
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .unwrap_or(Duration::ZERO);
     match rx.recv_timeout(remaining) {
-        Ok(Ok((report, _exit_code))) if report.connected => Ok(()),
-        Ok(Ok((report, _exit_code))) => Err(homeboy_core::error::Error::internal_unexpected(
-            report
-                .failure_message
-                .unwrap_or_else(|| "runner connect did not report a live session".to_string()),
-        )),
-        Ok(Err(error)) => Err(error),
+        Ok(result) => result,
         Err(_) => Err(homeboy_core::error::Error::new(
             homeboy_core::error::ErrorCode::RemoteCommandTimeout,
             "bounded reconnect did not finish before the auto-placement deadline",
             serde_json::json!({ "stage": "auto_placement_reconnect" }),
         )),
+    }
+}
+
+/// The fallback reason for a failed reconnect. A typed transport failure
+/// names what it does and does not prove: SSH failing says nothing about the
+/// daemon, and another daemon answering is authoritative, never retried.
+fn failed_reconnect_reason(error: &homeboy_core::error::Error) -> String {
+    match connection::TransportFailure::of(error) {
+        Some(connection::TransportFailure::Ssh) => format!(
+            "SSH to the runner failed, so the daemon's liveness is unknown (not treated as a dead daemon): {}",
+            error.message
+        ),
+        Some(connection::TransportFailure::Unreachable) => format!(
+            "the recorded runner daemon did not answer /health: {}",
+            error.message
+        ),
+        Some(connection::TransportFailure::IdentityMismatch) => format!(
+            "another daemon answered the runner's /health; the identity mismatch is not retried: {}",
+            error.message
+        ),
+        None => error.message.clone(),
     }
 }
 
@@ -549,5 +574,131 @@ mod tests {
             .as_deref()
             .is_some_and(|reason| reason.contains("refresh")));
         assert_eq!(resolved, observed);
+    }
+
+    /// A recorded session means the runner already has its one daemon, so
+    /// placement only re-establishes the transport to it. The full `connect`,
+    /// which can start or restart a daemon, is never reached.
+    #[test]
+    fn placement_with_a_recorded_session_calls_ensure_transport_not_connect() {
+        let ensured = std::cell::Cell::new(0);
+        connection::reach_runner_with(
+            "homeboy-lab",
+            |_| Ok(true),
+            |runner_id| {
+                assert_eq!(runner_id, "homeboy-lab");
+                ensured.set(ensured.get() + 1);
+                Ok(())
+            },
+            |_| panic!("a runner with a recorded session must never reach the full connect"),
+        )
+        .expect("transport re-established");
+        assert_eq!(ensured.get(), 1);
+    }
+
+    /// Only a runner with no daemon session at all falls back to `connect`.
+    #[test]
+    fn an_unreachable_recorded_daemon_falls_back_to_connect() {
+        let connected = std::cell::Cell::new(0);
+        connection::reach_runner_with(
+            "homeboy-lab",
+            |_| Ok(true),
+            |_| Err(transport_failure(connection::TransportFailure::Unreachable)),
+            |_| {
+                connected.set(connected.get() + 1);
+                Ok(())
+            },
+        )
+        .expect("connect brings the runner's one daemon back");
+        assert_eq!(connected.get(), 1);
+    }
+
+    #[test]
+    fn placement_without_any_session_falls_back_to_connect() {
+        let connected = std::cell::Cell::new(0);
+        connection::reach_runner_with(
+            "homeboy-lab",
+            |_| Ok(false),
+            |_| panic!("there is no recorded daemon to re-establish a transport to"),
+            |_| {
+                connected.set(connected.get() + 1);
+                Ok(())
+            },
+        )
+        .expect("connected");
+        assert_eq!(connected.get(), 1);
+    }
+
+    fn transport_failure(failure: connection::TransportFailure) -> homeboy_core::error::Error {
+        let mut error = homeboy_core::error::Error::validation_invalid_argument(
+            "runner",
+            "transport failed",
+            Some("homeboy-lab".to_string()),
+            None,
+        );
+        error.details["transport_failure"] =
+            serde_json::Value::String(failure.as_str().to_string());
+        error
+    }
+
+    /// A typed transport failure is the placement answer: it is never retried
+    /// through `connect`, and its fallback reason says what it proves.
+    #[test]
+    fn a_typed_transport_failure_falls_back_to_local() {
+        for (failure, expected) in [
+            (
+                connection::TransportFailure::Ssh,
+                "not treated as a dead daemon",
+            ),
+            (
+                connection::TransportFailure::Unreachable,
+                "did not answer /health",
+            ),
+            (
+                connection::TransportFailure::IdentityMismatch,
+                "identity mismatch is not retried",
+            ),
+        ] {
+            let observed = readiness(LabRunnerReadinessState::Disconnected);
+            let (resolved, attempt) = attempt_with(
+                &observed,
+                Instant::now() + Duration::from_secs(5),
+                |_deadline| {
+                    Ok(vec![ReconnectCandidate::Eligible(
+                        "homeboy-lab".to_string(),
+                    )])
+                },
+                |runner_id, _deadline| {
+                    connection::reach_runner_with(
+                        runner_id,
+                        |_| Ok(true),
+                        |_| Err(transport_failure(failure)),
+                        |_| {
+                            // Only an unreachable recorded daemon may be
+                            // (re)started by connect; here connect fails too.
+                            assert_eq!(
+                                failure,
+                                connection::TransportFailure::Unreachable,
+                                "a {failure:?} transport failure must never reach connect"
+                            );
+                            Err(transport_failure(failure))
+                        },
+                    )
+                },
+                || panic!("a failed reconnect must never consult post-reconnect readiness"),
+            );
+
+            assert!(attempt.attempted, "{failure:?}");
+            assert!(!attempt.succeeded, "{failure:?}");
+            assert!(
+                attempt
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(expected)),
+                "{failure:?}: {:?}",
+                attempt.reason
+            );
+            assert_eq!(resolved, observed);
+        }
     }
 }

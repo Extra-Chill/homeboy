@@ -191,11 +191,10 @@ pub(crate) fn diagnose_action(runner_id: &str) -> ExecutableAction {
     )
 }
 
-/// The last-resort controller-side repair: drop the session and rebuild it.
-///
-/// This is the plan used when nothing specific is known about the runner's
-/// daemon, so it stays deliberately generic.
-pub(crate) fn reconnect_plan(runner_id: &str) -> Vec<DaemonRepairStep> {
+/// The explicit restart repair for a restartable daemon: stop it and connect
+/// afresh. Re-establishing only the transport is never this plan; that is
+/// `ensure_transport`, which cannot restart a daemon.
+pub(crate) fn restart_plan(runner_id: &str) -> Vec<DaemonRepairStep> {
     vec![
         action_step(RUNNER_DISCONNECT, disconnect_action(runner_id)),
         action_step(RUNNER_CONNECT, connect_action(runner_id)),
@@ -269,7 +268,7 @@ pub(crate) fn controller_frame_plan(
         )];
     }
     if report.restartable {
-        return reconnect_plan(runner_id);
+        return restart_plan(runner_id);
     }
     // A stale report that matched no branch names a real problem but authorizes
     // no mutation. The report's ownership evidence is the terminal diagnostic;
@@ -523,7 +522,7 @@ mod tests {
     #[test]
     fn render_matches_the_operator_prose_format() {
         assert_eq!(
-            render(&reconnect_plan("homeboy-lab")),
+            render(&restart_plan("homeboy-lab")),
             "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
         );
     }

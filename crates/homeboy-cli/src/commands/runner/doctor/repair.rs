@@ -15,6 +15,7 @@ pub fn apply(
     if options.scope == RunnerDoctorScope::SecretEnv {
         match runner::apply_secret_env_migration(&report.runner_id) {
             Ok(plan) => report.repairs.push(RunnerRepair {
+                transport_failure: None,
                 id: "repair.secret_env_migration".to_string(),
                 status: RunnerDoctorStatus::Ok,
                 message: format!(
@@ -24,6 +25,7 @@ pub fn apply(
                 commands: Vec::new(),
             }),
             Err(error) => report.repairs.push(RunnerRepair {
+                transport_failure: None,
                 id: "repair.secret_env_migration".to_string(),
                 status: RunnerDoctorStatus::Error,
                 message: error.message,
@@ -35,6 +37,7 @@ pub fn apply(
 
     if options.scope != RunnerDoctorScope::LabOffload {
         report.repairs.push(RunnerRepair {
+            transport_failure: None,
             id: "repair.scope".to_string(),
             status: RunnerDoctorStatus::Warning,
             message:
@@ -53,6 +56,7 @@ pub fn apply(
     } = target
     else {
         report.repairs.push(RunnerRepair {
+            transport_failure: None,
             id: "repair.runner".to_string(),
             status: RunnerDoctorStatus::Warning,
             message: "No Lab daemon repair is available for local runner targets".to_string(),
@@ -91,6 +95,7 @@ pub fn apply(
         .unwrap_or(false);
     if !daemon_failed && !daemon_admission_closed {
         report.repairs.push(RunnerRepair {
+            transport_failure: None,
             id: "repair.daemon".to_string(),
             status: RunnerDoctorStatus::Ok,
             message: "Connected Lab daemon did not require repair".to_string(),
@@ -146,6 +151,7 @@ pub fn apply(
                 ),
             };
             report.repairs.push(RunnerRepair {
+                transport_failure: None,
                 id: "repair.daemon".to_string(),
                 status,
                 message,
@@ -157,6 +163,7 @@ pub fn apply(
                 .failure_message
                 .unwrap_or_else(|| format!("runner connect exited with code {exit_code}"));
             report.repairs.push(RunnerRepair {
+                transport_failure: None,
                 id: "repair.daemon".to_string(),
                 status: RunnerDoctorStatus::Error,
                 message: match disconnect_error {
@@ -171,6 +178,7 @@ pub fn apply(
         }
         Err(err) => {
             report.repairs.push(RunnerRepair {
+                transport_failure: None,
                 id: "repair.daemon".to_string(),
                 status: RunnerDoctorStatus::Error,
                 message: match disconnect_error {
@@ -223,6 +231,7 @@ fn repair_extension_parity(
         .unwrap_or(".");
     if let Err(error) = runner::ensure_runner_extension_parity(runner_id, cwd, &extension_ids) {
         report.repairs.push(RunnerRepair {
+            transport_failure: None,
             id: "repair.extension_parity".to_string(),
             status: RunnerDoctorStatus::Error,
             message: error.message,
@@ -238,6 +247,7 @@ fn repair_extension_parity(
         Ok(command) => command,
         Err(error) => {
             report.repairs.push(RunnerRepair {
+                transport_failure: None,
                 id: "repair.extension_parity".to_string(),
                 status: RunnerDoctorStatus::Error,
                 message: error.message,
@@ -286,6 +296,7 @@ fn repair_extension_parity(
         ));
     }
     report.repairs.push(RunnerRepair {
+        transport_failure: None,
         id: "repair.extension_parity".to_string(),
         status: if parity_ready {
             RunnerDoctorStatus::Ok
@@ -313,6 +324,7 @@ fn terminal_daemon_recovery_blocker(report: &RunnerDoctorOutput) -> bool {
 
 fn terminal_daemon_recovery_repair(report: &RunnerDoctorOutput) -> Option<RunnerRepair> {
     terminal_daemon_recovery_blocker(report).then(|| RunnerRepair {
+        transport_failure: None,
         id: "repair.daemon".to_string(),
         status: RunnerDoctorStatus::Warning,
         message: format!(
@@ -329,6 +341,7 @@ fn terminal_daemon_recovery_repair(report: &RunnerDoctorOutput) -> Option<Runner
 
 fn identity_repair(message: String) -> RunnerRepair {
     RunnerRepair {
+        transport_failure: None,
         id: "repair.target_identity".to_string(),
         status: RunnerDoctorStatus::Error,
         message,
@@ -750,6 +763,7 @@ fn apply_daemon_repair_plan(
             // explicit reason instead of silence.
             DaemonRepairDispatch::NotAutomatable { reason } => {
                 report.repairs.push(RunnerRepair {
+                    transport_failure: None,
                     id: "repair.daemon".to_string(),
                     status: RunnerDoctorStatus::Warning,
                     message: format!(
@@ -764,6 +778,7 @@ fn apply_daemon_repair_plan(
 
         if let Err(message) = outcome {
             report.repairs.push(RunnerRepair {
+                transport_failure: None,
                 id: "repair.daemon".to_string(),
                 status: RunnerDoctorStatus::Error,
                 message: format!(
@@ -787,12 +802,14 @@ fn apply_daemon_repair_plan(
         .join(", ");
     match target.ensure_current().and_then(|_| daemon_admission_ready(runner_id)) {
         Ok(true) => report.repairs.push(RunnerRepair {
+            transport_failure: None,
             id: "repair.daemon".to_string(),
             status: RunnerDoctorStatus::Ok,
             message: format!("Applied the reported daemon repair plan ({applied} step(s): {steps})"),
             commands,
         }),
         Ok(false) => report.repairs.push(RunnerRepair {
+            transport_failure: None,
             id: "repair.daemon".to_string(),
             status: RunnerDoctorStatus::Error,
             message: format!(
@@ -801,6 +818,7 @@ fn apply_daemon_repair_plan(
             commands,
         }),
         Err(error) => report.repairs.push(RunnerRepair {
+            transport_failure: None,
             id: "repair.daemon".to_string(),
             status: RunnerDoctorStatus::Error,
             message: format!(
@@ -892,14 +910,34 @@ fn refresh_outcome(
     })
 }
 
+/// A typed repair that did not apply. A transport repair carries the typed
+/// [`runner::TransportFailure`] `ensure_transport` reported, so an SSH failure
+/// is never read as a dead daemon and an identity mismatch is never retried.
+#[derive(Debug)]
+pub(super) struct TypedRepairFailure {
+    pub message: String,
+    pub transport_failure: Option<runner::TransportFailure>,
+}
+
+impl From<String> for TypedRepairFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            transport_failure: None,
+        }
+    }
+}
+
 /// Execute one check-owned repair without parsing its human-readable prose.
 /// The caller owns the bounded re-probe and action history.
 pub(super) fn apply_typed_action(
     target: &target::RunnerTarget,
     action: &RunnerRepairAction,
-) -> Result<(), String> {
+) -> Result<(), TypedRepairFailure> {
     let target::RunnerTarget::Ssh { id, client, .. } = target else {
-        return Err("typed Lab runner repairs require an SSH runner target".to_string());
+        return Err("typed Lab runner repairs require an SSH runner target"
+            .to_string()
+            .into());
     };
     match action {
         RunnerRepairAction::RefreshHomeboy {
@@ -908,10 +946,9 @@ pub(super) fn apply_typed_action(
         } => target
             .ensure_current()
             .map_err(|error| error.message)
-            .and_then(|_| refresh_outcome(id, git_ref.clone(), *allow_downgrade)),
-        RunnerRepairAction::Reconnect => connect_outcome_after_promotion_wait(target, || {
-            target.ensure_current().and_then(|_| runner::connect(id))
-        }),
+            .and_then(|_| refresh_outcome(id, git_ref.clone(), *allow_downgrade))
+            .map_err(Into::into),
+        RunnerRepairAction::Reconnect => reconnect_transport(target, id),
         RunnerRepairAction::RefreshManagedSources => {
             let mut report = RunnerDoctorOutput {
                 variant: "doctor",
@@ -939,10 +976,29 @@ pub(super) fn apply_typed_action(
                 .repairs
                 .iter()
                 .find(|repair| repair.status == RunnerDoctorStatus::Error)
-                .map(|repair| Err(repair.message.clone()))
+                .map(|repair| Err(repair.message.clone().into()))
                 .unwrap_or(Ok(()))
         }
     }
+}
+
+/// Re-establish the transport to the runner's recorded daemon through
+/// `ensure_transport`. It reuses a session whose `/health` still proves the
+/// lease and PID or opens a fresh tunnel to that same daemon; it never starts,
+/// restarts or adopts one. Restart and refresh stay their own explicit steps.
+fn reconnect_transport(
+    target: &target::RunnerTarget,
+    runner_id: &str,
+) -> Result<(), TypedRepairFailure> {
+    target
+        .ensure_current()
+        .map_err(|error| TypedRepairFailure::from(error.message))?;
+    runner::ensure_transport(runner_id, runner::TransportLifetime::Persisted)
+        .map(|_| ())
+        .map_err(|error| TypedRepairFailure {
+            transport_failure: runner::TransportFailure::of(&error),
+            message: error.message,
+        })
 }
 
 fn repair_managed_sources(client: &SshClient, report: &mut RunnerDoctorOutput) {
@@ -958,6 +1014,7 @@ fn repair_managed_sources(client: &SshClient, report: &mut RunnerDoctorOutput) {
         if !output.success {
             failed = true;
             report.repairs.push(RunnerRepair {
+                transport_failure: None,
                 id: format!("repair.managed_source.{}", plan.id),
                 status: RunnerDoctorStatus::Error,
                 message: format!(
@@ -971,6 +1028,7 @@ fn repair_managed_sources(client: &SshClient, report: &mut RunnerDoctorOutput) {
         }
 
         report.repairs.push(RunnerRepair {
+            transport_failure: None,
             id: format!("repair.managed_source.{}", plan.id),
             status: RunnerDoctorStatus::Ok,
             message: format!("Refreshed managed runner source `{}`", plan.label),

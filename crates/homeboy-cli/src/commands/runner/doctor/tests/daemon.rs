@@ -2,23 +2,48 @@ use super::super::*;
 use homeboy::runner::runners::RunnerTunnelMode;
 use types::RunnerDoctorStatus;
 
-#[test]
-fn healthy_session_health_probe_is_observational() {
+/// Serve one `/health` answer for `lease_id`/`pid`. The shared liveness
+/// predicate first proves the tunnel port with a bare TCP connect, so the
+/// server accepts that probe connection before the HTTP request.
+fn serve_health(lease_id: &'static str, pid: u32) -> std::net::SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
     let addr = listener.local_addr().expect("addr");
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let mut buffer = [0; 4096];
-        std::io::Read::read(&mut stream, &mut buffer).expect("read request");
-        let body =
-            r#"{"success":true,"data":{"freshness":{"lease_id":"lease-doctor"},"pid":4242}}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(), body
-        );
-        std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+        let body = serde_json::json!({
+            "freshness": {
+                "fresh": true,
+                "stale_reason_code": null,
+                "restartable": false,
+                "lease_id": lease_id,
+                "pid": pid,
+                "active_jobs": 0,
+                "repair_plan": []
+            },
+            "pid": pid
+        })
+        .to_string();
+        for _ in 0..4 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0; 4096];
+            let read = std::io::Read::read(&mut stream, &mut buffer).unwrap_or(0);
+            if read == 0 {
+                continue;
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        }
     });
-    let session = RunnerSession {
+    addr
+}
+
+fn health_session(addr: std::net::SocketAddr) -> RunnerSession {
+    RunnerSession {
         runner_id: "homeboy-lab".to_string(),
         mode: RunnerTunnelMode::DirectSsh,
         role: homeboy::runner::runners::RunnerSessionRole::Controller,
@@ -28,7 +53,7 @@ fn healthy_session_health_probe_is_observational() {
         remote_daemon_address: Some("127.0.0.1:4000".to_string()),
         local_port: Some(addr.port()),
         local_url: Some(format!("http://{addr}")),
-        tunnel_pid: Some(1234),
+        tunnel_pid: None,
         tunnel_process_start_identity: None,
         proxy_forward: None,
         remote_daemon_pid: Some(4242),
@@ -40,7 +65,12 @@ fn healthy_session_health_probe_is_observational() {
         worker_pid: None,
         last_seen_at: None,
         leaseless_recovery_evidence: None,
-    };
+    }
+}
+
+#[test]
+fn healthy_session_health_probe_is_observational() {
+    let session = health_session(serve_health("lease-doctor", 4242));
     let before = serde_json::to_value(&session).expect("session snapshot");
 
     let checks = probes::connected_daemon_health_checks_with_timeout(
@@ -55,6 +85,44 @@ fn healthy_session_health_probe_is_observational() {
         serde_json::to_value(&session).expect("session after"),
         before
     );
+}
+
+/// The doctor probe is the same predicate as status: another daemon answering
+/// `/health` on the recorded tunnel does not prove the session.
+#[test]
+fn health_probe_rejects_another_daemon_behind_the_recorded_tunnel() {
+    let session = health_session(serve_health("lease-other", 4242));
+
+    let checks = probes::connected_daemon_health_checks_with_timeout(
+        "homeboy-lab",
+        &session,
+        std::time::Duration::from_secs(1),
+    );
+
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, RunnerDoctorStatus::Error);
+    assert_eq!(
+        checks[0].details.get("expected_lease").map(String::as_str),
+        Some("lease-doctor")
+    );
+}
+
+/// A stale session file whose tunnel no longer answers is not connected.
+#[test]
+fn health_probe_reports_a_stale_session_without_live_health() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    drop(listener);
+    let session = health_session(addr);
+
+    let checks = probes::connected_daemon_health_checks_with_timeout(
+        "homeboy-lab",
+        &session,
+        std::time::Duration::from_millis(300),
+    );
+
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, RunnerDoctorStatus::Error);
 }
 
 #[test]

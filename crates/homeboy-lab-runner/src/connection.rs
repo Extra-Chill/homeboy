@@ -321,6 +321,62 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     )
 }
 
+/// Reach a runner for placement or admission. Lives here, beside [`connect`],
+/// because unlike the transport module it may start the runner's daemon.
+///
+///
+/// A runner with a recorded current session first gets its transport back
+/// through [`ensure_transport`]. Only when the recorded daemon is
+/// [`TransportFailure::Unreachable`] (for example after the runner host
+/// rebooted) does it fall back to the full [`connect`]. `connect` runs the
+/// idempotent `ensure-running` on the one state dir: it adopts a live daemon
+/// and starts a dead one, and it never restarts a live daemon in place. An SSH
+/// failure (liveness unknown) or an identity mismatch (another daemon answered)
+/// is the answer and never reaches `connect`. A runner with no daemon session
+/// at all goes straight to `connect`.
+pub(crate) fn reach_runner(runner_id: &str) -> Result<()> {
+    reach_runner_with(
+        runner_id,
+        |runner_id| Ok(read_session(runner_id)?.is_some()),
+        |runner_id| ensure_transport(runner_id, TransportLifetime::Persisted).map(|_| ()),
+        connect_until_connected,
+    )
+}
+
+/// [`reach_runner`] with its three effects injected, so the choice between
+/// re-establishing the transport and the no-session `connect` is testable.
+pub(crate) fn reach_runner_with(
+    runner_id: &str,
+    has_recorded_session: impl FnOnce(&str) -> Result<bool>,
+    ensure: impl FnOnce(&str) -> Result<()>,
+    connect: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    if !has_recorded_session(runner_id)? {
+        return connect(runner_id);
+    }
+    match ensure(runner_id) {
+        Err(error) if TransportFailure::of(&error) == Some(TransportFailure::Unreachable) => {
+            connect(runner_id)
+        }
+        result => result,
+    }
+}
+
+fn connect_until_connected(runner_id: &str) -> Result<()> {
+    let (report, exit_code) = connect(runner_id)?;
+    if report.connected && exit_code == 0 {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "runner",
+        report
+            .failure_message
+            .unwrap_or_else(|| "runner connect did not report a live session".to_string()),
+        Some(runner_id.to_string()),
+        None,
+    ))
+}
+
 /// Restart the runner's daemon in place after a binary refresh: the same
 /// state directory under a new lease. The caller has proven every active job
 /// is re-adoptable, so the restarted daemon continues them from its job store.
@@ -2214,25 +2270,13 @@ fn terminate_tunnel_with_identity<Inspect, Terminate>(
 }
 
 /// Resolve a direct-SSH session for work admission. A readiness observation can
-/// become stale when its controller-owned tunnel exits before submission; the
-/// reconnect transaction proves the remote daemon lease before replacing the
-/// local tunnel record.
+/// become stale when its controller-owned tunnel exits before submission.
+/// Admission then re-establishes only the transport to the recorded daemon
+/// through [`ensure_transport`], which proves the lease and PID before it
+/// replaces the local tunnel record and never restarts the daemon; see
+/// [`reach_runner`].
 pub(crate) fn status_for_admission(runner_id: &str) -> Result<RunnerStatusReport> {
-    status_for_admission_with(runner_id, status, |runner_id| {
-        let (report, exit_code) = connect(runner_id)?;
-        if report.connected && exit_code == 0 {
-            return Ok(());
-        }
-
-        Err(Error::validation_invalid_argument(
-            "runner",
-            report
-                .failure_message
-                .unwrap_or_else(|| "runner reconnect did not become ready".to_string()),
-            Some(runner_id.to_string()),
-            None,
-        ))
-    })
+    status_for_admission_with(runner_id, status, reach_runner)
 }
 
 /// Resolve the immutable identity of the executable that will start runner-side
@@ -3372,7 +3416,10 @@ pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
     for runner in super::list()? {
         // Indexed inspection is read-only: reconnecting here can start SSH work
         // and makes controller discovery depend on the unhealthy runner.
-        let (session, state) = read_session_for_status(&runner.id)?;
+        let (session, state) = read_session_for_status_until(
+            &runner.id,
+            Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+        )?;
         let connected = state == RunnerSessionState::Connected;
         let (active_jobs, active_job_state, active_job_error) = if connected {
             match session.as_ref() {
@@ -3436,6 +3483,47 @@ mod status_read_purity_tests {
             );
         }
     }
+
+    /// Status, persisted status and the doctor projection only observe the
+    /// recorded session through the shared liveness predicate. None of them
+    /// may open a tunnel or reconnect.
+    #[test]
+    fn status_never_opens_a_tunnel() {
+        let source = include_str!("connection.rs");
+        let section = |from: &str, to: &str| {
+            let start = source.find(from).expect("section start exists");
+            let end = start + source[start..].find(to).expect("section end exists");
+            &source[start..end]
+        };
+        for (name, observation) in [
+            (
+                "status",
+                section("pub fn status(", "pub fn reconcile_status("),
+            ),
+            (
+                "persisted_status",
+                section(
+                    "pub fn persisted_status(",
+                    "fn capture_tunnel_process_start_identity(",
+                ),
+            ),
+        ] {
+            for transport in [
+                "ensure_transport",
+                "reach_runner",
+                "open_transport",
+                "connect_remote_daemon",
+                " connect(",
+                "(connect(",
+                "restart_daemon_in_place",
+            ] {
+                assert!(
+                    !observation.contains(transport),
+                    "{name} must not open a tunnel through `{transport}`"
+                );
+            }
+        }
+    }
 }
 
 pub(crate) mod remote_daemon;
@@ -3459,7 +3547,9 @@ pub(crate) use service::{
 use session_store::*;
 pub(crate) use session_store::{controller_id, read_session};
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
-pub use transport::{close_transport, ensure_transport, TransportFailure, TransportLifetime};
+pub use transport::{
+    close_transport, ensure_transport, transport_is_live, TransportFailure, TransportLifetime,
+};
 
 #[cfg(test)]
 mod tests;

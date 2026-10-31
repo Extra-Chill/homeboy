@@ -1462,7 +1462,7 @@ fn daemon_repair_steps(runner_id: &str, status: &RunnerStatusReport) -> Vec<Daem
             daemon_repair::diagnose_action(runner_id),
         )];
     }
-    daemon_repair::reconnect_plan(runner_id)
+    daemon_repair::restart_plan(runner_id)
 }
 
 fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String {

@@ -344,10 +344,8 @@ pub fn report(
         })
         .unwrap_or_default();
     let daemon_timed_out = daemon_checks.iter().any(|check| {
-        matches!(
-            check.details.get("reason_code").map(String::as_str),
-            Some("runner_doctor.daemon_timeout" | "runner_doctor.overall_timeout")
-        )
+        check.details.get("reason_code").map(String::as_str)
+            == Some("runner_doctor.overall_timeout")
     });
     checks.extend(daemon_checks);
 
@@ -396,11 +394,7 @@ pub fn report(
         .collect::<Vec<_>>();
     if daemon_timed_out {
         timed_out_probes.push(types::RunnerDoctorTimedOutProbe {
-            reason_code: if daemon_timeout.is_zero() {
-                "runner_doctor.overall_timeout".to_string()
-            } else {
-                "runner_doctor.daemon_timeout".to_string()
-            },
+            reason_code: "runner_doctor.overall_timeout".to_string(),
             command: "daemon.exec".to_string(),
             replay_command: format!(
                 "homeboy runner doctor {} --scope lab-offload",

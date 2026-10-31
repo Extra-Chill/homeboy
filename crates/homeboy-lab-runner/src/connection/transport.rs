@@ -44,7 +44,8 @@ pub enum TransportFailure {
 }
 
 impl TransportFailure {
-    fn as_str(self) -> &'static str {
+    /// The stable wire name carried as `details.transport_failure`.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Ssh => "ssh",
             Self::Unreachable => "unreachable",
@@ -94,6 +95,16 @@ impl TransportFailure {
 /// Reach the runner's one current daemon without ever restarting it.
 pub fn ensure_transport(runner_id: &str, lifetime: TransportLifetime) -> Result<RunnerSession> {
     ensure_transport_with(runner_id, lifetime, &LiveTransport)
+}
+
+/// The one liveness predicate: the session's own tunnel is reachable and the
+/// daemon behind it answers `/health` with the session's lease and PID.
+///
+/// Status, readiness, doctor and [`ensure_transport`] all decide "connected"
+/// through this. A present session file or a running tunnel PID alone is never
+/// connected. It only observes: it never opens a tunnel or writes a session.
+pub fn transport_is_live(session: &RunnerSession, timeout: Duration) -> bool {
+    session_is_live_with_timeout(session, timeout)
 }
 
 /// Close a transport [`ensure_transport`] returned for

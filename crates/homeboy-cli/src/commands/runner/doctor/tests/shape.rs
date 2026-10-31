@@ -258,6 +258,7 @@ fn doctor_emits_refresh_next_action_for_version_skew_and_none_when_versions_matc
 fn compact_doctor_retains_failed_repair_cause_and_remediation() {
     let (mut report, _) = run("local").expect("local doctor report");
     report.repairs.push(types::RunnerRepair {
+        transport_failure: None,
         id: "repair.daemon".to_string(),
         status: RunnerDoctorStatus::Error,
         message: "promotion lease remained contended after the bounded wait".to_string(),
@@ -478,6 +479,7 @@ fn compact_doctor_size_fallback_retains_failed_repair() {
         })
         .collect();
     report.repairs.push(types::RunnerRepair {
+        transport_failure: None,
         id: "repair.daemon".to_string(),
         status: RunnerDoctorStatus::Error,
         message: "promotion wait exhausted; do not use generic reconnect".to_string(),

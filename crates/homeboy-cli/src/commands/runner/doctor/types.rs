@@ -98,6 +98,10 @@ pub struct RunnerRepair {
     pub message: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<String>,
+    /// Why a transport repair could not reach the runner's daemon:
+    /// `ssh`, `unreachable` or `identity_mismatch`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_failure: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -296,7 +300,8 @@ pub enum RunnerRepairAction {
         git_ref: Option<String>,
         allow_downgrade: bool,
     },
-    /// Re-establish the runner session. Executor: `repair::connect_outcome`.
+    /// Re-establish the transport to the runner's recorded daemon without
+    /// restarting it. Executor: `repair::reconnect_transport`.
     Reconnect,
     /// Re-materialize provider-declared managed source checkouts.
     /// Executor: `repair::repair_managed_sources`.
