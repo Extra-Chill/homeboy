@@ -313,13 +313,10 @@ process.stdin.on('end', () => {
   process.stderr.write('permission denied');
 });"#,
     );
-    let (mut request, mut provider) = request("pi-boundary", format!("node {script}"));
-    provider.id = "pi.agent-task-executor".to_string();
-    provider.backend = "pi".to_string();
+    let (mut request, mut provider) = request("workspace-boundary", format!("node {script}"));
     provider
         .capabilities
         .push(AGENT_TASK_PROVIDER_CAPABILITY_WORKSPACE_PERMISSION_ROOT_V1.to_string());
-    request.executor.backend = "pi".to_string();
     request.workspace.root = Some(candidate.display().to_string());
     request.executor.config = json!({
         "workspace": { "root": candidate.display().to_string() },
@@ -1376,4 +1373,60 @@ fn provider_command_env_strips_git_push_credentials() {
         Some("credential.helper")
     );
     assert_eq!(env.get("GIT_CONFIG_VALUE_0").map(String::as_str), Some(""));
+}
+
+#[cfg(unix)]
+#[test]
+fn pi_backend_spawns_pi_directly_without_node_or_stdin_request() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let pi = temp.path().join("pi");
+    let observed = temp.path().join("observed");
+    std::fs::write(&pi, format!(r#"#!/bin/sh
+if [ "$1" = --version ]; then echo 'pi 1.0'; exit; fi
+if [ "$1" = --list-models ]; then echo 'roadie test'; exit; fi
+printf '%s\n' "$@" > '{}'
+if read input; then exit 77; fi
+printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","stopReason":"stop","content":[{{"type":"text","text":"Native Pi completed."}}]}}}}'
+"#, observed.display())).unwrap();
+    std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (mut request, mut provider) = request("native-pi", "node /does/not/exist.cjs".into());
+    provider.backend = "pi".into();
+    request.executor.backend = "pi".into();
+    request.executor.config = json!({"command":pi,"model":"roadie/test"});
+    request.workspace.root = Some(temp.path().display().to_string());
+    std::fs::write(temp.path().join("report.txt"), "retained report").unwrap();
+    request.artifact_declarations = vec![serde_json::from_value(
+        json!({"name":"report", "path":"report.txt", "required":true}),
+    )
+    .unwrap()];
+    let result = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
+        request,
+        AgentTaskExecutionContext {
+            plan_id: "native-pi".into(),
+            run_id: None,
+            attempt: 1,
+            cancellation: Default::default(),
+            lifecycle_store: None,
+            provider_capacity_key: None,
+        },
+    );
+    assert_eq!(
+        result.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "{result:?}"
+    );
+    assert_eq!(result.summary.as_deref(), Some("Native Pi completed."));
+    let artifact = result
+        .artifacts
+        .iter()
+        .find(|a| a.name.as_deref() == Some("report"))
+        .expect("retained declared file");
+    assert_eq!(
+        std::fs::read_to_string(artifact.path.as_ref().unwrap()).unwrap(),
+        "retained report"
+    );
+    let observed = std::fs::read_to_string(observed).unwrap();
+    assert!(observed.starts_with("--mode\njson\n--session\n"));
+    assert!(observed.contains("native-pi-pi-session.jsonl\n--model\nroadie/test\n"));
 }
