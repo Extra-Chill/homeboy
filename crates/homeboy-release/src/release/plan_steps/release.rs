@@ -146,12 +146,24 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
         vec!["version".to_string()]
     };
 
-    let commit_needs = if package_step_needed {
+    steps.push(ready_step(
+        "git.commit",
+        "git.commit",
+        format!("Commit release: v{}", new_version),
+        package_needs,
+        StepConfig::new(),
+    ));
+
+    // The package is built from the release commit, so anything it records
+    // about its source (version, commit) names the commit the tag points at.
+    // A package failure here is still before tag and push, and the release
+    // checkout guard rolls the unpushed commit back.
+    let artifact_need = if package_step_needed {
         steps.push(ready_step(
             "package",
             "package",
-            "Preflight release package ownership",
-            package_needs,
+            "Package release artifacts",
+            vec!["git.commit".to_string()],
             StepConfig::new(),
         ));
         steps.push(ready_step(
@@ -161,18 +173,10 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
             vec!["package".to_string()],
             StepConfig::new(),
         ));
-        vec!["artifacts.authority".to_string()]
+        "artifacts.authority".to_string()
     } else {
-        package_needs
+        "git.commit".to_string()
     };
-
-    steps.push(ready_step(
-        "git.commit",
-        "git.commit",
-        format!("Commit release: v{}", new_version),
-        commit_needs,
-        StepConfig::new(),
-    ));
 
     if options.pipeline.protected_branch {
         let branch = format!("release/{tag_name}");
@@ -180,7 +184,7 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
             "git.push",
             "git.push",
             format!("Push release branch {}", branch),
-            vec!["git.commit".to_string()],
+            vec![artifact_need],
             StepConfig::new()
                 .bool("tags", false)
                 .string("branch", branch.clone()),
@@ -207,11 +211,11 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
     let gate_step = add_release_gate_steps(
         &mut steps,
         component,
-        "git.commit",
+        &artifact_need,
         package_step_needed,
         warnings,
     )?;
-    let tag_needs = gate_step.unwrap_or_else(|| "git.commit".to_string());
+    let tag_needs = gate_step.unwrap_or(artifact_need);
 
     steps.push(ready_step(
         "git.tag",
