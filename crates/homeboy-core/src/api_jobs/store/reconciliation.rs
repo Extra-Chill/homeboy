@@ -77,6 +77,16 @@ impl JobStore {
                 if !matches!(job.status, JobStatus::Queued | JobStatus::Running) {
                     return None;
                 }
+                // A job stamped with another daemon scope is that daemon's
+                // work in the shared ledger (#16104), even when this scope has
+                // no lease yet. Scope-less records keep the lease rule.
+                if let (Some(own), Some(job_scope)) =
+                    (self.daemon_scope.as_ref(), stored.daemon_scope.as_ref())
+                {
+                    if own != job_scope {
+                        return None;
+                    }
+                }
                 let terminal_evidence =
                     recovered_terminal_from_result(&stored.events).map(|(status, _)| status);
                 let linked_durable_run_id = stored_job_durable_run_id(stored);
