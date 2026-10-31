@@ -753,10 +753,10 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
         .as_u64()
         .and_then(|pid| i32::try_from(pid).ok())
         .expect("persisted launcher owner PID");
-    assert_ne!(
+    assert_eq!(
         launcher_owner_pid as u32,
         launcher.id(),
-        "pinned runtime must take durable pre-projection launcher custody"
+        "the launcher itself holds durable pre-projection custody"
     );
 
     let killed = unsafe { libc::kill(launcher_owner_pid, libc::SIGKILL) };

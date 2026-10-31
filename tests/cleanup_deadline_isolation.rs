@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 fn hanging_category_returns_typed_partial_evidence_and_later_category_completes() {
     let fixture = CleanupHangFixture::new();
     let started = Instant::now();
-    let output = fixture.run(&["cleanup", "--include", "repo-artifacts,controller-scratch"]);
+    let output = fixture.run(&["cleanup", "--include", "repo-artifacts,release-artifacts"]);
 
     assert!(started.elapsed() < Duration::from_secs(15), "{output:#}");
     // The timed-out category found nothing to reclaim and nothing failed, so
@@ -37,7 +37,7 @@ fn hanging_category_returns_typed_partial_evidence_and_later_category_completes(
     assert!(categories[0]["last_progress"]
         .as_str()
         .is_some_and(|progress| progress.contains("repo_artifacts")));
-    assert_eq!(categories[1]["category"], "controller_scratch");
+    assert_eq!(categories[1]["category"], "release_artifacts");
     assert_eq!(categories[1]["outcome"], "completed", "{output:#}");
     assert!(categories[1]["failure"].is_null(), "{output:#}");
 

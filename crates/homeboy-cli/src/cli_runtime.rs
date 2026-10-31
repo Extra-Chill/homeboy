@@ -1010,6 +1010,64 @@ fn register_startup_providers_after_reconcile(
     // can materialize an isolated validation-dependency workspace without
     // depending on runner behavior.
     crate::runner::register_workspace_snapshot_provider();
+    // Register the gate-feedback candidate-baseline provider so core's
+    // worktree-safety logic can accept a dirty worktree that is a verified
+    // agent-task gate-feedback candidate without depending on the agent-task
+    // subsystem.
+    // Register the orchestration service behind daemon HTTP control-plane
+    // routes without making core depend on the agent-task subsystem.
+    crate::agents::orchestration::register();
+    // Register the bench agent-task matrix provider so core's cross-rig
+    // bench comparison can project rig entries into an agent-task matrix
+    // without depending on the agent-task subsystem.
+    crate::agents::agent_task::bench_matrix_provider::register();
+    // Register the agent-task terminal-recovery provider so core's job store
+    // can recover terminal jobs from durable agent-task runs.
+    crate::agents::api_jobs_terminal_recovery::register();
+    // Register the agent-task secret provider so core's trace secret
+    // resolution can consult the agent-task secret store.
+    crate::agents::agent_task_secrets::register();
+    // Register the extension provider-discovery validator so core's
+    // extension install/repair can verify declared agent-runtime providers.
+    // Register the command-label resolver so core::runner can map dispatched
+    // argv to a hot-command label without depending on the full CLI parser.
+    crate::runner::set_command_label_resolver(|argv| {
+        let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).ok()?;
+        let route_contract = cli.command.lab_route_contract().ok()??;
+        Some(route_contract.command.hot_label.to_string())
+    });
+    // Register the agent-task dispatch resolver so core::runner can extract a
+    // cook dispatch command from argv without depending on the CLI parser.
+    crate::runner::set_agent_task_dispatch_resolver(|argv| {
+        let cli =
+            <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).map_err(|error| {
+                crate::core::error::Error::validation_invalid_argument(
+                    "agent-task",
+                    "failed to parse agent-task arguments while compiling Lab provider policy",
+                    Some(error.to_string()),
+                    None,
+                )
+            })?;
+        Ok(match cli.command {
+            crate::cli_surface::Commands::AgentTask(agent_task) => match agent_task.command {
+                crate::commands::agent_task::AgentTaskCommand::Cook(cook) => {
+                    Some(cook.dispatch.into())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+    });
+    // Register the Lab-runner hint provider so core::runner can compose
+    // `--runner`/`--placement` unsupported errors from the command-spec table
+    // without depending on `command_contract`.
+    crate::runner::set_lab_runner_hint_provider(|| {
+        let summary = crate::command_contract::lab_runner_support_summary();
+        crate::runner::LabRunnerHint {
+            hint: summary.hint,
+            unsupported_message: summary.unsupported_message,
+        }
+    });
 
     Ok(())
 }
