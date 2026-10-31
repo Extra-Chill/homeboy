@@ -385,10 +385,7 @@ pub(crate) struct LocalRunnerJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct LocalChildExecution {
     reservation_id: String,
-    /// Missing only on records written before reservation leases existed. Those
-    /// records remain fail-closed because Homeboy cannot prove their spawn state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    reservation_expires_at_ms: Option<u64>,
+    reservation_expires_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) process: Option<LocalChildProcessIdentity>,
 }
@@ -2999,7 +2996,7 @@ impl JobStore {
             }
             stored.local_child = Some(LocalChildExecution {
                 reservation_id: reservation_id.clone(),
-                reservation_expires_at_ms: Some(reservation_expires_at_ms),
+                reservation_expires_at_ms,
                 process: None,
             });
             let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
@@ -3040,10 +3037,7 @@ impl JobStore {
                     stored.job.status == JobStatus::Queued
                         && self.owns(stored)
                         && stored.local_child.as_ref().is_some_and(|child| {
-                            child.process.is_none()
-                                && child
-                                    .reservation_expires_at_ms
-                                    .is_some_and(|expires_at| expires_at <= now)
+                            child.process.is_none() && child.reservation_expires_at_ms <= now
                         })
                 })
                 .map(|stored| stored.job.id)

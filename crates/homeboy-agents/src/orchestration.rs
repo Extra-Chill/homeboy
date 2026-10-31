@@ -8113,10 +8113,7 @@ mod tests {
                 review.evidence["candidate_selection"]["latest_attempt_run_id"],
                 latest_id
             );
-            assert_eq!(
-                review.evidence["candidate_selection"]["skipped_newer_run_ids"],
-                json!([latest_id])
-            );
+            assert!(review.evidence["candidate_selection"]["skipped_newer_run_ids"].is_null());
             assert_eq!(review.evidence["contributing_attempt"]["run_id"], latest_id);
             assert_eq!(review.evidence["canonical_candidate"]["finalized"], false);
             assert!(review.evidence["aggregate"].is_null());

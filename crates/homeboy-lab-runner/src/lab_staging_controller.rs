@@ -116,9 +116,7 @@ pub struct LabStagingRecipe {
     /// pre-#10941 and must be recreated rather than silently re-routed.
     pub placement_decision: homeboy_lab_contract::ExecutionPlacementDecision,
     /// Immutable Homeboy build selected by the controller for this handoff.
-    /// Optional only for recipes persisted by older controllers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub required_homeboy_build_identity: Option<String>,
+    pub required_homeboy_build_identity: String,
     #[serde(default = "default_lab_staging_tunnel_mode")]
     pub tunnel_mode: crate::RunnerTunnelMode,
     pub command: LabStagingCommand,
@@ -200,9 +198,7 @@ impl LabStagingRecipe {
             run_id: run_id.into(),
             runner_id: runner_id.into(),
             placement_decision: request.placement_decision.clone(),
-            required_homeboy_build_identity: Some(
-                homeboy_product_identity::build_identity().display,
-            ),
+            required_homeboy_build_identity: homeboy_product_identity::build_identity().display,
             tunnel_mode,
             command: command.into(),
             normalized_args: request.normalized_args.to_vec(),
@@ -2875,10 +2871,7 @@ impl ProductionLabStagingOperations {
     fn validate_handoff_homeboy_identity(
         request: &LabStagingExecutionRequest,
     ) -> Result<Option<LabHandoffHomeboyIdentity>> {
-        let Some(requested) = request.recipe.required_homeboy_build_identity.as_deref() else {
-            // Mixed-version recovery: old recipes had no immutable binding.
-            return Ok(None);
-        };
+        let requested = request.recipe.required_homeboy_build_identity.as_str();
         // Convergence returns only a transport-checked, identity-ready observation.
         let converged = converge_lab_handoff_runtime(
             &request.recipe.runner_id,
@@ -6258,21 +6251,9 @@ mod tests {
         .expect("recipe");
 
         assert_eq!(
-            recipe.required_homeboy_build_identity.as_deref(),
-            Some(homeboy_product_identity::build_identity().display.as_str())
+            recipe.required_homeboy_build_identity,
+            homeboy_product_identity::build_identity().display
         );
-    }
-
-    #[test]
-    fn legacy_handoff_recipe_without_build_identity_remains_readable() {
-        let mut recipe = serde_json::to_value(execution_request().recipe).expect("recipe JSON");
-        recipe
-            .as_object_mut()
-            .expect("recipe object")
-            .remove("required_homeboy_build_identity");
-
-        let recipe: LabStagingRecipe = serde_json::from_value(recipe).expect("legacy recipe");
-        assert_eq!(recipe.required_homeboy_build_identity, None);
     }
 
     #[test]

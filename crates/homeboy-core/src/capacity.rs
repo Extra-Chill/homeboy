@@ -461,8 +461,7 @@ fn reservation_is_live(record: &CapacityReservationRecord) -> bool {
             crate::process::ProcessIdentityState::Live
                 | crate::process::ProcessIdentityState::Unverifiable
         ),
-        // Records written before process-start identity was recorded cannot
-        // distinguish PID reuse, so retain the old conservative behavior.
+        // Current writers can lack platform process-start inspection evidence.
         None => crate::process::pid_is_running(record.owner_pid),
     };
 

@@ -134,10 +134,8 @@ impl ObservationStore {
     /// The first event of `kind` for this run whose payload is still durable.
     ///
     /// Durable kinds are read from `durable_event_json`, which survives payload
-    /// pruning. Rows written before that column existed, or by an older binary
-    /// that does not populate it, are still found while their bounded
-    /// `event_json` payload is retained. Read-only; tolerates stores that have
-    /// not yet applied the durable-payload migration.
+    /// pruning; other kinds are found only while their bounded `event_json`
+    /// payload is retained.
     pub fn durable_control_plane_event(
         &self,
         run: &RunId,
@@ -147,12 +145,7 @@ impl ObservationStore {
         if !has_ledger {
             return Ok(None);
         }
-        let has_durable_column: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('control_plane_event_appends') WHERE name = 'durable_event_json')", [], |row| row.get(0)).map_err(|error| self.read_error("inspect control-plane durable event payloads", error))?;
-        let payload = if has_durable_column {
-            "COALESCE(durable_event_json, event_json)"
-        } else {
-            "event_json"
-        };
+        let payload = "COALESCE(durable_event_json, event_json)";
         let found: Option<(String, u64, String)> = self
             .connection
             .query_row(
@@ -182,12 +175,7 @@ impl ObservationStore {
         if !has_ledger {
             return Ok(Vec::new());
         }
-        let has_durable: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('control_plane_event_appends') WHERE name = 'durable_event_json')", [], |row| row.get(0)).map_err(|error| self.read_error("inspect durable payload column", error))?;
-        let payload = if has_durable {
-            "COALESCE(durable_event_json, event_json)"
-        } else {
-            "event_json"
-        };
+        let payload = "COALESCE(durable_event_json, event_json)";
         let mut statement = self.connection.prepare(&format!("SELECT event_id, sequence, {payload} FROM control_plane_event_appends WHERE run_id = ?1 AND {payload} IS NOT NULL AND json_extract({payload}, '$.kind') = ?2 ORDER BY sequence LIMIT ?3")).map_err(sqlite_error("read durable events"))?;
         let rows = statement
             .query_map(
@@ -562,39 +550,6 @@ mod tests {
                 )
                 .unwrap(),
             cancelled
-        );
-    }
-
-    #[test]
-    fn durable_lookup_finds_a_receipt_an_older_binary_wrote_without_the_column() {
-        let (_directory, store, run) = fixture();
-        let cancelled = store
-            .append_control_plane_event(
-                &run,
-                &request("cancel", "run.cancelled"),
-                &"a".repeat(64),
-                &"b".repeat(64),
-            )
-            .unwrap();
-        // An older binary inserts without populating the durable column.
-        store
-            .connection
-            .execute(
-                "UPDATE control_plane_event_appends SET durable_event_json = NULL",
-                [],
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .durable_control_plane_event(&run, "run.cancelled")
-                .unwrap(),
-            Some(cancelled)
-        );
-        assert_eq!(
-            store
-                .durable_control_plane_event(&run, "run.quarantined")
-                .unwrap(),
-            None
         );
     }
 

@@ -31,9 +31,6 @@ pub struct CleanupArgs {
     /// so every one written before intent tagging existed is otherwise retained
     /// forever. The fixed age floor, the running-run veto, and the never-reap
     /// rule for operator pulls all still apply.
-    // `#[serde(default)]` because `CleanupArgs` is the durable job request: a
-    // checkpoint written by a binary that predates this flag must still resume.
-    #[serde(default)]
     #[arg(long)]
     pub include_untagged: bool,
 
@@ -325,25 +322,6 @@ mod tests {
             parsed.cleanup.include,
             vec![CleanupCategoryArg::RunnerDownloads]
         );
-
-        // Durable cleanup jobs round-trip `CleanupArgs` as their request, and a
-        // checkpoint written before this flag existed must still resume.
-        //
-        // `kebab-case` is the clap `ValueEnum` spelling; serde carries the
-        // variant names verbatim, so a persisted checkpoint reads `RunnerDownloads`.
-        let legacy = serde_json::json!({
-            "apply": true,
-            "include": ["RunnerDownloads"],
-            "exclude": [],
-            "older_than_days": null,
-            "runtime_tmp_managed_older_than_days": null,
-            "limit": null,
-            "full": false,
-            "cursor": null,
-        });
-        let resumed: CleanupArgs =
-            serde_json::from_value(legacy).expect("resume a pre-flag checkpoint");
-        assert!(!resumed.include_untagged);
     }
 
     #[test]

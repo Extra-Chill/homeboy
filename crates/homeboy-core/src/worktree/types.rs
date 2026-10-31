@@ -88,8 +88,7 @@ pub struct TaskWorktreeRecord {
     pub worktree_path: String,
     pub branch: String,
     pub base_ref: String,
-    /// Stored for new manifests. Older records deterministically derive the
-    /// same value from their stable registry identity.
+    /// Persisted identity bound to the stable registry handle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_identity: Option<WorkspaceIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,18 +234,24 @@ pub fn authority_set_fingerprint(authorities: &[String]) -> String {
 impl TaskWorktreeRecord {
     pub fn effective_workspace_identity(&self) -> Result<WorkspaceIdentity> {
         let derived = task_worktree_workspace_identity(&self.component_id, &self.id)?;
-        if let Some(identity) = &self.workspace_identity {
-            identity.verify()?;
-            if identity != &derived {
-                return Err(crate::error::Error::validation_invalid_argument(
-                    "workspace_identity",
-                    "task worktree manifest identity conflicts with its stable handle and component",
-                    Some(self.id.clone()),
-                    None,
-                ));
-            }
+        let identity = self.workspace_identity.as_ref().ok_or_else(|| {
+            crate::error::Error::validation_invalid_argument(
+                "workspace_identity",
+                "task worktree manifest is missing its identity",
+                Some(self.id.clone()),
+                None,
+            )
+        })?;
+        identity.verify()?;
+        if identity != &derived {
+            return Err(crate::error::Error::validation_invalid_argument(
+                "workspace_identity",
+                "task worktree manifest identity conflicts with its stable handle and component",
+                Some(self.id.clone()),
+                None,
+            ));
         }
-        Ok(derived)
+        Ok(identity.clone())
     }
 }
 

@@ -56,15 +56,10 @@ impl StoredWorkloadRun {
             .and_then(serde_json::Value::as_str)
     }
 
-    /// The effective safety class recorded at run time, falling back to the
-    /// kind's declared class for runs that predate the recording.
-    pub fn recorded_safety_class(&self, kind_class: WorkloadSafetyClass) -> WorkloadSafetyClass {
-        self.run
-            .metadata_json
-            .get("safety_class")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or(kind_class)
+    /// The effective safety class recorded at run time.
+    pub fn recorded_safety_class(&self) -> Result<WorkloadSafetyClass> {
+        serde_json::from_value(self.run.metadata_json["safety_class"].clone())
+            .map_err(|error| Error::internal_json(error.to_string(), Some(self.run.id.clone())))
     }
 
     /// The persisted file for an envelope artifact name, when its bytes are

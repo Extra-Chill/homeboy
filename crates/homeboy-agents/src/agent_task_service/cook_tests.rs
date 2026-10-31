@@ -9878,63 +9878,6 @@ fn retryable_pre_provider_retry_accepts_runner_rebound_workspace_identity() {
 }
 
 #[test]
-fn retryable_pre_provider_retry_without_a_recipe_uses_legacy_lifecycle_retry() {
-    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
-
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let options = batch_cook_options(
-            "cook-legacy-retry",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        let run_id = "cook-legacy-retry-run";
-        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
-            .expect("persist legacy run");
-        agent_task_lifecycle::record_cook_attempt_in_store(
-            &test_lifecycle_store(),
-            "cook-legacy-retry",
-            1,
-            run_id,
-        )
-        .expect("mark legacy Cook metadata without a recipe");
-        agent_task_lifecycle::record_pre_execution_failure(
-            run_id,
-            &options.identity.initial_plan,
-            "gate_environment.preserve",
-            &Error::validation_invalid_argument("CARGO_HOME", "unavailable", None, None)
-                .with_retryable(true),
-        )
-        .expect("record retryable legacy failure");
-
-        let status = crate::orchestration::run_from_current_environment(run_id)
-            .expect("project legacy generic retry");
-        let retry_action = status
-            .action_eligibility
-            .as_ref()
-            .expect("action eligibility")
-            .actions
-            .iter()
-            .find(|action| action.action == ControlPlaneAction::Retry)
-            .expect("retry action");
-        assert_eq!(
-            retry_action.availability,
-            ControlPlaneActionAvailability::Available,
-            "legacy Cook metadata must retain generic retry projection"
-        );
-        assert_eq!(
-            retry_action.reason,
-            "generic lifecycle retry is admitted; runtime admission will be revalidated before execution"
-        );
-
-        let retry = crate::agent_task_service::retry(run_id, Some("legacy-retry"), false, false)
-            .expect("legacy retry remains supported");
-
-        assert_eq!(retry.record.run_id, "legacy-retry");
-        assert_eq!(retry.record.metadata["retry_of"], run_id);
-        assert!(retry.record.metadata["cook_id"].is_null());
-    });
-}
-
-#[test]
 fn cook_lab_workspace_stage_retry_eligibility_matches_durable_admission() {
     use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
 
@@ -16383,44 +16326,6 @@ fn record_cook_attempt_recovers_an_aggregate_completed_before_attempt_registrati
 }
 
 #[test]
-fn legacy_substantive_candidate_selection_is_explicitly_incomplete_after_64_newer_skips() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-substantive-bounded-window";
-        let attempts = (1..=65)
-            .map(
-                |attempt| crate::agent_task_lifecycle::AgentTaskCookIndexAttempt {
-                    attempt,
-                    run_id: format!("{cook_id}-{attempt}"),
-                    recorded_at: "2026-01-01T00:00:00Z".to_string(),
-                },
-            )
-            .collect();
-        agent_task_lifecycle::replace_cook_index_for_test(
-            &crate::agent_task_lifecycle::AgentTaskCookIndex {
-                schema: crate::agent_task_lifecycle::schemas::COOK_INDEX.to_string(),
-                cook_id: cook_id.to_string(),
-                latest_run_id: format!("{cook_id}-65"),
-                latest_substantive_candidate: None,
-                cancellation_fence: None,
-                attempts,
-            },
-        )
-        .expect("persist complete cook index once");
-        let selection = agent_task_lifecycle::select_cook_candidate(cook_id)
-            .expect("bounded selection returns an explicit result");
-        assert!(selection.incomplete);
-        assert_eq!(
-            selection.reason,
-            "selection_window_exhausted_without_promotable_candidate"
-        );
-        assert!(selection.run_id.is_empty());
-        assert_eq!(selection.latest_attempt_run_id, format!("{cook_id}-65"));
-        assert_eq!(selection.skipped_newer_run_ids.len(), 64);
-        assert_eq!(selection.skipped_newer_attempts.len(), 64);
-    });
-}
-
-#[test]
 fn cook_index_serialization_remains_compatible_with_indexes_without_a_candidate_pointer() {
     let legacy = serde_json::json!({
         "schema": "homeboy/agent-task-cook-index/v1",
@@ -16865,45 +16770,6 @@ fn first_attempt_named_as_cook_id_reads_its_own_substantive_aggregate() {
                 .unwrap()
                 .run_id,
             cook_id
-        );
-    });
-}
-
-#[test]
-fn large_cook_index_selects_the_deterministic_top_64_window() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-large-index";
-        let attempts = (1..=10_000)
-            .map(
-                |attempt| crate::agent_task_lifecycle::AgentTaskCookIndexAttempt {
-                    attempt,
-                    run_id: format!("{cook_id}-{attempt}"),
-                    recorded_at: "2026-01-01T00:00:00Z".to_string(),
-                },
-            )
-            .collect();
-        agent_task_lifecycle::replace_cook_index_for_test(
-            &crate::agent_task_lifecycle::AgentTaskCookIndex {
-                schema: crate::agent_task_lifecycle::schemas::COOK_INDEX.to_string(),
-                cook_id: cook_id.to_string(),
-                latest_run_id: format!("{cook_id}-10000"),
-                latest_substantive_candidate: None,
-                cancellation_fence: None,
-                attempts,
-            },
-        )
-        .unwrap();
-        let selection = agent_task_lifecycle::select_cook_candidate(cook_id).unwrap();
-        assert!(selection.incomplete);
-        assert_eq!(selection.latest_attempt_run_id, format!("{cook_id}-10000"));
-        assert_eq!(selection.skipped_newer_run_ids.len(), 64);
-        assert_eq!(
-            selection.skipped_newer_run_ids[0],
-            format!("{cook_id}-10000")
-        );
-        assert_eq!(
-            selection.skipped_newer_run_ids[63],
-            format!("{cook_id}-9937")
         );
     });
 }

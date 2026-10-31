@@ -1813,7 +1813,13 @@ mod tests {
             worktree_path: format!("/tmp/missing-{id}"),
             branch: id.into(),
             base_ref: "HEAD".into(),
-            workspace_identity: None,
+            workspace_identity: Some(
+                homeboy_core::worktree::task_worktree_workspace_identity(
+                    "fixture",
+                    &format!("fixture@{id}"),
+                )
+                .unwrap(),
+            ),
             task_url: None,
             run_id: run_id.map(str::to_string),
             cleanup_policy: homeboy_core::worktree::CleanupPolicy::RemoveWhenSafe,

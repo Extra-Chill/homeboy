@@ -1416,9 +1416,7 @@ fn resolve_cook_adoption_attempt_in_store<'a>(
     recipe: &'a super::AgentTaskCookRecipe,
 ) -> Result<&'a super::AgentTaskCookRecipeAttempt> {
     if let Ok(selection) = lifecycle_store.select_cook_candidate(&recipe.cook_id) {
-        if selection.reason
-            != "no_substantive_candidate_evidence_preserve_latest_attempt_compatibility"
-        {
+        if selection.reason != "no_substantive_candidate_evidence" {
             if let Some(attempt) = recipe
                 .attempts
                 .iter()

@@ -2510,11 +2510,6 @@ fn retryable_cook_attempt(
         )
     })?;
     let recipe_store = super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store);
-    if !recipe_store.recipe_exists(cook_id) {
-        // Legacy runs predate durable recipes. Retain their established generic
-        // lifecycle retry behavior rather than inventing Cook ownership.
-        return Ok(None);
-    }
     let recipe = recipe_store.load_recipe(cook_id)?;
     let source_recipe_attempt = recipe.attempts.iter().find(|recipe_attempt| {
         recipe_attempt.attempt == attempt && recipe_attempt.run_id == source.run_id
@@ -2867,8 +2862,7 @@ pub(crate) enum RetryProjectionAdmission {
 }
 
 /// Read-only retry admission for control-plane projections of records that
-/// carry Cook metadata. Legacy metadata without a durable recipe follows the
-/// same generic lifecycle preflight as executable retry.
+/// carry Cook metadata.
 pub(crate) fn retry_admission_for_projection(run_id: &str) -> Result<RetryProjectionAdmission> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;

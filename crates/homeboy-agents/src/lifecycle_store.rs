@@ -953,26 +953,18 @@ impl AgentTaskLifecycleStore {
                 None,
             )
         })?;
-        let record = snapshot_from_run(&run)?;
-        // Existing lifecycle rows predate the resource table. Their exact run
-        // projection is backfilled once, on first read.
         if store
-            .control_plane_resource_projection("agent_task_run", &record.run_id)?
+            .control_plane_resource_projection("agent_task_run", run_id)?
             .is_none()
         {
-            let projection = agent_task_resource_projection(self, &record, None)?;
-            if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
-                store.upsert_imported_run_with_mission_and_resource_projection(
-                    &run,
-                    mission.as_str(),
-                    &projection,
-                    true,
-                )?;
-            } else {
-                store.upsert_imported_run_with_resource_projection(&run, &projection, true)?;
-            }
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "agent-task run is missing its resource projection",
+                Some(run_id.to_string()),
+                None,
+            ));
         }
-        Ok(record)
+        snapshot_from_run(&run)
     }
 
     /// List every durable agent-task record from this store's own observation
@@ -1013,19 +1005,6 @@ impl AgentTaskLifecycleStore {
         aggregate: &AgentTaskAggregate,
     ) -> Result<AgentTaskRunRecord> {
         super::lifecycle_ops::record_run_aggregate_in_store(self, run_id, plan, aggregate)
-    }
-
-    /// Whether this store's observation record predates typed agent-task
-    /// metadata, so a legacy row can be resubmitted rather than rejected.
-    ///
-    /// The answer is a property of one observation database, so it has to be
-    /// read from the same roots the caller is about to write the replacement
-    /// record into (#7505).
-    pub(crate) fn record_lacks_typed_metadata(&self, run_id: &str) -> Result<bool> {
-        Ok(self
-            .open_observation_initialized()?
-            .get_run(run_id)?
-            .is_some_and(|run| run.metadata_json.get("agent_task_run").is_none()))
     }
 
     /// Check this store for one exact durable run identity without Cook alias

@@ -493,8 +493,7 @@ pub fn process_identity_state(
 }
 
 /// Check a persisted local process identity using the strongest available
-/// platform start evidence. `expected_linux_starttime_ticks` remains accepted
-/// for records written before [`ProcessStartIdentity`] existed.
+/// platform start evidence, including the Linux tick identity used by current callers.
 pub fn process_identity_state_with_start_identity(
     pid: u32,
     expected_linux_starttime_ticks: Option<u64>,

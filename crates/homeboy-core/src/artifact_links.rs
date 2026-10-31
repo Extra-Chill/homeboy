@@ -259,14 +259,13 @@ pub fn cached_validated_viewer_links(
 
 /// Return whether a persisted public URL may be presented to a reviewer.
 ///
-/// Records written before validation was introduced have no validation metadata
-/// and retain their persisted links. New records carry validation metadata, so
-/// malformed or failed validation suppresses their generated links.
+/// Missing, malformed or failed validation suppresses generated links.
 pub fn public_artifact_url_is_presentable(artifact: &ArtifactRecord) -> bool {
-    match artifact.metadata_json.get("public_url_validation") {
-        None => true,
-        Some(validation) => validation.get("reachable").and_then(Value::as_bool) == Some(true),
-    }
+    artifact
+        .metadata_json
+        .pointer("/public_url_validation/reachable")
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 /// Integrity-aware availability of a controller-retained artifact.
@@ -663,8 +662,8 @@ mod tests {
     }
 
     #[test]
-    fn public_url_validation_preserves_legacy_records_and_gates_new_records() {
-        let legacy = viewer_artifact();
+    fn public_url_validation_requires_reachable_evidence() {
+        let unvalidated = viewer_artifact();
         let reachable = ArtifactRecord {
             metadata_json: serde_json::json!({
                 "public_url_validation": { "reachable": true }
@@ -678,7 +677,7 @@ mod tests {
             ..viewer_artifact()
         };
 
-        assert!(public_artifact_url_is_presentable(&legacy));
+        assert!(!public_artifact_url_is_presentable(&unvalidated));
         assert!(public_artifact_url_is_presentable(&reachable));
         assert!(!public_artifact_url_is_presentable(&unreachable));
     }

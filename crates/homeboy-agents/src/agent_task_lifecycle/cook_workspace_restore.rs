@@ -154,34 +154,17 @@ pub(super) fn restore_follow_up_cook_candidate_workspace_in_root(
 /// the original task workspace remains in metadata for routing and projection.
 pub(super) fn restore_initial_cook_candidate_workspace(plan: &mut AgentTaskPlan) -> Result<()> {
     for task in &mut plan.tasks {
-        let Some(baseline) = task.metadata.get("cook_initial_candidate_baseline") else {
+        if task
+            .metadata
+            .get("cook_initial_candidate_baseline")
+            .is_none()
+        {
             continue;
-        };
+        }
         let continuation_root = task
             .metadata
             .pointer("/cook_continuation_workspace/candidate_source_root")
             .and_then(Value::as_str)
-            // The first continuation snapshot used `root` for the task
-            // workspace. New records use candidate_source_root; retain the
-            // legacy form only when no source-root evidence is available.
-            .or_else(|| {
-                baseline
-                    .get("source_root")
-                    .and_then(Value::as_str)
-                    .or_else(|| {
-                        task.metadata
-                            .pointer("/cook_continuation_workspace/root")
-                            .and_then(Value::as_str)
-                    })
-            })
-            .or_else(|| {
-                task.workspace
-                    .materialization
-                    .get("root")
-                    .and_then(Value::as_str)
-            })
-            // Older records did not retain a continuation workspace separately.
-            .or_else(|| baseline.get("source_root").and_then(Value::as_str))
             .filter(|path| !path.trim().is_empty())
             .map(str::to_string)
             .ok_or_else(|| missing_cook_candidate_source_workspace(&task.task_id, None))?;
