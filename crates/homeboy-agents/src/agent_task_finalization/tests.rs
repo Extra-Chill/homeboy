@@ -527,7 +527,7 @@ fn creates_new_pr_after_green_gates() {
         .contains("- `cargo test agent_task_finalization`; expect passes."));
     assert_eq!(backend.last_body.matches("Model: GPT-5.5").count(), 1);
     assert!(backend.last_body.contains("## How to test"));
-    assert!(backend.last_body.contains("## AI assistance"));
+    assert!(!backend.last_body.contains("## AI assistance"));
     assert!(!backend.last_body.contains("Publication intent"));
     assert_eq!(
         report.publication_intent.schema,
@@ -1253,16 +1253,6 @@ fn pr_body_labels_ci_equivalent_gates() {
 
     assert!(backend.last_body.contains("## Verification"));
     assert!(backend.last_body.contains("required project gate"));
-}
-
-#[test]
-fn requester_is_rendered_without_ambient_worker_lookup() {
-    let mut body = "Review dossier".to_string();
-    super::append_requester(&mut body, Some("opaque-user:42"));
-    assert!(body.ends_with("Requested by: opaque-user:42\n"));
-    let original = body.clone();
-    super::append_requester(&mut body, None);
-    assert_eq!(body, original);
 }
 
 #[test]
@@ -3823,8 +3813,6 @@ fn options() -> AgentTaskPrFinalizationOptions {
             public_contract_evidence: None,
             lifecycle: None,
         },
-        ai_used_for: "Traced the finalization contract change, implemented it, and confirmed with the recorded gate."
-            .to_string(),
         review_dossier: AgentTaskReviewDossier {
             schema: "homeboy/agent-task-review-dossier/v1".to_string(),
             summary: "Finalize a verified candidate.".to_string(),

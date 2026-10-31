@@ -844,8 +844,8 @@ pub struct FinalizePrArgs {
     /// Branch that must not be updated by finalization; repeat for multiple branches.
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
-    /// Description of how AI was used for the finalization.
-    #[arg(long, default_value = "", value_name = "TEXT")]
+    /// Ignored legacy disclosure slot.
+    #[arg(skip)]
     pub ai_used_for: String,
     /// Summary of the finalization candidate.
     #[arg(long, value_name = "TEXT")]

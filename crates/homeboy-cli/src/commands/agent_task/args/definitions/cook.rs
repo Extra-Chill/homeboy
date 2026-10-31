@@ -1738,7 +1738,7 @@ pub struct AgentTaskCookArgs {
     /// description) and validated by the cook loop's review-form gate; this flag
     /// no longer feeds the PR body. Retained only for recipe back-compatibility
     /// and defaults empty (no canned platitude).
-    #[arg(long, default_value = "", value_name = "TEXT")]
+    #[arg(skip)]
     pub ai_used_for: String,
     /// Require a separate durable acceptance verdict before PR finalization.
     #[arg(long)]

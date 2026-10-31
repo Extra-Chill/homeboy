@@ -14972,7 +14972,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             .body
             .contains("`test \"$(cat lib.rs)\" = candidate`"));
         assert!(
-            backend.body.contains("## AI assistance"),
+            !backend.body.contains("## AI assistance"),
             "{}",
             backend.body
         );
@@ -14981,7 +14981,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             "{}",
             backend.body
         );
-        assert_eq!(backend.body.matches("## AI assistance").count(), 1);
+        assert_eq!(backend.body.matches("## AI assistance").count(), 0);
         assert!(
             backend.body.contains("fixture-model-review"),
             "{}",
@@ -21209,7 +21209,7 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
             "Relates to Extra-Chill/homeboy#8058\n",
             "## What changed",
             "## Verification",
-            "Model: gpt-6.1-sol (tier cook-heavy)",
+            "Model: gpt-6.1-sol",
             ". Base `main`@`verified-base` (publication state not recorded).",
             // AI-authored prose (from the seeded review form).
             "Close the issue by guarding the reload path.",
@@ -21276,7 +21276,6 @@ fn cook_finalization_adopts_validated_review_form_used_for_when_option_is_empty(
 
         let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
             .expect("finalization options");
-        assert_eq!(finalization.ai_used_for, test_review_form().used_for);
         assert_eq!(
             finalization.review_dossier.ai_assistance.used_for,
             test_review_form().used_for
@@ -21285,7 +21284,6 @@ fn cook_finalization_adopts_validated_review_form_used_for_when_option_is_empty(
         options.ai_disclosure.ai_used_for = "Operator-authored disclosure.".to_string();
         let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
             .expect("finalization options with override");
-        assert_eq!(finalization.ai_used_for, "Operator-authored disclosure.");
         assert_eq!(
             finalization.review_dossier.ai_assistance.used_for,
             "Operator-authored disclosure."

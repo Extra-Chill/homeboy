@@ -3136,7 +3136,7 @@ fn cook_finalization_options_with_stores_and_review_form(
                 None,
             )
         })?;
-    let (mut review_dossier, composed_ai_model_disclosure, preserve_used_for_disclosure) =
+    let (mut review_dossier, composed_ai_model_disclosure, _) =
         cook_review_dossier_with_stores_and_review_form(
             store,
             lifecycle_store,
@@ -3148,19 +3148,6 @@ fn cook_finalization_options_with_stores_and_review_form(
     review_dossier.overrides = overrides;
     review_dossier.source_relationships =
         cook_task_issue_relationships(&options.workspace.source_refs, Path::new(&path));
-    // A non-empty option is an explicit operator disclosure. Otherwise retain
-    // the validated review form's process statement as durable PR provenance.
-    let ai_used_for = if options.ai_disclosure.ai_used_for.trim().is_empty() {
-        review_dossier.ai_assistance.used_for.clone()
-    } else if preserve_used_for_disclosure {
-        format!(
-            "{} {}",
-            review_dossier.ai_assistance.used_for, options.ai_disclosure.ai_used_for
-        )
-    } else {
-        options.ai_disclosure.ai_used_for.clone()
-    };
-    review_dossier.ai_assistance.used_for = ai_used_for.clone();
     let targeted_checks_run = review_dossier
         .verified_commands
         .iter()
@@ -3254,7 +3241,6 @@ fn cook_finalization_options_with_stores_and_review_form(
                 .ok()
                 .map(|record| record.lifecycle),
         },
-        ai_used_for,
         review_dossier,
         composed_ai_model_disclosure,
         review_profile,
@@ -4849,7 +4835,6 @@ fn manual_finalization_options(
         accept_inherited_failures: report.accept_inherited_failures,
         changed_files: report.changed_files,
         evidence: report.evidence,
-        ai_used_for: report.review_dossier.ai_assistance.used_for.clone(),
         review_dossier: report.review_dossier,
         composed_ai_model_disclosure: false,
         // A shared repository can register more than one component against

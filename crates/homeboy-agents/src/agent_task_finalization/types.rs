@@ -302,7 +302,6 @@ pub struct AgentTaskPrFinalizationOptions {
     pub accept_inherited_failures: bool,
     pub changed_files: Vec<String>,
     pub evidence: AgentTaskPrEvidence,
-    pub ai_used_for: String,
     pub review_dossier: AgentTaskReviewDossier,
     /// The caller authenticated multiple concrete execution roles. Preserve the
     /// composed model disclosure instead of replacing it with the terminal run.
