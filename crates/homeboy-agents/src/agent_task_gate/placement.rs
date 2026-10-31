@@ -139,7 +139,7 @@ impl LabGateRequest {
     /// path, but must retain the recorded HEAD, base and exact candidate tree.
     pub fn verify_materialized_candidate(&self, cwd: &Path) -> Result<()> {
         let actual = candidate_fingerprint(&cwd.display().to_string())?;
-        match (&self.candidate, actual) {
+        match (&self.candidate, &actual) {
             (
                 AgentTaskPromotionCandidate::Git {
                     fingerprint: expected,
@@ -154,10 +154,62 @@ impl LabGateRequest {
             {
                 Ok(())
             }
-            _ => Err(Error::invalid_argument(
-                "gate.candidate",
-                "Lab gate workspace differs from the controller candidate",
-            )),
+            _ => {
+                let mut error = Error::invalid_argument(
+                    "gate.candidate",
+                    "Lab gate workspace differs from the controller candidate",
+                );
+                if let (
+                    AgentTaskPromotionCandidate::Git {
+                        fingerprint: expected,
+                    },
+                    AgentTaskPromotionCandidate::Git {
+                        fingerprint: actual,
+                    },
+                ) = (&self.candidate, &actual)
+                {
+                    error.details["expected_head"] = serde_json::json!(expected.head);
+                    error.details["actual_head"] = serde_json::json!(actual.head);
+                    error.details["expected_base"] = serde_json::json!(expected.base);
+                    error.details["actual_base"] = serde_json::json!(actual.base);
+                    error.details["expected_tree"] = serde_json::json!(expected.tree);
+                    error.details["actual_tree"] = serde_json::json!(actual.tree);
+                    // Canonical candidate commits travel in the Git closure. Do not
+                    // substitute changed_files: those are relative to HEAD, not to
+                    // the admitted tree, and can hide missing tracked content.
+                    match homeboy_core::git::run_git_bytes_with_env(
+                        cwd,
+                        &[
+                            "diff",
+                            "--name-only",
+                            "--no-renames",
+                            "-z",
+                            &expected.tree,
+                            &actual.tree,
+                            "--",
+                        ],
+                        "compare admitted and materialized gate trees",
+                        &[],
+                    ) {
+                        Ok(bytes) => {
+                            let paths: Vec<_> = bytes
+                                .split(|byte| *byte == 0)
+                                .filter(|path| !path.is_empty())
+                                .map(|path| String::from_utf8_lossy(path).into_owned())
+                                .collect();
+                            if !paths.is_empty() {
+                                error.message.push_str(&format!(": {}", paths.join(", ")));
+                            }
+                            error.details["differing_paths"] = serde_json::json!(paths);
+                        }
+                        Err(cause) => {
+                            error.details["path_comparison_error"] =
+                                serde_json::json!(cause.message);
+                        }
+                    }
+                }
+                Err(error)
+            }
         }
     }
 
@@ -963,6 +1015,44 @@ mod tests {
             fs::write(temp.path().join("candidate.txt"), "altered candidate\n").unwrap();
             assert!(request.verify_materialized_candidate(temp.path()).is_err());
         });
+    }
+
+    #[test]
+    fn materialized_candidate_mismatch_names_exact_tree_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        repository(temp.path());
+        // A repository-level checkout deliberately has no root manifest.
+        let request = request(temp.path());
+        request.verify_materialized_candidate(temp.path()).unwrap();
+        fs::remove_file(temp.path().join("candidate.txt")).unwrap();
+        fs::create_dir_all(temp.path().join("plugins/example/tests")).unwrap();
+        fs::write(temp.path().join("plugins/example/tests/new.txt"), "new").unwrap();
+        let error = request
+            .verify_materialized_candidate(temp.path())
+            .unwrap_err();
+        assert_eq!(
+            error.details["differing_paths"],
+            serde_json::json!(["candidate.txt", "plugins/example/tests/new.txt"])
+        );
+        assert!(error.message.contains("candidate.txt"));
+        assert!(error.message.contains("plugins/example/tests/new.txt"));
+        assert_ne!(error.details["expected_tree"], error.details["actual_tree"]);
+    }
+
+    #[test]
+    fn materialized_candidate_ignores_nested_gitignored_dependencies() {
+        let temp = tempfile::tempdir().unwrap();
+        repository(temp.path());
+        fs::write(temp.path().join(".gitignore"), "vendor/\n").unwrap();
+        let request = request(temp.path());
+        fs::create_dir_all(temp.path().join("plugins/example/tools/vendor")).unwrap();
+        fs::write(
+            temp.path()
+                .join("plugins/example/tools/vendor/installed.php"),
+            "dependency",
+        )
+        .unwrap();
+        request.verify_materialized_candidate(temp.path()).unwrap();
     }
 
     fn gate_printing_path_and_home(root: &Path) -> LabGateRequest {
