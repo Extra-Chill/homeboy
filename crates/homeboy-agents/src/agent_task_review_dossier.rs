@@ -2529,7 +2529,7 @@ mod tests {
         for expected in [
             "`cargo test connection` passed (175/177) on `candidate-commit`.",
             "<details><summary>Cook run</summary>",
-            "- Gate 1: tree `candidate-tree`, fingerprint `candidate-fingerprint`; 2 failed, 0 ignored",
+            "- Gate 1: tree `candidate-tree`; 2 failed, 0 ignored",
         ] {
             assert!(body.contains(expected), "missing `{expected}` in {body}");
         }
