@@ -1230,47 +1230,80 @@ mod tests {
     fn configured_rotation_executes_fallback_and_only_a_confirmed_model_can_pin_it() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let capture = home.path().join("provider-models.jsonl");
-            let script = home.path().join("rotation-provider.cjs");
-            std::fs::write(&script, format!(
-                "const fs=require('node:fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const model=req.executor.model;fs.appendFileSync({:?},JSON.stringify(model)+'\\n');const success=model==='fallback-model';process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:success?'no_op':'provider_error',summary:success?'fallback completed':'primary unavailable',failure_classification:success?null:'provider'}}));",
-                capture.display().to_string()
-            )).expect("write deterministic provider process");
-            let runtime = home
-                .path()
-                .join(".config/homeboy/agent-runtimes/rotation-proof");
-            std::fs::create_dir_all(&runtime).expect("runtime directory");
-            std::fs::write(
-                runtime.join("rotation-proof.json"),
-                serde_json::to_vec(&serde_json::json!({
-                    "schema": "homeboy/agent-runtime-manifest/v1",
-                    "id": "rotation-proof",
-                    "agent_task_executors": [{
-                        "id": "rotation-proof.executor",
-                        "backend": "rotation-proof",
-                        "command_argv": ["node", script],
-                        "capabilities": ["structured_outcome"]
-                    }]
-                }))
-                .unwrap(),
-            )
-            .expect("declare provider runtime");
+            let fake = crate::agent_task_provider::test_pi::FakePi::with_probes(
+                &format!(
+                    "while [ \"$1\" != --model ]; do shift; done; model=$2; printf '\"%s\"\\n' \"$model\" >> '{}'; if [ \"$model\" = test/model ]; then printf '%s\\n' '{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"stopReason\":\"error\",\"errorMessage\":\"primary unavailable\"}}}}'; exit 0; fi; {}",
+                    capture.display(),
+                    crate::agent_task_provider::test_pi::FakePi::answer("fallback completed")
+                ),
+                "printf 'test-pi\\n'",
+                "printf 'test model\\ntest fallback\\n'",
+            );
+            let catalog = AgentTaskProviderCatalog {
+                providers: vec![fake.provider()],
+                ..Default::default()
+            };
 
             let mut request = model_override_request("configured-model", false);
-            request.backend = "rotation-proof".to_string();
+            request.backend = "pi".to_string();
+            request.core.provider_config = Some(fake.config().to_string());
             request.model = None;
             request.core.timeout_ms = Some(10_000);
             let policy = request.core.resolved_provider_policy.as_mut().unwrap();
-            policy.backend = "rotation-proof".to_string();
+            policy.backend = "pi".to_string();
             policy.rotation_starts_with_first_entry = true;
-            for entry in &mut policy.rotation.as_mut().unwrap().entries {
-                entry.backend = Some("rotation-proof".to_string());
+            for (entry, model) in policy
+                .rotation
+                .as_mut()
+                .unwrap()
+                .entries
+                .iter_mut()
+                .zip(["test/model", "test/fallback"])
+            {
+                entry.backend = Some("pi".to_string());
+                entry.model = Some(model.to_string());
+            }
+            // This test owns routing, not transcript harvesting. Preserve the
+            // dispatch artifact contract with a transcript of the fake's result.
+            struct WithTranscript(crate::agent_task_provider::ExtensionProviderAgentTaskExecutor);
+            impl AgentTaskExecutorAdapter for WithTranscript {
+                fn provider_route_capacity_key(&self, request: &AgentTaskRequest) -> String {
+                    self.0.provider_route_capacity_key(request)
+                }
+                fn provider_route_readiness(
+                    &self,
+                    request: &AgentTaskRequest,
+                ) -> crate::agent_task_scheduler::ProviderRouteReadiness {
+                    self.0.provider_route_readiness(request)
+                }
+                fn execute(
+                    &self,
+                    request: AgentTaskRequest,
+                    context: AgentTaskExecutionContext,
+                ) -> AgentTaskOutcome {
+                    let mut outcome = self.0.execute(request, context);
+                    if outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Succeeded {
+                        outcome.status = crate::agent_task::AgentTaskOutcomeStatus::NoOp;
+                    }
+                    outcome.typed_artifacts.push(
+                        serde_json::from_value(serde_json::json!({
+                            "name": "transcript", "payload": outcome.summary
+                        }))
+                        .unwrap(),
+                    );
+                    outcome
+                }
             }
             let executor = || {
-                Arc::new(crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover())
+                Arc::new(WithTranscript(
+                    crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::from_catalog(
+                        catalog.clone(),
+                    ),
+                ))
             };
-            let result =
-                dispatch(request.clone(), executor()).expect("execute configured rotation");
-            assert_eq!(result.exit_code, 0);
+            let result = dispatch_with_provider_catalog(request.clone(), executor(), &catalog)
+                .expect("execute configured rotation");
+            assert_eq!(result.exit_code, 0, "{:?}", result.value.aggregate);
             assert!(result.value.record.state().is_terminal());
             let attempted = || {
                 std::fs::read_to_string(&capture)
@@ -1279,11 +1312,11 @@ mod tests {
                     .map(|line| serde_json::from_str::<String>(line).unwrap())
                     .collect::<Vec<_>>()
             };
-            assert_eq!(attempted(), ["configured-model", "fallback-model"]);
+            assert_eq!(attempted(), ["test/model", "test/fallback"]);
 
             let mut capped = request.clone();
             capped.core.attempts = Some(1);
-            let error = dispatch(capped, executor())
+            let error = dispatch_with_provider_catalog(capped, executor(), &catalog)
                 .expect_err("a cap cannot suppress configured fallback");
             assert_eq!(error.details["field"], "max-provider-executions");
             assert_eq!(
@@ -1292,12 +1325,12 @@ mod tests {
                 "invalid budget starts no provider process"
             );
 
-            request.model = Some("configured-model".to_string());
+            request.model = Some("test/model".to_string());
             let policy = request.core.resolved_provider_policy.as_mut().unwrap();
             policy.model = request.model.clone();
             policy.rotation_starts_with_first_entry = false;
-            let error =
-                dispatch(request.clone(), executor()).expect_err("a model pin needs confirmation");
+            let error = dispatch_with_provider_catalog(request.clone(), executor(), &catalog)
+                .expect_err("a model pin needs confirmation");
             assert_eq!(error.details["confirmation_required"], true);
             assert_eq!(
                 attempted().len(),
@@ -1307,15 +1340,13 @@ mod tests {
 
             request.core.acknowledge_model_override = true;
             request.core.attempts = Some(1);
-            let pinned = dispatch(request, executor()).expect("execute confirmed model pin");
+            let pinned = dispatch_with_provider_catalog(request, executor(), &catalog)
+                .expect("execute confirmed model pin");
             assert_ne!(
                 pinned.exit_code, 0,
                 "the unavailable pinned model cannot use fallback"
             );
-            assert_eq!(
-                attempted(),
-                ["configured-model", "fallback-model", "configured-model"]
-            );
+            assert_eq!(attempted(), ["test/model", "test/fallback", "test/model"]);
             let plan = crate::agent_task_lifecycle::load_controller_plan(&pinned.value.run_id)
                 .expect("read persisted pin");
             assert_eq!(
@@ -1569,35 +1600,17 @@ mod tests {
     #[test]
     fn retryable_direct_admission_denial_never_runs_or_rederives_a_route() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().expect("readiness fixture");
-            let script = temp.path().join("temporarily-unavailable.js");
-            std::fs::write(
-                &script,
-                "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'capacity',retryable:true,remediation:'retry later',reason:'temporary capacity',cache_key:input.effective_config.model,identity:{model:input.effective_config.model}}));",
-            )
-            .expect("readiness script");
-            let provider = |id: &str| {
-                let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
-                    serde_json::from_value(serde_json::json!({
-                        "id": id,
-                        "backend": "test"
-                    }))
-                    .expect("provider fixture");
-                provider.readiness_invocation = Some(
-                    homeboy_core::command_invocation::CommandInvocation {
-                        argv: vec!["node".to_string(), script.display().to_string()],
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-                provider
-            };
+            let fake = crate::agent_task_provider::test_pi::FakePi::with_probes(
+                "exit 99",
+                "printf 'test-pi\\n'",
+                "exit 1",
+            );
             let catalog = AgentTaskProviderCatalog {
-                providers: vec![provider("test.primary"), provider("test.fallback")],
+                providers: vec![fake.provider()],
                 ..Default::default()
             };
             let run_id = format!("retryable-admission-{}", uuid::Uuid::new_v4());
-            let request = AgentTaskDispatchRequest {
+            let mut request = AgentTaskDispatchRequest {
                 prompt: Some("run".to_string()),
                 prompt_is_literal: false,
                 tasks: Vec::new(),
@@ -1640,6 +1653,16 @@ mod tests {
                 backend_selection: None,
             };
 
+            request.backend = "pi".to_string();
+            request.selector = Some("pi.agent-task-executor".to_string());
+            request.model = Some("test/model".to_string());
+            request.core.provider_config = Some(fake.config().to_string());
+            let policy = request.core.resolved_provider_policy.as_mut().unwrap();
+            policy.backend = request.backend.clone();
+            policy.selector = request.selector.clone();
+            policy.model = request.model.clone();
+            policy.rotation.as_mut().unwrap().entries[0].selector = request.selector.clone();
+            policy.rotation.as_mut().unwrap().entries[0].model = Some("test/fallback".to_string());
             let error =
                 dispatch_with_provider_catalog(request, Arc::new(NeverRunExecutor), &catalog)
                     .expect_err("temporary route unavailability denies direct dispatch");
@@ -1666,9 +1689,9 @@ mod tests {
                 .is_none_or(Vec::is_empty));
             assert_eq!(
                 persisted.tasks[0].executor.selector.as_deref(),
-                Some("test.primary")
+                Some("pi.agent-task-executor")
             );
-            assert_eq!(persisted.tasks[0].executor.model(), Some("primary"));
+            assert_eq!(persisted.tasks[0].executor.model(), Some("test/model"));
             assert!(persisted.tasks[0]
                 .metadata
                 .get("provider_readiness_routing")

@@ -242,15 +242,9 @@ fn first_runner_error(runner: &Value) -> Option<Value> {
         .iter()
         .find(|check| check.get("status").and_then(Value::as_str) == Some(error_label))
         .map(|check| {
-            let check_id = check.get("id").and_then(Value::as_str).unwrap_or_default();
-            let code = if check_id.starts_with("agent_task.provider_executor_resolution.") {
-                json!("executor_require_graph_unresolved")
-            } else {
-                check.get("id").cloned().unwrap_or(Value::Null)
-            };
             json!({
                 "stage": "runner_readiness",
-                "code": code,
+                "code": check.get("id").cloned().unwrap_or(Value::Null),
                 "message": check.get("message").cloned().unwrap_or(Value::Null),
                 "remediation": check.get("remediation").cloned().unwrap_or(Value::Null),
                 "details": check.get("details").cloned().unwrap_or(Value::Null),

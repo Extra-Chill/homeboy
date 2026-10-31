@@ -84,9 +84,8 @@ pub use capacity_readiness::{
 };
 pub use catalog::*;
 pub use command_runner::{
-    probe_provider_executor_resolves, provider_command_parts, run_provider_controller_refresh,
-    run_provider_readiness_invocation, validate_provider_immediate_failure_patterns,
-    ProviderExecutorResolution, ProviderReadinessInvocationCapacity,
+    provider_command_parts, run_provider_controller_refresh, run_provider_readiness_invocation,
+    validate_provider_immediate_failure_patterns, ProviderReadinessInvocationCapacity,
     ProviderReadinessInvocationResult, PROVIDER_READINESS_RESULT_SCHEMA,
 };
 pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;

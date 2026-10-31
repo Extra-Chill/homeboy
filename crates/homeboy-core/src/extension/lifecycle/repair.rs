@@ -571,28 +571,6 @@ mod tests {
         .expect("extension manifest");
     }
 
-    fn write_extension_fixture_with_invalid_agent_runtime_provider(root: &Path, id: &str) {
-        let dir = root.join(id);
-        fs::create_dir_all(&dir).expect("extension dir");
-        fs::write(
-            dir.join(format!("{}.json", id)),
-            format!(
-                r#"{{
-  "name": "{} extension",
-  "version": "2.0.0",
-  "agent_runtimes": [{{
-    "id": "{}-runtime",
-    "agent_task_executors": [{{
-      "id": "{}.default"
-    }}]
-  }}]
-}}"#,
-                id, id, id
-            ),
-        )
-        .expect("extension manifest");
-    }
-
     fn write_shared_runtime_fixture(root: &Path) {
         let runtime_script = root.join(
             "agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs",
@@ -856,39 +834,6 @@ mod tests {
                 !metadata_dir.join(".pi.source-requested-ref").exists(),
                 "relink must clear the requested ref inherited from the durable source"
             );
-        });
-    }
-
-    #[test]
-    fn replace_fails_and_restores_existing_install_when_declared_provider_is_not_discoverable() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let old_source = home.join("old-source");
-            let new_source = home.join("new-source");
-            write_extension_fixture(&old_source, "wordpress");
-            write_extension_fixture_with_invalid_agent_runtime_provider(&new_source, "wordpress");
-
-            install(
-                &old_source.join("wordpress").to_string_lossy(),
-                Some("wordpress"),
-            )
-            .expect("install linked extension");
-
-            let err = replace(
-                &new_source.join("wordpress").to_string_lossy(),
-                Some("wordpress"),
-            )
-            .expect_err("replace should fail invalid provider declaration");
-
-            assert!(err.message.contains("cannot be parsed"));
-            let installed_path = home.join(".config/homeboy/extensions/wordpress");
-            assert!(installed_path.is_symlink());
-            assert_eq!(
-                fs::read_link(installed_path).expect("read restored link"),
-                old_source.join("wordpress")
-            );
-            let extension = load_extension("wordpress").expect("load restored extension");
-            assert_eq!(extension.version, "1.0.0");
         });
     }
 

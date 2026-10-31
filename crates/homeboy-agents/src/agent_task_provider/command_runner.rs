@@ -3172,29 +3172,6 @@ pub fn provider_command_parts(
     }
 }
 
-/// Result of probing whether a provider's executor entrypoint actually loads on
-/// disk — i.e. its module require graph resolves against the materialized
-/// runtime layout.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProviderExecutorResolution {
-    /// The executor entrypoint loaded and printed its provider contract; the
-    /// require graph resolves.
-    Resolved,
-    /// The probe could not be run (no command parts, or the invocation is not a
-    /// runtime we can safely dry-load). Not a failure — nothing to assert.
-    Skipped { reason: String },
-    /// The executor entrypoint failed to load: its require graph does not
-    /// resolve on disk (e.g. a shared runtime package was never materialized).
-    Unresolved { command: String, detail: String },
-}
-
-/// Native Pi has no extension executor module graph to dry-load.
-pub fn probe_provider_executor_resolves(
-    _provider: &AgentTaskExecutorProvider,
-) -> ProviderExecutorResolution {
-    ProviderExecutorResolution::Resolved
-}
-
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn provider_command_env(
     request: &AgentTaskRequest,

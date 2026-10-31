@@ -460,111 +460,18 @@ pub(crate) fn selected_provider_readiness_contracts(
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct LabOffloadExtensionDependency {
-    pub extension_id: String,
-    pub provider_id: Option<String>,
-}
-
-pub(crate) fn lab_offload_extension_dependencies(
-    explicit: &[String],
-    providers: &[AgentTaskExecutorProvider],
-    selected_backend: Option<&str>,
-    selected_provider_id: Option<&str>,
-) -> Vec<LabOffloadExtensionDependency> {
-    let explicit = super::normalized_extension_ids(explicit);
-    let mut dependencies = explicit
-        .iter()
-        .map(|extension_id| LabOffloadExtensionDependency {
-            extension_id: extension_id.clone(),
-            provider_id: None,
-        })
-        .collect::<Vec<_>>();
-    for provider in selected_provider_executor_resolution_providers(
-        providers,
-        selected_backend,
-        selected_provider_id,
-    ) {
-        if let Some(extension_id) = provider
-            .extension_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        {
-            if !explicit.iter().any(|id| id == extension_id) {
-                dependencies.push(LabOffloadExtensionDependency {
-                    extension_id: extension_id.to_string(),
-                    provider_id: Some(provider.id.clone()),
-                });
-            }
-        }
-        for extension_id in provider
-            .runner_readiness
-            .iter()
-            .flat_map(|readiness| readiness.required_extensions.iter())
-            .map(|id| id.trim())
-            .filter(|id| !id.is_empty())
-        {
-            if !explicit.iter().any(|id| id == extension_id) {
-                dependencies.push(LabOffloadExtensionDependency {
-                    extension_id: extension_id.to_string(),
-                    provider_id: Some(provider.id.clone()),
-                });
-            }
-        }
-    }
-    dependencies.sort();
-    dependencies.dedup();
-    dependencies
-}
-
 pub(crate) fn eligible_provider_ids(
     providers: &[AgentTaskExecutorProvider],
     selected_backend: Option<&str>,
     selected_provider_id: Option<&str>,
 ) -> Vec<String> {
-    selected_provider_executor_resolution_providers(
-        providers,
-        selected_backend,
-        selected_provider_id,
-    )
-    .into_iter()
-    .map(|provider| provider.id.clone())
-    .collect()
+    selected_providers(providers, selected_backend, selected_provider_id)
+        .into_iter()
+        .map(|provider| provider.id.clone())
+        .collect()
 }
 
-pub(crate) fn local_provider_executor_resolution_checks(
-    providers: &[AgentTaskExecutorProvider],
-    selected_backend: Option<&str>,
-    selected_provider_id: Option<&str>,
-) -> Vec<RunnerCheck> {
-    selected_provider_executor_resolution_providers(
-        providers,
-        selected_backend,
-        selected_provider_id,
-    )
-    .into_iter()
-    .map(local_provider_executor_resolution_check)
-    .collect()
-}
-
-pub(crate) fn remote_provider_executor_resolution_checks(
-    client: &SshClient,
-    providers: &[AgentTaskExecutorProvider],
-    selected_backend: Option<&str>,
-    selected_provider_id: Option<&str>,
-) -> Vec<RunnerCheck> {
-    selected_provider_executor_resolution_providers(
-        providers,
-        selected_backend,
-        selected_provider_id,
-    )
-    .into_iter()
-    .map(|provider| remote_provider_executor_resolution_check(client, provider))
-    .collect()
-}
-
-fn selected_provider_executor_resolution_providers<'a>(
+fn selected_providers<'a>(
     providers: &'a [AgentTaskExecutorProvider],
     selected_backend: Option<&str>,
     selected_provider_id: Option<&str>,
@@ -576,72 +483,6 @@ fn selected_provider_executor_resolution_providers<'a>(
                 && selected_provider_id.is_none_or(|provider_id| provider.id == provider_id)
         })
         .collect()
-}
-
-fn local_provider_executor_resolution_check(provider: &AgentTaskExecutorProvider) -> RunnerCheck {
-    match homeboy::agents::agent_tasks::provider::probe_provider_executor_resolves(provider) {
-        homeboy::agents::agent_tasks::provider::ProviderExecutorResolution::Resolved => {
-            provider_executor_resolution_ok_check(provider, None)
-        }
-        homeboy::agents::agent_tasks::provider::ProviderExecutorResolution::Skipped { reason } => {
-            provider_executor_resolution_skipped_check(provider, reason)
-        }
-        homeboy::agents::agent_tasks::provider::ProviderExecutorResolution::Unresolved {
-            command,
-            detail,
-        } => provider_executor_resolution_error_check(provider, command, detail),
-    }
-}
-
-fn remote_provider_executor_resolution_check(
-    client: &SshClient,
-    provider: &AgentTaskExecutorProvider,
-) -> RunnerCheck {
-    let Some(entrypoint) = remote_provider_executor_entrypoint(provider) else {
-        return provider_executor_resolution_skipped_check(
-            provider,
-            format!(
-                "provider '{}' has no runtime-relative entrypoint for a runner-local dry-load probe",
-                provider.id
-            ),
-        );
-    };
-
-    let program_name = Path::new(entrypoint.program.value())
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(entrypoint.program.value());
-    if program_name != "node" && program_name != "nodejs" {
-        return provider_executor_resolution_skipped_check(
-            provider,
-            format!(
-                "provider '{}' executor program '{program_name}' does not implement the --provider-contract dry-load probe",
-                provider.id
-            ),
-        );
-    }
-
-    let command_display = entrypoint.display();
-    let shell_command = provider_executor_resolution_remote_shell(&entrypoint);
-    let output = client.execute(&shell_command);
-    if output.success {
-        return provider_executor_resolution_ok_check(provider, Some(command_display));
-    }
-
-    let detail = if output.timed_out {
-        "executor resolution probe timed out".to_string()
-    } else {
-        first_stderr_lines(
-            output
-                .stderr
-                .trim()
-                .split_once("__homeboy_probe_status=")
-                .map(|(stderr, _)| stderr.trim())
-                .unwrap_or_else(|| output.stderr.trim()),
-            8,
-        )
-    };
-    provider_executor_resolution_error_check(provider, command_display, detail)
 }
 
 /// A provider command represented relative to a named agent runtime. This is
@@ -659,14 +500,6 @@ pub(super) enum RemoteProviderExecutorEntrypointPart {
     RuntimeRelative(String),
 }
 
-impl RemoteProviderExecutorEntrypointPart {
-    fn value(&self) -> &str {
-        match self {
-            Self::Literal(value) | Self::RuntimeRelative(value) => value,
-        }
-    }
-}
-
 impl RemoteProviderExecutorEntrypoint {
     pub(super) fn display(&self) -> String {
         let mut argv = vec![self.part_display(&self.program)];
@@ -682,36 +515,6 @@ impl RemoteProviderExecutorEntrypoint {
             }
         }
     }
-}
-
-pub(super) fn remote_provider_executor_entrypoint(
-    provider: &AgentTaskExecutorProvider,
-) -> Option<RemoteProviderExecutorEntrypoint> {
-    let runtime_id = provider.runtime_id.as_deref()?.trim();
-    let runtime_root = Path::new(provider.runtime_path.as_deref()?.trim());
-    if runtime_id.is_empty() || runtime_root.as_os_str().is_empty() {
-        return None;
-    }
-    let (program, args, cwd) =
-        crate::agents::agent_task_provider::provider_command_parts(provider)?;
-    let program = runtime_relative_entrypoint_part(runtime_root, &program)?;
-    // A bare executable such as `node` is runner-local by definition. Any
-    // absolute invocation value must be rooted in the declared runtime.
-    let args = args
-        .iter()
-        .map(|arg| runtime_relative_entrypoint_part(runtime_root, arg))
-        .collect::<Option<Vec<_>>>()?;
-    let cwd = match cwd.as_deref() {
-        Some(cwd) => Some(runtime_relative_path(runtime_root, &cwd.to_string_lossy())?),
-        None => None,
-    };
-
-    Some(RemoteProviderExecutorEntrypoint {
-        runtime_id: runtime_id.to_string(),
-        program,
-        args,
-        cwd,
-    })
 }
 
 fn runtime_relative_entrypoint_part(
@@ -749,113 +552,6 @@ fn runtime_relative_path_is_safe(path: &Path) -> bool {
     !path
         .components()
         .any(|component| matches!(component, std::path::Component::ParentDir))
-}
-
-pub(super) fn provider_executor_resolution_remote_shell(
-    entrypoint: &RemoteProviderExecutorEntrypoint,
-) -> String {
-    provider_executor_resolution_remote_shell_with_timeout(entrypoint, 20)
-}
-
-pub(super) fn provider_executor_resolution_remote_shell_with_timeout(
-    entrypoint: &RemoteProviderExecutorEntrypoint,
-    timeout_seconds: u64,
-) -> String {
-    let runtime_root = format!(
-        "runtime_root=\"$HOME/.config/homeboy/agent-runtimes\"/{}",
-        common::shell_word(&entrypoint.runtime_id)
-    );
-    let runner_path = |value: &str| format!("\"$runtime_root\"/{}", common::shell_word(value));
-    let shell_part = |part: &RemoteProviderExecutorEntrypointPart| match part {
-        RemoteProviderExecutorEntrypointPart::Literal(value) => common::shell_word(value),
-        RemoteProviderExecutorEntrypointPart::RuntimeRelative(value) => runner_path(value),
-    };
-    let mut argv = Vec::with_capacity(entrypoint.args.len() + 2);
-    argv.push(shell_part(&entrypoint.program));
-    argv.extend(entrypoint.args.iter().map(shell_part));
-    argv.push(common::shell_word("--provider-contract"));
-    let invocation = argv.join(" ");
-    let invocation = if let Some(cwd) = &entrypoint.cwd {
-        format!("cd {} && exec {invocation}", runner_path(cwd))
-    } else {
-        format!("exec {invocation}")
-    };
-
-    // Keep the remote SSH command bounded even if an executor ignores the
-    // dry-load flag and waits for input. Stdin is closed and stderr is captured.
-    format!(
-        "{runtime_root}; tmp=$(mktemp 2>/dev/null || printf '/tmp/homeboy-provider-probe-$$'); ({invocation}) </dev/null >/dev/null 2>\"$tmp\" & pid=$!; (trap 'kill \"$sleeper\" 2>/dev/null; wait \"$sleeper\" 2>/dev/null; exit' TERM; sleep {timeout_seconds} & sleeper=$!; wait \"$sleeper\"; kill \"$pid\" 2>/dev/null) & killer=$!; wait \"$pid\"; rc=$?; kill \"$killer\" 2>/dev/null; pkill -P \"$killer\" 2>/dev/null; kill -9 \"$killer\" 2>/dev/null; wait \"$killer\" 2>/dev/null; cat \"$tmp\" >&2; rm -f \"$tmp\"; exit \"$rc\""
-    )
-}
-
-fn provider_executor_resolution_ok_check(
-    provider: &AgentTaskExecutorProvider,
-    command: Option<String>,
-) -> RunnerCheck {
-    let mut details = provider_executor_resolution_details(provider);
-    if let Some(command) = command {
-        details.insert("command".to_string(), command);
-    }
-    checks::ok_with_details(
-        format!("agent_task.provider_executor_resolution.{}", provider.id),
-        format!(
-            "Provider `{}` executor require graph resolves on the runner",
-            provider.id
-        ),
-        details,
-    )
-}
-
-fn provider_executor_resolution_skipped_check(
-    provider: &AgentTaskExecutorProvider,
-    reason: String,
-) -> RunnerCheck {
-    let mut details = provider_executor_resolution_details(provider);
-    details.insert("skip_reason".to_string(), reason.clone());
-    checks::ok_with_details(
-        format!("agent_task.provider_executor_resolution.{}", provider.id),
-        format!(
-            "Provider `{}` executor require graph probe was skipped: {reason}",
-            provider.id
-        ),
-        details,
-    )
-}
-
-fn provider_executor_resolution_error_check(
-    provider: &AgentTaskExecutorProvider,
-    command: String,
-    detail: String,
-) -> RunnerCheck {
-    let mut details = provider_executor_resolution_details(provider);
-    details.insert("command".to_string(), command);
-    details.insert("detail".to_string(), detail);
-    checks::error(
-        format!("agent_task.provider_executor_resolution.{}", provider.id),
-        format!(
-            "Provider `{}` is declared but its executor could not load its runtime require graph on the runner",
-            provider.id
-        ),
-        Some("Reinstall the runtime so shared runtime packages are materialized (e.g. `homeboy extension refresh <homeboy-extensions source> --id <extension>`), then rerun doctor".to_string()),
-        details,
-    )
-}
-
-fn provider_executor_resolution_details(
-    provider: &AgentTaskExecutorProvider,
-) -> BTreeMap<String, String> {
-    let mut details = BTreeMap::new();
-    details.insert("provider_id".to_string(), provider.id.clone());
-    details.insert("backend".to_string(), provider.backend.clone());
-    details
-}
-
-fn first_stderr_lines(stderr: &str, max: usize) -> String {
-    let trimmed = stderr.trim();
-    if trimmed.is_empty() {
-        return "executor exited non-zero while loading its module require graph".to_string();
-    }
-    trimmed.lines().take(max).collect::<Vec<_>>().join("\n")
 }
 
 pub(super) fn bounded_invocation_output(stdout: &str, stderr: &str, max_lines: usize) -> String {

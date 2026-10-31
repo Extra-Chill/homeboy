@@ -5477,6 +5477,11 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
             "HOMEBOY_TEST_MISSING_CREDENTIAL_{}",
             uuid::Uuid::new_v4().simple()
         );
+        let unavailable = crate::agent_task_provider::test_pi::FakePi::with_probes(
+            "exit 99",
+            "printf 'test-pi\\n'",
+            "printf 'No models available\\n'",
+        );
         let cases = vec![
             (
                 "route",
@@ -5491,7 +5496,8 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
                         "id": "model.provider",
                         "backend": "model",
                         "cli": { "profiles": [{ "name": "supported", "model": "supported" }] }
-                    })).expect("model provider")],
+                    }))
+                    .expect("model provider")],
                     ..Default::default()
                 },
                 compile_command("model", Some("unsupported"), Some(missing_workspace)),
@@ -5504,7 +5510,8 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
                         "id": "credential.provider",
                         "backend": "credential",
                         "secret_env_requirements": [{ "env": [missing_credential] }]
-                    })).expect("credential provider")],
+                    }))
+                    .expect("credential provider")],
                     ..Default::default()
                 },
                 compile_command("credential", None, Some(missing_workspace)),
@@ -5513,33 +5520,18 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
             (
                 "runtime",
                 crate::agent_task_provider::AgentTaskProviderCatalog {
-                    providers: vec![serde_json::from_value(serde_json::json!({
-                        "id": "runtime.provider",
-                        "backend": "runtime",
-                        "readiness_invocation": { "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"configuration\",\"retryable\":false,\"remediation\":\"repair runtime\",\"reason\":\"runtime unavailable\",\"cache_key\":\"test\",\"identity\":{}}'"] }
-                    })).expect("runtime provider")],
+                    providers: vec![unavailable.provider()],
                     ..Default::default()
                 },
-                compile_command("runtime", None, None),
-                // `runtime_unavailable`'s reason now surfaces the provider's own
-                // reported classification and reason instead of the old generic
-                // string, matching `offline_provider_owned_auth_remains_runtime_unavailable`
-                // (#13974).
-                "runtime_unavailable: configuration: runtime unavailable",
-            ),
-            (
-                "unverified-provider-auth",
-                crate::agent_task_provider::AgentTaskProviderCatalog {
-                    providers: vec![serde_json::from_value(serde_json::json!({
-                        "id": "unverified.provider",
-                        "backend": "unverified",
-                        "capabilities": ["cli_runtime", "provider_owned_auth"]
-                    })).expect("unverified provider")],
-                    ..Default::default()
+                {
+                    let mut command = compile_command("pi", Some("test/model"), None);
+                    command.core.provider_config = Some(unavailable.config().to_string());
+                    command
                 },
-                compile_command("unverified", None, None),
-                "configuration_invalid",
+                "revoked or unusable",
             ),
+            // Extension-owned auth without a readiness invocation is retired;
+            // Pi readiness is always the built-in CLI probe.
         ];
 
         for (dimension, catalog, command, reason) in cases {
@@ -5550,7 +5542,10 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
                 &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
             )
             .expect_err("unavailable dimension must reject before workspace validation");
-            assert_eq!(error.details["field"], "provider_dispatchability");
+            assert_eq!(
+                error.details["field"], "provider_dispatchability",
+                "{dimension}: {error}"
+            );
             assert!(error.message.contains(reason), "{dimension}: {error}");
         }
     });
@@ -5654,51 +5649,35 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let marker = temp.path().join("executed.json");
-        let readiness = temp.path().join("readiness.js");
-        let provider_command = temp.path().join("provider.js");
-        std::fs::write(
-            &readiness,
-            "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const ready=req.effective_config.model==='ready-model'&&req.effective_config.account==='ready-account';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'account',retryable:false,remediation:'',reason:ready?'':'blocked',cache_key:req.effective_config.account||'blocked',identity:{account:req.effective_config.account||'blocked'}}));",
-        )
-        .expect("readiness script");
-        std::fs::write(
-            &provider_command,
-            format!(
-                "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const transcript=require('path').join(req.artifacts_path,'transcript.txt');fs.writeFileSync({:?},JSON.stringify({{model:req.executor.model,config:req.executor.config}}));fs.writeFileSync(transcript,'ready fallback executed');process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',artifacts:[{{schema:'homeboy/agent-task-artifact/v1',id:'transcript',kind:'transcript',name:'transcript',path:transcript}}]}}));",
-                marker.display().to_string()
+        let fake = crate::agent_task_provider::test_pi::FakePi::with_probes(
+            &format!(
+                "while [ \"$1\" != --model ]; do shift; done; printf '{{\"model\":\"%s\",\"config\":%s}}' \"$2\" \"$HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON\" > '{}'; {}",
+                marker.display(),
+                crate::agent_task_provider::test_pi::FakePi::answer("ready fallback executed")
             ),
-        )
-        .expect("provider script");
-        let mut provider = compile_provider("production.provider", "production");
-        provider.invocation = homeboy_core::command_invocation::CommandInvocation {
-            argv: vec!["node".to_string(), provider_command.display().to_string()],
-            ..Default::default()
-        };
-        provider.readiness_invocation = Some(
-            homeboy_core::command_invocation::CommandInvocation {
-                argv: vec!["node".to_string(), readiness.display().to_string()],
-                ..Default::default()
-            }
-            .into(),
+            "printf 'test-pi\\n'",
+            "printf 'test fallback\\n'",
         );
+        let provider = fake.provider();
         let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
             providers: vec![provider],
             ..Default::default()
         };
-        let mut command = compile_command("production", None, None);
+        let mut command = compile_command("pi", None, None);
+        command.core.provider_config = Some(fake.config().to_string());
         command.core.resolved_provider_policy = Some(
             crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
-                backend: "production".to_string(),
+                backend: "pi".to_string(),
                 selector: None,
                 model: None,
                 rotation: Some(AgentTaskProviderRotationPolicy {
                     entries: vec![
                         AgentTaskProviderRotationEntry {
-                            model: Some("blocked-model".to_string()),
+                            model: Some("test/model".to_string()),
                             ..Default::default()
                         },
                         AgentTaskProviderRotationEntry {
-                            model: Some("ready-model".to_string()),
+                            model: Some("test/fallback".to_string()),
                             provider_config: serde_json::json!({ "account": "ready-account" }),
                             ..Default::default()
                         },
@@ -5723,10 +5702,14 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
         .expect("Cook compiles to its first ready route");
         assert_eq!(
             options.ai_disclosure.ai_model.as_deref(),
-            Some("ready-model")
+            Some("test/fallback")
         );
-        let plan = options.identity.initial_plan;
-        assert_eq!(plan.tasks[0].executor.model(), Some("ready-model"));
+        let mut plan = options.identity.initial_plan;
+        // Transcript harvesting is separate from this route-binding regression.
+        plan.tasks[0]
+            .expected_artifacts
+            .retain(|name| name != "transcript");
+        assert_eq!(plan.tasks[0].executor.model(), Some("test/fallback"));
         assert_eq!(plan.tasks[0].executor.config["account"], "ready-account");
         assert_eq!(
             plan.tasks[0].metadata["provider_readiness_routing"]["next_rotation_index"],
@@ -5747,7 +5730,7 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
         let executed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(marker).expect("execution marker"))
                 .expect("execution identity");
-        assert_eq!(executed["model"], "ready-model");
+        assert_eq!(executed["model"], "test/fallback");
         assert_eq!(executed["config"]["account"], "ready-account");
         assert_eq!(
             aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],

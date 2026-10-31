@@ -1609,7 +1609,7 @@ mod provider_rotation_tests {
                 &self,
                 request: &AgentTaskRequest,
             ) -> ProviderRouteReadiness {
-                if request.executor.model() != Some("primary") {
+                if request.executor.model() != Some("test/model") {
                     return ProviderRouteReadiness::dispatchable();
                 }
                 ProviderRouteReadiness {
@@ -1639,57 +1639,43 @@ mod provider_rotation_tests {
                     .push(model.clone());
                 let mut result = outcome(
                     request.task_id,
-                    if model == "fallback" {
+                    if model == "test/fallback" {
                         AgentTaskOutcomeStatus::ProviderError
                     } else {
                         AgentTaskOutcomeStatus::Succeeded
                     },
                 );
-                if model == "fallback" {
+                if model == "test/fallback" {
                     result.failure_classification = Some(AgentTaskFailureClassification::Provider);
                 }
                 result
             }
         }
 
-        let root = tempfile::tempdir().expect("tempdir");
-        let script = root.path().join("readiness.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const r=JSON.parse(fs.readFileSync(0,'utf8'));const model=r.effective_config.model;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model!=='primary',classification:model==='primary'?'account':'ready',retryable:false,remediation:'switch',reason:model==='primary'?'blocked':'',cache_key:model,identity:{model}}));",
-        )
-        .expect("readiness script");
-        let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
-            serde_json::from_value(json!({
-                "id": "test.provider",
-                "backend": "test",
-            }))
-            .expect("provider");
-        provider.readiness_invocation = Some(
-            homeboy_core::command_invocation::CommandInvocation {
-                argv: vec!["node".to_string(), script.display().to_string()],
-                ..Default::default()
-            }
-            .into(),
+        let fake = crate::agent_task_provider::test_pi::FakePi::with_probes(
+            "exit 99",
+            "printf 'test-pi\\n'",
+            "printf 'test fallback\\ntest forward\\n'",
         );
+        let provider = fake.provider();
         let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
             providers: vec![provider],
             diagnostics: Vec::new(),
             version: None,
         };
         let mut plan = plan_with_tasks(1);
-        plan.tasks[0].executor.model = Some("primary".to_string());
+        plan.tasks[0].executor = fake.request("fixture").executor;
         plan.options.rotation = Some(rotation_policy(vec![
             AgentTaskProviderRotationEntry {
-                model: Some("primary".to_string()),
+                model: Some("test/model".to_string()),
                 ..Default::default()
             },
             AgentTaskProviderRotationEntry {
-                model: Some("fallback".to_string()),
+                model: Some("test/fallback".to_string()),
                 ..Default::default()
             },
             AgentTaskProviderRotationEntry {
-                model: Some("forward".to_string()),
+                model: Some("test/forward".to_string()),
                 ..Default::default()
             },
         ]));
@@ -1701,7 +1687,7 @@ mod provider_rotation_tests {
                 &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
             )
             .expect("fallback admission");
-        assert_eq!(admitted.tasks[0].executor.model(), Some("fallback"));
+        assert_eq!(admitted.tasks[0].executor.model(), Some("test/fallback"));
         assert_eq!(
             admitted.tasks[0].metadata["provider_readiness_routing"]["next_rotation_index"],
             2
@@ -1730,7 +1716,7 @@ mod provider_rotation_tests {
                 .as_ref()
                 .expect("typed runtime evidence")
                 .classification,
-            "account"
+            "deterministic_incompatibility"
         );
 
         let observed = Arc::new(Mutex::new(Vec::new()));
@@ -1742,7 +1728,7 @@ mod provider_rotation_tests {
         assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(
             *observed.lock().expect("observed models"),
-            vec!["fallback".to_string(), "forward".to_string()]
+            vec!["test/fallback".to_string(), "test/forward".to_string()]
         );
 
         let durable_observed = Arc::new(Mutex::new(Vec::new()));
@@ -1753,7 +1739,7 @@ mod provider_rotation_tests {
         assert_eq!(durable.status(), AgentTaskRunState::Succeeded);
         assert_eq!(
             *durable_observed.lock().expect("durable observed models"),
-            vec!["fallback".to_string(), "forward".to_string()]
+            vec!["test/fallback".to_string(), "test/forward".to_string()]
         );
     }
 

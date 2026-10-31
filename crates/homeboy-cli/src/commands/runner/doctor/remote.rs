@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::BTreeSet;
 use types::*;
 
 pub fn report(
@@ -266,47 +265,23 @@ pub fn report(
             &homeboy,
         ));
         let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
-        checks.extend(probes::remote_provider_executor_resolution_checks(
-            client,
-            catalog.providers(),
-            options.agent_backend.as_deref(),
-            options.agent_selector.as_deref(),
-        ));
-        let extension_dependencies = probes::lab_offload_extension_dependencies(
-            &options.extensions,
-            catalog.providers(),
-            options.agent_backend.as_deref(),
-            options.agent_selector.as_deref(),
-        );
         let parity_cwd = options.path.as_deref().unwrap_or(workspace_root.as_str());
-        let parity_checks = extension_dependencies
+        let parity_checks = normalized_extension_ids(&options.extensions)
             .iter()
-            .map(|dependency| {
-                let mut check = extension_parity::remote_live_readiness_check(
+            .map(|extension_id| {
+                extension_parity::remote_live_readiness_check(
                     client,
                     runner_id,
                     runner,
                     homeboy_command,
                     Some(parity_cwd),
-                    &dependency.extension_id,
-                );
-                if let Some(provider_id) = &dependency.provider_id {
-                    check
-                        .details
-                        .insert("provider_id".to_string(), provider_id.clone());
-                }
-                check
+                    extension_id,
+                )
             })
             .collect::<Vec<_>>();
-        let global_parity_blocked = parity_checks.iter().any(|check| {
-            check.status == RunnerDoctorStatus::Error && !check.details.contains_key("provider_id")
-        });
-        let blocked_providers = parity_checks
+        let global_parity_blocked = parity_checks
             .iter()
-            .filter(|check| check.status == RunnerDoctorStatus::Error)
-            .filter_map(|check| check.details.get("provider_id"))
-            .cloned()
-            .collect::<BTreeSet<_>>();
+            .any(|check| check.status == RunnerDoctorStatus::Error);
         checks.extend(parity_checks);
         if !global_parity_blocked {
             let selected_provider_ids = probes::eligible_provider_ids(
@@ -317,10 +292,7 @@ pub fn report(
             let readiness_contracts = probes::selected_provider_readiness_contracts(
                 homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
                 &selected_provider_ids,
-            )
-            .into_iter()
-            .filter(|contract| !blocked_providers.contains(&contract.provider_id))
-            .collect::<Vec<_>>();
+            );
             checks.extend(probes::provider_readiness_checks(
                 client,
                 &readiness_contracts,

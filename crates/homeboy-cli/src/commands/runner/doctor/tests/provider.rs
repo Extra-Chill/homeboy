@@ -1,19 +1,15 @@
 use super::super::*;
 use homeboy::agents::agent_tasks::provider::{
-    AgentTaskExecutorProvider, AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
+    AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
     AgentTaskProviderRunnerReadinessContract,
 };
 use homeboy::core::command_invocation::CommandInvocation;
-use serde_json::json;
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::process::Command;
-use std::time::{Duration, Instant};
 use types::RunnerDoctorStatus;
 
-#[test]
-fn provider_readiness_renderer_uses_fake_provider_contract() {
-    let contract = AgentTaskProviderRunnerReadiness {
+fn readiness_contract() -> AgentTaskProviderRunnerReadiness {
+    AgentTaskProviderRunnerReadiness {
         id: "lab.fake_runtime.cache".to_string(),
         label: "Fake runtime cache".to_string(),
         required_extensions: Vec::new(),
@@ -28,16 +24,18 @@ fn provider_readiness_renderer_uses_fake_provider_contract() {
         executable: None,
         remediation: Some("Refresh the fake runtime cache".to_string()),
         extra: BTreeMap::new(),
-    };
+    }
+}
 
+#[test]
+fn provider_readiness_renderer_uses_fake_provider_contract() {
     let check = probes::provider_env_path_readiness_check_from_probe(
-        &contract,
+        &readiness_contract(),
         Some("/opt/fake-runtime/bin".to_string()),
         true,
         Some("abc123".to_string()),
         None,
     );
-
     assert_eq!(check.id, "lab.fake_runtime.cache");
     assert_eq!(check.status, RunnerDoctorStatus::Ok);
     assert!(check.message.contains("Fake runtime cache"));
@@ -53,23 +51,9 @@ fn provider_readiness_renderer_uses_fake_provider_contract() {
 
 #[test]
 fn provider_readiness_warns_on_non_canonical_checkout() {
-    let contract = AgentTaskProviderRunnerReadiness {
-        id: "lab.fake_runtime.cache".to_string(),
-        label: "Fake runtime cache".to_string(),
-        required_extensions: Vec::new(),
-        invocation: None,
-        secret_env: Vec::new(),
-        env_path: Some(AgentTaskProviderEnvPathReadiness {
-            env: vec!["FAKE_RUNTIME_BIN".to_string()],
-            revision: Some(true),
-            canonical_path: Some("/home/runner/.cache/homeboy/source".to_string()),
-            extra: BTreeMap::new(),
-        }),
-        executable: None,
-        remediation: Some("Refresh the managed source checkout".to_string()),
-        extra: BTreeMap::new(),
-    };
-
+    let mut contract = readiness_contract();
+    contract.env_path.as_mut().unwrap().canonical_path =
+        Some("/home/runner/.cache/homeboy/source".to_string());
     let check = probes::provider_env_path_readiness_check_from_probe(
         &contract,
         Some("/home/runner/Developer/stale-checkout/dist/index.js".to_string()),
@@ -77,7 +61,6 @@ fn provider_readiness_warns_on_non_canonical_checkout() {
         None,
         Some("/home/runner/.cache/homeboy/source".to_string()),
     );
-
     assert_eq!(check.status, RunnerDoctorStatus::Warning);
     assert!(check.message.contains("non-canonical checkout"));
     assert_eq!(
@@ -92,23 +75,9 @@ fn provider_readiness_warns_on_non_canonical_checkout() {
 
 #[test]
 fn provider_readiness_ok_when_path_within_canonical_root() {
-    let contract = AgentTaskProviderRunnerReadiness {
-        id: "lab.fake_runtime.cache".to_string(),
-        label: "Fake runtime cache".to_string(),
-        required_extensions: Vec::new(),
-        invocation: None,
-        secret_env: Vec::new(),
-        env_path: Some(AgentTaskProviderEnvPathReadiness {
-            env: vec!["FAKE_RUNTIME_BIN".to_string()],
-            revision: None,
-            canonical_path: Some("/home/runner/.cache/homeboy/source".to_string()),
-            extra: BTreeMap::new(),
-        }),
-        executable: None,
-        remediation: None,
-        extra: BTreeMap::new(),
-    };
-
+    let mut contract = readiness_contract();
+    contract.env_path.as_mut().unwrap().canonical_path =
+        Some("/home/runner/.cache/homeboy/source".to_string());
     let check = probes::provider_env_path_readiness_check_from_probe(
         &contract,
         Some("/home/runner/.cache/homeboy/source/dist/index.js".to_string()),
@@ -116,7 +85,6 @@ fn provider_readiness_ok_when_path_within_canonical_root() {
         None,
         Some("/home/runner/.cache/homeboy/source".to_string()),
     );
-
     assert_eq!(check.status, RunnerDoctorStatus::Ok);
 }
 
@@ -131,67 +99,12 @@ fn path_within_canonical_root_is_segment_aware() {
         "/a/source/",
         "/a/source"
     ));
-    // Prefix collision must not count as containment.
     assert!(!probes::path_within_canonical_root("/a/sour", "/a/source"));
     assert!(!probes::path_within_canonical_root(
         "/a/source-stale/dist",
         "/a/source"
     ));
-    // Empty root is treated as "no canonical constraint".
     assert!(probes::path_within_canonical_root("/anywhere", ""));
-}
-
-#[test]
-fn local_provider_executor_resolution_check_blocks_broken_require_graph() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let script = dir.path().join("broken-executor.cjs");
-    let mut file = std::fs::File::create(&script).expect("create script");
-    file.write_all(b"require('./missing-shared-runtime-package');\n")
-        .expect("write script");
-    let provider = node_provider("test.node.provider", "test", &script);
-
-    let checks = probes::local_provider_executor_resolution_checks(
-        &[provider],
-        Some("test"),
-        Some("test.node.provider"),
-    );
-
-    assert_eq!(checks.len(), 1);
-    let check = &checks[0];
-    assert_eq!(check.status, RunnerDoctorStatus::Error);
-    assert!(check.id.contains("test.node.provider"));
-    assert!(check.message.contains("could not load"));
-    assert!(check.details.get("detail").is_some_and(
-        |detail| detail.contains("MODULE_NOT_FOUND") || detail.contains("Cannot find module")
-    ));
-}
-
-#[test]
-fn local_provider_executor_resolution_check_filters_to_selected_provider() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let selected_script = dir.path().join("selected-executor.cjs");
-    std::fs::write(
-        &selected_script,
-        "if (process.argv.includes('--provider-contract')) process.exit(0); process.exit(2);\n",
-    )
-    .expect("write selected script");
-    let other_script = dir.path().join("other-executor.cjs");
-    std::fs::write(&other_script, "require('./missing-package');\n").expect("write other script");
-    let selected = node_provider("selected.provider", "test", &selected_script);
-    let other = node_provider("other.provider", "other", &other_script);
-
-    let checks = probes::local_provider_executor_resolution_checks(
-        &[selected, other],
-        Some("test"),
-        Some("selected.provider"),
-    );
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].status, RunnerDoctorStatus::Ok);
-    assert_eq!(
-        checks[0].details.get("provider_id").map(String::as_str),
-        Some("selected.provider")
-    );
 }
 
 #[test]
@@ -203,111 +116,15 @@ fn selected_provider_readiness_contracts_do_not_probe_unselected_providers() {
             backend: "test".to_string(),
             runtime_id: Some("test-runtime".to_string()),
             runtime_path: Some("/runtime".to_string()),
-            readiness: AgentTaskProviderRunnerReadiness {
-                id: format!("agent_task.provider_auth.{provider_id}"),
-                label: "Provider live authentication".to_string(),
-                required_extensions: Vec::new(),
-                invocation: Some(CommandInvocation {
-                    argv: vec!["node".to_string(), "readiness.cjs".to_string()],
-                    ..CommandInvocation::default()
-                }),
-                secret_env: Vec::new(),
-                env_path: None,
-                executable: None,
-                remediation: None,
-                extra: BTreeMap::new(),
-            },
+            readiness: readiness_contract(),
         })
         .collect();
-
     let selected = probes::selected_provider_readiness_contracts(
         contracts,
         &["selected.provider".to_string()],
     );
-
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].provider_id, "selected.provider");
-}
-
-#[test]
-fn remote_executor_probe_uses_runner_runtime_root_not_controller_path() {
-    let provider = node_provider(
-        "test.node.provider",
-        "test",
-        std::path::Path::new(
-            "/Users/controller/.config/homeboy/agent-runtimes/test-runtime/scripts/executor.cjs",
-        ),
-    );
-    let mut provider = provider;
-    provider.runtime_id = Some("test-runtime".to_string());
-    provider.runtime_path =
-        Some("/Users/controller/.config/homeboy/agent-runtimes/test-runtime".to_string());
-    provider.invocation.cwd = Some("{{runtime_path}}".to_string());
-
-    let entrypoint = probes::remote_provider_executor_entrypoint(&provider)
-        .expect("runtime-relative entrypoint");
-    let shell = probes::provider_executor_resolution_remote_shell(&entrypoint);
-
-    assert!(matches!(
-        entrypoint.args.first(),
-        Some(probes::RemoteProviderExecutorEntrypointPart::RuntimeRelative(path)) if path == "scripts/executor.cjs"
-    ));
-    assert_eq!(entrypoint.cwd.as_deref(), Some(""));
-    assert!(shell.contains("$HOME/.config/homeboy/agent-runtimes"));
-    assert!(shell.contains("test-runtime"));
-    assert!(!shell.contains("/Users/controller"));
-
-    let runner_root = tempfile::tempdir().expect("runner root");
-    let script = runner_root.path().join("scripts/executor.cjs");
-    std::fs::create_dir_all(script.parent().expect("script parent")).expect("create scripts");
-    std::fs::write(&script, "process.exit(0);\n").expect("write runner executor");
-    let output = std::process::Command::new("node")
-        .arg(runner_root.path().join("scripts/executor.cjs"))
-        .arg("--provider-contract")
-        .output()
-        .expect("run runner-local probe");
-
-    assert!(output.status.success());
-}
-
-#[test]
-fn remote_executor_probe_keeps_missing_runner_local_dependency_actionable() {
-    let provider = node_provider(
-        "test.node.provider",
-        "test",
-        std::path::Path::new(
-            "/Users/controller/.config/homeboy/agent-runtimes/test-runtime/scripts/executor.cjs",
-        ),
-    );
-    let mut provider = provider;
-    provider.runtime_id = Some("test-runtime".to_string());
-    provider.runtime_path =
-        Some("/Users/controller/.config/homeboy/agent-runtimes/test-runtime".to_string());
-
-    let entrypoint = probes::remote_provider_executor_entrypoint(&provider)
-        .expect("runtime-relative entrypoint");
-    assert!(entrypoint
-        .display()
-        .contains("<runtime:test-runtime>/scripts/executor.cjs"));
-    let home = tempfile::tempdir().expect("runner home");
-    let runner_root = home
-        .path()
-        .join(".config/homeboy/agent-runtimes/test-runtime");
-    let script = runner_root.join("scripts/executor.cjs");
-    std::fs::create_dir_all(script.parent().expect("script parent")).expect("create scripts");
-    std::fs::write(&script, "require('./missing-runner-local-package');\n")
-        .expect("write runner executor");
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(probes::provider_executor_resolution_remote_shell(
-            &entrypoint,
-        ))
-        .env("HOME", home.path())
-        .output()
-        .expect("run runner shell probe");
-
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Cannot find module"));
 }
 
 #[test]
@@ -321,16 +138,12 @@ fn command_readiness_failure_preserves_bounded_child_output() {
         "Cannot find module './missing-extension-module'\nRequire stack:\n- /runner/runtime/readiness.cjs",
         "",
     );
-
     assert_eq!(check.id, "lab.fixture.readiness");
     assert_eq!(check.status, RunnerDoctorStatus::Error);
     assert!(check
         .message
         .contains("Cannot find module './missing-extension-module'"));
-    assert_eq!(
-        check.details.get("stdout").map(String::as_str),
-        Some("Cannot find module './missing-extension-module'\nRequire stack:\n- /runner/runtime/readiness.cjs")
-    );
+    assert_eq!(check.details.get("stdout").map(String::as_str), Some("Cannot find module './missing-extension-module'\nRequire stack:\n- /runner/runtime/readiness.cjs"));
     assert_eq!(
         check.remediation.as_deref(),
         Some("homeboy extension refresh <source> --id fixture-extension")
@@ -355,12 +168,8 @@ fn command_readiness_surfaces_incomplete_cache_repair() {
         .path()
         .join(".config/homeboy/agent-runtimes/cache-fixture/scripts/readiness.cjs");
     std::fs::create_dir_all(script.parent().expect("script parent")).expect("create scripts");
-    std::fs::write(
-        &script,
-        "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'incomplete_cache',retryable:false,reason:'built CLI is missing',remediation:'repair the managed runtime cache',identity:{runtime:'cache-fixture'}}));",
-    )
-    .expect("write readiness script");
-
+    std::fs::write(&script, "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'incomplete_cache',retryable:false,reason:'built CLI is missing',remediation:'repair the managed runtime cache',identity:{runtime:'cache-fixture'}}));")
+        .expect("write readiness script");
     let shell = probes::provider_readiness_remote_shell(
         &entrypoint,
         r#"{"schema":"homeboy/agent-task-provider-readiness-request/v1"}"#,
@@ -372,7 +181,6 @@ fn command_readiness_surfaces_incomplete_cache_repair() {
         .env("HOME", home.path())
         .output()
         .expect("run runner-local readiness");
-
     assert!(output.status.success());
     let result: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("structured readiness result");
@@ -381,80 +189,4 @@ fn command_readiness_surfaces_incomplete_cache_repair() {
     assert_eq!(result["reason"], "built CLI is missing");
     assert_eq!(result["remediation"], "repair the managed runtime cache");
     assert_eq!(result["identity"]["runtime"], "cache-fixture");
-}
-
-#[test]
-fn remote_executor_probe_shell_returns_promptly_after_success() {
-    let dir = tempfile::tempdir().expect("watchdog marker directory");
-    let marker = dir.path().join("watchdog-fired");
-    let shell = probes::provider_executor_resolution_remote_shell_with_timeout(
-        &shell_entrypoint("exit 0"),
-        30,
-    );
-    assert!(shell.contains("kill \"$killer\" 2>/dev/null"));
-    assert!(shell.contains("pkill -P \"$killer\" 2>/dev/null"));
-    assert!(shell.contains("kill -9 \"$killer\" 2>/dev/null"));
-    assert!(shell.contains("wait \"$killer\""));
-    assert!(shell.contains("kill \"$pid\" 2>/dev/null)"));
-    let shell = format!(
-        "marker=\"{}\"; {}",
-        marker.display(),
-        shell.replace(
-            "kill \"$pid\" 2>/dev/null)",
-            "printf watchdog > \"$marker\"; kill \"$pid\" 2>/dev/null)"
-        )
-    );
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(shell)
-        .output()
-        .expect("run successful runner shell probe");
-
-    assert!(output.status.success());
-    assert!(!marker.exists(), "successful probe waited for its watchdog");
-}
-
-#[test]
-fn remote_executor_probe_shell_bounds_and_terminates_hanging_executor() {
-    let shell = probes::provider_executor_resolution_remote_shell_with_timeout(
-        &shell_entrypoint("while :; do :; done"),
-        1,
-    );
-    assert!(shell.contains("sleep 1"));
-    assert!(shell.contains("kill \"$pid\""));
-    let started = Instant::now();
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(shell)
-        .output()
-        .expect("run hanging runner shell probe");
-    let elapsed = started.elapsed();
-    assert!(!output.status.success());
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "probe was not bounded: {elapsed:?}"
-    );
-}
-
-fn shell_entrypoint(script: &str) -> probes::RemoteProviderExecutorEntrypoint {
-    probes::RemoteProviderExecutorEntrypoint {
-        runtime_id: "test-runtime".to_string(),
-        program: probes::RemoteProviderExecutorEntrypointPart::Literal("sh".to_string()),
-        args: vec![
-            probes::RemoteProviderExecutorEntrypointPart::Literal("-c".to_string()),
-            probes::RemoteProviderExecutorEntrypointPart::Literal(script.to_string()),
-        ],
-        cwd: None,
-    }
-}
-
-fn node_provider(id: &str, backend: &str, script: &std::path::Path) -> AgentTaskExecutorProvider {
-    serde_json::from_value(json!({
-        "id": id,
-        "backend": backend,
-        "invocation": {
-            "argv": ["node", script.display().to_string()]
-        }
-    }))
-    .expect("provider parses")
 }

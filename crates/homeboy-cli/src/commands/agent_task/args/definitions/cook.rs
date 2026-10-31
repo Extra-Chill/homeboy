@@ -904,25 +904,7 @@ mod tests {
             provider_config: Some(serde_json::json!({"profile": true})),
             ..Default::default()
         };
-        crate::test_support::with_isolated_home(|home| {
-            let root = home
-                .path()
-                .join(".config/homeboy/agent-runtimes/profile-test");
-            std::fs::create_dir_all(&root).unwrap();
-            std::fs::write(
-                root.join("profile-test.json"),
-                serde_json::json!({
-                    "schema": "homeboy/agent-runtime-manifest/v1",
-                    "id": "profile-test",
-                    "agent_task_executors": [{
-                        "id": "profile-selector", "backend": "profile-backend",
-                        "invocation": {"argv": ["true"]},
-                        "cli": {"profiles": [profile]}
-                    }]
-                })
-                .to_string(),
-            )
-            .unwrap();
+        crate::test_support::with_isolated_home(|_| {
             for explicit in [false, true] {
                 let mut argv = vec![
                     "homeboy",
@@ -950,7 +932,7 @@ mod tests {
                 let super::super::AgentTaskCommand::Cook(mut cook) = task.command else {
                     panic!("cook")
                 };
-                cook.dispatch.cook.resolve_provider_profile();
+                cook.dispatch.cook.merge_provider_profile(profile.clone());
                 let expected = if explicit {
                     "explicit"
                 } else {

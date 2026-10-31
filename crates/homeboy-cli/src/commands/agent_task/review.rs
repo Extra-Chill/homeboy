@@ -3180,6 +3180,18 @@ pub(crate) fn read_promotion_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("fake_pi_test.rs");
+
+    impl FakePi {
+        fn install_catalog_config(&self) {
+            let mut config = homeboy::core::defaults::load_config();
+            config
+                .settings
+                .extend(self.config().as_object().unwrap().clone());
+            homeboy::core::defaults::save_config(&config).unwrap();
+        }
+    }
+
     use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
     use clap::Parser;
     use homeboy::agents::agent_tasks::promotion::{
@@ -3457,25 +3469,6 @@ mod tests {
         .expect("provider fixture")
     }
 
-    fn provider_with_readiness_result(
-        id: &str,
-        backend: &str,
-        ready: bool,
-        classification: &str,
-        retryable: bool,
-    ) -> AgentTaskExecutorProvider {
-        let mut provider = provider(id, backend);
-        provider.readiness_invocation = Some(
-            serde_json::from_value(serde_json::json!({
-                "argv": ["sh", "-c", format!(
-                    "cat >/dev/null; printf '%s' '{{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":{ready},\"classification\":\"{classification}\",\"retryable\":{retryable},\"remediation\":\"repair {classification}\",\"reason\":\"{classification}\",\"cache_key\":\"test\",\"identity\":{{}}}}'"
-                )]
-            }))
-            .expect("readiness invocation"),
-        );
-        provider
-    }
-
     fn save_provider_policy(
         default_backend: Option<&str>,
         rotation: Option<homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy>,
@@ -3540,112 +3533,56 @@ mod tests {
     #[test]
     fn provider_readiness_next_actions_are_consistent_for_every_verdict() {
         crate::test_support::with_isolated_home(|_| {
-            let cases = [
-                (
-                    "ready",
-                    provider_with_readiness_result("ready.provider", "ready", true, "ready", false),
-                    "validated",
-                    None,
-                    Some("homeboy agent-task providers --backend ready --selector ready.provider --validate-readiness"),
-                ),
-                (
-                    "unavailable",
-                    provider_with_readiness_result(
-                        "unavailable.provider",
-                        "unavailable",
-                        false,
-                        "account",
-                        false,
-                    ),
-                    "unavailable",
-                    Some("homeboy agent-task providers --backend unavailable --selector unavailable.provider --validate-readiness"),
-                    None,
-                ),
-                (
-                    "unverified",
-                    provider("unverified.provider", "unverified"),
-                    "inference_unverified",
-                    Some("homeboy agent-task providers --backend unverified --selector unverified.provider --validate-readiness"),
-                    None,
-                ),
-                (
-                    "transient",
-                    provider_with_readiness_result(
-                        "transient.provider",
-                        "transient",
-                        false,
-                        "transient_failure",
-                        true,
-                    ),
-                    "unavailable",
-                    Some("homeboy agent-task providers --backend transient --selector transient.provider --validate-readiness"),
-                    None,
-                ),
-            ];
-
-            for (name, provider, live_dispatch, next, refresh) in cases {
-                let catalog = provider_catalog(vec![provider.clone()]);
-                let dispatchability = evaluate_provider_dispatchability(
-                    &catalog,
-                    &provider.backend,
-                    Some(&provider.id),
-                    None,
-                    true,
+            let fake = FakePi::with_probes("exit 99", "printf 'test model\\n'");
+            let provider = fake.provider();
+            let catalog = provider_catalog(vec![provider.clone()]);
+            for (model, validate, expected) in [
+                ("test/model", true, "validated"),
+                ("test/missing", true, "unavailable"),
+                ("test/model", false, "structurally_dispatchable"),
+            ] {
+                let dispatchability = homeboy::agents::agent_task_provider::evaluate_provider_dispatchability_with_config(
+                    &catalog, "pi", Some(&provider.id), Some(model), &fake.config(), validate,
+                    &mut Default::default(),
                 );
                 let projection = readiness_validation_projection(
                     None,
                     Some(&provider),
                     Some(&ProviderRoute::Resolved {
-                        backend: provider.backend.clone(),
+                        backend: "pi".into(),
                         provider_id: provider.id.clone(),
-                        model: None,
+                        model: Some(model.into()),
                         dispatchable: dispatchability.ready,
                     }),
                     Some(&dispatchability),
-                    true,
+                    validate,
                     None,
                 );
-                let expected_next = next
-                    .map(|command| Value::String(command.to_string()))
-                    .unwrap_or(Value::Null);
-                let expected_refresh = refresh
-                    .map(|command| Value::String(command.to_string()))
-                    .unwrap_or(Value::Null);
-
-                assert_eq!(projection["live_dispatch"], live_dispatch, "{name}");
-                assert_eq!(projection["next_command"], expected_next, "{name}");
-                assert_eq!(projection["refresh_command"], expected_refresh, "{name}");
-                let rendered = render_agent_task_summary(
-                    AgentTaskSummaryKind::Providers,
-                    &serde_json::json!({
-                        "providers": [{}],
-                        "operator_summary": {
-                            "state": "ready",
-                            "next_action": expected_next,
-                            "refresh_action": expected_refresh,
-                        },
-                    }),
-                )
-                .expect("rendered provider report");
-                assert_eq!(rendered.contains("\nNext:"), next.is_some(), "{name}");
-                assert_eq!(rendered.contains("\nRefresh:"), refresh.is_some(), "{name}");
+                assert_eq!(projection["live_dispatch"], expected);
+                let next = &projection["next_command"];
+                let refresh = &projection["refresh_command"];
+                assert_eq!(next.is_null(), expected == "validated");
+                assert_eq!(refresh.is_null(), expected != "validated");
+                let rendered = render_agent_task_summary(AgentTaskSummaryKind::Providers, &serde_json::json!({
+                    "providers":[{}], "operator_summary":{"state":"ready", "next_action":next, "refresh_action":refresh}
+                })).unwrap();
+                assert_eq!(rendered.contains("\nNext:"), !next.is_null());
+                assert_eq!(rendered.contains("\nRefresh:"), !refresh.is_null());
             }
-
-            let provider =
-                provider_with_readiness_result("ready.provider", "ready", true, "ready", false);
+            fake.install_catalog_config();
             for full in [false, true] {
-                let output = providers_with_catalog(
+                let (output, _) = providers_with_catalog(
                     ProvidersArgs {
-                        backend: Some(provider.backend.clone()),
+                        backend: Some("pi".into()),
                         selector: Some(provider.id.clone()),
+                        model: Some("test/model".into()),
                         validate_readiness: true,
                         full,
                         ..providers_args()
                     },
-                    provider_catalog(vec![provider.clone()]),
+                    catalog.clone(),
                 )
-                .expect("ready provider report")
-                .0;
+                .unwrap();
                 assert!(output["operator_summary"]["next_action"].is_null());
                 assert!(output["readiness_validation"]["next_command"].is_null());
                 assert_eq!(
@@ -3657,79 +3594,11 @@ mod tests {
     }
 
     #[test]
-    fn providers_end_to_end_uses_rotation_for_unavailable_default_and_live_validation() {
-        crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(
-                Some("unavailable"),
-                Some(
-                    homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy {
-                        entries: vec![
-                            homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                                backend: Some("fallback".to_string()),
-                                selector: Some("fallback.provider".to_string()),
-                                model: Some("fallback-model".to_string()),
-                                ..Default::default()
-                            },
-                        ],
-                        ..Default::default()
-                    },
-                ),
-            );
-            let mut unavailable = credential_declaring_provider();
-            unavailable.id = "unavailable.provider".to_string();
-            unavailable.backend = "unavailable".to_string();
-            let mut fallback = provider("fallback.provider", "fallback");
-            fallback.readiness_invocation = Some(
-                serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
-                }))
-                .expect("readiness invocation"),
-            );
-            let catalog = provider_catalog(vec![unavailable, fallback]);
-            let mut args = providers_args();
-            args.validate_readiness = true;
-            let output = providers_with_catalog(args, catalog)
-                .expect("validated fallback")
-                .0;
-            assert_eq!(output["operator_summary"]["state"], "ready");
-            assert_eq!(
-                output["readiness_validation"]["effective_backend"],
-                "fallback"
-            );
-            assert_eq!(
-                output["readiness_validation"]["effective_provider_id"],
-                "fallback.provider"
-            );
-            assert_eq!(
-                output["readiness_validation"]["effective_model"],
-                "fallback-model"
-            );
-            assert_eq!(output["readiness_validation"]["live_dispatch"], "validated");
-        });
-    }
-
-    #[test]
     fn providers_refresh_validated_model_uses_one_effective_verdict_everywhere() {
         crate::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().expect("temporary readiness script");
-            let script = temp.path().join("readiness.js");
-            std::fs::write(
-                &script,
-                "const fs=require('fs');const request=JSON.parse(fs.readFileSync(0,'utf8'));const model=request.effective_config.model;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model==='openai/gpt-5.6-terra',classification:model,retryable:false,remediation:'',reason:model,cache_key:model,identity:{model}}));",
-            )
-            .expect("readiness script");
-            let mut provider = provider("pi.agent-task-executor", "pi");
-            provider.cli.profiles = serde_json::from_value(serde_json::json!([
-                { "name": "terra", "model": "openai/gpt-5.6-terra" }
-            ]))
-            .expect("provider profile");
-            provider.readiness_invocation = Some(
-                CommandInvocation {
-                    argv: vec!["node".to_string(), script.display().to_string()],
-                    ..CommandInvocation::default()
-                }
-                .into(),
-            );
+            let fake = FakePi::with_probes("exit 99", "printf 'openai gpt-5.6-terra\\n'");
+            fake.install_catalog_config();
+            let provider = fake.provider();
             let mut args = providers_args();
             args.backend = Some("pi".to_string());
             args.selector = Some("pi.agent-task-executor".to_string());
@@ -3754,104 +3623,8 @@ mod tests {
         });
     }
 
-    /// An explicitly-named, not-dispatchable `--backend` fails fast here (the
-    /// same behavior `providers_reports_capacity_exhaustion_distinctly_with_its_reset_instant`
-    /// covers for `capacity_exhausted`, and #14858's acceptance note documents
-    /// as already applying to `account_unavailable`/`credentials_unusable`).
-    /// The structural/live distinction still rides in the error's structured
-    /// `tried` detail, so it remains observable even though the command
-    /// itself does not return a success envelope.
-    #[test]
-    fn providers_reports_account_block_as_structural_not_live_readiness() {
-        crate::test_support::with_isolated_home(|_| {
-            let mut provider = provider("blocked.provider", "blocked");
-            provider.cli.profiles = serde_json::from_value(serde_json::json!([
-                { "name": "blocked", "model": "blocked-model" }
-            ]))
-            .expect("provider profile");
-            provider.readiness_invocation = Some(
-                serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"account\",\"retryable\":false,\"remediation\":\"restore account quota or billing access\",\"reason\":\"account spending limit is exhausted\",\"cache_key\":\"blocked-account\",\"identity\":{\"account\":\"blocked\"}}'"]
-                }))
-                .expect("account-blocked readiness invocation"),
-            );
-            let mut args = providers_args();
-            args.backend = Some("blocked".to_string());
-            args.selector = Some("blocked.provider".to_string());
-            args.model = Some("blocked-model".to_string());
-            args.validate_readiness = true;
-
-            let error = providers_with_catalog(args, provider_catalog(vec![provider]))
-                .expect_err("an explicitly-named account-blocked backend fails fast");
-
-            assert!(
-                error.message.contains("account_unavailable"),
-                "{}",
-                error.message
-            );
-            let verdict = error.details["tried"][0]
-                .as_str()
-                .expect("structured verdict detail");
-            assert!(verdict.contains("\"state\":\"account_unavailable\""));
-            assert!(
-                verdict.contains(
-                    "\"structural_dispatchability\":{\"state\":\"ready\",\"ready\":true"
-                ),
-                "structural dispatchability must still read ready even though live use is blocked: {verdict}"
-            );
-            assert!(
-                verdict.contains("\"classification\":\"account\""),
-                "{verdict}"
-            );
-        });
-    }
-
-    /// #14858 acceptance: capacity exhaustion is a distinct typed readiness
-    /// state from account/credential unavailability, and carries its reset
-    /// instant. Querying one explicitly-named, not-yet-recovered `--backend`
-    /// fails fast with a structured error (the same behavior an explicitly
-    /// named `account_unavailable`/`credentials_unusable` backend already
-    /// gets here) — the capacity evidence rides in that error's structured
-    /// detail rather than a success envelope, but it is still observable
-    /// through this same inspection command before any dispatch is attempted.
-    #[test]
-    fn providers_reports_capacity_exhaustion_distinctly_with_its_reset_instant() {
-        crate::test_support::with_isolated_home(|_| {
-            let mut provider = provider("capped.provider", "capped");
-            provider.cli.profiles = serde_json::from_value(serde_json::json!([
-                { "name": "capped", "model": "capped-model" }
-            ]))
-            .expect("provider profile");
-            provider.readiness_invocation = Some(
-                serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"capacity\",\"retryable\":true,\"remediation\":\"wait for the reset window\",\"reason\":\"5-hour usage limit reached\",\"cache_key\":\"capped-account\",\"identity\":{\"account\":\"capped\"},\"capacity\":{\"remaining\":0,\"reset_at\":\"2026-08-27T12:37:03Z\"}}'"]
-                }))
-                .expect("capacity-exhausted readiness invocation"),
-            );
-            let mut args = providers_args();
-            args.backend = Some("capped".to_string());
-            args.selector = Some("capped.provider".to_string());
-            args.model = Some("capped-model".to_string());
-            args.validate_readiness = true;
-
-            let error = providers_with_catalog(args, provider_catalog(vec![provider]))
-                .expect_err("an explicitly-named capacity-exhausted backend fails fast");
-
-            assert!(
-                error.message.contains("capacity_exhausted"),
-                "capacity exhaustion must not read as the generic account/runtime buckets: {}",
-                error.message
-            );
-            let verdict = error.details["tried"][0]
-                .as_str()
-                .expect("structured verdict detail");
-            assert!(verdict.contains("\"state\":\"capacity_exhausted\""));
-            assert!(
-                verdict.contains("\"capacity\":{\"state\":\"exhausted\",\"reset_at\":\"2026-08-27T12:37:03+00:00\""),
-                "capacity evidence must carry its reset instant structurally: {verdict}"
-            );
-        });
-    }
+    // Extension readiness JSON account/capacity classifications and reset
+    // evidence are retired: the Pi CLI does not publish that protocol.
 
     /// #14858 acceptance: unknown capacity. A provider that never fills in
     /// `capacity` remains dispatchable and is reported as unknown with a
@@ -3881,106 +3654,6 @@ mod tests {
             assert!(capacity["reason"]
                 .as_str()
                 .is_some_and(|reason| !reason.is_empty()));
-        });
-    }
-
-    /// `--validate-readiness` with no `--backend` and no configured default is
-    /// exactly the discovery question Cook's missing-default error sends the
-    /// operator here to answer, so it must sweep instead of inheriting Cook's
-    /// precondition — and a backend that fails readiness must be reported, not
-    /// propagated (#12569).
-    #[test]
-    fn providers_validate_readiness_without_backend_sweeps_every_declared_backend() {
-        crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(None, None);
-            let mut ready = provider("ready.provider", "ready");
-            ready.readiness_invocation = Some(
-                serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
-                }))
-                .expect("ready readiness invocation"),
-            );
-            let mut failing = provider("failing.provider", "failing");
-            failing.readiness_invocation = Some(
-                serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"configuration\",\"retryable\":false,\"remediation\":\"install the executable\",\"reason\":\"executable_not_found\",\"cache_key\":\"test\",\"identity\":{}}'"]
-                }))
-                .expect("failing readiness invocation"),
-            );
-            let mut args = providers_args();
-            args.validate_readiness = true;
-
-            let (output, status) =
-                providers_with_catalog(args, provider_catalog(vec![ready, failing]))
-                    .expect("an unusable backend is reported, not propagated");
-
-            assert_eq!(status, 0);
-            let validation = &output["readiness_validation"];
-            let backends = validation["backends"]
-                .as_array()
-                .expect("every declared backend is reported");
-            assert_eq!(backends.len(), 2);
-            let failing = backends
-                .iter()
-                .find(|backend| backend["backend"] == "failing")
-                .expect("failing backend readiness");
-            assert_eq!(failing["validated"], false);
-            assert_eq!(failing["route_state"], "configuration_unavailable");
-            assert!(
-                failing["reason"]
-                    .as_str()
-                    .expect("failure reason")
-                    .contains("executable_not_found"),
-                "the readiness failure detail is captured per backend"
-            );
-            let ready = backends
-                .iter()
-                .find(|backend| backend["backend"] == "ready")
-                .expect("ready backend readiness");
-            assert_eq!(ready["validated"], true);
-            assert_eq!(ready["effective_provider_id"], "ready.provider");
-            assert_eq!(ready["live_dispatch"], "validated");
-            assert_eq!(ready["route_state"], "ready");
-            let rows = output["providers"].as_array().expect("provider rows");
-            assert_eq!(
-                rows.iter()
-                    .find(|provider| provider["id"] == "failing.provider")
-                    .expect("failing provider row")["state"],
-                "runtime_unavailable"
-            );
-            assert_eq!(
-                rows.iter()
-                    .find(|provider| provider["id"] == "ready.provider")
-                    .expect("ready provider row")["state"],
-                "ready"
-            );
-            assert_eq!(
-                validation["ready_backends"],
-                serde_json::json!(["ready"]),
-                "the usable --backend values are named directly"
-            );
-            // Providers are available, but Cook still requires an explicit
-            // backend when policy supplies no default. The report separates
-            // that operator selection from an executor outage.
-            assert_eq!(output["operator_summary"]["state"], "selection_required");
-            assert_eq!(validation["route_state"], "selection_required");
-            assert_eq!(
-                render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
-                Some(
-                    "Agent task providers\nStatus: selection_required\nProviders shown: 2\nChoose backend: ready\nNext: homeboy agent-task providers --backend ready --validate-readiness".to_string()
-                ),
-                "the rendered report preserves the selection decision over the empty-route dispatchability verdict"
-            );
-            assert_eq!(
-                output["operator_summary"]["selection_choices"],
-                serde_json::json!([
-                    {
-                        "backend": "ready",
-                        "command": "homeboy agent-task providers --backend ready --validate-readiness",
-                    },
-                ])
-            );
-            assert_eq!(validation["validated"], false);
         });
     }
 
@@ -4083,9 +3756,9 @@ mod tests {
     #[test]
     fn providers_set_default_fails_closed_and_writes_nothing_when_no_backend_is_ready() {
         crate::test_support::with_isolated_home(|_| {
-            let mut dead = credential_declaring_provider();
-            dead.id = "dead.provider".to_string();
-            dead.backend = "dead".to_string();
+            let fake = FakePi::with_probes("exit 99", "exit 1");
+            let mut dead = fake.provider();
+            dead.secret_env_requirements = credential_declaring_provider().secret_env_requirements;
             let catalog = provider_catalog(vec![dead]);
 
             let error = write_default_backend_from_readiness(&catalog)
@@ -4101,53 +3774,6 @@ mod tests {
             let after = homeboy::core::defaults::load_config();
             assert_eq!(after.agent_task.default_backend, None);
             assert_eq!(after.agent_task.rotation, None);
-        });
-    }
-
-    #[test]
-    fn providers_report_selection_required_with_matching_identity_catalog() {
-        crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(None, None);
-            let output = providers_with_catalog(
-                providers_args(),
-                provider_catalog(vec![
-                    provider("zeta.provider", "zeta"),
-                    provider("alpha.provider", "alpha"),
-                ]),
-            )
-            .expect("provider report")
-            .0;
-
-            assert_eq!(output["operator_summary"]["state"], "selection_required");
-            assert_eq!(
-                output["readiness_validation"]["route_state"],
-                "selection_required"
-            );
-            assert_eq!(output["providers"].as_array().map(Vec::len), Some(2));
-            assert_eq!(
-                output["provider_identity_catalog"].as_array().map(Vec::len),
-                Some(2),
-                "the compact identity catalog covers every displayed provider"
-            );
-            assert_eq!(
-                output["provider_identity_catalog"]
-                    .as_array()
-                    .expect("identity catalog")
-                    .iter()
-                    .map(|identity| identity["executor_provider_id"].clone())
-                    .collect::<Vec<_>>(),
-                output["providers"]
-                    .as_array()
-                    .expect("compact providers")
-                    .iter()
-                    .map(|provider| provider["id"].clone())
-                    .collect::<Vec<_>>(),
-                "each presented provider has its matching identity entry"
-            );
-            assert_eq!(
-                output["operator_summary"]["next_action"],
-                "homeboy agent-task providers --backend alpha --validate-readiness"
-            );
         });
     }
 
