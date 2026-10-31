@@ -209,18 +209,6 @@ impl UpgradeOperation {
         self.observation.as_ref().map(ActiveObservation::run_id)
     }
 
-    pub(super) fn record_cancelled_durable(&mut self, identity: &str) -> Result<()> {
-        emit_upgrade_phase(&format!("cancelled {identity}"));
-        if !self.metadata["cancelled"].is_array() {
-            self.metadata["cancelled"] = json!([]);
-        }
-        self.metadata["cancelled"]
-            .as_array_mut()
-            .expect("array")
-            .push(json!(identity));
-        self.persist_durable()
-    }
-
     pub fn set_phase_durable(&mut self, phase: &str) -> Result<()> {
         emit_upgrade_phase(phase);
         self.transition_phase(phase);
@@ -2026,12 +2014,6 @@ mod tests {
                 RunStatus::Pass.as_str()
             );
         });
-    }
-
-    #[cfg(unix)]
-    fn write_executable(path: &std::path::Path, contents: &str) {
-        homeboy_test_support::write_executable(path, contents, 0o755)
-            .expect("write executable fixture");
     }
 
     #[test]
