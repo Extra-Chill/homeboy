@@ -5,9 +5,8 @@ use std::path::PathBuf;
 
 use crate::commands::{
     agent_task, bench, cleanup, component, config, contract, control_plane, daemon, deploy,
-    extension, file, fuzz, git, harvest, project, refactor, release, review, rig, runner, runs,
-    runtime, self_cmd, server, source, ssh, status, trace, tunnel, upgrade, workflow, workload,
-    worktree,
+    extension, fuzz, git, harvest, project, refactor, release, review, rig, runner, runs, runtime,
+    self_cmd, server, source, ssh, status, trace, tunnel, upgrade, workflow, workload, worktree,
 };
 
 mod argument_provenance;
@@ -189,8 +188,6 @@ pub enum Commands {
     Workload(workload::WorkloadArgs),
     /// Manage component dependencies
     Deps(DepsArgs),
-    /// Remote file operations
-    File(file::FileArgs),
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
     /// Recover remote component content into local Git history
@@ -1492,17 +1489,6 @@ mod tests {
     }
 
     #[test]
-    fn ssh_help_routes_persisted_artifacts_to_file_commands() {
-        let help = scoped_help(&["ssh"]);
-
-        assert!(help.contains("Persisted artifact and file transfers use `homeboy file`"));
-        assert!(help.contains("homeboy file copy ./artifact.tar.gz prod:/var/tmp/artifact.tar.gz"));
-        assert!(help.contains("homeboy file copy prod:/var/tmp/result.json ./result.json"));
-        assert!(help.contains("homeboy file sync ./artifacts prod:/var/tmp/artifacts"));
-        assert!(help.contains("For a persisted remote artifact rather than stdout"));
-    }
-
-    #[test]
     fn reconciliation_help_names_each_state_plane_and_mutation_boundary() {
         let runs = scoped_help(&["runs", "reconcile"]);
         assert!(runs.contains("observation records"));
@@ -1570,8 +1556,6 @@ mod tests {
                 "--dry-run",
             ]
             .as_slice(),
-            ["homeboy", "file", "delete", "mysite", "tmp.txt", "--apply"].as_slice(),
-            ["homeboy", "file", "write", "mysite", "tmp.txt", "--apply"].as_slice(),
         ] {
             Cli::try_parse_from(args).unwrap_or_else(|error| {
                 panic!("documented command form failed to parse: {args:?}\n{error}")

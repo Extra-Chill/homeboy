@@ -50,10 +50,6 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
         "action-tagged daemon job projection; follow-up candidate",
     ),
     (
-        "file list",
-        "remote directory listing; FileOutput shared with read/write/delete",
-    ),
-    (
         "fuzz list",
         "per-component workload discovery report with diagnostics",
     ),

@@ -3,7 +3,7 @@ use crate::command_contract::{CommandRawOutputMode, CommandResponseMode};
 
 use super::output_runtime::{CommandPresentation, CommandRun};
 use super::utils::{response as output, tty};
-use super::{file, release, review, runner, runs, runtime, self_cmd, ssh, trace};
+use super::{release, review, runner, runs, runtime, self_cmd, ssh, trace};
 
 pub enum RawExecution {
     Handled(i32),
@@ -68,13 +68,6 @@ fn run_markdown(command: Commands) -> CommandRun {
 fn run_plain_text(command: Commands, retain_raw_evidence: bool) -> CommandRun {
     match command {
         Commands::Component(args) => raw_stdout_only(super::component::run_changed(args)),
-        Commands::File(args) => raw_stdout_only(match file::run(args) {
-            Ok((file::FileCommandOutput::Raw(content), exit_code)) => Ok((content, exit_code)),
-            Ok(_) => Err(homeboy::core::Error::internal_unexpected(
-                "Unexpected output type for raw mode",
-            )),
-            Err(err) => Err(err),
-        }),
         Commands::Runner(args)
             if runner::is_compact_exec_stdout(&args)
                 || runner::is_compact_job_list_stdout(&args) =>

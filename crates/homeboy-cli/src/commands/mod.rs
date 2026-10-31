@@ -235,7 +235,6 @@ pub mod daemon;
 pub mod deploy;
 pub mod docs;
 pub mod extension;
-pub mod file;
 pub mod fuzz;
 pub mod git;
 pub mod harvest;

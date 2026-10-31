@@ -372,7 +372,6 @@ const FUZZ_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const WORKLOAD_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write"];
-const FILE_APPLY_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 
 const fn mutating_safety() -> CommandSafetySpec {
     CommandSafetySpec {
@@ -469,8 +468,6 @@ const fn paths_safety_without_notes(
 }
 
 const DEPS_MUTATING_PATHS: &[&str] = &["install", "update", "stack apply"];
-const FILE_APPLY_PATHS: &[&str] = &["write", "delete", "mkdir", "rename"];
-const FILE_TRANSFER_PATHS: &[&str] = &["copy", "sync"];
 const SERVER_OPERATOR_PATHS: &[&str] = &[
     "create",
     "set",
@@ -511,20 +508,6 @@ const DEPS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     mutating_safety(),
     "mutates dependency manifests, lockfiles, or installed dependency trees",
 )];
-
-const FILE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    paths_safety(
-        FILE_APPLY_PATHS,
-        operator_safety(None, FILE_APPLY_DANGEROUS_FLAGS),
-        "default output is a non-mutating plan; pass --apply to mutate",
-    ),
-    paths_safety(
-        &["edit"],
-        operator_safety(Some("--dry-run"), &[]),
-        "mutates file content unless --dry-run is passed",
-    ),
-    paths_safety_without_notes(FILE_TRANSFER_PATHS, mutating_safety()),
-];
 
 const SERVER_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety_without_notes(
     SERVER_OPERATOR_PATHS,

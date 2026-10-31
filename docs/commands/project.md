@@ -144,7 +144,6 @@ homeboy project create my-site my-site.local \
 All commands execute locally when no `server_id` is configured:
 
 - **Extension CLI tools** (`homeboy wp`, `homeboy cargo`, or extension-provided verbs) - execute in local shell
-- **Files** (`homeboy file`) - browses/edits files at `base_path`
 - **Extension platform behaviors** - project discovery, version patterns, etc.
 
 ### What Requires a Server
