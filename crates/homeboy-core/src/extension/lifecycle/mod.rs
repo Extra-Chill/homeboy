@@ -228,23 +228,6 @@ fn durable_refresh_source(source: &str, extension_id: &str) -> Result<String> {
         remove_path(&staging_root, "replace staged durable extension source")?;
     }
 
-    if let Some(source_root) = runtime_package_source_root(&source) {
-        // Preserve the canonical repository layout. Runtime materialization
-        // resolves the root manifest from the parent of `agent-runtimes`, not
-        // from an isolated runtime package.
-        copy_dir_recursive(
-            &source,
-            &staging_root.join("agent-runtimes").join(extension_id),
-        )?;
-        copy_shared_refresh_assets(Some(source_root), &staging_root)?;
-        replace_durable_refresh_source(&staging_root, &durable_root)?;
-        return Ok(durable_root
-            .join("agent-runtimes")
-            .join(extension_id)
-            .to_string_lossy()
-            .to_string());
-    }
-
     let manifest_at_source = source.join(format!("{}.json", extension_id));
     if manifest_at_source.exists() {
         let staged_extension = staging_root.join(extension_id);
@@ -276,13 +259,6 @@ fn durable_refresh_source(source: &str, extension_id: &str) -> Result<String> {
         Some(source.to_string_lossy().to_string()),
         None,
     ))
-}
-
-fn runtime_package_source_root(source: &Path) -> Option<&Path> {
-    let runtime_packages = source.parent()?;
-    (runtime_packages.file_name()?.to_str()? == "agent-runtimes")
-        .then(|| runtime_packages.parent())
-        .flatten()
 }
 
 fn absolute_source_path(source: &str) -> Result<PathBuf> {
@@ -1009,106 +985,6 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn refresh_nested_runtime_package_preserves_root_assets_and_publishes_generation() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let old_source = home.join("old-source");
-            let source = home.join("source-repo");
-            let boundary_source = home.join("boundary-source");
-            write_extension_fixture(&old_source, "pi");
-            write_extension_fixture_with_version(&source.join("agent-runtimes"), "pi", "2.0.0");
-            write_declared_runtime_shared_assets(&source);
-            if !run_git(&source, &["init", "--quiet"]) || !commit_all(&source, "runtime source") {
-                return;
-            }
-            let source_revision =
-                git_output(&source, &["rev-parse", "--short", "HEAD"]).expect("source revision");
-            fs::create_dir_all(&boundary_source).expect("boundary source");
-            write_shared_asset_manifest(&boundary_source, &[]);
-
-            install(&old_source.join("pi").to_string_lossy(), Some("pi"))
-                .expect("install old extension");
-            crate::runtime_package::refresh_shared_assets(&boundary_source)
-                .expect("activate runtime generation boundary");
-
-            refresh(
-                &source.join("agent-runtimes/pi").to_string_lossy(),
-                Some("pi"),
-                None,
-            )
-            .expect("refresh nested runtime package");
-
-            assert_eq!(
-                load_extension("pi").expect("refreshed extension").version,
-                "2.0.0"
-            );
-            assert!(home
-                .join(".config/homeboy/extension-sources/pi/homeboy-extension-root.json")
-                .is_file());
-            assert!(home
-                .join(".config/homeboy/agent-runtimes/pi/pi.json")
-                .is_file());
-            assert!(
-                fs::read_to_string(home.join(".config/homeboy/agent-runtimes/pi/pi.json"))
-                    .expect("stable runtime manifest")
-                    .contains("2.0.0")
-            );
-            assert_eq!(
-                fs::read_to_string(home.join(".config/homeboy/agent-runtimes/pi/.source-revision"))
-                    .expect("stable runtime revision")
-                    .trim(),
-                source_revision
-            );
-            assert_eq!(
-                fs::read_link(home.join(".config/homeboy/extensions/pi"))
-                    .expect("durable extension link"),
-                home.join(".config/homeboy/extension-sources/pi/agent-runtimes/pi")
-            );
-        });
-    }
-
-    #[test]
-    fn refresh_nested_runtime_package_failure_preserves_extension_and_generation() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let old_source = home.join("old-source");
-            let source = home.join("source-repo");
-            let boundary_source = home.join("boundary-source");
-            write_extension_fixture(&old_source, "pi");
-            write_extension_fixture_with_version(&source.join("agent-runtimes"), "pi", "2.0.0");
-            fs::write(source.join("homeboy-extension-root.json"), "not json")
-                .expect("malformed root manifest");
-            fs::create_dir_all(&boundary_source).expect("boundary source");
-            write_shared_asset_manifest(&boundary_source, &[]);
-
-            install(&old_source.join("pi").to_string_lossy(), Some("pi"))
-                .expect("install old extension");
-            crate::runtime_package::refresh_shared_assets(&boundary_source)
-                .expect("activate runtime generation boundary");
-            let current = fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
-                .expect("active generation");
-
-            refresh(
-                &source.join("agent-runtimes/pi").to_string_lossy(),
-                Some("pi"),
-                None,
-            )
-            .expect_err("malformed root manifest should reject refresh");
-
-            assert_eq!(
-                fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
-                    .expect("preserved generation"),
-                current
-            );
-            assert_eq!(
-                fs::read_link(home.join(".config/homeboy/extensions/pi"))
-                    .expect("preserved extension link"),
-                old_source.join("pi")
-            );
-        });
-    }
-
-    #[test]
     fn install_without_replace_remains_non_destructive() {
         with_isolated_home(|home| {
             let home = home.path();
@@ -1405,83 +1281,6 @@ exec '{}' "$@"
             assert_eq!(
                 fs::read_to_string(external.join("extensions/scripts/lib/helper.sh")).unwrap(),
                 "declared helper\n"
-            );
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn declared_source_install_preserves_runtime_generation_write_boundary() {
-        with_isolated_home(|home| {
-            let config = home.path().join(".config/homeboy");
-            let _config =
-                homeboy_core::test_support::EnvVarGuard::set("HOMEBOY_CONFIG_ROOT", &config);
-            let _data = homeboy_core::test_support::EnvVarGuard::set(
-                "HOMEBOY_DATA_DIR",
-                home.path().join("data"),
-            );
-            let _runtime = homeboy_core::test_support::EnvVarGuard::set(
-                "HOMEBOY_RUNTIME_TMPDIR",
-                home.path().join("runtime"),
-            );
-            let first = home.path().join("first-generation-source");
-            write_extension_fixture(&first, "rust");
-            write_declared_runtime_shared_assets(&first);
-            crate::runtime_package::refresh_shared_assets(&first).unwrap();
-            let generation_link = config.join("runtime-generations/current");
-            let old_link = fs::read_link(&generation_link).unwrap();
-            let old_generation = config.join("runtime-generations").join(&old_link);
-            let relative = ["agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs",
-                "runtime-agent-ci/lib/agent-task-provider-contract.js", "agent-task-contracts/agent-task-provider-contract.js"];
-            let old_contents: Vec<_> = relative
-                .iter()
-                .map(|path| fs::read(old_generation.join(path)).unwrap())
-                .collect();
-            let stable_runtime_link = fs::read_link(config.join("agent-runtimes")).unwrap();
-            let second = home.path().join("next-generation-source");
-            write_extension_fixture(&second, "rust");
-            write_shared_runtime_fixture(&second);
-            write_shared_asset_manifest(
-                &second,
-                &[
-                    "agent-runtimes",
-                    "runtime-agent-ci",
-                    "agent-task-contracts",
-                    "scripts/lib",
-                ],
-            );
-            fs::create_dir_all(second.join("scripts/lib")).unwrap();
-            fs::write(second.join("scripts/lib/helper.sh"), "second helper\n").unwrap();
-            for path in relative {
-                fs::write(second.join(path), "second generation\n").unwrap();
-            }
-            let extension = config.join("extensions/rust");
-            fs::create_dir_all(extension.parent().unwrap()).unwrap();
-            super::resolve_cloned_extension(&second, "rust", &extension, "fixture-source").unwrap();
-            assert_ne!(
-                fs::read_link(&generation_link).unwrap(),
-                old_link,
-                "publish a successor, not write through the active generation"
-            );
-            let new_generation = generation_link.canonicalize().unwrap();
-            for (path, content) in relative.iter().zip(&old_contents) {
-                assert_eq!(
-                    &fs::read(old_generation.join(path)).unwrap(),
-                    content,
-                    "previous immutable generation must remain untouched"
-                );
-                assert_eq!(
-                    fs::read_to_string(new_generation.join(path)).unwrap(),
-                    "second generation\n"
-                );
-            }
-            assert_eq!(
-                fs::read_link(config.join("agent-runtimes")).unwrap(),
-                stable_runtime_link
-            );
-            assert_eq!(
-                fs::read_to_string(config.join("extensions/scripts/lib/helper.sh")).unwrap(),
-                "second helper\n"
             );
         });
     }

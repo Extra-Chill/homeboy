@@ -147,7 +147,6 @@ const REPRESENTATIVE_INVOCATIONS: &[&[&str]] = &[
     &["workload", "run", "--kind", "example"],
     &["rig", "check", "target"],
     &["rig", "run", "--profile", "profile", "rig-1"],
-    &["runtime", "refresh", "--source", "source", "runtime-1"],
     &["worktree", "cleanup"],
     &["extension", "update"],
     &["extension", "refresh", "source"],

@@ -85,8 +85,7 @@ pub(crate) const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth statu
 // re-exported here so existing `spec::*_LAB_LABEL` call sites are unchanged.
 pub(crate) use homeboy_lab_contract::lab::labels::{
     BENCH_LAB_LABEL, FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REVIEW_LAB_LABEL,
-    RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL,
-    TRACE_LAB_LABEL, WORKLOAD_LAB_LABEL,
+    RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL, WORKLOAD_LAB_LABEL,
 };
 
 pub(crate) const RIG_SOURCE_MANAGEMENT_LAB_LABEL: &str = "rig source management";
@@ -305,12 +304,6 @@ const RIG_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
         hint_label: RIG_RUN_LAB_LABEL,
     },
 ];
-
-const RUNTIME_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
-    contract_labels: &[RUNTIME_REFRESH_LAB_LABEL],
-    message_label: RUNTIME_REFRESH_LAB_LABEL,
-    hint_label: RUNTIME_REFRESH_LAB_LABEL,
-}];
 
 const EXTENSION_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     CommandLabSupportSummary {
@@ -837,12 +830,6 @@ const EXTENSION_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         "executes extension-owned actions that may mutate the target system",
     ),
 ];
-
-const RUNTIME_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
-    &["refresh"],
-    mutating_safety(),
-    "mutates installed runtime package files",
-)];
 
 const CLEANUP_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     &["artifacts"],

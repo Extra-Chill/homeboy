@@ -312,24 +312,6 @@ impl RunnerExecOptions {
         self
     }
 
-    pub(crate) fn with_optional_capability_preflight(
-        mut self,
-        capability_preflight: Option<RunnerCapabilityPreflight>,
-    ) -> Self {
-        self.capability_preflight = capability_preflight;
-        self
-    }
-
-    pub(crate) fn with_source_snapshot(mut self, source_snapshot: SourceSnapshot) -> Self {
-        self.source_snapshot = Some(source_snapshot);
-        self
-    }
-
-    pub(crate) fn with_required_extensions(mut self, required_extensions: Vec<String>) -> Self {
-        self.required_extensions = required_extensions;
-        self
-    }
-
     pub(crate) fn without_evidence_mirror(mut self) -> Self {
         self.mirror_evidence = false;
         self.print_handoff = false;

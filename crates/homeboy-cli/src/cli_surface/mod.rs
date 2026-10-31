@@ -223,8 +223,6 @@ pub enum Commands {
     Runner(runner::RunnerArgs),
     /// Inspect sealed source-package admissibility without staging resources
     Source(source::SourceArgs),
-    /// Inspect core-owned runtime helper assets
-    Runtime(runtime::RuntimeArgs),
     /// Run declarative multi-step and repeating workflows as daemon jobs
     Workflow(workflow::WorkflowArgs),
     /// Manage component-backed task worktrees

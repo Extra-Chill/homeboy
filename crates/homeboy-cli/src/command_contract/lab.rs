@@ -205,7 +205,6 @@ const LAB_VISIBLE_COMMAND_PATHS: &[&[&str]] = &[
     &["workload", "run"],
     &["rig", "check"],
     &["rig", "run"],
-    &["runtime", "refresh"],
     &["worktree", "cleanup"],
     &["extension", "update"],
     &["extension", "refresh"],

@@ -2619,16 +2619,21 @@ fn dispatchable_backend_choices(
     catalog: &AgentTaskProviderCatalog,
     probe_runtime: bool,
 ) -> Vec<ProviderSelectionChoice> {
+    let provider_config =
+        effective_provider_catalog_config().unwrap_or_else(|_| serde_json::json!({}));
+    let mut cache = ProviderRuntimeReadinessCache::default();
     let mut backends = catalog
         .providers()
         .iter()
         .filter(|provider| {
-            evaluate_provider_dispatchability(
+            evaluate_provider_dispatchability_with_config(
                 catalog,
                 &provider.backend,
                 Some(&provider.id),
                 None,
+                &provider_config,
                 probe_runtime,
+                &mut cache,
             )
             .ready
         })
@@ -3639,6 +3644,9 @@ mod tests {
     #[test]
     fn providers_set_default_leads_with_pi() {
         crate::test_support::with_isolated_home(|_| {
+            let pi =
+                super::super::fake_pi_test::FakePi::with_probes("exit 0", "printf 'test model\\n'");
+            pi.install_catalog_config();
             let ready = |id: &str, backend: &str| {
                 let mut provider = provider(id, backend);
                 provider.readiness_invocation = Some(
@@ -3649,10 +3657,7 @@ mod tests {
                 );
                 provider
             };
-            let catalog = provider_catalog(vec![
-                ready("alpha.provider", "alpha"),
-                ready("pi.agent-task-executor", "pi"),
-            ]);
+            let catalog = provider_catalog(vec![ready("alpha.provider", "alpha"), pi.provider()]);
             let output = write_default_backend_from_readiness(&catalog)
                 .expect("pi is live-ready")
                 .0;

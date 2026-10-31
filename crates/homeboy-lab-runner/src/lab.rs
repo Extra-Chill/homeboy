@@ -11,7 +11,6 @@
 //! - `agent_task_bridge` — inline AgentTask plan remapping and run-plan
 //!   lifecycle mirroring.
 //! - `secrets` — command-specific secret env hydration (agent-task vs trace).
-//! - `provider_preflight` — agent-task executor provider preflight on the
 //!   selected runner (backend/selector selectability before dispatch).
 //! - `evidence` — terminal Lab run evidence discovery for the idempotency
 //!   guard.
@@ -28,7 +27,6 @@ mod args_util;
 mod evidence;
 mod fallback;
 pub(crate) mod offload;
-mod provider_preflight;
 pub(crate) mod secrets;
 mod trace_fetch_refs;
 mod workspace_plan;

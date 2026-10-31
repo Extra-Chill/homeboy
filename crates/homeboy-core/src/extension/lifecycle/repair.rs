@@ -150,12 +150,7 @@ fn replace_from_path(
     }
 
     local_files::ensure_app_dirs()?;
-    install_linked_shared_assets(
-        &source,
-        &extension_dir,
-        source_root.as_deref(),
-        requested_revision,
-    )?;
+    install_linked_shared_assets(&source, &extension_dir, source_root.as_deref())?;
 
     let old_path = installed_source_path(&extension_dir);
     let source_revision = git::short_head_revision(&source).or_else(|| {
@@ -862,81 +857,6 @@ mod tests {
             assert!(home
                 .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
                 .exists());
-        });
-    }
-
-    #[test]
-    fn relink_nested_runtime_package_publishes_active_generation() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let old_source = home.join("old-source");
-            let new_source = home.join("new-source");
-            let boundary_source = home.join("boundary-source");
-            write_extension_fixture(&old_source, "pi");
-            write_extension_fixture_with_version(&new_source.join("agent-runtimes"), "pi", "2.0.0");
-            write_declared_runtime_shared_assets(&new_source);
-            fs::create_dir_all(&boundary_source).expect("boundary source");
-            write_shared_asset_manifest(&boundary_source, &[]);
-
-            install(&old_source.join("pi").to_string_lossy(), Some("pi"))
-                .expect("install linked extension");
-            crate::runtime_package::refresh_shared_assets(&boundary_source)
-                .expect("activate runtime generation boundary");
-
-            relink(
-                "pi",
-                &new_source.join("agent-runtimes/pi").to_string_lossy(),
-            )
-            .expect("relink should publish declared runtime assets");
-
-            assert!(home
-                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
-                .exists());
-            assert_eq!(
-                fs::read_link(home.join(".config/homeboy/extensions/pi"))
-                    .expect("read replacement link"),
-                new_source.join("agent-runtimes/pi")
-            );
-        });
-    }
-
-    #[test]
-    fn relink_malformed_runtime_root_preserves_active_generation_and_link() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let old_source = home.join("old-source");
-            let new_source = home.join("new-source");
-            let boundary_source = home.join("boundary-source");
-            write_extension_fixture(&old_source, "pi");
-            write_extension_fixture_with_version(&new_source.join("agent-runtimes"), "pi", "2.0.0");
-            fs::write(new_source.join("homeboy-extension-root.json"), "not json")
-                .expect("malformed root manifest");
-            fs::create_dir_all(&boundary_source).expect("boundary source");
-            write_shared_asset_manifest(&boundary_source, &[]);
-
-            install(&old_source.join("pi").to_string_lossy(), Some("pi"))
-                .expect("install linked extension");
-            crate::runtime_package::refresh_shared_assets(&boundary_source)
-                .expect("activate runtime generation boundary");
-            let current = fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
-                .expect("active generation");
-
-            relink(
-                "pi",
-                &new_source.join("agent-runtimes/pi").to_string_lossy(),
-            )
-            .expect_err("malformed root manifest should reject relink");
-
-            assert_eq!(
-                fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
-                    .expect("preserved generation"),
-                current
-            );
-            assert_eq!(
-                fs::read_link(home.join(".config/homeboy/extensions/pi"))
-                    .expect("preserved extension link"),
-                old_source.join("pi")
-            );
         });
     }
 

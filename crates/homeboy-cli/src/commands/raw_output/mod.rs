@@ -3,7 +3,7 @@ use crate::command_contract::{CommandRawOutputMode, CommandResponseMode};
 
 use super::output_runtime::{CommandPresentation, CommandRun};
 use super::utils::{response as output, tty};
-use super::{release, review, runner, runs, runtime, self_cmd, ssh, trace};
+use super::{release, review, runner, runs, self_cmd, ssh, trace};
 
 pub enum RawExecution {
     Handled(i32),
@@ -75,7 +75,6 @@ fn run_plain_text(command: Commands, retain_raw_evidence: bool) -> CommandRun {
             runner_compact_raw_output(args)
         }
         Commands::Ssh(args) => ssh_raw(args, retain_raw_evidence),
-        Commands::Runtime(args) => raw_stdout_only(runtime::run_plain_text(args)),
         _ => raw_stdout_only(unsupported_output("plain text")),
     }
 }

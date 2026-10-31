@@ -175,7 +175,6 @@ pub(crate) fn run_runner_resident_lab_offload(
         remote_cwd: runner_workspace_root.to_string(),
         command: command.clone(),
         remote_command: command,
-        remapped_args: remapped_args.clone(),
         accepted_extension_settings: Vec::new(),
         secret_preflight_args: remapped_args,
         agent_task_run_id,
@@ -191,7 +190,6 @@ pub(crate) fn run_runner_resident_lab_offload(
         source_snapshot: None,
         path_materialization_plan: Some(path_materialization_plan),
         capability_preflight: None,
-        provider_preflight: None,
         path_remaps,
         workspace_mapping_metadata: serde_json::json!({
             "schema": "homeboy/lab-runner-resident-workspace/v1",
