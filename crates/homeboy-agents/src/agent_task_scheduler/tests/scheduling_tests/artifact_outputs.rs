@@ -93,7 +93,7 @@ fn binds_artifacts_to_generic_child_run_ids_for_durable_fanout() {
 /// workspace and exits cleanly must stay succeeded, with a succeeded provider
 /// runtime, so publication accepts it (#15679).
 #[test]
-fn harvested_candidate_commit_satisfies_required_patch_artifact() {
+fn harvested_candidate_commit_satisfies_required_change_evidence() {
     use super::concurrency::concurrency_tests::init_git_workspace;
 
     struct EditAndSucceed;

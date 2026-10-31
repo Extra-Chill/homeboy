@@ -249,7 +249,7 @@ pub struct CookDeliveryCandidate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub patch_artifact: Option<String>,
+    pub candidate_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -576,12 +576,7 @@ fn read_candidate(
         string_at(promotion, pointer)
             .or_else(|| checkpoint.and_then(|checkpoint| string_at(checkpoint, pointer)))
     };
-    let patch_artifact = promotion
-        .get("patch_artifact")
-        .or_else(|| promotion.get("patch"))
-        .and_then(|artifact| {
-            string_at(artifact, "/id").or_else(|| string_at(artifact, "/artifact_id"))
-        });
+    let candidate_sha = string_at(promotion, "/candidate/candidate_sha");
     let candidate_recorded = promotion
         .pointer("/provenance/candidate")
         .is_some_and(|candidate| !candidate.is_null());
@@ -594,7 +589,7 @@ fn read_candidate(
         .pointer("/provenance/post_apply")
         .and_then(Value::as_bool)
         == Some(true)
-        && string_at(promotion, "/patch_artifact/id").is_some()
+        && string_at(promotion, "/candidate/candidate_sha").is_some()
         && destination_worktree(promotion).is_some()
         && candidate_recorded;
     CookDeliveryCandidate {
@@ -602,8 +597,8 @@ fn read_candidate(
         promotion: status,
         fingerprint: identity("/provenance/candidate/fingerprint/sha256"),
         identity: candidate_identity(promotion),
-        patch_artifact,
-        patch_sha: identity("/patch_artifact/sha256"),
+        candidate_sha,
+        patch_sha: identity("/candidate/tree_sha"),
         verified_base: identity("/verified_base/sha"),
         target_applied,
     }

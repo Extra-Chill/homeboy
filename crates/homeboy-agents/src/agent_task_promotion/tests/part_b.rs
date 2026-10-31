@@ -242,8 +242,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
             &store,
         )
         .expect("promote recovered controller projection");
-        assert_ne!(report.patch_artifact.path, patch.path);
-        assert_eq!(report.patch_artifact.kind, "candidate_commit");
+        assert!(report.candidate.is_some());
         assert!(provider.applied_patch_contents.is_empty());
     });
 }
@@ -413,7 +412,7 @@ fn promote_no_op_outcome_uses_audited_committed_candidate() {
     .expect("audited committed candidate promotes");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.kind, "candidate_commit");
+    assert!(report.candidate.is_some());
     assert_eq!(report.provenance["candidate_commit"]["base_sha"], base);
     assert_eq!(report.provenance["candidate"]["kind"], "git");
     assert_eq!(
@@ -490,7 +489,7 @@ fn adopt_no_op_pre_existing_candidate_when_base_equals_candidate() {
     .expect("pre-existing immutable candidate is adopted after no-op review");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.kind, "candidate_commit");
+    assert!(report.candidate.is_some());
     assert_eq!(report.changed_files, vec!["lib.rs"]);
     assert_eq!(report.provenance["base_ref"], git_head(&repo, "HEAD~1"));
     assert_eq!(report.provenance["historical_task_base"], candidate);
@@ -864,7 +863,7 @@ fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
     .expect("commits promoted");
 
     assert_eq!(report.provenance["candidate_commit"]["base_sha"], base);
-    let candidate = report.patch_artifact.id.as_str();
+    let candidate = report.candidate.as_ref().unwrap().candidate_sha.as_str();
     assert_eq!(git_head(&repo, &format!("{candidate}~2")), base);
     assert_eq!(report.changed_files, vec!["first.txt", "second.txt"]);
 }
@@ -937,7 +936,7 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         "source": { "task_id": "task-1" },
         "to_worktree": "repo@fix-8307",
         "target": { "worktree": "repo@fix-8307", "path": target },
-        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
+        "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
         "verified_base": { "base": "main", "sha": "checkpointed-base" },
         "provenance": {
             "resume_contract": {
@@ -957,6 +956,8 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
     let gate_log = temp.path().join("gate-executions");
     options.gates.verify = vec![format!("printf ran >> '{}'", gate_log.display())];
     let mut previous = previous;
+    previous["candidate"] =
+        serde_json::from_str::<Value>(&options.source).unwrap()["candidate"].clone();
     previous["provenance"]["resume_contract"]["gates"] =
         serde_json::to_value(&options.gates).unwrap();
     for (index, status) in ["gates_deferred", "gate_deferred"].into_iter().enumerate() {
@@ -1065,7 +1066,7 @@ fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
         "source": { "task_id": "task-1" },
         "to_worktree": "fixture@target",
         "target": { "worktree": "fixture@target", "path": target },
-        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
+        "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
         "provenance": {
             "post_apply": true,
             "candidate": candidate,
@@ -1077,6 +1078,9 @@ fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
     });
 
     let options = super::resume_candidate::bind_candidate(options, &target);
+    let mut checkpoint = checkpoint;
+    checkpoint["candidate"] =
+        serde_json::from_str::<Value>(&options.source).unwrap()["candidate"].clone();
     let resumed = resume_promoted_patch(options.clone(), &target, &checkpoint)
         .expect("candidate commit resumes with recorded trunk base");
     assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
@@ -1138,7 +1142,7 @@ fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
         "source": { "task_id": "task-1" },
         "to_worktree": "repo@fix-9392",
         "target": { "worktree": "repo@fix-9392", "path": target },
-        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
+        "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
         "provenance": { "candidate": candidate },
     });
 
@@ -1147,6 +1151,9 @@ fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
     assert!(rejected.message.contains("explicit completed-gate rerun"));
 
     let options = super::resume_candidate::bind_candidate(options(true), &target);
+    let mut previous = previous;
+    previous["candidate"] =
+        serde_json::from_str::<Value>(&options.source).unwrap()["candidate"].clone();
     let report = resume_promoted_patch(options, &target, &previous)
         .expect("exact applied candidate resumes gates");
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
@@ -1948,11 +1955,14 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
         "source": { "task_id": "task-1" },
         "to_worktree": "fixture@target",
         "target": { "worktree": "fixture@target", "path": target },
-        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
+        "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
         "provenance": { "candidate": candidate },
     });
 
     let options = super::resume_candidate::bind_candidate(options, &target);
+    let mut previous = previous;
+    previous["candidate"] =
+        serde_json::from_str::<Value>(&options.source).unwrap()["candidate"].clone();
     let report = resume_promoted_patch(options.clone(), &target, &previous)
         .expect("follow-up verification accepts the exact candidate commit");
 
@@ -1973,7 +1983,7 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
     std::fs::remove_file(target.join("unrelated.txt")).expect("restore candidate tree");
     let restored =
         resume_promoted_patch(options, &target, &previous).expect("candidate tree resumes");
-    assert_eq!(restored.patch_artifact.id, report.patch_artifact.id);
+    assert_eq!(restored.candidate, report.candidate);
 }
 
 #[test]
@@ -2040,7 +2050,7 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
     let feedback_baseline = serde_json::json!({
         "candidate_commit": report.provenance["candidate_commit"],
         "current_diff": diff,
-        "patch_artifact": {"id": report.patch_artifact.id, "kind": "patch", "path": evidence_path, "sha256": sha256_hex(diff)},
+        "candidate": report.candidate,
     });
     crate::agent_task_candidate_tree::validate_gate_feedback_candidate_baseline(
         &workspace,

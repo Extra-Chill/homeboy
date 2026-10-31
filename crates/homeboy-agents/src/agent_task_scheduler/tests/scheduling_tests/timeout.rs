@@ -583,7 +583,7 @@ mod timeout_tests {
     }
 
     #[test]
-    fn timeout_with_empty_patch_artifacts_and_actionable_false_stays_timed_out() {
+    fn timeout_with_empty_change_evidence_and_actionable_false_stays_timed_out() {
         let temp = tempfile::tempdir().expect("tempdir");
         let artifact_root = temp.path().join("task-1-artifacts");
         fs::create_dir_all(&artifact_root).expect("artifact root");

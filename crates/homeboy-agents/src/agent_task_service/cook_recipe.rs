@@ -3717,7 +3717,7 @@ mod tests {
             "source": { "kind": "aggregate", "task_id": "task", "run_id": "run-2" },
             "to_worktree": "corrected-target",
             "target": { "worktree": "corrected-target" },
-            "patch_artifact": { "id": "patch", "kind": "patch", "path": "/tmp/patch" },
+            "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
             "gate_results": gate_results,
             "operator_notification": { "status": "completed", "message": "fixture" }
         })
@@ -3763,7 +3763,7 @@ mod tests {
             "review_form_required": false,
             "artifact_provenance": {
                 "source_run_id": "run",
-                "source_patch_artifact_sha256": "abc",
+                "source_candidate_tree_sha": "abc",
             },
         }});
         let recipe = store

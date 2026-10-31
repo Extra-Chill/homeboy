@@ -560,7 +560,7 @@ mod tests {
             "source": { "kind": "aggregate", "run_id": "run-1", "task_id": "task" },
             "to_worktree": "repo@candidate",
             "target": { "worktree": "repo@candidate" },
-            "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+            "candidate": { "base_sha": "base", "candidate_sha": "patch-1", "tree_sha": "tree" },
             "operator_notification": { "status": "completed", "message": "complete" }
         }))
         .expect("report");
@@ -590,7 +590,7 @@ mod tests {
                 "source": { "kind": "aggregate", "task_id": "task" },
                 "to_worktree": "homeboy@promotion",
                 "target": { "worktree": "homeboy@promotion" },
-                "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+                "candidate": { "base_sha": "base", "candidate_sha": "patch-1", "tree_sha": "tree" },
                 "operator_notification": { "status": "completed", "message": "complete" }
             }))
             .expect("promotion report"),
@@ -640,7 +640,7 @@ mod tests {
                 "source": { "kind": "aggregate", "task_id": "task" },
                 "to_worktree": "homeboy@promotion",
                 "target": { "worktree": "homeboy@promotion" },
-                "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+                "candidate": { "base_sha": "base", "candidate_sha": "patch-1", "tree_sha": "tree" },
                 "operator_notification": { "status": "completed", "message": "complete" }
             }))
             .expect("promotion report"),

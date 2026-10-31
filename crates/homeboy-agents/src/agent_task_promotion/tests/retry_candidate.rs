@@ -101,7 +101,10 @@ fn runtime_retry_inherits_uncommitted_work_promotes_and_pushes_candidate_sha() {
         report.status,
         super::super::AgentTaskPromotionStatus::Applied
     );
-    assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
+    assert_eq!(
+        report.candidate.as_ref().unwrap().candidate_sha,
+        candidate.candidate_sha
+    );
     let remote = temp.path().join("published.git");
     git(temp.path(), &["init", "--bare", remote.to_str().unwrap()]);
     git(

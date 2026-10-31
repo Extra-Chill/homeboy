@@ -112,9 +112,15 @@ fn fresh_candidate_without_patch_promotes_provider_commits_and_dirty_state_as_on
             report.status,
             super::super::AgentTaskPromotionStatus::Applied
         );
-        assert_eq!(report.patch_artifact.id, candidate.candidate_sha);
         assert_eq!(
-            report.patch_artifact.sha256.as_deref(),
+            report.candidate.as_ref().unwrap().candidate_sha,
+            candidate.candidate_sha
+        );
+        assert_eq!(
+            report
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.tree_sha.as_str()),
             Some(candidate.tree_sha.as_str())
         );
         assert_eq!(report.changed_files, vec!["dirty", "provider"]);

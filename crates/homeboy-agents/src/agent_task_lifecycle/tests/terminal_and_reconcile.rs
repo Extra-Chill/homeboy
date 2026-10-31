@@ -2900,7 +2900,7 @@ fn record_promotion_persists_latest_event_on_run_metadata() {
         "schema": "homeboy/agent-task-promotion-status/v1",
         "status": "applied",
         "source_run_id": "run-promotion-status",
-        "patch_artifact_id": "patch.diff",
+        "candidate_sha": "candidate",
         "to_worktree": "homeboy@fix-5055",
         "target": {
             "worktree": "homeboy@fix-5055",
@@ -2930,8 +2930,8 @@ fn record_promotion_persists_latest_event_on_run_metadata() {
         promotion
     );
     assert_eq!(
-        loaded.metadata["cook_delivery"]["artifacts"]["promotion"]["patch_artifact_id"],
-        "patch.diff"
+        loaded.metadata["cook_delivery"]["artifacts"]["promotion"]["candidate_sha"],
+        "candidate"
     );
     assert_eq!(
         loaded.metadata["cook_delivery"]["artifacts"]["promotions"]

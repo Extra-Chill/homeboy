@@ -104,38 +104,26 @@ struct WorkspaceBaseCaptureHook {
 /// Cook IDs deliberately preserve normal current-attempt selection, while
 /// attempt IDs preserve exact lifecycle lineage for recovery. `executable`
 /// permits a controller-pinned runtime to own the recovery without changing
-/// the public command shape. `artifact_id` names one canonical patch candidate
-/// when the recovery step is a choice between several.
-pub fn cook_recover_command(
-    executable: Option<&str>,
-    cook_or_attempt_id: &str,
-    artifact_id: Option<&str>,
-) -> String {
+/// the public command shape.
+pub fn cook_recover_command(executable: Option<&str>, cook_or_attempt_id: &str) -> String {
     let executable = executable
         .map(quote_arg)
         .unwrap_or_else(|| cook_recovery_command_prefix(cook_or_attempt_id));
-    cook_recover_command_with_prefix(&executable, cook_or_attempt_id, artifact_id)
+    cook_recover_command_with_prefix(&executable, cook_or_attempt_id)
 }
 
 /// Render recovery from placement already authenticated by its record.
 pub fn cook_recover_command_for_record(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     cook_or_attempt_id: &str,
-    artifact_id: Option<&str>,
 ) -> String {
     cook_recover_command_with_prefix(
         &cook_recovery_command_prefix_for_record(record),
         cook_or_attempt_id,
-        artifact_id,
     )
 }
 
-fn cook_recover_command_with_prefix(
-    executable: &str,
-    cook_or_attempt_id: &str,
-    artifact_id: Option<&str>,
-) -> String {
-    let _ = artifact_id;
+fn cook_recover_command_with_prefix(executable: &str, cook_or_attempt_id: &str) -> String {
     cook_recovery_command_with_prefix(executable, &["recover", cook_or_attempt_id])
 }
 
@@ -883,7 +871,11 @@ fn run_cook_startup_phase<T>(
 /// same candidate is idempotent while a genuinely different candidate finalizes
 /// on its own claim (#8357).
 fn finalization_operation_key(run_id: &str, promotion: &AgentTaskPromotionReport) -> String {
-    match promotion.patch_artifact.sha256.as_deref() {
+    match promotion
+        .candidate
+        .as_ref()
+        .map(|candidate| candidate.tree_sha.as_str())
+    {
         Some(sha) => format!("finalize:{run_id}:{sha}"),
         None => format!("finalize:{run_id}"),
     }
@@ -1573,16 +1565,6 @@ const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route
 /// Record that the Cook continuation lifecycle route (`agent-task recover`) selected this exact attempt.
 /// This is durable route authority, not caller-controlled plan metadata.
 pub fn authorize_cook_continue_route(options: &CookRequest) -> Result<()> {
-    authorize_cook_continue_route_with_artifact(options, None)
-}
-
-/// Persist the continuation-only patch selection beside route authority. The
-/// selector is consumed solely by controller promotion and never reaches a
-/// provider request, so retrying promotion cannot spend another execution.
-pub fn authorize_cook_continue_route_with_artifact(
-    options: &CookRequest,
-    artifact_id: Option<&str>,
-) -> Result<()> {
     agent_task_lifecycle::exact_record(&options.identity.initial_run_id)?;
     agent_task_lifecycle::record_metadata_value(
         &options.identity.initial_run_id,
@@ -1591,7 +1573,6 @@ pub fn authorize_cook_continue_route_with_artifact(
             "schema": COOK_CONTINUE_ROUTE_SCHEMA,
             "cook_id": options.identity.cook_id,
             "run_id": options.identity.initial_run_id,
-            "artifact_id": artifact_id,
         }),
     )
 }
@@ -2105,10 +2086,9 @@ fn canonical_finalization_recovery_run_id_with_stores(
     ) || promotion.source.run_id.as_deref() != Some(run_id)
         || promotion.source.task_id != task_id
         || promotion
-            .patch_artifact
-            .sha256
-            .as_deref()
-            .is_none_or(str::is_empty)
+            .candidate
+            .as_ref()
+            .is_none_or(|candidate| candidate.tree_sha.is_empty())
     {
         return None;
     }
@@ -2466,7 +2446,6 @@ mod run_lifecycle_projection_tests {
             cook_recover_command_with_prefix(
                 &cook_recovery_command_prefix_for_decision(Some(&lab)),
                 "cook-attempt-1",
-                Some("patch"),
             ),
             "homeboy agent-task recover cook-attempt-1"
         );
@@ -3338,9 +3317,13 @@ pub(crate) fn dispatch_cook_follow_up(
         } else {
             super::cook_lineage::CookLineageKind::GateFix
         },
-        source_patch_sha256: promotion.patch_artifact.sha256.clone(),
+        source_patch_sha256: promotion
+            .candidate
+            .as_ref()
+            .map(|candidate| candidate.tree_sha.clone()),
     };
     if requested_edge.kind == super::cook_lineage::CookLineageKind::GateFix
+        && !no_change_remediation(promotion, aggregate)
         && requested_edge
             .source_patch_sha256
             .as_deref()
@@ -3436,7 +3419,7 @@ pub(crate) fn dispatch_cook_follow_up(
         incoming.inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
             "source_run_id": source_run_id,
             "source_task_id": promotion.source.task_id,
-            "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
+            "source_candidate_tree_sha": promotion.candidate.as_ref().map(|candidate| &candidate.tree_sha),
         });
         let mut frozen = bound.plan.tasks[0].clone();
         for request in [&mut incoming, &mut frozen] {
@@ -3615,7 +3598,7 @@ pub(crate) fn dispatch_cook_follow_up(
     follow_up_request.inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
         "source_run_id": source_run_id,
         "source_task_id": promotion.source.task_id,
-        "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
+        "source_candidate_tree_sha": promotion.candidate.as_ref().map(|candidate| &candidate.tree_sha),
     });
     if budget_scope != CookFollowUpBudgetScope::Cook {
         follow_up_request.inputs["cook_loop"]["execution_budget_authority"] =
@@ -4037,7 +4020,7 @@ pub(super) fn review_form_attempt_is_ready_for_cook_continuation_in_store(
     Ok(promotion.status == source.status
         && promotion.target == source.target
         && promotion.to_worktree == source.to_worktree
-        && promotion.patch_artifact == source.patch_artifact
+        && promotion.candidate == source.candidate
         && promotion.changed_files == source.changed_files
         && promotion.verified_base == source.verified_base
         && promotion.deterministic_gates == source.deterministic_gates
@@ -4260,7 +4243,7 @@ fn make_provider_timeout_actionable(
         && !deadline_expired;
     let command = can_retry.then(|| {
         let continuation = lifecycle_store.map_or_else(
-            || cook_recover_command(None, run_id, None),
+            || cook_recover_command(None, run_id),
             |store| cook_recovery_command_in_store(store, run_id, &["recover", run_id]),
         );
         format!("{} --timeout-ms {next_timeout_ms}", continuation)
@@ -4484,7 +4467,7 @@ fn make_review_form_timeout_actionable(
         && !deadline_expired;
     let command = can_retry.then(|| {
         let continuation = lifecycle_store.map_or_else(
-            || cook_recover_command(None, run_id, None),
+            || cook_recover_command(None, run_id),
             |store| cook_recovery_command_in_store(store, run_id, &["recover", run_id]),
         );
         format!(

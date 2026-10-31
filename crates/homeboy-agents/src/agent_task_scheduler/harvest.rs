@@ -607,7 +607,6 @@ mod committed_harvest_tests {
         AGENT_TASK_REQUEST_SCHEMA,
     };
 
-    use sha2::{Digest, Sha256};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
@@ -697,12 +696,7 @@ mod committed_harvest_tests {
 
     use homeboy_core::test_support::git_command_output as git;
 
-    fn gate_feedback_request(
-        workspace: &Path,
-        current_diff: String,
-        patch_artifact: &Path,
-        patch_sha256: &str,
-    ) -> AgentTaskRequest {
+    fn gate_feedback_request(workspace: &Path, current_diff: String) -> AgentTaskRequest {
         AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
             task_id: "source-gate-fix-2".to_string(),
@@ -724,11 +718,6 @@ mod committed_harvest_tests {
                 "source_run_id": "source-run",
                 "source_task_id": "source",
                 "source_patch_task_id": "source",
-                "patch_artifact": {
-                    "id": "candidate",
-                    "path": patch_artifact,
-                    "sha256": patch_sha256,
-                },
                 "failed_gates": [{ "gate_id": "visible" }],
                 "next_attempt": 2,
                 "to_worktree": workspace.display().to_string(),
@@ -750,7 +739,7 @@ mod committed_harvest_tests {
         }
     }
 
-    fn candidate_patch(workspace: &Path) -> (PathBuf, String) {
+    fn candidate_patch(workspace: &Path) -> String {
         git(workspace, &["add", "--all"]);
         let patch = git_output_raw(
             workspace,
@@ -758,13 +747,7 @@ mod committed_harvest_tests {
         )
         .expect("candidate patch");
         git(workspace, &["reset", "--quiet"]);
-        let path = workspace
-            .parent()
-            .expect("workspace has test parent")
-            .join("candidate.patch");
-        std::fs::write(&path, &patch).expect("write candidate patch");
-        let sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
-        (path, sha256)
+        patch
     }
 
     /// #15355: the provider's detached checkout must have its submodules
@@ -815,12 +798,7 @@ mod committed_harvest_tests {
         git(&workspace, &["commit", "--quiet", "-m", "superproject"]);
         let head = git(&workspace, &["rev-parse", "HEAD"]);
 
-        let mut request = gate_feedback_request(
-            &workspace,
-            String::new(),
-            &temp.path().join("unused.patch"),
-            "unused",
-        );
+        let mut request = gate_feedback_request(&workspace, String::new());
         let scratch = tempfile::tempdir().expect("attempt scratch");
         prepare_attempt_workspace(&mut request, Some(&head), None, scratch.path())
             .expect("attempt workspace")
@@ -865,10 +843,8 @@ mod committed_harvest_tests {
         std::fs::write(workspace.join("candidate.txt"), "candidate\n").expect("candidate");
         std::fs::write(workspace.join("new-candidate.txt"), "new candidate\n")
             .expect("new candidate");
-        let (patch_artifact, patch_sha256) = candidate_patch(&workspace);
-        let current_diff = std::fs::read_to_string(&patch_artifact).expect("complete current diff");
-        let mut request =
-            gate_feedback_request(&workspace, current_diff, &patch_artifact, &patch_sha256);
+        let current_diff = candidate_patch(&workspace);
+        let mut request = gate_feedback_request(&workspace, current_diff);
         let base = git(&workspace, &["rev-parse", "HEAD"]);
         git(&workspace, &["add", "-A"]);
         let tree = git(&workspace, &["write-tree"]);
@@ -933,11 +909,10 @@ mod committed_harvest_tests {
         git(&workspace, &["add", "file.txt"]);
         git(&workspace, &["commit", "--quiet", "-m", "base"]);
         std::fs::write(workspace.join("file.txt"), "candidate\n").expect("candidate");
-        let (patch_artifact, patch_sha256) = candidate_patch(&workspace);
-        let recorded = std::fs::read_to_string(&patch_artifact).expect("complete recorded diff");
+        let recorded = candidate_patch(&workspace);
         std::fs::write(workspace.join("extra.txt"), "unrelated\n").expect("extra");
         let error = prepare_committed_harvest(
-            &gate_feedback_request(&workspace, recorded.clone(), &patch_artifact, &patch_sha256),
+            &gate_feedback_request(&workspace, recorded.clone()),
             None,
             &HarvestExecutionContext::default(),
         )
@@ -946,20 +921,14 @@ mod committed_harvest_tests {
 
         std::fs::remove_file(workspace.join("extra.txt")).expect("remove extra");
         let error = prepare_committed_harvest(
-            &gate_feedback_request(
-                &workspace,
-                "not a patch".to_string(),
-                &patch_artifact,
-                "bad",
-            ),
+            &gate_feedback_request(&workspace, "not a patch".to_string()),
             None,
             &HarvestExecutionContext::default(),
         )
         .expect_err("mismatched recorded diff must fail closed");
         assert!(matches!(error, HarvestError::CandidateTreeMismatch { .. }));
 
-        let mut ordinary =
-            gate_feedback_request(&workspace, String::new(), &patch_artifact, &patch_sha256);
+        let mut ordinary = gate_feedback_request(&workspace, String::new());
         ordinary.metadata = serde_json::Value::Null;
         let error = prepare_committed_harvest(&ordinary, None, &HarvestExecutionContext::default())
             .expect_err("ordinary dirty worktree remains refused");
@@ -1399,8 +1368,6 @@ mod committed_harvest_tests {
                     .as_str()
                     .unwrap()
                     .into(),
-                &temp.path().join("unused.patch"),
-                "unused",
             );
             request.inputs["cook_loop"]["candidate_commit"] =
                 failed.provenance["candidate_commit"].clone();

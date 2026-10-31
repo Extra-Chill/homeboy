@@ -42,10 +42,9 @@ pub(crate) use super::tests::patch_fixture::{normalize_fixture_diff, validate_ar
 #[cfg(test)]
 use super::tests::FakePromotionWorkspaceProvider;
 use super::types::{
-    AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionNotification,
-    AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionSource,
-    AgentTaskPromotionStatus, AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase,
-    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionReport,
+    AgentTaskPromotionRequest, AgentTaskPromotionSource, AgentTaskPromotionStatus,
+    AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 
 mod gate_run;
@@ -189,7 +188,7 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
         report.provenance["lab_offload"] = json!({
             "runner_id": runner_id,
             "source_aggregate": report.source.path,
-            "source_artifact": report.patch_artifact.path,
+            "candidate": report.candidate,
             "target_worktree": report.to_worktree,
             "target_workspace": report.target.path,
         });
@@ -332,12 +331,7 @@ fn resume_promoted_patch_internal<'a>(
         source: promotion_source(&source_kind, &outcome, &options),
         to_worktree: options.to_worktree,
         target: target.clone(),
-        patch_artifact: AgentTaskPromotionArtifactRef {
-            id: commit.candidate_sha.clone(),
-            kind: "candidate_commit".to_string(),
-            path: String::new(),
-            sha256: Some(commit.tree_sha.clone()),
-        },
+        candidate: Some(commit.clone()),
         changed_files,
         command_evidence: Vec::new(),
         deterministic_gates: gates.deterministic_gates,
@@ -487,18 +481,17 @@ fn resume_promoted_patch_admission(
         )
         .with_retryable(false)
     })?;
-    if let Some(recorded) = previous.pointer("/provenance/candidate_commit") {
-        if recorded
-            != &serde_json::to_value(commit)
-                .map_err(|e| Error::internal_json(e.to_string(), None))?
-        {
-            return Err(Error::validation_invalid_argument(
-                "source.candidate",
-                "resume candidate differs from the recorded candidate commit",
-                None,
-                None,
-            ));
-        }
+    if previous.get("candidate")
+        != Some(
+            &serde_json::to_value(commit).map_err(|e| Error::internal_json(e.to_string(), None))?,
+        )
+    {
+        return Err(Error::validation_invalid_argument(
+            "source.candidate",
+            "resume candidate differs from the recorded candidate commit",
+            None,
+            None,
+        ));
     }
     let run_id = options.source_run_id.as_deref().unwrap_or(&outcome.task_id);
     let reference = format!("refs/homeboy/candidates/{run_id}");
@@ -787,14 +780,6 @@ fn promote_candidate(
     let materialized = materialized_promotion_workspace()?;
     let path =
         resolve_promotion_target_path(&options.to_worktree, materialized.as_deref(), None, None)?;
-    let patch_artifact = AgentTaskPromotionArtifactRef {
-        id: candidate
-            .map(|c| c.candidate_sha.clone())
-            .unwrap_or_default(),
-        kind: "candidate_commit".to_string(),
-        path: String::new(),
-        sha256: candidate.map(|c| c.tree_sha.clone()),
-    };
     let Some(commit) = candidate else {
         let target =
             AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), path.as_deref());
@@ -806,7 +791,7 @@ fn promote_candidate(
             to_worktree: options.to_worktree.clone(),
             operator_notification: promotion_notification_with_gate_summary(status, &target, &[]),
             target,
-            patch_artifact,
+            candidate: None,
             changed_files: Vec::new(),
             command_evidence: Vec::new(),
             deterministic_gates: Vec::new(),
@@ -865,7 +850,6 @@ fn promote_candidate(
             options,
             source_kind,
             outcome,
-            patch_artifact.clone(),
             changed_files.clone(),
             command_evidence.clone(),
             target.clone(),
@@ -927,7 +911,7 @@ fn promote_candidate(
         source: promotion_source(source_kind, outcome, options),
         to_worktree: options.to_worktree.clone(),
         target,
-        patch_artifact,
+        candidate: outcome.candidate.clone(),
         changed_files,
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
@@ -1498,12 +1482,6 @@ fn promote_committed_changes(
             options,
             source_kind,
             &outcome,
-            AgentTaskPromotionArtifactRef {
-                id: committed_patch.candidate.clone(),
-                kind: "candidate_commit".to_string(),
-                path: String::new(),
-                sha256: Some(committed_patch.tree_sha.clone()),
-            },
             changed_files.clone(),
             command_evidence.clone(),
             target.clone(),
@@ -1582,12 +1560,7 @@ fn promote_committed_changes(
         source: promotion_source(source_kind, &outcome, options),
         to_worktree: options.to_worktree.clone(),
         target,
-        patch_artifact: AgentTaskPromotionArtifactRef {
-            id: committed_patch.candidate.clone(),
-            kind: "candidate_commit".to_string(),
-            path: String::new(),
-            sha256: Some(committed_patch.tree_sha.clone()),
-        },
+        candidate: outcome.candidate.clone(),
         changed_files,
         command_evidence,
         deterministic_gates: gates.deterministic_gates,
@@ -3888,7 +3861,6 @@ fn post_apply_report(
     options: &AgentTaskPromotionRequest,
     source_kind: &str,
     outcome: &AgentTaskOutcome,
-    patch_artifact: AgentTaskPromotionArtifactRef,
     changed_files: Vec<String>,
     command_evidence: Vec<AgentTaskPromotionCommandReport>,
     target: AgentTaskPromotionTarget,
@@ -3923,7 +3895,7 @@ fn post_apply_report(
         source: promotion_source(source_kind, outcome, options),
         to_worktree: options.to_worktree.clone(),
         target: target.clone(),
-        patch_artifact: patch_artifact.clone(),
+        candidate: outcome.candidate.clone(),
         changed_files,
         command_evidence,
         deterministic_gates: Vec::new(),
@@ -3947,7 +3919,7 @@ fn post_apply_report(
             },
             "resume_contract": {
                 "resolved_base": verified_base,
-                "artifact": patch_artifact,
+                "candidate_commit": outcome.candidate,
                 "destination": target,
                 "candidate": candidate,
                 "inputs": {

@@ -556,7 +556,7 @@ fn build_follow_up_request(
             "retry_budget_remaining_after_dispatch": options.max_attempts.saturating_sub(next_attempt),
             "to_worktree": options.promotion_report.to_worktree,
             "changed_files": options.promotion_report.changed_files,
-            "patch_artifact": options.promotion_report.patch_artifact,
+            "candidate": options.promotion_report.candidate,
             "failed_gates": agent_visible_failed_gates,
             "failure_set": failure_set(failed_gates),
             "failure_progression": failure_progression,
@@ -589,7 +589,13 @@ fn build_follow_up_request(
         kind: "agent-task-promotion".to_string(),
         uri: format!(
             "homeboy://agent-task/promotion/{}/{}",
-            options.promotion_report.source.task_id, options.promotion_report.patch_artifact.id
+            options.promotion_report.source.task_id,
+            options
+                .promotion_report
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.candidate_sha.as_str())
+                .unwrap_or("no-changes")
         ),
         revision: None,
     });
@@ -1206,8 +1212,8 @@ mod tests {
     };
     use crate::agent_task_gate::{AgentTaskGateEnvironment, AgentTaskGateFailureEvidence};
     use crate::agent_task_promotion::{
-        AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionSource,
-        AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+        AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
+        AGENT_TASK_PROMOTION_REPORT_SCHEMA,
     };
 
     #[test]
@@ -2986,12 +2992,11 @@ mod tests {
                 head: Some("abc123".to_string()),
                 dirty: Some(true),
             },
-            patch_artifact: AgentTaskPromotionArtifactRef {
-                id: "patch".to_string(),
-                kind: "patch".to_string(),
-                path: "changes.patch".to_string(),
-                sha256: Some("abc123".to_string()),
-            },
+            candidate: Some(crate::agent_task::AgentTaskCandidate {
+                base_sha: "base".to_string(),
+                candidate_sha: "patch".to_string(),
+                tree_sha: "abc123".to_string(),
+            }),
             changed_files,
             command_evidence: Vec::new(),
             deterministic_gates,

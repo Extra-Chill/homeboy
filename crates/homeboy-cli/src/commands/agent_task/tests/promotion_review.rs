@@ -316,7 +316,7 @@ fn promotion_resume_reference_keeps_private_gates_out_of_review_commands() {
                 json!({
                     "status": "gate_failed",
                     "source": { "task_id": "task-a" },
-                    "patch_artifact": { "id": "patch-a" },
+                    "candidate": { "base_sha": "base", "candidate_sha": "patch-a", "tree_sha": "tree" },
                     "target": { "worktree": "fixture@resume" },
                     "provenance": {
                         "resume_contract": {
@@ -363,9 +363,7 @@ fn promotion_resume_reference_keeps_private_gates_out_of_review_commands() {
             None,
         )
         .expect_err("resume contract requires exact selectors");
-        assert!(missing_selectors
-            .message
-            .contains("--task-id and --artifact-id"));
+        assert!(missing_selectors.message.contains("--task-id"));
         let hydrated = review::resolve_promotion_gates(
             &mut promote.gates,
             false,
@@ -395,7 +393,7 @@ fn review_does_not_advertise_a_command_for_an_invalid_resume_gate_contract() {
                 json!({
                     "status": "gate_failed",
                     "source": { "task_id": "task-a" },
-                    "patch_artifact": { "id": "patch-a" },
+                    "candidate": { "base_sha": "base", "candidate_sha": "patch-a", "tree_sha": "tree" },
                     "target": { "worktree": "fixture@resume" },
                     "provenance": { "resume_contract": {
                         "inputs": { "base_ref": "main" },
@@ -1097,8 +1095,6 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
                 "agent-task",
                 "promote",
                 &source_spec,
-                "--artifact-id",
-                artifact_id,
                 "--to-worktree",
                 target_str,
                 "--provider-argv",
@@ -1126,9 +1122,12 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
             let promotion_report = &report["result"]["data"];
             assert_eq!(promotion_report["status"], "dry_run");
             assert_eq!(promotion_report["source"]["run_id"], candidate_run_id);
-            assert_eq!(promotion_report["patch_artifact"]["id"], candidate_sha);
+            assert_eq!(
+                promotion_report["candidate"]["candidate_sha"],
+                candidate_sha
+            );
             reports.push(promotion_report.clone());
         }
-        assert_eq!(reports[0]["patch_artifact"], reports[1]["patch_artifact"]);
+        assert_eq!(reports[0]["candidate"], reports[1]["candidate"]);
     });
 }

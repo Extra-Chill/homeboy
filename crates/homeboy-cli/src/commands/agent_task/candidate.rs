@@ -680,7 +680,7 @@ fn has_retained_candidate(payload: &Value) -> bool {
             AgentTaskPromotionStatus::VerificationPending
                 | AgentTaskPromotionStatus::Applied
                 | AgentTaskPromotionStatus::GateFailed
-        ) && candidate.patch_artifact.is_some()
+        ) && candidate.candidate_sha.is_some()
     }) || payload
         .get("attempts")
         .and_then(Value::as_array)
@@ -720,18 +720,10 @@ fn promotion_has_candidate(promotion: Option<&Value>) -> bool {
     matches!(
         promotion.get("status").and_then(Value::as_str),
         Some("verification_pending" | "applied" | "gate_failed")
-    ) && (promotion
-        .get("patch_artifact")
-        .or_else(|| promotion.get("patch"))
-        .and_then(|artifact| {
-            artifact
-                .get("id")
-                .or_else(|| artifact.get("artifact_id"))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| promotion.get("patch_artifact_id").and_then(Value::as_str))
-        .or_else(|| promotion.get("artifact_id").and_then(Value::as_str))
-        .is_some_and(|id| !id.trim().is_empty()))
+    ) && promotion
+        .pointer("/candidate/candidate_sha")
+        .and_then(Value::as_str)
+        .is_some_and(|sha| !sha.trim().is_empty())
 }
 
 fn aggregate_outcomes_are_no_op(payload: &Value) -> bool {
@@ -979,7 +971,7 @@ mod tests {
                 "retained candidate after a failed final attempt",
                 json!({
                     "attempts": [
-                        { "promotion": { "status": "applied", "patch_artifact": { "id": "candidate" } } },
+                        { "promotion": { "status": "applied", "candidate": { "base_sha": "base", "candidate_sha": "candidate", "tree_sha": "tree" } } },
                         { "aggregate": { "outcomes": [{ "status": "failed", "artifacts": [] }] } }
                     ]
                 }),
@@ -1013,7 +1005,7 @@ mod tests {
         let retained = classify_candidates(&json!({
             "metadata": delivery(json!({ "promotion": {
                 "status": "verification_pending",
-                "patch_artifact": { "id": "patch" },
+                "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
                 "target": { "worktree": "fixture@target" }
             } }))
         }));
@@ -1025,7 +1017,7 @@ mod tests {
         let target_applied = classify_candidates(&json!({
             "metadata": delivery(json!({ "promotion": {
                 "status": "verification_pending",
-                "patch_artifact": { "id": "patch" },
+                "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
                 "target": { "worktree": "fixture@target" },
                 "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
             } }))
@@ -1037,7 +1029,7 @@ mod tests {
         let verified = classify_candidates(&json!({
             "metadata": delivery(json!({ "promotion": {
                 "status": "applied",
-                "patch_artifact": { "id": "patch" },
+                "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
                 "target": { "worktree": "fixture@target" },
                 "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
             } }))
@@ -1177,7 +1169,7 @@ mod tests {
     fn review_envelope_reads_terminal_facts_from_its_record() {
         let retained = classify_candidates(&json!({
             "record": { "metadata": delivery(json!({ "promotion": {
-                "status": "applied", "patch_artifact": { "id": "patch" }
+                "status": "applied", "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" }
             }})) }
         }));
         assert_eq!(retained.state(), CandidateState::ApplyReady);

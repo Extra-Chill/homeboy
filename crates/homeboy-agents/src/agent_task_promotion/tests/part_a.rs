@@ -107,11 +107,7 @@ fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
         "gate_feedback_baseline": {
             "source_run_id": run_id,
             "source_task_id": task_id,
-            "patch_artifact": {
-                "id": artifact_id,
-                "kind": "patch",
-                "sha256": sha256_hex(VALID_PATCH),
-            }
+            "candidate": { "base_sha": "base", "candidate_sha": artifact_id, "tree_sha": "tree" }
         }
     });
     source["outcomes"][0]["artifacts"][0]
@@ -162,7 +158,7 @@ fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
     .expect("explicit projection is promoted");
 
     assert!(projected.is_file());
-    assert_eq!(result.patch_artifact.kind, "candidate_commit");
+    assert!(result.candidate.is_some());
     assert!(provider.apply_calls.is_empty());
 }
 
@@ -281,7 +277,7 @@ fn empty_patch_failing_gate_is_reported_against_destination() {
 }
 
 #[test]
-fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
+fn promote_exports_committed_changes_when_executor_reports_no_candidate() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -359,7 +355,10 @@ fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
         .expect("committed changes are promoted without a patch artifact");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.id, candidate_sha);
+    assert_eq!(
+        report.candidate.as_ref().unwrap().candidate_sha,
+        candidate_sha
+    );
     assert_eq!(report.changed_files, vec!["lib.rs"]);
     assert_eq!(report.provenance["candidate_commit"]["tree_sha"], tree_sha);
     assert!(provider.apply_calls.is_empty());
@@ -419,10 +418,10 @@ fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
     .expect("dry-run promotion report");
 
     assert_ne!(
-        report.patch_artifact.id,
+        report.candidate.as_ref().unwrap().candidate_sha,
         "task-1-attempt-1-committed-changes"
     );
-    assert_eq!(report.patch_artifact.kind, "candidate_commit");
+    assert!(report.candidate.is_some());
 }
 
 #[test]
@@ -610,7 +609,7 @@ fn post_apply_checkpoint_resume_refuses_candidate_tree_mismatch_without_gating()
     let restored = resume_promoted_patch(options, &worktree_path, &checkpoint)
         .expect("resume after the destination is the candidate again");
     assert_eq!(restored.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(restored.patch_artifact.id, sha);
+    assert_eq!(restored.candidate.as_ref().unwrap().candidate_sha, sha);
     assert_eq!(gate_runs(), 2);
 }
 

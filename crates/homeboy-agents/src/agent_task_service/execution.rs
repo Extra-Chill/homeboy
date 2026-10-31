@@ -2526,7 +2526,7 @@ fn retryable_cook_attempt(
             Some(source.run_id.clone()),
             Some(vec![format!(
                 "Recover the owning Cook with: {}",
-                super::cook_recover_command_for_record(source, &source.run_id, None)
+                super::cook_recover_command_for_record(source, &source.run_id)
             )]),
         ));
     };

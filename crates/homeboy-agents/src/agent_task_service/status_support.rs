@@ -1495,7 +1495,7 @@ mod tests {
                 "source": {"kind": "aggregate", "task_id": "cook"},
                 "to_worktree": "fixture",
                 "target": {"worktree": "fixture"},
-                "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch.diff"},
+                "candidate": {"base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree"},
                 "deterministic_gates": [{
                     "schema": "homeboy/agent-task-gate-report/v1",
                     "id": "gate-1",

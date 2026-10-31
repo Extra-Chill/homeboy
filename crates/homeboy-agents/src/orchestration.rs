@@ -1439,13 +1439,12 @@ fn review_promotion_candidates(
                 })
         }))
         .flat_map(|candidate| {
-            let artifact_ids = aggregate.outcomes.iter()
+            let commit = aggregate.outcomes.iter()
                 .find(|outcome| outcome.task_id == candidate.task_id)
-                .and_then(|outcome| outcome.candidate.as_ref())
-                .map(|candidate| vec![candidate.candidate_sha.clone()])
-                .unwrap_or_else(|| candidate.artifact_ids.clone());
-            let selection_required = artifact_ids.len() > 1;
-            artifact_ids.into_iter().map(move |artifact_id| {
+                .and_then(|outcome| outcome.candidate.as_ref());
+            let selection_required = false;
+            commit.into_iter().map(move |commit| {
+                let artifact_id = commit.candidate_sha.clone();
                 let mut command = vec![
                     "homeboy".to_string(),
                     "agent-task".to_string(),
@@ -1453,8 +1452,6 @@ fn review_promotion_candidates(
                     run_id.to_string(),
                     "--task-id".to_string(),
                     candidate.task_id.clone(),
-                    "--artifact-id".to_string(),
-                    artifact_id.clone(),
                 ];
                 // A promotion that cannot be read is no continuation; the
                 // promote command reports why.
@@ -1468,7 +1465,7 @@ fn review_promotion_candidates(
                         && promotion.pointer("/source/task_id").and_then(Value::as_str)
                             == Some(candidate.task_id.as_str())
                         && promotion
-                            .pointer("/patch_artifact/id")
+                            .pointer("/candidate/candidate_sha")
                             .and_then(Value::as_str)
                             == Some(artifact_id.as_str())
                 });
@@ -2850,7 +2847,7 @@ fn recover_interrupted_action_acknowledgement(
                             && parameters
                                 .artifact_id
                                 .as_deref()
-                                .is_none_or(|artifact| report.patch_artifact.id == artifact)
+                                .is_none_or(|artifact| report.candidate.as_ref().is_some_and(|candidate| candidate.candidate_sha == artifact))
                             && report.provenance["promotion_request_fingerprint"]
                                 == request_fingerprint
                             && report.status
@@ -3329,7 +3326,7 @@ fn review_canonical_candidate(
             AgentTaskPromotionStatus::Applied
                 | AgentTaskPromotionStatus::GateFailed
                 | AgentTaskPromotionStatus::VerificationPending
-        ) && candidate.patch_artifact.is_some()
+        ) && candidate.candidate_sha.is_some()
     });
     let state = if finalized {
         "finalized"
@@ -3715,7 +3712,7 @@ fn promotion_handoff(report: &crate::agent_task_promotion::AgentTaskPromotionRep
     serde_json::json!({
         "schema": "homeboy/agent-task-promotion-handoff/v1",
         "states": {
-            "patch_artifact_produced": true,
+            "candidate_produced": true,
             "candidate_retained": true,
             "target_applied": target_applied,
             "patch_promoted": target_applied,
@@ -8945,7 +8942,7 @@ mod tests {
                     "source": { "kind": "aggregate", "run_id": AGENT_TASK_RUN, "task_id": "task" },
                     "to_worktree": "homeboy@candidate",
                     "target": { "worktree": "homeboy@candidate" },
-                    "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+                    "candidate": { "base_sha": "base", "candidate_sha": "patch-1", "tree_sha": "tree" },
                     "operator_notification": { "status": "completed", "message": "complete" }
                 }))
                 .expect("promotion report");
@@ -9478,7 +9475,7 @@ mod tests {
                 "source": { "kind": "aggregate", "run_id": AGENT_TASK_RUN, "task_id": "task" },
                 "to_worktree": "homeboy@candidate",
                 "target": { "worktree": "homeboy@candidate" },
-                "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+                "candidate": { "base_sha": "base", "candidate_sha": "patch-1", "tree_sha": "tree" },
                 "operator_notification": { "status": "completed", "message": "complete" },
                 }))
                 .expect("promotion report");

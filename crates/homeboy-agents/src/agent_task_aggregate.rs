@@ -848,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_outcomes_does_not_apply_empty_patch_artifacts() {
+    fn aggregate_outcomes_does_not_apply_empty_change_evidence() {
         let mut empty_patch = artifact("sample-patch", "patch", json!({}));
         empty_patch.size_bytes = Some(0);
 

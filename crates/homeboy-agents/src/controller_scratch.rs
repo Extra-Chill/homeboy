@@ -2007,49 +2007,20 @@ fn promoted_attempt_workspace_matches(
     if promotion.status != crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
         || promotion.source.run_id.as_deref() != Some(resource.run_id.as_str())
         || promotion.source.task_id != resource.task_id
-        || promotion.patch_artifact.kind != "patch"
+        || promotion.candidate.is_none()
     {
         return false;
     }
-    let Some(artifact) = resource
+    let candidate = promotion.candidate.as_ref().expect("checked candidate");
+    let recorded = resource
         .terminal_evidence
         .as_ref()
-        .and_then(|evidence| evidence.pointer("/outcome/artifacts"))
-        .and_then(serde_json::Value::as_array)
-        .and_then(|artifacts| {
-            artifacts.iter().find(|artifact| {
-                artifact.get("id").and_then(serde_json::Value::as_str)
-                    == Some(promotion.patch_artifact.id.as_str())
-                    && artifact.get("kind").and_then(serde_json::Value::as_str) == Some("patch")
-            })
-        })
-    else {
-        return false;
-    };
-    let Some(base) = artifact
-        .pointer("/metadata/base_ref")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return false;
-    };
-    let Some(artifact_path) = artifact.get("path").and_then(serde_json::Value::as_str) else {
-        return false;
-    };
-    let Some(artifact_sha256) = artifact.get("sha256").and_then(serde_json::Value::as_str) else {
-        return false;
-    };
-    if artifact_path != promotion.patch_artifact.path
-        || promotion.patch_artifact.sha256.as_deref() != Some(artifact_sha256)
-    {
-        return false;
-    }
-    let Ok(patch) = fs::read(artifact_path) else {
-        return false;
-    };
-    if sha256(&patch) != artifact_sha256 {
-        return false;
-    }
-    workspace_matches_patch(workspace, base, &patch)
+        .and_then(|evidence| evidence.pointer("/outcome/candidate"))
+        .and_then(|value| {
+            serde_json::from_value::<crate::agent_task::AgentTaskCandidate>(value.clone()).ok()
+        });
+    recorded.as_ref() == Some(candidate)
+        && workspace_matches_candidate_commit(workspace, &candidate.candidate_sha)
 }
 
 /// A scheduler may stop after persisting authorization but before it can call
@@ -2093,14 +2064,13 @@ fn terminal_evidence_attempt_workspace_matches(
         .is_ok()
 }
 
-/// Verify that a checkout contains only the supplied patch against its immutable
-/// base. Scheduler compaction reuses this promotion proof rather than treating a
-/// persisted patch as sufficient evidence on its own.
-pub(crate) fn workspace_matches_patch(workspace: &Path, base: &str, patch: &[u8]) -> bool {
+/// Verify that a checkout is exactly the immutable candidate commit: HEAD is the
+/// candidate and no tracked, untracked or ignored state exists beside it.
+pub(crate) fn workspace_matches_candidate_commit(workspace: &Path, candidate_sha: &str) -> bool {
     let Ok(head) = git::run_git(workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD") else {
         return false;
     };
-    if head.trim() != base {
+    if head.trim() != candidate_sha {
         return false;
     }
     let Ok(git_dir) = git::run_git(
@@ -2116,60 +2086,16 @@ pub(crate) fn workspace_matches_patch(workspace: &Path, base: &str, patch: &[u8]
     if Path::new(git_dir.trim()).join("index.lock").exists() {
         return false;
     }
+    // Ignored provider output is outside the candidate commit, so it retains
+    // the checkout as much as tracked or untracked changes do.
     let readonly_env = &[("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string())];
-    let Ok(status) = git::run_git_with_env(
+    git::run_git_with_env(
         workspace,
         &["status", "--porcelain=v1", "--ignored", "--", "."],
         "git status",
         readonly_env,
-    ) else {
-        return false;
-    };
-    // Ignored provider output is outside a Git patch and therefore outside the
-    // authenticated candidate. Tracked and untracked bytes are compared below.
-    if status.lines().any(|line| line.starts_with("!!")) {
-        return false;
-    }
-    let Ok(index) = tempfile::NamedTempFile::new() else {
-        return false;
-    };
-    let index_env = &[(
-        "GIT_INDEX_FILE".to_string(),
-        index.path().display().to_string(),
-    )];
-    if git::run_git_with_env(
-        workspace,
-        &["read-tree", base],
-        "git read-tree scratch index",
-        index_env,
     )
-    .is_err()
-        || git::run_git_with_env(
-            workspace,
-            &["add", "--all", "--", "."],
-            "git add scratch index",
-            index_env,
-        )
-        .is_err()
-    {
-        return false;
-    }
-    git::run_git_with_env(
-        workspace,
-        &[
-            "diff",
-            "--cached",
-            "--binary",
-            "--full-index",
-            "--find-renames",
-            "HEAD",
-            "--",
-            ".",
-        ],
-        "git diff scratch index",
-        index_env,
-    )
-    .is_ok_and(|current| current.as_bytes() == patch)
+    .is_ok_and(|status| status.trim().is_empty())
 }
 
 fn git_safety_path(resource: &ControllerScratchResource, path: &Path) -> Option<PathBuf> {
@@ -4831,37 +4757,21 @@ mod tests {
     }
 
     #[test]
-    fn patch_proof_waits_for_the_linked_index_lock_and_rejects_extra_state() {
+    fn candidate_proof_waits_for_the_linked_index_lock_and_rejects_extra_state() {
         let root = tempfile::tempdir().expect("root");
         let lease = root.path().join("lease");
         let (_source, worktree) = attempt_worktree(root.path(), &lease);
-        let base = git::run_git(&worktree, &["rev-parse", "HEAD"], "git rev-parse HEAD")
-            .expect("base")
-            .trim()
-            .to_string();
         fs::write(
             worktree.join("generated.rs"),
             "pub const GENERATED: bool = true;\n",
         )
         .expect("candidate");
         run_git(&worktree, &["add", "generated.rs"]);
-        let patch = git::run_git(
-            &worktree,
-            &[
-                "diff",
-                "--cached",
-                "--binary",
-                "--full-index",
-                "--find-renames",
-                "HEAD",
-                "--",
-                ".",
-            ],
-            "git diff cached",
-        )
-        .expect("candidate patch")
-        .into_bytes();
-        run_git(&worktree, &["reset", "--quiet"]);
+        run_git(&worktree, &["commit", "-m", "candidate"]);
+        let candidate = git::run_git(&worktree, &["rev-parse", "HEAD"], "git rev-parse HEAD")
+            .expect("candidate")
+            .trim()
+            .to_string();
 
         let index_lock = PathBuf::from(
             git::run_git(
@@ -4875,36 +4785,42 @@ mod tests {
         .join("index.lock");
         fs::write(&index_lock, b"held by provider").expect("hold linked-worktree index lock");
         assert!(
-            !workspace_matches_patch(&worktree, &base, &patch),
+            !workspace_matches_candidate_commit(&worktree, &candidate),
             "an owned index lock must retain the linked worktree"
         );
         fs::remove_file(&index_lock).expect("release linked-worktree index lock");
-
         assert!(
-            workspace_matches_patch(&worktree, &base, &patch),
-            "the unstaged candidate must converge after its exact lock clears"
+            workspace_matches_candidate_commit(&worktree, &candidate),
+            "the candidate must converge after its exact lock clears"
         );
 
-        fs::write(worktree.join("untracked.txt"), "not in the patch\n").expect("extra file");
-        assert!(
-            !workspace_matches_patch(&worktree, &base, &patch),
-            "an untracked file is unrelated state and must retain the worktree"
-        );
-        fs::remove_file(worktree.join("untracked.txt")).expect("remove extra file");
-
-        fs::create_dir_all(worktree.join("vendor/package")).expect("vendor tree");
-        fs::write(worktree.join("vendor/package/index.js"), "generated\n").expect("vendor file");
-        assert!(
-            !workspace_matches_patch(&worktree, &base, &patch),
-            "an untracked dependency tree is outside the authenticated patch"
-        );
+        for (path, reason) in [
+            ("untracked.txt", "an untracked file"),
+            ("vendor/package/index.js", "an untracked dependency tree"),
+            ("generated.rs", "a tracked edit"),
+        ] {
+            let file = worktree.join(path);
+            let original = fs::read(&file).ok();
+            fs::create_dir_all(file.parent().expect("parent")).expect("parent dir");
+            fs::write(&file, "extra\n").expect("extra state");
+            assert!(
+                !workspace_matches_candidate_commit(&worktree, &candidate),
+                "{reason} is outside the candidate commit and must retain the worktree"
+            );
+            match original {
+                Some(bytes) => fs::write(&file, bytes).expect("restore"),
+                None => fs::remove_file(&file).expect("remove"),
+            }
+        }
         fs::remove_dir_all(worktree.join("vendor")).expect("remove vendor tree");
 
-        run_git(&worktree, &["add", "generated.rs"]);
-        run_git(&worktree, &["commit", "-m", "provider commit"]);
+        run_git(
+            &worktree,
+            &["commit", "--allow-empty", "-m", "provider commit"],
+        );
         assert!(
-            !workspace_matches_patch(&worktree, &base, &patch),
-            "a provider commit must remain recoverable even when its diff matches"
+            !workspace_matches_candidate_commit(&worktree, &candidate),
+            "a later provider commit must remain recoverable"
         );
     }
 

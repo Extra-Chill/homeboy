@@ -3,9 +3,9 @@
 
 use super::super::promote::normalize_fixture_diff;
 use super::super::types::{
-    AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionReport,
-    AgentTaskPromotionRequest, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionNotification, AgentTaskPromotionReport, AgentTaskPromotionRequest,
+    AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
+    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 use super::candidate_fixture::{promote_with_provider, promote_with_provider_in_observation_store};
 use super::*;
@@ -64,7 +64,7 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
             .expect("recovered aggregate promotes from controller projection");
 
             assert!(projected_path.is_file());
-            assert_eq!(report.patch_artifact.kind, "candidate_commit");
+            assert!(report.candidate.is_some());
             assert!(provider.applied_patch_contents.is_empty());
         }
     });
@@ -273,7 +273,7 @@ fn verified_unchanged_attempt_promotes_as_no_change_without_running_gates() {
 /// #15855: the audited-candidate requirement is not weakened for a no_op claim
 /// without a patch artifact unless Homeboy verified the checkout unchanged.
 #[test]
-fn no_op_without_patch_artifact_still_requires_an_audited_candidate_without_verification() {
+fn no_op_still_requires_an_audited_candidate_without_verification() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let source_path = temp.path().join("outcome.json");
@@ -316,7 +316,7 @@ fn no_op_without_patch_artifact_still_requires_an_audited_candidate_without_veri
 }
 
 #[test]
-fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
+fn promote_exports_committed_changes_when_evidence_is_empty() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -367,8 +367,7 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
-    assert_eq!(report.patch_artifact.kind, "candidate_commit");
-    assert!(report.patch_artifact.path.is_empty());
+    assert!(report.candidate.is_some());
     assert_eq!(
         std::fs::read_to_string(repo.join("src/lib.rs")).unwrap(),
         "new\n"
@@ -425,18 +424,13 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
         .expect("committed changes promote");
         let original_path = temp.path().join(format!(
             "committed-changes-{}.patch",
-            report.patch_artifact.sha256.as_deref().expect("patch sha")
+            report.candidate.as_ref().unwrap().tree_sha
         ));
-        assert_ne!(
-            report.patch_artifact.path,
-            original_path.display().to_string()
-        );
         assert!(
             !original_path.exists(),
             "adoption must not create a patch carrier"
         );
-        assert_eq!(report.patch_artifact.kind, "candidate_commit");
-        assert!(report.patch_artifact.path.is_empty());
+        assert!(report.candidate.is_some());
         let candidate: crate::agent_task::AgentTaskCandidate =
             serde_json::from_value(report.provenance["candidate_commit"].clone()).unwrap();
         super::super::promote::validate_candidate_commit(
@@ -508,7 +502,7 @@ fn promote_dry_run_validates_provider_request_without_applying() {
 
     assert_eq!(report.status, AgentTaskPromotionStatus::DryRun);
     assert_eq!(report.source.task_id, "task-1");
-    assert_eq!(report.patch_artifact.kind, "candidate_commit");
+    assert!(report.candidate.is_some());
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
     assert!(provider.apply_calls.is_empty());
     assert!(report.command_evidence.is_empty());
@@ -691,12 +685,11 @@ fn promotion_report_serializes_generic_command_evidence() {
             head: Some("abc123".to_string()),
             dirty: Some(true),
         },
-        patch_artifact: AgentTaskPromotionArtifactRef {
-            id: "patch".to_string(),
-            kind: "patch".to_string(),
-            path: "changes.patch".to_string(),
-            sha256: None,
-        },
+        candidate: Some(crate::agent_task::AgentTaskCandidate {
+            base_sha: "base".to_string(),
+            candidate_sha: "patch".to_string(),
+            tree_sha: "tree".to_string(),
+        }),
         changed_files: vec!["src/lib.rs".to_string()],
         command_evidence: vec![command_report(vec![
             "fake-workspace-provider",

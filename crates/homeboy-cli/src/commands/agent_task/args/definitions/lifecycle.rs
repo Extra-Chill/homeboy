@@ -754,9 +754,6 @@ pub struct PromoteArgs {
     /// Restrict promotion to this task ID.
     #[arg(long, value_name = "TASK_ID")]
     pub task_id: Option<String>,
-    /// Restrict promotion to this artifact ID.
-    #[arg(long, value_name = "ARTIFACT_ID")]
-    pub artifact_id: Option<String>,
     /// Validate the promotion without applying it.
     #[arg(long)]
     pub dry_run: bool,

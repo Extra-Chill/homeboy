@@ -1730,7 +1730,7 @@ mod tests {
     }
 
     #[test]
-    fn cook_summary_counts_empty_patch_artifact_as_empty_not_candidate() {
+    fn cook_summary_counts_empty_change_evidence_as_empty_not_candidate() {
         let payload = json!({
             "run_id": "homeboy-4345",
             "state": "succeeded",

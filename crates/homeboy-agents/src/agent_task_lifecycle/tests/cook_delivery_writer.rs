@@ -26,7 +26,7 @@ fn promotion(run_id: &str, status: &str, gates: Value) -> Value {
         "source": { "kind": "aggregate", "task_id": "task-a", "run_id": run_id },
         "to_worktree": "homeboy@cook",
         "target": { "worktree": "homeboy@cook", "path": "/work/homeboy", "branch": "cook/fix", "head": "abc123" },
-        "patch_artifact": { "id": "candidate.patch", "kind": "patch", "path": "candidate.patch", "sha256": "patchsha" },
+        "candidate": { "base_sha": "base", "candidate_sha": "candidate.patch", "tree_sha": "patchsha" },
         "changed_files": ["src/lib.rs"],
         "verified_base": { "base": "origin/main", "sha": "base-sha" },
         "deterministic_gates": gates,

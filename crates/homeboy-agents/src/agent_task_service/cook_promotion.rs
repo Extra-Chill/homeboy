@@ -356,12 +356,6 @@ fn replay_promotion_command(
     {
         command.extend(["--task-id".to_string(), task_id.to_string()]);
     }
-    if let Some(artifact_id) = promotion
-        .and_then(|promotion| promotion.pointer("/patch_artifact/id"))
-        .and_then(Value::as_str)
-    {
-        command.extend(["--artifact-id".to_string(), artifact_id.to_string()]);
-    }
     Some(quote_args(&command))
 }
 
@@ -469,8 +463,7 @@ fn preserved_candidate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecor
                 .pointer("/source/task_id")
                 .or_else(|| promotion.get("task_id"))
         }),
-        "artifact_id": promotion.and_then(|promotion| promotion.pointer("/patch_artifact/id")),
-        "sha256": promotion.and_then(|promotion| promotion.pointer("/patch_artifact/sha256")),
+        "candidate": promotion.and_then(|promotion| promotion.get("candidate")),
         "fingerprint": promotion.and_then(|promotion| promotion.pointer("/provenance/candidate")),
     })
 }
@@ -800,7 +793,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
             return Ok(json!({
                 "behavior": behavior,
                 "status": promotion.status,
-                "artifact_id": promotion.patch_artifact.id,
+                "candidate": promotion.candidate,
                 "candidate_fingerprint": promotion.provenance.get("candidate").cloned().unwrap_or(Value::Null),
                 "execution_only_checks": persisted_promotion_execution_only_checks(
                     promotion.status,
@@ -849,7 +842,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         return Ok(json!({
             "behavior": behavior,
             "status": promotion.status,
-            "artifact_id": promotion.patch_artifact.id,
+            "candidate": promotion.candidate,
             "candidate_fingerprint": promotion.provenance.get("candidate").cloned().unwrap_or(Value::Null),
             "execution_only_checks": persisted_promotion_execution_only_checks(
                 promotion.status,
@@ -1074,7 +1067,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                     task_id: selected_candidate_task_id_in_store(lifecycle_store, run_id)?,
                     // The checkpoint already authenticated this exact artifact;
                     // retain its identity rather than selecting an equivalent alias.
-                    artifact_id: Some(promotion.patch_artifact.id.clone()),
+                    artifact_id: None,
                     dry_run: false,
                     gates: options.gates.clone(),
                     provider_invocation: options.provider_transport.provider_invocation.clone(),
@@ -1240,7 +1233,7 @@ pub fn record_replacement_gate_proof(
             && replacement.source == original.source
             && replacement.target == original.target
             && replacement.to_worktree == original.to_worktree
-            && replacement.patch_artifact == original.patch_artifact
+            && replacement.candidate == original.candidate
             && replacement.changed_files == original.changed_files
             && replacement.verified_base == original.verified_base
             && replacement.deterministic_gates == original.deterministic_gates
@@ -1946,7 +1939,7 @@ fn verify_replacement_gates_owned(
                     .map(str::to_string),
                 to_worktree: original.to_worktree.clone(),
                 task_id: Some(original.source.task_id.clone()),
-                artifact_id: Some(original.patch_artifact.id.clone()),
+                artifact_id: None,
                 dry_run: false,
                 gates,
                 provider_invocation: None,
@@ -3130,7 +3123,7 @@ fn cook_finalization_options_with_stores_and_review_form(
             "homeboy://agent-task/run/{successful_run_id}"
         )))
         .collect();
-    let artifact_refs = std::iter::once(promotion.patch_artifact.path.clone()).collect();
+    let artifact_refs = Vec::new();
     let verified_base = promotion
         .verified_base
         .as_ref()
@@ -3960,7 +3953,7 @@ fn persist_supplied_recovery_review_form(
             "provenance": {
                 "source": "operator_supplied_recovery",
                 "run_id": run_id,
-                "patch_sha256": promotion.patch_artifact.sha256,
+                "tree_sha": promotion.candidate.as_ref().map(|candidate| &candidate.tree_sha),
                 "source_refs": options.workspace.source_refs,
                 "deterministic_gates": promotion.deterministic_gates,
             },
@@ -5521,7 +5514,7 @@ fn cook_contribution_source(
             .as_str()
             .unwrap_or_default()
             .to_string(),
-        patch_sha256: provenance["source_patch_artifact_sha256"]
+        patch_sha256: provenance["source_candidate_tree_sha"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
@@ -5650,7 +5643,10 @@ fn substantive_contribution_chain(
         if !(source_contributes
             || verified_no_change_link(lifecycle_store, &source.run_id, &source_promotion)?)
             || source_promotion.source.task_id.as_str() != source.task_id.as_str()
-            || source_promotion.patch_artifact.sha256.as_deref()
+            || source_promotion
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.tree_sha.as_str())
                 != Some(source.patch_sha256.as_str())
         {
             return Err(Error::validation_invalid_argument(
@@ -6354,7 +6350,7 @@ fn cook_selected_candidate_provenance(
         .ok()?;
     if let Ok(Some(promotion)) = recorded_promotion_report(&record.metadata) {
         value["applied_promotion"] = serde_json::json!({
-            "identity": promotion.pointer("/patch_artifact/sha256"),
+            "identity": promotion.pointer("/candidate/tree_sha"),
             "destination": promotion.get("to_worktree"),
             "fingerprint": promotion.pointer("/provenance/candidate"),
         });
@@ -7322,10 +7318,9 @@ fn delivered_candidate_facts(
         AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
     ) && promotion.finalization_eligible(accept_inherited_failures)
         && promotion
-            .patch_artifact
-            .sha256
-            .as_deref()
-            .is_some_and(|sha| !sha.is_empty())
+            .candidate
+            .as_ref()
+            .is_some_and(|candidate| !candidate.tree_sha.is_empty())
         && !delivery.is_some_and(super::CookDelivery::published);
     DeliveredCandidateFacts {
         applied_gate_failure,
@@ -7887,7 +7882,10 @@ mod provider_model_tests {
         assert!(outcome_model_identity_evidence(&selected_outcome(None)).is_none());
     }
 
-    fn patch_artifact(id: &str, model: Option<&str>) -> crate::agent_task::AgentTaskArtifact {
+    fn model_evidence_artifact(
+        id: &str,
+        model: Option<&str>,
+    ) -> crate::agent_task::AgentTaskArtifact {
         crate::agent_task::AgentTaskArtifact {
             id: id.to_string(),
             kind: "patch".to_string(),
@@ -7904,9 +7902,9 @@ mod provider_model_tests {
     fn candidate_artifact_model_evidence_resolves_one_model_and_fails_closed_on_ambiguity() {
         let mut outcome = selected_outcome(None);
         outcome.artifacts = vec![
-            patch_artifact("uncommitted", Some("anthropic/claude-sonnet-5")),
-            patch_artifact("committed", Some("anthropic/claude-sonnet-5")),
-            patch_artifact("unbound", None),
+            model_evidence_artifact("uncommitted", Some("anthropic/claude-sonnet-5")),
+            model_evidence_artifact("committed", Some("anthropic/claude-sonnet-5")),
+            model_evidence_artifact("unbound", None),
         ];
         assert_eq!(
             candidate_artifact_model_evidence(&outcome, "run")
@@ -7916,14 +7914,14 @@ mod provider_model_tests {
         );
 
         outcome.artifacts = vec![
-            patch_artifact("uncommitted", Some("model-a")),
-            patch_artifact("committed", Some("model-b")),
+            model_evidence_artifact("uncommitted", Some("model-a")),
+            model_evidence_artifact("committed", Some("model-b")),
         ];
         let error = candidate_artifact_model_evidence(&outcome, "run")
             .expect_err("distinct artifact models fail closed");
         assert_eq!(error.details["field"], "provider_model");
 
-        outcome.artifacts = vec![patch_artifact("unbound", None)];
+        outcome.artifacts = vec![model_evidence_artifact("unbound", None)];
         assert!(candidate_artifact_model_evidence(&outcome, "run")
             .expect("absent binding is unresolved, not an error")
             .is_none());
@@ -8012,7 +8010,7 @@ mod replacement_green_gate_status_tests {
             "source": {"kind": "aggregate", "task_id": "task", "run_id": "run-16236"},
             "to_worktree": "homeboy@16236",
             "target": {"worktree": "homeboy@16236", "path": "/tmp/homeboy-16236"},
-            "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch", "sha256": "sha"},
+            "candidate": {"base_sha": "base", "candidate_sha": "patch", "tree_sha": "sha"},
             "deterministic_gates": gates,
             "operator_notification": {"status": "completed", "message": "complete"},
             "verified_base": {"base": "main", "sha": "verified-base"},
