@@ -1,0 +1,22 @@
+[package]
+name = "bench-noop-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Test fixture for the homeboy bench harness. Two bench binaries discoverable
+# via the `bench-*` naming convention. See ../../scripts/bench/bench-runner.sh.
+
+[[bin]]
+name = "bench-noop"
+path = "src/bin/bench-noop.rs"
+
+[[bin]]
+name = "bench-busy"
+path = "src/bin/bench-busy.rs"
+
+[profile.release]
+# Default release settings — the bench harness builds with --release so this
+# matches what real components will pay.
+opt-level = 3
+lto = false

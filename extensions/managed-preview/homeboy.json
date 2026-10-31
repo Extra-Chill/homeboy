@@ -1,0 +1,9 @@
+{
+  "id": "managed-preview",
+  "version_targets": [
+    {
+      "file": "managed-preview.json",
+      "pattern": "\"version\":\\s*\"([0-9.]+)\""
+    }
+  ]
+}

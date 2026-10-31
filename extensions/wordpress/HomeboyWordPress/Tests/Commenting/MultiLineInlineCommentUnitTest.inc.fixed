@@ -1,0 +1,61 @@
+<?php
+/**
+ * Unit-test fixture for HomeboyWordPress.Commenting.MultiLineInlineComment.
+ *
+ * Each labelled section exercises one rule path. Expected violation lines
+ * are tracked in MultiLineInlineCommentUnitTest.php.
+ *
+ * @package HomeboyWordPress
+ */
+
+/* Section: PASS — single-line // is fine on its own. */
+// This is one comment on a single line.
+$single = 1;
+
+$trailing = 2; // EOL trailing comment is allowed even on multiple statements.
+$another  = 3; // Trailing on consecutive lines is still trailing, not a run.
+
+/* Section: PASS — tooling annotations are skipped. */
+// phpcs:disable WordPress.Security.NonceVerification.Missing
+// phpcs:enable WordPress.Security.NonceVerification.Missing
+// translators: %s is the user name.
+//phpstan-ignore-next-line
+//psalm-suppress UnusedVariable
+
+/* Section: FAIL A — 2-line consecutive // run. */
+/*
+ * First prose line that should be a block comment.
+ * Second prose line that joins it.
+ */
+$two_line = 'fail A 2-line';
+
+/* Section: FAIL A — 4-line run mirrors WP-develop #11387 review finding 3. */
+/*
+ * Use a query where have_posts() is true but wp_list_pluck()
+ * returns an empty array because the posts array contains scalar
+ * values (neither objects nor arrays). Confirms the bug surface
+ * from WordPress/wordpress-develop#11387 review finding 3.
+ */
+$four_line = 'fail A 4-line';
+
+function legitimate_function_with_docblock() {
+	return true;
+}
+
+/**
+ * Legitimate function DocBlock — must NOT trigger Detection B.
+ *
+ * @return bool
+ */
+function declared_after_docblock() {
+	/* Detection B fail: prose double-asterisk single-line inside body. */
+	$inside = 1;
+
+	/*
+	 * Detection B fail: multi-line prose double-asterisk between statements.
+	 * Should be a single-asterisk block comment per inline-docs section 5.2.
+	 */
+	$between = 2;
+
+	return ( $inside === 1 && $between === 2 );
+}

@@ -1,0 +1,84 @@
+name: WP Codebox test runtime canary
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/wp-codebox-test-runtime-canary.yml
+      - wordpress/scripts/test/**
+      - wordpress/tests/wp-codebox-phpunit-aggregate-smoke.mjs
+      - wordpress/tests/fixtures/test-db-activation-host/**
+      - wordpress/tests/fixtures/bench-db-activation-dep/**
+      - wordpress/tests/fixtures/test-managed-dependency-order-host/**
+      - wordpress/tests/fixtures/managed-dependency-order-dep/**
+
+permissions:
+  contents: read
+
+jobs:
+  db-activation-smoke:
+    name: DB activation PHPUnit smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Homeboy Extensions
+        uses: actions/checkout@v4
+
+      - name: Checkout WP Codebox
+        uses: actions/checkout@v4
+        with:
+          repository: Automattic/wp-codebox
+          ref: main
+          path: .ci/wp-codebox
+
+      - name: Checkout Homeboy core
+        uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy
+          ref: main
+          path: .ci/homeboy
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Homeboy WordPress extension dependencies
+        working-directory: wordpress
+        run: |
+          set -euo pipefail
+          composer install --no-interaction --no-progress --prefer-dist
+          npm install
+
+      - name: Build WP Codebox
+        working-directory: .ci/wp-codebox
+        run: |
+          set -euo pipefail
+          npm install
+          npm run build
+          npx playwright install --with-deps chromium
+
+      - name: Run WP Codebox-backed test runner canary
+        env:
+          HOMEBOY_WP_CODEBOX_BIN: ${{ github.workspace }}/.ci/wp-codebox/packages/cli/dist/index.js
+          HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/index.js
+          HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
+        run: bash wordpress/scripts/test/playground-db-activation-smoke.sh
+
+      - name: Run PHPUnit aggregate normalization smoke
+        working-directory: wordpress
+        run: npm run test:wp-codebox-phpunit-aggregate
+
+      - name: Run managed dependency ordering canary
+        env:
+          HOMEBOY_WP_CODEBOX_BIN: ${{ github.workspace }}/.ci/wp-codebox/packages/cli/dist/index.js
+          HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/index.js
+          HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
+        run: bash wordpress/scripts/test/playground-managed-dependency-order-smoke.sh
+
+      - name: Run raw extra_plugins Composer autoload canary
+        env:
+          HOMEBOY_WP_CODEBOX_BIN: ${{ github.workspace }}/.ci/wp-codebox/packages/cli/dist/index.js
+          HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/index.js
+        run: bash wordpress/scripts/test/wp-codebox-extra-plugins-autoload-smoke.sh

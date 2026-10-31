@@ -1,0 +1,22 @@
+{
+  "name": "Discord Notifications",
+  "id": "discord",
+  "version": "0.6.2",
+  "icon": "message.circle",
+  "description": "Outbound Discord run-completion notification delivery for Homeboy",
+  "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["mjs"]
+  },
+  "notification_transports": [
+    {
+      "schema": "homeboy/notification-transport/v1",
+      "id": "discord.run-completion",
+      "command": ["node", "{extension_path}/scripts/notify.mjs"],
+      "route_resolver": {
+        "schema": "homeboy/notification-route-resolver/v1",
+        "command": ["node", "{extension_path}/scripts/resolve-route.mjs"]
+      }
+    }
+  ]
+}

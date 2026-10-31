@@ -1,0 +1,151 @@
+{
+  "schema": "homeboy/agent-runtime-manifest/v1",
+  "id": "codex",
+  "name": "Codex",
+  "version": "1.1.2",
+  "description": "Standalone Codex agent runtime for repository-scoped agent tasks.",
+  "contract_producers": [
+    {
+      "id": "codex.agent-task-result",
+      "phase": "result",
+      "invocation": {
+        "script": "scripts/agent/homeboy-codex-agent-task-executor.cjs",
+        "input_schema": "homeboy/agent-task-request/v1",
+        "output_schema": "homeboy/agent-task-outcome/v1"
+      },
+      "produces": [
+        {
+          "kind": "status",
+          "name": "agent-task-outcome",
+          "schema": "homeboy/agent-task-outcome/v1"
+        }
+      ]
+    }
+  ],
+  "agent_task_executors": [
+    {
+      "schema": "homeboy/agent-task-executor-provider/v1",
+      "id": "codex.agent-task-executor",
+      "label": "Codex agent task executor",
+      "backend": "codex",
+      "runtime": "codex",
+      "invocation": {
+        "schema": "homeboy/command-invocation/v1",
+        "argv": [
+          "node",
+          "{{runtime_path}}/scripts/agent/homeboy-codex-agent-task-executor.cjs"
+        ],
+        "display": "node {{runtime_path}}/scripts/agent/homeboy-codex-agent-task-executor.cjs"
+      },
+      "readiness_invocation": {
+        "schema": "homeboy/command-invocation/v1",
+        "argv": [
+          "node",
+          "{{runtime_path}}/scripts/agent/homeboy-codex-provider-readiness.cjs"
+        ],
+        "env_allowlist": [
+          "HOMEBOY_CODEX_COMMAND",
+          "HOMEBOY_CODEX_COMMAND_ARGS",
+          "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+          "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
+          "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
+          "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
+          "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
+        ],
+        "display": "node {{runtime_path}}/scripts/agent/homeboy-codex-provider-readiness.cjs"
+      },
+      "request_schema": "homeboy/agent-task-request/v1",
+      "outcome_schema": "homeboy/agent-task-outcome/v1",
+      "request_required_fields": [
+        "schema",
+        "task_id",
+        "executor.backend",
+        "instructions"
+      ],
+      "outcome_statuses": [
+        "succeeded",
+        "no_op",
+        "unable_to_remediate",
+        "provider_error",
+        "timeout",
+        "failed",
+        "follow_up_issue",
+        "cancelled"
+      ],
+      "failure_classifications": [
+        "provider",
+        "transient",
+        "timeout",
+        "policy_denied",
+        "capability_missing",
+        "invalid_input",
+        "execution_failed",
+        "unknown"
+      ],
+      "redacted_metadata_keys": [
+        "secret_env_values",
+        "secretEnvValues",
+        "secrets",
+        "codex_auth"
+      ],
+      "secret_env_requirements": [
+        {
+          "schema": "homeboy/secret-env-requirement/v1",
+          "source": "provider_default",
+          "env": [
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
+          ],
+          "when": {
+            "any": [
+              { "path": "executor.config.provider", "equals": "codex" },
+              { "path": "executor.provider", "equals": "codex" },
+              { "path": "provider", "equals": "codex" }
+            ]
+          }
+        }
+      ],
+      "capabilities": [
+        "cli_runtime",
+        "repo_workspace",
+        "workspace_tools",
+        "patch_artifacts",
+        "report_artifacts",
+        "structured_outcome",
+        "provider_owned_auth",
+        "provider_owned_session",
+        "provider_owned_cancellation",
+        "runtime_tool_attachment"
+      ],
+      "workspace_materialization": {
+        "cwd": "git_checkout"
+      },
+      "provider_defaults": {
+        "codex": {
+          "command": "codex",
+          "command_args": ["exec"],
+          "secret_env": [
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
+          ]
+        }
+      },
+      "lifecycle": {
+        "completion": "synchronous_process",
+        "cancellation": "provider_signal"
+      },
+      "artifact_contract": {
+        "patch": ["git-diff", "patch"],
+        "report": ["json", "markdown"]
+      },
+      "status": "available",
+      "integration_contract": "homeboy-codex-agent-task/v1"
+    }
+  ]
+}

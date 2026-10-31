@@ -1,0 +1,14 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('node:fs');
+const { piProviderReadiness } = require('../../lib/pi-agent-task-executor');
+
+(async () => {
+	const request = JSON.parse(fs.readFileSync(0, 'utf8'));
+	process.stdout.write(`${JSON.stringify(await piProviderReadiness(request))}\n`);
+})().catch(() => {
+	// Do not serialize parser or process errors: either can contain secret input.
+	process.stderr.write('Pi provider readiness request could not be processed.\n');
+	process.exitCode = 1;
+});

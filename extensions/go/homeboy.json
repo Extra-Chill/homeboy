@@ -1,0 +1,16 @@
+{
+  "id": "go",
+  "changelog_target": "docs/CHANGELOG.md",
+  "version_targets": [
+    {
+      "file": "go.json",
+      "pattern": "\"version\":\\s*\"([0-9.]+)\""
+    }
+  ],
+  "self_checks": {
+    "lint": [
+      "jq empty go.json",
+      "find . -name '*.sh' -print0 | xargs -0 -r -n1 bash -n"
+    ]
+  }
+}

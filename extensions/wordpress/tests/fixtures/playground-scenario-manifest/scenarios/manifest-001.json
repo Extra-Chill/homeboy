@@ -1,0 +1,37 @@
+{
+  "id": "block-markup/navigation-001",
+  "label": "Generate valid navigation block markup",
+  "prompt_file": "prompt.md",
+  "blueprint": "blueprint.json",
+  "grader": "grader.php",
+  "verifier_files": ["verifier.php"],
+  "forbidden_mutations": ["scenarios/**"],
+  "required_active_plugins": ["playground-scenario-manifest/playground-scenario-manifest.php"],
+  "tags": ["blocks", "markup", "medium"],
+  "rules": {
+    "general": ["wordpress_editable_blocks"],
+    "task_specific": ["navigation_block_markup"]
+  },
+  "probes": {
+    "behavioral_fingerprints": [
+      {
+        "id": "block_shape_fingerprint",
+        "reward_weight": 0
+      }
+    ]
+  },
+  "limits": {
+    "max_turns": 8,
+    "step_budget": 12,
+    "time_budget_ms": 600000
+  },
+  "run": [
+    {
+      "type": "php",
+      "file": "scenarios/setup.php"
+    }
+  ],
+  "metadata": {
+    "corpus": "smoke"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "auto_cleanup": false,
+  "changelog_target": "CHANGELOG.md",
+  "id": "homeboy-extensions",
+  "remote_path": "",
+  "self_checks": {
+    "test": [
+      "node tests/agent-task-provider-contract-smoke.mjs",
+      "node agent-runtimes/codex/tests/declared-artifact-harvester.test.js",
+      "node agent-runtimes/claude-code/tests/claude-code-agent-task-executor-boundary.test.js",
+      "node agent-runtimes/lib/declared-outputs.test.js",
+      "node agent-runtimes/pi/tests/pi-agent-task-executor-boundary.test.js",
+      "node agent-runtimes/pi/tests/pi-runtime-readiness.test.js",
+      "node tests/browser-result-shapes-smoke.mjs",
+      "bash tests/cross-extension-sidecar-normalization-smoke.sh",
+      "node tests/deferred-init-browser-helper-smoke.mjs",
+      "node tests/dependency-adapter-manifests-smoke.mjs",
+      "node discord/tests/notify.test.mjs",
+      "node discord/tests/resolve-route.test.mjs",
+      "node tests/local-shell-agent-task-executor-boundary.test.mjs",
+      "bash tests/project-scripts-pnpm-workspace-smoke.sh",
+      "node tests/runtime-provider-resolver-smoke.mjs",
+      "bash tests/rust-release-prepare-smoke.sh",
+      "node tests/secret-env-plan-smoke.mjs",
+      "node tests/extension-shape-lint.mjs",
+      "node tests/extension-shape-lint-toolchain-probes.test.mjs",
+      "node tests/extension-shape-lint-consumer-files.test.mjs",
+      "node tests/runtime-settings-helper-declaration-contract.mjs",
+      "bash tests/nodejs-node-test-summary-smoke.sh",
+      "bash tests/settings-helper-smoke.sh",
+      "bash tests/wordpress-install-command-smoke.sh",
+      "bash tests/wordpress-release-artifact-version-smoke.sh",
+      "bash wordpress/tests/release-update-dependency-composer-smoke.sh",
+      "bash tests/wordpress-runtime-helper-resolver-smoke.sh",
+      "bash wordpress/scripts/test/test-shard-replay-smoke.sh",
+      "bash wordpress/scripts/test/test-inventory-standalone-smoke.sh",
+      "bash wordpress/scripts/test/full-suite-no-phpunit-smoke.sh",
+      "bash wordpress/tests/node-test-result-parser-smoke.sh",
+      "node tests/wp-codebox-install-overrides-persist-smoke.mjs",
+      "node ssh-checkout-deploy/tests/ssh-checkout-deploy.test.mjs"
+    ]
+  }
+}

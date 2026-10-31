@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<ruleset name="WordPress Module PHPCS Configuration">
+    <description>PHPCS configuration for WordPress components using the WordPress module.</description>
+
+    <!--
+        Dogfoods the shipped consumer ruleset (rulesets/homeboy-wordpress-project.xml):
+        WordPress-Extra with PSR-4 naming exclusions, PEAR/Squiz spacing exclusions,
+        testVersion, the shared non-source exclude-patterns, and the report args.
+        Running this extension's own lint against that file is what proves the
+        shipped artifact actually works for consumers who reference it the same way.
+    -->
+    <rule ref="rulesets/homeboy-wordpress-project.xml"/>
+
+    <!--
+        Custom homeboy-extensions sniffs (WP handbook rules not covered by WPCS).
+        Registered but opt-in: severity 0 keeps the rule off by default. Promote
+        a specific error code via the snippet at the top of HomeboyWordPress/ruleset.xml
+        in your project ruleset, or run on demand via the phpcs sniffs flag.
+    -->
+    <rule ref="HomeboyWordPress">
+        <severity>0</severity>
+    </rule>
+
+    <!--
+        Host-specific: exclude this extension's own tests/ directory (PHPUnit
+        fixtures, smoke harnesses) from the WordPress runtime lint profile. Not
+        part of the shared ruleset — see rulesets/homeboy-wordpress-project.xml
+        for why tests/ is intentionally left in scope by default there.
+    -->
+    <exclude-pattern>*/tests/*</exclude-pattern>
+
+    <!-- Text domain is auto-detected from plugin header by test-runner.sh -->
+</ruleset>

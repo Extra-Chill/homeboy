@@ -1,0 +1,1015 @@
+{
+  "name": "WordPress",
+  "version": "3.53.12",
+  "icon": "w.circle.fill",
+  "description": "WordPress project type with WP-CLI integration",
+  "author": "Extra Chill",
+  "wp_codebox": {
+    "minimum_version": "0.21.0"
+  },
+  "env_provider": {
+    "script": "scripts/env-provider.js"
+  },
+  "provides": {
+    "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
+    "discovery_markers": [
+      { "all": ["*.php"] },
+      { "all": ["style.css", "functions.php"] }
+    ]
+  },
+  "composition": {
+    "includes": ["nodejs"]
+  },
+  "isolated_home_paths": [".cache/homeboy/wp-codebox", ".wordpress-playground"],
+  "source_snapshot": {
+    "sync_excludes": ["vendor/", "vendor/**"]
+  },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "lint.producers": true,
+    "test.results": true,
+    "test.failures": true,
+    "test.coverage": false,
+    "bench.results": true,
+    "bench.responsiveness": true,
+    "trace.results": true,
+    "fix.results": true,
+    "fuzz.results": true,
+    "fuzz.artifacts": true,
+    "annotations": true
+  },
+  "diagnostics": {
+    "tools": [
+      {
+        "id": "php",
+        "version_args": ["--version"],
+        "remediation": "Install PHP and ensure php is on PATH"
+      },
+      {
+        "id": "composer",
+        "version_args": ["--version"],
+        "remediation": "Install Composer and ensure composer is on PATH"
+      },
+      {
+        "id": "node",
+        "version_args": ["--version"],
+        "remediation": "Install Node.js and ensure node is on PATH"
+      },
+      {
+        "id": "npm",
+        "version_args": ["--version"],
+        "remediation": "Install npm and ensure npm is on PATH"
+      }
+    ]
+  },
+  "contract_producers": [
+    {
+      "id": "wordpress.live-surface-discovery",
+      "phase": "discovery",
+      "invocation": {
+        "script": "scripts/runtime/wordpress-live-surface-discovery.php",
+        "output_schema": "homeboy/wordpress-live-surface-discovery-raw/v1"
+      },
+      "produces": [
+        {
+          "kind": "capability",
+          "name": "wordpress-live-surface-discovery",
+          "schema": "homeboy/wordpress-live-surface-discovery-raw/v1"
+        }
+      ]
+    },
+    {
+      "id": "wordpress.generic-fanout-reconcile-plan",
+      "phase": "planning",
+      "invocation": {
+        "script": "../runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs",
+        "output_schema": "homeboy/fanout-reconcile-plan/v1"
+      },
+      "produces": [
+        {
+          "kind": "execution_plan",
+          "name": "fanout-reconcile-plan",
+          "schema": "homeboy/fanout-reconcile-plan/v1"
+        }
+      ]
+    },
+    {
+      "id": "wordpress.generic-fanout-reconcile-result",
+      "phase": "result",
+      "invocation": {
+        "script": "../runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs",
+        "output_schema": "homeboy/generic-fanout-reconcile-result/v1"
+      },
+      "produces": [
+        {
+          "kind": "status",
+          "name": "generic-fanout-reconcile-result",
+          "schema": "homeboy/generic-fanout-reconcile-result/v1"
+        }
+      ]
+    },
+    {
+      "id": "wordpress.lint-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/lint/lint-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "lint.findings" },
+        { "kind": "artifact", "name": "lint.producers" }
+      ]
+    },
+    {
+      "id": "wordpress.test-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/test/test-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "test.results" },
+        { "kind": "artifact", "name": "test.failures" }
+      ]
+    },
+    {
+      "id": "wordpress.bench-results",
+      "phase": "result",
+      "invocation": {
+        "script": "scripts/bench/bench-runner.sh",
+        "output_schema": "homeboy/bench-results/v1"
+      },
+      "produces": [
+        {
+          "kind": "artifact",
+          "name": "bench.results",
+          "schema": "homeboy/bench-results/v1"
+        }
+      ]
+    },
+    {
+      "id": "wordpress.trace-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/trace/trace-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "trace.results" }
+      ]
+    }
+  ],
+  "dependency_materialization_recipes": {
+    "schema": "homeboy-extension-wordpress/dependency-materialization-recipes/v1",
+    "recipes": [
+      {
+        "id": "wordpress-php-package-dependencies",
+        "kind": "php-package-dependency-materialization",
+        "ecosystem": "php",
+        "package_manager": "composer",
+        "declaration": {
+          "manifest": "composer.json",
+          "lockfile": "composer.lock"
+        },
+        "materializes": [
+          { "kind": "directory", "path": "vendor" }
+        ],
+        "required_outputs": [
+          { "id": "composer-vendor-directory", "kind": "directory", "path": "vendor" }
+        ]
+      },
+      {
+        "id": "wordpress-js-asset-dependencies",
+        "kind": "js-asset-dependency-materialization",
+        "ecosystem": "javascript",
+        "package_manager": "npm",
+        "declaration": {
+          "manifest": "package.json",
+          "lockfile": "package-lock.json"
+        },
+        "materializes": [
+          { "kind": "directory", "path": "node_modules" }
+        ],
+        "required_outputs": [
+          { "id": "npm-node-modules-directory", "kind": "directory", "path": "node_modules" }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "format": "scripts/format.sh"
+  },
+  "deps": {
+    "extension_script": "scripts/deps/deps-runner.sh"
+  },
+  "component_env": {
+    "detect_script": "scripts/env/detect.sh"
+  },
+  "platform": {
+    "config_schema": "wordpress",
+    "discovery": {
+      "find_command": "find /home /var/www /srv -maxdepth 6 -name 'wp-config.php' -type f 2>/dev/null | head -20",
+      "base_path_transform": "dirname",
+      "display_name_command": "cd {{basePath}} && wp option get blogname --skip-themes --skip-plugins 2>/dev/null || basename {{basePath}}"
+    },
+    "default_pinned_files": [
+      "wp-config.php",
+      ".htaccess",
+      "robots.txt"
+    ],
+    "commands": [
+      "wp",
+      "wp-test"
+    ]
+  },
+  "hooks": {
+    "post:deploy": [
+      "wp cache flush --path={{base_path}} --allow-root 2>/dev/null || true",
+      "DEPLOY_OWNER=$(stat -c '%U:%G' {{install_dir}} 2>/dev/null || stat -f '%Su:%Sg' {{install_dir}} 2>/dev/null) && case \"$DEPLOY_OWNER\" in root:root) echo 'WARNING: {{install_dir}} is owned by root:root. PHP-FPM (www-data) may not be able to read plugin files.' && echo '  Fix: homeboy component set {{component_id}} remote_owner www-data:www-data' ;; esac || true"
+    ]
+  },
+  "deploy": {
+    "protected_path_suffixes": [
+      "/plugins",
+      "/themes",
+      "/mu-plugins",
+      "/wp-content",
+      "/wp-content/uploads",
+      "/wp-content/plugins",
+      "/wp-content/themes",
+      "/wp-content/mu-plugins"
+    ],
+    "path_roots": [
+      {
+        "path_prefix": "wp-content/",
+        "root": "wp_content",
+        "strip_prefix": true,
+        "detect_command": "wp eval 'echo WP_CONTENT_DIR;'"
+      }
+    ],
+    "owner_hints": [
+      {
+        "path_contains": "wp-content/",
+        "suggested_owner": "www-data:www-data"
+      }
+    ],
+    "remote_path_inference": [
+      {
+        "when_file_contains": { "file": "{{dir_name}}.php", "text": "Plugin Name:" },
+        "remote_path": "wp-content/plugins/{{dir_name}}"
+      },
+      {
+        "when_file_contains": { "file": "{{id}}.php", "text": "Plugin Name:" },
+        "remote_path": "wp-content/plugins/{{dir_name}}"
+      },
+      {
+        "when_file_contains": { "file": "style.css", "text": "Theme Name:" },
+        "remote_path": "wp-content/themes/{{dir_name}}"
+      }
+    ],
+    "archive_install": [
+      {
+        "path_pattern": "/wp-content/plugins/",
+        "staging_path": "/tmp/homeboy-staging",
+        "root_must_match_target_basename": true,
+        "required_header": {
+          "file": "{{targetBasename}}.php",
+          "contains": "Plugin Name:"
+        }
+      },
+      {
+        "path_pattern": "/wp-content/themes/",
+        "staging_path": "/tmp/homeboy-staging",
+        "root_must_match_target_basename": true,
+        "required_header": {
+          "file": "style.css",
+          "contains": "Theme Name:"
+        }
+      }
+    ],
+    "version_patterns": [
+      {
+        "extension": ".php",
+        "pattern": "Version:\\s*(\\d+\\.\\d+\\.\\d+)"
+      }
+    ],
+    "since_tag": {
+      "extensions": [".php"]
+    }
+  },
+  "executable": {
+    "runtime": {
+      "setup_command": "bash {{extension_path}}/scripts/build/setup.sh",
+      "setup_timeout_seconds": 900,
+      "ready_check": "bash {{extension_path}}/scripts/doctor/wp-codebox-doctor.sh doctor",
+      "run_command": "bash {{extension_path}}/scripts/test/test-runner.sh"
+    }
+  },
+  "cli": {
+    "tool": "wp",
+    "display_name": "WP-CLI",
+    "command_template": "{{cliPath}} --path={{sitePath}} --url={{domain}} {{args}}",
+    "working_dir_template": "{{sitePath}}",
+    "default_cli_path": "wp",
+    "settings_flags": {
+      "user": "--user={{value}}"
+    },
+    "auto_flags": [
+      {
+        "when": {
+          "server_user": "root"
+        },
+        "flag": "--allow-root"
+      }
+    ],
+    "help": {
+      "project_id_help": "Project ID (use 'homeboy project list'). For multisite: project:subtarget",
+      "args_help": "WP-CLI command and arguments (space-separated, not quoted)",
+      "examples": [
+        "homeboy wp my-site plugin list",
+        "homeboy wp my-site option get blogname",
+        "homeboy wp example-site:staging sample-plugin health-check"
+      ]
+    }
+  },
+  "build": {
+    "artifact_extensions": [
+      ".zip"
+    ],
+    "script_names": [
+      "build.sh"
+    ],
+    "command_template": "bash {{script}}",
+    "extension_script": "scripts/build/build.sh",
+    "pre_build_script": "scripts/build/validate-build.sh",
+    "artifact_pattern": "build/{component_id}.zip",
+    "cleanup_paths": [
+      "node_modules",
+      "vendor",
+      "build"
+    ],
+    "lockfile_paths": [
+      "composer.lock",
+      "package-lock.json",
+      "yarn.lock",
+      "pnpm-lock.yaml"
+    ]
+  },
+  "artifact_cleanup": {
+    "declarations": [
+      {
+        "id": "npm-node-modules",
+        "category": "dependencies",
+        "path": "node_modules",
+        "scopes": [
+          {
+            "manifest_files": ["package.json", "package-lock.json"],
+            "nested": true,
+            "max_depth": 5
+          }
+        ],
+        "rehydrate_command": "npm ci",
+        "min_age_days": 1,
+        "description": "npm dependency tree installed by this extension's bootstrap. Reconstructable from the committed package-lock.json. Resolved only beside a manifest and lockfile pair, so `npm ci` is guaranteed to restore it. A one-day floor keeps a tree that was just installed for in-flight work."
+      },
+      {
+        "id": "composer-vendor",
+        "category": "dependencies",
+        "path": "vendor",
+        "scopes": [
+          {
+            "manifest_files": ["composer.json", "composer.lock"],
+            "nested": true,
+            "max_depth": 5
+          }
+        ],
+        "rehydrate_command": "composer install --no-interaction --prefer-dist",
+        "min_age_days": 1,
+        "description": "Composer dependency tree installed by this extension's bootstrap. Reconstructable from the committed composer.lock. Vendor trees that ship inside a packaged release are produced into the packaging directory, not here."
+      },
+      {
+        "id": "generated-js-assets",
+        "category": "build_output",
+        "path": "dist",
+        "scopes": [
+          {
+            "manifest_files": ["package.json"],
+            "nested": true,
+            "max_depth": 5
+          }
+        ],
+        "rehydrate_command": "npm run build",
+        "description": "Generated JavaScript bundle output. Regenerated by the package build script, so it carries no retention cost beyond the rebuild. Resolved only beside a package manifest, which is what makes the rebuild available."
+      },
+      {
+        "id": "phpunit-result-cache",
+        "category": "build_cache",
+        "path": ".phpunit.result.cache",
+        "scopes": [
+          {
+            "manifest_files": ["phpunit.xml.dist"],
+            "nested": true,
+            "max_depth": 5
+          },
+          {
+            "manifest_files": ["phpunit.xml"],
+            "nested": true,
+            "max_depth": 5
+          }
+        ],
+        "description": "PHPUnit result cache written by this extension's test runner. Regenerated by the next run; losing it costs only test-ordering optimization."
+      },
+      {
+        "id": "packaged-release-output",
+        "category": "release_asset",
+        "path": "build",
+        "scopes": [
+          {
+            "manifest_files": ["package.json"],
+            "nested": true,
+            "max_depth": 5
+          }
+        ],
+        "description": "Packaging directory. Holds both built JS assets and the deployable {component_id}.zip this extension's artifact_pattern points at, so it is inventoried for review and never reclaimed."
+      }
+    ]
+  },
+  "lint": {
+    "extension_script": "scripts/lint/lint-runner.sh",
+    "changed_file_routes": [
+      {
+        "extensions": ["php"],
+        "step": "phpcs,phpstan"
+      },
+      {
+        "extensions": ["js", "jsx", "ts", "tsx"],
+        "step": "eslint"
+      }
+    ]
+  },
+  "test": {
+    "portable_env": {
+      "keys": [
+        "HOMEBOY_TEST_INVENTORY_ONLY",
+        "HOMEBOY_TEST_INVENTORY_FILE",
+        "HOMEBOY_TEST_SHARD_MANIFEST"
+      ]
+    },
+    "result_parse": {
+      "extension_script": "scripts/test/parse-test-results.sh",
+      "adapters": ["wp-codebox-json", "node-test"]
+    },
+    "changed_file_routing": {
+      "strategy": "exclusive_env",
+      "exclusive_env": {
+        "name": "HOMEBOY_WORDPRESS_HOST_SMOKE_FILES",
+        "globs": ["tests/**/*-smoke.php"]
+      }
+    },
+    "drift": {
+      "source_dirs": ["src", "inc", "lib"],
+      "test_dirs": ["tests"],
+      "file_extensions": ["php"],
+      "inline_tests": false
+    },
+    "inventory": {
+      "root_markers": ["composer.json", "readme.txt", "style.css"],
+      "fingerprint_names": ["composer.json", "composer.lock", "package.json", "package-lock.json", "phpunit.xml", "phpunit.xml.dist"],
+      "fingerprint_extensions": ["php", "js", "jsx", "ts", "tsx", "sh"],
+      "fingerprint_skip_dirs": [".git", "vendor", "node_modules", "build", "dist", "target", ".homeboy-action"],
+      "runners": [{ "id": "wordpress", "version_command": ["php", "--version"] }]
+    },
+    "secret_env_projections": [
+      {
+        "when": {
+          "path": ["wp_codebox_database_service", "provider"],
+          "equals": "external"
+        },
+        "names_path": ["wp_codebox_database_service", "secret_env"]
+      }
+    ],
+    "extension_script": "scripts/test/test-runner.sh",
+    "runtime_helpers": [
+      { "id": "runtime-settings" }
+    ]
+  },
+  "bench": {
+    "extension_script": "scripts/bench/bench-runner.sh"
+  },
+  "trace": {
+    "extension_script": "scripts/trace/trace-runner.sh",
+    "toolchain_provenance": [
+      {
+        "id": "wp-codebox",
+        "label": "WP Codebox",
+        "legacy_field": "wp_codebox",
+        "env_keys": ["HOMEBOY_WP_CODEBOX_BIN", "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"]
+      }
+    ]
+  },
+  "fuzz": {
+    "extension_script": "scripts/fuzz/fuzz-runner.cjs",
+    "capabilities": ["wordpress-fuzz-runner", "wp-codebox-fuzz-suite", "wp-codebox-fuzz-run", "wordpress-fuzz-coverage-aggregate"],
+    "env": [
+      "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE",
+      "HOMEBOY_FUZZ_WORKLOAD_PATH",
+      "HOMEBOY_FUZZ_WORKLOAD_ID",
+      "HOMEBOY_FUZZ_RUN_ID",
+      "HOMEBOY_FUZZ_SEED",
+      "HOMEBOY_FUZZ_MAX_DURATION",
+      "HOMEBOY_SETTINGS_JSON",
+      "HOMEBOY_SETTINGS_WP_CODEBOX_BIN",
+      "HOMEBOY_WP_CODEBOX_BIN",
+      "WP_CODEBOX_BIN",
+      "WP_CODEBOX_FUZZ_WORKLOAD_ROOT"
+    ]
+  },
+  "workloads": {
+    "fuzz": {
+      "script": "scripts/workload/fuzz-workload.sh",
+      "env": [
+        "HOMEBOY_FUZZ_MAX_DURATION",
+        "HOMEBOY_WP_CODEBOX_FUZZ_DISPATCH",
+        "HOMEBOY_SETTINGS_JSON",
+        "HOMEBOY_SETTINGS_WP_CODEBOX_BIN",
+        "HOMEBOY_WP_CODEBOX_BIN",
+        "WP_CODEBOX_BIN",
+        "WP_CODEBOX_FUZZ_WORKLOAD_ROOT"
+      ],
+      "result_schema": "homeboy/fuzz-campaign/v1",
+      "replay_command": "bash \"$HOMEBOY_EXTENSION_PATH/scripts/workload/fuzz-replay.sh\"",
+      "compare": {
+        "metrics": [
+          { "name": "cases_failed", "direction": "lower_is_better" },
+          { "name": "findings_total", "direction": "lower_is_better" }
+        ],
+        "findings_key": "fingerprint"
+      },
+      "safety_class": "read_only"
+    }
+  },
+  "ci": {
+    "profiles": {
+      "pr": {
+        "label": "Pull request checks",
+        "jobs": ["lint", "wp-codebox-phpunit"]
+      },
+      "wp-codebox-runtime": {
+        "label": "WP Codebox runtime checks",
+        "jobs": ["wp-codebox-phpunit", "wp-codebox-bench"]
+      },
+      "wp-codebox-validation": {
+        "label": "WP Codebox validation profile",
+        "jobs": ["wp-codebox-build-smoke", "wp-codebox-phpunit", "wp-codebox-bench-offloaded"],
+        "summary": "Run safe local build/PHPUnit smoke coverage first, then route WP Codebox benchmark work through Homeboy Lab/runner offload with durable run artifacts.",
+        "rerun_commands": [
+          "homeboy build <component>",
+          "homeboy test <component> --ci-job wp-codebox-phpunit",
+          "homeboy config set /bench/local_execution '\"denied\"'",
+          "homeboy bench <component> --ci-profile wp-codebox-validation-bench --runner <runner-id>"
+        ],
+        "artifact_contract": "Use Homeboy run artifacts from the build/test invocation plus the offloaded bench run artifact bundle; do not cite machine-local paths in PR evidence."
+      },
+      "wp-codebox-validation-bench": {
+        "label": "WP Codebox validation benchmark offload",
+        "jobs": ["wp-codebox-bench-offloaded"]
+      }
+    },
+    "jobs": {
+      "lint": {
+        "check_names": ["Lint", "PHP lint", "WordPress lint"],
+        "command": "lint",
+        "env": { "CI": "1" },
+        "provider": "github-actions",
+        "workflow": "homeboy.yml",
+        "fidelity": "local-equivalent",
+        "limitations": []
+      },
+      "wp-codebox-phpunit": {
+        "check_names": ["DB activation PHPUnit smoke", "WP Codebox PHPUnit", "WordPress PHPUnit"],
+        "command": "test",
+        "env": {
+          "CI": "1"
+        },
+        "provider": "github-actions",
+        "workflow": "wp-codebox-test-runtime-canary.yml",
+        "fidelity": "local-partial",
+        "limitations": ["Runs the local WP Codebox-backed WordPress test runner; CI checkout/setup details such as a freshly built external wp-codebox checkout are not reproduced by the profile itself."]
+      },
+      "wp-codebox-build-smoke": {
+        "check_names": ["WP Codebox build smoke", "WordPress package build"],
+        "command": "build",
+        "env": {
+          "CI": "1"
+        },
+        "provider": "local",
+        "workflow": "wp-codebox-validation",
+        "fidelity": "local-partial",
+        "limitations": ["Runs only safe local build/package validation. It must not run benchmark workloads or Cargo/Rust validation on the Studio controller."]
+      },
+      "wp-codebox-bench": {
+        "check_names": ["WP Codebox bench", "WordPress bench"],
+        "command": "bench",
+        "env": {
+          "CI": "1",
+          "HOMEBOY_BENCH_ITERATIONS": "3"
+        },
+        "provider": "github-actions",
+        "workflow": "homeboy.yml",
+        "fidelity": "local-partial",
+        "limitations": ["Runs local WP Codebox bench recipes for the current component; provider matrices, hosted runner hardware, and remote artifacts are not reproduced."]
+      },
+      "wp-codebox-bench-offloaded": {
+        "check_names": ["WP Codebox bench", "WordPress bench", "Homeboy Lab bench offload"],
+        "command": "bench",
+        "env": {
+          "CI": "1",
+          "HOMEBOY_BENCH_ITERATIONS": "3"
+        },
+        "provider": "homeboy-lab",
+        "workflow": "homeboy bench --ci-profile wp-codebox-validation-bench --runner <runner-id>",
+        "fidelity": "remote-only",
+        "limitations": ["Benchmark validation is remote-only. Set /bench/local_execution to denied and pass a connected Lab/runner id so fallback cannot execute benchmarks on the controller."]
+      }
+    }
+  },
+  "settings": [
+    {
+      "id": "standalone_php_test_paths",
+      "label": "Standalone PHP test paths",
+      "type": "array",
+      "default": ["tests/**/*-smoke.php"],
+      "description": "Component-relative PHP paths or globs (`**` matches zero or more directories) that identify executable standalone PHP tests. Matching files run through the bounded host-PHP runner with no booted WordPress in full suites, changed-file scopes, and shard replay. Absent means the convention default tests/**/*-smoke.php; a declared list replaces the default, and [] selects none."
+    },
+    {
+      "id": "wordpress_test_paths",
+      "label": "Booted-WordPress test paths",
+      "type": "array",
+      "default": [],
+      "description": "Component-relative PHP paths or globs that identify booted-WordPress smokes outside canonical PHPUnit locations. Full-suite runs execute matching tests/**/*-smoke.php files through the host-smoke WordPress backend. A file matching both this and standalone_php_test_paths runs only in booted WordPress."
+    },
+    {
+      "id": "test_path_excludes",
+      "label": "Test path excludes",
+      "type": "array",
+      "default": [],
+      "description": "Component-relative PHP paths or globs removed from both standalone_php_test_paths and wordpress_test_paths, for fixtures and helpers that match a test convention but are not tests."
+    },
+    {
+      "id": "validation_dependencies",
+      "label": "Validation Dependencies",
+      "type": "array",
+      "default": [],
+      "description": "Local component IDs or paths to load during PHPStan, autoload validation, PHPUnit, and bench. Accepts an array of component IDs, paths, or bench-scoped objects shaped like {dependency,path|slug,scenarios,profiles,profile_env}. Scoped objects let selected bench scenarios/profiles opt into expensive gateway dependencies without blocking unrelated profiles."
+    },
+    {
+      "id": "user",
+      "label": "WP-CLI User",
+      "type": "string",
+      "default": "",
+      "description": "WordPress user for WP-CLI commands (email, login, or ID). When configured, automatically appended as --user flag."
+    },
+    {
+      "id": "wp_config_defines",
+      "label": "wp-config additions",
+      "type": "object",
+      "default": {},
+      "description": "Map of CONSTANT_NAME => value appended to the WP Codebox wp-tests-config.php as additional define() statements. Lets a component declare wp-config-level constants (mode flags, debug toggles, custom paths) without shipping a custom drop-in. Values preserve PHP type via var_export() — booleans, integers, and nulls round-trip cleanly. Reserved canonical names (DB_NAME, ABSPATH, etc.) cannot be overridden."
+    },
+    {
+      "id": "build_nested_packages",
+      "label": "Build nested package.json directories",
+      "type": "boolean",
+      "default": true,
+      "description": "Whether the WordPress package builder should recursively run build scripts in nested package.json directories after the root frontend build. Disable for components whose root build already produces all required nested frontend assets. Can be overridden with HOMEBOY_BUILD_NESTED_PACKAGES=0."
+    },
+    {
+      "id": "bench_env",
+      "label": "Bench env passthrough",
+      "type": "object",
+      "default": {},
+      "description": "Map of NAME => value forwarded into the WordPress runtime as environment variables. Workloads (bench) and test fixtures (test runner) read them via getenv() / $_ENV. Required because host shell env doesn't cross the sandbox boundary; without this seam, getenv('MY_KNOB') returns false regardless of what the parent shell set. Values are coerced to strings (via json_encode for non-scalars) per PHP env-var convention. Component declares static defaults; matrix drivers can synthesize HOMEBOY_SETTINGS_JSON inline to override per-cell."
+    },
+    {
+      "id": "wp_codebox_core_module",
+      "label": "WP Codebox core module",
+      "type": "string",
+      "default": "",
+      "description": "Host-side ESM module path or package specifier that exports WP Codebox recipe builders. Used by the bench recipe builder before sandbox launch; distinct from bench_env, which is forwarded into the WordPress runtime."
+    },
+    {
+      "id": "phpunit_no_tests",
+      "label": "No PHPUnit tests discovered",
+      "type": "string",
+      "default": "skipped",
+      "description": "How the WP Codebox PHPUnit backend treats successful WordPress install/activation when discovery finds zero PHPUnit files. Use 'skipped' for components that intentionally test through smoke scripts, or 'failed' when the component expects PHPUnit coverage. Components with phpunit.xml(.dist) still fail on zero discovery."
+    },
+    {
+      "id": "npm_test_script",
+      "label": "npm test fallback script",
+      "type": "string",
+      "default": "",
+      "description": "package.json script to run after WP Codebox plugin install/activation succeeds but PHPUnit discovery finds no PHPUnit files. Composer scripts.test remains the first fallback when present."
+    },
+    {
+      "id": "wordpress_runtime_blueprint",
+      "label": "WordPress runtime blueprint",
+      "type": "object",
+      "default": {},
+      "description": "Backend-neutral WordPress runtime blueprint merged into the selected runtime adapter recipe. Empty object means stock WordPress. Runtime adapters normalize this canonical setting to backend-specific fields."
+    },
+    {
+      "id": "wp_codebox_extra_plugins",
+      "label": "WP Codebox extra plugins",
+      "type": "array",
+      "default": [],
+      "description": "Additional WP Codebox extra plugin entries for bench recipes. Use for runtime prerequisites that must be installed or activated but should not be treated as Homeboy validation dependencies."
+    },
+    {
+      "id": "wp_codebox_extra_themes",
+      "label": "WP Codebox extra themes",
+      "type": "array",
+      "default": [],
+      "description": "Immutable local theme checkouts for the wordpress-multisite-e2e rig. Each entry is {source,slug,activate?,metadata?}; the rig validates the theme and maps it to a readonly WP Codebox mount. At most one theme may be active."
+    },
+    {
+      "id": "wp_codebox_dependency_overlays",
+      "label": "WP Codebox dependency overlays",
+      "type": "array",
+      "default": [],
+      "description": "Existing WP Codebox dependency overlay entries forwarded by the wordpress-multisite-e2e rig for immutable Composer package replacement."
+    },
+    {
+      "id": "wordpress_multisite_synthetic_fixture",
+      "label": "WordPress multisite synthetic fixture",
+      "type": "boolean",
+      "default": true,
+      "description": "Run the wordpress-multisite-e2e rig's built-in alpha/beta self-test. Set false when consumer prepare/scenario/post steps own the complete network topology and journey."
+    },
+    {
+      "id": "wordpress_runtime_workloads",
+      "label": "WordPress runtime workloads",
+      "type": "array",
+      "default": [],
+      "description": "Backend-neutral WordPress workload declarations passed to the selected runtime adapter after dependency mounts and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file}, {type: 'ability', ability|name, input}, or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata."
+    },
+    {
+      "id": "wordpress_runtime_workload_plugin_slug",
+      "label": "WordPress runtime workload plugin slug",
+      "type": "string",
+      "default": "",
+      "description": "Mounted plugin slug that owns wordpress-multisite-e2e workloads. Defaults to the synthetic fixture only while that fixture is enabled; consumer-owned topology workloads must name a declared wp_codebox_extra_plugins entry."
+    },
+    {
+      "id": "wordpress_runtime_prepare_steps",
+      "label": "WordPress runtime prepare steps",
+      "type": "array",
+      "default": [],
+      "description": "Backend-neutral recipe steps to run before the measured WordPress runtime bench step. Each step is a runtime command object with command, args, and optional allowFailure/advisory flags. Use for generic pre-bench runtime evidence or setup that belongs outside measured workloads."
+    },
+    {
+      "id": "wordpress_runtime_post_steps",
+      "label": "WordPress runtime post steps",
+      "type": "array",
+      "default": [],
+      "description": "Backend-neutral recipe steps to run after the measured WordPress runtime bench step in the same disposable runtime. Use for generic post-bench browser probes, browser actions, or reviewer-facing evidence capture after workloads mutate WordPress state."
+    },
+    {
+      "id": "wp_codebox_bootstrap_files",
+      "label": "WP Codebox bench bootstrap files",
+      "type": "array",
+      "default": [],
+      "description": "Component-relative bootstrap file fallbacks for WP Codebox bench workloads. The runner resolves the list against the mounted component and passes the first existing file to wordpress.bench so it loads before workloads execute."
+    },
+    {
+      "id": "wp_codebox_phpunit_bootstrap_mode",
+      "label": "WP Codebox PHPUnit bootstrap mode",
+      "type": "string",
+      "default": "auto",
+      "description": "How the WP Codebox PHPUnit backend prepares WordPress tests. Use 'managed' for the Homeboy-managed WordPress test bootstrap, 'project' for the component's native PHPUnit bootstrap, or 'auto' to use project mode when phpunit.xml(.dist) declares a bootstrap attribute."
+    },
+    {
+      "id": "wp_codebox_multisite",
+      "label": "WP Codebox PHPUnit multisite",
+      "type": "boolean",
+      "default": false,
+      "description": "Explicitly enable multisite for plugin PHPUnit, including plugins that are not network-only. False forces single-site; HOMEBOY_WORDPRESS_MULTISITE remains the higher-precedence runtime override."
+    },
+    {
+      "id": "wp_codebox_database_service",
+      "label": "WP Codebox database service provider",
+      "type": "object",
+      "default": {},
+      "description": "Optional WP Codebox MySQL-compatible service selection. Native ephemeral mode is {provider:'native',engine:'mariadb'} and accepts no connection, administration, path, process, secret_env, or network-boundary fields. External host-managed mode remains {provider:'external',engine?,allowed_hosts,secret_env:{host,port?,username,password}}; engine may be mysql or mariadb, allowed_hosts declares its external-service boundary, and secret_env maps administrative fields to host environment variable names. Omit this setting to preserve WP Codebox's default Docker provider and engine; provider:'docker' is not accepted here."
+    },
+    {
+      "id": "wp_codebox_phpunit_project_bootstrap",
+      "label": "WP Codebox PHPUnit project bootstrap",
+      "type": "string",
+      "default": "",
+      "description": "Optional component-relative PHPUnit bootstrap path for wp_codebox_phpunit_bootstrap_mode=project. When empty, the runner reads the bootstrap attribute from phpunit.xml or phpunit.xml.dist."
+    },
+    {
+      "id": "wp_codebox_phpunit_test_root",
+      "label": "WP Codebox PHPUnit test root",
+      "type": "string",
+      "default": "",
+      "description": "Optional sandbox path containing PHPUnit test files for wordpress.phpunit discovery. Leave empty for the mounted component tests directory. Use with wp_codebox_phpunit_mounts when the suite lives outside the component mount."
+    },
+    {
+      "id": "wp_codebox_phpunit_config",
+      "label": "WP Codebox PHPUnit config",
+      "type": "string",
+      "default": "",
+      "description": "Optional sandbox path to phpunit.xml or phpunit.xml.dist for wordpress.phpunit discovery. Leave empty for the mounted component phpunit.xml.dist. For a component whose tests span several configs, declare wp_codebox_phpunit_suites instead."
+    },
+    {
+      "id": "wp_codebox_phpunit_suites",
+      "label": "WP Codebox PHPUnit suites",
+      "type": "array",
+      "default": [],
+      "description": "Optional ordered list of named PHPUnit suites, each { name, config, runtime?, preload_files? }, run in one pass and reported individually. runtime is 'sandbox' (default) or 'host'; a host suite runs against the component checkout with its own PHPUnit for tests that bootstrap without WordPress. preload_files replaces wp_codebox_phpunit_preload_files for that suite, which a sandbox suite needs when managed bootstrap means its config's own bootstrap never runs. Use instead of wp_codebox_phpunit_config when a component's tests span several configs; setting both is an error."
+    },
+    {
+      "id": "wp_codebox_phpunit_cwd",
+      "label": "WP Codebox PHPUnit cwd",
+      "type": "string",
+      "default": "",
+      "description": "Optional sandbox working directory for the wordpress.phpunit process. Leave empty for the mounted component directory."
+    },
+    {
+      "id": "wp_codebox_phpunit_preload_files",
+      "label": "WP Codebox PHPUnit preload files",
+      "type": "array",
+      "default": [],
+      "description": "Absolute WP Codebox sandbox PHP files to require during managed wordpress.phpunit bootstrap. Use for runtime files that are mounted into the sandbox but are not component-root relative."
+    },
+    {
+      "id": "wp_codebox_phpunit_mounts",
+      "label": "WP Codebox PHPUnit mounts",
+      "type": "array",
+      "default": [],
+      "description": "Additional host-to-sandbox mounts for wordpress.phpunit. Each entry is {source,target,mode?}; source must be an absolute existing host path and target an absolute sandbox path. Defaults to readonly mode."
+    },
+    {
+      "id": "wp_codebox_bootstrap_steps",
+      "label": "WP Codebox bench bootstrap steps",
+      "type": "array",
+      "default": [],
+      "description": "Generic WP Codebox recipe steps to run during pluginRuntime.setup after dependency activation and before measured bench workloads. Use this for dependency setup that must be prepared outside workload timing."
+    },
+    {
+      "id": "wp_codebox_bench_mounts",
+      "label": "WP Codebox bench mounts",
+      "type": "array",
+      "default": [],
+      "description": "Additional host-to-sandbox mounts for wordpress.bench. Each entry is {source,target,mode?}; source and target must be absolute paths. Use pre-bootstrap WordPress targets such as /wordpress/wp-content/db.php for component-owned runtime files."
+    },
+    {
+      "id": "wp_codebox_prepare_steps",
+      "label": "WP Codebox prepare steps",
+      "type": "array",
+      "default": [],
+      "description": "Explicit host-side commands to run before WP Codebox mounts and loads the plugin for wordpress.bench or wordpress.phpunit. Each step is an object with command, optional string args, and optional component-relative cwd. Use this for bounded source-checkout generation such as WooCommerce feature config files; no package scripts run implicitly."
+    },
+    {
+      "id": "wp_codebox_source_root",
+      "label": "WP Codebox source root",
+      "type": "string",
+      "default": "",
+      "description": "Optional absolute source checkout root for WP Codebox-backed bench materialization. Use with wp_codebox_source_subpath when the selected Homeboy component path is a nested plugin but host-side prepare steps and Composer path repositories need the surrounding monorepo. Lab offload remaps path-valued --setting entries to the synced runner path before execution."
+    },
+    {
+      "id": "wp_codebox_source_subpath",
+      "label": "WP Codebox source subpath",
+      "type": "string",
+      "default": "",
+      "description": "Component-relative path under wp_codebox_source_root used as the plugin source for WP Codebox bench prep, workload discovery, file mounts, and plugin loading. Leave empty only when HOMEBOY_COMPONENT_PATH is already under wp_codebox_source_root and the runner can derive the relative path."
+    },
+    {
+      "id": "wp_codebox_bin",
+      "label": "WP Codebox binary",
+      "type": "string",
+      "default": "",
+      "description": "Optional WP Codebox CLI binary path for WP Codebox-backed WordPress runtime execution. Use this to pin bench runs to a runner-local WP Codebox build with required runtime primitives. Leave empty to use HOMEBOY_WP_CODEBOX_BIN or the extension default."
+    },
+    {
+      "id": "wp_codebox_scenario_manifests",
+      "label": "WP Codebox scenario manifests",
+      "type": "array",
+      "default": [],
+      "description": "Scenario manifest files or inline objects compiled into wordpress.bench workloads in the generated WP Codebox recipe. Prompt, blueprint, grader, verifier hooks, rules, tags, limits, policy metadata, and metadata are preserved in BenchResults metadata."
+    },
+    {
+      "id": "bench_browser_target",
+      "label": "Bench browser target handoff",
+      "type": "object",
+      "default": {},
+      "description": "Optional browser bench target descriptor. Set {\"enabled\": true} to write HOMEBOY_BENCH_SHARED_STATE/browser-target.json. Include baseUrl/adminUrl for an already-running site; otherwise the file is metadata-only because the WP Codebox bench command exits after workloads complete. Login supports method plus username/password or password_env; raw target files are handoff artifacts and must not be published in reports."
+    },
+    {
+      "id": "wordpress_runtime_version",
+      "label": "WordPress runtime version",
+      "type": "string",
+      "default": "",
+      "description": "Optional WordPress core version passed to WordPress test and bench runtime providers. Leave empty for the runner default. Use this when a component needs classes or behavior from a newer WordPress core build."
+    },
+    {
+      "id": "wordpress_runtime_php_version",
+      "label": "WordPress multisite runtime PHP version",
+      "type": "string",
+      "default": "",
+      "description": "Optional PHP major.minor version projected to WP Codebox runtime.phpVersion by the wordpress-multisite-e2e rig. This setting is rig-scoped; the canonical WP Codebox bench builder does not currently expose PHP selection."
+    },
+    {
+      "id": "wp_codebox_php_memory_limit",
+      "label": "WP Codebox PHP memory limit",
+      "type": "string",
+      "default": "",
+      "description": "Optional PHP memory_limit for WP Codebox-backed wordpress.bench runs, expressed as a PHP shorthand size such as 512M or 1G. High-cardinality bench rigs can raise this per scenario or matrix cell."
+    },
+    {
+      "id": "package_artifacts",
+      "label": "WordPress package artifacts",
+      "type": "array",
+      "default": [],
+      "description": "Component-relative glob patterns for intentional package ZIP artifacts that should be included in the production build even though arbitrary *.zip files are excluded by default. Supports recursive ** matching at any depth. Each declared pattern must match at least one regular file; absolute and traversal paths are rejected."
+    },
+    {
+      "id": "package_excludes",
+      "label": "WordPress package excludes",
+      "type": "array",
+      "default": [],
+      "description": "Additional rsync exclude patterns applied with .buildignore/default excludes before Homeboy mandatory safety exclusions. Strings are required. Component-root rsync patterns such as /playground-runtime/ are supported; traversal and filesystem-absolute paths are rejected."
+    },
+    {
+      "id": "package_profile",
+      "label": "WordPress package profile",
+      "type": "object",
+      "default": {},
+      "description": "Optional component-relative JSON manifest and named profile that selects exact production package files after dependency preparation. Empty object keeps default rsync staging. Set {\"manifest\":\"path.json\",\"profile\":\"name\"}. The named profile must provide selectors with type file or prefix and path, plus optional required_files. Manifest/profile names and all paths fail closed against absolute paths, traversal, malformed selectors, missing explicit files, and missing required files. Homeboy mandatory safety exclusions still apply."
+    },
+    {
+      "id": "additional_package_profiles",
+      "label": "Additional WordPress release package profiles",
+      "type": "array",
+      "default": [],
+      "description": "Additional package profiles published as extra release ZIP assets alongside the unchanged primary release ZIP. Each entry is {manifest, profile, artifact}: an existing package profile manifest/profile pair validated by the same fail-closed rules as package_profile, plus a basename-only .zip artifact name that must be unique across entries and cannot replace the primary ZIP. release.package builds the primary ZIP unchanged, then builds every additional profile through the same production dependency and profile-staging build path, verifies each ZIP contains the release version, and returns the primary ZIP followed by the additional assets in declared order. Malformed declarations, unsafe artifact names, and duplicates fail closed before any build runs."
+    },
+    {
+      "id": "local_workspace_dependencies",
+      "label": "Local workspace dependency overrides",
+      "type": "array",
+      "default": [],
+      "description": "Declared local (unpublished) workspace package dependencies to build from source, pack, and install into the consumer as a self-contained built tarball before the consumer build runs. Installing a built tarball (not a file: symlink) lets peer dependencies such as React dedupe to the consumer's single copy. Each entry is an object: name (required package name), path (required source path relative to the component, may reference sibling repos), and optional package_dir (monorepo subpackage to pack), build (explicit build command run in path; defaults to install + run build script), and package_manager (npm|pnpm|yarn, auto-detected by default)."
+    },
+    {
+      "id": "release_provenance_command",
+      "label": "WordPress release provenance command",
+      "type": "string",
+      "default": "",
+      "description": "Optional component command run after the release ZIP is staged and before it is published. The command writes a JSON object to HOMEBOY_WORDPRESS_RELEASE_SIDECAR_PATH. It receives the bounded package root, source version/tag/commit, ZIP path, and output path through HOMEBOY_WORDPRESS_RELEASE_PACKAGE_ROOT, HOMEBOY_WORDPRESS_RELEASE_SOURCE_VERSION, HOMEBOY_WORDPRESS_RELEASE_SOURCE_TAG, HOMEBOY_WORDPRESS_RELEASE_SOURCE_COMMIT, HOMEBOY_WORDPRESS_RELEASE_ZIP_PATH, and HOMEBOY_WORDPRESS_RELEASE_OUTPUT_PATH. A failing command or missing sidecar aborts release; publish verifies and uploads the resulting sidecar with the ZIP."
+    }
+  ],
+  "release_preflights": [
+    {
+      "id": "publish_token",
+      "label": "Validate WordPress release publish token",
+      "action": "release.preflight.publish-token",
+      "needs": ["preflight.bump_policy"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "release.preflight.publish-token",
+      "label": "Validate WordPress release publish token",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/preflight-publish-token.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.package",
+      "label": "Build WordPress plugin/theme ZIP",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/package.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.publish",
+      "label": "Upload release ZIP to GitHub Release assets",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/publish.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.update_dependency",
+      "label": "Repin Composer custom-package to a released upstream",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/update-dependency.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "dependency": "{{payload.dependency}}"
+      }
+    }
+  ]
+}

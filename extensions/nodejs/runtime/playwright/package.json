@@ -1,0 +1,12 @@
+{
+  "name": "@homeboy/nodejs-playwright-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Extension-owned Playwright runtime for Homeboy Node.js browser utilities",
+  "dependencies": {
+    "playwright": "1.61.1"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  }
+}

@@ -1,0 +1,121 @@
+# Pull request gate for the published extensions.
+#
+# `homeboy.yml` only runs on push to main, and it only runs `commands: release`.
+# `homeboy-action` always invokes `homeboy release` with `--skip-checks` because
+# it assumes "quality gates run in separate jobs before this script"
+# (homeboy-action scripts/release/run-release.sh). This repo had no such jobs,
+# so `preflight.lint` / `preflight.test` were reported as
+# `skip_reason: "--skip-checks"` on every release and the declared `self_checks`
+# never executed anywhere.
+#
+# Homeboy resolves extensions at the latest published release and consumers do
+# not pin, so a regression merged here reaches every consumer with nothing in
+# front of it. This workflow is the missing gate: it runs each extension's
+# declared `self_checks` on every pull request.
+name: Extension self-checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  self-checks:
+    name: Self-checks ${{ matrix.label || matrix.component }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - discord
+          - go
+          - nodejs
+          - rust
+          - ssh-checkout-deploy
+          - swift
+          - wordpress
+          # The repo-root component owns the shared tests/ directory. The runner
+          # is directory-generic, so "." reads self_checks from the root
+          # homeboy.json and executes with the repo root as its working
+          # directory.
+          - "."
+        include:
+          - component: "."
+            label: shared
+
+          # #2507 is closed: runtime helpers now resolve through
+          # scripts/lib/runtime-helper-resolver.sh, which honours HOMEBOY_CORE_DIR
+          # (checked out below), so the rust zero-test-scope smoke and the
+          # WordPress full-suite smoke both run here now.
+          #
+          # tests/wordpress-fuzz-runner-smoke.js was skipped here unconditionally
+          # because its own fake-wp-codebox.js fixture contradicted the runner it
+          # tested. A test that runs nowhere asserts nothing, so it and this skip
+          # entry are both gone rather than carried indefinitely.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Extension runners source Homeboy's runtime helpers (runner-prelude.sh,
+      # sidecar-writer.sh, command-capture.sh and friends) from Homeboy's source
+      # tree. Without this the resolver falls back to a sibling checkout that
+      # only exists on a developer's disk, so a smoke passes or fails based on
+      # what happens to sit next to the repo. Same pattern as the WP Codebox
+      # canary workflow.
+      - name: Checkout Homeboy core
+        uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy
+          ref: main
+          path: .ci/homeboy
+          sparse-checkout: crates/homeboy-core/src/extension/runtime
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Cache Rust tools
+        if: matrix.component == 'rust'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        if: matrix.component == 'rust'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+
+      - name: Install WordPress extension dependencies
+        if: matrix.component == 'wordpress'
+        working-directory: wordpress
+        run: |
+          set -euo pipefail
+          composer install --no-interaction --no-progress --prefer-dist
+          npm install
+
+      # Isolated from wordpress/'s own npm install (see
+      # wordpress/toolchains/wp-scripts/package.json) so this pin's
+      # dependency tree never collides with the extension's own lint
+      # tooling. Without this install, the wp-scripts-extension-toolchain-*
+      # self-checks degrade to a SKIP rather than exercising the real
+      # toolchain (homeboy-extensions#2870).
+      - name: Install wordpress extension's wp-scripts toolchain
+        if: matrix.component == 'wordpress'
+        working-directory: wordpress/toolchains/wp-scripts
+        run: npm install
+
+      - name: Run lint self-checks
+        env:
+          HOMEBOY_SELF_CHECK_SKIP: ${{ matrix.self_check_skip }}
+          HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
+        run: bash scripts/ci/run-self-checks.sh "${{ matrix.component }}" lint
+
+      - name: Run test self-checks
+        env:
+          HOMEBOY_SELF_CHECK_SKIP: ${{ matrix.self_check_skip }}
+          HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
+        run: bash scripts/ci/run-self-checks.sh "${{ matrix.component }}" test

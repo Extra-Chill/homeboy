@@ -1,0 +1,18 @@
+✔ tests/browser-sdk-facade.test.ts (696.840708ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 812.4
+> tsc --project fixtures/tsconfig.json
+✔ Modal (3.1ms)
+ℹ tests 9
+ℹ suites 2
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0

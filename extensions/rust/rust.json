@@ -1,0 +1,268 @@
+{
+  "name": "Rust",
+  "version": "1.37.10",
+  "icon": "gearshape.2.fill",
+  "description": "Cargo CLI integration for Rust components",
+  "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["rs"],
+    "discovery_markers": [
+      { "all": ["Cargo.toml"] }
+    ]
+  },
+  "composition": {
+    "includes": []
+  },
+  "source_snapshot": {
+    "sync_excludes": ["target/", "target/**"]
+  },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "test.results": true,
+    "test.failures": true,
+    "test.coverage": true,
+    "bench.results": true,
+    "fix.results": true,
+    "annotations": true
+  },
+  "contract_producers": [
+    {
+      "id": "rust.lint-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/lint-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "lint.findings" }
+      ]
+    },
+    {
+      "id": "rust.test-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/test-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "test.results" },
+        { "kind": "artifact", "name": "test.failures" }
+      ]
+    },
+    {
+      "id": "rust.bench-results",
+      "phase": "result",
+      "invocation": {
+        "script": "scripts/bench/bench-runner.sh",
+        "output_schema": "homeboy/bench-results/v1"
+      },
+      "produces": [
+        {
+          "kind": "artifact",
+          "name": "bench.results",
+          "schema": "homeboy/bench-results/v1"
+        }
+      ]
+    }
+  ],
+  "scripts": {
+    "format": "scripts/format.sh"
+  },
+  "env_provider": {
+    "script": "scripts/env-provider.sh"
+  },
+  "ci": {
+    "cache": {
+      "namespace": "cargo",
+      "key_files": ["Cargo.lock"],
+      "paths": [
+        { "root": "home", "path": ".cargo/registry" },
+        { "root": "home", "path": ".cargo/git" },
+        { "root": "component", "path": "target", "env": "CARGO_TARGET_DIR" }
+      ]
+    }
+  },
+  "toolchain_readiness": [
+    {
+      "id": "cargo-lint-toolchain",
+      "capabilities": ["lint"],
+      "program": "cargo",
+      "args": ["--version"],
+      "repair_command": "rustup default stable",
+      "diagnostic_env": ["PATH", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]
+    },
+    {
+      "id": "cargo-fmt-lint-toolchain",
+      "capabilities": ["lint"],
+      "program": "cargo",
+      "args": ["fmt", "--version"],
+      "repair_command": "rustup default stable",
+      "diagnostic_env": ["PATH", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]
+    }
+  ],
+  "lint": {
+    "extension_script": "scripts/lint-runner.sh"
+  },
+  "test": {
+    "extension_script": "scripts/test-runner.sh",
+    "runtime_helpers": [
+      { "id": "runtime-settings" }
+    ],
+    "portable_env": {
+      "keys": [
+        "HOMEBOY_TEST_INVENTORY_ONLY",
+        "HOMEBOY_TEST_INVENTORY_FILE",
+        "HOMEBOY_TEST_SHARD_MANIFEST",
+        "HOMEBOY_RUST_NEXTEST_FILTER_MAX_BYTES"
+      ]
+    },
+    "passthrough_filter": {
+      "strategy": "runner_positional"
+    },
+    "changed_file_routing": {
+      "strategy": "rust_cargo"
+    },
+    "drift": {
+      "source_dirs": ["src"],
+      "test_dirs": ["tests"],
+      "file_extensions": ["rs"],
+      "inline_tests": true
+    }
+  },
+  "bench": {
+    "extension_script": "scripts/bench/bench-runner.sh",
+    "runtime_helpers": [
+      { "id": "runtime-settings" }
+    ]
+  },
+  "settings": [
+    {
+      "id": "rust_test_runner",
+      "label": "Rust test runner",
+      "type": "string",
+      "default": "cargo",
+      "description": "Select the Rust extension test runner: cargo or nextest. Set HOMEBOY_RUST_TEST_RUNNER=nextest or configure this setting to use cargo nextest run."
+    },
+    {
+      "id": "rust_nextest_fallback",
+      "label": "Rust nextest fallback",
+      "type": "boolean",
+      "default": true,
+      "description": "When cargo-nextest is selected but unavailable, fall back to cargo test. Set false or HOMEBOY_RUST_NEXTEST_FALLBACK=0 to fail with an install diagnostic instead."
+    },
+    {
+      "id": "rust_nextest_measured_counts",
+      "label": "Rust nextest measured counts",
+      "type": "boolean",
+      "default": true,
+      "description": "Measure unsharded cargo nextest runs by parsing libtest-json-plus events into Homeboy test results. Applies only when rust_test_runner is already nextest; it does not select the runner. nextest emits no 'test result:' lines, so without this an unsharded nextest run produces no structured counts at all. Set false or HOMEBOY_RUST_NEXTEST_MEASURED_COUNTS=0 to run nextest with its human-readable output and no measured result."
+    },
+    {
+      "id": "rust_nextest_filter_max_bytes",
+      "label": "Rust nextest filter maximum bytes",
+      "type": "integer",
+      "default": 65536,
+      "description": "Maximum UTF-8 byte length for each serialized nextest -E filter during shard replay. Selected identities are deterministically batched under this bound."
+    },
+    {
+      "id": "bench_criterion",
+      "label": "Criterion bench adapter",
+      "type": "boolean",
+      "default": false,
+      "description": "Opt into the Rust extension's Criterion adapter. Set HOMEBOY_RUST_BENCH_CRITERION=1 to run Cargo bench targets and normalize target/criterion estimates into Homeboy BenchResults. bench-* binaries remain the default contract."
+    },
+    {
+      "id": "bench_profiles",
+      "label": "Rust perf profiles",
+      "type": "boolean",
+      "default": false,
+      "description": "Opt into Rust developer-loop perf scenarios. Set HOMEBOY_RUST_BENCH_PROFILES=1 to emit rust-clean-build, rust-warm-build, rust-changed-file-check, and rust-test scenarios with cache/change metadata."
+    },
+    {
+      "id": "bench_changed_file",
+      "label": "Rust bench changed file",
+      "type": "string",
+      "default": "",
+      "description": "Optional changed-file profile target relative to the Cargo project root. When omitted, the runner uses src/lib.rs or src/main.rs if present."
+    },
+    {
+      "id": "rust_sccache",
+      "label": "Rust sccache wrapper",
+      "type": "boolean",
+      "default": false,
+      "description": "Opt into sccache through the Rust extension env provider. Set HOMEBOY_RUST_SCCACHE=1 or rust_sccache=true; the provider sets RUSTC_WRAPPER=sccache only when sccache is on PATH and RUSTC_WRAPPER is not already set."
+    },
+    {
+      "id": "rust_linker",
+      "label": "Rust linker acceleration",
+      "type": "string",
+      "default": "",
+      "description": "Optional Rust linker acceleration knob owned by the Rust extension. Set HOMEBOY_RUST_LINKER=mold or lld, or rust_linker to the same value; the provider appends the matching -C link-arg=-fuse-ld flag only when the requested linker binary is on PATH."
+    },
+    {
+      "id": "rust_cargo_test_threads",
+      "label": "Cargo test threads",
+      "type": "integer",
+      "default": 0,
+      "description": "Optional Cargo libtest thread count. Set to 1 for suites that mutate process-global environment and need deterministic serial execution. Zero preserves Cargo's default parallelism."
+    },
+    {
+      "id": "rust_nextest_shard_threads",
+      "label": "Nextest shard threads",
+      "type": "integer",
+      "default": 1,
+      "description": "Thread count for nextest shard replay, which hard-coded 1 before it was configurable. Zero selects nextest's num-cpus parallelism. nextest runs every test in its own process, so process-global state is already isolated and serial replay is only the conservative default. Override per run with HOMEBOY_RUST_NEXTEST_SHARD_THREADS."
+    },
+    {
+      "id": "clippy_all",
+      "label": "Enable clippy::all",
+      "type": "boolean",
+      "default": false,
+      "description": "Opt into passing -W clippy::all during Rust lint. By default the Rust extension runs cargo clippy with the toolchain's default lint set so warning-only toolchain drift does not block release gates."
+    }
+  ],
+  "build": {
+    "cleanup_paths": [
+      "target"
+    ],
+    "lockfile_paths": ["Cargo.lock"]
+  },
+  "autofix_verify": {
+    "command": "cargo",
+    "args": ["check", "--release"],
+    "timeout_secs": 300
+  },
+  "cli": {
+    "tool": "cargo",
+    "display_name": "Cargo",
+    "command_template": "{{cliPath}} {{args}}",
+    "working_dir_template": "{{sitePath}}",
+    "default_cli_path": "cargo"
+  },
+  "actions": [
+    {
+      "id": "release.prepare",
+      "label": "Prepare release files",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/prepare-release.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.package",
+      "label": "Package release artifacts",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/package.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.publish",
+      "label": "Publish Rust release artifacts",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/publish-crates.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    }
+  ]
+}

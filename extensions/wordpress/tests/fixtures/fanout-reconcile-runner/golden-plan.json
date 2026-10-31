@@ -1,0 +1,71 @@
+{
+  "schema": "fixture/fanout-plan/v1",
+  "orchestrator": {
+    "id": "fixture-orchestrator",
+    "run_id": "fixture-run"
+  },
+  "summary": {
+    "item_count": 3,
+    "group_count": 2,
+    "task_count": 2,
+    "fixture": true
+  },
+  "groups": [
+    {
+      "key": "alpha",
+      "index": 0,
+      "item_count": 2
+    },
+    {
+      "key": "beta",
+      "index": 1,
+      "item_count": 1
+    }
+  ],
+  "task_requests": [
+    {
+      "id": "task-alpha",
+      "group_key": "alpha",
+      "item_ids": [
+        "a1",
+        "a2"
+      ],
+      "goal": "Resolve alpha: a1, a2",
+      "orchestrator": {
+        "id": "fixture-orchestrator",
+        "run_id": "fixture-run",
+        "group_index": 0
+      }
+    },
+    {
+      "id": "task-beta",
+      "group_key": "beta",
+      "item_ids": [
+        "b1"
+      ],
+      "goal": "Resolve beta: b1",
+      "orchestrator": {
+        "id": "fixture-orchestrator",
+        "run_id": "fixture-run",
+        "group_index": 1
+      }
+    }
+  ],
+  "reconciliation": {
+    "targets": [
+      {
+        "group_key": "alpha",
+        "item_ids": [
+          "a1",
+          "a2"
+        ]
+      },
+      {
+        "group_key": "beta",
+        "item_ids": [
+          "b1"
+        ]
+      }
+    ]
+  }
+}

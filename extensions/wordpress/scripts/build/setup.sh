@@ -1,0 +1,701 @@
+#!/bin/bash
+set -euo pipefail
+
+# Setup script for WordPress Homeboy extension.
+#
+# Installs npm dependencies, PHP dev dependencies (PHPCS, PHPStan for linting),
+# and the WP Codebox CLI used by the default WordPress test backend.
+#
+# The legacy wp-phpunit dependency was removed in Phase 3 (#214). WordPress
+# PHPUnit execution now runs through WP Codebox by default. The host-smoke
+# backend is only for standalone PHP smoke scripts.
+
+EXTENSION_PATH="$(pwd)"
+
+install_wp_codebox() {
+    write_github_env() {
+        local name="$1"
+        local value="$2"
+
+        if [ -n "${GITHUB_ENV:-}" ]; then
+            echo "${name}=${value}" >> "${GITHUB_ENV}"
+        fi
+    }
+
+    configure_core_module() {
+        local module_path="$1"
+
+        if [ ! -f "${module_path}" ]; then
+            return 1
+        fi
+        if ! node -e 'const value=require(process.argv[1]); const module=value?.default && typeof value.default === "object" ? {...value.default,...value} : value; if (typeof module?.runtimeContractManifest !== "function") process.exit(1);' "${module_path}" >/dev/null 2>&1; then
+            return 1
+        fi
+
+        export HOMEBOY_WP_CODEBOX_CORE_MODULE="${module_path}"
+        write_github_env "HOMEBOY_WP_CODEBOX_CORE_MODULE" "${module_path}"
+        echo "WP Codebox core module configured: ${module_path}"
+        return 0
+    }
+
+    probe_wp_codebox_runtime() {
+        local bin_path="$1"
+
+        # `commands` verifies the CLI entrypoint without starting a WordPress workload.
+        if ! "${bin_path}" commands >/dev/null 2>&1; then
+            echo "WP Codebox CLI runtime probe failed: ${bin_path}" >&2
+            return 1
+        fi
+
+        return 0
+    }
+
+    preflight_wp_codebox_version() {
+        local bin_path="$1"
+        local script_dir
+        local selection_module
+        local result
+
+        # Setup runs before Homeboy installs this extension beside the shared
+        # runtime shim. Validate through the canonical helper in the extension
+        # source currently being installed; runtime consumers use the shim once
+        # the installed sibling exists.
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        selection_module="${script_dir}/../../lib/wp-codebox-runtime-selection.js"
+        if [ ! -f "${selection_module}" ]; then
+            echo "WordPress setup runtime selection helper missing at ${selection_module}" >&2
+            return 1
+        fi
+        result="$(node - "${selection_module}" "${bin_path}" <<'NODE'
+const { preflightWpCodeboxCommand } = require(process.argv[2]);
+const result = preflightWpCodeboxCommand([process.argv[3]]);
+if (!result.ready) {
+  process.stdout.write(`WP Codebox ${result.reason}: required >=${result.required_version}, observed ${result.selected.version || 'unavailable'} at ${result.selected.path || 'no executable'}. Run ${result.remediation}.\n`);
+  process.exit(1);
+}
+NODE
+)" || {
+            [ -n "${result}" ] && printf '%s\n' "${result}" >&2
+            return 1
+        }
+    }
+
+    probe_wp_codebox_native_runtime() {
+        local dependency_root="$1"
+
+        # Resolve from WP Codebox's dependency tree so Homeboy's dependencies
+        # cannot satisfy this check. Requiring sharp loads its platform binary.
+        if ! node -e 'const root=process.argv[1]; require(require.resolve("sharp", { paths: [ root ] }));' "${dependency_root}" >/dev/null 2>&1; then
+            echo "WP Codebox native runtime probe failed to load sharp from: ${dependency_root}" >&2
+            return 1
+        fi
+
+        return 0
+    }
+
+    wp_codebox_dependency_root() {
+        local bin_path="$1"
+        local install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+        local core_module="${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}"
+
+        case "${core_module}" in
+            "${install_root}/source/node_modules/"*) printf '%s' "${install_root}/source" ;;
+            "${install_root}/release/wp-codebox-cli/node_modules/"*) printf '%s' "${install_root}/release/wp-codebox-cli" ;;
+            *) dirname "${bin_path}" ;;
+        esac
+    }
+
+    wp_codebox_identity_file() {
+        local install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+        printf '%s\n' "${install_root}/managed-release-identity.json"
+    }
+
+    wp_codebox_freshness_inspector() {
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        printf '%s\n' "${script_dir}/inspect-wp-codebox-freshness.mjs"
+    }
+
+    wp_codebox_authority_digest() {
+        node -e 'const { createHash } = require("node:crypto"); process.stdout.write(createHash("sha256").update(process.argv[1]).digest("hex"));' "$1"
+    }
+
+    # Upstream publishes a prebuilt CLI tarball for a subset of platforms only
+    # (currently macos-arm64). On every other platform the release path is not a
+    # transient registry outage that a retry could clear -- it is a permanent gap,
+    # and source is the only supported authority. Report that up front so setup
+    # selects source directly instead of burning a guaranteed-404 download and
+    # logging it as a retryable failure.
+    #
+    # An explicit HOMEBOY_WP_CODEBOX_DOWNLOAD_URL is an operator assertion that an
+    # artifact exists (used by tests and private mirrors) and always wins.
+    wp_codebox_release_artifact_is_published() {
+        local candidate_platform="$1"
+        local candidate_arch="$2"
+        if [ -n "${HOMEBOY_WP_CODEBOX_DOWNLOAD_URL:-}" ]; then
+            return 0
+        fi
+        case "${candidate_platform}-${candidate_arch}" in
+            macos-arm64) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    report_wp_codebox_freshness() {
+        local result_file="$1"
+        local authority="$2"
+        local remediation="$3"
+
+        echo "WP Codebox candidate: $(jq -r '.bin' "${result_file}")"
+        echo "WP Codebox source authority: ${authority}"
+        echo "WP Codebox expected identity: $(jq -c '.expected' "${result_file}")"
+        echo "WP Codebox observed version/provenance: $(jq -c '.observed' "${result_file}")"
+        if [ "$(jq -r '.fresh' "${result_file}")" != "true" ]; then
+            echo "WP Codebox candidate rejected: $(jq -r '.reason + (if .detail == "" then "" else ": " + .detail end)' "${result_file}")" >&2
+            echo "WP Codebox remediation: ${remediation}" >&2
+        fi
+    }
+
+    wp_codebox_candidate_is_fresh() {
+        local bin_path="$1"
+        local candidate_kind="$2"
+        local mode="$3"
+        local authority="$4"
+        local expected_version="$5"
+        local expected_dist="$6"
+        local expected_ref="$7"
+        local expected_commit="$8"
+        local remediation="$9"
+        local result_file
+        local args=(--bin "${bin_path}" --candidate "${candidate_kind}" --mode "${mode}")
+
+        [ -n "${expected_version}" ] && args+=(--expected-version "${expected_version}")
+        [ -n "${expected_dist}" ] && args+=(--expected-dist "${expected_dist}")
+        [ -n "${expected_ref}" ] && args+=(--expected-ref "${expected_ref}")
+        [ -n "${expected_commit}" ] && args+=(--expected-commit "${expected_commit}")
+
+        result_file="$(mktemp)"
+        if node "$(wp_codebox_freshness_inspector)" "${args[@]}" > "${result_file}"; then
+            report_wp_codebox_freshness "${result_file}" "${authority}" "${remediation}"
+            rm -f "${result_file}"
+            return 0
+        fi
+        report_wp_codebox_freshness "${result_file}" "${authority}" "${remediation}"
+        rm -f "${result_file}"
+        return 1
+    }
+
+    record_managed_release_identity() {
+        local bin_path="$1"
+        local authority_digest="$2"
+        local result_file
+        local identity_file
+        local identity_tmp
+
+        result_file="$(mktemp)"
+        identity_file="$(wp_codebox_identity_file)"
+        if ! node "$(wp_codebox_freshness_inspector)" --bin "${bin_path}" --candidate managed --mode release --record > "${result_file}"; then
+            report_wp_codebox_freshness "${result_file}" "managed release artifact" "reinstall the managed release or use the configured source fallback"
+            rm -f "${result_file}"
+            return 1
+        fi
+        identity_tmp="${identity_file}.tmp"
+        jq -n \
+            --arg schema "homeboy-wordpress/wp-codebox-managed-release/v1" \
+            --arg authority_sha256 "${authority_digest}" \
+            --arg version "$(jq -r '.observed.version' "${result_file}")" \
+            --arg dist_sha256 "$(jq -r '.observed.dist_sha256' "${result_file}")" \
+            '{schema:$schema,authority_sha256:$authority_sha256,version:$version,dist_sha256:$dist_sha256}' > "${identity_tmp}"
+        mv "${identity_tmp}" "${identity_file}"
+        rm -f "${result_file}"
+    }
+
+    persist_managed_wp_codebox_selection() {
+        local selected_bin="$1"
+
+        export HOMEBOY_WP_CODEBOX_BIN="${selected_bin}"
+        write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${selected_bin}"
+        HOMEBOY_WP_CODEBOX_CLI="" WP_CODEBOX_CLI="" WP_CODEBOX_BIN="" \
+            node "${EXTENSION_PATH}/scripts/build/persist-wp-codebox-overrides.mjs" --machine "$(wp_codebox_override_file)" "${EXTENSION_PATH}/wordpress.json"
+    }
+
+    # A wrapper written into ${HOME}/.local/bin by an earlier install keeps
+    # resolving on PATH after its exec target is pruned or a build is
+    # interrupted. Anything that trusts PATH then reaches a missing entrypoint
+    # and dies inside the runtime rather than here, so drop the wrapper as soon
+    # as its target is gone.
+    prune_stale_wp_codebox_wrapper() {
+        local wrapper="$1"
+        local target=""
+        local line
+
+        [ -f "${wrapper}" ] || return 0
+
+        while IFS= read -r line; do
+            case "${line}" in
+                "exec "*)
+                    target="${line#*\"}"
+                    target="${target%%\"*}"
+                    break
+                    ;;
+            esac
+        done < "${wrapper}"
+        [ -n "${target}" ] || return 0
+        [ ! -e "${target}" ] || return 0
+
+        echo "Removing stale WP Codebox wrapper ${wrapper}; its target no longer exists: ${target}" >&2
+        rm -f "${wrapper}"
+    }
+
+    first_non_empty_env() {
+        local name
+        for name in "$@"; do
+            if [ -n "${!name:-}" ]; then
+                printf '%s' "${!name}"
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    is_managed_install_path() {
+        local candidate="$1"
+        local install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+
+        case "${candidate}" in
+            "${install_root}"/*) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    clear_rejected_release_runtime() {
+        local release_root="$1"
+        local managed_wrapper="$2"
+        local name
+        local value
+
+        managed_wrapper_targets_release() {
+            local wrapper="$1"
+            local root="$2"
+            local line
+            local target=""
+
+            [ "${wrapper}" = "${managed_wrapper}" ] && [ -f "${wrapper}" ] || return 1
+            while IFS= read -r line; do
+                case "${line}" in
+                    "exec "*)
+                        target="${line#*\"}"
+                        target="${target%%\"*}"
+                        break
+                        ;;
+                esac
+            done < "${wrapper}"
+            case "${target}" in
+                "${root}"/*) return 0 ;;
+                *) return 1 ;;
+            esac
+        }
+
+        # A rejected release may have configured these during its probes. Only
+        # clear paths owned by that release, or Homeboy's wrapper when it
+        # resolves into that release. Explicit external overrides remain intact.
+        for name in \
+            HOMEBOY_WP_CODEBOX_BIN \
+            WP_CODEBOX_BIN \
+            HOMEBOY_WP_CODEBOX_CLI \
+            WP_CODEBOX_CLI \
+            HOMEBOY_WP_CODEBOX_CORE_MODULE \
+            WP_CODEBOX_CORE_MODULE; do
+            value="${!name:-}"
+            case "${value}" in
+                "${release_root}"/*) unset "${name}" ;;
+                *) managed_wrapper_targets_release "${value}" "${release_root}" && unset "${name}" ;;
+            esac
+        done
+
+        return 0
+    }
+
+    # Machine-scoped override file under the homeboy-managed cache install root.
+    # Setup persists the resolved wp_codebox_bin / wp_codebox_core_module here
+    # instead of rewriting the tracked wordpress.json manifest, so a linked
+    # extension source checkout never gets dirtied by machine-local paths.
+    wp_codebox_override_file() {
+        local install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+        printf '%s\n' "${install_root}/wp-codebox-overrides.json"
+    }
+
+    configure_explicit_overrides() {
+        local explicit_bin=""
+        local explicit_core_module=""
+        local configured_bin=0
+        local configured_core_module=0
+
+        explicit_bin="$(first_non_empty_env HOMEBOY_WP_CODEBOX_CLI WP_CODEBOX_CLI WP_CODEBOX_BIN || true)"
+        if [ -n "${explicit_bin}" ]; then
+            if [ ! -x "${explicit_bin}" ]; then
+                echo "Explicit WP Codebox CLI override is not executable: ${explicit_bin}" >&2
+                exit 1
+            fi
+            export HOMEBOY_WP_CODEBOX_BIN="${explicit_bin}"
+            write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${explicit_bin}"
+            echo "WP Codebox CLI override configured: ${explicit_bin}"
+            configured_bin=1
+        fi
+
+        explicit_core_module="$(first_non_empty_env WP_CODEBOX_CORE_MODULE HOMEBOY_WP_CODEBOX_CORE_MODULE || true)"
+        if [ -n "${explicit_core_module}" ]; then
+            configure_core_module "${explicit_core_module}" || {
+                if is_managed_install_path "${explicit_core_module}"; then
+                    echo "Managed WP Codebox core module is missing; reinstalling: ${explicit_core_module}" >&2
+                    unset WP_CODEBOX_CORE_MODULE HOMEBOY_WP_CODEBOX_CORE_MODULE
+                    explicit_core_module=""
+                else
+                    echo "Explicit WP Codebox core module override is not a file: ${explicit_core_module}" >&2
+                    exit 1
+                fi
+            }
+            if [ -n "${explicit_core_module}" ]; then
+                configured_core_module=1
+            fi
+        fi
+
+        if [ "${configured_bin}" -eq 1 ] && wp_codebox_candidate_is_fresh "${HOMEBOY_WP_CODEBOX_BIN}" override "${install_mode}" "${source_authority_label}" "${expected_release_version}" "${expected_release_dist}" "${expected_source_ref}" "${expected_source_commit}" "use a provenance-bearing override matching the requested identity, or let setup converge the managed install" && { [ "${configured_core_module}" -eq 1 ] || resolve_core_module_from_known_locations; } && probe_wp_codebox_runtime "${HOMEBOY_WP_CODEBOX_BIN}" && preflight_wp_codebox_version "${HOMEBOY_WP_CODEBOX_BIN}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${HOMEBOY_WP_CODEBOX_BIN}")"; then
+            # Persist machine-local overrides to the untracked cache override
+            # file rather than the tracked wordpress.json manifest so setup does
+            # not dirty a linked extension source checkout.
+            node "${EXTENSION_PATH}/scripts/build/persist-wp-codebox-overrides.mjs" --machine "$(wp_codebox_override_file)" "${EXTENSION_PATH}/wordpress.json"
+            return 0
+        fi
+
+        return 1
+    }
+
+    # Re-derive the core runtime module from the deterministic install
+    # locations on disk. The CLI binary is persisted across GitHub Actions
+    # steps via GITHUB_ENV, but HOMEBOY_WP_CODEBOX_CORE_MODULE does not always
+    # survive process/step boundaries (e.g. `homeboy extension setup` runs in a
+    # child process, and a cached bin can be picked up in a later step where the
+    # earlier export is gone). The recipe loader hard-fails without the module,
+    # so probe the known on-disk paths instead of trusting the env var.
+    resolve_core_module_from_known_locations() {
+        local probe_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+        local candidate
+        for candidate in \
+            "${WP_CODEBOX_CORE_MODULE:-}" \
+            "${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}" \
+            "${probe_root}/source/node_modules/@automattic/wp-codebox-core/dist/contracts.js" \
+            "${probe_root}/source/node_modules/@automattic/wp-codebox-core/dist/index.js" \
+            "${probe_root}/release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/contracts.js" \
+            "${probe_root}/release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"; do
+            if [ -n "${candidate}" ] && configure_core_module "${candidate}"; then
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    local source_install_requested=0
+    if [ -n "${HOMEBOY_WP_CODEBOX_SOURCE:-}" ] || [ -n "${HOMEBOY_WP_CODEBOX_REF:-}" ] || [ "${HOMEBOY_WP_CODEBOX_INSTALL_MODE:-}" = "source" ]; then
+        source_install_requested=1
+        export HOMEBOY_WP_CODEBOX_INSTALL_MODE="source"
+    fi
+
+    local install_mode install_root bin_dir bin_path platform arch artifact_name download_url artifact_path extract_dir source ref repo_dir
+    local source_authority_label expected_release_version="" expected_release_dist="" expected_source_ref="" expected_source_commit=""
+    local release_authority_digest identity_file managed_candidate detected_bin
+    install_mode="${HOMEBOY_WP_CODEBOX_INSTALL_MODE:-release}"
+    install_root="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+    bin_dir="${HOME}/.local/bin"
+    bin_path="${bin_dir}/wp-codebox"
+    source="${HOMEBOY_WP_CODEBOX_SOURCE:-https://github.com/Automattic/wp-codebox.git}"
+    ref="${HOMEBOY_WP_CODEBOX_REF:-main}"
+    repo_dir="${install_root}/source"
+    download_url="${HOMEBOY_WP_CODEBOX_DOWNLOAD_URL:-}"
+    if [ -e "${source}" ]; then
+        source="$(cd "$(dirname -- "${source}")" && printf '%s/%s' "$(pwd -P)" "$(basename -- "${source}")")"
+    fi
+    source_authority_label="managed source ref ${ref}"
+    expected_source_ref="${ref}"
+    expected_source_commit="${WP_CODEBOX_SOURCE_SHA:-}"
+
+    prune_stale_wp_codebox_wrapper "${HOME}/.local/bin/wp-codebox"
+
+    # Resolve the effective mode before any download is attempted. A platform with
+    # no published artifact is downgraded to source here, so the release branch is
+    # only ever entered when it can actually succeed.
+    if [ "${install_mode}" != "source" ]; then
+        platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        arch="$(uname -m)"
+        case "${platform}" in darwin) platform="macos" ;; esac
+        case "${arch}" in x86_64|amd64) arch="x64" ;; aarch64) arch="arm64" ;; esac
+        if ! wp_codebox_release_artifact_is_published "${platform}" "${arch}"; then
+            echo "WP Codebox publishes no release artifact for ${platform}-${arch}; using managed source ref ${ref} (the only supported authority on this platform)" >&2
+            install_mode="source"
+        fi
+    fi
+
+    if [ "${install_mode}" != "source" ]; then
+        artifact_name="wp-codebox-cli-${platform}-${arch}.tar.gz"
+        download_url="${download_url:-https://github.com/Automattic/wp-codebox/releases/latest/download/${artifact_name}}"
+        release_authority_digest="$(wp_codebox_authority_digest "${download_url}")"
+        source_authority_label="managed release artifact ${artifact_name}"
+        identity_file="$(wp_codebox_identity_file)"
+        if [ -f "${identity_file}" ] && [ "$(jq -r '.schema // empty' "${identity_file}" 2>/dev/null)" = "homeboy-wordpress/wp-codebox-managed-release/v1" ] && [ "$(jq -r '.authority_sha256 // empty' "${identity_file}" 2>/dev/null)" = "${release_authority_digest}" ]; then
+            expected_release_version="$(jq -r '.version // empty' "${identity_file}")"
+            expected_release_dist="$(jq -r '.dist_sha256 // empty' "${identity_file}")"
+        fi
+    fi
+
+    if configure_explicit_overrides; then
+        return 0
+    fi
+
+    if [ "${install_mode}" = "source" ]; then
+        managed_candidate="${repo_dir}/packages/cli/dist/index.js"
+        if [ -x "${managed_candidate}" ] && [ -d "${repo_dir}/.git" ] && [ "$(git -C "${repo_dir}" remote get-url origin 2>/dev/null || true)" = "${source}" ] && wp_codebox_candidate_is_fresh "${managed_candidate}" managed source "${source_authority_label}" "" "" "${expected_source_ref}" "${expected_source_commit}" "refresh and rebuild the managed source checkout" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${managed_candidate}" && preflight_wp_codebox_version "${managed_candidate}" && probe_wp_codebox_native_runtime "${repo_dir}"; then
+            persist_managed_wp_codebox_selection "${managed_candidate}"
+            echo "WP Codebox managed source is already current: ${managed_candidate}"
+            return 0
+        fi
+    else
+        managed_candidate="${install_root}/release/wp-codebox-cli/bin/wp-codebox"
+        if [ -x "${managed_candidate}" ] && wp_codebox_candidate_is_fresh "${managed_candidate}" managed release "${source_authority_label}" "${expected_release_version}" "${expected_release_dist}" "" "" "reinstall the managed release artifact" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${managed_candidate}" && preflight_wp_codebox_version "${managed_candidate}" && probe_wp_codebox_native_runtime "${install_root}/release/wp-codebox-cli"; then
+            persist_managed_wp_codebox_selection "${managed_candidate}"
+            echo "WP Codebox managed release is already current: ${managed_candidate}"
+            return 0
+        fi
+    fi
+
+    if [ "${source_install_requested}" -eq 0 ] && [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && [ -x "${HOMEBOY_WP_CODEBOX_BIN}" ]; then
+        echo "WP Codebox already configured: ${HOMEBOY_WP_CODEBOX_BIN}"
+        if wp_codebox_candidate_is_fresh "${HOMEBOY_WP_CODEBOX_BIN}" ambient "${install_mode}" "${source_authority_label}" "${expected_release_version}" "${expected_release_dist}" "${expected_source_ref}" "${expected_source_commit}" "use the managed installation selected by setup" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${HOMEBOY_WP_CODEBOX_BIN}" && preflight_wp_codebox_version "${HOMEBOY_WP_CODEBOX_BIN}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${HOMEBOY_WP_CODEBOX_BIN}")"; then
+            return 0
+        fi
+        echo "WP Codebox CLI is configured without a ready runtime; (re)installing source module" >&2
+    fi
+
+    if [ "${source_install_requested}" -eq 0 ] && command -v wp-codebox >/dev/null 2>&1; then
+        detected_bin="$(command -v wp-codebox)"
+        echo "WP Codebox already available: ${detected_bin}"
+        write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${detected_bin}"
+        if wp_codebox_candidate_is_fresh "${detected_bin}" ambient "${install_mode}" "${source_authority_label}" "${expected_release_version}" "${expected_release_dist}" "${expected_source_ref}" "${expected_source_commit}" "use the managed installation selected by setup" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${detected_bin}" && preflight_wp_codebox_version "${detected_bin}" && probe_wp_codebox_native_runtime "$(wp_codebox_dependency_root "${detected_bin}")"; then
+            return 0
+        fi
+        echo "WP Codebox CLI is available without a ready runtime; (re)installing source module" >&2
+    fi
+
+    if [ "${install_mode}" != "source" ]; then
+        local release_artifact_downloaded=0
+        artifact_path="${install_root}/${artifact_name}"
+        extract_dir="${install_root}/release"
+
+        echo "Installing WP Codebox CLI from ${source_authority_label}..."
+        mkdir -p "${install_root}" "${bin_dir}"
+
+        if command -v curl >/dev/null 2>&1 && curl -fsIL "${download_url}" >/dev/null 2>&1 && curl -fsSL "${download_url}" -o "${artifact_path}"; then
+            release_artifact_downloaded=1
+            rm -rf "${extract_dir}"
+            mkdir -p "${extract_dir}"
+            tar -xzf "${artifact_path}" -C "${extract_dir}"
+
+            if [ ! -x "${extract_dir}/wp-codebox-cli/bin/wp-codebox" ]; then
+                echo "Downloaded WP Codebox artifact did not contain an executable bin/wp-codebox" >&2
+                exit 1
+            fi
+
+            cat > "${bin_path}" <<EOF
+#!/usr/bin/env bash
+exec "${extract_dir}/wp-codebox-cli/bin/wp-codebox" "\$@"
+EOF
+            chmod +x "${bin_path}"
+
+            write_github_env "HOMEBOY_WP_CODEBOX_BIN" "${bin_path}"
+            write_github_env "PATH" "${bin_dir}:${PATH}"
+
+            echo "WP Codebox installed: ${bin_path}"
+            if record_managed_release_identity "${extract_dir}/wp-codebox-cli/bin/wp-codebox" "${release_authority_digest}" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${bin_path}" && preflight_wp_codebox_version "${bin_path}" && probe_wp_codebox_native_runtime "${extract_dir}/wp-codebox-cli"; then
+                persist_managed_wp_codebox_selection "${extract_dir}/wp-codebox-cli/bin/wp-codebox"
+                return 0
+            fi
+
+            echo "WP Codebox release artifact did not provide a ready runtime; falling back to source install" >&2
+        fi
+
+        if [ "${release_artifact_downloaded}" -eq 0 ]; then
+            echo "WP Codebox release artifact is unavailable from the configured authority; falling back to source install" >&2
+        fi
+    fi
+
+    # Source setup is also the repair path for unavailable release artifacts
+    # and explicitly requested source installs. Discard only values owned by
+    # this managed release before resolving the source CLI/core pair.
+    clear_rejected_release_runtime "${install_root}/release" "${bin_path}"
+
+    # Reaching here means source is the authority in play, whether it was selected
+    # up front or fallen back to. The label may still describe the release artifact
+    # that was just abandoned, so restate it before announcing the install --
+    # otherwise this banner names an authority that is not being used.
+    source_authority_label="managed source ref ${ref}"
+
+    echo "Installing WP Codebox CLI from ${source_authority_label}..."
+    mkdir -p "${install_root}" "${bin_dir}"
+
+    local script_dir source_sha source_bin_path
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    bash "${script_dir}/update-wp-codebox-cache.sh" --source "${source}" --ref "${ref}" --cache-dir "${repo_dir}"
+
+    source_sha="$(git -C "${repo_dir}" rev-parse HEAD)"
+    export WP_CODEBOX_SOURCE_REF="${ref}"
+    export WP_CODEBOX_SOURCE_SHA="${source_sha}"
+    write_github_env "WP_CODEBOX_SOURCE_REF" "${ref}"
+    write_github_env "WP_CODEBOX_SOURCE_SHA" "${source_sha}"
+
+    resolve_core_module_from_known_locations || {
+        echo "Built WP Codebox source did not contain the @automattic/wp-codebox-core package entrypoint" >&2
+        exit 1
+    }
+
+    source_bin_path="${repo_dir}/packages/cli/dist/index.js"
+    if [ ! -x "${source_bin_path}" ]; then
+        echo "Built WP Codebox source did not contain an executable CLI at ${source_bin_path}" >&2
+        exit 1
+    fi
+
+    probe_wp_codebox_runtime "${source_bin_path}" || {
+        echo "Built WP Codebox source CLI runtime is not ready" >&2
+        exit 1
+    }
+    preflight_wp_codebox_version "${source_bin_path}" || {
+        echo "Built WP Codebox source CLI does not satisfy the WordPress test adapter minimum. Run homeboy extension setup wordpress." >&2
+        exit 1
+    }
+    probe_wp_codebox_native_runtime "${repo_dir}" || {
+        echo "Built WP Codebox source native runtime is not ready" >&2
+        exit 1
+    }
+    wp_codebox_candidate_is_fresh "${source_bin_path}" managed source "managed source ref ${ref}" "" "" "${ref}" "${source_sha}" "rebuild the managed source checkout" || {
+        echo "Built WP Codebox source did not provide matching immutable provenance" >&2
+        exit 1
+    }
+
+    bin_path="${source_bin_path}"
+
+    persist_managed_wp_codebox_selection "${bin_path}"
+    write_github_env "PATH" "${bin_dir}:${PATH}"
+
+    echo "WP Codebox installed: ${bin_path}"
+}
+
+echo "Setting up WordPress extension..."
+
+# Install PHP dev dependencies (PHPCS, PHPStan, PHPUnit - used for linting
+# and the extension's own self-tests, not for running component tests).
+if [ -f "composer.json" ]; then
+    bash "${EXTENSION_PATH}/scripts/build/install-composer-dependencies.sh"
+
+    if [ -x "vendor/bin/phpcs" ]; then
+        echo "Registering PHPCS standards..."
+        phpcs_paths=()
+        for path in \
+            "${EXTENSION_PATH}/vendor/wp-coding-standards/wpcs" \
+            "${EXTENSION_PATH}/vendor/phpcsstandards/phpcsextra" \
+            "${EXTENSION_PATH}/vendor/phpcsstandards/phpcsutils" \
+            "${EXTENSION_PATH}/HomeboyWordPress"; do
+            if [ -d "$path" ]; then
+                phpcs_paths+=("$path")
+            fi
+        done
+
+        if [ "${#phpcs_paths[@]}" -gt 0 ]; then
+            installed_paths=$(IFS=','; printf '%s' "${phpcs_paths[*]}")
+            vendor/bin/phpcs --config-set installed_paths "$installed_paths" --quiet > /dev/null 2>&1
+        fi
+    fi
+fi
+
+# Install npm dependencies (Blueprint validation helpers, ESLint). npm ci is
+# lockfile-preserving by contract, but a version-skewed lockfile can still be
+# normalised in place. Snapshot the tracked lockfile before the install and
+# restore it if the install rewrote it, so setup never dirties a linked
+# extension source checkout. Only a modification this script itself just caused
+# is reverted — a deliberate pre-existing user edit is captured by the snapshot
+# and restored verbatim.
+if [ -f "package.json" ]; then
+    lockfile_snapshot=""
+    if [ -f "package-lock.json" ]; then
+        lockfile_snapshot="$(mktemp)"
+        cp "${EXTENSION_PATH}/package-lock.json" "${lockfile_snapshot}"
+    fi
+
+    echo "Installing npm dependencies..."
+    if [ -f "package-lock.json" ]; then
+        npm ci --quiet --no-fund --no-audit 2>&1 || {
+            echo "Warning: npm ci failed — extension Node tooling may not be available"
+        }
+    else
+        npm install --quiet --no-fund --no-audit 2>&1 || {
+            echo "Warning: npm install failed — extension Node tooling may not be available"
+        }
+    fi
+
+    if [ -n "${lockfile_snapshot}" ]; then
+        if ! cmp -s "${lockfile_snapshot}" "${EXTENSION_PATH}/package-lock.json"; then
+            echo "Restoring package-lock.json rewritten by npm; setup must not dirty the extension source checkout" >&2
+            cp "${lockfile_snapshot}" "${EXTENSION_PATH}/package-lock.json"
+        fi
+        rm -f "${lockfile_snapshot}"
+    fi
+fi
+
+# Verify the shared agent-runtime files this extension's installed entrypoints
+# require. They live in a separate shared-asset tree that the extension payload
+# does not carry, so an install can succeed while leaving them absent — the
+# failure then surfaces only when a test shard boots and dies on
+# MODULE_NOT_FOUND, with zero tests executed (#12585). Fail here instead, before
+# anything is planned or fanned out.
+verify_shared_agent_runtime_assets() {
+    # Resolve from this script's own location, not the working directory: the
+    # resolver ships beside setup.sh in the extension payload, and that is the
+    # payload whose completeness is in question.
+    local script_dir
+    local resolver
+    local missing=0
+    local dependency
+
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    resolver="${script_dir}/../lib/agent-runtime-paths.cjs"
+
+    if [ ! -f "${resolver}" ]; then
+        echo "Error: agent runtime resolver missing at ${resolver}; the WordPress extension payload is incomplete." >&2
+        return 1
+    fi
+
+    for dependency in \
+        "wp-codebox/scripts/lib/test-result-adapters.sh"; do
+        if ! node "${resolver}" "${dependency}" >/dev/null; then
+            missing=1
+        fi
+    done
+
+    # Runtime selection is WordPress-owned and ships in this extension's lib.
+    if [ ! -f "${script_dir}/../../lib/wp-codebox-runtime-selection.js" ]; then
+        echo "Error: WP Codebox runtime selection module missing from the WordPress extension payload." >&2
+        missing=1
+    fi
+
+    if [ "${missing}" -ne 0 ]; then
+        echo "Error: shared agent runtime assets are missing from this installation; WordPress test shards cannot bootstrap." >&2
+        return 1
+    fi
+
+    echo "Shared WordPress runtime assets verified."
+}
+
+install_wp_codebox
+
+verify_shared_agent_runtime_assets
+
+echo "WordPress extension setup complete."
+echo "Default test backend: WP Codebox (WordPress Playground runtime)"
+echo "Host smoke backend: set test_backend=host-smoke for standalone tests/**/*-smoke.php"

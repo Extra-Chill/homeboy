@@ -1,0 +1,76 @@
+{
+  "name": "Go",
+  "id": "go",
+  "version": "1.8.4",
+  "icon": "g.circle.fill",
+  "description": "Go CLI integration for services, bridges, and binaries",
+  "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["go", "mod", "sum"],
+    "discovery_markers": [
+      { "all": ["go.mod"] }
+    ]
+  },
+  "composition": {
+    "includes": []
+  },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "test.results": false,
+    "test.failures": true,
+    "test.coverage": false,
+    "annotations": false
+  },
+  "contract_producers": [
+    {
+      "id": "go.lint-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/lint-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "lint.findings" }
+      ]
+    },
+    {
+      "id": "go.test-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/test-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "test.failures" }
+      ]
+    }
+  ],
+  "scripts": {
+    "format": "scripts/format.sh"
+  },
+  "build": {
+    "script_names": [
+      "build.sh"
+    ],
+    "command_template": "bash {{script}}",
+    "extension_script": "scripts/build.sh",
+    "cleanup_paths": [
+      "bin",
+      "dist"
+    ],
+    "lockfile_paths": ["go.sum"]
+  },
+  "lint": {
+    "extension_script": "scripts/lint-runner.sh"
+  },
+  "test": {
+    "extension_script": "scripts/test-runner.sh",
+    "drift": {
+      "source_dirs": ["."],
+      "test_dirs": ["."],
+      "file_extensions": ["go"],
+      "inline_tests": false
+    }
+  },
+  "cli": {
+    "tool": "go",
+    "display_name": "Go",
+    "command_template": "{{cliPath}} {{args}}",
+    "working_dir_template": "{{sitePath}}",
+    "default_cli_path": "go"
+  }
+}

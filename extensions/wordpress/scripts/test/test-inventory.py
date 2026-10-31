@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Emit a `homeboy/test-inventory/v1` document for a WordPress component.
+
+Sharded test execution needs an enumeration of the suite that is produced
+*without running it*, bound to a fingerprint of the workspace and of the runner.
+Homeboy core owns the binding and re-derives both fingerprints itself before
+accepting anything this script writes, so the only way a document is accepted is
+by computing them exactly the way core does.
+
+Two details are load-bearing and easy to get wrong:
+
+* The canonical JSON that feeds `inventory_fingerprint` is
+  `json.dumps(record, sort_keys=True, separators=(",", ":"))` with the default
+  `ensure_ascii=True`, over the record *without* `inventory_fingerprint`.
+  Core reproduces that byte layout by hand in `canonical_inventory_json`,
+  including the ASCII escaping, so a differently-encoded equivalent document is
+  rejected. This is also why the producer is Python rather than PHP or shell:
+  matching Python's `json.dumps` is the contract.
+
+* The workspace fingerprint concatenates `f"{relative_path}\\0{text}\\0"` over
+  the selected files ordered **by path components**, where `text` has been read
+  with universal newlines. Core normalizes CRLF and lone CR to LF for the same
+  reason, and orders by components because Rust's `Ord for PathBuf` does.
+
+The suite is the same one normal full-suite execution runs: canonical PHPUnit
+discovery from WP Codebox, plus the component's standalone PHP tests as
+`test_path_resolver.resolve` selects them from the homeboy.json extension
+settings in `HOMEBOY_SETTINGS_JSON` (convention default
+`tests/**/*-smoke.php`, minus `wordpress_test_paths` and
+`test_path_excludes`). The runner shells out to the same module, so the
+two cannot disagree. Core validates members structurally and refuses unknown fields, so a
+member's runner/environment identity is carried in the existing `target` field
+— `phpunit` for discovered PHPUnit files, `standalone-php` for selected
+standalone tests — rather than in a new field. A file both PHPUnit discovery
+and the standalone selection claim is a standalone member, matching the classifier
+precedence the runner itself applies. Empty PHPUnit discovery is valid when
+the standalone list is non-empty; both empty is refused.
+
+The file selection, skip list, root markers and runner identity are read from
+the extension manifest's `test.inventory` block, so this script and the
+declaration Homeboy validates against cannot drift apart.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+# The resolver lives beside this script; never leave bytecode in the extension.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_path_resolver  # noqa: E402
+
+SCHEMA = "homeboy/test-inventory/v1"
+
+
+def fail(message):
+    raise SystemExit(f"WordPress test inventory error: {message}")
+
+
+def digest(value):
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def load_inventory_config(extension_path):
+    manifest = Path(extension_path) / "wordpress.json"
+    try:
+        declared = json.loads(manifest.read_text())
+    except OSError as error:
+        fail(f"could not read {manifest}: {error}")
+    except json.JSONDecodeError as error:
+        fail(f"{manifest} is not valid JSON: {error}")
+
+    config = declared.get("test", {}).get("inventory")
+    if not config:
+        fail("wordpress.json declares no test.inventory block")
+    return config
+
+
+def workspace_root(project, config):
+    """Mirror core's `inventory_workspace_root`.
+
+    Walk upward for the first ancestor holding a declared marker; with none
+    found the component path is its own root. Core resolves this identically,
+    and a mismatch means the workspace fingerprints cannot agree.
+    """
+    start = Path(project).resolve()
+    markers = config.get("root_markers") or []
+    for candidate in [start, *start.parents]:
+        if any((candidate / marker).exists() for marker in markers):
+            return candidate
+    return start
+
+
+def selected_for_fingerprint(path, config):
+    names = set(config.get("fingerprint_names") or [])
+    extensions = set(config.get("fingerprint_extensions") or [])
+    if path.name in names:
+        return True
+    return path.suffix[1:] in extensions if path.suffix else False
+
+
+def workspace_fingerprint(root, config):
+    skip = set(config.get("fingerprint_skip_dirs") or [])
+    selected = []
+    for directory, subdirectories, files in os.walk(root):
+        subdirectories[:] = [name for name in subdirectories if name not in skip]
+        for name in files:
+            path = Path(directory) / name
+            if path.is_file() and selected_for_fingerprint(path, config):
+                selected.append(path)
+
+    # Ordered by path components, never by the joined text.
+    #
+    # Core hashes in `Ord for PathBuf` order, which compares component by
+    # component. Sorting `str(relative)` instead disagrees with it whenever a
+    # directory name is a prefix of a sibling followed by a byte below "/":
+    #
+    #     inc/auth-tokens/browser-handoff-token.php   # first by joined text ("-" < "/")
+    #     inc/auth/browser-handoff-handler.php        # first by components ("auth" < "auth-tokens")
+    #
+    # Same files, different order, different digest -- so core rejected every
+    # inventory this producer wrote for `extrachill-users` (which has exactly
+    # that pair of directories) as a workspace-provenance mismatch, and no rerun
+    # could ever fix a sort order. Extra-Chill/homeboy#13494.
+    #
+    # `sorted()` over `Path` objects is not a substitute: it returned joined-text
+    # order before Python 3.12 and component order after it, which would make the
+    # fingerprint depend on the interpreter installed on the runner.
+    content = []
+    for path in sorted(selected, key=lambda item: item.relative_to(root).parts):
+        try:
+            # `read_text` applies universal newlines, which is what core's
+            # CRLF/CR normalization reproduces.
+            text = path.read_text(errors="replace")
+        except OSError as error:
+            fail(f"could not read {path} for the workspace fingerprint: {error}")
+        content.append(f"{path.relative_to(root)}\0{text}\0")
+    return digest("".join(content))
+
+
+def runner_fingerprint(root, config, runner):
+    declared = next(
+        (entry for entry in config.get("runners") or [] if entry.get("id") == runner),
+        None,
+    )
+    if not declared:
+        fail(f"wordpress.json declares no inventory runner named {runner!r}")
+    argv = declared.get("version_command") or []
+    if not argv:
+        fail(f"inventory runner {runner!r} declares no version_command")
+    try:
+        result = subprocess.run(
+            argv, cwd=root, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False,
+        )
+    except OSError as error:
+        fail(f"could not fingerprint {runner} runner: {error}")
+    if result.returncode:
+        fail(f"could not fingerprint {runner} runner: {result.stderr.strip()}")
+    return digest(f"{runner}\0{result.stdout.strip()}")
+
+
+def settings():
+    raw_settings = os.environ.get("HOMEBOY_SETTINGS_JSON") or "{}"
+    try:
+        value = json.loads(raw_settings)
+    except json.JSONDecodeError:
+        value = {}
+    return value if isinstance(value, dict) else {}
+
+
+def host_test_path(project, plugin_slug, sandbox_path):
+    mounts = settings().get("wp_codebox_phpunit_mounts") or []
+    for mount in sorted(mounts, key=lambda item: len(item.get("target", "")) if isinstance(item, dict) else 0, reverse=True):
+        if not isinstance(mount, dict):
+            continue
+        source = mount.get("source")
+        target = mount.get("target")
+        if not isinstance(source, str) or not isinstance(target, str):
+            continue
+        target = target.rstrip("/")
+        if sandbox_path != target and not sandbox_path.startswith(f"{target}/"):
+            continue
+        return Path(source).joinpath(sandbox_path[len(target):].lstrip("/"))
+
+    plugin_root = f"/wordpress/wp-content/plugins/{plugin_slug}/"
+    if sandbox_path.startswith(plugin_root):
+        return project / sandbox_path[len(plugin_root):]
+
+    fail(f"discovered PHPUnit file has no declared host mount: {sandbox_path}")
+
+
+def standalone_test_paths(project):
+    """Resolve the standalone PHP suite through the shared resolver."""
+    try:
+        return test_path_resolver.resolve(project, settings())["standalone-php"]
+    except test_path_resolver.TestPathError as error:
+        fail(str(error))
+
+
+def enumerate_tests(project, package, discovery_file, standalone_paths):
+    try:
+        discovery = json.loads(Path(discovery_file).read_text())
+    except OSError as error:
+        fail(f"could not read WP Codebox discovery result: {error}")
+    except json.JSONDecodeError as error:
+        fail(f"WP Codebox discovery result is not valid JSON: {error}")
+    if not isinstance(discovery, dict) or discovery.get("schema") != "wp-codebox/phpunit-discovery/v1":
+        fail("WP Codebox discovery result has an unsupported schema")
+    plugin_slug = discovery.get("plugin_slug")
+    files = discovery.get("files")
+    if not isinstance(plugin_slug, str) or not plugin_slug or not isinstance(files, list):
+        fail("WP Codebox discovery result has no plugin identity or files")
+    if any(not isinstance(path, str) or not path.startswith("/") for path in files):
+        fail("WP Codebox discovery files must be unique sandbox-absolute paths")
+    if len(files) != len(set(files)):
+        fail("WP Codebox discovery files must be unique sandbox-absolute paths")
+
+    tests = {}
+    project = project.resolve()
+    for sandbox_path in files:
+        path = host_test_path(project, plugin_slug, sandbox_path).resolve()
+        try:
+            relative = str(path.relative_to(project))
+        except ValueError:
+            fail(f"configured PHPUnit test file escapes the component: {path}")
+        if not path.is_file():
+            fail(f"discovered PHPUnit test file is missing on the host: {path}")
+        tests[relative] = {
+            "id": relative,
+            "package": package,
+            "target": "phpunit",
+            "target_kind": "test",
+            "name": path.name,
+            "expected_outcome": "executed",
+        }
+    for relative in standalone_paths:
+        path = project / relative
+        # A file both the PHPUnit discovery and the standalone selection
+        # claim is a standalone member: that is the precedence the runner's
+        # own classifier applies, so the inventory must not disagree.
+        tests[relative] = {
+            "id": relative,
+            "package": package,
+            "target": "standalone-php",
+            "target_kind": "test",
+            "name": path.name,
+            "expected_outcome": "executed",
+        }
+    return [tests[key] for key in sorted(tests)]
+
+
+def build_inventory(runner, runner_digest, workspace_digest, tests):
+    record = {
+        "schema": SCHEMA,
+        "runner": runner,
+        "runner_fingerprint": runner_digest,
+        "workspace_fingerprint": workspace_digest,
+        "tests": tests,
+    }
+    # Core hashes the record without `inventory_fingerprint`, and deliberately
+    # excludes `fallback_reason` from the canonical form, so this producer never
+    # emits one.
+    record["inventory_fingerprint"] = digest(
+        json.dumps(record, sort_keys=True, separators=(",", ":"))
+    )
+    return record
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--project", required=True, help="component source path")
+    parser.add_argument("--extension-path", required=True, help="extension root holding wordpress.json")
+    parser.add_argument("--runner", default="wordpress", help="declared runner identity")
+    parser.add_argument("--package", default="", help="package label recorded on each test")
+    parser.add_argument("--discovery-file", required=True, help="WP Codebox canonical discovery result")
+    parser.add_argument("--output", required=True, help="file to write the inventory to")
+    args = parser.parse_args()
+
+    config = load_inventory_config(args.extension_path)
+    root = workspace_root(args.project, config)
+    package = args.package or Path(args.project).resolve().name
+
+    project = Path(args.project).resolve()
+    standalone_paths = standalone_test_paths(project)
+    tests = enumerate_tests(project, package, args.discovery_file, standalone_paths)
+    if not tests:
+        # Core refuses an empty inventory, and it is right to: an empty
+        # enumeration cannot be distinguished from a broken producer, and
+        # sharding nothing would report a green suite that ran no tests.
+        fail(
+            f"no test files found under {root}: PHPUnit discovery is empty "
+            "and no standalone PHP tests are selected"
+        )
+
+    inventory = build_inventory(
+        args.runner,
+        runner_fingerprint(root, config, args.runner),
+        workspace_fingerprint(root, config),
+        tests,
+    )
+
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(inventory, sort_keys=True, separators=(",", ":")))
+    print(f"WordPress test inventory: {len(tests)} tests -> {output}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

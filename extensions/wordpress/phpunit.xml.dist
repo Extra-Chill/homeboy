@@ -1,0 +1,19 @@
+<phpunit
+    colors="true"
+    verbose="false"
+    stopOnFailure="false">
+
+    <testsuites>
+        <testsuite name="WordPress Extension Tests">
+            <directory>tests/</directory>
+        </testsuite>
+        <testsuite name="HomeboyWordPress Sniff Tests">
+            <directory suffix="UnitTest.php">HomeboyWordPress/Tests/</directory>
+        </testsuite>
+    </testsuites>
+
+    <php>
+        <!-- Extension tests run via the WP Codebox test runner. This config is kept
+             for tooling compatibility; runtime bootstrap is handled by WP Codebox. -->
+    </php>
+</phpunit>
