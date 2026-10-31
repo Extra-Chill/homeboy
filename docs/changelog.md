@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.436.10] - 2026-10-31
+
+### Changed
+- Add direct-only component change detection and JSON reasons
+
 ## [0.436.9] - 2026-10-30
 
 ### Changed
