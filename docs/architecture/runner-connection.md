@@ -40,6 +40,31 @@ failure evidence may add `durability_stage`; existing health attempt fields are
 preserved. `health_attempt_count` and `health_attempts` contain failed initial
 health probes and failed durability observations, not successful observations.
 
+## Daemon State Directory
+
+Each (runner, controller) pair has exactly one daemon state directory on the
+runner host: `~/.config/homeboy/runner-daemons/<runner>/<controller>`. Direct SSH
+launches, every remote `daemon` command, and the service unit's
+`HOMEBOY_DAEMON_STATE_DIR` derive it from one function, so a restarted daemon
+reopens the job store its predecessor wrote.
+
+### One-time move off `daemon-generations`
+
+Homeboy before #16752 kept runner daemons in
+`~/.config/homeboy/daemon-generations/<runner>/controllers/<controller>/<dir>`
+(`primary` or a rotated 48-hex generation). Before a daemon starts in the new
+directory, direct connect, direct in-place restart, `runner service install`,
+and service repoint-and-restart run one legacy step: for each subdirectory of
+that controller's legacy root it reads `daemon status`, and if any legacy daemon
+has active jobs the operation fails with `legacy_daemon_busy`, naming the
+directory and job count, without stopping anything or starting a second daemon.
+Otherwise it runs the normal `daemon stop` in each directory. A recorded session
+whose lease was one of the stopped daemons is dropped, so connect proceeds to
+the daemon in the new directory. The legacy directories stay on disk for
+operator cleanup. This step exists only to move runners off the old layout
+(epic #16680) and will be deleted once no runner has a `daemon-generations`
+directory.
+
 ## Current Session
 
 A controller tracks exactly one current session per runner. Jobs, runs, logs,
@@ -62,12 +87,12 @@ controller then never starts, replaces, rotates, or retires the remote daemon.
 1. Writes `~/.config/systemd/user/homeboy-runner-<id>-<controller>.service`.
    The unit runs `homeboy daemon serve --addr 127.0.0.1:0` from the controller's
    stable link `~/.local/share/homeboy/runner-service/<id>/controllers/<controller>/homeboy`,
-   in `daemon-generations/<id>/controllers/<controller>/primary`, with
-   `Restart=always`. The controller scope is a readable sanitized prefix plus
-   the full SHA-256 of the raw controller ID, shared by service names, binary
-   slots, and daemon-generation paths so sanitized IDs cannot alias.
-2. Stops the idle controller-started daemon so the unit takes the daemon owner
-   lock, and stops idle generation daemons left by earlier rotation.
+   in `runner-daemons/<id>/<controller>`, with `Restart=always`. The
+   controller scope is a readable sanitized prefix plus the full SHA-256 of the
+   raw controller ID, shared by service names, binary slots, and daemon state
+   paths so sanitized IDs cannot alias.
+2. Runs the one-time legacy `daemon-generations` step above, then stops the
+   idle controller-started daemon so the unit takes the daemon owner lock.
 3. Waits for the unit's lease, then marks the runner `service_managed`.
 
 For a service-managed runner:
@@ -78,8 +103,9 @@ For a service-managed runner:
 - **Disconnect** closes the tunnel and removes the session. The daemon and its
   jobs keep running.
 - **Refresh** never rotates daemons. It builds the new binary, drains
-  through the active-job guard, repoints the unit's link, and restarts the
-  unit. The daemon's own startup recovers anything a previous owner left
+  through the active-job guard, runs the legacy step, rewrites the unit (so a
+  unit still pointing at a legacy state directory moves to the new one),
+  repoints the unit's link, and restarts the unit. The daemon's own startup recovers anything a previous owner left
   behind.
 
 The service needs systemd user lingering on the runner host

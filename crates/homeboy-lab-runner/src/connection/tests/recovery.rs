@@ -1430,7 +1430,7 @@ fn rejected_state_loss_refusal_is_retired_before_plain_connect_retries(
 ) {
     crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
-        let generation_count = home.path().join("daemon-generations");
+        let start_count = home.path().join("daemon-start-count");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let endpoint = std::thread::spawn(move || {
@@ -1470,14 +1470,14 @@ case "$1 $2" in
     if [ "$3" = "--help" ]; then
       printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
     else
-      printf '%s' '1' > "{generation_count}"
+      printf '%s' '1' > "{start_count}"
       printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
     fi
     ;;
 esac
 "#,
                 address = address,
-                generation_count = generation_count.display(),
+                start_count = start_count.display(),
                 rejection_exit = if transport_success { "" } else { "      exit 2" },
             ), 0o755)
         .expect("write remote Homeboy shim");
@@ -1558,7 +1558,7 @@ esac
         assert!(connected.connected);
         assert_eq!(connected.remote_daemon_pid, Some(4242));
         assert_eq!(
-            std::fs::read_to_string(generation_count).expect("start count"),
+            std::fs::read_to_string(start_count).expect("start count"),
             "1"
         );
         drop(endpoint);
@@ -1591,7 +1591,7 @@ fn rejected_fresh_state_loss_envelope_is_retired_before_plain_connect_retries() 
 fn recovery_retry_reattaches_journaled_b_after_four_lost_health_requests() {
     crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
-        let generation_count = home.path().join("daemon-generations");
+        let start_count = home.path().join("daemon-start-count");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let health_requests = Arc::new(AtomicUsize::new(0));
@@ -1637,16 +1637,16 @@ case "$1 $2" in
     ;;
   "daemon reconcile-leaseless-orphans")
       count=0
-      if [ -f "{generation_count}" ]; then count=$(cat "{generation_count}"); fi
+      if [ -f "{start_count}" ]; then count=$(cat "{start_count}"); fi
       count=$((count + 1))
-      printf '%s' "$count" > "{generation_count}"
+      printf '%s' "$count" > "{start_count}"
       printf '%s\n' '{{"success":true,"data":{{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}}}'
     ;;
   "daemon status") exit 99 ;;
 esac
 "#,
                 address = address,
-                generation_count = generation_count.display(),
+                start_count = start_count.display(),
             ), 0o755)
         .expect("write remote Homeboy shim");
 
@@ -1681,7 +1681,7 @@ esac
             "homeboy runner connect local-runner"
         );
         assert_eq!(
-            std::fs::read_to_string(&generation_count).expect("generation count"),
+            std::fs::read_to_string(&start_count).expect("generation count"),
             "1"
         );
 
@@ -1713,7 +1713,7 @@ esac
             "the replay report names the identity verified from the selected binary"
         );
         assert_eq!(
-            std::fs::read_to_string(&generation_count).expect("generation count"),
+            std::fs::read_to_string(&start_count).expect("generation count"),
             "1"
         );
         assert_eq!(health_requests.load(Ordering::SeqCst), 7);
@@ -1732,7 +1732,7 @@ fn normal_start_response_loss_replays_b_without_creating_c() {
     crate::test_support::with_isolated_home(|home| {
         let old_daemon = home.path().join("old-homeboy");
         let selected_daemon = home.path().join("selected-homeboy");
-        let generation_count = home.path().join("daemon-generations");
+        let start_count = home.path().join("daemon-start-count");
         let old_replay = home.path().join("old-replay");
         let selected_argv = home.path().join("selected-argv");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -1778,11 +1778,11 @@ case "$1 $2" in
   "daemon ensure-running")
     if [ "$3" = "--help" ]; then
       printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
-    elif [ -f "{generation_count}" ]; then
+    elif [ -f "{start_count}" ]; then
       printf '%s' 'executed' > "{old_replay}"
       exit 98
     else
-      printf '%s' '1' > "{generation_count}"
+      printf '%s' '1' > "{start_count}"
       # The daemon has durably recorded B's operation key, but its SSH response
       # was lost before the controller could persist B's coordinates.
       exit 99
@@ -1790,7 +1790,7 @@ case "$1 $2" in
     ;;
 esac
 "#,
-                generation_count = generation_count.display(),
+                start_count = start_count.display(),
                 old_replay = old_replay.display(),
             ), 0o755)
         .expect("write remote Homeboy shim");
@@ -1838,7 +1838,7 @@ esac
                 .expect("first connect result");
         assert_eq!(first_exit, 20);
         assert_eq!(
-            std::fs::read_to_string(&generation_count).expect("B start count"),
+            std::fs::read_to_string(&start_count).expect("B start count"),
             "1"
         );
 
@@ -1891,7 +1891,7 @@ esac
             "the promoted runner must retain the selected executable path"
         );
         assert_eq!(
-            std::fs::read_to_string(&generation_count).expect("B only start count"),
+            std::fs::read_to_string(&start_count).expect("B only start count"),
             "1",
             "replay must return B rather than starting C"
         );
@@ -2425,7 +2425,7 @@ fn rejected_ensure_running_refusal_is_retired_before_plain_connect_retries() {
     crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let marker = home.path().join("ensure-running-attempted");
-        let generation_count = home.path().join("daemon-generations");
+        let start_count = home.path().join("daemon-start-count");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let endpoint = std::thread::spawn(move || {
@@ -2457,7 +2457,7 @@ case "$1 $2" in
     if [ "$3" = "--help" ]; then
       printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
     elif [ -f "{marker}" ]; then
-      printf '%s' '1' > "{generation_count}"
+      printf '%s' '1' > "{start_count}"
       printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
     else
       touch "{marker}"
@@ -2469,7 +2469,7 @@ esac
 "#,
                 marker = marker.display(),
                 address = address,
-                generation_count = generation_count.display(),
+                start_count = start_count.display(),
             ), 0o755)
         .expect("write remote Homeboy shim");
 
@@ -2492,7 +2492,7 @@ esac
         assert_eq!(exit_code, 20);
         assert!(marker.exists(), "the shim recorded exactly one attempt");
         assert!(
-            !generation_count.exists(),
+            !start_count.exists(),
             "the refused attempt must never report a started daemon"
         );
         assert_eq!(
@@ -2542,7 +2542,7 @@ esac
         assert!(connected.connected);
         assert_eq!(connected.remote_daemon_pid, Some(4242));
         assert_eq!(
-            std::fs::read_to_string(&generation_count).expect("start count"),
+            std::fs::read_to_string(&start_count).expect("start count"),
             "1",
             "the retry must mint exactly one fresh daemon, not replay the refused attempt"
         );

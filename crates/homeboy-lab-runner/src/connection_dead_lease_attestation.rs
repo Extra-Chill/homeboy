@@ -208,8 +208,7 @@ mod tests {
     use homeboy_core::daemon::lifecycle_plan::Attestation;
     use std::cell::RefCell;
 
-    const STATE_DIR: &str =
-        "/home/lab/.config/homeboy/daemon-generations/lab/controllers/ctrl/primary";
+    const STATE_DIR: &str = "/home/lab/.config/homeboy/runner-daemons/lab/ctrl";
 
     struct FakeTransport {
         homeboy_path: String,

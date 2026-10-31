@@ -1999,6 +1999,7 @@ pub(super) fn failed_connect(
                     RunnerFailureKind::RunnerCapabilityMissing => "runner_capability".to_string(),
                     RunnerFailureKind::DaemonStartupFailure => "daemon_startup".to_string(),
                     RunnerFailureKind::TunnelFailure => "tunnel".to_string(),
+                    RunnerFailureKind::LegacyDaemonBusy => "legacy_daemon_busy".to_string(),
                 },
                 remote_start_command: None,
                 known_remote_pid: None,

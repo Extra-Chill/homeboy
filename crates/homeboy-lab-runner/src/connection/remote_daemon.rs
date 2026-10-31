@@ -1750,11 +1750,11 @@ mod tests {
             crate::connection::controller_scope_segment(&crate::connection::controller_id());
         assert_eq!(
             remote_daemon_ensure_running_command("/opt/homeboy", "runner/a", Some("op-1")),
-            format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/controllers/{controller}/primary\" HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0")
+            format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/runner-daemons/runner_a/{controller}\" HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0")
         );
         assert_eq!(
             remote_daemon_command("runner/a", "/opt/homeboy", "daemon status"),
-            format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/controllers/{controller}/primary\" /opt/homeboy daemon status")
+            format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/runner-daemons/runner_a/{controller}\" /opt/homeboy daemon status")
         );
     }
 
@@ -1765,16 +1765,16 @@ mod tests {
         let first_scope = crate::connection::controller_scope_segment("controller-a");
         let second_scope = crate::connection::controller_scope_segment("controller-b");
         assert_ne!(first_store, second_store);
-        assert!(first_store.ends_with(&format!("/controllers/{first_scope}/primary")));
-        assert!(second_store.ends_with(&format!("/controllers/{second_scope}/primary")));
+        assert!(first_store.ends_with(&format!("/runner-daemons/shared-runner/{first_scope}")));
+        assert!(second_store.ends_with(&format!("/runner-daemons/shared-runner/{second_scope}")));
         let first_status =
             format!("HOMEBOY_DAEMON_STATE_DIR=\"{first_store}\" /opt/homeboy daemon status");
         let second_start = format!("HOMEBOY_DAEMON_STATE_DIR=\"{second_store}\" /opt/homeboy daemon ensure-running --addr 127.0.0.1:0");
         let first_stop = format!("HOMEBOY_DAEMON_STATE_DIR=\"{first_store}\" /opt/homeboy daemon stop --lease-id lease-a");
-        assert!(first_status.contains("controllers/controller-a"));
-        assert!(second_start.contains("controllers/controller-b"));
-        assert!(first_stop.contains("controllers/controller-a"));
-        assert!(!second_start.contains("controllers/controller-a"));
+        assert!(first_status.contains("/shared-runner/controller-a-"));
+        assert!(second_start.contains("/shared-runner/controller-b-"));
+        assert!(first_stop.contains("/shared-runner/controller-a-"));
+        assert!(!second_start.contains("/shared-runner/controller-a-"));
     }
 
     #[test]
@@ -1796,8 +1796,7 @@ mod tests {
             ),
             "the direct path and the service unit derive the dir from one function"
         );
-        assert!(state_dir.ends_with("/primary"));
-        assert!(!state_dir.contains("generation-"));
+        assert!(state_dir.starts_with("$HOME/.config/homeboy/runner-daemons/homeboy-lab/"));
         let pinned = format!("HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\"");
         assert!(stop.starts_with(&pinned), "{stop}");
         assert!(start.starts_with(&pinned), "{start}");
@@ -1825,7 +1824,7 @@ mod tests {
             "plan": {
                 "plan": "needs_attestation",
                 "lease_id": "lease-lab",
-                "state_dir": "/lab/daemon/primary",
+                "state_dir": "/lab/runner-daemons/lab/ctrl",
                 "job_ids": [uuid::Uuid::nil()],
                 "confirmation": "confirm-workload-processes-absent"
             },
@@ -1857,14 +1856,14 @@ mod tests {
         let second = uuid::Uuid::from_u128(2);
         let command = remote_daemon_attested_reconcile_command(
             "/opt/homeboy",
-            "/home/lab/.config/homeboy/daemon-generations/lab/controllers/ctrl/primary",
+            "/home/lab/.config/homeboy/runner-daemons/lab/ctrl",
             "lease-lab",
             &[first, second],
         );
         assert_eq!(
             command,
             format!(
-                "HOMEBOY_DAEMON_STATE_DIR=/home/lab/.config/homeboy/daemon-generations/lab/controllers/ctrl/primary /opt/homeboy daemon reconcile-dead-lease-orphans --lease-id lease-lab --job-id {first} --job-id {second} --confirm-workload-processes-absent --no-replacement"
+                "HOMEBOY_DAEMON_STATE_DIR=/home/lab/.config/homeboy/runner-daemons/lab/ctrl /opt/homeboy daemon reconcile-dead-lease-orphans --lease-id lease-lab --job-id {first} --job-id {second} --confirm-workload-processes-absent --no-replacement"
             )
         );
     }

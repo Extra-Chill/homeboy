@@ -439,19 +439,17 @@ fn daemon_invocations(log: &Path) -> Vec<(String, String)> {
 /// no second state directory was created next to it.
 fn assert_single_state_dir() {
     let state_dir = PathBuf::from(expected_state_dir());
-    let controller_dir = state_dir.parent().expect("controller state root");
-    let mut children = std::fs::read_dir(controller_dir)
-        .expect("controller state root exists")
+    let runner_dir = state_dir.parent().expect("runner state root");
+    let children = std::fs::read_dir(runner_dir)
+        .expect("runner state root exists")
         .map(|entry| entry.expect("entry").file_name())
         .collect::<Vec<_>>();
-    children.sort();
-    assert_eq!(children, vec![std::ffi::OsString::from("primary")]);
-    let controllers_dir = controller_dir.parent().expect("runner state root");
     assert_eq!(
-        std::fs::read_dir(controllers_dir)
-            .expect("runner state root exists")
-            .count(),
-        1,
+        children,
+        vec![state_dir
+            .file_name()
+            .expect("controller dir")
+            .to_os_string()],
         "only this controller's state directory exists"
     );
 }
